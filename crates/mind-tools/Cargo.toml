@@ -1,0 +1,6 @@
+[package]
+name = "mind-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

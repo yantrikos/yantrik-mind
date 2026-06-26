@@ -1,0 +1,6 @@
+[package]
+name = "mind-conversation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

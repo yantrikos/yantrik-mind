@@ -1,0 +1,6 @@
+[package]
+name = "mind-cortex"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

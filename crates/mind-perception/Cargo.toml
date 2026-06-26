@@ -1,0 +1,6 @@
+[package]
+name = "mind-perception"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

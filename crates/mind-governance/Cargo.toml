@@ -1,0 +1,7 @@
+[package]
+name = "mind-governance"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mind-types = { workspace = true }

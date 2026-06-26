@@ -1,0 +1,6 @@
+[package]
+name = "mind-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

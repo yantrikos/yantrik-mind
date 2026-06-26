@@ -1,0 +1,58 @@
+# Yantrik Mind — ground-up companion on the YantrikDB typed-memory moat.
+# Reuses the live (newest) crates from the yantrik-companion workspace via path deps.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# common
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+uuid7 = "1"
+
+# reused foundations (local path to the yantrik-companion workspace crates)
+yantrikdb-core = { path = "../yantrik-companion/crates/yantrikdb-core" }
+yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml" }
+yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
+yantrik-chat = { path = "../yantrik-companion/crates/yantrik-chat" }
+
+# internal mind-* crates (path)
+mind-types = { path = "crates/mind-types" }
+mind-observability = { path = "crates/mind-observability" }
+mind-evals = { path = "crates/mind-evals" }
+mind-governance = { path = "crates/mind-governance" }
+mind-memory = { path = "crates/mind-memory" }
+mind-inference = { path = "crates/mind-inference" }
+mind-perception = { path = "crates/mind-perception" }
+mind-cortex = { path = "crates/mind-cortex" }
+mind-instincts = { path = "crates/mind-instincts" }
+mind-proactive = { path = "crates/mind-proactive" }
+mind-conversation = { path = "crates/mind-conversation" }
+mind-tools = { path = "crates/mind-tools" }
+mind-evolution = { path = "crates/mind-evolution" }
+mind-identity = { path = "crates/mind-identity" }
+
+# yantrikdb-core git-deps yantrik-ml; redirect both git URLs to the local crates
+# (mirrors the yantrik-companion workspace patch set).
+[patch."https://github.com/yantrikos/yantrik-ml.git"]
+yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml" }
+[patch."https://github.com/yantrikos/yantrikdb.git"]
+yantrikdb-core = { path = "../yantrik-companion/crates/yantrikdb-core" }
+
+# keep heavy local-inference deps optimized even in dev (matches companion)
+[profile.dev.package.candle-core]
+opt-level = 2
+[profile.dev.package.candle-nn]
+opt-level = 2
+[profile.dev.package.candle-transformers]
+opt-level = 2

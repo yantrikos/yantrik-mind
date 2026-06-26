@@ -1,0 +1,6 @@
+[package]
+name = "mind-proactive"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

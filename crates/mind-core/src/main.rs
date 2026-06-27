@@ -52,6 +52,14 @@ async fn main() -> anyhow::Result<()> {
     let mem = MemoryHandle::spawn(&db, 8).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
     let conv = mind_core::engine(&mem, pool);
 
+    // If a telegram token is configured, run the phone channel instead of the stdin REPL.
+    if let Ok(tok) = std::env::var("YM_TELEGRAM_TOKEN") {
+        if !tok.trim().is_empty() {
+            println!("yantrik-mind — backend: {name} · db: {db} · channel: telegram");
+            return mind_core::telegram::run(tok, mem, conv).await;
+        }
+    }
+
     println!("yantrik-mind — backend: {name} · db: {db}");
     println!(
         "commands: ':remember +/- <stmt>', ':conflicts', ':explain <stmt>', ':task <desc>', ':tasks', ':done <id>', ':quit'  (else = chat)\n"

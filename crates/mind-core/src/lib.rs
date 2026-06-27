@@ -10,6 +10,8 @@ use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade};
 
+pub mod telegram;
+
 /// One REPL line → an outcome. Split out of `main` so it's deterministically testable with a
 /// `ScriptedLLM` (no real model).
 pub enum Outcome {

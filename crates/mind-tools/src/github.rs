@@ -95,6 +95,58 @@ impl GithubClient for ApiGithubClient {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Writing — an OUTWARD effect (a public comment). Transport only; whether it's allowed/confirmed is
+// the harm-gate + ActionRuntime's job.
+// ---------------------------------------------------------------------------------------------
+
+#[async_trait]
+pub trait GithubWriter: Send + Sync {
+    /// Post a comment on an issue/PR (`owner/repo`, number). Returns the new comment's URL.
+    async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<String>;
+}
+
+#[async_trait]
+impl GithubWriter for ApiGithubClient {
+    async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<String> {
+        let token = self.token.clone();
+        let (repo, body) = (repo.to_string(), body.to_string());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let url = format!("https://api.github.com/repos/{repo}/issues/{number}/comments");
+            let resp = ureq::post(&url)
+                .timeout(std::time::Duration::from_secs(20))
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("Accept", "application/vnd.github+json")
+                .set("X-GitHub-Api-Version", "2022-11-28")
+                .set("User-Agent", "yantrik-mind")
+                .send_json(serde_json::json!({ "body": body }))?;
+            let v: serde_json::Value = resp.into_json()?;
+            Ok(v["html_url"].as_str().unwrap_or("(posted)").to_string())
+        })
+        .await?
+    }
+}
+
+/// Records comments instead of posting them — for tests/dry-runs.
+#[derive(Default)]
+pub struct ScriptedGithubWriter {
+    pub posted: std::sync::Mutex<Vec<(String, u64, String)>>,
+}
+
+impl ScriptedGithubWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl GithubWriter for ScriptedGithubWriter {
+    async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<String> {
+        self.posted.lock().unwrap().push((repo.into(), number, body.into()));
+        Ok(format!("https://github.com/{repo}/issues/{number}#scripted"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,7 +20,8 @@ pub use executor::ToolActionExecutor;
 
 pub mod github;
 pub use github::{
-    render_github_digest, ApiGithubClient, GithubClient, GithubNotification, ScriptedGithubClient,
+    render_github_digest, ApiGithubClient, GithubClient, GithubNotification, GithubWriter,
+    ScriptedGithubClient, ScriptedGithubWriter,
 };
 
 #[async_trait]

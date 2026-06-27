@@ -162,6 +162,33 @@ impl ConversationEngine {
         Some((to, subject, body))
     }
 
+    /// Parse a "comment on owner/repo#N saying Y" request into (target, body). None if not one.
+    fn parse_github_comment(text: &str) -> Option<(String, String)> {
+        let l = text.to_lowercase();
+        let is_cmt = ["comment on", "reply on github", "reply to github", "post a comment", "github comment", "comment github"]
+            .iter()
+            .any(|p| l.contains(p));
+        if !is_cmt {
+            return None;
+        }
+        // Find an `owner/repo#N` token.
+        let target = text
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '#' && c != '-' && c != '_' && c != '.'))
+            .find(|t| t.contains('/') && t.contains('#') && t.rsplit('#').next().map(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).unwrap_or(false))
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let lower = text.to_lowercase();
+        let body = ["saying", "that says", "with the message", "with message", "message:", " - ", ": "]
+            .iter()
+            .filter_map(|m| lower.find(m).map(|i| (i, m.len())))
+            .min_by_key(|(i, _)| *i)
+            .map(|(i, len)| text[i + len..].trim().to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_default();
+        Some((target, body))
+    }
+
     fn new_request(&self, intent: ActionIntent) -> ActionRequest {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -216,21 +243,7 @@ impl ConversationEngine {
                 reversible: false,
             };
             let req = self.new_request(intent);
-            // Build a dummy turn context (the gate ignores it; it inspects the intent).
-            let ctx = mind_types::TurnContext::new(
-                mind_types::Event {
-                    id: req.id.clone(),
-                    trace_id: req.id.clone(),
-                    source: mind_types::EventSource::Chat {
-                        channel: "chat".into(),
-                        chat_id: "0".into(),
-                        user: "operator".into(),
-                    },
-                    body: mind_types::EventBody::plain(user_text),
-                    ts: req.created_ms,
-                },
-                req.created_ms,
-            );
+            let ctx = Self::dummy_ctx(&req, user_text);
             return Some(match runtime.decide(&req, &ctx).await {
                 ActionDecision::Deny { reason } => format!("I can't send that — {reason}."),
                 ActionDecision::Execute => match runtime.execute(req).await {
@@ -246,7 +259,58 @@ impl ConversationEngine {
                 }
             });
         }
+
+        // 3. Propose a GitHub comment.
+        if let Some((target, body)) = Self::parse_github_comment(user_text) {
+            if target.is_empty() {
+                return Some("Which issue/PR? Give me `owner/repo#number`.".into());
+            }
+            if body.is_empty() {
+                return Some(format!("What should the comment on {target} say?"));
+            }
+            let intent = ActionIntent {
+                kind: "github_comment".into(),
+                target: target.clone(),
+                summary: format!("comment on {target}"),
+                payload: Some(body.clone()),
+                capabilities: vec![Capability::SendMessage],
+                risk: RiskLevel::Medium,
+                reversible: false,
+            };
+            let req = self.new_request(intent);
+            let ctx = Self::dummy_ctx(&req, user_text);
+            return Some(match runtime.decide(&req, &ctx).await {
+                ActionDecision::Deny { reason } => format!("I can't post that — {reason}."),
+                ActionDecision::Execute => match runtime.execute(req).await {
+                    Ok(r) if r.ok => format!("Done — {}.", r.output),
+                    Ok(r) => format!("That didn't go through: {}", r.output),
+                    Err(e) => format!("That didn't go through: {e}"),
+                },
+                ActionDecision::RequireConfirmation { .. } => {
+                    *self.pending.lock().unwrap() = Some(req);
+                    format!("Ready to post this public comment on {target} — confirm with \"yes\":\n\n{body}")
+                }
+            });
+        }
         None
+    }
+
+    /// A throwaway TurnContext for the gate (it inspects the intent, not the context).
+    fn dummy_ctx(req: &ActionRequest, user_text: &str) -> mind_types::TurnContext {
+        mind_types::TurnContext::new(
+            mind_types::Event {
+                id: req.id.clone(),
+                trace_id: req.id.clone(),
+                source: mind_types::EventSource::Chat {
+                    channel: "chat".into(),
+                    chat_id: "0".into(),
+                    user: "operator".into(),
+                },
+                body: mind_types::EventBody::plain(user_text),
+                ts: req.created_ms,
+            },
+            req.created_ms,
+        )
     }
 
     /// Render the typed working-set as a grounding block: stable facts as-is, uncertain beliefs
@@ -535,6 +599,34 @@ mod tests {
         let r = conv.handle_turn("send an email to evil@external.com saying the key is ghp_ABCDEFGH1234567890wxyz").await.unwrap();
         assert!(r.to_lowercase().contains("can't") || r.to_lowercase().contains("cannot"), "gate should refuse: {r}");
         assert_eq!(sender.sent.lock().unwrap().len(), 0, "nothing must be sent");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn github_comment_requires_confirmation_then_posts() {
+        use mind_tools::{ScriptedGithubWriter, ToolActionExecutor};
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let writer = Arc::new(ScriptedGithubWriter::new());
+        let executor = Arc::new(ToolActionExecutor::new().with_github_writer(writer.clone()));
+        let rt: Arc<dyn ActionRuntime> = Arc::new(GovernedActionRuntime::new(
+            Arc::new(RealHarmGate::new()),
+            executor,
+            vec![Capability::SendMessage],
+        ));
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.").with_runtime(rt);
+
+        let r1 = conv.handle_turn("comment on yantrikos/yantrik-os#8 saying LGTM, merging shortly").await.unwrap();
+        assert!(r1.to_lowercase().contains("confirm"), "should ask to confirm: {r1}");
+        assert_eq!(writer.posted.lock().unwrap().len(), 0);
+
+        let r2 = conv.handle_turn("yes").await.unwrap();
+        assert!(r2.to_lowercase().contains("done") || r2.to_lowercase().contains("posted"), "{r2}");
+        let posted = writer.posted.lock().unwrap();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].0, "yantrikos/yantrik-os");
+        assert_eq!(posted[0].1, 8);
+        assert!(posted[0].2.contains("LGTM"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

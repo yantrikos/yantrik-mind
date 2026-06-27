@@ -139,18 +139,23 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         }
     }
     // Read-only GitHub triage, if a token is configured.
-    if let Ok(token) = std::env::var("YM_GITHUB_TOKEN") {
-        if !token.is_empty() {
-            eng = eng.with_github(Arc::new(mind_tools::ApiGithubClient::new(token)));
-        }
+    let gh_token = std::env::var("YM_GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
+    if let Some(token) = &gh_token {
+        eng = eng.with_github(Arc::new(mind_tools::ApiGithubClient::new(token.clone())));
     }
-    // Hands: an outward-action runtime, harm-gated + confirmation-required. v1 grants SendMessage
-    // (email), wired to the same account as inbox read. Every send rides the deterministic harm-gate.
+    // Hands: an outward-action runtime, harm-gated + confirmation-required. Grants SendMessage when a
+    // transport (email send and/or github comment) is configured. Every action rides the harm-gate.
     let mut executor = mind_tools::ToolActionExecutor::new();
     let mut granted: Vec<mind_types::Capability> = Vec::new();
     if let (Ok(addr), Ok(pw)) = (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
         if !addr.is_empty() && !pw.is_empty() {
             executor = executor.with_mail_sender(Arc::new(mind_tools::SmtpMailSender::for_address(&addr, pw)));
+            granted.push(mind_types::Capability::SendMessage);
+        }
+    }
+    if let Some(token) = &gh_token {
+        executor = executor.with_github_writer(Arc::new(mind_tools::ApiGithubClient::new(token.clone())));
+        if !granted.contains(&mind_types::Capability::SendMessage) {
             granted.push(mind_types::Capability::SendMessage);
         }
     }

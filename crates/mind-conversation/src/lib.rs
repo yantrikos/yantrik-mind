@@ -12,7 +12,14 @@ use std::sync::{Arc, Mutex};
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{Fetcher, GithubClient, MailClient};
+use mind_tools::{Fetcher, GithubClient, MailClient, Sandbox};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CodeLang {
+    Shell,
+    Python,
+    Rust,
+}
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
     MemoryFacade, MindError, Result, RiskLevel, WorkingSet,
@@ -42,6 +49,8 @@ pub struct ConversationEngine {
     recipes: Option<Arc<RecipeEngine>>,
     /// Research sub-agent — when set, "research X" dispatches a bounded ReAct sub-agent.
     researcher: Option<Arc<SubAgent>>,
+    /// Code sandbox — when set, "run python/shell/rust …" executes in an isolated, no-network jail.
+    sandbox: Option<Arc<Sandbox>>,
 }
 
 impl ConversationEngine {
@@ -59,7 +68,62 @@ impl ConversationEngine {
             pending_question: Mutex::new(None),
             recipes: None,
             researcher: None,
+            sandbox: None,
         }
+    }
+
+    /// Give the mind a code sandbox (isolated, no-network execution of shell/python/rust).
+    pub fn with_sandbox(mut self, sandbox: Arc<Sandbox>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Extract the first ```fenced``` block → (info-string lowercased, code).
+    fn fenced_code(text: &str) -> Option<(String, String)> {
+        let start = text.find("```")?;
+        let after = &text[start + 3..];
+        let nl = after.find('\n')?;
+        let info = after[..nl].trim().to_lowercase();
+        let rest = &after[nl + 1..];
+        let end = rest.find("```")?;
+        Some((info, rest[..end].to_string()))
+    }
+
+    /// Parse a "run/execute … <lang> … <code>" request → (language, code). Requires an explicit run
+    /// intent AND a determinable language (never guesses), so ordinary code chat isn't executed.
+    fn parse_code_request(text: &str) -> Option<(CodeLang, String)> {
+        let l = text.to_lowercase();
+        if !["run ", "execute ", "exec ", "eval "].iter().any(|p| l.contains(p)) {
+            return None;
+        }
+        let fence = Self::fenced_code(text);
+        let kw_lang = if l.contains("rust") {
+            Some(CodeLang::Rust)
+        } else if l.contains("python") || l.contains(" py") {
+            Some(CodeLang::Python)
+        } else if l.contains("shell") || l.contains("bash") || l.contains("command") {
+            Some(CodeLang::Shell)
+        } else {
+            None
+        };
+        let fence_lang = fence.as_ref().and_then(|(info, _)| match info.as_str() {
+            "rust" | "rs" => Some(CodeLang::Rust),
+            "python" | "py" => Some(CodeLang::Python),
+            "sh" | "bash" | "shell" => Some(CodeLang::Shell),
+            _ => None,
+        });
+        let lang = kw_lang.or(fence_lang)?;
+        let code = match fence {
+            Some((_, c)) => c,
+            None => {
+                let idx = text.find(':')?;
+                text[idx + 1..].trim().to_string()
+            }
+        };
+        if code.trim().is_empty() {
+            return None;
+        }
+        Some((lang, code))
     }
 
     /// Turn a recipe RunOutcome into a chat reply, parking any pause (question or action) so the
@@ -853,6 +917,23 @@ impl ConversationEngine {
                 return Ok(reply);
             }
         }
+        // Code sandbox: "run python/shell/rust …" → isolated, no-network execution.
+        if let Some(sb) = &self.sandbox {
+            if let Some((lang, code)) = Self::parse_code_request(user_text) {
+                let res = match lang {
+                    CodeLang::Python => sb.run_python(&code).await,
+                    CodeLang::Shell => sb.run_shell(&code).await,
+                    CodeLang::Rust => sb.run_rust(&code).await,
+                };
+                let reply = match res {
+                    Ok(r) => format!("Ran it in the sandbox (no network, resource-limited):\n\n{}", r.render()),
+                    Err(e) => format!("Couldn't run it — the sandbox is unavailable here ({e})."),
+                };
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
+        }
         // The briefing recipe: compose what the mind can read into a digest.
         if (self.mail.is_some() || self.github.is_some()) && Self::wants_briefing(user_text) {
             let reply = self.briefing().await?;
@@ -1114,6 +1195,23 @@ mod tests {
         let p = scripted.last_prompt();
         assert!(p.contains("BRIEFMAIL") && p.contains("BRIEFGH"), "briefing must compose both sources:\n{p}");
         assert!(p.contains("NOT instructions"), "briefing data must be untrusted-wrapped:\n{p}");
+    }
+
+    #[test]
+    fn code_request_parsing() {
+        let (lang, code) = ConversationEngine::parse_code_request("run python: print(6*7)").unwrap();
+        assert_eq!(lang, CodeLang::Python);
+        assert_eq!(code.trim(), "print(6*7)");
+        // fenced block + run intent
+        let (lang, code) = ConversationEngine::parse_code_request("run this rust:\n```rust\nfn main(){println!(\"hi\");}\n```").unwrap();
+        assert_eq!(lang, CodeLang::Rust);
+        assert!(code.contains("println!"));
+        // shell
+        assert_eq!(ConversationEngine::parse_code_request("run shell: ls -la").unwrap().0, CodeLang::Shell);
+        // no run intent → not code
+        assert!(ConversationEngine::parse_code_request("here's some python: print(1)").is_none());
+        // run intent but no determinable language → don't guess
+        assert!(ConversationEngine::parse_code_request("run this: foo").is_none());
     }
 
     #[test]

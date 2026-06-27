@@ -21,6 +21,9 @@ pub use executor::ToolActionExecutor;
 pub mod search;
 pub use search::{render_search, DdgSearch, ScriptedSearch, SearchHit, WebSearch};
 
+pub mod sandbox;
+pub use sandbox::{ExecResult, Limits, Sandbox};
+
 pub mod github;
 pub use github::{
     render_github_digest, ApiGithubClient, GithubClient, GithubNotification, GithubWriter,

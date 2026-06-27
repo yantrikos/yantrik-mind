@@ -222,6 +222,15 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         }
     }
     eng = eng.with_recipes(Arc::new(recipe_engine));
+
+    // Code sandbox: isolated (userns + no network), resource-limited execution of shell/python/rust.
+    // Masks the mind's own state dir so sandboxed code can't read/corrupt the DB.
+    let state_dir = std::env::var("YM_DB")
+        .ok()
+        .and_then(|p| std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string()))
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "/var/lib/yantrik-mind".to_string());
+    eng = eng.with_sandbox(Arc::new(mind_tools::Sandbox::new().hiding(state_dir)));
     eng
 }
 

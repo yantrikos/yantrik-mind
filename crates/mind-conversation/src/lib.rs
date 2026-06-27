@@ -9,6 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{RecipeEngine, RecipeHost};
 use mind_tools::{Fetcher, GithubClient, MailClient};
@@ -37,6 +38,8 @@ pub struct ConversationEngine {
     pending: Mutex<Option<ActionRequest>>,
     /// Recipe engine — when set, recipes (e.g. the citation-validated briefing) run through it.
     recipes: Option<Arc<RecipeEngine>>,
+    /// Research sub-agent — when set, "research X" dispatches a bounded ReAct sub-agent.
+    researcher: Option<Arc<SubAgent>>,
 }
 
 impl ConversationEngine {
@@ -52,7 +55,28 @@ impl ConversationEngine {
             runtime: None,
             pending: Mutex::new(None),
             recipes: None,
+            researcher: None,
         }
+    }
+
+    /// Give the mind a research sub-agent it can dispatch.
+    pub fn with_researcher(mut self, agent: Arc<SubAgent>) -> Self {
+        self.researcher = Some(agent);
+        self
+    }
+
+    /// "research X" / "look into X" / "investigate X" → (topic). None if not a research ask.
+    fn wants_research(text: &str) -> Option<String> {
+        let l = text.trim().to_lowercase();
+        for p in ["research ", "look into ", "investigate ", "dig into ", "find out about ", "look up "] {
+            if let Some(idx) = l.find(p) {
+                let topic = text[idx + p.len()..].trim().trim_end_matches(['.', '?', '!']).trim();
+                if topic.len() >= 2 {
+                    return Some(topic.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Give the mind hands: outward actions run through this harm-gated runtime with confirmation.
@@ -595,6 +619,16 @@ impl ConversationEngine {
             let _ = self.memory.append_message("assistant", &reply).await;
             return Ok(reply);
         }
+        // Research sub-agent: dispatch a bounded ReAct agent over the read tools.
+        if let Some(agent) = &self.researcher {
+            if let Some(topic) = Self::wants_research(user_text) {
+                let result = agent.run(&topic).await;
+                let reply = format!("{}\n\n_(researched in {} step(s))_", result.answer, result.steps);
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
+        }
         // The briefing recipe: compose what the mind can read into a digest.
         if (self.mail.is_some() || self.github.is_some()) && Self::wants_briefing(user_text) {
             let reply = self.briefing().await?;
@@ -728,6 +762,18 @@ impl RecipeHost for MindRecipeHost {
                     anyhow::bail!("no tasks due soon");
                 }
                 Ok(due.join("\n"))
+            }
+            "recall" => {
+                let query = _args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let hits = self
+                    .memory
+                    .recall_typed(mind_types::RecallQuery { text: query, top_k: 6, kind: None })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if hits.is_empty() {
+                    anyhow::bail!("nothing in memory for that");
+                }
+                Ok(hits.iter().map(|h| format!("- {}", h.item.text)).collect::<Vec<_>>().join("\n"))
             }
             other => anyhow::bail!("unknown source '{other}'"),
         }

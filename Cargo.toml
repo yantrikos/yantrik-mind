@@ -40,6 +40,7 @@ mind-proactive = { path = "crates/mind-proactive" }
 mind-conversation = { path = "crates/mind-conversation" }
 mind-tools = { path = "crates/mind-tools" }
 mind-recipes = { path = "crates/mind-recipes" }
+mind-agents = { path = "crates/mind-agents" }
 mind-evolution = { path = "crates/mind-evolution" }
 mind-identity = { path = "crates/mind-identity" }
 

@@ -11,6 +11,7 @@ mind-conversation = { workspace = true }
 mind-tools = { workspace = true }
 mind-governance = { workspace = true }
 mind-recipes = { workspace = true }
+mind-agents = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false, features = ["claude-cli", "api-llm"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }

@@ -182,10 +182,23 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         eng = eng.with_runtime(rt.clone());
     }
 
+    // Shared tool host: recipe Tool steps + sub-agent tool calls both go through it.
+    let host: Arc<dyn mind_recipes::RecipeHost> =
+        Arc::new(mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone()));
+
+    // A research sub-agent over the read tools (bounded ReAct, read-only — no outward effects).
+    let researcher = mind_agents::SubAgent::new(
+        pool.clone(),
+        host.clone(),
+        persona.clone(),
+        vec!["recall".into(), "inbox".into(), "github".into()],
+        5,
+    );
+    eng = eng.with_researcher(Arc::new(researcher));
+
     // Recipe engine: citation-validated, adaptive workflows over the read capabilities. Gets the same
     // harm-gated runtime (for Act steps) and a durable store (persistence + crash recovery).
-    let host = mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone());
-    let mut recipe_engine = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(host), persona.clone());
+    let mut recipe_engine = mind_recipes::RecipeEngine::new(pool.clone(), host.clone(), persona.clone());
     if let Some(rt) = &runtime {
         recipe_engine = recipe_engine.with_runtime(rt.clone());
     }

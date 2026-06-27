@@ -36,6 +36,8 @@ pub struct ConversationEngine {
     runtime: Option<Arc<dyn ActionRuntime>>,
     /// An outward action awaiting the user's yes/no.
     pending: Mutex<Option<ActionRequest>>,
+    /// A recipe paused on an AskUser question — holds the run_id to resume with the next message.
+    pending_question: Mutex<Option<String>>,
     /// Recipe engine — when set, recipes (e.g. the citation-validated briefing) run through it.
     recipes: Option<Arc<RecipeEngine>>,
     /// Research sub-agent — when set, "research X" dispatches a bounded ReAct sub-agent.
@@ -54,9 +56,33 @@ impl ConversationEngine {
             github: None,
             runtime: None,
             pending: Mutex::new(None),
+            pending_question: Mutex::new(None),
             recipes: None,
             researcher: None,
         }
+    }
+
+    /// Turn a recipe RunOutcome into a chat reply, parking any pause (question or action) so the
+    /// next message resumes it.
+    fn handle_recipe_outcome(&self, out: mind_recipes::RunOutcome) -> String {
+        if let Some(pq) = out.pending_question {
+            *self.pending_question.lock().unwrap() = Some(pq.run_id);
+            return pq.question;
+        }
+        if let Some(req) = out.pending_action {
+            let body = req.intent.payload.clone().unwrap_or_default();
+            let to = req.intent.target.clone();
+            let subject = req.intent.summary.clone();
+            *self.pending.lock().unwrap() = Some(req);
+            return format!("Drafted this email — reply \"yes\" to send:\n\nTo: {to}\nSubject: {subject}\n\n{body}");
+        }
+        if let Some(e) = out.error {
+            return format!("That didn't work: {e}");
+        }
+        if !out.notifications.is_empty() {
+            return out.notifications.join("\n");
+        }
+        "Done.".into()
     }
 
     /// Give the mind a research sub-agent it can dispatch.
@@ -484,50 +510,59 @@ impl ConversationEngine {
             // Anything else supersedes the pending action; fall through to re-parse this message.
         }
 
-        // 2a. Draft-and-send recipe: LLM drafts the body (a recipe Think step), then the Act step
-        // proposes the gated send. Composes the recipe engine + Act + the confirm flow.
+        // 1b. Resolve a recipe paused on an AskUser question — this message IS the answer.
+        let waiting = self.pending_question.lock().unwrap().take();
+        if let Some(run_id) = waiting {
+            if let Some(re) = &self.recipes {
+                if Self::is_denial(user_text) {
+                    return Some("Okay, dropped it.".into());
+                }
+                let out = re.resume_with_answer(&run_id, user_text).await;
+                return Some(self.handle_recipe_outcome(out));
+            }
+        }
+
+        // 2a. Draft-and-send recipe: the LLM drafts the body (Think), then the Act step proposes the
+        // gated send. If the body wasn't given, an AskUser step PAUSES to ask for it, then resumes.
         if let Some(re) = &self.recipes {
             if let Some((to, gist)) = Self::parse_draft_email(user_text) {
                 if to.is_empty() {
                     return Some("Who should I send it to? Give me an email address.".into());
                 }
-                if gist.is_empty() {
-                    return Some(format!("What should the email to {to} be about?"));
-                }
-                let subject: String = gist.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
-                let recipe = Recipe {
-                    id: "draft_send_email".into(),
-                    name: "Draft & send email".into(),
-                    steps: vec![
-                        RecipeStep::Think {
-                            prompt: format!(
-                                "Write a brief, warm, professional email BODY to {to} that conveys: {gist}. \
-                                 Output ONLY the body text — no 'Subject:' line, no bracketed placeholders, \
-                                 no signature block."
-                            ),
-                            store_as: "draft".into(),
-                            on_error: ErrorAction::Fail,
-                        },
-                        RecipeStep::Act {
-                            kind: "send_email".into(),
-                            target: to.clone(),
-                            summary: subject.clone(),
-                            payload: "{{draft}}".into(),
-                        },
-                    ],
+                let subject: String = if gist.is_empty() {
+                    "(from JARVIS)".into()
+                } else {
+                    gist.split_whitespace().take(8).collect::<Vec<_>>().join(" ")
                 };
+                let mut steps = Vec::new();
+                if gist.is_empty() {
+                    // Pause and ask for the gist, bind it to {{gist}}, then draft from it.
+                    steps.push(RecipeStep::AskUser {
+                        question: format!("What should the email to {to} say?"),
+                        store_as: "gist".into(),
+                    });
+                }
+                let draft_prompt = if gist.is_empty() {
+                    format!(
+                        "Write a brief, warm, professional email BODY to {to} that conveys: {{{{gist}}}}. \
+                         Output ONLY the body text — no 'Subject:' line, no bracketed placeholders, no signature block."
+                    )
+                } else {
+                    format!(
+                        "Write a brief, warm, professional email BODY to {to} that conveys: {gist}. \
+                         Output ONLY the body text — no 'Subject:' line, no bracketed placeholders, no signature block."
+                    )
+                };
+                steps.push(RecipeStep::Think { prompt: draft_prompt, store_as: "draft".into(), on_error: ErrorAction::Fail });
+                steps.push(RecipeStep::Act {
+                    kind: "send_email".into(),
+                    target: to.clone(),
+                    summary: subject.clone(),
+                    payload: "{{draft}}".into(),
+                });
+                let recipe = Recipe { id: "draft_send_email".into(), name: "Draft & send email".into(), steps };
                 let out = re.run(&recipe).await;
-                if let Some(req) = out.pending_action {
-                    let body = req.intent.payload.clone().unwrap_or_default();
-                    *self.pending.lock().unwrap() = Some(req);
-                    return Some(format!(
-                        "Drafted this email — reply \"yes\" to send:\n\nTo: {to}\nSubject: {subject}\n\n{body}"
-                    ));
-                }
-                if let Some(e) = out.error {
-                    return Some(format!("I couldn't draft that: {e}"));
-                }
-                return Some("Drafted, but there's nothing to confirm.".into());
+                return Some(self.handle_recipe_outcome(out));
             }
         }
 
@@ -1135,6 +1170,49 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "boss@acme.com");
         assert!(sent[0].2.contains("deployment is live"), "the drafted body is what gets sent");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn draft_email_without_body_asks_then_resumes_then_sends() {
+        use mind_recipes::{RecipeEngine, RecipeStore};
+        use mind_tools::{ScriptedMailSender, ToolActionExecutor};
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("Hi — the deploy is live and stable. Best, J"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let sender = Arc::new(ScriptedMailSender::new());
+        let rt: Arc<dyn ActionRuntime> = gated_runtime(sender.clone());
+        struct NoHost;
+        #[async_trait::async_trait]
+        impl RecipeHost for NoHost {
+            async fn call_tool(&self, _t: &str, _a: &serde_json::Value) -> anyhow::Result<String> {
+                anyhow::bail!("no tools")
+            }
+        }
+        // AskUser resume requires a store (persistence).
+        let db = format!("{}/ym_ask_{}.db", std::env::temp_dir().display(), std::process::id());
+        let store = Arc::new(RecipeStore::open(&db).unwrap());
+        let engine = Arc::new(
+            RecipeEngine::new(pool.clone(), Arc::new(NoHost), "JARVIS").with_runtime(rt.clone()).with_store(store),
+        );
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_runtime(rt)
+            .with_recipes(engine);
+
+        // Turn 1: no body given → the recipe PAUSES and asks.
+        let r1 = conv.handle_turn("draft an email to boss@acme.com").await.unwrap();
+        assert!(r1.to_lowercase().contains("what should the email"), "should ask for the body: {r1}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 0);
+
+        // Turn 2: the answer resumes the recipe → drafts → proposes the send.
+        let r2 = conv.handle_turn("tell them the deploy is live").await.unwrap();
+        assert!(r2.to_lowercase().contains("yes") && r2.contains("deploy is live"), "should propose draft: {r2}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 0, "still not sent — awaiting confirm");
+
+        // Turn 3: confirm → sends.
+        let r3 = conv.handle_turn("yes").await.unwrap();
+        assert!(r3.to_lowercase().contains("done") || r3.to_lowercase().contains("sent"), "{r3}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
+        assert!(sender.sent.lock().unwrap()[0].2.contains("deploy is live"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

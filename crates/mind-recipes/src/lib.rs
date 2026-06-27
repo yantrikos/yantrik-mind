@@ -65,6 +65,9 @@ pub enum RecipeStep {
     JumpIf { condition: Condition, target_step: usize },
     /// Emit a message to the user (supports {{var}}).
     Notify { message: String },
+    /// PAUSE and ask the user a question; their next message is bound to `store_as` and the recipe
+    /// resumes from the next step. Requires a store (persistence) so the pause survives across turns.
+    AskUser { question: String, store_as: String },
     /// An OUTWARD action (e.g. send an email). Fields are {{var}}-resolved, then the action rides the
     /// harm-gate + ActionRuntime: Execute runs it; RequireConfirmation pauses the recipe for a yes;
     /// Deny fails it. Non-idempotent — never blind-rerun on recovery.
@@ -182,7 +185,16 @@ pub struct RunOutcome {
     pub failure_learnings: Vec<(String, String, String)>,
     /// An outward action awaiting confirmation — the recipe paused here until the user says yes.
     pub pending_action: Option<ActionRequest>,
+    /// A clarifying question the recipe paused on — answer via `resume_with_answer(run_id, ..)`.
+    pub pending_question: Option<PendingQuestion>,
     pub vars: HashMap<String, Value>,
+}
+
+/// A recipe paused on an `AskUser` step, awaiting the user's free-form answer.
+#[derive(Debug, Clone)]
+pub struct PendingQuestion {
+    pub run_id: String,
+    pub question: String,
 }
 
 enum StepResult {
@@ -192,6 +204,8 @@ enum StepResult {
     Failed(String),
     /// An Act step needs confirmation — pause the recipe and surface the proposed action.
     Pending(ActionRequest),
+    /// An AskUser step — pause the recipe and surface the question.
+    Ask(String),
 }
 
 /// How a step failure was resolved by its `ErrorAction`.
@@ -281,6 +295,33 @@ impl RecipeEngine {
         resumed
     }
 
+    /// Resume a recipe that paused on an `AskUser` step, binding the user's answer + continuing.
+    pub async fn resume_with_answer(&self, run_id: &str, answer: &str) -> RunOutcome {
+        let empty = || RunOutcome {
+            ok: false,
+            error: Some("no such paused recipe".into()),
+            notifications: vec![],
+            failure_learnings: vec![],
+            pending_action: None,
+            pending_question: None,
+            vars: HashMap::new(),
+        };
+        let store = match &self.store {
+            Some(s) => s.clone(),
+            None => return empty(),
+        };
+        let rec = match store.load(run_id) {
+            Some(r) => r,
+            None => return empty(),
+        };
+        let mut vars = rec.vars;
+        // Bind the answer to the AskUser step's store_as, then continue past it.
+        if let Some(RecipeStep::AskUser { store_as, .. }) = rec.steps.get(rec.current_step) {
+            vars.insert(store_as.clone(), Value::String(answer.to_string()));
+        }
+        self.run_from(&rec.id, &rec.name, rec.steps.clone(), rec.current_step + 1, vars).await
+    }
+
     async fn run_from(
         &self,
         id: &str,
@@ -314,7 +355,7 @@ impl RecipeEngine {
             guard += 1;
             if guard > 1000 {
                 persist("failed", i, &steps, &vars, Some("step budget exceeded"));
-                return RunOutcome { ok: false, error: Some("step budget exceeded".into()), notifications, failure_learnings, pending_action: None, vars };
+                return RunOutcome { ok: false, error: Some("step budget exceeded".into()), notifications, failure_learnings, pending_action: None, pending_question: None, vars };
             }
             let step = steps[i].clone();
             match self.execute_step(&step, &mut vars).await {
@@ -327,7 +368,13 @@ impl RecipeEngine {
                 StepResult::Pending(req) => {
                     // Pause here: the action needs the user's confirmation before it runs.
                     persist("waiting", i, &steps, &vars, None);
-                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: Some(req), vars };
+                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: Some(req), pending_question: None, vars };
+                }
+                StepResult::Ask(question) => {
+                    // Pause here: wait for the user's free-form answer (resume_with_answer binds it).
+                    persist("waiting", i, &steps, &vars, None);
+                    let pq = PendingQuestion { run_id: id.to_string(), question };
+                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: Some(pq), vars };
                 }
                 StepResult::Failed(e) => {
                     match self.handle_error(i, &e, &step.on_error(), &mut vars, &mut steps, &mut failure_learnings).await {
@@ -336,7 +383,7 @@ impl RecipeEngine {
                         ErrorResolution::JumpTo(t) => i = t,
                         ErrorResolution::Abort => {
                             persist("failed", i, &steps, &vars, Some(&e));
-                            return RunOutcome { ok: false, error: Some(e), notifications, failure_learnings, pending_action: None, vars };
+                            return RunOutcome { ok: false, error: Some(e), notifications, failure_learnings, pending_action: None, pending_question: None, vars };
                         }
                     }
                 }
@@ -345,7 +392,7 @@ impl RecipeEngine {
             persist("running", i, &steps, &vars, None);
         }
         persist("done", i, &steps, &vars, None);
-        RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, vars }
+        RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: None, vars }
     }
 
     /// Resolve a step failure per its `ErrorAction`. `Replan` asks the LLM to rewrite the tail.
@@ -491,6 +538,7 @@ impl RecipeEngine {
                 }
             }
             RecipeStep::Notify { message } => StepResult::Notify(resolve_vars(message, vars)),
+            RecipeStep::AskUser { question, .. } => StepResult::Ask(resolve_vars(question, vars)),
             RecipeStep::Act { kind, target, summary, payload } => {
                 let runtime = match &self.runtime {
                     Some(r) => r,
@@ -723,6 +771,28 @@ mod tests {
         let resumed = plain_engine_with_store(store.clone()).resume_incomplete().await;
         assert_eq!(resumed, 0, "a non-idempotent send must NOT be blind-replayed");
         assert!(store.resumable().is_empty(), "it should be marked failed, not left running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn askuser_pauses_then_resumes_with_answer() {
+        let store = Arc::new(RecipeStore::open(&temp_db("ask")).unwrap());
+        let eng = plain_engine_with_store(store.clone());
+        let recipe = Recipe {
+            id: "ask".into(),
+            name: "ask".into(),
+            steps: vec![
+                RecipeStep::AskUser { question: "What's your favorite color?".into(), store_as: "color".into() },
+                RecipeStep::Notify { message: "Got it: {{color}}".into() },
+            ],
+        };
+        let out = eng.run(&recipe).await;
+        let pq = out.pending_question.expect("should pause on AskUser");
+        assert!(pq.question.contains("favorite color"));
+        assert!(out.notifications.is_empty(), "must pause BEFORE the Notify");
+
+        let resumed = eng.resume_with_answer(&pq.run_id, "teal").await;
+        assert!(resumed.ok, "{:?}", resumed.error);
+        assert_eq!(resumed.notifications, vec!["Got it: teal".to_string()], "answer bound + recipe continued");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

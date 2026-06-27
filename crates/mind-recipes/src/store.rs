@@ -71,6 +71,29 @@ impl RecipeStore {
         );
     }
 
+    /// Load a single run by id (any status) — used to resume a recipe waiting on an AskUser answer.
+    pub fn load(&self, id: &str) -> Option<RunRecord> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE id=?1",
+            [id],
+            |row| {
+                let steps_json: String = row.get(4)?;
+                let vars_json: String = row.get(5)?;
+                Ok(RunRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    status: row.get(2)?,
+                    current_step: row.get::<_, i64>(3)? as usize,
+                    steps: serde_json::from_str(&steps_json).unwrap_or_default(),
+                    vars: serde_json::from_str(&vars_json).unwrap_or_default(),
+                    error: row.get::<_, Option<String>>(6)?,
+                })
+            },
+        )
+        .ok()
+    }
+
     /// Runs that were `running` when the process stopped — candidates for recovery.
     pub fn resumable(&self) -> Vec<RunRecord> {
         let conn = self.conn.lock().unwrap();

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use mind_inference::InferencePool;
-use mind_types::{MemoryFacade, MindError, Result, WorkingSet};
+use mind_types::{BeliefAssertion, MemoryFacade, MindError, Result, WorkingSet};
 use yantrik_ml::{ChatMessage, GenerationConfig};
 
 pub struct ConversationEngine {
@@ -63,8 +63,39 @@ impl ConversationEngine {
         messages
     }
 
-    /// Handle one conversational turn: ground in typed memory → reply.
+    /// Pull an explicitly-taught fact out of a turn ("remember that X"). Scoped to an explicit
+    /// teaching intent so casual chat isn't silently stored as belief (that broader,
+    /// LLM-extracted learning is a later eval-driven step).
+    fn extract_taught_belief(text: &str) -> Option<String> {
+        let t = text.trim();
+        let lower = t.to_lowercase();
+        for p in ["remember that ", "remember: ", "remember "] {
+            if lower.starts_with(p) {
+                let rest = t[p.len()..].trim().trim_end_matches('.').trim();
+                if rest.len() >= 3 {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Handle one conversational turn: learn what's taught → ground in typed memory → reply.
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
+        // The mind learns from conversation: an explicitly-taught fact becomes a typed belief,
+        // available to ground this very turn and every future one.
+        if let Some(stmt) = Self::extract_taught_belief(user_text) {
+            let _ = self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: stmt,
+                    polarity: 1.0,
+                    weight: 1.5,
+                    source_event: Some("chat".into()),
+                    provenance: "told".into(),
+                })
+                .await;
+        }
         let ws = self.memory.hydrate_working_set(user_text).await?;
         let grounding = Self::render_grounding(&ws);
         let messages = self.build_prompt(&grounding, user_text);

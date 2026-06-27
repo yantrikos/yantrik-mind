@@ -59,7 +59,9 @@ pub struct Scenario {
     pub name: String,
     pub seeds: Vec<Seed>,
     pub relations: Vec<Relation>,
-    pub probe: Option<String>,
+    /// Chat turns run in order (multi-turn). Checks see the LAST turn's assembled prompt — so a
+    /// scenario can teach in turn 1 and assert turn 2 grounds on it.
+    pub turns: Vec<String>,
     pub checks: Vec<Check>,
 }
 
@@ -134,12 +136,11 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, EVAL_PERSONA);
 
-    let prompt = if let Some(p) = &s.probe {
-        let _ = conv.handle_turn(p).await;
-        scripted.last_system_prompt()
-    } else {
-        String::new()
-    };
+    let mut prompt = String::new();
+    for turn in &s.turns {
+        let _ = conv.handle_turn(turn).await;
+        prompt = scripted.last_system_prompt(); // checks grade the final turn's grounding
+    }
 
     let mut checks = Vec::new();
     for c in &s.checks {
@@ -201,21 +202,21 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "belief revision: positive evidence raises confidence".into(),
             seeds: vec![Seed::pos("Pranab prefers terse replies")],
             relations: vec![],
-            probe: None,
+            turns: vec![],
             checks: vec![Check::ConfidenceAbove("Pranab prefers terse replies".into(), 0.5)],
         },
         Scenario {
             name: "belief revision: negative evidence lowers confidence".into(),
             seeds: vec![Seed::neg("Pranab lives in Tokyo")],
             relations: vec![],
-            probe: None,
+            turns: vec![],
             checks: vec![Check::ConfidenceBelow("Pranab lives in Tokyo".into(), 0.5)],
         },
         Scenario {
             name: "grounded chat: reply is grounded in the belief".into(),
             seeds: vec![Seed::pos("Pranab prefers terse replies")],
             relations: vec![],
-            probe: Some("how should you answer me?".into()),
+            turns: vec!["how should you answer me?".into()],
             checks: vec![
                 Check::PromptContains("terse".into()),
                 Check::PromptContains("NOT instructions".into()), // untrusted-wrapped
@@ -232,7 +233,7 @@ pub fn standard_suite() -> Vec<Scenario> {
                 b: "Pranab prefers long detailed replies".into(),
                 rel: "contradicts".into(),
             }],
-            probe: Some("what's my reply style?".into()),
+            turns: vec!["what's my reply style?".into()],
             checks: vec![
                 Check::MinConflicts(1),
                 Check::PromptContains("conflicts with".into()),
@@ -242,25 +243,37 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "confidence-aware hedging of uncertain beliefs".into(),
             seeds: vec![Seed::weak("Pranab is travelling next week")],
             relations: vec![],
-            probe: Some("am I travelling?".into()),
+            turns: vec!["am I travelling?".into()],
             checks: vec![Check::PromptContains("confidence".into())],
         },
         Scenario {
             name: "no confabulation: empty memory => no grounding block".into(),
             seeds: vec![],
             relations: vec![],
-            probe: Some("tell me about myself".into()),
+            turns: vec!["tell me about myself".into()],
             checks: vec![Check::PromptOmits("<<memory".into())],
         },
         Scenario {
             name: "typed recall surfaces a seeded belief".into(),
             seeds: vec![Seed::pos("Pranab is building Yantrik Mind")],
             relations: vec![],
-            probe: None,
+            turns: vec![],
             checks: vec![Check::RecallSurfaces {
                 query: "what is Pranab building".into(),
                 expect: "Yantrik Mind".into(),
             }],
+        },
+        // GROWTH (added test-first): the mind learns from conversation — taught in turn 1, it
+        // grounds on it in turn 2. Failed before ConversationEngine learned taught facts.
+        Scenario {
+            name: "learns from chat: teach in turn 1, recall in turn 2".into(),
+            seeds: vec![],
+            relations: vec![],
+            turns: vec![
+                "remember that I drink dark roast coffee".into(),
+                "what coffee do I like?".into(),
+            ],
+            checks: vec![Check::PromptContains("dark roast".into())],
         },
     ]
 }

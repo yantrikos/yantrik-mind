@@ -25,10 +25,20 @@ pub enum Outcome {
 ///   `:explain <statement>`                                  show a belief + its evidence count
 ///   `:quit`
 pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngine) -> Outcome {
-    let t = line.trim();
-    if t.is_empty() {
+    let raw = line.trim();
+    if raw.is_empty() {
         return Outcome::Said(String::new());
     }
+    // Accept telegram-style '/command' (with optional @botname) as our ':command'.
+    let owned;
+    let t: &str = if let Some(body) = raw.strip_prefix('/') {
+        let (cmd, rest) = body.split_once(' ').unwrap_or((body, ""));
+        let cmd = cmd.split('@').next().unwrap_or(cmd);
+        owned = if rest.is_empty() { format!(":{cmd}") } else { format!(":{cmd} {rest}") };
+        &owned
+    } else {
+        raw
+    };
     if t == ":quit" || t == ":q" {
         return Outcome::Quit;
     }
@@ -149,5 +159,19 @@ mod tests {
 
         // :quit
         assert!(matches!(handle_line(":quit", &mem, &conv).await, Outcome::Quit));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn telegram_slash_commands_are_accepted() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = engine(&mem, pool);
+        handle_line("/task@th_ym_c1_bot buy milk", &mem, &conv).await;
+        match handle_line("/tasks", &mem, &conv).await {
+            Outcome::Said(s) => assert!(s.contains("buy milk"), "slash command should work: {s}"),
+            _ => panic!("expected output"),
+        }
+        assert!(matches!(handle_line("/quit", &mem, &conv).await, Outcome::Quit));
     }
 }

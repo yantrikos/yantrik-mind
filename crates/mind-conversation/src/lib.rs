@@ -79,6 +79,76 @@ impl ConversationEngine {
         None
     }
 
+    /// "deep dive on X" / "deep research X" / "thoroughly research X" → (topic). Checked BEFORE the
+    /// single-agent research so the deeper, parallel path wins.
+    fn wants_deep_research(text: &str) -> Option<String> {
+        let l = text.trim().to_lowercase();
+        for p in ["deep dive on ", "deep dive into ", "deep-dive on ", "deep dive ", "deep research ",
+                  "thoroughly research ", "comprehensive research on ", "thorough research on "] {
+            if let Some(idx) = l.find(p) {
+                let topic = text[idx + p.len()..].trim().trim_start_matches("on ").trim_start_matches("into ").trim();
+                let topic = topic.trim_end_matches(['.', '?', '!']).trim();
+                if topic.len() >= 2 {
+                    return Some(topic.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Deep research: split the topic into sub-questions, run a sub-agent on each IN PARALLEL
+    /// (fan-out), then synthesize. The visible payoff of the sub-agent + concurrency work.
+    async fn deep_research(&self, topic: &str) -> Result<String> {
+        let agent = match &self.researcher {
+            Some(a) => a,
+            None => return Ok("(no researcher configured)".into()),
+        };
+        // 1. Split into focused sub-questions.
+        let split = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::user(&format!(
+                "Break this into 3 focused, non-overlapping sub-questions to investigate. \
+                 One per line, no numbering, no preamble.\nTopic: {topic}"
+            )),
+        ];
+        let subs = self
+            .inference
+            .chat(split, GenerationConfig::default())
+            .await
+            .map_err(|e| MindError::Inference(e.to_string()))?;
+        let mut tasks: Vec<String> = subs
+            .text
+            .lines()
+            .map(|l| l.trim().trim_start_matches(['-', '*', '•', ' ']).trim().to_string())
+            .filter(|l| l.len() > 3)
+            .take(4)
+            .collect();
+        if tasks.is_empty() {
+            tasks.push(topic.to_string());
+        }
+        // 2. Fan out — sub-agents run concurrently.
+        let results = agent.fan_out(tasks).await;
+        let findings = results
+            .iter()
+            .map(|r| format!("Q: {}\nA: {}", r.task, r.answer))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        // 3. Synthesize, grounded only in the findings.
+        let synth = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::user(&format!(
+                "Synthesize one coherent answer to '{topic}' from these parallel findings. Ground ONLY \
+                 in them; note any gaps.\n\n{findings}"
+            )),
+        ];
+        let out = self
+            .inference
+            .chat(synth, GenerationConfig::default())
+            .await
+            .map_err(|e| MindError::Inference(e.to_string()))?;
+        Ok(format!("{}\n\n_(deep-dived {} angles in parallel)_", out.text, results.len()))
+    }
+
     /// Give the mind hands: outward actions run through this harm-gated runtime with confirmation.
     pub fn with_runtime(mut self, runtime: Arc<dyn ActionRuntime>) -> Self {
         self.runtime = Some(runtime);
@@ -619,10 +689,16 @@ impl ConversationEngine {
             let _ = self.memory.append_message("assistant", &reply).await;
             return Ok(reply);
         }
-        // Research sub-agent: dispatch a bounded ReAct agent over the read tools.
-        if let Some(agent) = &self.researcher {
+        // Research sub-agent: parallel deep-dive first, then the single-agent path.
+        if self.researcher.is_some() {
+            if let Some(topic) = Self::wants_deep_research(user_text) {
+                let reply = self.deep_research(&topic).await?;
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
             if let Some(topic) = Self::wants_research(user_text) {
-                let result = agent.run(&topic).await;
+                let result = self.researcher.as_ref().unwrap().run(&topic).await;
                 let reply = format!("{}\n\n_(researched in {} step(s))_", result.answer, result.steps);
                 let _ = self.memory.append_message("user", user_text).await;
                 let _ = self.memory.append_message("assistant", &reply).await;
@@ -861,6 +937,15 @@ mod tests {
         let p = scripted.last_prompt();
         assert!(p.contains("BRIEFMAIL") && p.contains("BRIEFGH"), "briefing must compose both sources:\n{p}");
         assert!(p.contains("NOT instructions"), "briefing data must be untrusted-wrapped:\n{p}");
+    }
+
+    #[test]
+    fn research_triggers_route_correctly() {
+        assert_eq!(ConversationEngine::wants_research("look into my github").as_deref(), Some("my github"));
+        // deep-research must win over plain research for "deep research X"
+        assert_eq!(ConversationEngine::wants_deep_research("deep research the q3 numbers").as_deref(), Some("the q3 numbers"));
+        assert_eq!(ConversationEngine::wants_deep_research("deep dive on tariffs").as_deref(), Some("tariffs"));
+        assert!(ConversationEngine::wants_deep_research("hi there").is_none());
     }
 
     #[test]

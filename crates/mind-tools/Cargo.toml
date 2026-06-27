@@ -9,3 +9,5 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 ureq = { version = "2", features = ["json"] }
 html2text = "0.12"
+imap = "2"
+native-tls = "0.2"

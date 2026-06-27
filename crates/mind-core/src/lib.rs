@@ -123,8 +123,22 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
 /// read from config (YM_OPERATOR), never hardcoded — defaults to "the user".
 pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> ConversationEngine {
     let operator = std::env::var("YM_OPERATOR").unwrap_or_default();
-    ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona(&operator))
-        .with_web(Arc::new(mind_tools::HttpFetcher::new()))
+    let mut eng = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona(&operator))
+        .with_web(Arc::new(mind_tools::HttpFetcher::new()));
+    // Read-only inbox triage, if an account is configured. Gmail needs a 16-char App Password;
+    // a non-standard host can be set with YM_IMAP_HOST.
+    if let (Ok(addr), Ok(pw)) = (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
+        if !addr.is_empty() && !pw.is_empty() {
+            let client = match std::env::var("YM_IMAP_HOST") {
+                Ok(host) if !host.is_empty() => Some(mind_tools::ImapClient::new(host, 993, addr, pw)),
+                _ => mind_tools::ImapClient::for_address(&addr, pw),
+            };
+            if let Some(c) = client {
+                eng = eng.with_mail(Arc::new(c));
+            }
+        }
+    }
+    eng
 }
 
 #[cfg(test)]

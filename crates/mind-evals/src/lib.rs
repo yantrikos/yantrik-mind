@@ -141,7 +141,13 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
     let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona("the user"))
         .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
             "WEBDOC: Teal is a cyan-family blue-green color.",
-        )));
+        )))
+        .with_mail(Arc::new(mind_tools::ScriptedMailClient::new(vec![mind_tools::EmailMsg {
+            id: "1".into(),
+            from: "INBOXDOC alice@acme.com".into(),
+            subject: "Q3 invoice".into(),
+            date: "today".into(),
+        }])));
 
     let mut prompt = String::new();
     for turn in &s.turns {
@@ -351,6 +357,18 @@ pub fn standard_suite() -> Vec<Scenario> {
             checks: vec![
                 Check::PromptContains("WEBDOC".into()),          // the page reached the prompt
                 Check::PromptContains("web page".into()),         // untrusted-wrapped web block
+            ],
+        },
+        // GROWTH (email): "check my email" pulls the inbox (read-only) and grounds the reply.
+        Scenario {
+            name: "email: 'check my email' grounds the reply in the inbox (untrusted)".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["can you check my email?".into()],
+            checks: vec![
+                Check::PromptContains("INBOXDOC".into()),        // the inbox reached the prompt
+                Check::PromptContains("<<inbox".into()),         // untrusted-wrapped inbox block
             ],
         },
     ]

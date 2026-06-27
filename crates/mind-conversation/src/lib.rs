@@ -143,6 +143,27 @@ impl ConversationEngine {
             .any(|p| l.contains(p))
     }
 
+    /// "find/search (a )?skill for X" / "do you have a skill for/to X" / "any skill for X" → query.
+    fn parse_find_skill(text: &str) -> Option<String> {
+        let l = text.to_lowercase();
+        let is_search = ["find a skill", "find skill", "search skill", "search for a skill",
+            "do you have a skill", "any skill for", "is there a skill", "which skill", "skill for ", "skill to "]
+            .iter()
+            .any(|p| l.contains(p));
+        if !is_search {
+            return None;
+        }
+        // The query is whatever follows the last "for "/"to " marker, else the whole message.
+        let q = ["skill for ", "skill to ", " for ", " to "]
+            .iter()
+            .filter_map(|m| l.rfind(m).map(|i| (i, m.len())))
+            .max_by_key(|(i, _)| *i)
+            .map(|(i, len)| text[i + len..].trim().trim_end_matches(['?', '.', '!']).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| text.trim().to_string());
+        Some(q)
+    }
+
     /// A topic too thin to research well (ask to scope it first).
     fn is_vague_topic(topic: &str) -> bool {
         let words = topic.split_whitespace().count();
@@ -800,6 +821,22 @@ impl ConversationEngine {
             return Some(format!("Skills ({}):\n{body}", skills.len()));
         }
 
+        // Skill SEARCH: find banked skills relevant to a task.
+        if let Some(query) = Self::parse_find_skill(user_text) {
+            let hits = self.memory.recall_skills(&query, 5).await.unwrap_or_default();
+            if hits.is_empty() {
+                return Some(format!(
+                    "No skill matches \"{query}\" yet. Run code (e.g. \"run python: …\"), then \"save that as skill <name>\" to bank one."
+                ));
+            }
+            let body = hits
+                .iter()
+                .map(|s| format!("- {} [{}] — {} ({}/{} ok) → \"run skill {}\"", s.name, s.lang, s.summary, s.successes, s.runs, s.name))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Some(format!("Skills matching \"{query}\":\n{body}"));
+        }
+
         if let Some(name) = Self::parse_save_skill(user_text) {
             let last = self.last_run.lock().unwrap().clone();
             let (lang, code) = match last {
@@ -1414,6 +1451,10 @@ mod tests {
         assert_eq!(ConversationEngine::parse_run_skill("use the skill fib").as_deref(), Some("fib"));
         assert!(ConversationEngine::wants_list_skills("list my skills"));
         assert!(ConversationEngine::parse_run_skill("run python: print(1)").is_none());
+        // search
+        assert_eq!(ConversationEngine::parse_find_skill("do you have a skill for parsing csv").as_deref(), Some("parsing csv"));
+        assert_eq!(ConversationEngine::parse_find_skill("find a skill to summarize text").as_deref(), Some("summarize text"));
+        assert!(ConversationEngine::parse_find_skill("hello there").is_none());
     }
 
     #[test]

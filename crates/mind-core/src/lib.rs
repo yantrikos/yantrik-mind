@@ -153,11 +153,6 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         eng = eng.with_github(g.clone());
     }
 
-    // Recipe engine: citation-validated, adaptive workflows over the read capabilities.
-    let host = mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone());
-    let recipe_engine = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(host), persona.clone());
-    eng = eng.with_recipes(Arc::new(recipe_engine));
-
     // Hands: an outward-action runtime, harm-gated + confirmation-required. Grants SendMessage when a
     // transport (email send and/or github comment) is configured. Every action rides the harm-gate.
     let mut executor = mind_tools::ToolActionExecutor::new();
@@ -174,14 +169,34 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
             granted.push(mind_types::Capability::SendMessage);
         }
     }
-    if !granted.is_empty() {
-        let runtime = mind_governance::GovernedActionRuntime::new(
+    let runtime: Option<Arc<dyn mind_types::ActionRuntime>> = if granted.is_empty() {
+        None
+    } else {
+        Some(Arc::new(mind_governance::GovernedActionRuntime::new(
             Arc::new(mind_governance::RealHarmGate::new()),
             Arc::new(executor),
             granted,
-        );
-        eng = eng.with_runtime(Arc::new(runtime));
+        )))
+    };
+    if let Some(rt) = &runtime {
+        eng = eng.with_runtime(rt.clone());
     }
+
+    // Recipe engine: citation-validated, adaptive workflows over the read capabilities. Gets the same
+    // harm-gated runtime (for Act steps) and a durable store (persistence + crash recovery).
+    let host = mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone());
+    let mut recipe_engine = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(host), persona.clone());
+    if let Some(rt) = &runtime {
+        recipe_engine = recipe_engine.with_runtime(rt.clone());
+    }
+    if let Ok(db) = std::env::var("YM_DB") {
+        if !db.is_empty() && db != ":memory:" {
+            if let Ok(store) = mind_recipes::RecipeStore::open(&db) {
+                recipe_engine = recipe_engine.with_store(Arc::new(store));
+            }
+        }
+    }
+    eng = eng.with_recipes(Arc::new(recipe_engine));
     eng
 }
 

@@ -67,6 +67,15 @@ impl ConversationEngine {
         self
     }
 
+    /// Recover any recipe runs left mid-flight by a previous crash (idempotent steps re-run; a
+    /// non-idempotent send is failed-visibly). Returns how many were resumed.
+    pub async fn resume_recipes(&self) -> usize {
+        match &self.recipes {
+            Some(re) => re.resume_incomplete().await,
+            None => 0,
+        }
+    }
+
     /// Give the mind read-only web browsing.
     pub fn with_web(mut self, fetcher: Arc<dyn Fetcher>) -> Self {
         self.web = Some(fetcher);
@@ -107,8 +116,7 @@ impl ConversationEngine {
     fn wants_briefing(text: &str) -> bool {
         let l = text.trim().to_lowercase();
         ["good morning", "morning briefing", "brief me", "give me a briefing", "my briefing",
-         "daily briefing", "catch me up", "the rundown", "what's on my plate", "whats on my plate",
-         "what do i need to know"]
+         "daily briefing", "catch me up", "the rundown"]
             .iter()
             .any(|p| l.contains(p))
             || l == "briefing"

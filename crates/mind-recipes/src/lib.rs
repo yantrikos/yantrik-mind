@@ -13,11 +13,39 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod store;
+pub use store::{RecipeStore, RunRecord};
+
 use async_trait::async_trait;
 use mind_inference::InferencePool;
+use mind_types::{
+    ActionDecision, ActionIntent, ActionRequest, ActionRuntime, Capability, Event, EventBody,
+    EventSource, RiskLevel, TurnContext,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use yantrik_ml::{ChatMessage, GenerationConfig};
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A throwaway TurnContext for the harm-gate (it inspects the intent, not the context).
+fn dummy_ctx(req: &ActionRequest) -> TurnContext {
+    TurnContext::new(
+        Event {
+            id: req.id.clone(),
+            trace_id: req.id.clone(),
+            source: EventSource::SelfReflection,
+            body: EventBody::plain("recipe action"),
+            ts: req.created_ms,
+        },
+        req.created_ms,
+    )
+}
 
 // ── Step model (lifted) ───────────────────────────────────────────────────────────────────────
 
@@ -37,6 +65,10 @@ pub enum RecipeStep {
     JumpIf { condition: Condition, target_step: usize },
     /// Emit a message to the user (supports {{var}}).
     Notify { message: String },
+    /// An OUTWARD action (e.g. send an email). Fields are {{var}}-resolved, then the action rides the
+    /// harm-gate + ActionRuntime: Execute runs it; RequireConfirmation pauses the recipe for a yes;
+    /// Deny fails it. Non-idempotent — never blind-rerun on recovery.
+    Act { kind: String, target: String, summary: String, payload: String },
 }
 
 impl RecipeStep {
@@ -47,6 +79,11 @@ impl RecipeStep {
             | RecipeStep::ThinkCited { on_error, .. } => on_error.clone(),
             _ => ErrorAction::Fail,
         }
+    }
+
+    /// Idempotent steps are safe to re-run on crash recovery; an `Act` is NOT.
+    pub fn is_idempotent(&self) -> bool {
+        !matches!(self, RecipeStep::Act { .. })
     }
 }
 
@@ -143,6 +180,8 @@ pub struct RunOutcome {
     pub notifications: Vec<String>,
     /// Adaptations made on failure: ("<failed step>", "<error>", "<what changed>").
     pub failure_learnings: Vec<(String, String, String)>,
+    /// An outward action awaiting confirmation — the recipe paused here until the user says yes.
+    pub pending_action: Option<ActionRequest>,
     pub vars: HashMap<String, Value>,
 }
 
@@ -151,6 +190,8 @@ enum StepResult {
     JumpTo(usize),
     Notify(String),
     Failed(String),
+    /// An Act step needs confirmation — pause the recipe and surface the proposed action.
+    Pending(ActionRequest),
 }
 
 /// How a step failure was resolved by its `ErrorAction`.
@@ -190,26 +231,90 @@ pub struct RecipeEngine {
     inference: InferencePool,
     host: Arc<dyn RecipeHost>,
     persona: String,
+    /// Outward-action runtime — required for `Act` steps (harm-gate + confirmation).
+    runtime: Option<Arc<dyn ActionRuntime>>,
+    /// Durable run state — when set, runs are persisted per step and recoverable on restart.
+    store: Option<Arc<RecipeStore>>,
 }
 
 impl RecipeEngine {
     pub fn new(inference: InferencePool, host: Arc<dyn RecipeHost>, persona: impl Into<String>) -> Self {
-        Self { inference, host, persona: persona.into() }
+        Self { inference, host, persona: persona.into(), runtime: None, store: None }
+    }
+
+    /// Enable `Act` steps by giving the engine the harm-gated action runtime.
+    pub fn with_runtime(mut self, runtime: Arc<dyn ActionRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Persist runs (durability + crash recovery).
+    pub fn with_store(mut self, store: Arc<RecipeStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     pub async fn run(&self, recipe: &Recipe) -> RunOutcome {
-        // Steps are owned + mutable so a Replan can rewrite the tail in place (like the original's
-        // replace_remaining_steps), and survive across the loop.
-        let mut steps = recipe.steps.clone();
-        let mut vars: HashMap<String, Value> = HashMap::new();
+        let id = format!("{}-{}", recipe.id, now_ms());
+        self.run_from(&id, &recipe.name, recipe.steps.clone(), 0, HashMap::new()).await
+    }
+
+    /// Recover runs left mid-flight by a crash. Idempotent steps are re-run from where they stopped;
+    /// a non-idempotent step (an Act/send) is failed-visibly, never blind-replayed (no double-send).
+    pub async fn resume_incomplete(&self) -> usize {
+        let store = match &self.store {
+            Some(s) => s.clone(),
+            None => return 0,
+        };
+        let mut resumed = 0;
+        for rec in store.resumable() {
+            match rec.steps.get(rec.current_step) {
+                Some(step) if !step.is_idempotent() => {
+                    store.set_status(&rec.id, "failed", Some("interrupted at a non-idempotent step; not retried"), now_ms());
+                }
+                _ => {
+                    self.run_from(&rec.id, &rec.name, rec.steps, rec.current_step, rec.vars).await;
+                    resumed += 1;
+                }
+            }
+        }
+        resumed
+    }
+
+    async fn run_from(
+        &self,
+        id: &str,
+        name: &str,
+        mut steps: Vec<RecipeStep>,
+        start: usize,
+        mut vars: HashMap<String, Value>,
+    ) -> RunOutcome {
         let mut notifications = Vec::new();
         let mut failure_learnings = Vec::new();
-        let mut i = 0usize;
+        let mut i = start;
         let mut guard = 0usize;
+        let persist = |status: &str, step: usize, steps: &[RecipeStep], vars: &HashMap<String, Value>, error: Option<&str>| {
+            if let Some(s) = &self.store {
+                let _ = s.save(
+                    &RunRecord {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        status: status.to_string(),
+                        current_step: step,
+                        steps: steps.to_vec(),
+                        vars: vars.clone(),
+                        error: error.map(|e| e.to_string()),
+                    },
+                    now_ms(),
+                );
+            }
+        };
+        persist("running", i, &steps, &vars, None);
         while i < steps.len() {
             guard += 1;
             if guard > 1000 {
-                return RunOutcome { ok: false, error: Some("step budget exceeded".into()), notifications, failure_learnings, vars };
+                persist("failed", i, &steps, &vars, Some("step budget exceeded"));
+                return RunOutcome { ok: false, error: Some("step budget exceeded".into()), notifications, failure_learnings, pending_action: None, vars };
             }
             let step = steps[i].clone();
             match self.execute_step(&step, &mut vars).await {
@@ -219,19 +324,28 @@ impl RecipeEngine {
                     notifications.push(m);
                     i += 1;
                 }
+                StepResult::Pending(req) => {
+                    // Pause here: the action needs the user's confirmation before it runs.
+                    persist("waiting", i, &steps, &vars, None);
+                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: Some(req), vars };
+                }
                 StepResult::Failed(e) => {
                     match self.handle_error(i, &e, &step.on_error(), &mut vars, &mut steps, &mut failure_learnings).await {
                         ErrorResolution::Skip => i += 1,
                         ErrorResolution::RetryHere => { /* re-run steps[i] */ }
                         ErrorResolution::JumpTo(t) => i = t,
                         ErrorResolution::Abort => {
-                            return RunOutcome { ok: false, error: Some(e), notifications, failure_learnings, vars };
+                            persist("failed", i, &steps, &vars, Some(&e));
+                            return RunOutcome { ok: false, error: Some(e), notifications, failure_learnings, pending_action: None, vars };
                         }
                     }
                 }
             }
+            // Record progress so a crash here resumes from the right place.
+            persist("running", i, &steps, &vars, None);
         }
-        RunOutcome { ok: true, error: None, notifications, failure_learnings, vars }
+        persist("done", i, &steps, &vars, None);
+        RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, vars }
     }
 
     /// Resolve a step failure per its `ErrorAction`. `Replan` asks the LLM to rewrite the tail.
@@ -377,6 +491,38 @@ impl RecipeEngine {
                 }
             }
             RecipeStep::Notify { message } => StepResult::Notify(resolve_vars(message, vars)),
+            RecipeStep::Act { kind, target, summary, payload } => {
+                let runtime = match &self.runtime {
+                    Some(r) => r,
+                    None => return StepResult::Failed("no action runtime configured for Act step".into()),
+                };
+                let intent = ActionIntent {
+                    kind: kind.clone(),
+                    target: resolve_vars(target, vars),
+                    summary: resolve_vars(summary, vars),
+                    payload: Some(resolve_vars(payload, vars)),
+                    capabilities: vec![Capability::SendMessage],
+                    risk: RiskLevel::Medium,
+                    reversible: false,
+                };
+                let req = ActionRequest {
+                    id: format!("rcp-{}", now_ms()),
+                    actor: "recipe".into(),
+                    intent,
+                    justification: "recipe action step".into(),
+                    created_ms: now_ms(),
+                };
+                let ctx = dummy_ctx(&req);
+                match runtime.decide(&req, &ctx).await {
+                    ActionDecision::Deny { reason } => StepResult::Failed(format!("harm-gate denied: {reason}")),
+                    ActionDecision::RequireConfirmation { .. } => StepResult::Pending(req),
+                    ActionDecision::Execute => match runtime.execute(req).await {
+                        Ok(r) if r.ok => StepResult::Continue,
+                        Ok(r) => StepResult::Failed(r.output),
+                        Err(e) => StepResult::Failed(e.to_string()),
+                    },
+                }
+            }
         }
     }
 }
@@ -477,6 +623,135 @@ mod tests {
         let scripted = Arc::new(ScriptedLLM::new(llm_text));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
         RecipeEngine::new(pool, Arc::new(ScriptedHost), "You are JARVIS.")
+    }
+
+    use mind_types::{ActionDecision, ActionReceipt, ActionRequest};
+    use std::sync::Mutex;
+
+    struct FakeRuntime {
+        decision: ActionDecision,
+        executed: Arc<Mutex<u32>>,
+    }
+    #[async_trait]
+    impl ActionRuntime for FakeRuntime {
+        async fn decide(&self, _req: &ActionRequest, _ctx: &mind_types::TurnContext) -> ActionDecision {
+            self.decision.clone()
+        }
+        async fn execute(&self, req: ActionRequest) -> mind_types::Result<ActionReceipt> {
+            *self.executed.lock().unwrap() += 1;
+            Ok(ActionReceipt { request_id: req.id, ok: true, output: "sent".into(), idempotency_key: "k".into() })
+        }
+    }
+
+    fn act_recipe() -> Recipe {
+        Recipe {
+            id: "act".into(),
+            name: "act".into(),
+            steps: vec![RecipeStep::Act {
+                kind: "send_email".into(),
+                target: "a@b.com".into(),
+                summary: "say hi".into(),
+                payload: "hello".into(),
+            }],
+        }
+    }
+
+    fn engine_with_runtime(decision: ActionDecision) -> (RecipeEngine, Arc<Mutex<u32>>) {
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let executed = Arc::new(Mutex::new(0));
+        let rt: Arc<dyn ActionRuntime> = Arc::new(FakeRuntime { decision, executed: executed.clone() });
+        let eng = RecipeEngine::new(pool, Arc::new(ScriptedHost), "JARVIS").with_runtime(rt);
+        (eng, executed)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn act_step_requiring_confirmation_pauses_with_pending() {
+        let (eng, executed) = engine_with_runtime(ActionDecision::RequireConfirmation { reason: "outward".into() });
+        let out = eng.run(&act_recipe()).await;
+        assert!(out.ok && out.pending_action.is_some(), "should pause for confirmation");
+        assert_eq!(*executed.lock().unwrap(), 0, "must NOT execute before confirmation");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn act_step_execute_runs_the_action() {
+        let (eng, executed) = engine_with_runtime(ActionDecision::Execute);
+        let out = eng.run(&act_recipe()).await;
+        assert!(out.ok && out.pending_action.is_none());
+        assert_eq!(*executed.lock().unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn act_step_denied_fails_the_recipe() {
+        let (eng, executed) = engine_with_runtime(ActionDecision::Deny { reason: "nope".into() });
+        let out = eng.run(&act_recipe()).await;
+        assert!(!out.ok);
+        assert_eq!(*executed.lock().unwrap(), 0);
+    }
+
+    fn temp_db(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("mind_recipes_{tag}_{}.db", now_ms()))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn plain_engine_with_store(store: Arc<RecipeStore>) -> RecipeEngine {
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        RecipeEngine::new(pool, Arc::new(ScriptedHost), "JARVIS").with_store(store)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn recovery_fails_visibly_on_interrupted_act() {
+        let store = Arc::new(RecipeStore::open(&temp_db("act")).unwrap());
+        // Simulate a crash mid-Act (non-idempotent) — status left 'running' at that step.
+        store
+            .save(
+                &RunRecord {
+                    id: "r1".into(),
+                    name: "send".into(),
+                    status: "running".into(),
+                    current_step: 0,
+                    steps: vec![RecipeStep::Act { kind: "send_email".into(), target: "a@b".into(), summary: "s".into(), payload: "p".into() }],
+                    vars: HashMap::new(),
+                    error: None,
+                },
+                now_ms(),
+            )
+            .unwrap();
+        let resumed = plain_engine_with_store(store.clone()).resume_incomplete().await;
+        assert_eq!(resumed, 0, "a non-idempotent send must NOT be blind-replayed");
+        assert!(store.resumable().is_empty(), "it should be marked failed, not left running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn recovery_reruns_idempotent_step() {
+        let store = Arc::new(RecipeStore::open(&temp_db("idem")).unwrap());
+        store
+            .save(
+                &RunRecord {
+                    id: "r2".into(),
+                    name: "notify".into(),
+                    status: "running".into(),
+                    current_step: 0,
+                    steps: vec![RecipeStep::Notify { message: "hi".into() }],
+                    vars: HashMap::new(),
+                    error: None,
+                },
+                now_ms(),
+            )
+            .unwrap();
+        let resumed = plain_engine_with_store(store.clone()).resume_incomplete().await;
+        assert_eq!(resumed, 1, "an idempotent step is safe to re-run");
+        assert!(store.resumable().is_empty(), "it should complete (done), not stay running");
+    }
+
+    #[test]
+    fn act_is_not_idempotent() {
+        let act = RecipeStep::Act { kind: "send_email".into(), target: "x".into(), summary: "y".into(), payload: "z".into() };
+        assert!(!act.is_idempotent());
+        assert!(RecipeStep::Notify { message: "x".into() }.is_idempotent());
     }
 
     #[test]

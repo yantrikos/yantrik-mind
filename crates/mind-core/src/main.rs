@@ -52,6 +52,12 @@ async fn main() -> anyhow::Result<()> {
     let mem = MemoryHandle::spawn(&db, 8).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
     let conv = mind_core::engine(&mem, pool);
 
+    // Recover any recipe runs interrupted by a previous crash (durable + idempotency-safe).
+    let resumed = conv.resume_recipes().await;
+    if resumed > 0 {
+        println!("recovered {resumed} interrupted recipe run(s)");
+    }
+
     // If a telegram token is configured, run the phone channel instead of the stdin REPL.
     if let Ok(tok) = std::env::var("YM_TELEGRAM_TOKEN") {
         if !tok.trim().is_empty() {

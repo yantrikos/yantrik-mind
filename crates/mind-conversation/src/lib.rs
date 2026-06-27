@@ -1255,11 +1255,37 @@ impl ConversationEngine {
             .chat(messages, GenerationConfig::default())
             .await
             .map_err(|e| MindError::Inference(e.to_string()))?;
-        let reply = resp.text;
+        let mut reply = resp.text;
+        // Auto-select: if a banked skill clearly fits this task, surface it (suggest, never auto-run).
+        if let Some(suggestion) = self.suggest_skill(user_text).await {
+            reply.push_str(&suggestion);
+        }
         // Persist this turn so it's available as context next time (cheap raw storage).
         let _ = self.memory.append_message("user", user_text).await;
         let _ = self.memory.append_message("assistant", &reply).await;
         Ok(reply)
+    }
+
+    /// Conservative recall router: if a banked skill strongly matches the task, return a one-line
+    /// suggestion to run it. Requires the sandbox (skills run there) + a multi-word topical match so
+    /// it doesn't fire on greetings or weak overlaps. Suggests — never auto-runs (the brainstorm rule).
+    async fn suggest_skill(&self, user_text: &str) -> Option<String> {
+        self.sandbox.as_ref()?;
+        if user_text.split_whitespace().count() < 3 {
+            return None;
+        }
+        let top = self.memory.recall_skills(user_text, 1).await.ok()?.into_iter().next()?;
+        let hay = format!("{} {} {}", top.name, top.summary, top.tags.join(" ")).to_lowercase();
+        let q = user_text.to_lowercase();
+        let matches = q.split_whitespace().filter(|w| w.len() >= 4).filter(|w| hay.contains(*w)).count();
+        if matches >= 2 {
+            Some(format!(
+                "\n\n_(I have a skill \"{}\" that may fit — say \"run skill {}\" to use it.)_",
+                top.name, top.name
+            ))
+        } else {
+            None
+        }
     }
 }
 
@@ -1528,6 +1554,37 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "boss@acme.com");
         assert!(sent[0].2.contains("deployment is live"), "the drafted body is what gets sent");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn auto_select_suggests_a_matching_skill() {
+        use mind_types::Skill;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        memarc
+            .save_skill(Skill {
+                name: "csv_rows".into(),
+                lang: "python".into(),
+                code: "print(1)".into(),
+                summary: "count rows in a csv file".into(),
+                tags: vec!["csv".into()],
+                status: "candidate".into(),
+                runs: 0,
+                successes: 0,
+                created_ms: 0,
+            })
+            .await
+            .unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS").with_sandbox(Arc::new(mind_tools::Sandbox::new()));
+        // a topical multi-word match -> suggestion naming the skill
+        let s = conv.suggest_skill("can you count rows in this csv data").await;
+        assert!(s.as_deref().map_or(false, |t| t.contains("csv_rows")), "should suggest: {s:?}");
+        // unrelated -> no suggestion (no noise)
+        assert!(conv.suggest_skill("what is the weather like today").await.is_none());
+        // greeting/too short -> none
+        assert!(conv.suggest_skill("hi there").await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

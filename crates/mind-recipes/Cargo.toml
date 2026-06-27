@@ -1,0 +1,16 @@
+[package]
+name = "mind-recipes"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mind-types = { workspace = true }
+mind-inference = { workspace = true }
+yantrik-ml = { workspace = true, default-features = false }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

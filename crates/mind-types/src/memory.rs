@@ -106,6 +106,28 @@ pub struct Reflection {
     pub open_conflicts: Vec<Contradiction>,
 }
 
+/// A reusable code-tool the mind authored, vetted in the sandbox, and banked for recall. Stored in
+/// YantrikDB. Reuse ALWAYS runs through the sandbox — promotion grants recallability, never authority.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub lang: String, // "python" | "shell" | "rust"
+    pub code: String,
+    /// What it does (used for recall) — should be system/verifier-generated, not raw author prose.
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub status: String, // "candidate" | "active" | "quarantined"
+    pub runs: u64,
+    pub successes: u64,
+    pub created_ms: u64,
+}
+
+impl Skill {
+    pub fn success_rate(&self) -> f64 {
+        if self.runs == 0 { 1.0 } else { self.successes as f64 / self.runs as f64 }
+    }
+}
+
 #[async_trait]
 pub trait MemoryFacade: Send + Sync {
     /// Typed + semantic + temporal recall (multi-signal).
@@ -136,6 +158,18 @@ pub trait MemoryFacade: Send + Sync {
     async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task>;
     async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>>;
     async fn complete_task(&self, id: &str) -> Result<bool>;
+
+    // ── skill library (code-tools the mind banks + reuses; reuse always runs in the sandbox) ──
+    /// Save/replace a vetted skill (code is secret-scanned by the write-gate). Returns Err if gated.
+    async fn save_skill(&self, skill: Skill) -> Result<()>;
+    /// Fetch a skill by exact name.
+    async fn get_skill(&self, name: &str) -> Result<Option<Skill>>;
+    /// All skills (for "what can you do?").
+    async fn list_skills(&self) -> Result<Vec<Skill>>;
+    /// Recall skills relevant to a task (ranked by name/summary/tag match).
+    async fn recall_skills(&self, query: &str, limit: usize) -> Result<Vec<Skill>>;
+    /// Record a run outcome → updates runs/successes; auto-quarantines a flaky skill.
+    async fn record_skill_outcome(&self, name: &str, success: bool) -> Result<()>;
 
     // ── cheap raw transcript (immediate conversational context; NOT knowledge) ──
     /// Append a raw chat line (role = "user" | "assistant").

@@ -22,7 +22,7 @@ enum CodeLang {
 }
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
-    MemoryFacade, MindError, Result, RiskLevel, WorkingSet,
+    MemoryFacade, MindError, Result, RiskLevel, Skill, WorkingSet,
 };
 use yantrik_ml::{ChatMessage, GenerationConfig};
 
@@ -53,6 +53,8 @@ pub struct ConversationEngine {
     sandbox: Option<Arc<Sandbox>>,
     /// A vague deep-dive topic awaiting a scoping answer (clarify-before-research).
     pending_research: Mutex<Option<String>>,
+    /// The last GREEN sandbox run (lang, code) — promotable into a saved skill.
+    last_run: Mutex<Option<(CodeLang, String)>>,
 }
 
 impl ConversationEngine {
@@ -72,7 +74,73 @@ impl ConversationEngine {
             researcher: None,
             sandbox: None,
             pending_research: Mutex::new(None),
+            last_run: Mutex::new(None),
         }
+    }
+
+    fn lang_str(l: CodeLang) -> &'static str {
+        match l {
+            CodeLang::Shell => "shell",
+            CodeLang::Python => "python",
+            CodeLang::Rust => "rust",
+        }
+    }
+
+    fn lang_from_str(s: &str) -> CodeLang {
+        match s {
+            "rust" => CodeLang::Rust,
+            "shell" => CodeLang::Shell,
+            _ => CodeLang::Python,
+        }
+    }
+
+    /// "save that/this/it as (a )?skill (called|named)? <name>" → skill name.
+    fn parse_save_skill(text: &str) -> Option<String> {
+        let l = text.to_lowercase();
+        if !(l.contains("save") && l.contains("skill")) {
+            return None;
+        }
+        // take the token(s) after "skill", "called", or "named"
+        for marker in ["skill called ", "skill named ", "as skill ", "a skill called ", "skill "] {
+            if let Some(i) = l.find(marker) {
+                let name = text[i + marker.len()..]
+                    .trim()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// "run/use (the )? skill <name>" / "use the <name> skill" → skill name.
+    fn parse_run_skill(text: &str) -> Option<String> {
+        let l = text.to_lowercase();
+        for marker in ["run skill ", "use skill ", "run the skill ", "use the skill ", "invoke skill "] {
+            if let Some(i) = l.find(marker) {
+                let name = text[i + marker.len()..]
+                    .trim()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn wants_list_skills(text: &str) -> bool {
+        let l = text.to_lowercase();
+        ["list skills", "list my skills", "what skills", "which skills", "your skills", "what can you do"]
+            .iter()
+            .any(|p| l.contains(p))
     }
 
     /// A topic too thin to research well (ask to scope it first).
@@ -709,6 +777,98 @@ impl ConversationEngine {
         None
     }
 
+    /// The skill loop: save a green run as a reusable skill, run a saved skill (always in the
+    /// sandbox), or list skills. Returns Some(reply) if handled. Requires the sandbox (reuse runs
+    /// code; banking without a runner would be pointless).
+    async fn handle_skills(&self, user_text: &str) -> Option<String> {
+        let sb = self.sandbox.as_ref()?;
+
+        if Self::wants_list_skills(user_text) {
+            let skills = self.memory.list_skills().await.unwrap_or_default();
+            if skills.is_empty() {
+                return Some("No skills banked yet. Run some code, then say \"save that as skill <name>\".".into());
+            }
+            let body = skills
+                .iter()
+                .map(|s| format!(
+                    "- {} [{}] — {} ({}/{} ok{})",
+                    s.name, s.lang, s.summary, s.successes, s.runs,
+                    if s.status == "quarantined" { ", QUARANTINED" } else { "" }
+                ))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Some(format!("Skills ({}):\n{body}", skills.len()));
+        }
+
+        if let Some(name) = Self::parse_save_skill(user_text) {
+            let last = self.last_run.lock().unwrap().clone();
+            let (lang, code) = match last {
+                Some(lc) => lc,
+                None => return Some("Run something green first (e.g. \"run python: …\"), then I'll save it as a skill.".into()),
+            };
+            // Verifier-generated summary for recall (not author prose).
+            let summary = self
+                .inference
+                .chat(
+                    vec![
+                        ChatMessage::system(&self.persona),
+                        ChatMessage::user(&format!(
+                            "In ONE terse sentence, say what this {} code does — for a tool catalog, no preamble:\n\n{code}",
+                            Self::lang_str(lang)
+                        )),
+                    ],
+                    GenerationConfig::default(),
+                )
+                .await
+                .map(|r| r.text.trim().to_string())
+                .unwrap_or_else(|_| format!("{} skill", Self::lang_str(lang)));
+            let skill = Skill {
+                name: name.clone(),
+                lang: Self::lang_str(lang).into(),
+                code,
+                summary: summary.clone(),
+                tags: vec![],
+                status: "candidate".into(),
+                runs: 0,
+                successes: 0,
+                created_ms: Self::now_ms(),
+            };
+            return Some(match self.memory.save_skill(skill).await {
+                Ok(()) => format!("Saved skill \"{name}\": {summary}\nRun it anytime with \"run skill {name}\" (always sandboxed)."),
+                Err(e) => format!("Couldn't save that skill — {e}."),
+            });
+        }
+
+        if let Some(name) = Self::parse_run_skill(user_text) {
+            let skill = match self.memory.get_skill(&name).await.ok().flatten() {
+                Some(s) => s,
+                None => {
+                    let hits = self.memory.recall_skills(&name, 3).await.unwrap_or_default();
+                    let hint = if hits.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Did you mean: {}?", hits.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", "))
+                    };
+                    return Some(format!("No skill named \"{name}\".{hint}"));
+                }
+            };
+            let res = match Self::lang_from_str(&skill.lang) {
+                CodeLang::Python => sb.run_python(&skill.code).await,
+                CodeLang::Shell => sb.run_shell(&skill.code).await,
+                CodeLang::Rust => sb.run_rust(&skill.code).await,
+            };
+            return Some(match res {
+                Ok(r) => {
+                    let ok = r.exit_code == 0 && !r.timed_out;
+                    let _ = self.memory.record_skill_outcome(&name, ok).await;
+                    format!("Ran skill \"{name}\" (prior {}/{} ok):\n\n{}", skill.successes, skill.runs, r.render())
+                }
+                Err(e) => format!("Couldn't run skill \"{name}\" — sandbox unavailable ({e})."),
+            });
+        }
+        None
+    }
+
     /// A throwaway TurnContext for the gate (it inspects the intent, not the context).
     fn dummy_ctx(req: &ActionRequest, user_text: &str) -> mind_types::TurnContext {
         mind_types::TurnContext::new(
@@ -947,6 +1107,12 @@ impl ConversationEngine {
                 return Ok(reply);
             }
         }
+        // Skill library: save a green run, run a saved skill, or list skills (before raw code-run).
+        if let Some(reply) = self.handle_skills(user_text).await {
+            let _ = self.memory.append_message("user", user_text).await;
+            let _ = self.memory.append_message("assistant", &reply).await;
+            return Ok(reply);
+        }
         // Code sandbox: "run python/shell/rust …" → isolated, no-network execution.
         if let Some(sb) = &self.sandbox {
             if let Some((lang, code)) = Self::parse_code_request(user_text) {
@@ -956,7 +1122,13 @@ impl ConversationEngine {
                     CodeLang::Rust => sb.run_rust(&code).await,
                 };
                 let reply = match res {
-                    Ok(r) => format!("Ran it in the sandbox (no network, resource-limited):\n\n{}", r.render()),
+                    Ok(r) => {
+                        // A green run is promotable into a skill.
+                        if r.exit_code == 0 && !r.timed_out {
+                            *self.last_run.lock().unwrap() = Some((lang, code.clone()));
+                        }
+                        format!("Ran it in the sandbox (no network, resource-limited):\n\n{}", r.render())
+                    }
                     Err(e) => format!("Couldn't run it — the sandbox is unavailable here ({e})."),
                 };
                 let _ = self.memory.append_message("user", user_text).await;
@@ -1232,6 +1404,16 @@ mod tests {
         assert!(ConversationEngine::is_vague_topic("AI"));
         assert!(ConversationEngine::is_vague_topic("rust async"));
         assert!(!ConversationEngine::is_vague_topic("how the rust borrow checker handles closures"));
+    }
+
+    #[test]
+    fn skill_command_parsing() {
+        assert_eq!(ConversationEngine::parse_save_skill("save that as skill csv_rows").as_deref(), Some("csv_rows"));
+        assert_eq!(ConversationEngine::parse_save_skill("save this as a skill called fib").as_deref(), Some("fib"));
+        assert_eq!(ConversationEngine::parse_run_skill("run skill csv_rows").as_deref(), Some("csv_rows"));
+        assert_eq!(ConversationEngine::parse_run_skill("use the skill fib").as_deref(), Some("fib"));
+        assert!(ConversationEngine::wants_list_skills("list my skills"));
+        assert!(ConversationEngine::parse_run_skill("run python: print(1)").is_none());
     }
 
     #[test]

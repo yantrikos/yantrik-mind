@@ -12,11 +12,12 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 use tokio::sync::{mpsc, oneshot};
 
 use mind_types::{
     Belief, BeliefAssertion, Contradiction, Evidence as MEvidence, MemoryFacade, MemoryItem,
-    MemoryKind, MindError, RecallQuery, Recalled, Reflection, Result, Task, WorkingSet,
+    MemoryKind, MindError, RecallQuery, Recalled, Reflection, Result, Skill, Task, WorkingSet,
 };
 
 use yantrikdb_core::belief::{BeliefRevisionConfig, Evidence as YEvidence};
@@ -48,6 +49,12 @@ enum Cmd {
     // cheap raw transcript (immediate context; isolated table, not the cognitive graph)
     AppendMessage { role: String, text: String, reply: Reply<()> },
     RecentMessages { limit: usize, reply: Reply<Vec<(String, String)>> },
+    // skill library
+    SaveSkill { skill: Skill, reply: Reply<()> },
+    GetSkill { name: String, reply: Reply<Option<Skill>> },
+    ListSkills { reply: Reply<Vec<Skill>> },
+    RecallSkills { query: String, limit: usize, reply: Reply<Vec<Skill>> },
+    RecordSkillOutcome { name: String, success: bool, reply: Reply<()> },
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
@@ -322,6 +329,98 @@ fn ensure_transcript_table(db: &YantrikDB) {
     );
 }
 
+// ── skill library (code-tools; same store, plain SQL; reuse always runs in the sandbox) ──
+
+fn ensure_skills_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_skills \
+         (name TEXT PRIMARY KEY, lang TEXT NOT NULL, code TEXT NOT NULL, summary TEXT NOT NULL, \
+          tags TEXT NOT NULL, status TEXT NOT NULL, runs INTEGER NOT NULL, successes INTEGER NOT NULL, created_ms INTEGER NOT NULL)",
+        [],
+    );
+}
+
+fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
+    let tags_json: String = r.get(4)?;
+    Ok(Skill {
+        name: r.get(0)?,
+        lang: r.get(1)?,
+        code: r.get(2)?,
+        summary: r.get(3)?,
+        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+        status: r.get(5)?,
+        runs: r.get::<_, i64>(6)? as u64,
+        successes: r.get::<_, i64>(7)? as u64,
+        created_ms: r.get::<_, i64>(8)? as u64,
+    })
+}
+
+fn save_skill(db: &YantrikDB, s: &Skill) -> std::result::Result<(), String> {
+    // The write-gate applies to skill CODE too — no hardcoded secrets bank into the library.
+    gate_write(&s.code)?;
+    let tags = serde_json::to_string(&s.tags).unwrap_or_else(|_| "[]".into());
+    db.conn()
+        .execute(
+            "INSERT INTO mind_skills (name,lang,code,summary,tags,status,runs,successes,created_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+             ON CONFLICT(name) DO UPDATE SET lang=?2,code=?3,summary=?4,tags=?5,status=?6",
+            rusqlite::params![s.name, s.lang, s.code, s.summary, tags, s.status, s.runs as i64, s.successes as i64, s.created_ms as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn get_skill(db: &YantrikDB, name: &str) -> std::result::Result<Option<Skill>, String> {
+    db.conn()
+        .query_row("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms FROM mind_skills WHERE name=?1", [name], skill_row)
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+fn list_skills(db: &YantrikDB) -> std::result::Result<Vec<Skill>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms FROM mind_skills ORDER BY created_ms DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], skill_row).map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Result<Vec<Skill>, String> {
+    // v0 ranking: substring overlap of the query's words against name+summary+tags. Deterministic;
+    // semantic recall over the moat is the earned upgrade. Quarantined skills are excluded.
+    let q = query.to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().filter(|w| w.len() >= 3).collect();
+    let mut scored: Vec<(i32, Skill)> = list_skills(db)?
+        .into_iter()
+        .filter(|s| s.status != "quarantined")
+        .map(|s| {
+            let hay = format!("{} {} {}", s.name, s.summary, s.tags.join(" ")).to_lowercase();
+            let score = words.iter().filter(|w| hay.contains(**w)).count() as i32;
+            (score, s)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(scored.into_iter().take(limit).map(|(_, s)| s).collect())
+}
+
+fn record_skill_outcome(db: &YantrikDB, name: &str, success: bool) -> std::result::Result<(), String> {
+    let conn = db.conn();
+    conn.execute(
+        "UPDATE mind_skills SET runs = runs + 1, successes = successes + ?2 WHERE name = ?1",
+        rusqlite::params![name, if success { 1i64 } else { 0 }],
+    )
+    .map_err(|e| e.to_string())?;
+    // Auto-quarantine a flaky skill: <50% success over >=4 runs (DeepSeek's rule).
+    conn.execute(
+        "UPDATE mind_skills SET status='quarantined' WHERE name=?1 AND runs>=4 AND (successes*2) < runs",
+        [name],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn append_message(db: &YantrikDB, role: &str, text: &str) -> std::result::Result<(), String> {
     db.conn()
         .execute(
@@ -373,6 +472,7 @@ impl MemoryHandle {
                     Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
                 };
                 ensure_transcript_table(&db);
+                ensure_skills_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -436,6 +536,21 @@ impl MemoryHandle {
                         }
                         Cmd::AppendMessage { role, text, reply } => {
                             let _ = reply.send(append_message(&db, &role, &text));
+                        }
+                        Cmd::SaveSkill { skill, reply } => {
+                            let _ = reply.send(save_skill(&db, &skill));
+                        }
+                        Cmd::GetSkill { name, reply } => {
+                            let _ = reply.send(get_skill(&db, &name));
+                        }
+                        Cmd::ListSkills { reply } => {
+                            let _ = reply.send(list_skills(&db));
+                        }
+                        Cmd::RecallSkills { query, limit, reply } => {
+                            let _ = reply.send(recall_skills(&db, &query, limit));
+                        }
+                        Cmd::RecordSkillOutcome { name, success, reply } => {
+                            let _ = reply.send(record_skill_outcome(&db, &name, success));
                         }
                         Cmd::RecentMessages { limit, reply } => {
                             let _ = reply.send(recent_messages(&db, limit));
@@ -587,6 +702,25 @@ impl MemoryFacade for MemoryHandle {
     async fn complete_task(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
         self.call(|reply| Cmd::CompleteTask { id, reply }).await
+    }
+
+    async fn save_skill(&self, skill: Skill) -> Result<()> {
+        self.call(|reply| Cmd::SaveSkill { skill, reply }).await
+    }
+    async fn get_skill(&self, name: &str) -> Result<Option<Skill>> {
+        let name = name.to_string();
+        self.call(|reply| Cmd::GetSkill { name, reply }).await
+    }
+    async fn list_skills(&self) -> Result<Vec<Skill>> {
+        self.call(|reply| Cmd::ListSkills { reply }).await
+    }
+    async fn recall_skills(&self, query: &str, limit: usize) -> Result<Vec<Skill>> {
+        let query = query.to_string();
+        self.call(|reply| Cmd::RecallSkills { query, limit, reply }).await
+    }
+    async fn record_skill_outcome(&self, name: &str, success: bool) -> Result<()> {
+        let name = name.to_string();
+        self.call(|reply| Cmd::RecordSkillOutcome { name, success, reply }).await
     }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {

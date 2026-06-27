@@ -53,6 +53,27 @@ pub struct AgentResult {
     /// Outward actions the agent PROPOSED that need the human's confirmation — it cannot self-approve
     /// (the harm-gate's confirmation requirement is inviolable even for sub-agents).
     pub pending_actions: Vec<ActionRequest>,
+    /// Source URLs the agent searched/fetched — for citations.
+    pub sources: Vec<String>,
+}
+
+/// Pull http(s) URLs out of text (for collecting research sources).
+fn extract_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for marker in ["https://", "http://"] {
+        let mut rest = text;
+        while let Some(i) = rest.find(marker) {
+            let tail = &rest[i..];
+            let end = tail.find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | ')' | ']'))
+                .unwrap_or(tail.len());
+            let url = tail[..end].trim_end_matches(['.', ',', ';']).to_string();
+            if url.len() > marker.len() {
+                out.push(url);
+            }
+            rest = &tail[end..];
+        }
+    }
+    out
 }
 
 /// The LLM's decision each step.
@@ -117,6 +138,7 @@ impl SubAgent {
         let mut observations = String::new();
         let mut trace: Vec<String> = Vec::new();
         let mut pending_actions: Vec<ActionRequest> = Vec::new();
+        let mut sources: Vec<String> = Vec::new();
         let tool_list = self.tools.join(", ");
         let act_note = if self.act_tools.is_empty() {
             String::new()
@@ -146,17 +168,17 @@ impl SubAgent {
             ];
             let text = match self.inference.chat(messages, GenerationConfig::default()).await {
                 Ok(r) => r.text,
-                Err(e) => return AgentResult { task: task.into(), answer: format!("(sub-agent inference error: {e})"), steps: step, trace, pending_actions },
+                Err(e) => return AgentResult { task: task.into(), answer: format!("(sub-agent inference error: {e})"), steps: step, trace, pending_actions, sources: sources.clone() },
             };
             let decision = parse_decision(&text);
 
             if decision.action == "finish" || (decision.action.is_empty() && !decision.answer.is_empty()) {
-                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions };
+                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
             }
             // call_tool
             let tool = decision.tool.trim().to_string();
             if tool.is_empty() {
-                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions };
+                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
             }
             // OUTWARD action tool → through the harm-gate. The agent can never self-confirm.
             if self.act_tools.iter().any(|t| t == &tool) {
@@ -197,6 +219,19 @@ impl SubAgent {
                 Ok(o) => o,
                 Err(e) => format!("error: {e}"),
             };
+            // Collect sources for citations: an explicit fetch url + any urls in the observation.
+            if tool == "fetch" {
+                if let Some(u) = decision.args.get("url").and_then(|v| v.as_str()) {
+                    if !sources.iter().any(|s| s == u) {
+                        sources.push(u.to_string());
+                    }
+                }
+            }
+            for u in extract_urls(&obs) {
+                if !sources.iter().any(|s| s == &u) {
+                    sources.push(u);
+                }
+            }
             let short: String = obs.chars().take(120).collect();
             trace.push(format!("{tool}: {short}"));
             observations.push_str(&format!("[{tool}] => {obs}\n"));
@@ -216,7 +251,7 @@ impl SubAgent {
             .await
             .map(|r| r.text)
             .unwrap_or_else(|e| format!("(sub-agent synthesis error: {e})"));
-        AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions }
+        AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions, sources: sources.clone() }
     }
 
     /// Run several tasks concurrently (parallelism via the InferencePool's blocking pool).

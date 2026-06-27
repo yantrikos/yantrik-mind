@@ -133,6 +133,15 @@ impl ConversationEngine {
             .map(|r| format!("Q: {}\nA: {}", r.task, r.answer))
             .collect::<Vec<_>>()
             .join("\n\n");
+        // Collect + dedupe source URLs across all the sub-agents (citations).
+        let mut sources: Vec<String> = Vec::new();
+        for r in &results {
+            for u in &r.sources {
+                if !sources.iter().any(|s| s == u) {
+                    sources.push(u.clone());
+                }
+            }
+        }
         // 3. Synthesize, grounded only in the findings.
         let synth = vec![
             ChatMessage::system(&self.persona),
@@ -141,12 +150,39 @@ impl ConversationEngine {
                  in them; note any gaps.\n\n{findings}"
             )),
         ];
-        let out = self
+        let draft = self
             .inference
             .chat(synth, GenerationConfig::default())
             .await
-            .map_err(|e| MindError::Inference(e.to_string()))?;
-        Ok(format!("{}\n\n_(deep-dived {} angles in parallel)_", out.text, results.len()))
+            .map_err(|e| MindError::Inference(e.to_string()))?
+            .text;
+        // 4. Adversarial verify: check the draft's claims against the findings (anti-confabulation).
+        let verify = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::user(&format!(
+                "You are a skeptical fact-checker. Below is a DRAFT answer and the FINDINGS it should \
+                 rest on. List any claim in the draft NOT supported by the findings, one per line as \
+                 '⚠ <claim>'. If every claim is supported, reply exactly 'All claims grounded.'\n\n\
+                 DRAFT:\n{draft}\n\nFINDINGS:\n{findings}"
+            )),
+        ];
+        let verdict = self
+            .inference
+            .chat(verify, GenerationConfig::default())
+            .await
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_else(|_| "(verification unavailable)".into());
+
+        let mut out = draft;
+        if !sources.is_empty() {
+            out.push_str("\n\n**Sources:**\n");
+            for u in sources.iter().take(8) {
+                out.push_str(&format!("- {u}\n"));
+            }
+        }
+        out.push_str(&format!("\n**Verification:** {verdict}"));
+        out.push_str(&format!("\n\n_(deep-dived {} angles in parallel, fact-checked)_", results.len()));
+        Ok(out)
     }
 
     /// Give the mind hands: outward actions run through this harm-gated runtime with confirmation.
@@ -769,7 +805,14 @@ impl ConversationEngine {
             }
             if let Some(topic) = Self::wants_research(user_text) {
                 let result = self.researcher.as_ref().unwrap().run(&topic).await;
-                let reply = format!("{}\n\n_(researched in {} step(s))_", result.answer, result.steps);
+                let mut reply = result.answer.clone();
+                if !result.sources.is_empty() {
+                    reply.push_str("\n\n**Sources:**\n");
+                    for u in result.sources.iter().take(6) {
+                        reply.push_str(&format!("- {u}\n"));
+                    }
+                }
+                reply.push_str(&format!("\n_(researched in {} step(s))_", result.steps));
                 let _ = self.memory.append_message("user", user_text).await;
                 let _ = self.memory.append_message("assistant", &reply).await;
                 return Ok(reply);

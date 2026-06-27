@@ -10,6 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use mind_inference::InferencePool;
+use mind_recipes::{RecipeEngine, RecipeHost};
 use mind_tools::{Fetcher, GithubClient, MailClient};
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
@@ -34,6 +35,8 @@ pub struct ConversationEngine {
     runtime: Option<Arc<dyn ActionRuntime>>,
     /// An outward action awaiting the user's yes/no.
     pending: Mutex<Option<ActionRequest>>,
+    /// Recipe engine — when set, recipes (e.g. the citation-validated briefing) run through it.
+    recipes: Option<Arc<RecipeEngine>>,
 }
 
 impl ConversationEngine {
@@ -48,12 +51,19 @@ impl ConversationEngine {
             github: None,
             runtime: None,
             pending: Mutex::new(None),
+            recipes: None,
         }
     }
 
     /// Give the mind hands: outward actions run through this harm-gated runtime with confirmation.
     pub fn with_runtime(mut self, runtime: Arc<dyn ActionRuntime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+
+    /// Wire the recipe engine (citation-validated, adaptive workflows).
+    pub fn with_recipes(mut self, engine: Arc<RecipeEngine>) -> Self {
+        self.recipes = Some(engine);
         self
     }
 
@@ -115,6 +125,23 @@ impl ConversationEngine {
     /// due soon), then renders a terse digest grounded ONLY in that data (untrusted-wrapped; failures
     /// surfaced, never confabulated). Read-only — no harm-gate needed; the act-steps come later.
     pub async fn briefing(&self) -> Result<String> {
+        // Prefer the recipe engine (citation-validated + adaptive). Fall back to the robust prose
+        // briefing if the engine isn't wired or yields nothing groundable.
+        if let Some(re) = &self.recipes {
+            let out = re.run(&mind_recipes::morning_briefing()).await;
+            let composed = out.notifications.join("\n");
+            let usable = out.ok
+                && !composed.trim().is_empty()
+                && !composed.contains("nothing grounded to report");
+            if usable {
+                return Ok(composed);
+            }
+        }
+        self.briefing_prose().await
+    }
+
+    /// The robust prose briefing (fallback / no-recipe path).
+    async fn briefing_prose(&self) -> Result<String> {
         let mut blocks: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         if let Some(m) = &self.mail {
@@ -647,6 +674,55 @@ impl ConversationEngine {
         let _ = self.memory.append_message("user", user_text).await;
         let _ = self.memory.append_message("assistant", &reply).await;
         Ok(reply)
+    }
+}
+
+/// Maps recipe `Tool` steps to the mind's read capabilities. Source-read failures return Err so a
+/// recipe's `on_error: Skip` degrades gracefully instead of fabricating.
+pub struct MindRecipeHost {
+    mail: Option<Arc<dyn MailClient>>,
+    github: Option<Arc<dyn GithubClient>>,
+    memory: Arc<dyn MemoryFacade>,
+}
+
+impl MindRecipeHost {
+    pub fn new(
+        mail: Option<Arc<dyn MailClient>>,
+        github: Option<Arc<dyn GithubClient>>,
+        memory: Arc<dyn MemoryFacade>,
+    ) -> Self {
+        Self { mail, github, memory }
+    }
+}
+
+#[async_trait::async_trait]
+impl RecipeHost for MindRecipeHost {
+    async fn call_tool(&self, tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+        match tool {
+            "inbox" => match &self.mail {
+                Some(m) => Ok(mind_tools::render_inbox_digest(&m.inbox(10).await?)),
+                None => anyhow::bail!("no mailbox configured"),
+            },
+            "github" => match &self.github {
+                Some(g) => Ok(mind_tools::render_github_digest(&g.notifications(15).await?)),
+                None => anyhow::bail!("no github configured"),
+            },
+            "due_tasks" => {
+                let tasks = self.memory.list_tasks(false).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let now = ConversationEngine::now_ms();
+                let soon = now + 18 * 3_600_000;
+                let due: Vec<String> = tasks
+                    .iter()
+                    .filter(|t| t.due_ms.map(|d| d <= soon).unwrap_or(false))
+                    .map(|t| format!("- {}", t.description))
+                    .collect();
+                if due.is_empty() {
+                    anyhow::bail!("no tasks due soon");
+                }
+                Ok(due.join("\n"))
+            }
+            other => anyhow::bail!("unknown source '{other}'"),
+        }
     }
 }
 

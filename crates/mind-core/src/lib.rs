@@ -123,26 +123,41 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
 /// read from config (YM_OPERATOR), never hardcoded — defaults to "the user".
 pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> ConversationEngine {
     let operator = std::env::var("YM_OPERATOR").unwrap_or_default();
-    let mut eng = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona(&operator))
-        .with_web(Arc::new(mind_tools::HttpFetcher::new()));
-    // Read-only inbox triage, if an account is configured. Gmail needs a 16-char App Password;
-    // a non-standard host can be set with YM_IMAP_HOST.
-    if let (Ok(addr), Ok(pw)) = (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
-        if !addr.is_empty() && !pw.is_empty() {
-            let client = match std::env::var("YM_IMAP_HOST") {
-                Ok(host) if !host.is_empty() => Some(mind_tools::ImapClient::new(host, 993, addr, pw)),
-                _ => mind_tools::ImapClient::for_address(&addr, pw),
-            };
-            if let Some(c) = client {
-                eng = eng.with_mail(Arc::new(c));
-            }
-        }
-    }
-    // Read-only GitHub triage, if a token is configured.
+    let persona = mind_types::default_persona(&operator);
+    let memory: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+
+    // Shared read capabilities (used by both chat grounding and recipes).
+    // Gmail needs a 16-char App Password; a non-standard IMAP host can be set with YM_IMAP_HOST.
+    let mail_read: Option<Arc<dyn mind_tools::MailClient>> =
+        match (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
+            (Ok(addr), Ok(pw)) if !addr.is_empty() && !pw.is_empty() => match std::env::var("YM_IMAP_HOST") {
+                Ok(host) if !host.is_empty() => {
+                    Some(Arc::new(mind_tools::ImapClient::new(host, 993, addr, pw)) as Arc<dyn mind_tools::MailClient>)
+                }
+                _ => mind_tools::ImapClient::for_address(&addr, pw)
+                    .map(|c| Arc::new(c) as Arc<dyn mind_tools::MailClient>),
+            },
+            _ => None,
+        };
     let gh_token = std::env::var("YM_GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
-    if let Some(token) = &gh_token {
-        eng = eng.with_github(Arc::new(mind_tools::ApiGithubClient::new(token.clone())));
+    let github_read: Option<Arc<dyn mind_tools::GithubClient>> = gh_token
+        .as_ref()
+        .map(|t| Arc::new(mind_tools::ApiGithubClient::new(t.clone())) as Arc<dyn mind_tools::GithubClient>);
+
+    let mut eng = ConversationEngine::new(memory.clone(), pool.clone(), persona.clone())
+        .with_web(Arc::new(mind_tools::HttpFetcher::new()));
+    if let Some(m) = &mail_read {
+        eng = eng.with_mail(m.clone());
     }
+    if let Some(g) = &github_read {
+        eng = eng.with_github(g.clone());
+    }
+
+    // Recipe engine: citation-validated, adaptive workflows over the read capabilities.
+    let host = mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone());
+    let recipe_engine = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(host), persona.clone());
+    eng = eng.with_recipes(Arc::new(recipe_engine));
+
     // Hands: an outward-action runtime, harm-gated + confirmation-required. Grants SendMessage when a
     // transport (email send and/or github comment) is configured. Every action rides the harm-gate.
     let mut executor = mind_tools::ToolActionExecutor::new();

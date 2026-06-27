@@ -54,6 +54,80 @@ impl InferencePool {
     }
 }
 
+/// A deterministic `LLMBackend` for tests across the whole system: it returns a canned reply and
+/// records the last system prompt it saw, so orchestration (prompt grounding, routing) can be
+/// asserted with zero real model. This is the injectable seam BUILD.md calls for.
+pub struct ScriptedLLM {
+    reply: String,
+    last_system: std::sync::Mutex<String>,
+    last_user: std::sync::Mutex<String>,
+}
+
+impl ScriptedLLM {
+    pub fn new(reply: impl Into<String>) -> Self {
+        Self {
+            reply: reply.into(),
+            last_system: std::sync::Mutex::new(String::new()),
+            last_user: std::sync::Mutex::new(String::new()),
+        }
+    }
+    /// The concatenated system-role content from the most recent call.
+    pub fn last_system_prompt(&self) -> String {
+        self.last_system.lock().unwrap().clone()
+    }
+    /// The most recent user-role content.
+    pub fn last_user_prompt(&self) -> String {
+        self.last_user.lock().unwrap().clone()
+    }
+}
+
+impl LLMBackend for ScriptedLLM {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _config: &GenerationConfig,
+        _tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<LLMResponse> {
+        let sys = messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let usr = messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        *self.last_system.lock().unwrap() = sys;
+        *self.last_user.lock().unwrap() = usr;
+        Ok(LLMResponse {
+            text: self.reply.clone(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            tool_calls: vec![],
+            api_tool_calls: vec![],
+            stop_reason: "stop".into(),
+        })
+    }
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+        _on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<LLMResponse> {
+        self.chat(messages, config, tools)
+    }
+    fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        Ok(text.len() / 4)
+    }
+    fn backend_name(&self) -> &str {
+        "scripted"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

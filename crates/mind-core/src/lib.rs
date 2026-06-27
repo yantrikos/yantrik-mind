@@ -124,6 +124,7 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
 pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> ConversationEngine {
     let operator = std::env::var("YM_OPERATOR").unwrap_or_default();
     ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona(&operator))
+        .with_web(Arc::new(mind_tools::HttpFetcher::new()))
 }
 
 #[cfg(test)]

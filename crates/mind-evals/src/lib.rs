@@ -138,7 +138,10 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
 
     let scripted = Arc::new(ScriptedLLM::new("ack"));
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
-    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona("the user"));
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona("the user"))
+        .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
+            "WEBDOC: Teal is a cyan-family blue-green color.",
+        )));
 
     let mut prompt = String::new();
     for turn in &s.turns {
@@ -335,6 +338,19 @@ pub fn standard_suite() -> Vec<Scenario> {
             checks: vec![
                 Check::PromptContains("Lead with the answer".into()), // communication persona in play
                 Check::PromptContains("terse".into()),                // learned style pref surfaced
+            ],
+        },
+        // GROWTH (web browse): a URL in a message is fetched (read-only) and grounds the reply,
+        // untrusted-wrapped.
+        Scenario {
+            name: "web browse: a URL is fetched and grounds the reply (untrusted)".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["summarize https://example.com/teal".into()],
+            checks: vec![
+                Check::PromptContains("WEBDOC".into()),          // the page reached the prompt
+                Check::PromptContains("web page".into()),         // untrusted-wrapped web block
             ],
         },
     ]

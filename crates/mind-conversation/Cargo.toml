@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 mind-types = { workspace = true }
 mind-inference = { workspace = true }
+mind-tools = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false }
 tokio = { workspace = true }
 

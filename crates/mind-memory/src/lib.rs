@@ -44,6 +44,9 @@ enum Cmd {
     AddTask { description: String, priority: String, due_ms: Option<u64>, reply: Reply<Task> },
     ListTasks { include_done: bool, reply: Reply<Vec<Task>> },
     CompleteTask { id: String, reply: Reply<bool> },
+    // cheap raw transcript (immediate context; isolated table, not the cognitive graph)
+    AppendMessage { role: String, text: String, reply: Reply<()> },
+    RecentMessages { limit: usize, reply: Reply<Vec<(String, String)>> },
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
@@ -297,6 +300,39 @@ fn complete_task(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> 
     }
 }
 
+// ── cheap raw transcript (dedicated isolated table; plain SQL, no cognitive ops) ──
+
+fn ensure_transcript_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_transcript \
+         (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, ts REAL NOT NULL)",
+        [],
+    );
+}
+
+fn append_message(db: &YantrikDB, role: &str, text: &str) -> std::result::Result<(), String> {
+    db.conn()
+        .execute(
+            "INSERT INTO mind_transcript (role, text, ts) VALUES (?1, ?2, ?3)",
+            rusqlite::params![role, text, now_secs()],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn recent_messages(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<(String, String)>, String> {
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT role, text FROM mind_transcript ORDER BY id DESC LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut v: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
+    v.reverse(); // newest-first SQL -> chronological for the prompt
+    Ok(v)
+}
+
 fn relate(db: &YantrikDB, src: &str, dst: &str, rel: &str, weight: f64) -> std::result::Result<(), String> {
     let a = find_belief(db, src).ok_or_else(|| format!("no belief: {src}"))?;
     let b = find_belief(db, dst).ok_or_else(|| format!("no belief: {dst}"))?;
@@ -324,6 +360,7 @@ impl MemoryHandle {
                     Ok(d) => { let _ = ready_tx.send(Ok(())); d }
                     Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
                 };
+                ensure_transcript_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -376,6 +413,12 @@ impl MemoryHandle {
                         }
                         Cmd::CompleteTask { id, reply } => {
                             let _ = reply.send(complete_task(&db, &id));
+                        }
+                        Cmd::AppendMessage { role, text, reply } => {
+                            let _ = reply.send(append_message(&db, &role, &text));
+                        }
+                        Cmd::RecentMessages { limit, reply } => {
+                            let _ = reply.send(recent_messages(&db, limit));
                         }
                     }
                 }
@@ -518,6 +561,14 @@ impl MemoryFacade for MemoryHandle {
     async fn complete_task(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
         self.call(|reply| Cmd::CompleteTask { id, reply }).await
+    }
+
+    async fn append_message(&self, role: &str, text: &str) -> Result<()> {
+        let (role, text) = (role.to_string(), text.to_string());
+        self.call(|reply| Cmd::AppendMessage { role, text, reply }).await
+    }
+    async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        self.call(|reply| Cmd::RecentMessages { limit, reply }).await
     }
 }
 

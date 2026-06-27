@@ -146,7 +146,7 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
     let mut prompt = String::new();
     for turn in &s.turns {
         let _ = conv.handle_turn(turn).await;
-        prompt = scripted.last_system_prompt(); // checks grade the final turn's grounding
+        prompt = scripted.last_prompt(); // grade everything the model saw on the final turn
     }
 
     let mut checks = Vec::new();
@@ -313,6 +313,19 @@ pub fn standard_suite() -> Vec<Scenario> {
             tasks: vec![],
             turns: vec!["remind me to call the dentist tomorrow".into()],
             checks: vec![Check::TaskOpen("dentist".into())],
+        },
+        // GROWTH (raw transcript): a casual statement (NOT a 'remember that', so not a belief)
+        // is still available next turn via the cheap recent-message window.
+        Scenario {
+            name: "raw transcript: recalls a casual statement across turns".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec![
+                "my favorite color is teal".into(),
+                "what did I just tell you?".into(),
+            ],
+            checks: vec![Check::PromptContains("teal".into())],
         },
     ]
 }

@@ -61,6 +61,7 @@ pub struct ScriptedLLM {
     reply: String,
     last_system: std::sync::Mutex<String>,
     last_user: std::sync::Mutex<String>,
+    last_all: std::sync::Mutex<String>,
 }
 
 impl ScriptedLLM {
@@ -69,6 +70,7 @@ impl ScriptedLLM {
             reply: reply.into(),
             last_system: std::sync::Mutex::new(String::new()),
             last_user: std::sync::Mutex::new(String::new()),
+            last_all: std::sync::Mutex::new(String::new()),
         }
     }
     /// The concatenated system-role content from the most recent call.
@@ -78,6 +80,11 @@ impl ScriptedLLM {
     /// The most recent user-role content.
     pub fn last_user_prompt(&self) -> String {
         self.last_user.lock().unwrap().clone()
+    }
+    /// Everything the model saw last (all roles, "role: content" per line) — for grading what
+    /// actually reached the model regardless of which role carried it.
+    pub fn last_prompt(&self) -> String {
+        self.last_all.lock().unwrap().clone()
     }
 }
 
@@ -100,8 +107,14 @@ impl LLMBackend for ScriptedLLM {
             .map(|m| m.content.clone())
             .collect::<Vec<_>>()
             .join("\n");
+        let all = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
         *self.last_system.lock().unwrap() = sys;
         *self.last_user.lock().unwrap() = usr;
+        *self.last_all.lock().unwrap() = all;
         Ok(LLMResponse {
             text: self.reply.clone(),
             prompt_tokens: 0,

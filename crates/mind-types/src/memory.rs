@@ -133,4 +133,10 @@ pub trait MemoryFacade: Send + Sync {
     async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task>;
     async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>>;
     async fn complete_task(&self, id: &str) -> Result<bool>;
+
+    // ── cheap raw transcript (immediate conversational context; NOT knowledge) ──
+    /// Append a raw chat line (role = "user" | "assistant").
+    async fn append_message(&self, role: &str, text: &str) -> Result<()>;
+    /// The most recent chat lines in chronological order: Vec<(role, text)>.
+    async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>>;
 }

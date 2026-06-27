@@ -1,0 +1,19 @@
+[Unit]
+Description=yantrik-mind — the companion (telegram channel + recipes + sub-agents)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yantrikmind
+WorkingDirectory=/opt/yantrik-mind
+# Secrets live ONLY here (chmod 600, not in git). See yantrik-mind.env.example.
+EnvironmentFile=/etc/yantrik-mind.env
+ExecStart=/opt/yantrik-mind/mind-core
+Restart=always
+RestartSec=5
+# Persisted state (DB, offsets, reminded ids) lives under the working dir.
+StateDirectory=yantrik-mind
+
+[Install]
+WantedBy=multi-user.target

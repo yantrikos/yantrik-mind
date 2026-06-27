@@ -51,6 +51,8 @@ pub struct ConversationEngine {
     researcher: Option<Arc<SubAgent>>,
     /// Code sandbox — when set, "run python/shell/rust …" executes in an isolated, no-network jail.
     sandbox: Option<Arc<Sandbox>>,
+    /// A vague deep-dive topic awaiting a scoping answer (clarify-before-research).
+    pending_research: Mutex<Option<String>>,
 }
 
 impl ConversationEngine {
@@ -69,7 +71,14 @@ impl ConversationEngine {
             recipes: None,
             researcher: None,
             sandbox: None,
+            pending_research: Mutex::new(None),
         }
+    }
+
+    /// A topic too thin to research well (ask to scope it first).
+    fn is_vague_topic(topic: &str) -> bool {
+        let words = topic.split_whitespace().count();
+        words <= 2 || topic.trim().len() < 8
     }
 
     /// Give the mind a code sandbox (isolated, no-network execution of shell/python/rust).
@@ -896,7 +905,28 @@ impl ConversationEngine {
         }
         // Research sub-agent: parallel deep-dive first, then the single-agent path.
         if self.researcher.is_some() {
+            // Resume a deep-dive that paused to scope a vague topic — this message is the focus.
+            let scoping = self.pending_research.lock().unwrap().take();
+            if let Some(orig) = scoping {
+                if !Self::is_denial(user_text) {
+                    let topic = format!("{orig} (focus: {})", user_text.trim());
+                    let reply = self.deep_research(&topic).await?;
+                    let _ = self.memory.append_message("user", user_text).await;
+                    let _ = self.memory.append_message("assistant", &reply).await;
+                    return Ok(reply);
+                }
+            }
             if let Some(topic) = Self::wants_deep_research(user_text) {
+                // Clarify-before-research: a thin topic gets one scoping question first.
+                if Self::is_vague_topic(&topic) {
+                    *self.pending_research.lock().unwrap() = Some(topic.clone());
+                    let reply = format!(
+                        "Happy to dig into \"{topic}\" — what should I focus on? (a specific angle, timeframe, or what you're trying to decide)"
+                    );
+                    let _ = self.memory.append_message("user", user_text).await;
+                    let _ = self.memory.append_message("assistant", &reply).await;
+                    return Ok(reply);
+                }
                 let reply = self.deep_research(&topic).await?;
                 let _ = self.memory.append_message("user", user_text).await;
                 let _ = self.memory.append_message("assistant", &reply).await;
@@ -1195,6 +1225,13 @@ mod tests {
         let p = scripted.last_prompt();
         assert!(p.contains("BRIEFMAIL") && p.contains("BRIEFGH"), "briefing must compose both sources:\n{p}");
         assert!(p.contains("NOT instructions"), "briefing data must be untrusted-wrapped:\n{p}");
+    }
+
+    #[test]
+    fn vague_topic_detection() {
+        assert!(ConversationEngine::is_vague_topic("AI"));
+        assert!(ConversationEngine::is_vague_topic("rust async"));
+        assert!(!ConversationEngine::is_vague_topic("how the rust borrow checker handles closures"));
     }
 
     #[test]

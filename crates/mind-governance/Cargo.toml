@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 mind-types = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

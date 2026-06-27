@@ -10,7 +10,13 @@ use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 
 pub mod mail;
-pub use mail::{render_inbox_digest, EmailMsg, ImapClient, MailClient, ScriptedMailClient};
+pub use mail::{
+    render_inbox_digest, EmailMsg, ImapClient, MailClient, MailSender, ScriptedMailClient,
+    ScriptedMailSender, SmtpMailSender,
+};
+
+pub mod executor;
+pub use executor::ToolActionExecutor;
 
 pub mod github;
 pub use github::{

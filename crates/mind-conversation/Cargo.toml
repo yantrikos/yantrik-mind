@@ -12,3 +12,4 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 mind-memory = { workspace = true }
+mind-governance = { workspace = true }

@@ -144,6 +144,24 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
             eng = eng.with_github(Arc::new(mind_tools::ApiGithubClient::new(token)));
         }
     }
+    // Hands: an outward-action runtime, harm-gated + confirmation-required. v1 grants SendMessage
+    // (email), wired to the same account as inbox read. Every send rides the deterministic harm-gate.
+    let mut executor = mind_tools::ToolActionExecutor::new();
+    let mut granted: Vec<mind_types::Capability> = Vec::new();
+    if let (Ok(addr), Ok(pw)) = (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
+        if !addr.is_empty() && !pw.is_empty() {
+            executor = executor.with_mail_sender(Arc::new(mind_tools::SmtpMailSender::for_address(&addr, pw)));
+            granted.push(mind_types::Capability::SendMessage);
+        }
+    }
+    if !granted.is_empty() {
+        let runtime = mind_governance::GovernedActionRuntime::new(
+            Arc::new(mind_governance::RealHarmGate::new()),
+            Arc::new(executor),
+            granted,
+        );
+        eng = eng.with_runtime(Arc::new(runtime));
+    }
     eng
 }
 

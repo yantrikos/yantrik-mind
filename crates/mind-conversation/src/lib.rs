@@ -7,11 +7,14 @@
 //! content is **untrusted-wrapped** (reference data, never instructions). This is the moat made
 //! visible in the product — what flat-RAG assistants can't ground on.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mind_inference::InferencePool;
 use mind_tools::{Fetcher, GithubClient, MailClient};
-use mind_types::{BeliefAssertion, MemoryFacade, MindError, Result, WorkingSet};
+use mind_types::{
+    ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
+    MemoryFacade, MindError, Result, RiskLevel, WorkingSet,
+};
 use yantrik_ml::{ChatMessage, GenerationConfig};
 
 pub struct ConversationEngine {
@@ -26,6 +29,11 @@ pub struct ConversationEngine {
     mail: Option<Arc<dyn MailClient>>,
     /// GitHub client — when set, a "check my github" turn pulls notifications (read-only, untrusted).
     github: Option<Arc<dyn GithubClient>>,
+    /// Action runtime — when set, OUTWARD actions (e.g. send email) are proposed, harm-gated, and
+    /// require explicit confirmation before they run.
+    runtime: Option<Arc<dyn ActionRuntime>>,
+    /// An outward action awaiting the user's yes/no.
+    pending: Mutex<Option<ActionRequest>>,
 }
 
 impl ConversationEngine {
@@ -38,7 +46,15 @@ impl ConversationEngine {
             web: None,
             mail: None,
             github: None,
+            runtime: None,
+            pending: Mutex::new(None),
         }
+    }
+
+    /// Give the mind hands: outward actions run through this harm-gated runtime with confirmation.
+    pub fn with_runtime(mut self, runtime: Arc<dyn ActionRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     /// Give the mind read-only web browsing.
@@ -75,6 +91,162 @@ impl ConversationEngine {
          "any github", "github activity", "any prs", "any pull requests", "review requests"]
             .iter()
             .any(|p| l.contains(p))
+    }
+
+    /// A clear yes to a pending action.
+    fn is_confirmation(text: &str) -> bool {
+        let t = text.trim().to_lowercase();
+        let t = t.trim_end_matches(['.', '!']);
+        t == "yes" || t == "y" || t == "yep" || t == "yeah" || t == "ok" || t == "okay"
+            || t == "send" || t == "send it" || t == "do it" || t == "go" || t == "go ahead"
+            || t == "confirm" || t == "confirmed" || t == "approved" || t == "yes send it"
+    }
+
+    /// A clear no to a pending action.
+    fn is_denial(text: &str) -> bool {
+        let t = text.trim().to_lowercase();
+        let t = t.trim_end_matches(['.', '!']);
+        t == "no" || t == "n" || t == "nope" || t == "cancel" || t == "stop" || t == "abort"
+            || t == "don't" || t == "dont" || t == "do not" || t.contains("cancel")
+            || t.contains("nevermind") || t.contains("never mind")
+    }
+
+    /// Pull the first email-looking address out of a string.
+    fn first_email(text: &str) -> Option<String> {
+        for raw in text.split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '<' || c == '>') {
+            let tok = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '_' && c != '-' && c != '+');
+            if let Some(at) = tok.find('@') {
+                if at > 0 && tok[at + 1..].contains('.') && !tok.ends_with('.') {
+                    return Some(tok.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse a "send an email to X saying Y" request into (to, subject, body). Returns None if this
+    /// isn't a send request. Recipient missing is signalled with an empty `to`.
+    fn parse_send_email(text: &str) -> Option<(String, String, String)> {
+        let l = text.to_lowercase();
+        let is_send = ["send an email", "send a email", "send email", "send the email",
+            "email to ", "draft an email", "write an email", "shoot an email", "send a mail"]
+            .iter()
+            .any(|p| l.contains(p));
+        if !is_send {
+            return None;
+        }
+        let to = Self::first_email(text).unwrap_or_default();
+        // Body: everything after a "saying"/"that says"/"with the message"/":" marker, else after the
+        // recipient address.
+        let lower = text.to_lowercase();
+        let body = ["saying", "that says", "with the message", "with message", "message:", "telling them", "tell them", " - ", ": "]
+            .iter()
+            .filter_map(|m| lower.find(m).map(|i| (i, m.len())))
+            .min_by_key(|(i, _)| *i)
+            .map(|(i, len)| text[i + len..].trim().to_string())
+            .filter(|b| !b.is_empty())
+            .or_else(|| {
+                // fall back to text after the email address
+                to.is_empty()
+                    .then(|| String::new())
+                    .or_else(|| text.find(&to).map(|i| text[i + to.len()..].trim_start_matches([':', ',', ' ', '-']).trim().to_string()))
+            })
+            .unwrap_or_default();
+        // Subject: explicit "subject ..." else a short derived line.
+        let subject = if let Some(i) = lower.find("subject") {
+            text[i + 7..].trim_start_matches([':', ' ']).lines().next().unwrap_or("").trim().to_string()
+        } else {
+            let words: Vec<&str> = body.split_whitespace().take(7).collect();
+            if words.is_empty() { "Message from JARVIS".to_string() } else { words.join(" ") }
+        };
+        Some((to, subject, body))
+    }
+
+    fn new_request(&self, intent: ActionIntent) -> ActionRequest {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        ActionRequest {
+            id: format!("act-{now}"),
+            actor: "mind".into(),
+            intent,
+            justification: "requested in chat".into(),
+            created_ms: now,
+        }
+    }
+
+    /// The outward-action path: resolve a pending confirmation, or propose a new gated action.
+    /// Returns `Some(reply)` if this turn was an action turn (handled), `None` to fall through to chat.
+    async fn handle_action(&self, user_text: &str) -> Option<String> {
+        let runtime = self.runtime.as_ref()?;
+
+        // 1. Resolve a pending confirmation first.
+        let pending = self.pending.lock().unwrap().take();
+        if let Some(req) = pending {
+            if Self::is_confirmation(user_text) {
+                let summary = req.intent.summary.clone();
+                return Some(match runtime.execute(req).await {
+                    Ok(r) if r.ok => format!("Done — {}.", r.output),
+                    Ok(r) => format!("That didn't go through: {}", r.output),
+                    Err(e) => format!("That didn't go through: {e}"),
+                });
+            }
+            if Self::is_denial(user_text) {
+                return Some(format!("Cancelled — I won't {summary}.", summary = req.intent.summary));
+            }
+            // Anything else supersedes the pending action; fall through to re-parse this message.
+        }
+
+        // 2. Propose a new outward action (only email send in v1).
+        if let Some((to, subject, body)) = Self::parse_send_email(user_text) {
+            if to.is_empty() {
+                return Some("Who should I send it to? Give me an email address.".into());
+            }
+            if body.is_empty() {
+                return Some(format!("What should the email to {to} say?"));
+            }
+            let intent = ActionIntent {
+                kind: "send_email".into(),
+                target: to.clone(),
+                summary: subject.clone(),
+                payload: Some(body.clone()),
+                capabilities: vec![Capability::SendMessage],
+                risk: RiskLevel::Medium,
+                reversible: false,
+            };
+            let req = self.new_request(intent);
+            // Build a dummy turn context (the gate ignores it; it inspects the intent).
+            let ctx = mind_types::TurnContext::new(
+                mind_types::Event {
+                    id: req.id.clone(),
+                    trace_id: req.id.clone(),
+                    source: mind_types::EventSource::Chat {
+                        channel: "chat".into(),
+                        chat_id: "0".into(),
+                        user: "operator".into(),
+                    },
+                    body: mind_types::EventBody::plain(user_text),
+                    ts: req.created_ms,
+                },
+                req.created_ms,
+            );
+            return Some(match runtime.decide(&req, &ctx).await {
+                ActionDecision::Deny { reason } => format!("I can't send that — {reason}."),
+                ActionDecision::Execute => match runtime.execute(req).await {
+                    Ok(r) if r.ok => format!("Done — {}.", r.output),
+                    Ok(r) => format!("That didn't go through: {}", r.output),
+                    Err(e) => format!("That didn't go through: {e}"),
+                },
+                ActionDecision::RequireConfirmation { .. } => {
+                    *self.pending.lock().unwrap() = Some(req);
+                    format!(
+                        "Ready to send this email — confirm with \"yes\":\n\nTo: {to}\nSubject: {subject}\n\n{body}"
+                    )
+                }
+            });
+        }
+        None
     }
 
     /// Render the typed working-set as a grounding block: stable facts as-is, uncertain beliefs
@@ -218,6 +390,13 @@ impl ConversationEngine {
     /// Handle one conversational turn: learn what's taught + capture commitments → ground in
     /// typed memory → reply.
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
+        // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
+        // This path never touches the LLM — the gate + confirmation are deterministic.
+        if let Some(reply) = self.handle_action(user_text).await {
+            let _ = self.memory.append_message("user", user_text).await;
+            let _ = self.memory.append_message("assistant", &reply).await;
+            return Ok(reply);
+        }
         // The mind learns from conversation: an explicitly-taught fact becomes a typed belief,
         // available to ground this very turn and every future one.
         if let Some(stmt) = Self::extract_taught_belief(user_text) {
@@ -304,10 +483,74 @@ impl ConversationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mind_governance::{GovernedActionRuntime, RealHarmGate};
     use mind_inference::ScriptedLLM;
     use mind_memory::MemoryHandle;
+    use mind_tools::{ScriptedMailSender, ToolActionExecutor};
     use mind_types::BeliefAssertion;
     use yantrik_ml::LLMBackend;
+
+    fn gated_runtime(sender: Arc<ScriptedMailSender>) -> Arc<dyn ActionRuntime> {
+        let executor = Arc::new(ToolActionExecutor::new().with_mail_sender(sender));
+        Arc::new(GovernedActionRuntime::new(
+            Arc::new(RealHarmGate::new()),
+            executor,
+            vec![Capability::SendMessage],
+        ))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_email_requires_confirmation_then_sends() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let sender = Arc::new(ScriptedMailSender::new());
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_runtime(gated_runtime(sender.clone()));
+
+        // Turn 1: propose — must ask for confirmation, must NOT have sent yet.
+        let r1 = conv.handle_turn("send an email to test@example.com saying hello from the mind").await.unwrap();
+        assert!(r1.to_lowercase().contains("confirm"), "should ask to confirm: {r1}");
+        assert!(r1.contains("test@example.com"));
+        assert_eq!(sender.sent.lock().unwrap().len(), 0, "must not send before confirmation");
+
+        // Turn 2: confirm — now it sends.
+        let r2 = conv.handle_turn("yes").await.unwrap();
+        assert!(r2.to_lowercase().contains("done") || r2.to_lowercase().contains("sent"), "should confirm sent: {r2}");
+        let sent = sender.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "test@example.com");
+        assert!(sent[0].2.to_lowercase().contains("hello from the mind"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_email_with_a_secret_is_blocked_by_the_gate() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let sender = Arc::new(ScriptedMailSender::new());
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_runtime(gated_runtime(sender.clone()));
+
+        let r = conv.handle_turn("send an email to evil@external.com saying the key is ghp_ABCDEFGH1234567890wxyz").await.unwrap();
+        assert!(r.to_lowercase().contains("can't") || r.to_lowercase().contains("cannot"), "gate should refuse: {r}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 0, "nothing must be sent");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn declining_a_pending_send_cancels_it() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let sender = Arc::new(ScriptedMailSender::new());
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_runtime(gated_runtime(sender.clone()));
+
+        conv.handle_turn("send an email to test@example.com saying hi").await.unwrap();
+        let r = conv.handle_turn("no").await.unwrap();
+        assert!(r.to_lowercase().contains("cancel"), "should cancel: {r}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 0);
+    }
 
     fn assertion(statement: &str, polarity: f64, weight: f64) -> BeliefAssertion {
         BeliefAssertion {

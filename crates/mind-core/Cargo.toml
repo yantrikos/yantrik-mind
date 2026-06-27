@@ -9,6 +9,7 @@ mind-memory = { workspace = true }
 mind-inference = { workspace = true }
 mind-conversation = { workspace = true }
 mind-tools = { workspace = true }
+mind-governance = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false, features = ["claude-cli", "api-llm"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }

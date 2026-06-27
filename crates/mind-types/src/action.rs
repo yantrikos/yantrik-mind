@@ -29,8 +29,12 @@ pub enum Capability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionIntent {
     pub kind: String,
+    /// The thing acted on (e.g. an email recipient, a repo, a path).
     pub target: String,
+    /// Human-readable one-liner describing the action (shown when asking for confirmation).
     pub summary: String,
+    /// The concrete content to act with (e.g. the email body), distinct from the human `summary`.
+    pub payload: Option<String>,
     pub capabilities: Vec<Capability>,
     pub risk: RiskLevel,
     pub reversible: bool,
@@ -64,4 +68,13 @@ pub struct ActionReceipt {
 pub trait ActionRuntime: Send + Sync {
     async fn decide(&self, req: &ActionRequest, ctx: &TurnContext) -> ActionDecision;
     async fn execute(&self, req: ActionRequest) -> Result<ActionReceipt>;
+}
+
+/// The thing that actually performs an effect (send the email, post the comment). Injectable so the
+/// runtime stays a leaf and tests use a scripted executor instead of touching the world. The runtime
+/// only calls this AFTER the harm-gate + decision have passed — an executor never re-decides policy.
+#[async_trait]
+pub trait ActionExecutor: Send + Sync {
+    /// Perform the effect for this request, returning a human-readable result string.
+    async fn perform(&self, req: &ActionRequest) -> Result<String>;
 }

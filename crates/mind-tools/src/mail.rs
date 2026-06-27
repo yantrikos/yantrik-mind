@@ -7,6 +7,7 @@
 //! blocking `imap`, run on the blocking pool so it never stalls the async runtime.
 
 use async_trait::async_trait;
+use std::sync::Mutex;
 
 /// One inbox message, reduced to what a digest needs (headers only — no body fetch in v1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +129,82 @@ impl MailClient for ImapClient {
             Ok(out)
         })
         .await?
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sending — an OUTWARD effect. This is the transport only; whether a send is allowed/confirmed is
+// the harm-gate + ActionRuntime's job, never the sender's.
+// ---------------------------------------------------------------------------------------------
+
+#[async_trait]
+pub trait MailSender: Send + Sync {
+    async fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()>;
+}
+
+/// Real SMTP sender (TLS). For gmail use `for_address` (-> smtp.gmail.com) with the App Password.
+pub struct SmtpMailSender {
+    host: String,
+    user: String,
+    password: String,
+    from: String,
+}
+
+impl SmtpMailSender {
+    pub fn new(host: impl Into<String>, user: impl Into<String>, password: impl Into<String>, from: impl Into<String>) -> Self {
+        Self { host: host.into(), user: user.into(), password: password.into(), from: from.into() }
+    }
+
+    pub fn for_address(addr: &str, password: impl Into<String>) -> Self {
+        let host = if addr.ends_with("@gmail.com") {
+            "smtp.gmail.com".to_string()
+        } else {
+            addr.split('@').nth(1).map(|d| format!("mail.{d}")).unwrap_or_else(|| "localhost".into())
+        };
+        Self::new(host, addr, password, addr)
+    }
+}
+
+#[async_trait]
+impl MailSender for SmtpMailSender {
+    async fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()> {
+        use lettre::transport::smtp::authentication::Credentials;
+        use lettre::{Message, SmtpTransport, Transport};
+        let (host, user, password, from) =
+            (self.host.clone(), self.user.clone(), self.password.clone(), self.from.clone());
+        let (to, subject, body) = (to.to_string(), subject.to_string(), body.to_string());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let email = Message::builder()
+                .from(from.parse()?)
+                .to(to.parse()?)
+                .subject(subject)
+                .body(body)?;
+            let creds = Credentials::new(user, password);
+            let mailer = SmtpTransport::relay(&host)?.credentials(creds).build();
+            mailer.send(&email)?;
+            Ok(())
+        })
+        .await?
+    }
+}
+
+/// Records sends instead of performing them — for tests/dry-runs.
+#[derive(Default)]
+pub struct ScriptedMailSender {
+    pub sent: Mutex<Vec<(String, String, String)>>,
+}
+
+impl ScriptedMailSender {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl MailSender for ScriptedMailSender {
+    async fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()> {
+        self.sent.lock().unwrap().push((to.into(), subject.into(), body.into()));
+        Ok(())
     }
 }
 

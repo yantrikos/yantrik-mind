@@ -24,8 +24,8 @@ pub use memory::{
 };
 pub use candidate::{Candidate, CandidateKind, ScoreAxes};
 pub use action::{
-    ActionDecision, ActionIntent, ActionReceipt, ActionRequest, ActionRuntime, Capability,
-    RiskLevel,
+    ActionDecision, ActionExecutor, ActionIntent, ActionReceipt, ActionRequest, ActionRuntime,
+    Capability, RiskLevel,
 };
 pub use harm::{Decision, HarmGate};
 pub use turn::TurnContext;

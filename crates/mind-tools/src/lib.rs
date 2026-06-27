@@ -12,6 +12,11 @@ use std::net::{IpAddr, ToSocketAddrs};
 pub mod mail;
 pub use mail::{render_inbox_digest, EmailMsg, ImapClient, MailClient, ScriptedMailClient};
 
+pub mod github;
+pub use github::{
+    render_github_digest, ApiGithubClient, GithubClient, GithubNotification, ScriptedGithubClient,
+};
+
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).

@@ -138,6 +138,12 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
             }
         }
     }
+    // Read-only GitHub triage, if a token is configured.
+    if let Ok(token) = std::env::var("YM_GITHUB_TOKEN") {
+        if !token.is_empty() {
+            eng = eng.with_github(Arc::new(mind_tools::ApiGithubClient::new(token)));
+        }
+    }
     eng
 }
 

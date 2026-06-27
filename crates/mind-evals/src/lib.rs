@@ -147,7 +147,15 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
             from: "INBOXDOC alice@acme.com".into(),
             subject: "Q3 invoice".into(),
             date: "today".into(),
-        }])));
+        }])))
+        .with_github(Arc::new(mind_tools::ScriptedGithubClient::new(vec![
+            mind_tools::GithubNotification {
+                repo: "GHDOC yantrikos/yantrik-os".into(),
+                kind: "PullRequest".into(),
+                title: "logging".into(),
+                reason: "review_requested".into(),
+            },
+        ])));
 
     let mut prompt = String::new();
     for turn in &s.turns {
@@ -369,6 +377,18 @@ pub fn standard_suite() -> Vec<Scenario> {
             checks: vec![
                 Check::PromptContains("INBOXDOC".into()),        // the inbox reached the prompt
                 Check::PromptContains("<<inbox".into()),         // untrusted-wrapped inbox block
+            ],
+        },
+        // GROWTH (github): "check my github" pulls notifications (read-only) and grounds the reply.
+        Scenario {
+            name: "github: 'check my github' grounds the reply in notifications (untrusted)".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["check my github".into()],
+            checks: vec![
+                Check::PromptContains("GHDOC".into()),           // notifications reached the prompt
+                Check::PromptContains("<<github".into()),        // untrusted-wrapped github block
             ],
         },
     ]

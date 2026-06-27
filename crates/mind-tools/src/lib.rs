@@ -6,11 +6,56 @@
 //! page (forms, clicks, logins) is a separate, harm-gated capability and is deliberately not here.
 
 use async_trait::async_trait;
+use std::io::Read;
+use std::net::{IpAddr, ToSocketAddrs};
 
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).
     async fn fetch(&self, url: &str) -> anyhow::Result<String>;
+}
+
+/// Pull the host out of an http(s) URL (handles userinfo + bracketed IPv6).
+fn host_of(url: &str) -> Option<String> {
+    let after = url.splitn(2, "://").nth(1)?;
+    let authority = after.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplitn(2, '@').next()?; // drop userinfo
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next()?.to_string() // IPv6 literal
+    } else {
+        authority.split(':').next()?.to_string()
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// SSRF guard: is this resolved IP private/internal and therefore off-limits?
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => {
+            v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified()
+                || v.is_broadcast() || v.is_documentation()
+        }
+        IpAddr::V6(v) => {
+            let s = v.segments();
+            v.is_loopback() || v.is_unspecified()
+                || (s[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+/// Refuse to fetch internal/private targets (resolves the host first, so a public name that
+/// points at a private IP is also blocked).
+fn ssrf_check(url: &str) -> anyhow::Result<()> {
+    let host = host_of(url).ok_or_else(|| anyhow::anyhow!("bad url"))?;
+    if let Ok(addrs) = (host.as_str(), 443u16).to_socket_addrs() {
+        for a in addrs {
+            if is_blocked_ip(a.ip()) {
+                anyhow::bail!("refusing to fetch a private/internal address (SSRF guard): {host}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Real HTTP fetcher: GET → strip HTML to readable text → truncate. Blocking ureq on the blocking
@@ -43,11 +88,15 @@ impl Fetcher for HttpFetcher {
         let url = url.to_string();
         let max = self.max_chars;
         let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let html = ureq::get(&url)
+            // SSRF guard: never let an (injected) URL pull from the local/internal network.
+            ssrf_check(&url)?;
+            let resp = ureq::get(&url)
                 .timeout(std::time::Duration::from_secs(20))
-                .call()?
-                .into_string()?;
-            Ok(html2text::from_read(html.as_bytes(), 100))
+                .call()?;
+            // Cap the download (2 MB) so a hostile/huge page can't exhaust memory.
+            let mut bytes = Vec::new();
+            resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?;
+            Ok(html2text::from_read(&bytes[..], 100))
         })
         .await??;
         let mut t = text.trim().to_string();
@@ -110,5 +159,33 @@ mod tests {
     async fn scripted_fetcher_returns_canned() {
         let f = ScriptedFetcher::new("hello world");
         assert_eq!(f.fetch("https://anything").await.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn host_of_handles_userinfo_ports_and_ipv6() {
+        assert_eq!(host_of("https://example.com/x").as_deref(), Some("example.com"));
+        assert_eq!(host_of("http://u:p@10.0.0.5:8080/x").as_deref(), Some("10.0.0.5"));
+        assert_eq!(host_of("http://[::1]:7438/health").as_deref(), Some("::1"));
+    }
+
+    #[test]
+    fn ssrf_guard_blocks_private_loopback_and_metadata() {
+        for u in [
+            "http://127.0.0.1/",
+            "http://localhost/",
+            "http://192.168.4.140:7438/v1/health", // the YDB cluster on the LAN
+            "http://10.0.0.5/",
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata
+            "http://[::1]:7438/",
+        ] {
+            assert!(ssrf_check(u).is_err(), "should block internal target: {u}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_fetcher_refuses_internal_targets() {
+        let f = HttpFetcher::new();
+        let err = f.fetch("http://192.168.4.140:7438/v1/health").await.unwrap_err();
+        assert!(err.to_string().contains("SSRF"), "expected SSRF refusal, got: {err}");
     }
 }

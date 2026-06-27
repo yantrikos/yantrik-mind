@@ -39,17 +39,6 @@ const HARMFUL_CONTENT: &[(&str, &str)] = &[
     ("malware", "deploy a keylogger"),
 ];
 
-/// Secret-shaped tokens that must never leave the machine via an outward action.
-const SECRET_MARKERS: &[&str] = &[
-    "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", // GitHub tokens
-    "glpat-",                                       // GitLab
-    "akia", "asia",                                 // AWS access keys
-    "-----begin", "private key",                    // PEM private keys
-    "app password", "app-password",                 // mail app passwords
-    "xoxb-", "xoxp-",                               // Slack
-    "sk-",                                          // OpenAI-style
-];
-
 /// Path fragments the mind may never write to.
 const PROTECTED_PATHS: &[&str] = &[
     "keys.env", ".env", ".ssh", "id_rsa", ".git/config", "/etc/", "authorized_keys",
@@ -58,11 +47,6 @@ const PROTECTED_PATHS: &[&str] = &[
 
 fn contains_ci(haystack_lower: &str, needle: &str) -> bool {
     haystack_lower.contains(needle)
-}
-
-/// Does this outward content carry a secret? (Checked against summary + target.)
-fn leaks_secret(text_lower: &str) -> bool {
-    SECRET_MARKERS.iter().any(|m| contains_ci(text_lower, m))
 }
 
 fn harmful_category(text_lower: &str) -> Option<&'static str> {
@@ -141,7 +125,7 @@ impl HarmGate for RealHarmGate {
             .capabilities
             .iter()
             .any(|c| matches!(c, Capability::Network | Capability::SendMessage | Capability::WriteFs));
-        if outward && leaks_secret(&blob) {
+        if outward && mind_types::contains_secret(&blob) {
             return Decision::Deny { reason: "outward action appears to contain a secret/credential".into() };
         }
 

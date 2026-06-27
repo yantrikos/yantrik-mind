@@ -32,6 +32,7 @@ type Reply<T> = oneshot::Sender<std::result::Result<T, String>>;
 
 enum Cmd {
     Record { text: String, reply: Reply<String> },
+    RememberObservation { text: String, source: String, reply: Reply<String> },
     GetText { rid: String, reply: Reply<Option<String>> },
     AssertBelief { statement: String, signed_weight: f64, source: String, provenance: String, reply: Reply<Belief> },
     RecallTyped { text: String, top_k: usize, reply: Reply<Vec<Recalled>> },
@@ -50,6 +51,16 @@ enum Cmd {
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
+
+/// THE write gate: nothing secret-shaped may enter the cognitive moat (beliefs/observations).
+/// Deterministic, shared with the harm-gate (one source of truth). Raw transcript is exempt
+/// (verbatim ephemeral context, never reasoned over as knowledge).
+fn gate_write(text: &str) -> std::result::Result<(), String> {
+    if mind_types::contains_secret(text) {
+        return Err("refused: write contains a secret/credential marker (write-gate)".into());
+    }
+    Ok(())
+}
 
 fn now_secs() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,6 +131,7 @@ fn assert_belief(
     source: &str,
     provenance: &str,
 ) -> std::result::Result<Belief, String> {
+    gate_write(statement)?;
     let node = match find_belief(db, statement) {
         Some(n) => n,
         None => {
@@ -367,7 +379,15 @@ impl MemoryHandle {
                 while let Some(cmd) = rx.blocking_recv() {
                     match cmd {
                         Cmd::Record { text, reply } => {
-                            let r = db.record(&text, "episodic", 0.5, 0.0, 604_800.0, &meta, &zero, "default", 0.8, "general", "user", None).map_err(|e| e.to_string());
+                            let r = gate_write(&text).and_then(|_| db.record(&text, "episodic", 0.5, 0.0, 604_800.0, &meta, &zero, "default", 0.8, "general", "user", None).map_err(|e| e.to_string()));
+                            let _ = reply.send(r);
+                        }
+                        Cmd::RememberObservation { text, source, reply } => {
+                            // Provenance-tagged, secret-scanned, low-certainty: an Observation, never a Belief.
+                            let r = gate_write(&text).and_then(|_| {
+                                let obs_meta = serde_json::json!({ "provenance": source, "observed_at": now_secs(), "kind": "observation" });
+                                db.record(&text, "episodic", 0.4, 0.0, 604_800.0, &obs_meta, &zero, "default", 0.6, "general", &source, None).map_err(|e| e.to_string())
+                            });
                             let _ = reply.send(r);
                         }
                         Cmd::GetText { rid, reply } => {
@@ -456,6 +476,12 @@ impl MemoryFacade for MemoryHandle {
     async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>> {
         let (text, top_k) = (q.text, q.top_k);
         self.call(|reply| Cmd::RecallTyped { text, top_k, reply }).await
+    }
+
+    async fn remember_observation(&self, text: &str, source: mind_types::ProvenanceCategory) -> Result<String> {
+        let text = text.to_string();
+        let source = source.as_str().to_string();
+        self.call(|reply| Cmd::RememberObservation { text, source, reply }).await
     }
 
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief> {
@@ -581,6 +607,29 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let rid = mem.record("the sky is blue").await.unwrap();
         assert_eq!(mem.get_text(&rid).await.unwrap().as_deref(), Some("the sky is blue"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn write_gate_blocks_secrets_into_the_moat() {
+        use mind_types::ProvenanceCategory;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        // A secret can't enter as a belief…
+        let belief = mem
+            .remember_as_belief(BeliefAssertion {
+                statement: "the deploy token is ghp_ABCDEFGH1234567890".into(),
+                polarity: 1.0,
+                weight: 1.5,
+                source_event: None,
+                provenance: "told".into(),
+            })
+            .await;
+        assert!(belief.is_err(), "secret-bearing belief must be refused by the write-gate");
+        // …nor as an observation…
+        let obs_secret = mem.remember_observation("here is the key: ghp_SECRET1234567890ab", ProvenanceCategory::SandboxedSkill).await;
+        assert!(obs_secret.is_err(), "secret-bearing observation must be refused");
+        // …but a clean observation is stored (provenance-tagged), never a belief.
+        let ok = mem.remember_observation("the CSV had 412 rows", ProvenanceCategory::SandboxedSkill).await;
+        assert!(ok.is_ok(), "clean observation should store: {ok:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

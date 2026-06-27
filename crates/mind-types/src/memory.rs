@@ -112,6 +112,9 @@ pub trait MemoryFacade: Send + Sync {
     async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>>;
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;
+    /// Write a machine-derived OBSERVATION (skill/tool/sub-agent/web output) — provenance-tagged,
+    /// secret-scanned, NEVER a naked Belief. This is the gated inward boundary for the moat.
+    async fn remember_observation(&self, text: &str, source: crate::safety::ProvenanceCategory) -> Result<String>;
     /// Create/strengthen a graph edge between entities.
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()>;
     /// Compose typed recalls + open conflicts into a structured reflection.

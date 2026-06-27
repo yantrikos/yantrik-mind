@@ -14,6 +14,7 @@ pub mod action;
 pub mod harm;
 pub mod turn;
 pub mod task;
+pub mod safety;
 
 pub use error::{MindError, Result};
 pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
@@ -30,6 +31,7 @@ pub use action::{
 pub use harm::{Decision, HarmGate};
 pub use turn::TurnContext;
 pub use task::Task;
+pub use safety::{contains_secret, ProvenanceCategory, SECRET_MARKERS};
 
 /// The default persona — and, deliberately, the communication spine. Most of what makes a reply
 /// land is *how* it's said; these are the habits distilled into directives the model follows every

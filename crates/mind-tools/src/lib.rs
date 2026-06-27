@@ -18,6 +18,9 @@ pub use mail::{
 pub mod executor;
 pub use executor::ToolActionExecutor;
 
+pub mod search;
+pub use search::{render_search, DdgSearch, ScriptedSearch, SearchHit, WebSearch};
+
 pub mod github;
 pub use github::{
     render_github_digest, ApiGithubClient, GithubClient, GithubNotification, GithubWriter,

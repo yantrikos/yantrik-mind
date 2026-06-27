@@ -182,17 +182,29 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         eng = eng.with_runtime(rt.clone());
     }
 
-    // Shared tool host: recipe Tool steps + sub-agent tool calls both go through it.
-    let host: Arc<dyn mind_recipes::RecipeHost> =
-        Arc::new(mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone()));
+    // Shared tool host: recipe Tool steps + sub-agent tool calls both go through it. Includes web
+    // research tools (keyless DuckDuckGo search + SSRF-guarded fetch).
+    let host: Arc<dyn mind_recipes::RecipeHost> = Arc::new(
+        mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone())
+            .with_web(
+                Arc::new(mind_tools::HttpFetcher::new()),
+                Arc::new(mind_tools::DdgSearch::new()),
+            ),
+    );
 
-    // A research sub-agent over the read tools (bounded ReAct, read-only — no outward effects).
+    // A research sub-agent: web search + fetch + the mind's own read tools. Bounded ReAct, read-only.
     let researcher = mind_agents::SubAgent::new(
         pool.clone(),
         host.clone(),
         persona.clone(),
-        vec!["recall".into(), "inbox".into(), "github".into()],
-        5,
+        vec![
+            "web_search".into(),
+            "fetch".into(),
+            "recall".into(),
+            "inbox".into(),
+            "github".into(),
+        ],
+        6,
     );
     eng = eng.with_researcher(Arc::new(researcher));
 

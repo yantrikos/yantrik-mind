@@ -871,6 +871,8 @@ pub struct MindRecipeHost {
     mail: Option<Arc<dyn MailClient>>,
     github: Option<Arc<dyn GithubClient>>,
     memory: Arc<dyn MemoryFacade>,
+    web: Option<Arc<dyn Fetcher>>,
+    search: Option<Arc<dyn mind_tools::WebSearch>>,
 }
 
 impl MindRecipeHost {
@@ -879,7 +881,14 @@ impl MindRecipeHost {
         github: Option<Arc<dyn GithubClient>>,
         memory: Arc<dyn MemoryFacade>,
     ) -> Self {
-        Self { mail, github, memory }
+        Self { mail, github, memory, web: None, search: None }
+    }
+
+    /// Add web research tools: `web_search` (discover) + `fetch` (read a page, SSRF-guarded).
+    pub fn with_web(mut self, web: Arc<dyn Fetcher>, search: Arc<dyn mind_tools::WebSearch>) -> Self {
+        self.web = Some(web);
+        self.search = Some(search);
+        self
     }
 }
 
@@ -920,6 +929,26 @@ impl RecipeHost for MindRecipeHost {
                     anyhow::bail!("nothing in memory for that");
                 }
                 Ok(hits.iter().map(|h| format!("- {}", h.item.text)).collect::<Vec<_>>().join("\n"))
+            }
+            "web_search" => {
+                let s = self.search.as_ref().ok_or_else(|| anyhow::anyhow!("no web search configured"))?;
+                let query = _args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                if query.is_empty() {
+                    anyhow::bail!("web_search needs a 'query'");
+                }
+                let hits = s.search(query, 6).await?;
+                if hits.is_empty() {
+                    anyhow::bail!("no results for '{query}'");
+                }
+                Ok(mind_tools::render_search(&hits))
+            }
+            "fetch" => {
+                let f = self.web.as_ref().ok_or_else(|| anyhow::anyhow!("no fetcher configured"))?;
+                let url = _args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if url.is_empty() {
+                    anyhow::bail!("fetch needs a 'url'");
+                }
+                f.fetch(url).await
             }
             other => anyhow::bail!("unknown source '{other}'"),
         }

@@ -53,6 +53,8 @@ pub enum Check {
     ConfidenceBelow(String, f64),
     /// Typed recall for `query` surfaces a memory whose text contains `expect`.
     RecallSurfaces { query: String, expect: String },
+    /// An OPEN task exists whose description contains this substring.
+    TaskOpen(String),
 }
 
 pub struct Scenario {
@@ -134,7 +136,7 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
         let _ = mem.relate(&r.a, &r.b, &r.rel, 0.9).await;
     }
     for t in &s.tasks {
-        let _ = mem.add_task(t.clone(), "medium", None).await;
+        let _ = mem.add_task(t, "medium", None).await;
     }
 
     let scripted = Arc::new(ScriptedLLM::new("ack"));
@@ -173,6 +175,10 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
                     format!("recall('{query}') surfaces '{expect}'"),
                     r.iter().any(|x| x.item.text.contains(expect.as_str())),
                 )
+            }
+            Check::TaskOpen(x) => {
+                let ts = mem.list_tasks(false).await.unwrap_or_default();
+                (format!("open task contains '{x}'"), ts.iter().any(|t| t.description.contains(x.as_str())))
             }
         };
         checks.push(CheckResult { desc, pass });
@@ -297,6 +303,16 @@ pub fn standard_suite() -> Vec<Scenario> {
             tasks: vec!["finish the Q3 report".into()],
             turns: vec!["what's on my plate today?".into()],
             checks: vec![Check::PromptContains("Q3 report".into())],
+        },
+        // GROWTH (commitments): a spoken commitment in chat auto-becomes an open task — composes
+        // conversational learning + the cheap task tier.
+        Scenario {
+            name: "commitment: 'remind me to ...' in chat becomes an open task".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["remind me to call the dentist tomorrow".into()],
+            checks: vec![Check::TaskOpen("dentist".into())],
         },
     ]
 }

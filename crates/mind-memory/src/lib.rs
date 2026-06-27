@@ -406,19 +406,6 @@ impl MemoryHandle {
         let rid = rid.to_string();
         self.call(|reply| Cmd::GetText { rid, reply }).await
     }
-
-    // ── cheap task tier ──
-    pub async fn add_task(&self, description: impl Into<String>, priority: impl Into<String>, due_ms: Option<u64>) -> Result<Task> {
-        let (description, priority) = (description.into(), priority.into());
-        self.call(|reply| Cmd::AddTask { description, priority, due_ms, reply }).await
-    }
-    pub async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
-        self.call(|reply| Cmd::ListTasks { include_done, reply }).await
-    }
-    pub async fn complete_task(&self, id: &str) -> Result<bool> {
-        let id = id.to_string();
-        self.call(|reply| Cmd::CompleteTask { id, reply }).await
-    }
 }
 
 #[async_trait]
@@ -519,6 +506,18 @@ impl MemoryFacade for MemoryHandle {
 
     async fn export(&self) -> Result<String> {
         self.call(|reply| Cmd::Export { reply }).await
+    }
+
+    async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task> {
+        let (description, priority) = (description.to_string(), priority.to_string());
+        self.call(|reply| Cmd::AddTask { description, priority, due_ms, reply }).await
+    }
+    async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
+        self.call(|reply| Cmd::ListTasks { include_done, reply }).await
+    }
+    async fn complete_task(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.call(|reply| Cmd::CompleteTask { id, reply }).await
     }
 }
 

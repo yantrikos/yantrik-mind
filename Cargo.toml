@@ -22,7 +22,7 @@ uuid7 = "1"
 
 # reused foundations (local path to the yantrik-companion workspace crates)
 yantrikdb-core = { path = "../yantrik-companion/crates/yantrikdb-core" }
-yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml" }
+yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml", default-features = false }
 yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
 yantrik-chat = { path = "../yantrik-companion/crates/yantrik-chat" }
 

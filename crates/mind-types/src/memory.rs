@@ -3,6 +3,7 @@
 //! is the sole implementor and the sole writer to the cognitive graph.
 use crate::clock::UnixMillis;
 use crate::error::Result;
+use crate::task::Task;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -127,4 +128,9 @@ pub trait MemoryFacade: Send + Sync {
     async fn forget(&self, id: &str) -> Result<bool>;
     /// Privacy: export everything (JSON).
     async fn export(&self) -> Result<String>;
+
+    // ── cheap task tier (plain CRUD, no cognitive cost) ──
+    async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task>;
+    async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>>;
+    async fn complete_task(&self, id: &str) -> Result<bool>;
 }

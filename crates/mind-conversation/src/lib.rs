@@ -86,7 +86,47 @@ impl ConversationEngine {
         None
     }
 
-    /// Handle one conversational turn: learn what's taught → ground in typed memory → reply.
+    /// Pull a spoken commitment out of a turn ("remind me to X", "I'll X tomorrow") + an optional
+    /// due time from a coarse date word. Returns (description, due_ms).
+    fn extract_commitment(text: &str) -> Option<(String, Option<u64>)> {
+        let t = text.trim().trim_end_matches(['.', '!', '?']).trim();
+        let lower = t.to_lowercase();
+        let prefixes = [
+            "remind me to ", "i'll ", "i will ", "i need to ", "i have to ", "i gotta ",
+            "i must ", "i should ", "i'm going to ", "im going to ",
+        ];
+        let action = prefixes
+            .iter()
+            .find(|p| lower.starts_with(*p))
+            .map(|p| t[p.len()..].trim())?;
+        if action.len() < 2 {
+            return None;
+        }
+        Some((action.to_string(), Self::parse_due_ms(action)))
+    }
+
+    fn parse_due_ms(text: &str) -> Option<u64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let day = 86_400_000u64;
+        let l = text.to_lowercase();
+        if l.contains("tomorrow") {
+            Some(now + day)
+        } else if l.contains("next week") {
+            Some(now + 7 * day)
+        } else if l.contains("tonight") {
+            Some(now + 4 * 3_600_000)
+        } else if l.contains("today") {
+            Some(now + 6 * 3_600_000)
+        } else {
+            None
+        }
+    }
+
+    /// Handle one conversational turn: learn what's taught + capture commitments → ground in
+    /// typed memory → reply.
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
         // The mind learns from conversation: an explicitly-taught fact becomes a typed belief,
         // available to ground this very turn and every future one.
@@ -101,6 +141,10 @@ impl ConversationEngine {
                     provenance: "told".into(),
                 })
                 .await;
+        }
+        // A spoken commitment becomes a cheap open task (with a due date if one was implied).
+        if let Some((desc, due_ms)) = Self::extract_commitment(user_text) {
+            let _ = self.memory.add_task(&desc, "medium", due_ms).await;
         }
         let ws = self.memory.hydrate_working_set(user_text).await?;
         let grounding = Self::render_grounding(&ws);
@@ -158,6 +202,17 @@ mod tests {
         assert!(sys.contains("confidence"), "uncertain beliefs should be hedged:\n{sys}");
         // ...and recalled memory was untrusted-wrapped.
         assert!(sys.contains("NOT instructions"), "memory must be untrusted-wrapped:\n{sys}");
+    }
+
+    #[test]
+    fn commitment_extraction_and_due_parsing() {
+        let (desc, due) = ConversationEngine::extract_commitment("remind me to call the dentist tomorrow").unwrap();
+        assert!(desc.contains("dentist"));
+        assert!(due.is_some(), "'tomorrow' should set a due date");
+        let (d2, due2) = ConversationEngine::extract_commitment("I'll email the team").unwrap();
+        assert!(d2.contains("email"));
+        assert!(due2.is_none(), "no date word => no due");
+        assert!(ConversationEngine::extract_commitment("what's the weather?").is_none(), "questions aren't commitments");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

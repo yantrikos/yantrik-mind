@@ -6,10 +6,14 @@
 //! Offset is persisted (so a restart doesn't replay old messages). Network/parse errors are logged
 //! and retried; the loop never crashes.
 
+use std::collections::HashSet;
 use std::io::Write;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
+use mind_types::MemoryFacade;
 
 use crate::{handle_line, Outcome};
 
@@ -56,6 +60,78 @@ fn save_offset(n: i64) {
     }
 }
 
+fn reminded_path() -> String {
+    format!("{}.reminded", offset_path())
+}
+
+fn load_reminded() -> HashSet<String> {
+    std::fs::read_to_string(reminded_path())
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+fn save_reminded(set: &HashSet<String>) {
+    if let Ok(mut f) = std::fs::File::create(reminded_path()) {
+        let _ = write!(f, "{}", set.iter().cloned().collect::<Vec<_>>().join("\n"));
+    }
+}
+
+/// Quiet-hours check with wraparound (e.g. start=22, end=7 means 22:00–06:59 is quiet).
+fn is_quiet_hour(hour: u32, start: u32, end: u32) -> bool {
+    if start == end {
+        false
+    } else if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
+}
+
+fn in_quiet_hours_now() -> bool {
+    use chrono::Timelike;
+    let start = std::env::var("YM_QUIET_START").ok().and_then(|s| s.parse().ok()).unwrap_or(22);
+    let end = std::env::var("YM_QUIET_END").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    is_quiet_hour(chrono::Local::now().hour(), start, end)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Proactive reminders: a background tick that messages the operator when a commitment they asked
+/// to be reminded of comes due. Conservative by design — it only surfaces *due* tasks (never
+/// free-form outreach), honors quiet hours, and dedupes so a reminder fires once.
+async fn reminder_loop(api: String, mem: MemoryHandle, active_chat: Arc<AtomicI64>) {
+    let mut reminded = load_reminded();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let chat = active_chat.load(Ordering::Relaxed);
+        if chat == 0 || in_quiet_hours_now() {
+            continue;
+        }
+        let now = now_ms();
+        let tasks = mem.list_tasks(false).await.unwrap_or_default();
+        for t in tasks {
+            let due = match t.due_ms {
+                Some(d) if d <= now => d,
+                _ => continue,
+            };
+            let _ = due;
+            if reminded.contains(&t.id) {
+                continue;
+            }
+            let msg = format!("⏰ Reminder: {}", t.description);
+            if tg_send(&api, chat, &msg).await.is_ok() {
+                reminded.insert(t.id.clone());
+                save_reminded(&reminded);
+            }
+        }
+    }
+}
+
 /// Run the telegram channel until killed. `chat_lock` (YM_TELEGRAM_CHAT) optionally restricts to a
 /// single chat id; if unset, the first chatter is accepted (single-user companion).
 pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
@@ -70,6 +146,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         }
     }
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT").ok().and_then(|s| s.trim().parse().ok());
+
+    // Proactive reminders run in the background, messaging the last-active chat when a due
+    // commitment arrives. (Disabled with YM_REMINDERS=off.)
+    let active_chat = Arc::new(AtomicI64::new(chat_lock.unwrap_or(0)));
+    if std::env::var("YM_REMINDERS").map(|v| v != "off").unwrap_or(true) {
+        tokio::spawn(reminder_loop(api.clone(), mem.clone(), active_chat.clone()));
+    }
 
     let mut offset = load_offset();
     loop {
@@ -97,6 +180,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     continue;
                 }
             }
+            // Remember where to push proactive messages.
+            active_chat.store(chat_id, Ordering::Relaxed);
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
             if text.is_empty() {
                 continue;
@@ -110,5 +195,35 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 eprintln!("[telegram] send error: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_quiet_hour;
+
+    #[test]
+    fn quiet_hours_wraparound_overnight() {
+        // 22:00–07:00 quiet
+        assert!(is_quiet_hour(23, 22, 7));
+        assert!(is_quiet_hour(2, 22, 7));
+        assert!(is_quiet_hour(6, 22, 7));
+        assert!(!is_quiet_hour(7, 22, 7)); // end is exclusive
+        assert!(!is_quiet_hour(12, 22, 7));
+        assert!(!is_quiet_hour(21, 22, 7));
+        assert!(is_quiet_hour(22, 22, 7)); // start inclusive
+    }
+
+    #[test]
+    fn quiet_hours_same_day_window() {
+        // 1:00–5:00 quiet (non-wrapping)
+        assert!(is_quiet_hour(3, 1, 5));
+        assert!(!is_quiet_hour(6, 1, 5));
+        assert!(!is_quiet_hour(0, 1, 5));
+    }
+
+    #[test]
+    fn no_quiet_window_when_equal() {
+        assert!(!is_quiet_hour(3, 0, 0));
     }
 }

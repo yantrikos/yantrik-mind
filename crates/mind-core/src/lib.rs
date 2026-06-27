@@ -52,6 +52,31 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
             Err(e) => Outcome::Said(format!("(error: {e})")),
         };
     }
+    if t == ":tasks" {
+        return match mem.list_tasks(false).await {
+            Ok(ts) if ts.is_empty() => Outcome::Said("(no open tasks)".into()),
+            Ok(ts) => Outcome::Said(
+                ts.iter()
+                    .map(|t| format!("• [{}] {} ({})", t.id, t.description, t.priority))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
+    if let Some(desc) = t.strip_prefix(":task ") {
+        return match mem.add_task(desc.trim(), "medium", None).await {
+            Ok(task) => Outcome::Said(format!("added task [{}]: {}", task.id, task.description)),
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
+    if let Some(id) = t.strip_prefix(":done ") {
+        return match mem.complete_task(id.trim()).await {
+            Ok(true) => Outcome::Said("task completed".into()),
+            Ok(false) => Outcome::Said("(no such task)".into()),
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
     if let Some(rest) = t.strip_prefix(":remember ") {
         let rest = rest.trim();
         let (polarity, statement) = if let Some(s) = rest.strip_prefix("- ") {

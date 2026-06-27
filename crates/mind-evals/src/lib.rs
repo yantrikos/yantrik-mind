@@ -59,6 +59,8 @@ pub struct Scenario {
     pub name: String,
     pub seeds: Vec<Seed>,
     pub relations: Vec<Relation>,
+    /// Cheap-tier task descriptions to add before the turns run.
+    pub tasks: Vec<String>,
     /// Chat turns run in order (multi-turn). Checks see the LAST turn's assembled prompt — so a
     /// scenario can teach in turn 1 and assert turn 2 grounds on it.
     pub turns: Vec<String>,
@@ -131,6 +133,9 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
     for r in &s.relations {
         let _ = mem.relate(&r.a, &r.b, &r.rel, 0.9).await;
     }
+    for t in &s.tasks {
+        let _ = mem.add_task(t.clone(), "medium", None).await;
+    }
 
     let scripted = Arc::new(ScriptedLLM::new("ack"));
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
@@ -202,6 +207,7 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "belief revision: positive evidence raises confidence".into(),
             seeds: vec![Seed::pos("Pranab prefers terse replies")],
             relations: vec![],
+            tasks: vec![],
             turns: vec![],
             checks: vec![Check::ConfidenceAbove("Pranab prefers terse replies".into(), 0.5)],
         },
@@ -209,6 +215,7 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "belief revision: negative evidence lowers confidence".into(),
             seeds: vec![Seed::neg("Pranab lives in Tokyo")],
             relations: vec![],
+            tasks: vec![],
             turns: vec![],
             checks: vec![Check::ConfidenceBelow("Pranab lives in Tokyo".into(), 0.5)],
         },
@@ -216,6 +223,7 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "grounded chat: reply is grounded in the belief".into(),
             seeds: vec![Seed::pos("Pranab prefers terse replies")],
             relations: vec![],
+            tasks: vec![],
             turns: vec!["how should you answer me?".into()],
             checks: vec![
                 Check::PromptContains("terse".into()),
@@ -233,6 +241,7 @@ pub fn standard_suite() -> Vec<Scenario> {
                 b: "Pranab prefers long detailed replies".into(),
                 rel: "contradicts".into(),
             }],
+            tasks: vec![],
             turns: vec!["what's my reply style?".into()],
             checks: vec![
                 Check::MinConflicts(1),
@@ -243,6 +252,7 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "confidence-aware hedging of uncertain beliefs".into(),
             seeds: vec![Seed::weak("Pranab is travelling next week")],
             relations: vec![],
+            tasks: vec![],
             turns: vec!["am I travelling?".into()],
             checks: vec![Check::PromptContains("confidence".into())],
         },
@@ -250,6 +260,7 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "no confabulation: empty memory => no grounding block".into(),
             seeds: vec![],
             relations: vec![],
+            tasks: vec![],
             turns: vec!["tell me about myself".into()],
             checks: vec![Check::PromptOmits("<<memory".into())],
         },
@@ -257,6 +268,7 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "typed recall surfaces a seeded belief".into(),
             seeds: vec![Seed::pos("Pranab is building Yantrik Mind")],
             relations: vec![],
+            tasks: vec![],
             turns: vec![],
             checks: vec![Check::RecallSurfaces {
                 query: "what is Pranab building".into(),
@@ -269,11 +281,22 @@ pub fn standard_suite() -> Vec<Scenario> {
             name: "learns from chat: teach in turn 1, recall in turn 2".into(),
             seeds: vec![],
             relations: vec![],
+            tasks: vec![],
             turns: vec![
                 "remember that I drink dark roast coffee".into(),
                 "what coffee do I like?".into(),
             ],
             checks: vec![Check::PromptContains("dark roast".into())],
+        },
+        // GROWTH (cheap task tier): an open task surfaces in the conversation grounding so the
+        // mind can act on it — bookkeeping in the same store, no cognitive cost.
+        Scenario {
+            name: "cheap task tier: open task surfaces in chat grounding".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec!["finish the Q3 report".into()],
+            turns: vec!["what's on my plate today?".into()],
+            checks: vec![Check::PromptContains("Q3 report".into())],
         },
     ]
 }

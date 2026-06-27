@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("yantrik-mind — backend: {name} · db: {db}");
     println!(
-        "commands: ':remember + <stmt>' / ':remember - <stmt>', ':conflicts', ':explain <stmt>', ':quit'  (else = chat)\n"
+        "commands: ':remember +/- <stmt>', ':conflicts', ':explain <stmt>', ':task <desc>', ':tasks', ':done <id>', ':quit'  (else = chat)\n"
     );
 
     let stdin = std::io::stdin();

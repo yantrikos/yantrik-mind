@@ -13,6 +13,7 @@ pub mod candidate;
 pub mod action;
 pub mod harm;
 pub mod turn;
+pub mod task;
 
 pub use error::{MindError, Result};
 pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
@@ -28,3 +29,4 @@ pub use action::{
 };
 pub use harm::{Decision, HarmGate};
 pub use turn::TurnContext;
+pub use task::Task;

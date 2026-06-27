@@ -46,6 +46,12 @@ impl ConversationEngine {
                 s.push_str(&format!("- \"{}\" conflicts with \"{}\"\n", c.belief_a, c.belief_b));
             }
         }
+        if !ws.commitments.is_empty() {
+            s.push_str("Open tasks/commitments:\n");
+            for t in &ws.commitments {
+                s.push_str(&format!("- {}\n", t.text));
+            }
+        }
         s
     }
 

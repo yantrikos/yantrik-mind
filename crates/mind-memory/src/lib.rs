@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use mind_types::{
     Belief, BeliefAssertion, Contradiction, Evidence as MEvidence, MemoryFacade, MemoryItem,
-    MemoryKind, MindError, RecallQuery, Recalled, Reflection, Result, WorkingSet,
+    MemoryKind, MindError, RecallQuery, Recalled, Reflection, Result, Task, WorkingSet,
 };
 
 use yantrikdb_core::belief::{BeliefRevisionConfig, Evidence as YEvidence};
@@ -24,7 +24,7 @@ use yantrikdb_core::belief_query::BeliefPattern;
 use yantrikdb_core::contradiction::ContradictionConfig;
 use yantrikdb_core::state::{
     sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId,
-    NodeIdAllocator, NodeKind, NodePayload, Provenance,
+    NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
 };
 use yantrikdb_core::YantrikDB;
 
@@ -40,6 +40,10 @@ enum Cmd {
     Relate { src: String, dst: String, rel: String, weight: f64, reply: Reply<()> },
     Forget { statement: String, reply: Reply<bool> },
     Export { reply: Reply<String> },
+    // cheap task tier (plain node CRUD — no cognitive ops)
+    AddTask { description: String, priority: String, due_ms: Option<u64>, reply: Reply<Task> },
+    ListTasks { include_done: bool, reply: Reply<Vec<Task>> },
+    CompleteTask { id: String, reply: Reply<bool> },
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
@@ -224,6 +228,75 @@ fn explain(db: &YantrikDB, statement: &str) -> std::result::Result<Option<(Belie
     Ok(Some((belief, evs)))
 }
 
+// ── cheap task tier (plain cognitive-node CRUD; no embedding/revision/scan) ──
+
+fn prio(s: &str) -> Priority {
+    match s.to_ascii_lowercase().as_str() {
+        "critical" => Priority::Critical,
+        "high" => Priority::High,
+        "low" => Priority::Low,
+        _ => Priority::Medium,
+    }
+}
+
+fn task_dto(n: &CognitiveNode) -> Option<Task> {
+    if let NodePayload::Task(t) = &n.payload {
+        Some(Task {
+            id: format!("{}", n.id),
+            description: t.description.clone(),
+            status: t.status.as_str().to_string(),
+            priority: t.priority.as_str().to_string(),
+            due_ms: t.deadline.map(|s| (s * 1000.0) as u64),
+        })
+    } else {
+        None
+    }
+}
+
+fn all_task_nodes(db: &YantrikDB) -> Vec<CognitiveNode> {
+    db.load_cognitive_nodes_by_kind(NodeKind::Task).unwrap_or_default()
+}
+
+fn add_task(
+    db: &YantrikDB,
+    alloc: &mut NodeIdAllocator,
+    description: &str,
+    priority: &str,
+    due_ms: Option<u64>,
+) -> std::result::Result<Task, String> {
+    let id = alloc.alloc(NodeKind::Task);
+    let node = CognitiveNode::new(
+        id,
+        description.to_string(),
+        NodePayload::Task(TaskPayload {
+            description: description.to_string(),
+            status: TaskStatus::Pending,
+            goal_id: None,
+            deadline: due_ms.map(|m| m as f64 / 1000.0),
+            priority: prio(priority),
+            estimated_minutes: None,
+            prerequisites: vec![],
+        }),
+    );
+    db.persist_cognitive_node(&node).map_err(|e| e.to_string())?;
+    db.persist_node_id_allocator(alloc).map_err(|e| e.to_string())?;
+    task_dto(&node).ok_or_else(|| "task build failed".to_string())
+}
+
+fn complete_task(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> {
+    let mut node = match all_task_nodes(db).into_iter().find(|n| format!("{}", n.id) == id) {
+        Some(n) => n,
+        None => return Ok(false),
+    };
+    if let NodePayload::Task(ref mut t) = node.payload {
+        t.status = TaskStatus::Completed;
+        db.persist_cognitive_node(&node).map_err(|e| e.to_string())?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 fn relate(db: &YantrikDB, src: &str, dst: &str, rel: &str, weight: f64) -> std::result::Result<(), String> {
     let a = find_belief(db, src).ok_or_else(|| format!("no belief: {src}"))?;
     let b = find_belief(db, dst).ok_or_else(|| format!("no belief: {dst}"))?;
@@ -290,6 +363,20 @@ impl MemoryHandle {
                             let beliefs: Vec<Belief> = all_beliefs(&db).iter().map(to_belief_dto).collect();
                             let _ = reply.send(serde_json::to_string(&beliefs).map_err(|e| e.to_string()));
                         }
+                        Cmd::AddTask { description, priority, due_ms, reply } => {
+                            let _ = reply.send(add_task(&db, &mut alloc, &description, &priority, due_ms));
+                        }
+                        Cmd::ListTasks { include_done, reply } => {
+                            let tasks: Vec<Task> = all_task_nodes(&db)
+                                .iter()
+                                .filter_map(task_dto)
+                                .filter(|t| include_done || t.is_open())
+                                .collect();
+                            let _ = reply.send(Ok(tasks));
+                        }
+                        Cmd::CompleteTask { id, reply } => {
+                            let _ = reply.send(complete_task(&db, &id));
+                        }
                     }
                 }
             })
@@ -318,6 +405,19 @@ impl MemoryHandle {
     pub async fn get_text(&self, rid: &str) -> Result<Option<String>> {
         let rid = rid.to_string();
         self.call(|reply| Cmd::GetText { rid, reply }).await
+    }
+
+    // ── cheap task tier ──
+    pub async fn add_task(&self, description: impl Into<String>, priority: impl Into<String>, due_ms: Option<u64>) -> Result<Task> {
+        let (description, priority) = (description.into(), priority.into());
+        self.call(|reply| Cmd::AddTask { description, priority, due_ms, reply }).await
+    }
+    pub async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
+        self.call(|reply| Cmd::ListTasks { include_done, reply }).await
+    }
+    pub async fn complete_task(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.call(|reply| Cmd::CompleteTask { id, reply }).await
     }
 }
 
@@ -392,6 +492,17 @@ impl MemoryFacade for MemoryHandle {
             }
         }
         ws.active_contradictions = open;
+        // open tasks ride along as commitments (cheap tier surfaced for grounding)
+        for t in self.list_tasks(false).await.unwrap_or_default() {
+            ws.commitments.push(MemoryItem {
+                id: t.id,
+                kind: MemoryKind::Task,
+                text: t.description,
+                confidence: 1.0,
+                certainty: 1.0,
+                updated_ms: t.due_ms.unwrap_or(0),
+            });
+        }
         Ok(ws)
     }
 
@@ -512,5 +623,27 @@ mod tests {
             .await
             .unwrap();
         assert!(down.confidence < 0.5, "negative evidence should lower confidence, got {}", down.confidence);
+    }
+
+    /// The CHEAP task tier: plain CRUD, no cognitive ops, in the same store.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cheap_task_crud_and_completion() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let t = mem.add_task("finish the Q3 report", "high", None).await.unwrap();
+        assert_eq!(t.status, "pending");
+        assert_eq!(t.priority, "high");
+
+        let open = mem.list_tasks(false).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].description, "finish the Q3 report");
+
+        assert!(mem.complete_task(&t.id).await.unwrap());
+        assert!(mem.list_tasks(false).await.unwrap().is_empty(), "completed task should drop off the open list");
+        assert_eq!(mem.list_tasks(true).await.unwrap().len(), 1, "but still present when including done");
+
+        // tasks ride into the working-set as commitments (for grounding)
+        mem.add_task("call the dentist", "medium", None).await.unwrap();
+        let ws = mem.hydrate_working_set("what's on my plate").await.unwrap();
+        assert!(ws.commitments.iter().any(|c| c.text.contains("dentist")), "open task should surface in working-set");
     }
 }

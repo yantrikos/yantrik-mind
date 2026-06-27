@@ -107,15 +107,12 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
     }
 }
 
-/// Build a `ConversationEngine` from a memory handle, an inference pool, and the persona.
+/// Build a `ConversationEngine` from a memory handle and an inference pool. The operator name is
+/// read from config (YM_OPERATOR), never hardcoded — defaults to "the user".
 pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> ConversationEngine {
-    ConversationEngine::new(Arc::new(mem.clone()), pool, PERSONA)
+    let operator = std::env::var("YM_OPERATOR").unwrap_or_default();
+    ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona(&operator))
 }
-
-pub const PERSONA: &str =
-    "You are JARVIS — Pranab's AI, his extension and friend. Terse, warm, honest. Ground every \
-     claim in the memory block; never invent facts. If a belief is uncertain, hedge (\"I think\"). \
-     If there's an open contradiction, ask to resolve it rather than picking a side.";
 
 #[cfg(test)]
 mod tests {

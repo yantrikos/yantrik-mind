@@ -17,9 +17,6 @@ use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery};
 use serde::Serialize;
 use yantrik_ml::LLMBackend;
 
-const EVAL_PERSONA: &str =
-    "You are JARVIS. Ground every claim in the memory block; never invent facts; hedge uncertain \
-     beliefs; ask to resolve contradictions instead of picking a side.";
 
 pub struct Seed {
     pub statement: String,
@@ -141,7 +138,7 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
 
     let scripted = Arc::new(ScriptedLLM::new("ack"));
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
-    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, EVAL_PERSONA);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona("the user"));
 
     let mut prompt = String::new();
     for turn in &s.turns {
@@ -326,6 +323,19 @@ pub fn standard_suite() -> Vec<Scenario> {
                 "what did I just tell you?".into(),
             ],
             checks: vec![Check::PromptContains("teal".into())],
+        },
+        // GROWTH (communication): the persona carries the communication spine, and a LEARNED
+        // style preference reaches the prompt so the mind adapts how it talks to Pranab.
+        Scenario {
+            name: "communication: persona spine + adapts to a learned style preference".into(),
+            seeds: vec![Seed::pos("Pranab prefers terse replies with no preamble")],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["give me the status".into()],
+            checks: vec![
+                Check::PromptContains("Lead with the answer".into()), // communication persona in play
+                Check::PromptContains("terse".into()),                // learned style pref surfaced
+            ],
         },
     ]
 }

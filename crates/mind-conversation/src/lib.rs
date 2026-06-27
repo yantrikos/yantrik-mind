@@ -31,7 +31,7 @@ impl ConversationEngine {
     fn render_grounding(ws: &WorkingSet) -> String {
         let mut s = String::new();
         if !ws.stable_facts.is_empty() {
-            s.push_str("What you know about Pranab (stable):\n");
+            s.push_str("What you know about the user (stable):\n");
             for f in &ws.stable_facts {
                 s.push_str(&format!("- {}\n", f.text));
             }

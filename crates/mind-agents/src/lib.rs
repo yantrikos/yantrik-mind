@@ -16,8 +16,32 @@ use std::sync::Arc;
 use futures::future::join_all;
 use mind_inference::InferencePool;
 use mind_recipes::RecipeHost;
+use mind_types::{
+    ActionDecision, ActionIntent, ActionRequest, ActionRuntime, Capability, Event, EventBody,
+    EventSource, RiskLevel, TurnContext,
+};
 use serde::Deserialize;
 use yantrik_ml::{ChatMessage, GenerationConfig};
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn dummy_ctx(req: &ActionRequest) -> TurnContext {
+    TurnContext::new(
+        Event {
+            id: req.id.clone(),
+            trace_id: req.id.clone(),
+            source: EventSource::SelfReflection,
+            body: EventBody::plain("sub-agent action"),
+            ts: req.created_ms,
+        },
+        req.created_ms,
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentResult {
@@ -26,6 +50,9 @@ pub struct AgentResult {
     pub steps: usize,
     /// A short trace of tool calls made (for transparency/audit).
     pub trace: Vec<String>,
+    /// Outward actions the agent PROPOSED that need the human's confirmation — it cannot self-approve
+    /// (the harm-gate's confirmation requirement is inviolable even for sub-agents).
+    pub pending_actions: Vec<ActionRequest>,
 }
 
 /// The LLM's decision each step.
@@ -45,9 +72,12 @@ pub struct SubAgent {
     inference: InferencePool,
     host: Arc<dyn RecipeHost>,
     persona: String,
-    /// Tools this sub-agent may call (read-only in v1).
+    /// Read tools this sub-agent may call.
     tools: Vec<String>,
     max_steps: usize,
+    /// Optional harm-gated runtime + the tool names that are OUTWARD actions (gated).
+    runtime: Option<Arc<dyn ActionRuntime>>,
+    act_tools: Vec<String>,
 }
 
 impl SubAgent {
@@ -58,19 +88,50 @@ impl SubAgent {
         tools: Vec<String>,
         max_steps: usize,
     ) -> Self {
-        Self { inference, host, persona: persona.into(), tools, max_steps: max_steps.max(1) }
+        Self {
+            inference,
+            host,
+            persona: persona.into(),
+            tools,
+            max_steps: max_steps.max(1),
+            runtime: None,
+            act_tools: Vec::new(),
+        }
+    }
+
+    /// Make the sub-agent act-capable: `act_tools` (e.g. ["send_email"]) route through the harm-gate.
+    /// The agent can PROPOSE these; it can never self-confirm an action that needs confirmation.
+    pub fn with_actions(mut self, runtime: Arc<dyn ActionRuntime>, act_tools: Vec<String>) -> Self {
+        self.runtime = Some(runtime);
+        for t in &act_tools {
+            if !self.tools.contains(t) {
+                self.tools.push(t.clone());
+            }
+        }
+        self.act_tools = act_tools;
+        self
     }
 
     /// Run the ReAct loop for one task.
     pub async fn run(&self, task: &str) -> AgentResult {
         let mut observations = String::new();
         let mut trace: Vec<String> = Vec::new();
+        let mut pending_actions: Vec<ActionRequest> = Vec::new();
         let tool_list = self.tools.join(", ");
+        let act_note = if self.act_tools.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Action tools (OUTWARD, need the user's confirmation — propose with args like \
+                 {{\"target\":\"...\",\"summary\":\"...\",\"payload\":\"...\"}}): [{}].",
+                self.act_tools.join(", ")
+            )
+        };
 
         for step in 0..self.max_steps {
             let prompt = format!(
                 "Task: {task}\n\
-                 Read-only tools you may call: [{tool_list}]\n\
+                 Tools you may call: [{tool_list}].{act_note}\n\
                  Observations so far:\n{obs}\n\n\
                  Decide the next action. Respond with STRICT JSON and nothing else:\n\
                  {{\"action\":\"call_tool\"|\"finish\",\"tool\":\"<name>\",\"args\":{{}},\"answer\":\"...\"}}\n\
@@ -80,22 +141,52 @@ impl SubAgent {
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are a focused research sub-agent. Output ONLY the decision JSON."),
+                ChatMessage::system("You are a focused sub-agent. Output ONLY the decision JSON."),
                 ChatMessage::user(&prompt),
             ];
             let text = match self.inference.chat(messages, GenerationConfig::default()).await {
                 Ok(r) => r.text,
-                Err(e) => return AgentResult { task: task.into(), answer: format!("(sub-agent inference error: {e})"), steps: step, trace },
+                Err(e) => return AgentResult { task: task.into(), answer: format!("(sub-agent inference error: {e})"), steps: step, trace, pending_actions },
             };
             let decision = parse_decision(&text);
 
             if decision.action == "finish" || (decision.action.is_empty() && !decision.answer.is_empty()) {
-                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace };
+                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions };
             }
             // call_tool
             let tool = decision.tool.trim().to_string();
             if tool.is_empty() {
-                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace };
+                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions };
+            }
+            // OUTWARD action tool → through the harm-gate. The agent can never self-confirm.
+            if self.act_tools.iter().any(|t| t == &tool) {
+                if let Some(rt) = &self.runtime {
+                    let intent = ActionIntent {
+                        kind: tool.clone(),
+                        target: decision.args.get("target").or_else(|| decision.args.get("to")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        summary: decision.args.get("summary").or_else(|| decision.args.get("subject")).and_then(|v| v.as_str()).unwrap_or("(sub-agent action)").to_string(),
+                        payload: Some(decision.args.get("payload").or_else(|| decision.args.get("body")).and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                        capabilities: vec![Capability::SendMessage],
+                        risk: RiskLevel::Medium,
+                        reversible: false,
+                    };
+                    let req = ActionRequest { id: format!("sa-{}", now_ms()), actor: "sub-agent".into(), intent, justification: format!("sub-agent task: {task}"), created_ms: now_ms() };
+                    let obs = match rt.decide(&req, &dummy_ctx(&req)).await {
+                        ActionDecision::Execute => match rt.execute(req).await {
+                            Ok(r) if r.ok => format!("done: {}", r.output),
+                            Ok(r) => format!("failed: {}", r.output),
+                            Err(e) => format!("failed: {e}"),
+                        },
+                        ActionDecision::RequireConfirmation { .. } => {
+                            pending_actions.push(req);
+                            "PROPOSED — needs the user's confirmation; NOT executed".to_string()
+                        }
+                        ActionDecision::Deny { reason } => format!("BLOCKED by harm-gate: {reason}"),
+                    };
+                    trace.push(format!("{tool}: {obs}"));
+                    observations.push_str(&format!("[{tool}] => {obs}\n"));
+                    continue;
+                }
             }
             if !self.tools.iter().any(|t| t == &tool) {
                 observations.push_str(&format!("[{tool}] REFUSED: not in the allowed tool set\n"));
@@ -125,7 +216,7 @@ impl SubAgent {
             .await
             .map(|r| r.text)
             .unwrap_or_else(|e| format!("(sub-agent synthesis error: {e})"));
-        AgentResult { task: task.into(), answer, steps: self.max_steps, trace }
+        AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions }
     }
 
     /// Run several tasks concurrently (parallelism via the InferencePool's blocking pool).
@@ -253,6 +344,37 @@ mod tests {
         let seq = vec![r#"{"action":"call_tool","tool":"recall","args":{}}"#; 50];
         let r = agent(seq, vec!["recall"], 3).run("loop forever?").await;
         assert_eq!(r.steps, 3, "must stop at the step budget");
+    }
+
+    struct ConfirmRuntime {
+        executed: Arc<Mutex<u32>>,
+    }
+    #[async_trait::async_trait]
+    impl ActionRuntime for ConfirmRuntime {
+        async fn decide(&self, _req: &ActionRequest, _ctx: &TurnContext) -> ActionDecision {
+            ActionDecision::RequireConfirmation { reason: "outward".into() }
+        }
+        async fn execute(&self, req: ActionRequest) -> mind_types::Result<mind_types::ActionReceipt> {
+            *self.executed.lock().unwrap() += 1;
+            Ok(mind_types::ActionReceipt { request_id: req.id, ok: true, output: "sent".into(), idempotency_key: "k".into() })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn act_capable_agent_proposes_but_never_self_confirms() {
+        let seq = vec![
+            r#"{"action":"call_tool","tool":"send_email","args":{"target":"a@b.com","summary":"hi","payload":"hello"}}"#,
+            r#"{"action":"finish","answer":"I drafted an email for your approval."}"#,
+        ];
+        let pool = InferencePool::new(Arc::new(SeqLLM::new(seq)) as Arc<dyn LLMBackend>, 1);
+        let executed = Arc::new(Mutex::new(0));
+        let rt: Arc<dyn ActionRuntime> = Arc::new(ConfirmRuntime { executed: executed.clone() });
+        let agent = SubAgent::new(pool, Arc::new(FakeHost), "JARVIS", vec![], 5)
+            .with_actions(rt, vec!["send_email".into()]);
+        let r = agent.run("email a@b.com that the deploy is live").await;
+        assert_eq!(r.pending_actions.len(), 1, "the action must be PROPOSED, not executed");
+        assert_eq!(r.pending_actions[0].intent.target, "a@b.com");
+        assert_eq!(*executed.lock().unwrap(), 0, "a sub-agent can NEVER self-confirm an outward action");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

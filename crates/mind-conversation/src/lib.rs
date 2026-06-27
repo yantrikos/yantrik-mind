@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
-use mind_recipes::{RecipeEngine, RecipeHost};
+use mind_recipes::{ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
 use mind_tools::{Fetcher, GithubClient, MailClient};
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
@@ -328,8 +328,9 @@ impl ConversationEngine {
     /// isn't a send request. Recipient missing is signalled with an empty `to`.
     fn parse_send_email(text: &str) -> Option<(String, String, String)> {
         let l = text.to_lowercase();
+        // "send ... saying <verbatim>" — the literal-body path. (Drafting is parse_draft_email.)
         let is_send = ["send an email", "send a email", "send email", "send the email",
-            "email to ", "draft an email", "write an email", "shoot an email", "send a mail"]
+            "email to ", "shoot an email", "send a mail"]
             .iter()
             .any(|p| l.contains(p));
         if !is_send {
@@ -389,6 +390,28 @@ impl ConversationEngine {
         Some((target, body))
     }
 
+    /// Parse a "draft/compose an email to X about Y" request → (to, gist). The body is LLM-DRAFTED
+    /// (vs parse_send_email's verbatim). Empty `to` signals a missing recipient.
+    fn parse_draft_email(text: &str) -> Option<(String, String)> {
+        let l = text.to_lowercase();
+        let is = ["draft an email", "draft a email", "draft email", "compose an email", "compose a email",
+            "write an email", "draft a reply", "compose a reply", "write a reply", "draft a message"]
+            .iter()
+            .any(|p| l.contains(p));
+        if !is {
+            return None;
+        }
+        let to = Self::first_email(text).unwrap_or_default();
+        let gist = ["about ", "saying ", "regarding ", "telling them ", "to say ", "that says ", ": "]
+            .iter()
+            .filter_map(|m| l.find(m).map(|i| (i, m.len())))
+            .min_by_key(|(i, _)| *i)
+            .map(|(i, len)| text[i + len..].trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        Some((to, gist))
+    }
+
     fn new_request(&self, intent: ActionIntent) -> ActionRequest {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -423,6 +446,53 @@ impl ConversationEngine {
                 return Some(format!("Cancelled — I won't {summary}.", summary = req.intent.summary));
             }
             // Anything else supersedes the pending action; fall through to re-parse this message.
+        }
+
+        // 2a. Draft-and-send recipe: LLM drafts the body (a recipe Think step), then the Act step
+        // proposes the gated send. Composes the recipe engine + Act + the confirm flow.
+        if let Some(re) = &self.recipes {
+            if let Some((to, gist)) = Self::parse_draft_email(user_text) {
+                if to.is_empty() {
+                    return Some("Who should I send it to? Give me an email address.".into());
+                }
+                if gist.is_empty() {
+                    return Some(format!("What should the email to {to} be about?"));
+                }
+                let subject: String = gist.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
+                let recipe = Recipe {
+                    id: "draft_send_email".into(),
+                    name: "Draft & send email".into(),
+                    steps: vec![
+                        RecipeStep::Think {
+                            prompt: format!(
+                                "Write a brief, warm, professional email BODY to {to} that conveys: {gist}. \
+                                 Output ONLY the body text — no 'Subject:' line, no bracketed placeholders, \
+                                 no signature block."
+                            ),
+                            store_as: "draft".into(),
+                            on_error: ErrorAction::Fail,
+                        },
+                        RecipeStep::Act {
+                            kind: "send_email".into(),
+                            target: to.clone(),
+                            summary: subject.clone(),
+                            payload: "{{draft}}".into(),
+                        },
+                    ],
+                };
+                let out = re.run(&recipe).await;
+                if let Some(req) = out.pending_action {
+                    let body = req.intent.payload.clone().unwrap_or_default();
+                    *self.pending.lock().unwrap() = Some(req);
+                    return Some(format!(
+                        "Drafted this email — reply \"yes\" to send:\n\nTo: {to}\nSubject: {subject}\n\n{body}"
+                    ));
+                }
+                if let Some(e) = out.error {
+                    return Some(format!("I couldn't draft that: {e}"));
+                }
+                return Some("Drafted, but there's nothing to confirm.".into());
+            }
         }
 
         // 2. Propose a new outward action (only email send in v1).
@@ -953,6 +1023,46 @@ mod tests {
         assert_eq!(ConversationEngine::parse_relative_ms("remind me to ping in 2 minutes"), Some(120_000));
         assert_eq!(ConversationEngine::parse_relative_ms("in 3 hours do x"), Some(3 * 3_600_000));
         assert_eq!(ConversationEngine::parse_relative_ms("no relative here"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn draft_email_recipe_drafts_then_confirms_then_sends() {
+        use mind_recipes::RecipeEngine;
+        use mind_tools::{ScriptedMailSender, ToolActionExecutor};
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        // LLM "drafts" this body for the Think step.
+        let scripted = Arc::new(ScriptedLLM::new("Hi — the deployment is live and stable. Best, J"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let sender = Arc::new(ScriptedMailSender::new());
+        let rt: Arc<dyn ActionRuntime> = gated_runtime(sender.clone());
+        // The recipe engine needs the runtime for the Act step.
+        struct NoHost;
+        #[async_trait::async_trait]
+        impl RecipeHost for NoHost {
+            async fn call_tool(&self, _t: &str, _a: &serde_json::Value) -> anyhow::Result<String> {
+                anyhow::bail!("no tools")
+            }
+        }
+        let engine = Arc::new(
+            RecipeEngine::new(pool.clone(), Arc::new(NoHost), "JARVIS").with_runtime(rt.clone()),
+        );
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_runtime(rt)
+            .with_recipes(engine);
+
+        // Turn 1: draft → must propose (not send yet).
+        let r1 = conv.handle_turn("draft an email to boss@acme.com about the deploy going live").await.unwrap();
+        assert!(r1.to_lowercase().contains("yes") && r1.contains("boss@acme.com"), "should propose draft: {r1}");
+        assert!(r1.contains("deployment is live"), "drafted body should be shown: {r1}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 0, "must not send before confirm");
+
+        // Turn 2: confirm → sends the drafted body.
+        let r2 = conv.handle_turn("yes").await.unwrap();
+        assert!(r2.to_lowercase().contains("done") || r2.to_lowercase().contains("sent"), "{r2}");
+        let sent = sender.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "boss@acme.com");
+        assert!(sent[0].2.contains("deployment is live"), "the drafted body is what gets sent");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

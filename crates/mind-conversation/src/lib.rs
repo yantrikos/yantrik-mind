@@ -948,6 +948,39 @@ impl ConversationEngine {
         log
     }
 
+    /// PROACTIVE DIGEST (tension economy, Stage 2) — arbitration + conserved speech. Reads the open
+    /// urges the drives accrued while idle and, ONLY if one clears the pressure bar, composes a short
+    /// digest of the top few and DISCHARGES them (so they never repeat). Returns None to STAY SILENT —
+    /// the default and the common case (null-discipline). This is the one path that messages the user
+    /// unprompted; restraint is the whole design — a HIGH bar, ≤3 items, and the caller additionally
+    /// gates on idle + quiet-hours + a once-per-period cap. Deterministic phrasing (no extra LLM call):
+    /// the urges already carry human-readable `about` text from when the drive formed them.
+    pub async fn proactive_digest(&self) -> Option<String> {
+        let min_pressure: f64 = std::env::var("YM_PROACTIVE_MIN_PRESSURE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.7);
+        let open = self.memory.open_tensions(12).await.unwrap_or_default();
+        let mut winners: Vec<_> = open.into_iter().filter(|t| t.pressure >= min_pressure).collect();
+        if winners.is_empty() {
+            return None; // nothing clears the bar → stay silent (the default)
+        }
+        winners.sort_by(|a, b| b.pressure.partial_cmp(&a.pressure).unwrap_or(std::cmp::Ordering::Equal));
+        winners.truncate(3);
+        let mut s = String::from("A few things surfaced while you were away:");
+        for t in &winners {
+            let tag = match t.kind {
+                mind_types::TensionKind::Contradiction => "possible contradiction",
+                mind_types::TensionKind::Staleness => "may be going stale",
+                mind_types::TensionKind::Curiosity => "a thread worth pulling",
+                mind_types::TensionKind::VerificationDebt => "worth verifying",
+            };
+            s.push_str(&format!("\n• ({tag}) {}", t.about));
+            let _ = self.memory.discharge_tension(&t.id).await; // surfaced once; don't repeat
+        }
+        Some(s)
+    }
+
     /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
     /// they surfaced (the caller delivers these to the home channel). Called on the heartbeat.
     pub async fn tick_delegations(&self) -> Vec<String> {
@@ -2311,6 +2344,23 @@ mod tests {
         assert!((open[0].pressure - 0.9).abs() < 1e-9, "keeps the max pressure, got {}", open[0].pressure);
         assert!(memarc.discharge_tension(&open[0].id).await.unwrap(), "discharge should report it changed");
         assert!(memarc.open_tensions(10).await.unwrap().is_empty(), "discharged tension is no longer open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn proactive_digest_surfaces_only_above_the_bar() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        // a faint urge (below the default 0.7 bar) → stays silent (restraint default)
+        memarc.record_tension(mind_types::TensionKind::Curiosity, 0.4, "a faint hunch").await.unwrap();
+        assert!(conv.proactive_digest().await.is_none(), "below-bar urge must NOT surface");
+        // a strong urge → surfaces, names it, and discharges it
+        memarc.record_tension(mind_types::TensionKind::Contradiction, 0.9, "\"X is true\" vs \"X is false\"").await.unwrap();
+        let digest = conv.proactive_digest().await.expect("above-bar urge should surface");
+        assert!(digest.contains("X is true"), "digest must name the urge: {digest}");
+        // already surfaced → a second call stays silent (no repeats)
+        assert!(conv.proactive_digest().await.is_none(), "a surfaced urge must not repeat");
     }
 
     #[test]

@@ -160,6 +160,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // live turn and needs no extra task. Disabled with YM_DMN=off.
     let mut last_activity = now_ms();
     let mut last_dmn = 0u64;
+    let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -234,6 +235,30 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     eprintln!("{line}");
                 }
                 last_dmn = now;
+            }
+        }
+
+        // Proactive digest: the ONE path that messages you unprompted. Heavily gated — only when you've
+        // been idle, outside quiet hours, at most once per YM_PROACTIVE_SECS (default daily), and only
+        // if an urge clears the pressure bar (else proactive_digest returns None and we stay silent).
+        if std::env::var("YM_PROACTIVE").map(|v| v != "off").unwrap_or(true) {
+            let idle_secs: u64 =
+                std::env::var("YM_DMN_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+            let pd_secs: u64 =
+                std::env::var("YM_PROACTIVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400);
+            let now = now_ms();
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && now.saturating_sub(last_activity) >= idle_secs * 1000
+                && now.saturating_sub(last_digest) >= pd_secs * 1000
+            {
+                if let Some(msg) = conv.proactive_digest().await {
+                    if tg_send(&api, chat, &msg).await.is_ok() {
+                        eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());
+                    }
+                }
+                last_digest = now; // reset the cadence whether or not we spoke (never hammer)
             }
         }
     }

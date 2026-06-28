@@ -13,6 +13,10 @@ set -euo pipefail
 KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
 [ -f "$KILL" ] && { echo "$(date -u +%FT%TZ) kill-switch present — tick skipped"; exit 0; }
 
+# Single-flight: never let a new tick stack on top of a still-running one.
+exec 9>/var/lib/yantrik-mind/.selfbuild.lock
+flock -n 9 || { echo "$(date -u +%FT%TZ) another tick is still running — skip"; exit 0; }
+
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"

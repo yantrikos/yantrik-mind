@@ -66,6 +66,12 @@ fn parse_due(s: &str) -> Option<u64> {
     None
 }
 
+/// Current date/time, human-readable — injected into the agent prompt every turn so it never guesses
+/// "now" (it was hallucinating things like "5 days away"). UTC + weekday; unambiguous for date math.
+fn now_str() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M UTC (%A)").to_string()
+}
+
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
@@ -2011,6 +2017,7 @@ impl ConversationEngine {
     async fn run_agent_tool(&self, tool: &str, args: &serde_json::Value) -> String {
         let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         match tool {
+            "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
             "recall" => match self
                 .memory
                 .recall_typed(mind_types::RecallQuery { text: s("query"), top_k: 6, kind: None })
@@ -2207,11 +2214,13 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
 - run_skill {name, target, url?}: run a skill you found via discover_tools\n\
 - build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
+- now {}: the current date and time\n\
 - answer {text}: give the user your final reply";
+        let now = now_str();
         let mut scratch = String::new();
         for step in 0..MAX_STEPS {
             let prompt = format!(
-                "{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
+                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let messages = vec![

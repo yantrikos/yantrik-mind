@@ -192,6 +192,12 @@ pub trait MemoryFacade: Send + Sync {
     /// Currently-open contradictions across stored beliefs.
     async fn conflicts(&self) -> Result<Vec<Contradiction>>;
 
+    // ── tiny profile KV (name/purpose/onboarding) — durable, isolated from the cognitive graph ──
+    /// Set a profile value (latest write wins on read).
+    async fn profile_set(&self, key: &str, value: &str) -> Result<()>;
+    /// Read the latest profile value for a key, or None.
+    async fn profile_get(&self, key: &str) -> Result<Option<String>>;
+
     // ── tension economy (the "urges": drives emit substrate-grounded pressures; proactive arbitrates) ──
     /// Record a typed urge emitted by a drive (deduped on (kind, about) so it accrues, not floods).
     async fn record_tension(&self, kind: TensionKind, pressure: f64, about: &str) -> Result<()>;

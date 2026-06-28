@@ -104,8 +104,9 @@ pub struct ConversationEngine {
     last_consolidated: Mutex<i64>,
     /// Default-mode ("sleep") phase rotor: rehearse → reconcile → associate, one bounded op per idle tick.
     dmn_phase: Mutex<u64>,
-    /// Ask-drive cursor: which seed get-to-know-you question to ask next (cycles; gated to ≤1/period).
-    ask_cursor: Mutex<usize>,
+    /// Onboarding interview: when set, the mind is awaiting the user's answer to a "name"/"purpose"
+    /// question — the next user turn is captured as that slot's value (then the interview advances).
+    pending_onboard: Mutex<Option<String>>,
 }
 
 impl ConversationEngine {
@@ -130,7 +131,7 @@ impl ConversationEngine {
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
             dmn_phase: Mutex::new(0),
-            ask_cursor: Mutex::new(0),
+            pending_onboard: Mutex::new(None),
         }
     }
 
@@ -1037,22 +1038,32 @@ impl ConversationEngine {
         Some(s)
     }
 
-    /// ASK DRIVE — curiosity turned OUTWARD. A companion shouldn't wait to be fed: when it knows little
-    /// about you, it should ASK. Returns ONE get-to-know-you question while the brain is sparse, then
-    /// goes quiet once it knows enough (so it never pesters). The caller gates it to ≤1 per period +
-    /// idle + quiet-hours. Answers flow back as ordinary chat → consolidation → typed beliefs → the gap
-    /// closes. Reversible + low-cost (a question), per the locked OperatorAsk restraint invariant.
+    /// ASK DRIVE — curiosity turned OUTWARD, as a progressive interview rather than a fixed list. A
+    /// companion shouldn't wait to be fed; when it doesn't know you it ASKS, in order: first your NAME,
+    /// then your PURPOSE (what you want from it), then purpose-grounded follow-ups one at a time — and
+    /// it goes quiet once it knows enough (never pesters). The caller gates it to ≤1/period + idle +
+    /// quiet-hours. Name/purpose answers are captured directly (`handle_turn` → `capture_onboard`);
+    /// later answers flow back as ordinary chat → consolidation → typed beliefs.
     pub async fn proactive_ask(&self) -> Option<String> {
-        const SEEDS: &[&str] = &[
-            "What are you working on right now that I should understand?",
-            "Who are the people that matter most in your world — so I know who you mean?",
-            "Is there anything you'd like me to keep an eye on for you (a repo, an inbox, a topic)?",
-            "How do you prefer I talk to you — terse and to the point, or more detail?",
-            "What would make this a good week for you?",
-            "What's a recurring annoyance I could quietly help with?",
-        ];
+        // Don't stack a new question while we're still awaiting an answer to the last one.
+        if self.pending_onboard.lock().unwrap().is_some() {
+            return None;
+        }
+        let name = self.memory.profile_get("name").await.ok().flatten();
+        if name.is_none() {
+            *self.pending_onboard.lock().unwrap() = Some("name".to_string());
+            return Some("Before we really get going — what should I call you?".to_string());
+        }
+        let purpose = self.memory.profile_get("purpose").await.ok().flatten();
+        if purpose.is_none() {
+            *self.pending_onboard.lock().unwrap() = Some("purpose".to_string());
+            return Some(format!(
+                "What would you most like me to help you with, {}? Knowing your main goal lets me be genuinely useful instead of generic.",
+                name.unwrap_or_default()
+            ));
+        }
+        // OPEN stage — purpose-grounded follow-ups, but taper once the brain knows enough about you.
         let enough: usize = std::env::var("YM_ASK_ENOUGH").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
-        // Stop asking once the brain knows enough about you — the ask-drive exists to cure cold-start.
         let known = self
             .memory
             .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None })
@@ -1062,13 +1073,67 @@ impl ConversationEngine {
         if known >= enough {
             return None;
         }
-        let i = {
-            let mut c = self.ask_cursor.lock().unwrap();
-            let i = *c % SEEDS.len();
-            *c = c.wrapping_add(1);
-            i
-        };
-        Some(SEEDS[i].to_string())
+        self.purpose_followup(&purpose.unwrap_or_default()).await
+    }
+
+    /// Capture the user's answer to the current onboarding question into its slot, then ADVANCE the
+    /// interview in the same breath (name → purpose → first grounded follow-up) so it flows as a real
+    /// conversation rather than one question a day. Stores both a durable belief and the profile KV.
+    async fn capture_onboard(&self, slot: &str, text: &str) -> String {
+        match slot {
+            "name" => {
+                let name = Self::clean_name(text);
+                let _ = self.memory.profile_set("name", &name).await;
+                let _ = self.memory.remember_as_belief(BeliefAssertion {
+                    statement: format!("The user's name is {name}"),
+                    polarity: 1.0, weight: 1.0, source_event: Some("onboard".into()), provenance: "told".into(),
+                }).await;
+                *self.pending_onboard.lock().unwrap() = Some("purpose".to_string());
+                format!("Good to meet you, {name}. What would you most like me to help you with — the main thing you'd want from me? Knowing that lets me actually be useful rather than generic.")
+            }
+            "purpose" => {
+                let purpose: String = text.trim().chars().take(240).collect();
+                let _ = self.memory.profile_set("purpose", &purpose).await;
+                let _ = self.memory.remember_as_belief(BeliefAssertion {
+                    statement: format!("The user wants me to help with: {purpose}"),
+                    polarity: 1.0, weight: 1.0, source_event: Some("onboard".into()), provenance: "told".into(),
+                }).await;
+                match self.purpose_followup(&purpose).await {
+                    Some(q) => format!("Got it — I'll keep that as my north star. {q}"),
+                    None => "Got it — I'll keep that as my north star. Tell me more whenever you like.".to_string(),
+                }
+            }
+            _ => "Thanks.".to_string(),
+        }
+    }
+
+    /// Ask ONE specific, useful follow-up grounded in the user's stated purpose (the adaptive part of
+    /// the interview). None if the LLM doesn't produce a clean question.
+    async fn purpose_followup(&self, purpose: &str) -> Option<String> {
+        let prompt = format!(
+            "The user's main goal for me is: \"{purpose}\". Ask ONE specific, concretely useful follow-up question that would help me help them with that. Reply with ONLY the question."
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("Ask exactly one concise, specific question. No preamble, no markdown."),
+            ChatMessage::user(&prompt),
+        ];
+        let r = self.inference.chat(messages, GenerationConfig::default()).await.ok()?;
+        let q = r.text.trim().lines().last().unwrap_or("").trim().to_string();
+        if q.ends_with('?') && q.len() > 8 { Some(q) } else { None }
+    }
+
+    /// Strip a few common lead-ins ("my name is", "i'm", "call me") so we store the bare name.
+    fn clean_name(s: &str) -> String {
+        let t = s.trim();
+        let low = t.to_lowercase();
+        for p in ["my name is ", "i am ", "i'm ", "call me ", "it's ", "this is ", "name's "] {
+            if let Some(rest) = low.strip_prefix(p) {
+                let start = t.len() - rest.len();
+                return t[start..].trim().trim_end_matches(['.', '!', ',']).chars().take(40).collect();
+            }
+        }
+        t.trim_end_matches(['.', '!', ',']).chars().take(40).collect()
     }
 
     /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
@@ -1789,6 +1854,15 @@ impl ConversationEngine {
     /// Handle one conversational turn: learn what's taught + capture commitments → ground in
     /// typed memory → reply.
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
+        // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
+        // (Take the slot first so the lock is released before the await in capture_onboard.)
+        let onboard = self.pending_onboard.lock().unwrap().take();
+        if let Some(slot) = onboard {
+            let reply = self.capture_onboard(&slot, user_text).await;
+            let _ = self.memory.append_message("user", user_text).await;
+            let _ = self.memory.append_message("assistant", &reply).await;
+            return Ok(reply);
+        }
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.
         if let Some(reply) = self.handle_action(user_text).await {
@@ -2464,30 +2538,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn ask_drive_asks_while_sparse_then_quiets() {
+    async fn onboarding_interview_asks_name_then_purpose() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
-        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
         let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
-        // sparse brain → it ASKS, and cycles seeds rather than repeating
-        let q1 = conv.proactive_ask().await.expect("should ask while sparse");
-        assert!(q1.ends_with('?'), "an ask is a question: {q1}");
-        let q2 = conv.proactive_ask().await.expect("still sparse");
-        assert_ne!(q1, q2, "should cycle through seed questions");
-        // once it knows enough about you, it goes quiet (never pesters)
-        for i in 0..8 {
-            memarc
-                .remember_as_belief(BeliefAssertion {
-                    statement: format!("fact {i} about Pranab's world"),
-                    polarity: 1.0,
-                    weight: 1.0,
-                    source_event: None,
-                    provenance: "test".into(),
-                })
-                .await
-                .unwrap();
-        }
-        assert!(conv.proactive_ask().await.is_none(), "stops asking once it knows enough");
+        // first question is the NAME
+        let q1 = conv.proactive_ask().await.expect("asks while it doesn't know you");
+        assert!(q1.to_lowercase().contains("call you"), "first asks the name: {q1}");
+        // it must NOT stack a second question while awaiting the answer
+        assert!(conv.proactive_ask().await.is_none(), "doesn't stack questions while awaiting an answer");
+        // answering captures the name (lead-in stripped) and chains straight to the PURPOSE question
+        let ack = conv.handle_turn("my name is Pranab").await.unwrap();
+        assert!(ack.contains("Pranab"), "acks + uses the name: {ack}");
+        assert_eq!(memarc.profile_get("name").await.unwrap().as_deref(), Some("Pranab"), "name captured");
+        // that reply also posed the purpose question → answering it captures the purpose
+        let _ack2 = conv.handle_turn("help me ship yantrik-mind").await.unwrap();
+        assert_eq!(
+            memarc.profile_get("purpose").await.unwrap().as_deref(),
+            Some("help me ship yantrik-mind"),
+            "purpose captured"
+        );
+        // with name + purpose known and the brain otherwise empty, the open stage may ask grounded
+        // follow-ups (here the scripted LLM returns no clean question → None), and never re-asks name.
+        let q3 = conv.proactive_ask().await;
+        assert!(q3.as_deref().map(|q| !q.to_lowercase().contains("call you")).unwrap_or(true), "never re-asks name once known");
     }
 
     #[test]

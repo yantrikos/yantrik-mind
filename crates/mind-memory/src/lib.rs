@@ -919,6 +919,16 @@ impl MemoryFacade for MemoryHandle {
         self.call(|reply| Cmd::Conflicts { reply }).await
     }
 
+    async fn profile_set(&self, key: &str, value: &str) -> Result<()> {
+        let (kind, text) = (key.to_string(), value.to_string());
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+    }
+    async fn profile_get(&self, key: &str) -> Result<Option<String>> {
+        let kind = key.to_string();
+        let items = self.call(|reply| Cmd::ListGoalPrefs { kind, reply }).await?;
+        Ok(items.last().map(|i| i.text.clone()))
+    }
+
     async fn record_tension(&self, kind: mind_types::TensionKind, pressure: f64, about: &str) -> Result<()> {
         let (kind, about) = (kind.as_str().to_string(), about.to_string());
         self.call(|reply| Cmd::RecordTension { kind, pressure: pressure.clamp(0.0, 1.0), about, reply }).await

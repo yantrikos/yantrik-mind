@@ -42,10 +42,12 @@ fi
 
 # 2) self-review: Claude proposes ONE new goal by reading the code (read-only), avoiding recent work
 if [ -z "$GOAL" ]; then
+  echo "goal source: self-review (deriving a goal via claude)"
   W="$(mktemp -d /root/codes/ymreview.XXXXXX)"; CH="$(mktemp -d /opt/yantrik-mind/ymrh.XXXXXX)"
   trap 'rm -rf "$W" "$CH"' EXIT
   export HOME="$CH"
-  git clone -q https://github.com/yantrikos/yantrik-mind.git "$W"; cd "$W"
+  git clone -q https://github.com/yantrikos/yantrik-mind.git "$W" 2>/dev/null || { echo "self-review: clone failed — skip tick"; rm -rf "$W" "$CH"; exit 0; }
+  cd "$W"
   RECENT="$(git log --oneline -20 --pretty='- %s' 2>/dev/null || true)"
   GOAL="$(timeout 300 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
@@ -55,9 +57,9 @@ Recently done (do NOT repeat or trivially restate these):
 $RECENT
 
 Read crates/mind-* and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It MUST be self-contained, keep the build green WITH a test, be reversible, and MUST NOT touch crates/mind-governance. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes." \
-    --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r')"
+    --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r' || true)"
   cd /; rm -rf "$W" "$CH"; trap - EXIT
-  echo "goal source: self-review"
+  [ -n "$GOAL" ] && echo "self-review proposed a goal" || echo "self-review produced no goal"
 fi
 
 if [ -z "$GOAL" ]; then echo "no goal derived — skip"; exit 0; fi

@@ -986,6 +986,15 @@ impl MemoryFacade for MemoryHandle {
         self.call(|reply| Cmd::Export { reply }).await
     }
 
+    async fn store_goal(&self, text: &str) -> Result<()> {
+        let (kind, text) = ("goal".to_string(), text.to_string());
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+    }
+    async fn store_preference(&self, text: &str) -> Result<()> {
+        let (kind, text) = ("preference".to_string(), text.to_string());
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+    }
+
     async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task> {
         let (description, priority) = (description.to_string(), priority.to_string());
         self.call(|reply| Cmd::AddTask { description, priority, due_ms, reply }).await

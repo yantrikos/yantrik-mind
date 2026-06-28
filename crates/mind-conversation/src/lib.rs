@@ -754,16 +754,21 @@ impl ConversationEngine {
         let max_id = msgs.iter().map(|(id, _, _)| *id).max().unwrap_or(after);
         let transcript: String = msgs.iter().map(|(_, r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
 
-        // ONE pass extracts both halves of typed memory: durable FACTS (-> beliefs) and the user's
-        // future COMMITMENTS (-> tasks with a due date, which the reminder loop delivers).
+        // ONE pass extracts four typed slices: durable FACTS (-> beliefs), explicit GOALS and
+        // PREFERENCES (-> named capture surfaced by :reflect), and future COMMITMENTS (-> tasks).
         let prompt = format!(
-            "From this conversation excerpt, extract two things:\n\
-             1. DURABLE facts/preferences about the user and their world (long-term, reusable).\n\
-             2. The user's future COMMITMENTS or intentions, with any deadline mentioned.\n\
+            "From this conversation excerpt, extract four things:\n\
+             1. DURABLE facts about the user and their world (long-term, third-person).\n\
+             2. Explicit GOALS the user has stated (aspirations, intentions: \"I want to...\").\n\
+             3. Explicit PREFERENCES the user has stated (style, likes/dislikes: \"I prefer...\").\n\
+             4. The user's future COMMITMENTS or intentions, with any deadline mentioned.\n\
              Skip greetings, ephemera, and transient chatter. Output ONLY JSON:\n\
              {{\"beliefs\":[{{\"statement\":\"...\",\"certainty\":0.0-1.0}}], \
+             \"goals\":[{{\"goal\":\"...\"}}], \
+             \"preferences\":[{{\"preference\":\"...\"}}], \
              \"commitments\":[{{\"task\":\"...\",\"due\":\"tomorrow|tonight|next week|in 3 days|in 2 hours|null\"}}]}}\n\
-             Statements are standalone + third-person (e.g. \"Pranab prefers terse replies\"). Tasks are \
+             Beliefs are standalone + third-person (e.g. \"Pranab uses async Rust\"). Goals and \
+             preferences are plain text (e.g. \"learn Rust\", \"terse replies\"). Tasks are \
              imperative (e.g. \"send Pranab the Q3 report\"). Use empty arrays if none.\n\nCONVERSATION:\n{transcript}"
         );
         let messages = vec![
@@ -807,7 +812,20 @@ impl ConversationEngine {
                 count += 1;
             }
         }
-        // (2) commitments -> tasks with a resolve-by; the reminder loop pings them when due. They also
+        // (2) user-stated goals and preferences — cheap named capture, not Bayesian; surfaced by :reflect.
+        for item in v.get("goals").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let text = item.get("goal").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if text.len() >= 4 && self.memory.store_goal(&text).await.is_ok() {
+                count += 1;
+            }
+        }
+        for item in v.get("preferences").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let text = item.get("preference").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if text.len() >= 4 && self.memory.store_preference(&text).await.is_ok() {
+                count += 1;
+            }
+        }
+        // (3) commitments -> tasks with a resolve-by; the reminder loop pings them when due. They also
         // ride into the working-set as commitments (grounding). Open-ended ones still become tasks.
         for item in v.get("commitments").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
             let task = item.get("task").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -2281,6 +2299,33 @@ mod tests {
             belief.item.confidence <= 0.75,
             "machine-consolidated belief confidence must be ≤ 0.75 (sigmoid(1.0)≈0.731), got {}",
             belief.item.confidence
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn consolidation_extracts_goals_and_preferences_visible_in_reflect() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        // LLM returns JSON containing one goal and one preference (plus empty other arrays).
+        let extracted = r#"{"beliefs":[],"goals":[{"goal":"learn async Rust"}],"preferences":[{"preference":"terse replies"}],"commitments":[]}"#;
+        let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new(extracted)) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            memarc.append_message(role, &format!("message {i} about goals and preferences")).await.unwrap();
+        }
+        let n = conv.consolidate().await;
+        assert_eq!(n, 2, "1 goal + 1 preference");
+        let reflection = memarc.reflect("goals and preferences").await.unwrap();
+        assert!(
+            reflection.goals.iter().any(|g| g.text.contains("async Rust")),
+            "goal must appear in reflect: {:?}",
+            reflection.goals.iter().map(|g| &g.text).collect::<Vec<_>>()
+        );
+        assert!(
+            reflection.preferences.iter().any(|p| p.text.contains("terse")),
+            "preference must appear in reflect: {:?}",
+            reflection.preferences.iter().map(|p| &p.text).collect::<Vec<_>>()
         );
     }
 

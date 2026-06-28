@@ -207,6 +207,10 @@ pub trait MemoryFacade: Send + Sync {
     /// Privacy: export everything (JSON).
     async fn export(&self) -> Result<String>;
 
+    // ── goals + preferences (named capture; surfaced by reflect) ──
+    async fn store_goal(&self, text: &str) -> Result<()>;
+    async fn store_preference(&self, text: &str) -> Result<()>;
+
     // ── cheap task tier (plain CRUD, no cognitive cost) ──
     async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task>;
     async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>>;

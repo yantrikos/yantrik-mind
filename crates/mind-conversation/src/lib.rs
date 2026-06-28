@@ -91,6 +91,83 @@ fn looks_like_html(s: &str) -> bool {
     l.contains("<!doctype") || l.contains("<html") || l.contains("<table") || (l.contains("<div") && l.contains("</div>")) || (l.contains("<body") && l.contains("</body>"))
 }
 
+/// Is this string itself a (possibly broken/truncated) agent tool-call JSON wrapper — NOT a real
+/// answer? A truncated `publish_page` call contains `<!doctype` inside its `html` arg, so it would
+/// fool `looks_like_html`; we must never host the JSON wrapper as a "page". Guards that path.
+fn is_tool_call_blob(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with('{') && (t.contains("\"thought\"") || (t.contains("\"tool\"") && t.contains("\"args\"")))
+}
+
+/// A meaningful page slug source: the HTML's `<title>` (else first `<h1>`). Beats naming a page after
+/// the user's raw request text ("can-you-please-try-again..."). Returns the inner text, tags stripped.
+fn title_from_html(html: &str) -> Option<String> {
+    let low = html.to_lowercase();
+    let pick = |open: &str, close: &str| -> Option<String> {
+        let i = low.find(open)? + open.len();
+        let j = low[i..].find(close)? + i;
+        let t: String = html[i..j].chars().filter(|c| !c.is_control()).collect();
+        let t = t.trim();
+        if t.is_empty() { None } else { Some(t.chars().take(60).collect()) }
+    };
+    pick("<title>", "</title>").or_else(|| pick("<h1>", "</h1>"))
+}
+
+/// Extract the value of a JSON string field `"html":"…"` even from a TRUNCATED/broken object — reads
+/// from the opening quote to the closing UNESCAPED quote (or end of input), then unescapes. Lets a
+/// `publish_page` call that overflowed the token budget still yield a usable page instead of garbage.
+fn extract_html_arg(s: &str) -> Option<String> {
+    let ki = s.find("\"html\"")?;
+    let after = &s[ki + 6..];
+    let colon = after.find(':')?;
+    let after = &after[colon + 1..];
+    let q = after.find('"')?;
+    let val = &after[q + 1..];
+    let bytes = val.as_bytes();
+    let mut end = bytes.len();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => {
+                end = i;
+                break;
+            }
+            _ => i += 1,
+        }
+    }
+    let raw = &val[..end.min(val.len())];
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                }
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
@@ -132,6 +209,9 @@ pub struct ConversationEngine {
     /// Onboarding interview: when set, the mind is awaiting the user's answer to a "name"/"purpose"
     /// question — the next user turn is captured as that slot's value (then the interview advances).
     pending_onboard: Mutex<Option<String>>,
+    /// Is the agentic loop the primary turn handler? Default true (overridable by `YM_AGENT=off`);
+    /// `with_agent_primary(false)` exercises the legacy deterministic dispatch chain (used by tests).
+    agent_primary: bool,
 }
 
 impl ConversationEngine {
@@ -157,7 +237,15 @@ impl ConversationEngine {
             last_consolidated: Mutex::new(0),
             dmn_phase: Mutex::new(0),
             pending_onboard: Mutex::new(None),
+            agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
         }
+    }
+
+    /// Force the agentic loop on/off for this instance (tests use `false` to drive the legacy
+    /// deterministic grounding chain without touching the process-global `YM_AGENT` env).
+    pub fn with_agent_primary(mut self, on: bool) -> Self {
+        self.agent_primary = on;
+        self
     }
 
     fn lang_str(l: CodeLang) -> &'static str {
@@ -2247,6 +2335,9 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
 - answer {text}: give the user your final reply";
         let now = now_str();
+        // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
+        // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
+        let cfg = GenerationConfig { max_tokens: 8000, ..GenerationConfig::default() };
         let mut scratch = String::new();
         for step in 0..MAX_STEPS {
             let prompt = format!(
@@ -2258,7 +2349,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
                 ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
-            let text = match self.inference.chat(messages, GenerationConfig::default()).await {
+            let text = match self.inference.chat(messages, cfg.clone()).await {
                 Ok(r) => r.text,
                 Err(e) => return Ok(format!("(couldn't think just now: {e})")),
             };
@@ -2269,13 +2360,30 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
                 _ => "",
             };
             let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+            // Recover a broken/truncated publish_page call: pull the html out of the (unparseable) blob
+            // and HOST it — never let the raw JSON wrapper fall through and get published as a "page".
+            let parsed = v.get("answer").is_some() || v.get("tool").is_some();
+            if !parsed && (body.contains("publish_page") || body.contains("\"html\"")) {
+                if let Some(html) = extract_html_arg(body) {
+                    if looks_like_html(&html) {
+                        let name = title_from_html(&html).unwrap_or_else(|| "page".to_string());
+                        if let Some(url) = publish_html(&name, &html) {
+                            let a = format!("Done — I published it as a page: {url}");
+                            let _ = self.memory.append_message("user", user_text).await;
+                            let _ = self.memory.append_message("assistant", &a).await;
+                            return Ok(a);
+                        }
+                    }
+                }
+            }
             if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
                 let mut a = ans.trim().to_string();
                 if !a.is_empty() {
                     if looks_like_html(&a) {
                         // The model dumped a raw HTML page instead of using publish_page — HOST it and
                         // send the link, never a wall of HTML in the chat.
-                        if let Some(url) = publish_html(user_text, &a) {
+                        let name = title_from_html(&a).unwrap_or_else(|| "page".to_string());
+                        if let Some(url) = publish_html(&name, &a) {
                             a = format!("Done — I published it as a page: {url}");
                         }
                     } else if !scratch.is_empty() {
@@ -2294,9 +2402,19 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             }
             let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
             if tool.is_empty() {
-                let mut a = if text.trim().is_empty() { "Sorry — could you rephrase that?".to_string() } else { text.trim().to_string() };
-                if looks_like_html(&a) {
-                    if let Some(url) = publish_html(user_text, &a) {
+                let raw = text.trim();
+                // A broken tool-call blob is NOT a real answer — never echo it or publish it as a page
+                // (recovery above already handled a salvageable publish_page). Ask for a retry instead.
+                let mut a = if raw.is_empty() {
+                    "Sorry — could you rephrase that?".to_string()
+                } else if is_tool_call_blob(raw) {
+                    "Sorry — I had trouble putting that together. Mind asking once more?".to_string()
+                } else {
+                    raw.to_string()
+                };
+                if !is_tool_call_blob(&a) && looks_like_html(&a) {
+                    let name = title_from_html(&a).unwrap_or_else(|| "page".to_string());
+                    if let Some(url) = publish_html(&name, &a) {
                         a = format!("Done — I published it as a page: {url}");
                     }
                 }
@@ -2312,7 +2430,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
         let wrap = format!("Give the user a concise, direct final answer based on this work log.\n{scratch}\n\nUser: {user_text}");
         let ans = self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)], GenerationConfig::default())
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)], cfg.clone())
             .await
             .map(|r| r.text.trim().to_string())
             .unwrap_or_else(|_| "I looked into it but couldn't wrap up cleanly.".to_string());
@@ -2342,7 +2460,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
         // build_capability self-extension hook). It subsumes the capability paths below — research,
         // code, monitors, grounded chat — as tools. The stateful interceptors (onboarding capture +
         // pending confirmation) already ran above. YM_AGENT=off falls back to the legacy dispatch chain.
-        if std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true) {
+        if self.agent_primary {
             return self.agent_loop(user_text).await;
         }
         // Research sub-agent: parallel deep-dive first, then the single-agent path.
@@ -2816,6 +2934,7 @@ mod tests {
         let scripted = Arc::new(ScriptedLLM::new("your briefing"));
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
         let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_agent_primary(false)
             .with_mail(Arc::new(ScriptedMailClient::new(vec![EmailMsg {
                 id: "1".into(),
                 from: "BRIEFMAIL boss@acme.com".into(),
@@ -3073,6 +3192,34 @@ mod tests {
         // and the turn is recorded in the transcript
         let recent = memarc.recent_messages(4).await.unwrap();
         assert!(recent.iter().any(|(role, t)| role == "assistant" && t.contains("Pranab")));
+    }
+
+    #[test]
+    fn truncated_publish_page_recovers_html_not_the_wrapper() {
+        // The real failure: the model inlined a full page into a publish_page call, overflowed the
+        // token cap, and the JSON arrived truncated mid-string (no closing quote/braces).
+        let blob = r#"{"thought":"publishing the page","tool":"publish_page","args":{"name":"gift-deals","html":"<!DOCTYPE html>\n<html><head><title>Top 10 Combos</title></head><body><h1>Deals</h1><div>combo one</div"#;
+        // It must NOT parse as a clean object, and IS recognized as a tool-call blob (so we never host it raw).
+        assert!(serde_json::from_str::<serde_json::Value>(blob).is_err(), "blob is genuinely broken JSON");
+        assert!(is_tool_call_blob(blob), "recognized as a tool-call wrapper, never published raw");
+        // We recover the inner HTML even though it's cut off…
+        let html = extract_html_arg(blob).expect("recovers the html arg from the truncated blob");
+        assert!(html.starts_with("<!DOCTYPE html>"), "unescaped real html, not the JSON: {html}");
+        assert!(looks_like_html(&html));
+        assert!(!html.contains("\\n"), "JSON escapes are decoded: {html}");
+        // …and name the page from its <title>, not the user's request text.
+        assert_eq!(title_from_html(&html).as_deref(), Some("Top 10 Combos"));
+    }
+
+    #[test]
+    fn page_slug_prefers_title_over_request_text() {
+        let html = "<!doctype html><html><head><title>Repo Dashboard</title></head><body>x</body></html>";
+        assert_eq!(title_from_html(html).as_deref(), Some("Repo Dashboard"));
+        // falls back to <h1> when there's no <title>
+        let h1 = "<div><h1>👜 Handbag Combos</h1><p>…</p></div>";
+        assert_eq!(title_from_html(h1).as_deref(), Some("👜 Handbag Combos"));
+        // a plain answer is not a tool-call blob (so re-grounding/normal handling applies)
+        assert!(!is_tool_call_blob("Here's what I found."));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3399,7 +3546,7 @@ mod tests {
 
         let scripted = Arc::new(ScriptedLLM::new("Noted."));
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
-        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS, Pranab's AI.");
+        let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS, Pranab's AI.").with_agent_primary(false);
 
         let reply = conv.handle_turn("what's my reply style?").await.unwrap();
         assert_eq!(reply, "Noted.");
@@ -3433,6 +3580,7 @@ mod tests {
         let scripted = Arc::new(ScriptedLLM::new("summary"));
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
         let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_agent_primary(false)
             .with_web(Arc::new(ScriptedFetcher::new("Teal is a blue-green color often used in design.")));
         conv.handle_turn("summarize https://example.com/teal please").await.unwrap();
         let p = scripted.last_prompt();
@@ -3453,6 +3601,7 @@ mod tests {
             date: "today".into(),
         }];
         let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_agent_primary(false)
             .with_mail(Arc::new(ScriptedMailClient::new(inbox)));
         conv.handle_turn("can you check my email?").await.unwrap();
         let p = scripted.last_prompt();
@@ -3473,6 +3622,7 @@ mod tests {
             reason: "review_requested".into(),
         }];
         let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_agent_primary(false)
             .with_github(Arc::new(ScriptedGithubClient::new(items)));
         conv.handle_turn("check my github").await.unwrap();
         let p = scripted.last_prompt();
@@ -3488,6 +3638,7 @@ mod tests {
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
         // Real fetcher → the SSRF guard refuses an internal URL (no network hit).
         let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.")
+            .with_agent_primary(false)
             .with_web(Arc::new(HttpFetcher::new()));
         conv.handle_turn("summarize http://192.168.4.140:7438/v1/health").await.unwrap();
         let p = scripted.last_prompt();

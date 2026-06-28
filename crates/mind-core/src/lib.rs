@@ -26,6 +26,8 @@ const HELP_TEXT: &str = "\
 :reflect [topic]     structured self-reflection from typed memory
 :conflicts           list open contradictions
 :explain <stmt>      show a belief with its evidence count
+:goal <text>         store a goal (surfaces in :reflect)
+:prefer <text>       store a preference (surfaces in :reflect)
 :tasks               list open tasks
 :task <desc>         add a new task
 :done <id>           mark a task complete
@@ -111,8 +113,27 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
                         ));
                     }
                 }
-                out.push_str("## goals\n  (none stored)\n");
-                out.push_str("## preferences\n  (none stored)");
+                out.push_str("## goals\n");
+                if r.goals.is_empty() {
+                    out.push_str("  (none stored)\n");
+                } else {
+                    for g in &r.goals {
+                        out.push_str(&format!("  \u{25b6} {}\n", g.text));
+                    }
+                }
+                out.push_str("## preferences\n");
+                if r.preferences.is_empty() {
+                    out.push_str("  (none stored)");
+                } else {
+                    for p in &r.preferences {
+                        out.push_str(&format!("  \u{2605} {}", p.text));
+                        out.push('\n');
+                    }
+                    // trim trailing newline to keep parity with the empty-branch output
+                    if out.ends_with('\n') {
+                        out.pop();
+                    }
+                }
                 Outcome::Said(out)
             }
         };
@@ -136,6 +157,18 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
                 b.statement, b.confidence, ev.len().max(b.evidence_count as usize), b.provenance
             )),
             Ok(None) => Outcome::Said("(no such belief)".into()),
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
+    if let Some(text) = t.strip_prefix(":goal ") {
+        return match mem.store_goal(text.trim()).await {
+            Ok(()) => Outcome::Said("goal stored".into()),
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
+    if let Some(text) = t.strip_prefix(":prefer ") {
+        return match mem.store_preference(text.trim()).await {
+            Ok(()) => Outcome::Said("preference stored".into()),
             Err(e) => Outcome::Said(format!("(error: {e})")),
         };
     }
@@ -430,6 +463,17 @@ mod tests {
         match handle_line(":reflect concise", &mem, &conv).await {
             Outcome::Said(s) => {
                 assert!(s.contains("concise"), ":reflect <topic> should surface related belief: {s}");
+            }
+            _ => panic!("expected Outcome::Said"),
+        }
+
+        // store a goal and a preference, then verify they appear in :reflect
+        assert!(matches!(handle_line(":goal be helpful and honest", &mem, &conv).await, Outcome::Said(s) if s.contains("stored")));
+        assert!(matches!(handle_line(":prefer concise responses", &mem, &conv).await, Outcome::Said(s) if s.contains("stored")));
+        match handle_line(":reflect", &mem, &conv).await {
+            Outcome::Said(s) => {
+                assert!(s.contains("be helpful and honest"), "goal should appear in reflection: {s}");
+                assert!(s.contains("concise responses"), "preference should appear in reflection: {s}");
             }
             _ => panic!("expected Outcome::Said"),
         }

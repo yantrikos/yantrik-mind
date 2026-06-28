@@ -47,10 +47,12 @@ if [ -z "$GOAL" ]; then
   RECENT="$(git log --oneline -20 --pretty='- %s' 2>/dev/null || true)"
   GOAL="$(timeout 300 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
+NORTH STAR: make the typed-memory moat — typed beliefs, confidence scores, contradiction detection, Bayesian revision, consolidation, reflection — more CORRECT, more ROBUST, or more USEFUL in the live chat product. Those are the things a flat-text RAG assistant structurally cannot do; that is where your value compounds. Favor closing a real gap or hardening correctness over adding surface commands or cosmetic cleanup.
+
 Recently done (do NOT repeat or trivially restate these):
 $RECENT
 
-Read crates/mind-* and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It must be self-contained, keep the build green, and must NOT touch crates/mind-governance. Prefer a real capability or correctness gain over cosmetic cleanup. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes." \
+Read crates/mind-* and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It MUST be self-contained, keep the build green WITH a test, be reversible, and MUST NOT touch crates/mind-governance. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes." \
     --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r')"
   cd /; rm -rf "$W" "$CH"; trap - EXIT
   echo "goal source: self-review"

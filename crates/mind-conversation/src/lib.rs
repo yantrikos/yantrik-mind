@@ -2146,6 +2146,25 @@ impl ConversationEngine {
                     format!("(skill '{}' ran but produced nothing)", sk.name)
                 }
             }
+            "publish_page" => {
+                let name = s("name");
+                let html = s("html");
+                if name.is_empty() || html.len() < 10 {
+                    return "(need a page name + html content to publish)".to_string();
+                }
+                let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+                let safe = safe.trim_matches('-').to_lowercase();
+                let safe = if safe.is_empty() { "page".to_string() } else { safe };
+                let dir = std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
+                let _ = std::fs::create_dir_all(&dir);
+                match std::fs::write(format!("{dir}/{safe}.html"), &html) {
+                    Ok(_) => {
+                        let base = std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
+                        format!("Published — view/share it at {base}/{safe}.html")
+                    }
+                    Err(e) => format!("(couldn't publish: {e})"),
+                }
+            }
             "discover_tools" | "search_skills" => {
                 let q = s("query");
                 match self.memory.recall_skills(&q, 6).await {
@@ -2210,11 +2229,12 @@ impl ConversationEngine {
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
+- publish_page {name, html}: host an HTML page/dashboard and get a shareable URL to send the user\n\
+- now {}: the current date and time\n\
 SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
 - run_skill {name, target, url?}: run a skill you found via discover_tools\n\
 - build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
-- now {}: the current date and time\n\
 - answer {text}: give the user your final reply";
         let now = now_str();
         let mut scratch = String::new();
@@ -2225,7 +2245,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. NEVER INVENT specifics about the user — their GitHub username, email, IDs, exact repo names, or dates. If you don't know one, `recall` it or ASK the user; do not guess. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
             let text = match self.inference.chat(messages, GenerationConfig::default()).await {

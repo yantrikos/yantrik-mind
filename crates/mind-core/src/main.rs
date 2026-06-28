@@ -65,9 +65,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("yantrik-mind — backend: {name} · db: {db}");
-    println!(
-        "commands: ':remember +/- <stmt>', ':conflicts', ':explain <stmt>', ':task <desc>', ':tasks', ':done <id>', ':quit'  (else = chat)\n"
-    );
+    println!("type :help for a list of commands  (else = chat)\n");
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();

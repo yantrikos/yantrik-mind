@@ -19,12 +19,28 @@ pub enum Outcome {
     Said(String),
 }
 
+const HELP_TEXT: &str = "\
+:remember + <stmt>   assert evidence in favour of a belief
+:remember - <stmt>   assert evidence against a belief
+:beliefs [query]     list top beliefs by confidence (optional semantic filter)
+:reflect [topic]     structured self-reflection from typed memory
+:conflicts           list open contradictions
+:explain <stmt>      show a belief with its evidence count
+:tasks               list open tasks
+:task <desc>         add a new task
+:done <id>           mark a task complete
+:consolidate         fold recent turns into durable beliefs
+:workers             show remote worker-pool status
+:help / :commands    show this help
+:quit / :q           exit";
+
 /// Handle a single REPL line. Commands start with `:`; anything else is a chat turn.
 ///   `:remember + <statement>` / `:remember - <statement>`  assert evidence for/against a belief
 ///   `:beliefs [query]`                                      list top beliefs by confidence (optional semantic filter)
 ///   `:reflect [topic]`                                      structured self-reflection from typed memory
 ///   `:conflicts`                                            list open contradictions
 ///   `:explain <statement>`                                  show a belief + its evidence count
+///   `:help` / `:commands`                                   print every command with a one-line description
 ///   `:quit`
 pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngine) -> Outcome {
     let raw = line.trim();
@@ -43,6 +59,9 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
     };
     if t == ":quit" || t == ":q" {
         return Outcome::Quit;
+    }
+    if t == ":help" || t == ":commands" {
+        return Outcome::Said(HELP_TEXT.into());
     }
     if t == ":consolidate" {
         let n = conv.consolidate().await;
@@ -428,5 +447,26 @@ mod tests {
             _ => panic!("expected output"),
         }
         assert!(matches!(handle_line("/quit", &mem, &conv).await, Outcome::Quit));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn help_command_lists_all_commands() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = engine(&mem, pool);
+
+        for cmd in [":help", ":commands"] {
+            match handle_line(cmd, &mem, &conv).await {
+                Outcome::Said(s) => {
+                    for expected in &[":remember", ":beliefs", ":reflect", ":conflicts",
+                                      ":explain", ":tasks", ":task", ":done",
+                                      ":consolidate", ":workers", ":quit"] {
+                        assert!(s.contains(expected), "{cmd}: missing {expected} in help:\n{s}");
+                    }
+                }
+                Outcome::Quit => panic!("{cmd} should return Said, not Quit"),
+            }
+        }
     }
 }

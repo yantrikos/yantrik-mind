@@ -841,6 +841,34 @@ impl ConversationEngine {
         count
     }
 
+    /// SELF-VIGILANCE (self-healing) — read the mind's own self-build cron log and, if its most recent
+    /// run FAILED, emit an Operational urge so the failure surfaces (via the digest) instead of dying
+    /// silently. Observation-only (rung 1–2): it never remediates, just notices + records. Cheap (a
+    /// file read), no LLM. Deduped on (kind, about) so the same failure accrues rather than floods.
+    pub async fn vigilance_scan(&self) -> Option<String> {
+        let path = std::env::var("YM_CRON_LOG")
+            .unwrap_or_else(|_| "/var/lib/yantrik-mind/selfbuild-cron.log".to_string());
+        let log = std::fs::read_to_string(&path).ok()?;
+        let about = Self::vigilance_scan_text(&log)?;
+        let _ = self.memory.record_tension(mind_types::TensionKind::Operational, 0.85, &about).await;
+        Some(about)
+    }
+
+    /// Pure failure-detector over a self-build log (testable). Looks ONLY at the most recent tick block
+    /// and flags it only on an EXPLICIT failure signature — never on a merely-incomplete block (which
+    /// could be a run still in progress), so it doesn't false-alarm. Returns a short description, or None.
+    fn vigilance_scan_text(log: &str) -> Option<String> {
+        let block = log.rsplit_once("self-build tick start").map(|(_, a)| a).unwrap_or(log);
+        // Real failures only — NOT "auto-merge BLOCKED" (that's a controlled draft, working as intended).
+        const SIGS: &[&str] = &[
+            "No such file", "ABORT:", "MERGE-FAIL", "PR-FAIL", "could not compile",
+            "clone failed", "tests failed", "timeout: failed to run",
+        ];
+        let hit = SIGS.iter().find(|s| block.contains(**s))?;
+        let line = block.lines().find(|l| l.contains(*hit)).unwrap_or(hit).trim();
+        Some(format!("my last self-build run failed — {}", line.chars().take(160).collect::<String>()))
+    }
+
     /// DEFAULT-MODE ("sleep") TICK — offline cognition over the typed substrate, run by the channel
     /// ONLY when the user has been idle a while (so it never competes with a live turn). Where
     /// `consolidate()` FILES new experience into typed memory, this STRENGTHENS and RECOMBINES what's
@@ -856,6 +884,12 @@ impl ConversationEngine {
             cur
         };
         let mut log = Vec::new();
+        // SELF-VIGILANCE (self-healing rung 1): every idle tick, cheaply scan the mind's OWN health
+        // (its self-build cron log) for failures and, if found, emit an Operational urge — so a broken
+        // autonomous build SURFACES via the proactive digest instead of dying silently in a log.
+        if let Some(v) = self.vigilance_scan().await {
+            log.push(format!("[dmn] vigilance: {v}"));
+        }
         match phase {
             // REHEARSE — re-touch the most load-bearing beliefs (recall refreshes recency/access; we do
             // NOT add evidence, which would inflate confidence — rehearsal strengthens, it doesn't vote).
@@ -992,6 +1026,7 @@ impl ConversationEngine {
                 mind_types::TensionKind::Staleness => "may be going stale",
                 mind_types::TensionKind::Curiosity => "a thread worth pulling",
                 mind_types::TensionKind::VerificationDebt => "worth verifying",
+                mind_types::TensionKind::Operational => "⚠ needs your attention",
             };
             s.push_str(&format!("\n• ({tag}) {}", t.about));
             let _ = self.memory.discharge_tension(&t.id).await; // surfaced once; don't repeat
@@ -2389,6 +2424,20 @@ mod tests {
         assert!((open[0].pressure - 0.9).abs() < 1e-9, "keeps the max pressure, got {}", open[0].pressure);
         assert!(memarc.discharge_tension(&open[0].id).await.unwrap(), "discharge should report it changed");
         assert!(memarc.open_tensions(10).await.unwrap().is_empty(), "discharged tension is no longer open");
+    }
+
+    #[test]
+    fn vigilance_detects_a_failed_self_build_only() {
+        // a real failure signature in the last tick block → flagged + named
+        let failed = "==========\n2026-06-28T12:17:01Z self-build tick start\n==> Claude implementing\ntimeout: failed to run command 'claude': No such file or directory\n";
+        let v = ConversationEngine::vigilance_scan_text(failed).expect("should detect the failed run");
+        assert!(v.to_lowercase().contains("no such file"), "names the failure: {v}");
+        // a clean, completed run → NO alarm (don't false-flag)
+        let ok = "self-build tick start\ngoal source: human queue\nTICK GOAL: x\n==> done\n2026-06-28T06:30:00Z self-build tick done\n";
+        assert!(ConversationEngine::vigilance_scan_text(ok).is_none(), "a clean run must not alarm");
+        // a controlled draft (auto-merge BLOCKED) is NOT a failure
+        let draft = "self-build tick start\nauto-merge BLOCKED: diff too large — draft for human\nPR: https://...\n==> done\n";
+        assert!(ConversationEngine::vigilance_scan_text(draft).is_none(), "a controlled draft must not alarm");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

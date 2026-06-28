@@ -130,6 +130,7 @@ pub enum TensionKind {
     Staleness,        // vigilance drive — an important belief is decaying/unrefreshed
     Curiosity,        // curiosity drive — a knowledge gap worth exploring
     VerificationDebt, // rigor drive — believed but unverified
+    Operational,      // self-vigilance drive — the mind's OWN functioning needs attention (self-healing)
 }
 
 impl TensionKind {
@@ -139,6 +140,7 @@ impl TensionKind {
             TensionKind::Staleness => "staleness",
             TensionKind::Curiosity => "curiosity",
             TensionKind::VerificationDebt => "verification_debt",
+            TensionKind::Operational => "operational",
         }
     }
     pub fn parse(s: &str) -> TensionKind {
@@ -146,6 +148,7 @@ impl TensionKind {
             "staleness" => TensionKind::Staleness,
             "curiosity" => TensionKind::Curiosity,
             "verification_debt" => TensionKind::VerificationDebt,
+            "operational" => TensionKind::Operational,
             _ => TensionKind::Contradiction,
         }
     }

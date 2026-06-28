@@ -2184,6 +2184,7 @@ impl ConversationEngine {
             }
             let args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
             let obs = self.run_agent_tool(&tool, &args).await;
+            eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
         }
         let wrap = format!("Give the user a concise, direct final answer based on this work log.\n{scratch}\n\nUser: {user_text}");

@@ -43,6 +43,17 @@ async fn tg_send(api: &str, chat_id: i64, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Show the "typing…" indicator (Telegram clears it after ~5s or on the next message) — covers the
+/// agentic loop's think time so a slow turn doesn't feel like dead air. Best-effort; errors ignored.
+async fn tg_typing(api: &str, chat_id: i64) {
+    let url = format!("{api}/sendChatAction");
+    let payload = serde_json::json!({ "chat_id": chat_id, "action": "typing" });
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = ureq::post(&url).timeout(std::time::Duration::from_secs(10)).send_json(payload);
+    })
+    .await;
+}
+
 fn offset_path() -> String {
     std::env::var("YM_TG_OFFSET").unwrap_or_else(|_| "telegram_offset".to_string())
 }
@@ -195,6 +206,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             if text.is_empty() {
                 continue;
             }
+            let _ = tg_typing(&api, chat_id).await; // show "typing…" while the agent loop works
             let reply = match handle_line(&text, &mem, &conv).await {
                 Outcome::Quit => "(the mind keeps running — nothing to quit here)".to_string(),
                 Outcome::Said(s) if s.is_empty() => continue,

@@ -89,6 +89,13 @@ if [ "${YM_AUTOMERGE:-0}" = "1" ]; then
   if [ "$files_changed" -gt 10 ] || [ "$lines_changed" -gt 400 ]; then
     echo "auto-merge BLOCKED: diff too large ($files_changed files / $lines_changed lines) — draft for human"; AUTOMERGE=0
   fi
+  # test-PRESENCE gate: a Rust change must ADD a test in the diff. Without this, `cargo test` passes
+  # vacuously (ok with 0 new tests) and inert/untested code can auto-merge. No added test => draft.
+  if [ "$AUTOMERGE" = "1" ] && git diff --cached --name-only | grep -q '\.rs$'; then
+    if ! git diff --cached -U0 | grep -qE '^\+.*#\[(tokio::)?test'; then
+      echo "auto-merge BLOCKED: Rust changed but no #[test] added in the diff — draft for human"; AUTOMERGE=0
+    fi
+  fi
   if [ "$AUTOMERGE" = "1" ] && git diff --cached --name-only | grep -q '\.rs$'; then
     pkgs=$(git diff --cached --name-only | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u)
     PFLAGS="-p mind-core"; for p in $pkgs; do [ "$p" = "mind-core" ] || PFLAGS="$PFLAGS -p $p"; done

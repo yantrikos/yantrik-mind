@@ -133,11 +133,27 @@ try:
 except urllib.error.HTTPError as e:
     print("PR-FAIL", e.code, e.read().decode()[:300]); sys.exit(1)
 if automerge:
-    time.sleep(3)  # let GitHub compute mergeability
-    try:
-        m = call("PUT", f"{api}/pulls/{pr['number']}/merge", {"merge_method": "squash"})
-        print("MERGED:", (m.get("sha") or "")[:7], "— auto-merged on green")
-    except urllib.error.HTTPError as e:
-        print("MERGE-FAIL", e.code, e.read().decode()[:300])  # PR stays open for a human
+    head_sha = pr.get("head", {}).get("sha", "")
+    # Wait for the required GitHub check (harm-gate-guard) to go GREEN before merging — the
+    # independent, GitHub-side wall. The box-side gates already passed; this is defense in depth.
+    ok = False
+    for _ in range(18):  # ~3 min
+        time.sleep(10)
+        try:
+            cr = call("GET", f"{api}/commits/{head_sha}/check-runs")
+        except Exception:
+            continue
+        guard = [r for r in cr.get("check_runs", []) if r.get("name") == "harm-gate-guard"]
+        if guard and all(r.get("status") == "completed" for r in guard):
+            ok = all(r.get("conclusion") == "success" for r in guard)
+            break
+    if not ok:
+        print("auto-merge HELD: harm-gate CI check not green/done — PR left open for human")
+    else:
+        try:
+            m = call("PUT", f"{api}/pulls/{pr['number']}/merge", {"merge_method": "squash"})
+            print("MERGED:", (m.get("sha") or "")[:7], "— auto-merged on green (CI gate passed)")
+        except urllib.error.HTTPError as e:
+            print("MERGE-FAIL", e.code, e.read().decode()[:300])  # PR stays open for a human
 PY
 echo "==> done"

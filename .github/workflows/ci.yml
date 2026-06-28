@@ -1,0 +1,37 @@
+# Independent, GitHub-side enforcement of the ONE inviolable rule: no change may modify the harm-gate
+# (crates/mind-governance). This is defense-in-depth — the box-side self-build gate already aborts on
+# such a change, and this check enforces the same wall on GitHub, so even a bypassed/buggy box gate
+# cannot land a governance edit on main. Pure `git diff` — no toolchain, no path-deps (so it works on
+# hosted runners despite yantrik-mind's ../yantrikdb path dependencies, which a full build can't).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  harm-gate-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assert crates/mind-governance is untouched
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base commit to diff against — pass"; exit 0
+          fi
+          changed="$(git diff --name-only "$base" "${{ github.sha }}" || true)"
+          echo "changed files:"; echo "$changed"
+          if echo "$changed" | grep -q '^crates/mind-governance/'; then
+            echo "::error::This change modifies crates/mind-governance (the harm-gate). That wall is human-only — blocked."
+            exit 1
+          fi
+          echo "harm-gate untouched ✓"

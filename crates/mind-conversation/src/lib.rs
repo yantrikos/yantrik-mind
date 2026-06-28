@@ -102,6 +102,8 @@ pub struct ConversationEngine {
     last_run: Mutex<Option<(CodeLang, String)>>,
     /// Highest transcript id already distilled by `consolidate()` (the consolidation cursor).
     last_consolidated: Mutex<i64>,
+    /// Default-mode ("sleep") phase rotor: rehearse → reconcile → associate, one bounded op per idle tick.
+    dmn_phase: Mutex<u64>,
 }
 
 impl ConversationEngine {
@@ -125,6 +127,7 @@ impl ConversationEngine {
             pending_research: Mutex::new(None),
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
+            dmn_phase: Mutex::new(0),
         }
     }
 
@@ -818,6 +821,117 @@ impl ConversationEngine {
         }
         *self.last_consolidated.lock().unwrap() = max_id;
         count
+    }
+
+    /// DEFAULT-MODE ("sleep") TICK — offline cognition over the typed substrate, run by the channel
+    /// ONLY when the user has been idle a while (so it never competes with a live turn). Where
+    /// `consolidate()` FILES new experience into typed memory, this STRENGTHENS and RECOMBINES what's
+    /// already stored — the other half of what a sleeping brain does. One bounded phase per call
+    /// (≤1 LLM call), rotating rehearse → reconcile → associate. Everything is internal: nothing is
+    /// sent to the user; insights are stored as low-certainty hypotheses the moat can surface later.
+    /// Returns short log lines (the channel just prints them). Disabled by the caller via YM_DMN=off.
+    pub async fn dmn_tick(&self) -> Vec<String> {
+        let phase = {
+            let mut p = self.dmn_phase.lock().unwrap();
+            let cur = *p % 3;
+            *p = p.wrapping_add(1);
+            cur
+        };
+        let mut log = Vec::new();
+        match phase {
+            // REHEARSE — re-touch the most load-bearing beliefs (recall refreshes recency/access; we do
+            // NOT add evidence, which would inflate confidence — rehearsal strengthens, it doesn't vote).
+            0 => {
+                let rs = self
+                    .memory
+                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None })
+                    .await
+                    .unwrap_or_default();
+                log.push(if rs.is_empty() {
+                    "[dmn] rehearse: nothing stored yet".to_string()
+                } else {
+                    format!("[dmn] rehearsed {} memories", rs.len())
+                });
+            }
+            // RECONCILE — judge ONE open contradiction and record the judgment as a low-certainty NOTE.
+            // We deliberately do NOT auto-revise the beliefs: entrenching a wrong side unattended is
+            // worse than leaving the tension for the user. The note is recallable; resolution waits.
+            1 => {
+                let cs = self.memory.conflicts().await.unwrap_or_default();
+                if let Some(c) = cs.first() {
+                    let prompt = format!(
+                        "Two of my stored beliefs conflict:\nA: {}\nB: {}\nWhich is better supported by general knowledge, or is this genuinely unresolved? Answer in ONE sentence, starting with A, B, or UNRESOLVED.",
+                        c.belief_a, c.belief_b
+                    );
+                    let messages = vec![
+                        ChatMessage::system(&self.persona),
+                        ChatMessage::system("You weigh conflicting beliefs cautiously. One sentence."),
+                        ChatMessage::user(&prompt),
+                    ];
+                    if let Ok(r) = self.inference.chat(messages, GenerationConfig::default()).await {
+                        let note: String =
+                            format!("On the tension '{}' vs '{}': {}", c.belief_a, c.belief_b, r.text.trim())
+                                .chars()
+                                .take(400)
+                                .collect();
+                        let _ = self
+                            .memory
+                            .remember_as_belief(BeliefAssertion {
+                                statement: note,
+                                polarity: 1.0,
+                                weight: 0.3, // low → low confidence; a note, not a verdict
+                                source_event: Some("dmn_reconcile".into()),
+                                provenance: "dmn".into(),
+                            })
+                            .await;
+                        log.push("[dmn] reconciled 1 contradiction (noted, not auto-revised)".to_string());
+                    }
+                } else {
+                    log.push("[dmn] reconcile: no open contradictions".to_string());
+                }
+            }
+            // ASSOCIATE — free-associate over stored beliefs for ONE non-obvious insight/question, and
+            // store it as a low-certainty HYPOTHESIS (provenance=dmn) the mind can later test or surface.
+            _ => {
+                let rs = self
+                    .memory
+                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 10, kind: None })
+                    .await
+                    .unwrap_or_default();
+                if rs.len() < 3 {
+                    log.push("[dmn] associate: too little stored to connect".to_string());
+                    return log;
+                }
+                let facts = rs.iter().map(|r| format!("- {}", r.item.text)).collect::<Vec<_>>().join("\n");
+                let prompt = format!(
+                    "Here is some of what I know:\n{facts}\n\nName ONE non-obvious connection, pattern, or question that emerges across these — something worth following up. Reply with a single sentence."
+                );
+                let messages = vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::system("You free-associate to surface one genuinely useful insight or question. One sentence, no preamble."),
+                    ChatMessage::user(&prompt),
+                ];
+                if let Ok(r) = self.inference.chat(messages, GenerationConfig::default()).await {
+                    let insight = r.text.trim();
+                    if insight.len() > 8 {
+                        let statement: String =
+                            format!("(hypothesis) {insight}").chars().take(400).collect();
+                        let _ = self
+                            .memory
+                            .remember_as_belief(BeliefAssertion {
+                                statement,
+                                polarity: 1.0,
+                                weight: 0.3, // a hunch, not a fact
+                                source_event: Some("dmn_associate".into()),
+                                provenance: "dmn".into(),
+                            })
+                            .await;
+                        log.push("[dmn] associated 1 hypothesis".to_string());
+                    }
+                }
+            }
+        }
+        log
     }
 
     /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
@@ -2120,6 +2234,47 @@ mod tests {
             belief.item.confidence <= 0.75,
             "machine-consolidated belief confidence must be ≤ 0.75 (sigmoid(1.0)≈0.731), got {}",
             belief.item.confidence
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dmn_associates_a_hypothesis_when_idle() {
+        // The default-mode loop's ASSOCIATE phase should free-associate over stored beliefs and bank a
+        // low-certainty hypothesis (provenance=dmn) the mind can later surface — sleep-like recombination.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        for s in [
+            "Pranab prefers terse replies",
+            "Pranab loves async Rust",
+            "Pranab pre-registers kill criteria before experiments",
+        ] {
+            memarc
+                .remember_as_belief(BeliefAssertion {
+                    statement: s.into(),
+                    polarity: 1.0,
+                    weight: 1.0,
+                    source_event: None,
+                    provenance: "test".into(),
+                })
+                .await
+                .unwrap();
+        }
+        let insight = "Pranab consistently optimizes for signal over noise.";
+        let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new(insight)) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        // phase rotor: 0 rehearse, 1 reconcile (no conflicts → no-op), 2 associate
+        let _ = conv.dmn_tick().await;
+        let _ = conv.dmn_tick().await;
+        let log = conv.dmn_tick().await;
+        assert!(log.iter().any(|l| l.contains("associated")), "associate phase should run: {log:?}");
+        let r = memarc
+            .recall_typed(mind_types::RecallQuery { text: "signal over noise".into(), top_k: 8, kind: None })
+            .await
+            .unwrap();
+        assert!(
+            r.iter().any(|x| x.item.text.contains("hypothesis")),
+            "a dmn hypothesis must be stored + recallable: {:?}",
+            r.iter().map(|x| &x.item.text).collect::<Vec<_>>()
         );
     }
 

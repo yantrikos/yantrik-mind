@@ -155,6 +155,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     }
 
     let mut offset = load_offset();
+    // Default-mode ("sleep") loop state: when the user has been idle a while, run one offline cognition
+    // tick (rehearse/reconcile/associate). Tracked inline on the poll loop so it never competes with a
+    // live turn and needs no extra task. Disabled with YM_DMN=off.
+    let mut last_activity = now_ms();
+    let mut last_dmn = 0u64;
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -180,8 +185,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     continue;
                 }
             }
-            // Remember where to push proactive messages.
+            // Remember where to push proactive messages, and that the user is active right now (so the
+            // default-mode loop stays out of the way until they've been idle a while).
             active_chat.store(chat_id, Ordering::Relaxed);
+            last_activity = now_ms();
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
             if text.is_empty() {
                 continue;
@@ -210,6 +217,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         let formed = conv.consolidate().await;
         if formed > 0 {
             eprintln!("[consolidate] formed {formed} durable memories");
+        }
+
+        // Default-mode ("sleep") tick: when the user has been idle past the threshold, run ONE bounded
+        // offline-cognition pass (rehearse → reconcile → associate over the typed substrate). Paced so
+        // it fires at most every YM_DMN_SECS, and only while idle so it never competes with a live turn.
+        if std::env::var("YM_DMN").map(|v| v != "off").unwrap_or(true) {
+            let idle_secs: u64 =
+                std::env::var("YM_DMN_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+            let period: u64 = std::env::var("YM_DMN_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+            let now = now_ms();
+            if now.saturating_sub(last_activity) >= idle_secs * 1000
+                && now.saturating_sub(last_dmn) >= period * 1000
+            {
+                for line in conv.dmn_tick().await {
+                    eprintln!("{line}");
+                }
+                last_dmn = now;
+            }
         }
     }
 }

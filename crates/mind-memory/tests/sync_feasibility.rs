@@ -33,8 +33,9 @@ fn oplog_serializes_cross_process_and_apply_is_idempotent() {
     record(&a, "alpha fact");
     record(&a, "beta fact");
 
-    // Extract A's oplog.
-    let ops = extract_ops_since(a.conn(), None, None, None, 10_000).unwrap();
+    // Extract A's oplog. (0.9.0's `conn()` returns a MutexGuard; bind + reborrow to `&Connection`.)
+    let aconn = a.conn();
+    let ops = extract_ops_since(&aconn, None, None, None, 10_000).unwrap();
     assert!(!ops.is_empty(), "expected oplog entries from A");
 
     // Cross-PROCESS boundary: serialize to JSON, ship, deserialize back.

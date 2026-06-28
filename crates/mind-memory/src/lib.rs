@@ -49,6 +49,7 @@ enum Cmd {
     // cheap raw transcript (immediate context; isolated table, not the cognitive graph)
     AppendMessage { role: String, text: String, reply: Reply<()> },
     RecentMessages { limit: usize, reply: Reply<Vec<(String, String)>> },
+    MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
     // skill library
     SaveSkill { skill: Skill, reply: Reply<()> },
     GetSkill { name: String, reply: Reply<Option<Skill>> },
@@ -178,9 +179,92 @@ fn assert_belief(
     Ok(to_belief_dto(&updated))
 }
 
+/// Record into the flat vector store. Uses native `record_text` (auto-embed) when an embedder is
+/// attached — 0.9.0 bundles one at dim 64, so this is the live path — giving real semantic recall.
+/// Falls back to a zero-vector `record` only on no-embedder builds (the dim-8 test path), where
+/// recall degrades to keyword rather than erroring with `NoEmbedder`.
+fn record_memory(
+    db: &YantrikDB,
+    text: &str,
+    zero: &[f32],
+    mtype: &str,
+    importance: f64,
+    certainty: f64,
+    source: &str,
+    meta: &serde_json::Value,
+) -> std::result::Result<String, String> {
+    if db.has_embedder() {
+        db.record_text(text, mtype, importance, 0.0, 604_800.0, meta, "default", certainty, "general", source, None)
+            .map_err(|e| e.to_string())
+    } else {
+        db.record(text, mtype, importance, 0.0, 604_800.0, meta, zero, "default", certainty, "general", source, None)
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
+    for i in 0..a.len() {
+        let (x, y) = (a[i] as f64, b[i] as f64);
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+fn belief_item(n: &CognitiveNode) -> MemoryItem {
+    let prop = node_prop(n).unwrap_or("").to_string();
+    MemoryItem {
+        id: prop.clone(),
+        kind: MemoryKind::Belief,
+        text: prop,
+        confidence: n.attrs.confidence,
+        certainty: n.attrs.confidence,
+        updated_ms: n.attrs.last_updated_ms,
+    }
+}
+
+/// Belief recall. Beliefs live in `cognitive_nodes` (not the flat HNSW index), so when an embedder
+/// is attached we rank by cosine similarity of the query vs each proposition (model2vec is in-process
+/// and fast), blended with a small confidence prior so a confident near-match outranks a vague exact
+/// one. With no embedder (test builds) we fall back to keyword overlap + confidence — the prior shape.
 fn recall_beliefs(db: &YantrikDB, text: &str, top_k: usize) -> Vec<Recalled> {
+    let beliefs = all_beliefs(db);
+
+    if db.has_embedder() {
+        if let Ok(q) = db.embed(text) {
+            let mut scored: Vec<(f64, f64, CognitiveNode)> = beliefs
+                .into_iter()
+                .map(|n| {
+                    let prop = node_prop(&n).unwrap_or("");
+                    let sim = db.embed(prop).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
+                    let blended = sim + 0.1 * n.attrs.confidence;
+                    (blended, sim, n)
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            return scored
+                .into_iter()
+                .take(top_k.max(1))
+                .map(|(blended, sim, n)| Recalled {
+                    score: blended,
+                    why: vec![format!("semantic {:.2}, confidence {:.2}", sim, n.attrs.confidence)],
+                    item: belief_item(&n),
+                })
+                .collect();
+        }
+    }
+
+    // keyword fallback (no embedder)
     let qwords: Vec<String> = text.to_ascii_lowercase().split_whitespace().map(|w| w.to_string()).collect();
-    let mut scored: Vec<(f64, CognitiveNode)> = all_beliefs(db)
+    let mut scored: Vec<(f64, CognitiveNode)> = beliefs
         .into_iter()
         .map(|n| {
             let p = node_prop(&n).unwrap_or("").to_ascii_lowercase();
@@ -195,14 +279,7 @@ fn recall_beliefs(db: &YantrikDB, text: &str, top_k: usize) -> Vec<Recalled> {
         .map(|(score, n)| Recalled {
             score,
             why: vec![format!("confidence {:.2}", n.attrs.confidence)],
-            item: MemoryItem {
-                id: node_prop(&n).unwrap_or("").to_string(),
-                kind: MemoryKind::Belief,
-                text: node_prop(&n).unwrap_or("").to_string(),
-                confidence: n.attrs.confidence,
-                certainty: n.attrs.confidence,
-                updated_ms: n.attrs.last_updated_ms,
-            },
+            item: belief_item(&n),
         })
         .collect()
 }
@@ -387,13 +464,38 @@ fn list_skills(db: &YantrikDB) -> std::result::Result<Vec<Skill>, String> {
 }
 
 fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Result<Vec<Skill>, String> {
-    // v0 ranking: substring overlap of the query's words against name+summary+tags. Deterministic;
-    // semantic recall over the moat is the earned upgrade. Quarantined skills are excluded.
+    // Quarantined skills are never recalled.
+    let skills: Vec<Skill> = list_skills(db)?.into_iter().filter(|s| s.status != "quarantined").collect();
+
+    // SEMANTIC when an embedder is attached (0.9.0 bundles one) — the earned upgrade now that the
+    // moat embeds. Rank by cosine of the query vs each skill's "name. summary. tags", blended with a
+    // small reliability prior so a proven skill edges out an equally-relevant flaky one. A similarity
+    // floor keeps "no matching skill" first-class (don't surface an unrelated skill). Falls back to
+    // substring overlap on no-embedder builds.
+    if db.has_embedder() {
+        if let Ok(q) = db.embed(query) {
+            let mut scored: Vec<(f64, f64, Skill)> = skills
+                .into_iter()
+                .map(|s| {
+                    let text = format!("{}. {}. {}", s.name, s.summary, s.tags.join(" "));
+                    let sim = db.embed(&text).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
+                    (sim + 0.1 * s.success_rate(), sim, s)
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            return Ok(scored
+                .into_iter()
+                .filter(|(_, sim, _)| *sim >= 0.30)
+                .take(limit)
+                .map(|(_, _, s)| s)
+                .collect());
+        }
+    }
+
     let q = query.to_lowercase();
     let words: Vec<&str> = q.split_whitespace().filter(|w| w.len() >= 3).collect();
-    let mut scored: Vec<(i32, Skill)> = list_skills(db)?
+    let mut scored: Vec<(i32, Skill)> = skills
         .into_iter()
-        .filter(|s| s.status != "quarantined")
         .map(|s| {
             let hay = format!("{} {} {}", s.name, s.summary, s.tags.join(" ")).to_lowercase();
             let score = words.iter().filter(|w| hay.contains(**w)).count() as i32;
@@ -432,8 +534,10 @@ fn append_message(db: &YantrikDB, role: &str, text: &str) -> std::result::Result
 }
 
 fn recent_messages(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<(String, String)>, String> {
-    let mut stmt = db
-        .conn()
+    // 0.9.0's `conn()` returns a temporary guard (was `&Connection`); bind it so the prepared
+    // statement doesn't outlive a dropped temporary.
+    let conn = db.conn();
+    let mut stmt = conn
         .prepare("SELECT role, text FROM mind_transcript ORDER BY id DESC LIMIT ?1")
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -442,6 +546,19 @@ fn recent_messages(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<(Str
     let mut v: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
     v.reverse(); // newest-first SQL -> chronological for the prompt
     Ok(v)
+}
+
+fn messages_since(db: &YantrikDB, after_id: i64, limit: usize) -> std::result::Result<Vec<(i64, String, String)>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT id, role, text FROM mind_transcript WHERE id > ?1 ORDER BY id ASC LIMIT ?2")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![after_id, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 fn relate(db: &YantrikDB, src: &str, dst: &str, rel: &str, weight: f64) -> std::result::Result<(), String> {
@@ -479,14 +596,14 @@ impl MemoryHandle {
                 while let Some(cmd) = rx.blocking_recv() {
                     match cmd {
                         Cmd::Record { text, reply } => {
-                            let r = gate_write(&text).and_then(|_| db.record(&text, "episodic", 0.5, 0.0, 604_800.0, &meta, &zero, "default", 0.8, "general", "user", None).map_err(|e| e.to_string()));
+                            let r = gate_write(&text).and_then(|_| record_memory(&db, &text, &zero, "episodic", 0.5, 0.8, "user", &meta));
                             let _ = reply.send(r);
                         }
                         Cmd::RememberObservation { text, source, reply } => {
                             // Provenance-tagged, secret-scanned, low-certainty: an Observation, never a Belief.
                             let r = gate_write(&text).and_then(|_| {
                                 let obs_meta = serde_json::json!({ "provenance": source, "observed_at": now_secs(), "kind": "observation" });
-                                db.record(&text, "episodic", 0.4, 0.0, 604_800.0, &obs_meta, &zero, "default", 0.6, "general", &source, None).map_err(|e| e.to_string())
+                                record_memory(&db, &text, &zero, "episodic", 0.4, 0.6, &source, &obs_meta)
                             });
                             let _ = reply.send(r);
                         }
@@ -554,6 +671,9 @@ impl MemoryHandle {
                         }
                         Cmd::RecentMessages { limit, reply } => {
                             let _ = reply.send(recent_messages(&db, limit));
+                        }
+                        Cmd::MessagesSince { after_id, limit, reply } => {
+                            let _ = reply.send(messages_since(&db, after_id, limit));
                         }
                     }
                 }
@@ -727,6 +847,9 @@ impl MemoryFacade for MemoryHandle {
         let (role, text) = (role.to_string(), text.to_string());
         self.call(|reply| Cmd::AppendMessage { role, text, reply }).await
     }
+    async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>> {
+        self.call(|reply| Cmd::MessagesSince { after_id, limit, reply }).await
+    }
     async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>> {
         self.call(|reply| Cmd::RecentMessages { limit, reply }).await
     }
@@ -878,5 +1001,73 @@ mod tests {
         mem.add_task("call the dentist", "medium", None).await.unwrap();
         let ws = mem.hydrate_working_set("what's on my plate").await.unwrap();
         assert!(ws.commitments.iter().any(|c| c.text.contains("dentist")), "open task should surface in working-set");
+    }
+
+    /// THE EMBEDDER MOAT (yantrikdb 0.9.0): at dim 64 the engine auto-attaches its bundled
+    /// model2vec embedder, so recall is genuinely SEMANTIC — a paraphrase that shares *no words*
+    /// with the stored belief still surfaces it. This is what keyword recall structurally cannot do.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn semantic_recall_with_bundled_embedder() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        for s in [
+            "the cat sat quietly on the mat",
+            "Pranab prefers concise answers",
+            "the stock market fell sharply today",
+        ] {
+            mem.remember_as_belief(BeliefAssertion {
+                statement: s.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+        }
+        // "he likes short responses" shares no keywords with "Pranab prefers concise answers".
+        let r = mem
+            .recall_typed(RecallQuery { text: "he likes short responses".into(), top_k: 1, kind: None })
+            .await
+            .unwrap();
+        assert!(!r.is_empty(), "semantic recall returned nothing");
+        assert!(
+            r[0].item.text.contains("concise"),
+            "semantic recall should rank the paraphrase first, got: {:?} (why: {:?})",
+            r[0].item.text,
+            r[0].why
+        );
+    }
+
+    /// SEMANTIC SKILL RECALL (earned by the bundled embedder): a paraphrased need finds the right
+    /// banked skill even with no shared keywords, and ranks it above an unrelated skill.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn semantic_skill_recall_ranks_paraphrase_first() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        for (name, summary, tags) in [
+            ("csv_row_counter", "counts the number of rows in a CSV file", vec!["csv", "data"]),
+            ("greeter", "prints a friendly hello greeting", vec!["text"]),
+        ] {
+            mem.save_skill(Skill {
+                name: name.into(),
+                lang: "python".into(),
+                code: "print(1)".into(),
+                summary: summary.into(),
+                tags: tags.into_iter().map(String::from).collect(),
+                status: "active".into(),
+                runs: 3,
+                successes: 3,
+                created_ms: 0,
+            })
+            .await
+            .unwrap();
+        }
+        // "how many lines are in a spreadsheet" shares no keywords with "counts rows in a CSV file".
+        let hits = mem.recall_skills("how many lines are in a spreadsheet", 3).await.unwrap();
+        assert!(!hits.is_empty(), "semantic skill recall returned nothing");
+        assert_eq!(
+            hits[0].name, "csv_row_counter",
+            "the CSV skill should rank first for the paraphrase, got: {:?}",
+            hits.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
     }
 }

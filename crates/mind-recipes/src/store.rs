@@ -94,6 +94,43 @@ impl RecipeStore {
         .ok()
     }
 
+    /// Sleeping (persistent-delegation) runs whose wake time (`vars.__wake_at`) is due as of `now_ms`.
+    /// The tick (`RecipeEngine::resume_due`) wakes these.
+    pub fn due_sleeping(&self, now_ms: u64) -> Vec<RunRecord> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE status='sleeping'",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| {
+            let steps_json: String = row.get(4)?;
+            let vars_json: String = row.get(5)?;
+            Ok(RunRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                status: row.get(2)?,
+                current_step: row.get::<_, i64>(3)? as usize,
+                steps: serde_json::from_str(&steps_json).unwrap_or_default(),
+                vars: serde_json::from_str(&vars_json).unwrap_or_default(),
+                error: row.get::<_, Option<String>>(6)?,
+            })
+        });
+        match rows {
+            Ok(it) => it
+                .filter_map(|r| r.ok())
+                .filter(|r| {
+                    r.vars
+                        .get("__wake_at")
+                        .and_then(|v| v.as_u64())
+                        .map_or(false, |w| w <= now_ms)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Runs that were `running` when the process stopped — candidates for recovery.
     pub fn resumable(&self) -> Vec<RunRecord> {
         let conn = self.conn.lock().unwrap();

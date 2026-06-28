@@ -19,24 +19,19 @@ fn claude_available() -> bool {
 }
 
 fn build_backend() -> (Arc<dyn LLMBackend>, String) {
-    if let Ok(key) = std::env::var("NANOGPT_KEY") {
-        if !key.trim().is_empty() {
-            let model = std::env::var("YM_MODEL").unwrap_or_else(|_| "chatgpt-4o-latest".to_string());
-            let be = yantrik_ml::GenericOpenAIBackend::for_provider(
-                "openai",
-                "https://nano-gpt.com/api/v1",
-                Some(key),
-                model.clone(),
-            );
-            return (Arc::new(be), format!("nanogpt:{model}"));
-        }
+    // Resilient multi-provider chain (NanoGPT → Ollama Cloud → MiniMax, in priority order) built from
+    // whatever keys are present; an error OR empty reply fails over to the next. Provider endpoints
+    // live in mind_inference so adding a provider is one line there. Verified live: NanoGPT
+    // (deepseek-v4-pro), Ollama Cloud (glm-4.7), MiniMax (MiniMax-M2.7).
+    if let Some((backend, label)) = mind_inference::default_chain_from_env() {
+        return (backend, label);
     }
     if claude_available() {
         return (Arc::new(yantrik_ml::ClaudeCliLLM::new(None, 1024)), "claude-cli".to_string());
     }
     (
         Arc::new(ScriptedLLM::new(
-            "(scripted fallback — set NANOGPT_KEY or install the claude CLI for a real reply)",
+            "(scripted fallback — set NANOGPT_KEY/OLLAMA_CLOUD_KEY/MINIMAX_API_KEY or install the claude CLI for a real reply)",
         )),
         "scripted".to_string(),
     )
@@ -49,7 +44,10 @@ async fn main() -> anyhow::Result<()> {
     let pool = InferencePool::new(backend, permits);
 
     let db = std::env::var("YM_DB").unwrap_or_else(|_| ":memory:".to_string());
-    let mem = MemoryHandle::spawn(&db, 8).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
+    // dim 64 = yantrikdb 0.9.0's bundled embedder dimension; YantrikDB::new auto-attaches the
+    // in-process model2vec embedder at this dim, so record/recall are genuinely SEMANTIC with no
+    // external server. (A dim-8 DB from before this upgrade is incompatible — recreate the file.)
+    let mem = MemoryHandle::spawn(&db, 64).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
     let conv = mind_core::engine(&mem, pool);
 
     // Recover any recipe runs interrupted by a previous crash (durable + idempotency-safe).

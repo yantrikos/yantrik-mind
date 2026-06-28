@@ -21,7 +21,11 @@ async-trait = "0.1"
 uuid7 = "1"
 
 # reused foundations (local path to the yantrik-companion workspace crates)
-yantrikdb-core = { path = "../yantrik-companion/crates/yantrikdb-core" }
+# yantrikdb-core: upgraded to standalone yantrikdb 0.9.0 (package `yantrikdb`), which ships
+# the in-process BundledEmbedder (potion-base-2M, dim 64) ON BY DEFAULT — so `record_text`/
+# `recall_text` and semantic recall Just Work with no external server, no candle, no download.
+# `package=` rename keeps every `use yantrikdb_core::…` site compiling unchanged.
+yantrikdb-core = { path = "../yantrikdb/crates/yantrikdb-core", package = "yantrikdb" }
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml", default-features = false }
 yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
 yantrik-chat = { path = "../yantrik-companion/crates/yantrik-chat" }

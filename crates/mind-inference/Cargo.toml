@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-yantrik-ml = { workspace = true, default-features = false }
+# api-llm gates GenericOpenAIBackend — the provider chain/router builds OpenAI-compat backends.
+yantrik-ml = { workspace = true, default-features = false, features = ["api-llm"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }

@@ -42,6 +42,13 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
     if t == ":quit" || t == ":q" {
         return Outcome::Quit;
     }
+    if t == ":consolidate" {
+        let n = conv.consolidate().await;
+        return Outcome::Said(format!("consolidated {n} durable belief(s) from recent turns"));
+    }
+    if t == ":workers" {
+        return Outcome::Said(conv.workers_status().await);
+    }
     if t == ":conflicts" {
         return match mem.conflicts().await {
             Ok(cs) if cs.is_empty() => Outcome::Said("(no open contradictions)".into()),
@@ -144,7 +151,15 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .as_ref()
         .map(|t| Arc::new(mind_tools::ApiGithubClient::new(t.clone())) as Arc<dyn mind_tools::GithubClient>);
 
-    let mut eng = ConversationEngine::new(memory.clone(), pool.clone(), persona.clone())
+    // Per-function model routing: pin a role (chat/research/util/…) to a provider:model via
+    // YM_ROLE_<ROLE> (e.g. YM_ROLE_RESEARCH=ollama-cloud:kimi-k2.7); unset roles use the default
+    // chain. Conversation→chat, the research sub-agent→research, recipe Think steps→util.
+    let router = mind_inference::Router::from_env(pool.clone(), 4);
+    let chat_pool = router.pool("chat");
+    let research_pool = router.pool("research");
+    let util_pool = router.pool("util");
+
+    let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
         .with_web(Arc::new(mind_tools::HttpFetcher::new()));
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
@@ -194,7 +209,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
 
     // A research sub-agent: web search + fetch + the mind's own read tools. Bounded ReAct, read-only.
     let researcher = mind_agents::SubAgent::new(
-        pool.clone(),
+        research_pool,
         host.clone(),
         persona.clone(),
         vec![
@@ -210,7 +225,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
 
     // Recipe engine: citation-validated, adaptive workflows over the read capabilities. Gets the same
     // harm-gated runtime (for Act steps) and a durable store (persistence + crash recovery).
-    let mut recipe_engine = mind_recipes::RecipeEngine::new(pool.clone(), host.clone(), persona.clone());
+    let mut recipe_engine = mind_recipes::RecipeEngine::new(util_pool, host.clone(), persona.clone());
     if let Some(rt) = &runtime {
         recipe_engine = recipe_engine.with_runtime(rt.clone());
     }
@@ -231,6 +246,26 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| "/var/lib/yantrik-mind".to_string());
     eng = eng.with_sandbox(Arc::new(mind_tools::Sandbox::new().hiding(state_dir)));
+
+    // Remote worker pool: fan work out to the transferred LXCs over SSH (YM_WORKERS / YM_WORKER_KEY).
+    if let Some(pool) = mind_tools::WorkerPool::from_env() {
+        eng = eng.with_workers(Arc::new(pool));
+    }
+
+    // Agentic coder (the `code` role): Claude Code driven by MiniMax-M2 via MiniMax's Anthropic-compat
+    // endpoint — runs on the MiniMax subscription, zero Anthropic cost. Needs the `claude` CLI present
+    // + MINIMAX_API_KEY. Isolated scratch under the service user's home; secret-stripped child env.
+    if mind_tools::Coder::available() {
+        if let Ok(key) = std::env::var("MINIMAX_API_KEY") {
+            if !key.trim().is_empty() {
+                let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
+                let scratch = std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
+                eng = eng.with_coder(Arc::new(mind_tools::Coder::new(
+                    key, model, "https://api.minimax.io/anthropic", scratch,
+                )));
+            }
+        }
+    }
     eng
 }
 

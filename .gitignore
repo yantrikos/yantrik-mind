@@ -3,3 +3,12 @@ Cargo.lock
 evals_history.jsonl
 telegram_offset
 *.db
+
+# secret safety net (public repo)
+*.env
+keys*
+*.pem
+id_ed25519*
+id_rsa*
+*secret*
+*.key

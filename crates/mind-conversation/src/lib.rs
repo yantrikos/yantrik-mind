@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
-use mind_recipes::{ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{Fetcher, GithubClient, MailClient, Sandbox};
+use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
+use mind_tools::{Coder, Fetcher, GithubClient, MailClient, Sandbox, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -25,6 +25,46 @@ use mind_types::{
     MemoryFacade, MindError, Result, RiskLevel, Skill, WorkingSet,
 };
 use yantrik_ml::{ChatMessage, GenerationConfig};
+
+/// Parse a loose due expression ("tomorrow", "tonight", "next week", "in 3 days", "in 2 hours") to
+/// an absolute epoch-ms. None for null/empty/unparseable — the commitment still becomes an open task,
+/// just without an auto-reminder. Calendar dates + weekday names are a later refinement.
+fn parse_due(s: &str) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let (hour, day) = (3_600_000u64, 86_400_000u64);
+    let l = s.trim().to_lowercase();
+    match l.as_str() {
+        "" | "null" | "none" => return None,
+        "today" | "tonight" | "this evening" => return Some(now + 6 * hour),
+        "tomorrow" => return Some(now + day),
+        "next week" => return Some(now + 7 * day),
+        _ => {}
+    }
+    if let Some(rest) = l.strip_prefix("in ") {
+        let p: Vec<&str> = rest.split_whitespace().collect();
+        if p.len() >= 2 {
+            if let Ok(n) = p[0].parse::<u64>() {
+                let u = p[1];
+                if u.starts_with("min") {
+                    return Some(now + n * 60_000);
+                }
+                if u.starts_with("hour") {
+                    return Some(now + n * hour);
+                }
+                if u.starts_with("day") {
+                    return Some(now + n * day);
+                }
+                if u.starts_with("week") {
+                    return Some(now + n * 7 * day);
+                }
+            }
+        }
+    }
+    None
+}
 
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
@@ -51,10 +91,17 @@ pub struct ConversationEngine {
     researcher: Option<Arc<SubAgent>>,
     /// Code sandbox — when set, "run python/shell/rust …" executes in an isolated, no-network jail.
     sandbox: Option<Arc<Sandbox>>,
+    /// Agentic coder — when set, "code: X" / "write a script to X" dispatches Claude Code (on MiniMax)
+    /// in an isolated scratch dir with a secret-stripped env.
+    coder: Option<Arc<Coder>>,
+    /// Remote worker pool — when set, the mind can fan work out to the transferred LXCs over SSH.
+    workers: Option<Arc<WorkerPool>>,
     /// A vague deep-dive topic awaiting a scoping answer (clarify-before-research).
     pending_research: Mutex<Option<String>>,
     /// The last GREEN sandbox run (lang, code) — promotable into a saved skill.
     last_run: Mutex<Option<(CodeLang, String)>>,
+    /// Highest transcript id already distilled by `consolidate()` (the consolidation cursor).
+    last_consolidated: Mutex<i64>,
 }
 
 impl ConversationEngine {
@@ -73,8 +120,11 @@ impl ConversationEngine {
             recipes: None,
             researcher: None,
             sandbox: None,
+            coder: None,
+            workers: None,
             pending_research: Mutex::new(None),
             last_run: Mutex::new(None),
+            last_consolidated: Mutex::new(0),
         }
     }
 
@@ -176,6 +226,185 @@ impl ConversationEngine {
         self
     }
 
+    pub fn with_coder(mut self, coder: Arc<Coder>) -> Self {
+        self.coder = Some(coder);
+        self
+    }
+
+    pub fn with_workers(mut self, workers: Arc<WorkerPool>) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
+    /// Health + a quick parallel `nproc` across the worker pool (the `:workers` command).
+    pub async fn workers_status(&self) -> String {
+        let pool = match &self.workers {
+            Some(p) => p,
+            None => return "No worker pool configured (set YM_WORKERS).".into(),
+        };
+        let health = pool.health().await;
+        let up = health.iter().filter(|(_, ok)| *ok).count();
+        let mut s = format!("Worker pool: {}/{} up\n", up, health.len());
+        for (h, ok) in &health {
+            s.push_str(&format!("  {} {}\n", if *ok { "✓" } else { "✗" }, h));
+        }
+        let demo = pool.map("nproc", 8).await;
+        let cores = demo
+            .iter()
+            .map(|(h, r)| format!("{}={}", h.split('@').last().unwrap_or(h), r.as_deref().unwrap_or("?")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!("cores (parallel probe): {cores}"));
+        s
+    }
+
+    /// "watch my inbox for X" / "let me know when X emails" / "tell me when ... email ... X" → the
+    /// keyword/sender to monitor the inbox for. Persistent delegation: a WaitForCondition that polls
+    /// the inbox until a match, then pings you. Distinct from task reminders (this is a monitor).
+    fn parse_watch_request(text: &str) -> Option<String> {
+        let low = text.to_lowercase();
+        let is_monitor = (low.contains("watch")
+            || low.contains("let me know when")
+            || low.contains("tell me when")
+            || low.contains("notify me when")
+            || low.contains("ping me when"))
+            && (low.contains("inbox") || low.contains("email") || low.contains("mail"));
+        if !is_monitor {
+            return None;
+        }
+        for marker in [" for ", " from ", " about ", "when "] {
+            if let Some(idx) = low.find(marker) {
+                let mut tail = text[idx + marker.len()..].trim().trim_end_matches(['.', '!', '?']).trim();
+                for suf in [" emails", " arrives", " comes in", " shows up", " lands"] {
+                    tail = tail.strip_suffix(suf).unwrap_or(tail).trim();
+                }
+                if tail.len() >= 2 && !tail.eq_ignore_ascii_case("an email") && !tail.eq_ignore_ascii_case("email") {
+                    return Some(tail.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// True if the text is a monitor request ("watch …", "tell me when …", "monitor …").
+    fn is_monitor_verb(low: &str) -> bool {
+        low.contains("watch")
+            || low.contains("monitor")
+            || low.contains("let me know when")
+            || low.contains("tell me when")
+            || low.contains("notify me when")
+            || low.contains("ping me when")
+            || low.contains("keep an eye on")
+    }
+
+    /// Pull the watched-for target after a connective ("for"/"says"/"shows"/…). Trims trailing noise.
+    fn watch_target(text: &str, low: &str) -> Option<String> {
+        for marker in [" for ", " says ", " shows ", " contains ", " mentions ", " about ", " has ", " when it "] {
+            if let Some(idx) = low.find(marker) {
+                let t = text[idx + marker.len()..].trim().trim_end_matches(['.', '!', '?']).trim();
+                let t = t.strip_prefix("says ").or_else(|| t.strip_prefix("shows ")).unwrap_or(t).trim();
+                if t.len() >= 2 {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// "watch <url> for X" / "tell me when <url> says X" → (url, X). Monitors any web page.
+    fn parse_web_watch(text: &str) -> Option<(String, String)> {
+        let low = text.to_lowercase();
+        if !Self::is_monitor_verb(&low) {
+            return None;
+        }
+        let url = mind_tools::first_url(text)?;
+        let target = Self::watch_target(text, &low)?;
+        Some((url, target))
+    }
+
+    /// "watch my github for X" / "tell me when a PR about X" → X (no URL, github-ish words present).
+    fn parse_github_watch(text: &str) -> Option<String> {
+        let low = text.to_lowercase();
+        if !Self::is_monitor_verb(&low) {
+            return None;
+        }
+        let is_gh = low.contains("github") || low.contains("repo") || low.contains("pull request")
+            || low.contains(" pr ") || low.contains("issue") || low.contains("notification");
+        if !is_gh || mind_tools::first_url(text).is_some() {
+            return None;
+        }
+        Self::watch_target(text, &low)
+    }
+
+    /// "worker python: <code>" / "worker shell: <code>" → run code in a sandbox ON A WORKER (off the
+    /// main box). Distinct prefix from the local "run python:" path so both coexist.
+    fn parse_worker_run(text: &str) -> Option<(CodeLang, String)> {
+        let l = text.trim();
+        let low = l.to_lowercase();
+        for (pat, lang) in [
+            ("worker python:", CodeLang::Python),
+            ("worker shell:", CodeLang::Shell),
+            ("run python on a worker:", CodeLang::Python),
+            ("run shell on a worker:", CodeLang::Shell),
+        ] {
+            if let Some(idx) = low.find(pat) {
+                let code = l[idx + pat.len()..].trim().trim_matches('`').trim();
+                if !code.is_empty() {
+                    return Some((lang, code.to_string()));
+                }
+            }
+        }
+        None
+    }
+
+    /// "plan: X" / "task: X" / "automate X" / "set up a task to X" → a free-form goal for the NL
+    /// planner (authors + runs a recipe). Explicit prefixes keep it from swallowing ordinary chat.
+    fn parse_plan_request(text: &str) -> Option<String> {
+        let l = text.trim();
+        let low = l.to_lowercase();
+        for p in ["plan:", "task:", "automate:", "do this:", "set up:"] {
+            if let Some(rest) = low.strip_prefix(p) {
+                let g = l[l.len() - rest.len()..].trim();
+                if g.len() >= 3 {
+                    return Some(g.to_string());
+                }
+            }
+        }
+        for p in ["automate ", "set up a task to ", "set up a workflow to ", "set up a task that ", "set up a routine to "] {
+            if let Some(idx) = low.find(p) {
+                let g = l[idx + p.len()..].trim().trim_end_matches(['.', '!']).trim();
+                if g.len() >= 3 {
+                    return Some(g.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// "code: X" / "coder: X" / "write a script to X" / "build me a tool that X" → an agentic coding
+    /// task for Claude Code (on MiniMax). Distinct from "run python: …" (that's the raw sandbox).
+    fn parse_coder_request(text: &str) -> Option<String> {
+        let l = text.trim();
+        let low = l.to_lowercase();
+        for p in ["code:", "coder:", "claude code:"] {
+            if let Some(rest) = low.strip_prefix(p) {
+                let task = l[l.len() - rest.len()..].trim();
+                if !task.is_empty() {
+                    return Some(task.to_string());
+                }
+            }
+        }
+        let triggers = [
+            "write code to", "write a script", "write me a script", "write a program",
+            "build me a script", "build me a program", "build a script", "build a program",
+            "build a tool", "build me a tool", "code me a", "make a script", "make a program",
+        ];
+        if triggers.iter().any(|t| low.contains(t)) {
+            return Some(l.to_string());
+        }
+        None
+    }
+
     /// Extract the first ```fenced``` block → (info-string lowercased, code).
     fn fenced_code(text: &str) -> Option<(String, String)> {
         let start = text.find("```")?;
@@ -238,6 +467,9 @@ impl ConversationEngine {
             *self.pending.lock().unwrap() = Some(req);
             return format!("Drafted this email — reply \"yes\" to send:\n\nTo: {to}\nSubject: {subject}\n\n{body}");
         }
+        if out.sleeping_until.is_some() {
+            return "Set up — it'll run in the background and I'll message you when it does.".into();
+        }
         if let Some(e) = out.error {
             return format!("That didn't work: {e}");
         }
@@ -267,6 +499,24 @@ impl ConversationEngine {
         None
     }
 
+    /// "research and update X" / "update your knowledge on X" → (topic). The research→belief-revision
+    /// path: live findings reconcile against + revise prior typed beliefs. Checked FIRST.
+    fn wants_research_revise(text: &str) -> Option<String> {
+        let l = text.trim().to_lowercase();
+        for p in [
+            "research and update ", "research and revise ", "update your knowledge on ",
+            "update your beliefs on ", "refresh your knowledge on ", "fact-check and update ",
+        ] {
+            if let Some(idx) = l.find(p) {
+                let topic = text[idx + p.len()..].trim().trim_end_matches(['.', '?', '!']).trim();
+                if topic.len() >= 2 {
+                    return Some(topic.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// "deep dive on X" / "deep research X" / "thoroughly research X" → (topic). Checked BEFORE the
     /// single-agent research so the deeper, parallel path wins.
     fn wants_deep_research(text: &str) -> Option<String> {
@@ -286,6 +536,95 @@ impl ConversationEngine {
 
     /// Deep research: split the topic into sub-questions, run a sub-agent on each IN PARALLEL
     /// (fan-out), then synthesize. The visible payoff of the sub-agent + concurrency work.
+    /// RESEARCH → BELIEF REVISION (the moat's signature move). Recall what we already believe near the
+    /// topic, research it live (cited), reconcile findings vs priors, then ASSERT new facts AND REVISE
+    /// contradicted priors — negative evidence weakens the stale belief (Bayesian), the corrected one
+    /// is asserted (research-backed), and a contradiction edge is drawn. Every research run permanently
+    /// updates the typed model; flat-RAG companions can't do this.
+    pub async fn research_revise(&self, topic: &str) -> Result<String> {
+        let agent = match &self.researcher {
+            Some(a) => a,
+            None => return Ok("(no researcher configured)".into()),
+        };
+        // 1. what we already believe near this topic
+        let priors = self
+            .memory
+            .recall_typed(mind_types::RecallQuery { text: topic.to_string(), top_k: 6, kind: None })
+            .await
+            .unwrap_or_default();
+        let prior_list = if priors.is_empty() {
+            "(no prior beliefs on this)".to_string()
+        } else {
+            priors.iter().map(|r| format!("- {} (confidence {:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n")
+        };
+        // 2. research live (cited)
+        let res = agent.run(topic).await;
+        // 3. reconcile priors vs findings
+        let prompt = format!(
+            "PRIOR BELIEFS:\n{prior_list}\n\nLIVE RESEARCH FINDINGS:\n{}\n\n\
+             Reconcile the priors with the findings. Output ONLY JSON:\n\
+             {{\"facts\":[{{\"statement\":\"...\",\"certainty\":0.0-1.0}}], \
+             \"revisions\":[{{\"old\":\"<copy a prior belief above that is now contradicted/outdated>\",\"new\":\"<corrected third-person statement>\",\"certainty\":0.0-1.0}}]}}\n\
+             A REVISION is when a specific prior belief is now wrong/outdated (copy its text verbatim into \"old\"). FACTS are genuinely new third-person statements. Empty arrays if none.",
+            res.answer
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You reconcile prior beliefs with fresh research. Output ONLY the JSON object."),
+            ChatMessage::user(&prompt),
+        ];
+        let text = self.inference.chat(messages, GenerationConfig::default()).await.map_err(|e| MindError::Inference(e.to_string()))?.text;
+        let b = text.rsplit("</think>").next().unwrap_or(&text);
+        let b = b.split("```").find(|s| s.contains('{')).unwrap_or(b);
+        let obj = match (b.find('{'), b.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &b[s..=e],
+            _ => "{}",
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+
+        let mut report: Vec<String> = Vec::new();
+        for f in v.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let stmt = f.get("statement").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if stmt.len() < 6 {
+                continue;
+            }
+            let cert = f.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.7).clamp(0.1, 0.95);
+            if self
+                .memory
+                .remember_as_belief(BeliefAssertion { statement: stmt.clone(), polarity: 1.0, weight: 0.5 + cert * 1.5, source_event: Some("research".into()), provenance: "extracted".into() })
+                .await
+                .is_ok()
+            {
+                report.push(format!("📚 learned: {stmt}"));
+            }
+        }
+        for r in v.get("revisions").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let old = r.get("old").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let new = r.get("new").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if old.len() < 6 || new.len() < 6 {
+                continue;
+            }
+            let cert = r.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.8).clamp(0.1, 0.95);
+            let w = 0.5 + cert * 1.5;
+            // corrected belief (research-backed) + negative evidence weakening the stale one + a
+            // contradiction edge — a real Bayesian revision with an evidence trail.
+            let _ = self.memory.remember_as_belief(BeliefAssertion { statement: new.clone(), polarity: 1.0, weight: w, source_event: Some("research".into()), provenance: "extracted".into() }).await;
+            let _ = self.memory.remember_as_belief(BeliefAssertion { statement: old.clone(), polarity: -1.0, weight: w, source_event: Some("research".into()), provenance: "extracted".into() }).await;
+            let _ = self.memory.relate(&new, &old, "contradicts", 0.9).await;
+            report.push(format!("🔄 revised: \"{old}\" → \"{new}\""));
+        }
+
+        let mut out = if report.is_empty() {
+            format!("Researched \"{topic}\" — nothing changed in what I believe.")
+        } else {
+            format!("Researched \"{topic}\" and updated my memory:\n{}", report.join("\n"))
+        };
+        if !res.sources.is_empty() {
+            out.push_str(&format!("\n\nSources:\n{}", res.sources.iter().take(6).map(|s| format!("• {s}")).collect::<Vec<_>>().join("\n")));
+        }
+        Ok(out)
+    }
+
     async fn deep_research(&self, topic: &str) -> Result<String> {
         let agent = match &self.researcher {
             Some(a) => a,
@@ -392,6 +731,112 @@ impl ConversationEngine {
             Some(re) => re.resume_incomplete().await,
             None => 0,
         }
+    }
+
+    /// CONSOLIDATION — the moat's compounding loop. Distills new transcript turns into DURABLE typed
+    /// beliefs (provenance=consolidated, semantically recalled forever), then advances a cursor so it
+    /// never re-chews the same turns. This is what flat-RAG companions structurally can't do: instead
+    /// of truncating old context to oblivion (or summarizing to markdown), it grows a revisable typed
+    /// model of the user + world that grounds every future reply. Raw transcript is untouched
+    /// (provenance-preserving). Runs on the heartbeat; self-gates until enough new turns accrue.
+    pub async fn consolidate(&self) -> usize {
+        let after = *self.last_consolidated.lock().unwrap();
+        let msgs = match self.memory.messages_since(after, 40).await {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+        if msgs.len() < 6 {
+            return 0; // wait for enough new context to be worth an extraction call
+        }
+        let max_id = msgs.iter().map(|(id, _, _)| *id).max().unwrap_or(after);
+        let transcript: String = msgs.iter().map(|(_, r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
+
+        // ONE pass extracts both halves of typed memory: durable FACTS (-> beliefs) and the user's
+        // future COMMITMENTS (-> tasks with a due date, which the reminder loop delivers).
+        let prompt = format!(
+            "From this conversation excerpt, extract two things:\n\
+             1. DURABLE facts/preferences about the user and their world (long-term, reusable).\n\
+             2. The user's future COMMITMENTS or intentions, with any deadline mentioned.\n\
+             Skip greetings, ephemera, and transient chatter. Output ONLY JSON:\n\
+             {{\"beliefs\":[{{\"statement\":\"...\",\"certainty\":0.0-1.0}}], \
+             \"commitments\":[{{\"task\":\"...\",\"due\":\"tomorrow|tonight|next week|in 3 days|in 2 hours|null\"}}]}}\n\
+             Statements are standalone + third-person (e.g. \"Pranab prefers terse replies\"). Tasks are \
+             imperative (e.g. \"send Pranab the Q3 report\"). Use empty arrays if none.\n\nCONVERSATION:\n{transcript}"
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You distill conversations into durable typed memory + future commitments. Output ONLY the JSON object."),
+            ChatMessage::user(&prompt),
+        ];
+        let text = match self.inference.chat(messages, GenerationConfig::default()).await {
+            Ok(r) => r.text,
+            Err(_) => return 0,
+        };
+        // Robust object extraction (tolerates <think> preambles + ```json fences).
+        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+        let obj = match (body.find('{'), body.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &body[s..=e],
+            _ => "{}",
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+
+        let mut count = 0usize;
+        // (1) durable beliefs — revisable, write-gated, belief-keyed (dedupe+reinforce), contradictable.
+        for item in v.get("beliefs").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let stmt = item.get("statement").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if stmt.len() < 6 {
+                continue;
+            }
+            let cert = item.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.6).clamp(0.1, 0.95);
+            if self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: stmt,
+                    polarity: 1.0,
+                    weight: 0.5 + cert * 1.5,
+                    source_event: Some("consolidation".into()),
+                    provenance: "consolidated".into(),
+                })
+                .await
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        // (2) commitments -> tasks with a resolve-by; the reminder loop pings them when due. They also
+        // ride into the working-set as commitments (grounding). Open-ended ones still become tasks.
+        for item in v.get("commitments").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let task = item.get("task").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if task.len() < 4 {
+                continue;
+            }
+            let due = item.get("due").and_then(|x| x.as_str()).and_then(parse_due);
+            if self.memory.add_task(&task, "medium", due).await.is_ok() {
+                count += 1;
+            }
+        }
+        *self.last_consolidated.lock().unwrap() = max_id;
+        count
+    }
+
+    /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
+    /// they surfaced (the caller delivers these to the home channel). Called on the heartbeat.
+    pub async fn tick_delegations(&self) -> Vec<String> {
+        let recipes = match &self.recipes {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        recipes
+            .resume_due(now)
+            .await
+            .into_iter()
+            .flat_map(|o| o.notifications)
+            .collect()
     }
 
     /// Give the mind read-only web browsing.
@@ -1113,6 +1558,13 @@ impl ConversationEngine {
                     return Ok(reply);
                 }
             }
+            // Research → belief revision: findings reconcile against + revise prior typed beliefs.
+            if let Some(topic) = Self::wants_research_revise(user_text) {
+                let reply = self.research_revise(&topic).await?;
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
             if let Some(topic) = Self::wants_deep_research(user_text) {
                 // Clarify-before-research: a thin topic gets one scoping question first.
                 if Self::is_vague_topic(&topic) {
@@ -1149,6 +1601,120 @@ impl ConversationEngine {
             let _ = self.memory.append_message("user", user_text).await;
             let _ = self.memory.append_message("assistant", &reply).await;
             return Ok(reply);
+        }
+        // Persistent delegation — MONITOR a source until a match, then ping (woken by the heartbeat
+        // tick). Sources: any web page (URL), GitHub, or the inbox. Read/monitor only (no actions).
+        if let Some(recipes) = &self.recipes {
+            let monitor: Option<(&str, &str, serde_json::Value, &str, String)> = Self::parse_web_watch(user_text)
+                .map(|(url, t)| ("web page", "fetch", serde_json::json!({ "url": url }), "page", t))
+                .or_else(|| {
+                    Self::parse_github_watch(user_text)
+                        .map(|t| ("GitHub", "github", serde_json::json!({ "limit": 15 }), "github", t))
+                })
+                .or_else(|| {
+                    Self::parse_watch_request(user_text)
+                        .map(|t| ("inbox", "inbox", serde_json::json!({ "limit": 10 }), "inbox", t))
+                });
+            if let Some((label, tool, args, var, target)) = monitor {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let rec = Recipe {
+                    id: "watch".into(),
+                    name: format!("watch {label}: {target}"),
+                    steps: vec![
+                        RecipeStep::WaitForCondition {
+                            tool_name: tool.into(),
+                            args,
+                            store_as: var.into(),
+                            condition: Condition::VarContains { var: var.into(), substring: target.clone() },
+                            poll_secs: 120,
+                            expire_ms: now + 24 * 3600 * 1000,
+                        },
+                        RecipeStep::Notify { message: format!("📡 Heads up — the {label} now matches \"{target}\".") },
+                    ],
+                };
+                let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                let reply = if out.sleeping_until.is_some() {
+                    format!("Watching the {label} for \"{target}\" — I'll ping you when it matches (every ~2 min, up to 24h).")
+                } else if !out.notifications.is_empty() {
+                    out.notifications.join("\n")
+                } else {
+                    format!("Couldn't start watching ({}).", out.error.unwrap_or_else(|| "tool unavailable".into()))
+                };
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
+        }
+        // Agentic coder: "code: X" / "write a script to X" → Claude Code on MiniMax. Prefer a WORKER
+        // (off the main box; the pool round-robins so concurrent code: requests run in parallel);
+        // fall back to the local isolated coder. Either way it's a generator — running stays sandboxed.
+        if self.coder.is_some() || self.workers.is_some() {
+            if let Some(task) = Self::parse_coder_request(user_text) {
+                let reply = if let Some(workers) = &self.workers {
+                    match workers.run_coder(&task, "MiniMax-M2", 260).await {
+                        Ok(out) => out,
+                        Err(e) => match &self.coder {
+                            Some(c) => match c.run(&task).await {
+                                Ok(r) => format!("(worker busy: {e}) — coded locally:\n\n{}", mind_tools::render_coder(&r)),
+                                Err(e2) => format!("Coder failed (worker: {e}; local: {e2})"),
+                            },
+                            None => format!("Worker coder failed: {e}"),
+                        },
+                    }
+                } else {
+                    match self.coder.as_ref().unwrap().run(&task).await {
+                        Ok(r) => format!("Coded it (Claude Code on MiniMax, isolated scratch):\n\n{}", mind_tools::render_coder(&r)),
+                        Err(e) => format!("Coder run failed: {e}"),
+                    }
+                };
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
+        }
+        // NL PLANNER: "plan: X" / "task: X" / "automate X" → the LLM authors a recipe (tools +
+        // delegation + gated actions) and runs it under an effect budget. Outward steps stay
+        // harm-gated + confirmation-required; handle_recipe_outcome parks any pause/sleep.
+        if let Some(recipes) = &self.recipes {
+            if let Some(goal) = Self::parse_plan_request(user_text) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let reply = match recipes.plan(&goal, now).await {
+                    Some(steps) => {
+                        let rec = Recipe { id: "planned".into(), name: format!("plan: {goal}"), steps };
+                        let mut vars = std::collections::HashMap::new();
+                        vars.insert("__effect_budget".into(), serde_json::Value::from(2i64));
+                        self.handle_recipe_outcome(recipes.run_with(&rec, vars).await)
+                    }
+                    None => "I couldn't turn that into a runnable plan — try rephrasing the goal, or give me a direct command.".to_string(),
+                };
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
+        }
+        // Worker offload: "worker python: X" runs in a sandbox ON A WORKER (off the main box; the
+        // pool round-robins, so concurrent requests spread across machines). Local sandbox unchanged.
+        if let Some(workers) = &self.workers {
+            if let Some((lang, code)) = Self::parse_worker_run(user_text) {
+                let lang_s = match lang {
+                    CodeLang::Python => "python",
+                    CodeLang::Shell => "shell",
+                    CodeLang::Rust => "rust",
+                };
+                let reply = match workers.run_sandboxed(lang_s, &code, 25).await {
+                    Ok(out) => format!("Ran it on a worker (isolated, no network):\n\n{out}"),
+                    Err(e) => format!("Worker run failed: {e}"),
+                };
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
         }
         // Code sandbox: "run python/shell/rust …" → isolated, no-network execution.
         if let Some(sb) = &self.sandbox {
@@ -1460,6 +2026,107 @@ mod tests {
         let p = scripted.last_prompt();
         assert!(p.contains("BRIEFMAIL") && p.contains("BRIEFGH"), "briefing must compose both sources:\n{p}");
         assert!(p.contains("NOT instructions"), "briefing data must be untrusted-wrapped:\n{p}");
+    }
+
+    #[test]
+    fn watch_request_parsing() {
+        assert_eq!(ConversationEngine::parse_watch_request("watch my inbox for the acme contract").as_deref(), Some("the acme contract"));
+        assert_eq!(ConversationEngine::parse_watch_request("let me know when bob@x.com emails").as_deref(), Some("bob@x.com"));
+        assert_eq!(ConversationEngine::parse_watch_request("tell me when an email from finance arrives").as_deref(), Some("finance"));
+        // not a monitor request
+        assert!(ConversationEngine::parse_watch_request("watch the game tonight").is_none());
+        assert!(ConversationEngine::parse_watch_request("what's in my inbox").is_none());
+    }
+
+    #[test]
+    fn web_and_github_watch_parsing() {
+        let (url, t) = ConversationEngine::parse_web_watch("watch https://shop.com/item for back in stock").unwrap();
+        assert_eq!(url, "https://shop.com/item");
+        assert_eq!(t, "back in stock");
+        assert_eq!(ConversationEngine::parse_web_watch("tell me when https://x.io says SOLD OUT").unwrap().1, "SOLD OUT");
+        // github (no url) routes to the github monitor
+        assert_eq!(ConversationEngine::parse_github_watch("watch my github for auth").as_deref(), Some("auth"));
+        // a URL present → NOT a github watch (web takes it)
+        assert!(ConversationEngine::parse_github_watch("watch https://github.com/x/y for releases").is_none());
+        // plain chat → nothing
+        assert!(ConversationEngine::parse_web_watch("what's on that website").is_none());
+    }
+
+    #[test]
+    fn parse_due_handles_common_expressions() {
+        assert!(parse_due("null").is_none());
+        assert!(parse_due("").is_none());
+        assert!(parse_due("sometime").is_none());
+        assert!(parse_due("tomorrow").is_some());
+        assert!(parse_due("in 3 days").is_some());
+        assert!(parse_due("in 2 hours").is_some());
+        assert!(parse_due("next week").unwrap() > parse_due("tomorrow").unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn consolidation_distills_beliefs_and_commitments() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let extracted = r#"{"beliefs":[{"statement":"Pranab prefers terse replies","certainty":0.9}],"commitments":[{"task":"send Pranab the Q3 report","due":"in 2 days"}]}"#;
+        let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new(extracted)) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            memarc.append_message(role, &format!("message {i} about preferences and plans")).await.unwrap();
+        }
+        let n = conv.consolidate().await;
+        assert_eq!(n, 2, "1 durable belief + 1 commitment");
+        // the belief is recallable
+        let r = memarc
+            .recall_typed(mind_types::RecallQuery { text: "terse replies".into(), top_k: 5, kind: None })
+            .await
+            .unwrap();
+        assert!(r.iter().any(|x| x.item.text.contains("terse")), "consolidated belief must be recallable");
+        // the commitment became an open task with a due date (the reminder loop will deliver it)
+        let tasks = memarc.list_tasks(false).await.unwrap();
+        assert!(
+            tasks.iter().any(|t| t.description.contains("Q3 report") && t.due_ms.is_some()),
+            "commitment must become a due-dated task: {:?}",
+            tasks.iter().map(|t| &t.description).collect::<Vec<_>>()
+        );
+        // cursor advanced — no new turns means no re-processing
+        assert_eq!(conv.consolidate().await, 0, "cursor must prevent re-chewing the same turns");
+    }
+
+    #[test]
+    fn plan_request_parsing() {
+        assert_eq!(ConversationEngine::parse_plan_request("plan: summarize my inbox and email me").as_deref(), Some("summarize my inbox and email me"));
+        assert_eq!(ConversationEngine::parse_plan_request("task: watch the news for AI").as_deref(), Some("watch the news for AI"));
+        assert_eq!(ConversationEngine::parse_plan_request("automate my morning routine").as_deref(), Some("my morning routine"));
+        assert!(ConversationEngine::parse_plan_request("what's the plan for today").is_none());
+        assert!(ConversationEngine::parse_plan_request("hello there").is_none());
+    }
+
+    #[test]
+    fn research_revise_parsing() {
+        assert_eq!(ConversationEngine::wants_research_revise("research and update the latest rust version").as_deref(), Some("the latest rust version"));
+        assert_eq!(ConversationEngine::wants_research_revise("update your knowledge on rust releases").as_deref(), Some("rust releases"));
+        assert!(ConversationEngine::wants_research_revise("research the latest rust").is_none(), "plain research is not a revise");
+    }
+
+    #[test]
+    fn worker_run_parsing() {
+        assert_eq!(ConversationEngine::parse_worker_run("worker python: print(6*7)").unwrap().0, CodeLang::Python);
+        assert_eq!(ConversationEngine::parse_worker_run("worker python: print(6*7)").unwrap().1, "print(6*7)");
+        assert_eq!(ConversationEngine::parse_worker_run("worker shell: uname -a").unwrap().0, CodeLang::Shell);
+        assert!(ConversationEngine::parse_worker_run("run python: print(1)").is_none(), "local run is not a worker run");
+        assert!(ConversationEngine::parse_worker_run("what are my workers").is_none());
+    }
+
+    #[test]
+    fn coder_request_parsing() {
+        assert_eq!(ConversationEngine::parse_coder_request("code: build a CSV deduper").as_deref(), Some("build a CSV deduper"));
+        assert_eq!(ConversationEngine::parse_coder_request("write a script to rename files by date").as_deref(),
+            Some("write a script to rename files by date"));
+        assert!(ConversationEngine::parse_coder_request("build me a tool that scrapes a sitemap").is_some());
+        // raw sandbox runs are NOT coder tasks (they go to the sandbox path)
+        assert!(ConversationEngine::parse_coder_request("run python: print(1)").is_none());
+        assert!(ConversationEngine::parse_coder_request("what's the weather").is_none());
     }
 
     #[test]

@@ -24,6 +24,12 @@ pub use search::{render_search, DdgSearch, ScriptedSearch, SearchHit, WebSearch}
 pub mod sandbox;
 pub use sandbox::{ExecResult, Limits, Sandbox};
 
+pub mod coder;
+pub use coder::{render_coder, Coder, CoderResult};
+
+pub mod workers;
+pub use workers::WorkerPool;
+
 pub mod github;
 pub use github::{
     render_github_digest, ApiGithubClient, GithubClient, GithubNotification, GithubWriter,

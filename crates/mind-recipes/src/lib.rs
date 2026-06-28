@@ -72,6 +72,20 @@ pub enum RecipeStep {
     /// harm-gate + ActionRuntime: Execute runs it; RequireConfirmation pauses the recipe for a yes;
     /// Deny fails it. Non-idempotent — never blind-rerun on recovery.
     Act { kind: String, target: String, summary: String, payload: String },
+    /// PERSISTENT DELEGATION (time): sleep until an absolute epoch-ms, then continue. The run is
+    /// persisted as `sleeping`; the tick (`resume_due`) wakes it when the time has passed.
+    WaitUntil { until_ms: u64 },
+    /// PERSISTENT DELEGATION (condition): poll a read tool every `poll_secs` until `condition` holds
+    /// on its stored result (then continue), giving up at `expire_ms` (then fail). Each poll sleeps
+    /// the run; the tick re-polls. read/monitor only — the doing is later, harm-gated, `Act` steps.
+    WaitForCondition {
+        tool_name: String,
+        args: Value,
+        store_as: String,
+        condition: Condition,
+        poll_secs: u64,
+        expire_ms: u64,
+    },
 }
 
 impl RecipeStep {
@@ -187,6 +201,9 @@ pub struct RunOutcome {
     pub pending_action: Option<ActionRequest>,
     /// A clarifying question the recipe paused on — answer via `resume_with_answer(run_id, ..)`.
     pub pending_question: Option<PendingQuestion>,
+    /// The recipe is SLEEPING on a WaitUntil/WaitForCondition step until this epoch-ms; the tick
+    /// (`resume_due`) wakes it. `None` for a non-sleeping outcome.
+    pub sleeping_until: Option<u64>,
     pub vars: HashMap<String, Value>,
 }
 
@@ -206,6 +223,8 @@ enum StepResult {
     Pending(ActionRequest),
     /// An AskUser step — pause the recipe and surface the question.
     Ask(String),
+    /// A WaitUntil/WaitForCondition step — pause the recipe; wake at this epoch-ms (the tick resumes).
+    Sleep(u64),
 }
 
 /// How a step failure was resolved by its `ErrorAction`.
@@ -269,8 +288,50 @@ impl RecipeEngine {
     }
 
     pub async fn run(&self, recipe: &Recipe) -> RunOutcome {
+        self.run_with(recipe, HashMap::new()).await
+    }
+
+    /// Start a run with initial vars — how a DELEGATED run is created: seed `__effect_budget` (cap on
+    /// outward actions) and any inputs before the first step. The intent hash is stamped from the
+    /// recipe's `Act` steps on first run and re-validated on every later resume.
+    pub async fn run_with(&self, recipe: &Recipe, vars: HashMap<String, Value>) -> RunOutcome {
         let id = format!("{}-{}", recipe.id, now_ms());
-        self.run_from(&id, &recipe.name, recipe.steps.clone(), 0, HashMap::new()).await
+        self.run_from(&id, &recipe.name, recipe.steps.clone(), 0, vars).await
+    }
+
+    /// THE PLANNER — author a runnable recipe from a free-form goal. The LLM emits a JSON array of
+    /// `RecipeStep` over a constrained menu + the read tools (same shape Replan already produces, so
+    /// this reuses the proven authoring path). The planner only PROPOSES: outward `Act` steps are
+    /// still harm-gated, confirmation-required, and effect-budget-capped when the recipe runs.
+    /// Returns `None` if the model produced nothing parseable.
+    pub async fn plan(&self, goal: &str, now_ms: u64) -> Option<Vec<RecipeStep>> {
+        // A raw template (literal JSON braces + `{{var}}` placeholders) with simple text tokens we
+        // substitute — avoids `format!` brace-escaping entirely.
+        let template = r#"Turn the GOAL into a runnable recipe: a JSON array of RecipeStep (externally-tagged JSON).
+Read tools available for Tool / WaitForCondition steps: inbox, github, web_search, fetch, recall, due_tasks.
+Step types:
+- {"Tool":{"tool_name":"web_search","args":{"query":"..."},"store_as":"hits"}}
+- {"Tool":{"tool_name":"fetch","args":{"url":"https://..."},"store_as":"page"}}
+- {"Think":{"prompt":"summarize {{hits}}","store_as":"answer"}}
+- {"Notify":{"message":"{{answer}}"}}
+- {"WaitForCondition":{"tool_name":"inbox","args":{"limit":10},"store_as":"inbox","condition":{"op":"VarContains","var":"inbox","substring":"keyword"},"poll_secs":120,"expire_ms":NOW_MS}}
+- {"WaitUntil":{"until_ms":NOW_MS}}
+- {"Act":{"kind":"send_email","target":"addr","summary":"subject","payload":"body"}}
+RULES: prefer read -> Think -> Notify. Reference an earlier step's result by its store_as in double-brace placeholders (see Think/Notify). Use Act ONLY if the goal clearly wants an OUTWARD action; it will require the user's confirmation. End with a Notify that reports the result. Keep it under 6 steps. Current epoch ms = NOW_MS; for any time or expiry use that number plus an offset in ms. Output ONLY the JSON array — no prose, no code fences.
+GOAL: GOAL_HERE"#;
+        let prompt = template.replace("NOW_MS", &now_ms.to_string()).replace("GOAL_HERE", goal);
+        let messages = vec![
+            ChatMessage::system("You are JARVIS's task planner. Output ONLY a JSON array of RecipeStep."),
+            ChatMessage::user(&prompt),
+        ];
+        // Reasoning models burn tokens on a preamble before the JSON, so give generous headroom.
+        let cfg = GenerationConfig { max_tokens: 8000, ..GenerationConfig::default() };
+        let resp = self.inference.chat(messages, cfg).await.ok()?;
+        let arr = extract_recipe_json(&resp.text);
+        match serde_json::from_str::<Vec<RecipeStep>>(&arr) {
+            Ok(steps) if !steps.is_empty() => Some(steps),
+            _ => None,
+        }
     }
 
     /// Recover runs left mid-flight by a crash. Idempotent steps are re-run from where they stopped;
@@ -295,6 +356,37 @@ impl RecipeEngine {
         resumed
     }
 
+    /// PERSISTENT-DELEGATION TICK: wake every sleeping run whose wake time has passed. Call this on
+    /// the scheduler heartbeat. Before resuming, each run re-validates its authorized-intent hash —
+    /// a changed set of `Act` steps parks it as `needs_confirmation` instead of executing (so a
+    /// long-delegated task can't drift into doing something different from what was authorized).
+    pub async fn resume_due(&self, now_ms: u64) -> Vec<RunOutcome> {
+        let store = match &self.store {
+            Some(s) => s.clone(),
+            None => return Vec::new(),
+        };
+        let mut outcomes = Vec::new();
+        for rec in store.due_sleeping(now_ms) {
+            let stamped = rec.vars.get("__intent_hash").and_then(|v| v.as_i64());
+            if stamped != Some(intent_hash(&rec.steps)) {
+                store.set_status(
+                    &rec.id,
+                    "needs_confirmation",
+                    Some("intent changed since delegation — awaiting re-confirmation"),
+                    now_ms,
+                );
+                continue;
+            }
+            // WaitUntil's wait is satisfied by the due check → step past it. WaitForCondition re-polls.
+            let resume_at = match rec.steps.get(rec.current_step) {
+                Some(RecipeStep::WaitUntil { .. }) => rec.current_step + 1,
+                _ => rec.current_step,
+            };
+            outcomes.push(self.run_from(&rec.id, &rec.name, rec.steps, resume_at, rec.vars).await);
+        }
+        outcomes
+    }
+
     /// Resume a recipe that paused on an `AskUser` step, binding the user's answer + continuing.
     pub async fn resume_with_answer(&self, run_id: &str, answer: &str) -> RunOutcome {
         let empty = || RunOutcome {
@@ -304,6 +396,7 @@ impl RecipeEngine {
             failure_learnings: vec![],
             pending_action: None,
             pending_question: None,
+            sleeping_until: None,
             vars: HashMap::new(),
         };
         let store = match &self.store {
@@ -350,12 +443,17 @@ impl RecipeEngine {
                 );
             }
         };
+        // Stamp the authorized-intent hash once; delegated runs re-validate it on each resume so a
+        // mutated set of outward (Act) steps can never silently execute after a wait.
+        if !vars.contains_key("__intent_hash") {
+            vars.insert("__intent_hash".into(), Value::from(intent_hash(&steps)));
+        }
         persist("running", i, &steps, &vars, None);
         while i < steps.len() {
             guard += 1;
             if guard > 1000 {
                 persist("failed", i, &steps, &vars, Some("step budget exceeded"));
-                return RunOutcome { ok: false, error: Some("step budget exceeded".into()), notifications, failure_learnings, pending_action: None, pending_question: None, vars };
+                return RunOutcome { ok: false, error: Some("step budget exceeded".into()), notifications, failure_learnings, pending_action: None, pending_question: None, sleeping_until: None, vars };
             }
             let step = steps[i].clone();
             match self.execute_step(&step, &mut vars).await {
@@ -368,13 +466,20 @@ impl RecipeEngine {
                 StepResult::Pending(req) => {
                     // Pause here: the action needs the user's confirmation before it runs.
                     persist("waiting", i, &steps, &vars, None);
-                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: Some(req), pending_question: None, vars };
+                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: Some(req), pending_question: None, sleeping_until: None, vars };
                 }
                 StepResult::Ask(question) => {
                     // Pause here: wait for the user's free-form answer (resume_with_answer binds it).
                     persist("waiting", i, &steps, &vars, None);
                     let pq = PendingQuestion { run_id: id.to_string(), question };
-                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: Some(pq), vars };
+                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: Some(pq), sleeping_until: None, vars };
+                }
+                StepResult::Sleep(wake_at) => {
+                    // Persistent delegation: park the run until `wake_at`; the tick (`resume_due`)
+                    // wakes it. The wait step re-evaluates on resume (WaitForCondition re-polls).
+                    vars.insert("__wake_at".into(), Value::from(wake_at));
+                    persist("sleeping", i, &steps, &vars, None);
+                    return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: None, sleeping_until: Some(wake_at), vars };
                 }
                 StepResult::Failed(e) => {
                     match self.handle_error(i, &e, &step.on_error(), &mut vars, &mut steps, &mut failure_learnings).await {
@@ -383,7 +488,7 @@ impl RecipeEngine {
                         ErrorResolution::JumpTo(t) => i = t,
                         ErrorResolution::Abort => {
                             persist("failed", i, &steps, &vars, Some(&e));
-                            return RunOutcome { ok: false, error: Some(e), notifications, failure_learnings, pending_action: None, pending_question: None, vars };
+                            return RunOutcome { ok: false, error: Some(e), notifications, failure_learnings, pending_action: None, pending_question: None, sleeping_until: None, vars };
                         }
                     }
                 }
@@ -392,7 +497,7 @@ impl RecipeEngine {
             persist("running", i, &steps, &vars, None);
         }
         persist("done", i, &steps, &vars, None);
-        RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: None, vars }
+        RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: None, sleeping_until: None, vars }
     }
 
     /// Resolve a step failure per its `ErrorAction`. `Replan` asks the LLM to rewrite the tail.
@@ -540,6 +645,14 @@ impl RecipeEngine {
             RecipeStep::Notify { message } => StepResult::Notify(resolve_vars(message, vars)),
             RecipeStep::AskUser { question, .. } => StepResult::Ask(resolve_vars(question, vars)),
             RecipeStep::Act { kind, target, summary, payload } => {
+                // Effect-budget: a delegated run carries a cap on outward actions. Replan can't expand
+                // it (the counter lives in vars, preserved across replans/resumes).
+                if let Some(b) = vars.get("__effect_budget").and_then(|v| v.as_i64()) {
+                    if b <= 0 {
+                        return StepResult::Failed("effect budget exhausted".into());
+                    }
+                    vars.insert("__effect_budget".into(), Value::from(b - 1));
+                }
                 let runtime = match &self.runtime {
                     Some(r) => r,
                     None => return StepResult::Failed("no action runtime configured for Act step".into()),
@@ -571,6 +684,30 @@ impl RecipeEngine {
                     },
                 }
             }
+            RecipeStep::WaitUntil { until_ms } => {
+                if now_ms() >= *until_ms {
+                    StepResult::Continue
+                } else {
+                    StepResult::Sleep(*until_ms)
+                }
+            }
+            RecipeStep::WaitForCondition { tool_name, args, store_as, condition, poll_secs, expire_ms } => {
+                if now_ms() >= *expire_ms {
+                    return StepResult::Failed(format!("WaitForCondition expired before '{store_as}' held"));
+                }
+                match self.host.call_tool(tool_name, args).await {
+                    Ok(out) => {
+                        vars.insert(store_as.clone(), Value::String(out));
+                    }
+                    Err(e) => return StepResult::Failed(format!("monitor tool '{tool_name}' failed: {e}")),
+                }
+                if condition.evaluate(vars) {
+                    StepResult::Continue
+                } else {
+                    let wake = now_ms().saturating_add(poll_secs.saturating_mul(1000));
+                    StepResult::Sleep(wake.min(*expire_ms))
+                }
+            }
         }
     }
 }
@@ -588,6 +725,55 @@ fn parse_cited(raw: &str) -> CitedOutput {
         }
     }
     CitedOutput::default()
+}
+
+/// A stable hash of a run's authorized OUTWARD intent — the (kind,target,summary) of its `Act`
+/// steps. FNV-1a (deterministic across processes, unlike the std hasher's per-process seed) so a
+/// run can stamp it at creation and re-validate it after a restart. 0 when there are no Act steps.
+fn intent_hash(steps: &[RecipeStep]) -> i64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    let mut feed = |s: &str| {
+        for b in s.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime
+        }
+    };
+    for s in steps {
+        if let RecipeStep::Act { kind, target, summary, .. } = s {
+            feed(kind);
+            feed("\x1f");
+            feed(target);
+            feed("\x1f");
+            feed(summary);
+            feed("\x1e");
+        }
+    }
+    h as i64
+}
+
+/// Robustly pull a JSON array out of a planner/LLM reply that may include a reasoning preamble
+/// (`<think>…</think>`, which can itself contain `[`) and/or a ```json fence. Drops the think block,
+/// prefers fenced content, then slices the first `[` to the last `]`.
+fn extract_recipe_json(text: &str) -> String {
+    let mut t = text;
+    if let Some(idx) = t.rfind("</think>") {
+        t = &t[idx + "</think>".len()..];
+    }
+    // Prefer the contents of the first fenced block, if any.
+    let body = if let Some(start) = t.find("```") {
+        let after = &t[start + 3..];
+        let after = after.strip_prefix("json").or_else(|| after.strip_prefix("JSON")).unwrap_or(after);
+        let after = after.trim_start_matches(['\n', '\r', ' ']);
+        after.split("```").next().unwrap_or(after)
+    } else {
+        t
+    };
+    if let (Some(s), Some(e)) = (body.find('['), body.rfind(']')) {
+        if e > s {
+            return body[s..=e].to_string();
+        }
+    }
+    "[]".to_string()
 }
 
 /// Extract the first [...] JSON array from an LLM response (lenient).
@@ -905,5 +1091,162 @@ mod tests {
         let out = engine(llm).run(&morning_briefing()).await;
         assert!(out.vars.get("inbox").and_then(|v| v.as_str()).unwrap().contains("boss@acme.com"));
         assert!(out.vars.get("github").and_then(|v| v.as_str()).unwrap().contains("PR #8"));
+    }
+
+    // ── persistent delegation ──────────────────────────────────────────────────────────────────
+
+    /// A condition tool whose answer flips from "pending" to "ready" — to drive WaitForCondition.
+    struct FlipHost {
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait]
+    impl RecipeHost for FlipHost {
+        async fn call_tool(&self, _tool: &str, _args: &Value) -> anyhow::Result<String> {
+            Ok(if self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                "STATUS: ready".into()
+            } else {
+                "STATUS: pending".into()
+            })
+        }
+    }
+
+    /// WaitUntil parks the run until its time, then the tick (`resume_due`) wakes it and it continues.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wait_until_sleeps_then_resumes_on_tick() {
+        let store = Arc::new(RecipeStore::open(&temp_db("waituntil")).unwrap());
+        let eng = plain_engine_with_store(store.clone());
+        let future = now_ms() + 60_000;
+        let rec = Recipe {
+            id: "wu".into(),
+            name: "wu".into(),
+            steps: vec![
+                RecipeStep::WaitUntil { until_ms: future },
+                RecipeStep::Notify { message: "awake".into() },
+            ],
+        };
+        let out = eng.run(&rec).await;
+        assert_eq!(out.sleeping_until, Some(future), "should sleep until the target time");
+        assert!(out.notifications.is_empty(), "must not run past the wait yet");
+
+        assert!(eng.resume_due(future - 1).await.is_empty(), "not due yet → no resume");
+        let woke = eng.resume_due(future + 1).await;
+        assert_eq!(woke.len(), 1, "due now → resumes exactly one run");
+        assert!(woke[0].notifications.iter().any(|n| n == "awake"), "runs the step after the wait");
+    }
+
+    /// WaitForCondition re-polls each tick; stays asleep while false, continues once true.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wait_for_condition_polls_until_true() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let store = Arc::new(RecipeStore::open(&temp_db("wfc")).unwrap());
+        let ready = Arc::new(AtomicBool::new(false));
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+        let eng = RecipeEngine::new(pool, Arc::new(FlipHost { ready: ready.clone() }), "JARVIS")
+            .with_store(store.clone());
+        let rec = Recipe {
+            id: "wfc".into(),
+            name: "wfc".into(),
+            steps: vec![
+                RecipeStep::WaitForCondition {
+                    tool_name: "status".into(),
+                    args: serde_json::json!({}),
+                    store_as: "st".into(),
+                    condition: Condition::VarContains { var: "st".into(), substring: "ready".into() },
+                    poll_secs: 30,
+                    expire_ms: now_ms() + 3_600_000,
+                },
+                RecipeStep::Notify { message: "condition met".into() },
+            ],
+        };
+        let out = eng.run(&rec).await;
+        assert!(out.sleeping_until.is_some(), "condition false → sleeps");
+        assert!(out.notifications.is_empty());
+
+        // Still false: a tick re-polls and sleeps again.
+        let w1 = eng.resume_due(now_ms() + 10_000_000).await;
+        assert_eq!(w1.len(), 1);
+        assert!(w1[0].sleeping_until.is_some(), "still pending → sleeps again");
+
+        // Flip true: the next tick re-polls and the run completes.
+        ready.store(true, Ordering::SeqCst);
+        let w2 = eng.resume_due(now_ms() + 20_000_000).await;
+        assert_eq!(w2.len(), 1);
+        assert!(w2[0].notifications.iter().any(|n| n == "condition met"), "condition true → runs the step");
+    }
+
+    /// A delegated run whose stored `Act` steps were altered after delegation must NOT execute on
+    /// resume — it parks as `needs_confirmation` (intent-hash re-validation).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn intent_hash_mismatch_parks_for_confirmation() {
+        let store = Arc::new(RecipeStore::open(&temp_db("intent")).unwrap());
+        let executed = Arc::new(Mutex::new(0u32));
+        let rt: Arc<dyn ActionRuntime> = Arc::new(FakeRuntime { decision: ActionDecision::Execute, executed: executed.clone() });
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+        let eng = RecipeEngine::new(pool, Arc::new(ScriptedHost), "JARVIS").with_runtime(rt).with_store(store.clone());
+        let future = now_ms() + 60_000;
+        let rec = Recipe {
+            id: "ih".into(),
+            name: "ih".into(),
+            steps: vec![
+                RecipeStep::WaitUntil { until_ms: future },
+                RecipeStep::Act { kind: "send_email".into(), target: "a@b.com".into(), summary: "hi".into(), payload: "p".into() },
+            ],
+        };
+        let out = eng.run_with(&rec, HashMap::new()).await;
+        assert!(out.sleeping_until.is_some());
+
+        // Tamper the stored Act target, keeping status=sleeping + the original stamped intent hash.
+        let mut r = store.due_sleeping(future + 1).into_iter().next().expect("one sleeping run");
+        if let RecipeStep::Act { target, .. } = &mut r.steps[1] {
+            *target = "attacker@evil.com".into();
+        }
+        store.save(&r, future).unwrap();
+
+        let woke = eng.resume_due(future + 2).await;
+        assert!(woke.is_empty(), "tampered run must not resume/execute");
+        assert_eq!(store.load(&r.id).unwrap().status, "needs_confirmation");
+        assert_eq!(*executed.lock().unwrap(), 0, "the altered action must never run");
+    }
+
+    /// Planner JSON extraction survives a reasoning preamble (with a stray `[`) and a ```json fence.
+    #[test]
+    fn extract_recipe_json_handles_think_and_fence() {
+        let msg = "<think>I'll use [web_search] then notify the user</think>\n```json\n[{\"Notify\":{\"message\":\"hi\"}}]\n```";
+        let arr = extract_recipe_json(msg);
+        let steps: Vec<RecipeStep> = serde_json::from_str(&arr).expect("should parse despite think+fence");
+        assert_eq!(steps.len(), 1);
+    }
+
+    /// The planner authors a JSON recipe from a goal (LLM scripted), and the recipe then runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn planner_authors_a_runnable_recipe() {
+        let recipe_json = r#"[{"Tool":{"tool_name":"inbox","args":{"limit":5},"store_as":"inbox"}},{"Notify":{"message":"Inbox: {{inbox}}"}}]"#;
+        let eng = engine(recipe_json);
+        let steps = eng.plan("summarize my inbox", 1000).await.expect("planner should author steps");
+        assert_eq!(steps.len(), 2, "should parse both authored steps");
+        let rec = Recipe { id: "p".into(), name: "p".into(), steps };
+        let out = eng.run(&rec).await;
+        assert!(out.ok);
+        assert!(out.notifications.iter().any(|n| n.contains("boss@acme.com")), "Notify renders the gathered inbox");
+    }
+
+    /// The effect budget caps outward actions across a delegated run; Replan/resume can't expand it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn effect_budget_caps_outward_actions() {
+        let (eng, executed) = engine_with_runtime(ActionDecision::Execute);
+        let two_acts = Recipe {
+            id: "eb".into(),
+            name: "eb".into(),
+            steps: vec![
+                RecipeStep::Act { kind: "send_email".into(), target: "a@b".into(), summary: "1".into(), payload: "p".into() },
+                RecipeStep::Act { kind: "send_email".into(), target: "c@d".into(), summary: "2".into(), payload: "p".into() },
+            ],
+        };
+        let mut vars = HashMap::new();
+        vars.insert("__effect_budget".into(), Value::from(1i64));
+        let out = eng.run_with(&two_acts, vars).await;
+        assert!(!out.ok, "second action should be capped");
+        assert_eq!(out.error.as_deref(), Some("effect budget exhausted"));
+        assert_eq!(*executed.lock().unwrap(), 1, "exactly one action runs under a budget of 1");
     }
 }

@@ -7,6 +7,7 @@
 //! local single-model backend, higher for API backends). This queue is also where latency/quality
 //! fallback + cost governance will live (Phase 2).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use yantrik_ml::{ChatMessage, GenerationConfig, LLMBackend, LLMResponse};
@@ -141,6 +142,185 @@ impl LLMBackend for ScriptedLLM {
     }
 }
 
+/// A resilience chain over several `LLMBackend`s: try each in order; the first that returns a
+/// non-empty success wins. An error OR an empty reply (some reasoning models emit nothing under a
+/// tight token budget) falls over to the next link. For an always-on companion this means it keeps
+/// answering when the primary provider rate-limits, errors, or returns nothing — the "many LLM
+/// supports, just make them click" property. Links are built from whatever provider keys are present
+/// (NanoGPT, Ollama Cloud, MiniMax, …), all OpenAI-compatible, so adding a provider is config-only.
+pub struct ChainBackend {
+    links: Vec<Arc<dyn LLMBackend>>,
+    name: String,
+}
+
+impl ChainBackend {
+    pub fn new(links: Vec<Arc<dyn LLMBackend>>) -> Self {
+        let name = format!(
+            "chain[{}]",
+            links.iter().map(|b| b.backend_name().to_string()).collect::<Vec<_>>().join(" -> ")
+        );
+        Self { links, name }
+    }
+
+    fn is_usable(r: &LLMResponse) -> bool {
+        !r.text.trim().is_empty() || !r.tool_calls.is_empty() || !r.api_tool_calls.is_empty()
+    }
+}
+
+impl LLMBackend for ChainBackend {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<LLMResponse> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for be in &self.links {
+            match be.chat(messages, config, tools) {
+                Ok(r) if Self::is_usable(&r) => return Ok(r),
+                Ok(_) => {
+                    eprintln!("[chain] {} returned empty — failing over", be.backend_name());
+                    last_err = Some(anyhow::anyhow!("empty response from {}", be.backend_name()));
+                }
+                Err(e) => {
+                    eprintln!("[chain] {} failed ({e}) — failing over", be.backend_name());
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("chain has no backends")))
+    }
+
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+        on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<LLMResponse> {
+        // The chain can't stream across a failover boundary cleanly, so it resolves the whole reply
+        // (with fallover) then emits it once. The mind uses non-streaming `chat`, so this is a
+        // correctness-preserving shim, not the hot path.
+        let r = self.chat(messages, config, tools)?;
+        on_token(&r.text);
+        Ok(r)
+    }
+
+    fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        match self.links.first() {
+            Some(be) => be.count_tokens(text),
+            None => Ok(text.len() / 4),
+        }
+    }
+
+    fn backend_name(&self) -> &str {
+        &self.name
+    }
+}
+
+// ── Provider catalog + per-function router ────────────────────────────────────────────────────
+//
+// "Configurable which function is done by which model/provider." Every provider is OpenAI-compatible,
+// so a provider is just (base_url, key-env, default-model). A function ("role") is mapped to a
+// provider:model via `YM_ROLE_<ROLE>`; unset roles use the default chain. This is the one place that
+// knows provider endpoints — add a provider here and it's usable everywhere.
+
+/// Resolve a "provider" or "provider:model" spec to an OpenAI-compat backend, reading the provider's
+/// API key from env. `None` for an unknown provider or a missing/empty key.
+pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
+    let (provider, model) = match spec.split_once(':') {
+        Some((p, m)) => (p.trim(), m.trim()),
+        None => (spec.trim(), ""),
+    };
+    let (base, key_env, default_model) = match provider {
+        "nanogpt" => ("https://nano-gpt.com/api/v1", "NANOGPT_KEY", "deepseek/deepseek-v4-pro-cheaper"),
+        "ollama-cloud" | "ollama" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY", "glm-4.7"),
+        "minimax" => ("https://api.minimax.io/v1", "MINIMAX_API_KEY", "MiniMax-M2.7"),
+        "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY", "deepseek/deepseek-chat"),
+        "grok" => ("https://api.x.ai/v1", "GROK_API_KEY", "grok-2-latest"),
+        _ => return None,
+    };
+    let key = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty())?;
+    let model = if model.is_empty() { default_model.to_string() } else { model.to_string() };
+    Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", base, Some(key), model)) as Arc<dyn LLMBackend>)
+}
+
+/// The default resilient chain from whatever provider keys are present, in priority order
+/// (NanoGPT → Ollama Cloud → MiniMax). `None` if no provider key is set. Models can be overridden
+/// per provider via `YM_MODEL` / `YM_OLLAMA_MODEL` / `YM_MINIMAX_MODEL`.
+pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
+    let order = [
+        ("nanogpt", std::env::var("YM_MODEL").ok()),
+        ("ollama-cloud", std::env::var("YM_OLLAMA_MODEL").ok()),
+        ("minimax", std::env::var("YM_MINIMAX_MODEL").ok()),
+    ];
+    let mut links: Vec<Arc<dyn LLMBackend>> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    for (provider, model) in order {
+        let spec = match model {
+            Some(m) if !m.trim().is_empty() => format!("{provider}:{m}"),
+            _ => provider.to_string(),
+        };
+        if let Some(be) = backend_from_spec(&spec) {
+            links.push(be);
+            labels.push(spec);
+        }
+    }
+    if links.is_empty() {
+        return None;
+    }
+    let label = labels.join(" -> ");
+    if links.len() == 1 {
+        return Some((links.pop().unwrap(), label));
+    }
+    Some((Arc::new(ChainBackend::new(links)), label))
+}
+
+/// Per-function model routing. Each role resolves to its own `InferencePool`; an unconfigured role
+/// falls back to the `default` pool. Built once at startup; cloning a pool is cheap (shared Arcs).
+pub struct Router {
+    roles: HashMap<String, InferencePool>,
+    default: InferencePool,
+}
+
+impl Router {
+    /// All roles resolve to one pool (tests, single-backend setups).
+    pub fn uniform(default: InferencePool) -> Self {
+        Self { roles: HashMap::new(), default }
+    }
+
+    /// Read `YM_ROLE_<ROLE>` for each known function; a set+resolvable spec gets its own pool, else
+    /// the role uses `default`. Known roles: chat, research, util, verify, code, consolidate.
+    pub fn from_env(default: InferencePool, concurrency: usize) -> Self {
+        let mut roles = HashMap::new();
+        for role in ["chat", "research", "util", "verify", "code", "consolidate"] {
+            let var = format!("YM_ROLE_{}", role.to_uppercase());
+            if let Ok(spec) = std::env::var(&var) {
+                if !spec.trim().is_empty() {
+                    if let Some(be) = backend_from_spec(&spec) {
+                        roles.insert(role.to_string(), InferencePool::new(be, concurrency));
+                    } else {
+                        eprintln!("[router] {var}={spec:?} — unknown provider or missing key; using default");
+                    }
+                }
+            }
+        }
+        Self { roles, default }
+    }
+
+    /// The pool for a function role (falls back to the default pool).
+    pub fn pool(&self, role: &str) -> InferencePool {
+        self.roles.get(role).cloned().unwrap_or_else(|| self.default.clone())
+    }
+
+    /// Roles that have an explicit (non-default) backend — for startup reporting.
+    pub fn configured_roles(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.roles.keys().cloned().collect();
+        v.sort();
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +336,46 @@ mod tests {
             api_tool_calls: vec![],
             stop_reason: "stop".into(),
         }
+    }
+
+    /// Configurable test backend: `None` => errors, `Some("")` => empty reply, `Some(x)` => Ok(x).
+    struct TestBE {
+        reply: Option<String>,
+        name: String,
+    }
+    impl LLMBackend for TestBE {
+        fn chat(&self, _: &[ChatMessage], _: &GenerationConfig, _: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            match &self.reply {
+                None => anyhow::bail!("{} boom", self.name),
+                Some(t) => Ok(resp(t)),
+            }
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            &self.name
+        }
+    }
+
+    #[test]
+    fn chain_falls_over_past_error_and_empty_then_errors_when_all_dead() {
+        let chain = ChainBackend::new(vec![
+            Arc::new(TestBE { reply: None, name: "err".into() }),
+            Arc::new(TestBE { reply: Some(String::new()), name: "empty".into() }),
+            Arc::new(TestBE { reply: Some("hello from C".into()), name: "good".into() }),
+        ]);
+        let out = chain.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None).unwrap();
+        assert_eq!(out.text, "hello from C", "chain should skip err+empty links to the first usable reply");
+
+        let dead = ChainBackend::new(vec![
+            Arc::new(TestBE { reply: None, name: "e1".into() }),
+            Arc::new(TestBE { reply: None, name: "e2".into() }),
+        ]);
+        assert!(dead.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None).is_err(), "all-dead chain must error");
     }
 
     /// A backend whose `chat` blocks the calling thread and records peak concurrency.

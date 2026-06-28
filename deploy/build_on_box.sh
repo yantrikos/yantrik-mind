@@ -12,7 +12,11 @@ STATE=/var/lib/yantrik-mind
 
 echo "==> system deps"
 sudo apt-get update -y
-sudo apt-get install -y build-essential pkg-config libssl-dev curl
+# build-essential/pkg-config/libssl-dev: core + native-tls(openssl) for imap/lettre.
+# clang/libclang-dev: bindgen for speech-dispatcher-sys (pulled transitively by yantrik-ml -> tts).
+# libspeechd-dev: the -lspeechd target that speech-dispatcher-sys links. (The mind is text-first
+# and never calls TTS, but the dep is non-optional in yantrik-ml, so the build needs these present.)
+sudo apt-get install -y build-essential pkg-config libssl-dev curl clang libclang-dev libspeechd-dev
 
 echo "==> rust toolchain (if missing)"
 if ! command -v cargo >/dev/null 2>&1; then

@@ -195,6 +195,22 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 eprintln!("[telegram] send error: {e}");
             }
         }
+
+        // Persistent-delegation tick: wake any due WaitUntil/WaitForCondition runs and deliver what
+        // they surfaced to the active chat (~25s idle cadence — the getUpdates long-poll interval).
+        for note in conv.tick_delegations().await {
+            let target = active_chat.load(Ordering::Relaxed);
+            if target != 0 {
+                let _ = tg_send(&api, target, &note).await;
+            }
+        }
+
+        // Consolidation tick: distill new conversation turns into durable typed beliefs (the moat's
+        // compounding loop). Self-gates until enough new turns accrue; background, not surfaced.
+        let formed = conv.consolidate().await;
+        if formed > 0 {
+            eprintln!("[consolidate] formed {formed} durable memories");
+        }
     }
 }
 

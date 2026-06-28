@@ -176,4 +176,7 @@ pub trait MemoryFacade: Send + Sync {
     async fn append_message(&self, role: &str, text: &str) -> Result<()>;
     /// The most recent chat lines in chronological order: Vec<(role, text)>.
     async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>>;
+    /// Transcript lines with id > `after_id`, ascending: Vec<(id, role, text)>. For the consolidation
+    /// pass, which advances a cursor over what it has already distilled into typed memory.
+    async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>>;
 }

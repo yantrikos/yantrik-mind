@@ -2047,14 +2047,9 @@ impl ConversationEngine {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
             },
-            "research" => self.deep_research(&s("topic")).await.unwrap_or_else(|e| format!("(research error: {e})")),
-            "code" => match &self.coder {
-                Some(c) => match c.run(&s("task")).await {
-                    Ok(r) => format!("{}\n(files: {})", r.summary.chars().take(700).collect::<String>(), r.files.join(", ")),
-                    Err(e) => format!("(coder error: {e})"),
-                },
-                None => "(coder not configured)".to_string(),
-            },
+            // Heavyweight ops are NOT inline steps — they'd block the chat turn (the coder is a ~5min
+            // job). Return fast guidance; proper background/delegated coding+research is a follow-up.
+            "research" | "code" => "(that's a heavyweight background job, not an inline step — for quick facts use web_fetch; full research/coding will run as a delegated task soon)".to_string(),
             "set_monitor" => {
                 let recipes = match &self.recipes {
                     Some(r) => r,
@@ -2204,9 +2199,7 @@ impl ConversationEngine {
 - recall {query}: search your typed memory\n\
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
-- web_fetch {url}: read a web page\n\
-- research {topic}: deep multi-source research (use for real, current info instead of guessing)\n\
-- code {task}: write/run code via the agentic coder\n\
+- web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\

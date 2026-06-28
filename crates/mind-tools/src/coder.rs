@@ -28,6 +28,9 @@ pub struct Coder {
     model: String,
     scratch_root: String,
     timeout_secs: u64,
+    /// When set, run on real Claude via the subscription OAuth token (Max-plan), dropping the MiniMax
+    /// base/model override. Falls back to MiniMax (base_url/token/model) when None.
+    oauth_token: Option<String>,
 }
 
 /// The result of one coder run.
@@ -55,11 +58,19 @@ impl Coder {
             model: model.into(),
             scratch_root: scratch_root.into(),
             timeout_secs: 300,
+            oauth_token: None,
         }
     }
 
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    /// Run on real Claude via a subscription OAuth token (`claude setup-token`), instead of MiniMax.
+    pub fn with_oauth(mut self, token: impl Into<String>) -> Self {
+        let t = token.into();
+        self.oauth_token = if t.trim().is_empty() { None } else { Some(t) };
         self
     }
 
@@ -93,11 +104,20 @@ impl Coder {
             .env_clear()
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("HOME", &wd)
-            .env("USER", "yantrikmind")
-            .env("ANTHROPIC_BASE_URL", &self.base_url)
-            .env("ANTHROPIC_AUTH_TOKEN", &self.token)
-            .env("ANTHROPIC_MODEL", &self.model)
-            .arg("-p")
+            .env("USER", "yantrikmind");
+        match &self.oauth_token {
+            // Subscription (real Claude): only the OAuth token; no MiniMax base/model override.
+            Some(tok) => {
+                cmd.env("CLAUDE_CODE_OAUTH_TOKEN", tok);
+            }
+            // Fallback: MiniMax via its Anthropic-compat endpoint.
+            None => {
+                cmd.env("ANTHROPIC_BASE_URL", &self.base_url)
+                    .env("ANTHROPIC_AUTH_TOKEN", &self.token)
+                    .env("ANTHROPIC_MODEL", &self.model);
+            }
+        }
+        cmd.arg("-p")
             .arg(task)
             .arg("--permission-mode")
             .arg("acceptEdits")

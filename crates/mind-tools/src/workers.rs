@@ -122,15 +122,18 @@ impl WorkerPool {
     pub async fn run_coder(&self, task: &str, model: &str, timeout_secs: u64) -> anyhow::Result<String> {
         let host = self.pick().ok_or_else(|| anyhow::anyhow!("no workers in pool"))?.to_string();
         let inner = timeout_secs.saturating_sub(5).max(30);
+        // Source the worker's coder env, then PREFER the subscription: if CLAUDE_CODE_OAUTH_TOKEN is
+        // present, run real Claude (drop the MiniMax base/model overrides); else MiniMax with `model`.
         let cmd = format!(
             "d=$(mktemp -d /tmp/ymcoder.XXXXXX) && cd \"$d\" && export HOME=\"$d\" && \
-             set -a && . /root/.ym-coder.env && set +a && export ANTHROPIC_MODEL={model} && \
+             set -a && . /root/.ym-coder.env && set +a && \
+             if [ -n \"$CLAUDE_CODE_OAUTH_TOKEN\" ]; then unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL; else export ANTHROPIC_MODEL={model}; fi && \
              task=$(cat) && \
              out=$(timeout {inner} claude -p \"$task\" --permission-mode acceptEdits --allowedTools 'Write Edit Read' --output-format text 2>&1); \
              echo \"$out\"; for f in \"$d\"/*; do [ -f \"$f\" ] && printf '\\n=== %s ===\\n' \"$(basename \"$f\")\" && cat \"$f\"; done; cd / && rm -rf \"$d\""
         );
         let out = run_ssh_stdin(&self.key, &host, &cmd, task, timeout_secs).await?;
-        Ok(format!("[coded on {host} — Claude Code on {model}, write-only]\n{out}"))
+        Ok(format!("[coded on {host} — Claude Code, write-only]\n{out}"))
     }
 }
 

@@ -256,14 +256,16 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // endpoint — runs on the MiniMax subscription, zero Anthropic cost. Needs the `claude` CLI present
     // + MINIMAX_API_KEY. Isolated scratch under the service user's home; secret-stripped child env.
     if mind_tools::Coder::available() {
-        if let Ok(key) = std::env::var("MINIMAX_API_KEY") {
-            if !key.trim().is_empty() {
-                let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
-                let scratch = std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
-                eng = eng.with_coder(Arc::new(mind_tools::Coder::new(
-                    key, model, "https://api.minimax.io/anthropic", scratch,
-                )));
+        let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|t| !t.trim().is_empty());
+        let minimax = std::env::var("MINIMAX_API_KEY").ok().filter(|k| !k.trim().is_empty());
+        if oauth.is_some() || minimax.is_some() {
+            let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
+            let scratch = std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
+            let mut coder = mind_tools::Coder::new(minimax.unwrap_or_default(), model, "https://api.minimax.io/anthropic", scratch);
+            if let Some(t) = oauth {
+                coder = coder.with_oauth(t); // prefer the Max-plan subscription (real Claude)
             }
+            eng = eng.with_coder(Arc::new(coder));
         }
     }
     eng

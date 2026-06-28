@@ -2006,6 +2006,198 @@ impl ConversationEngine {
 
     /// Handle one conversational turn: learn what's taught + capture commitments → ground in
     /// typed memory → reply.
+    /// Execute ONE agent tool, returning a short observation. Read/compose tools; outward effects stay
+    /// gated on their own paths. `build_capability` is the self-extension hook (author + save a skill).
+    async fn run_agent_tool(&self, tool: &str, args: &serde_json::Value) -> String {
+        let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        match tool {
+            "recall" => match self
+                .memory
+                .recall_typed(mind_types::RecallQuery { text: s("query"), top_k: 6, kind: None })
+                .await
+            {
+                Ok(rs) if !rs.is_empty() => rs.iter().map(|r| format!("- {} ({:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n"),
+                _ => "(nothing relevant in memory)".to_string(),
+            },
+            "remember" => {
+                let t = s("text");
+                if t.len() < 4 {
+                    return "(nothing to remember)".to_string();
+                }
+                let _ = self.memory.remember_as_belief(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }).await;
+                "(remembered)".to_string()
+            }
+            "github_repo_items" => match &self.github {
+                Some(g) => {
+                    let repo = s("repo");
+                    match g.repo_open_items(&repo, 15).await {
+                        Ok(items) if !items.is_empty() => format!("{repo} — {} open:\n", items.len())
+                            + &items.iter().map(|i| format!("#{} [{}] {} (by {})", i.number, i.kind, i.title, i.author)).collect::<Vec<_>>().join("\n"),
+                        Ok(_) => format!("{repo}: no open issues/PRs"),
+                        Err(e) => format!("(github error for {repo}: {e})"),
+                    }
+                }
+                None => "(github not configured)".to_string(),
+            },
+            "github_notifications" => match &self.github {
+                Some(g) => match g.notifications(15).await { Ok(n) => mind_tools::render_github_digest(&n), Err(e) => format!("(error: {e})") },
+                None => "(github not configured)".to_string(),
+            },
+            "web_fetch" => match &self.web {
+                Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
+                None => "(web not configured)".to_string(),
+            },
+            "research" => self.deep_research(&s("topic")).await.unwrap_or_else(|e| format!("(research error: {e})")),
+            "code" => match &self.coder {
+                Some(c) => match c.run(&s("task")).await {
+                    Ok(r) => format!("{}\n(files: {})", r.summary.chars().take(700).collect::<String>(), r.files.join(", ")),
+                    Err(e) => format!("(coder error: {e})"),
+                },
+                None => "(coder not configured)".to_string(),
+            },
+            "set_monitor" => {
+                let recipes = match &self.recipes {
+                    Some(r) => r,
+                    None => return "(monitor engine unavailable)".to_string(),
+                };
+                let (source, target) = (s("source"), s("target"));
+                if target.len() < 2 {
+                    return "(need a target to watch for)".to_string();
+                }
+                let (tool_name, var, targs, label): (&str, &str, serde_json::Value, &str) = match source.as_str() {
+                    "web" => ("fetch", "page", serde_json::json!({ "url": s("url") }), "web page"),
+                    "inbox" | "email" => ("inbox", "inbox", serde_json::json!({ "limit": 10 }), "inbox"),
+                    _ => ("github", "github", serde_json::json!({ "limit": 15 }), "GitHub"),
+                };
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                let rec = Recipe {
+                    id: "watch".into(),
+                    name: format!("watch {label}: {target}"),
+                    steps: vec![
+                        RecipeStep::WaitForCondition { tool_name: tool_name.into(), args: targs, store_as: var.into(), condition: Condition::VarContains { var: var.into(), substring: target.clone() }, poll_secs: 120, expire_ms: now + 24 * 3600 * 1000 },
+                        RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
+                    ],
+                };
+                let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                if out.sleeping_until.is_some() {
+                    format!("Watching the {label} for \"{target}\" — I'll ping you when it matches.")
+                } else if !out.notifications.is_empty() {
+                    out.notifications.join("\n")
+                } else {
+                    format!("(couldn't start watching: {})", out.error.unwrap_or_else(|| "tool unavailable".into()))
+                }
+            }
+            "build_capability" => {
+                let name = s("name");
+                if name.len() < 2 {
+                    return "(need a capability name)".to_string();
+                }
+                let summary = s("summary");
+                let code = args.get("recipe").map(|r| r.to_string()).filter(|r| r.len() > 2).unwrap_or_else(|| "{}".to_string());
+                let tags: Vec<String> = summary.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 3).take(8).map(|w| w.to_string()).collect();
+                let sk = Skill { name: name.clone(), lang: "capability".into(), code, summary, tags, status: "active".into(), runs: 0, successes: 0, created_ms: 0 };
+                match self.memory.save_skill(sk).await {
+                    Ok(_) => format!("Built + saved capability '{name}' — it's reusable now."),
+                    Err(e) => format!("(couldn't save '{name}': {e})"),
+                }
+            }
+            _ => format!("(unknown tool: {tool})"),
+        }
+    }
+
+    /// THE AGENTIC LOOP — the mind AS an agent (mimicking Claude Code): reason → select ONE tool → act →
+    /// observe → iterate → answer. Tools = primitives + the build_capability self-extension hook, so
+    /// "I can't" becomes "I didn't have that, so I built it." Bounded to MAX_STEPS. This is the PRIMARY
+    /// handler behind the two stateful interceptors (onboarding answer-capture + pending confirmation).
+    async fn agent_loop(&self, user_text: &str) -> Result<String> {
+        const MAX_STEPS: usize = 5;
+        let ws = self.memory.hydrate_working_set(user_text).await.unwrap_or_default();
+        let mut grounding = String::from("What I know that may be relevant:");
+        for b in ws.stable_facts.iter().take(5) {
+            grounding.push_str(&format!("\n- {}", b.text));
+        }
+        for b in ws.uncertain_beliefs.iter().take(3) {
+            grounding.push_str(&format!("\n- {} (uncertain {:.2})", b.statement, b.confidence));
+        }
+        let recent = self
+            .memory
+            .recent_messages(self.recent_window)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|(r, t)| format!("{r}: {t}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let skills = self.memory.recall_skills(user_text, 5).await.unwrap_or_default();
+        let skill_line = if skills.is_empty() {
+            String::new()
+        } else {
+            format!("\nSaved skills that may help: {}", skills.iter().map(|s| format!("{} ({})", s.name, s.summary)).collect::<Vec<_>>().join("; "))
+        };
+        const TOOLS: &str = "TOOLS (use ONE per step):\n\
+- recall {query}: search your typed memory\n\
+- remember {text}: store a durable fact about the user/world\n\
+- github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
+- github_notifications {}: your GitHub notifications\n\
+- web_fetch {url}: read a web page\n\
+- research {topic}: deep multi-source research\n\
+- code {task}: write/run code via the agentic coder\n\
+- set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
+- build_capability {name, summary, recipe}: author a NEW reusable capability when none fits\n\
+- answer {text}: give the user your final reply";
+        let mut scratch = String::new();
+        for step in 0..MAX_STEPS {
+            let prompt = format!(
+                "{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
+                if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
+            );
+            let messages = vec![
+                ChatMessage::system(&self.persona),
+                ChatMessage::system("You are an agent: think, optionally use ONE tool, observe, repeat, then answer. If you lack a capability, build it rather than refusing. Output ONLY the JSON object."),
+                ChatMessage::user(&prompt),
+            ];
+            let text = match self.inference.chat(messages, GenerationConfig::default()).await {
+                Ok(r) => r.text,
+                Err(e) => return Ok(format!("(couldn't think just now: {e})")),
+            };
+            let body = text.rsplit("</think>").next().unwrap_or(&text);
+            let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+            let obj = match (body.find('{'), body.rfind('}')) {
+                (Some(a), Some(b)) if b > a => &body[a..=b],
+                _ => "",
+            };
+            let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+            if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
+                let a = ans.trim().to_string();
+                if !a.is_empty() {
+                    let _ = self.memory.append_message("user", user_text).await;
+                    let _ = self.memory.append_message("assistant", &a).await;
+                    return Ok(a);
+                }
+            }
+            let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if tool.is_empty() {
+                let a = if text.trim().is_empty() { "Sorry — could you rephrase that?".to_string() } else { text.trim().to_string() };
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &a).await;
+                return Ok(a);
+            }
+            let args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let obs = self.run_agent_tool(&tool, &args).await;
+            scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
+        }
+        let wrap = format!("Give the user a concise, direct final answer based on this work log.\n{scratch}\n\nUser: {user_text}");
+        let ans = self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)], GenerationConfig::default())
+            .await
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_else(|_| "I looked into it but couldn't wrap up cleanly.".to_string());
+        let _ = self.memory.append_message("user", user_text).await;
+        let _ = self.memory.append_message("assistant", &ans).await;
+        Ok(ans)
+    }
+
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
         // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
         // (Take the slot first so the lock is released before the await in capture_onboard.)
@@ -2022,6 +2214,13 @@ impl ConversationEngine {
             let _ = self.memory.append_message("user", user_text).await;
             let _ = self.memory.append_message("assistant", &reply).await;
             return Ok(reply);
+        }
+        // PRIMARY: the agentic loop (reason → pick ONE tool → observe → iterate → answer, with the
+        // build_capability self-extension hook). It subsumes the capability paths below — research,
+        // code, monitors, grounded chat — as tools. The stateful interceptors (onboarding capture +
+        // pending confirmation) already ran above. YM_AGENT=off falls back to the legacy dispatch chain.
+        if std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true) {
+            return self.agent_loop(user_text).await;
         }
         // Research sub-agent: parallel deep-dive first, then the single-agent path.
         if self.researcher.is_some() {
@@ -2734,6 +2933,23 @@ mod tests {
         // no github source, or not a monitor ask → no false trigger
         assert!(ConversationEngine::parse_github_watch("track my fitness goals").is_none(), "'track' without a github source must not trigger");
         assert!(ConversationEngine::parse_github_watch("what's the status of my repo?").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn agent_loop_reasons_then_answers() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        // the agent decides it can answer directly (no tool) on the first step
+        let pool = InferencePool::new(
+            Arc::new(ScriptedLLM::new(r#"{"thought":"simple greeting","answer":"Hey Pranab — what do you need?"}"#)) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        let r = conv.agent_loop("hi").await.unwrap();
+        assert!(r.contains("Pranab"), "agent should return its answer: {r}");
+        // and the turn is recorded in the transcript
+        let recent = memarc.recent_messages(4).await.unwrap();
+        assert!(recent.iter().any(|(role, t)| role == "assistant" && t.contains("Pranab")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -17,10 +17,26 @@ pub struct GithubNotification {
     pub reason: String, // mention / review_requested / assign / ...
 }
 
+/// One open issue or PR on a specific repo — what a repo TRACKER needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubItem {
+    pub number: u64,
+    pub kind: String, // "issue" | "pr"
+    pub title: String,
+    pub author: String,
+    pub url: String,
+}
+
 #[async_trait]
 pub trait GithubClient: Send + Sync {
     /// Unread notifications (most recent first), capped at `limit`.
     async fn notifications(&self, limit: usize) -> anyhow::Result<Vec<GithubNotification>>;
+    /// Open issues + PRs on a specific repo ("owner/name"), newest first. Public repos need no auth;
+    /// the token (if present) is sent only to raise the rate limit / reach private repos. Default impl
+    /// returns empty so non-API clients don't have to implement it.
+    async fn repo_open_items(&self, _repo: &str, _limit: usize) -> anyhow::Result<Vec<GithubItem>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Render notifications as a compact, untrusted digest block.
@@ -88,6 +104,39 @@ impl GithubClient for ApiGithubClient {
                 let title = n["subject"]["title"].as_str().unwrap_or("").to_string();
                 let reason = n["reason"].as_str().unwrap_or("").to_string();
                 out.push(GithubNotification { repo, kind, title, reason });
+            }
+            Ok(out)
+        })
+        .await?
+    }
+
+    async fn repo_open_items(&self, repo: &str, limit: usize) -> anyhow::Result<Vec<GithubItem>> {
+        let token = self.token.clone();
+        let (repo, per_page) = (repo.to_string(), limit.clamp(1, 50));
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<GithubItem>> {
+            // The issues endpoint returns BOTH issues and PRs (a PR carries a "pull_request" key).
+            let url = format!(
+                "https://api.github.com/repos/{repo}/issues?state=open&sort=created&direction=desc&per_page={per_page}"
+            );
+            let mut req = ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(20))
+                .set("Accept", "application/vnd.github+json")
+                .set("X-GitHub-Api-Version", "2022-11-28")
+                .set("User-Agent", "yantrik-mind");
+            if !token.is_empty() {
+                req = req.set("Authorization", &format!("Bearer {token}"));
+            }
+            let v: serde_json::Value = req.call()?.into_json()?;
+            let arr = v.as_array().cloned().unwrap_or_default();
+            let mut out = Vec::new();
+            for it in arr {
+                out.push(GithubItem {
+                    number: it["number"].as_u64().unwrap_or(0),
+                    kind: if it.get("pull_request").is_some() { "pr" } else { "issue" }.to_string(),
+                    title: it["title"].as_str().unwrap_or("").to_string(),
+                    author: it["user"]["login"].as_str().unwrap_or("").to_string(),
+                    url: it["html_url"].as_str().unwrap_or("").to_string(),
+                });
             }
             Ok(out)
         })

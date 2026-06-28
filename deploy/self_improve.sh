@@ -48,16 +48,16 @@ Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under c
   --permission-mode acceptEdits --allowedTools "Write Edit Read" --output-format text 2>&1 | tail -25
 
 echo "==> enforce bounds"
-if git diff --name-only | grep -q '^crates/mind-governance/'; then
-  echo "ABORT: change touched the harm-gate (crates/mind-governance) — human-only. No PR."
-  exit 1
-fi
-if git diff --quiet; then
+git add -A   # stage everything incl. NEW files (git diff alone ignores untracked)
+if git diff --cached --quiet; then
   echo "no changes produced — nothing to PR"
   exit 0
 fi
-
-if git diff --name-only | grep -q '\.rs$'; then
+if git diff --cached --name-only | grep -q '^crates/mind-governance/'; then
+  echo "ABORT: change touched the harm-gate (crates/mind-governance) — human-only. No PR."
+  exit 1
+fi
+if git diff --cached --name-only | grep -q '\.rs$'; then
   echo "==> compile-gate (cargo build)"
   if ! cargo build -p mind-core 2>&1 | tail -8; then
     echo "ABORT: changes do not compile — no PR"
@@ -65,8 +65,8 @@ if git diff --name-only | grep -q '\.rs$'; then
   fi
 fi
 
+echo "==> changed files:"; git diff --cached --name-only | sed 's/^/   /'
 echo "==> commit + push (as yantrikdb) + draft PR"
-git add -A
 git commit -q -m "self-improve: $GOAL"
 git remote set-url origin "https://yantrikdb:${YANTRIKDB_ACC_GIT_TOKEN}@github.com/yantrikos/yantrik-mind.git"
 git push -q -u origin "$BR"

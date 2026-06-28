@@ -49,14 +49,14 @@ if [ -z "$GOAL" ]; then
   git clone -q https://github.com/yantrikos/yantrik-mind.git "$W" 2>/dev/null || { echo "self-review: clone failed — skip tick"; rm -rf "$W" "$CH"; exit 0; }
   cd "$W"
   RECENT="$(git log --oneline -20 --pretty='- %s' 2>/dev/null || true)"
-  GOAL="$(timeout 300 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
+  GOAL="$(timeout 480 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
 NORTH STAR: make the typed-memory moat — typed beliefs, confidence scores, contradiction detection, Bayesian revision, consolidation, reflection — more CORRECT, more ROBUST, or more USEFUL in the live chat product. Those are the things a flat-text RAG assistant structurally cannot do; that is where your value compounds. Favor closing a real gap or hardening correctness over adding surface commands or cosmetic cleanup.
 
 Recently done (do NOT repeat or trivially restate these):
 $RECENT
 
-Read crates/mind-* and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It MUST be self-contained, keep the build green WITH a test, be reversible, and MUST NOT touch crates/mind-governance. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes." \
+Read the core moat crates (crates/mind-conversation, crates/mind-memory, crates/mind-core) and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It MUST be self-contained, keep the build green WITH a test, be reversible, and MUST NOT touch crates/mind-governance. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes." \
     --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r' || true)"
   cd /; rm -rf "$W" "$CH"; trap - EXIT
   [ -n "$GOAL" ] && echo "self-review proposed a goal" || echo "self-review produced no goal"

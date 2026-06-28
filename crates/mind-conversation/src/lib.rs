@@ -1151,6 +1151,144 @@ impl ConversationEngine {
         t.trim_end_matches(['.', '!', ',']).chars().take(40).collect()
     }
 
+    /// Seed the built-in CAPABILITY skills into YantrikDB (idempotent). Capabilities are DATA, not code:
+    /// each is a Skill{lang="capability"} whose `code` is a tiny JSON spec (tool/var/args/label) and whose
+    /// summary+tags drive semantic routing. Adding a new capability later = save_skill(...) at runtime —
+    /// no recompile. (Monitors first; research/coder/email migrate the same way.)
+    async fn seed_capabilities(&self) {
+        let existing = self.memory.list_skills().await.unwrap_or_default();
+        if existing.iter().any(|s| s.lang == "capability") {
+            return;
+        }
+        let caps = [
+            ("github-monitor",
+             "Monitor your GitHub repos and notifications and ping you when a new issue, pull request, or activity matches. Use when the user wants to track/watch/keep an eye on repos, issues, or PRs.",
+             "github,repo,repos,issue,issues,pull request,pr,prs,notification,monitor,track,watch",
+             r#"{"tool":"github","var":"github","args":{"limit":15},"label":"GitHub","needs_url":false}"#),
+            ("web-monitor",
+             "Watch any web page / URL and ping you when its content changes to match (a price, 'in stock', a phrase). Use when the user gives a URL to watch.",
+             "web,page,url,http,price,stock,availability,watch,monitor,track",
+             r#"{"tool":"fetch","var":"page","args":{},"label":"web page","needs_url":true}"#),
+            ("inbox-monitor",
+             "Watch your email inbox and ping you when a message from a sender or about a keyword arrives. Use for email/inbox monitoring.",
+             "email,inbox,mail,sender,message,watch,monitor,track,notify",
+             r#"{"tool":"inbox","var":"inbox","args":{"limit":10},"label":"inbox","needs_url":false}"#),
+        ];
+        for (name, summary, tags, code) in caps {
+            let _ = self.memory.save_skill(Skill {
+                name: name.into(),
+                lang: "capability".into(),
+                code: code.into(),
+                summary: summary.into(),
+                tags: tags.split(',').map(|s| s.trim().to_string()).collect(),
+                status: "active".into(),
+                runs: 0,
+                successes: 0,
+                created_ms: 0,
+            }).await;
+        }
+    }
+
+    /// The LLM routing decision (testable, no I/O): given the request + the capability catalog, pick ONE
+    /// capability (or none) and extract its target/url. This is the dynamic replacement for the hardcoded
+    /// `parse_*` verb lists — new capabilities appear here automatically because they're read from the store.
+    async fn decide_capability(&self, user_text: &str, caps: &[Skill]) -> Option<(String, String, String)> {
+        let catalog = caps.iter().map(|c| format!("- {}: {}", c.name, c.summary)).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "User request: \"{user_text}\"\n\nCapabilities I can set up:\n{catalog}\n\nIf the request is asking me to set ONE of these up, reply ONLY JSON: {{\"capability\":\"<exact name>\",\"target\":\"<short phrase to watch for>\",\"url\":\"<url if any else empty>\"}}. If none clearly fit, reply {{\"capability\":null}}."
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You route a request to exactly one capability or none. Reply ONLY the JSON object."),
+            ChatMessage::user(&prompt),
+        ];
+        let text = self.inference.chat(messages, GenerationConfig::default()).await.ok()?.text;
+        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+        let obj = match (body.find('{'), body.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &body[s..=e],
+            _ => return None,
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).ok()?;
+        let name = v.get("capability").and_then(|x| x.as_str()).unwrap_or("");
+        if name.is_empty() || name == "null" {
+            return None;
+        }
+        let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        Some((name.to_string(), target, url))
+    }
+
+    /// SKILL-BASED CAPABILITY ROUTER (dynamic — no recompile to add a capability). A cheap tag-derived
+    /// pre-filter (built FROM the skills, so a new skill extends it for free) decides whether to spend an
+    /// LLM call; if so, `decide_capability` picks one, and we instantiate its recipe from the skill's spec.
+    async fn route_capability(&self, user_text: &str) -> Option<String> {
+        let recipes = self.recipes.as_ref()?;
+        self.seed_capabilities().await;
+        let caps: Vec<Skill> = self
+            .memory
+            .list_skills()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.lang == "capability")
+            .collect();
+        if caps.is_empty() {
+            return None;
+        }
+        // Pre-filter from the skills' OWN tags — skip the LLM on plain chat, but any new skill's tags
+        // automatically widen what gets routed (zero code to add a capability).
+        let low = user_text.to_lowercase();
+        let hinted = caps.iter().flat_map(|c| c.tags.iter()).any(|t| t.len() > 2 && low.contains(t.as_str()));
+        if !hinted {
+            return None;
+        }
+        let (name, target, url) = self.decide_capability(user_text, &caps).await?;
+        let cap = caps.iter().find(|c| c.name == name)?;
+        if target.len() < 2 {
+            return None;
+        }
+        let spec: serde_json::Value = serde_json::from_str(&cap.code).ok()?;
+        let tool = spec.get("tool")?.as_str()?.to_string();
+        let var = spec.get("var")?.as_str()?.to_string();
+        let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&cap.name).to_string();
+        let needs_url = spec.get("needs_url").and_then(|x| x.as_bool()).unwrap_or(false);
+        let mut args = spec.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        if needs_url {
+            if url.is_empty() {
+                return None;
+            }
+            args = serde_json::json!({ "url": url });
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let rec = Recipe {
+            id: "watch".into(),
+            name: format!("watch {label}: {target}"),
+            steps: vec![
+                RecipeStep::WaitForCondition {
+                    tool_name: tool,
+                    args,
+                    store_as: var.clone(),
+                    condition: Condition::VarContains { var, substring: target.clone() },
+                    poll_secs: 120,
+                    expire_ms: now + 24 * 3600 * 1000,
+                },
+                RecipeStep::Notify { message: format!("📡 Heads up — the {label} now matches \"{target}\".") },
+            ],
+        };
+        let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+        Some(if out.sleeping_until.is_some() {
+            format!("Watching the {label} for \"{target}\" — I'll ping you when it matches (every ~2 min, up to 24h).")
+        } else if !out.notifications.is_empty() {
+            out.notifications.join("\n")
+        } else {
+            format!("Couldn't start watching ({}).", out.error.unwrap_or_else(|| "tool unavailable".into()))
+        })
+    }
+
     /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
     /// they surfaced (the caller delivers these to the home channel). Called on the heartbeat.
     pub async fn tick_delegations(&self) -> Vec<String> {
@@ -1987,6 +2125,13 @@ impl ConversationEngine {
                 let _ = self.memory.append_message("assistant", &reply).await;
                 return Ok(reply);
             }
+            // Skill-based capability routing (dynamic — no recompile to add a capability). If the fast
+            // hardcoded parsers above didn't catch it, semantic-match the request against capability SKILLS.
+            if let Some(reply) = self.route_capability(user_text).await {
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
         }
         // Agentic coder: "code: X" / "write a script to X" → Claude Code on MiniMax. Prefer a WORKER
         // (off the main box; the pool round-robins so concurrent code: requests run in parallel);
@@ -2589,6 +2734,30 @@ mod tests {
         // no github source, or not a monitor ask → no false trigger
         assert!(ConversationEngine::parse_github_watch("track my fitness goals").is_none(), "'track' without a github source must not trigger");
         assert!(ConversationEngine::parse_github_watch("what's the status of my repo?").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn capabilities_are_skills_and_route_dynamically() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        // the router LLM is scripted to return its routing decision as JSON
+        let pool = InferencePool::new(
+            Arc::new(ScriptedLLM::new(r#"{"capability":"github-monitor","target":"new issues","url":""}"#)) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        // capabilities live in YantrikDB as skills (DATA), seeded idempotently — adding one = no recompile
+        conv.seed_capabilities().await;
+        conv.seed_capabilities().await;
+        let caps: Vec<_> = memarc.list_skills().await.unwrap().into_iter().filter(|s| s.lang == "capability").collect();
+        assert_eq!(caps.len(), 3, "3 capability skills seeded exactly once, got {}", caps.len());
+        // searchable: a natural phrasing recalls the right capability (no hardcoded verb list)
+        let hits = memarc.recall_skills("track my git repos for issues", 5).await.unwrap();
+        assert!(hits.iter().any(|s| s.name == "github-monitor"), "github-monitor must be recalled");
+        // the LLM router picks it + extracts the target
+        let (name, target, _url) = conv.decide_capability("track my git repos for issues", &caps).await.expect("should route");
+        assert_eq!(name, "github-monitor");
+        assert_eq!(target, "new issues");
     }
 
     #[test]

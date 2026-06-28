@@ -294,6 +294,30 @@ impl RecipeEngine {
     /// Start a run with initial vars — how a DELEGATED run is created: seed `__effect_budget` (cap on
     /// outward actions) and any inputs before the first step. The intent hash is stamped from the
     /// recipe's `Act` steps on first run and re-validated on every later resume.
+    /// ANTI-CONFABULATION answer (reusable inline): synthesize ONLY from `evidence` with per-claim
+    /// citations (ThinkCited), then DETERMINISTICALLY strip any uncited claim (Validate) and render
+    /// (Render). Returns the grounded text, or None if nothing in the evidence supports an answer (the
+    /// caller should then say "I don't know" / fall back). This is the recipe engine's standout
+    /// anti-hallucination — stronger than a prompt plea — exposed for the agent loop's factual answers.
+    pub async fn cited_answer(&self, question: &str, evidence: &str) -> Option<String> {
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system(
+                "Answer the user's question using ONLY the source below. Output STRICT JSON: \
+                 {\"claims\":[{\"text\":\"...\",\"sources\":[\"evidence\"],\"confidence\":\"high|medium|low\"}]}. \
+                 Every claim MUST cite \"evidence\". If the source doesn't support something, OMIT it. JSON only.",
+            ),
+            ChatMessage::user(&format!("QUESTION: {question}\n\nSOURCES:\n[source: evidence]\n{evidence}")),
+        ];
+        let raw = self.inference.chat(messages, GenerationConfig::default()).await.ok()?.text;
+        let cited = parse_cited(&raw);
+        let kept = CitedOutput { claims: cited.claims.into_iter().filter(|c| c.is_grounded()).collect() };
+        if kept.claims.is_empty() {
+            return None;
+        }
+        Some(render(&kept, &RenderFormat::Summary))
+    }
+
     pub async fn run_with(&self, recipe: &Recipe, vars: HashMap<String, Value>) -> RunOutcome {
         let id = format!("{}-{}", recipe.id, now_ms());
         self.run_from(&id, &recipe.name, recipe.steps.clone(), 0, vars).await

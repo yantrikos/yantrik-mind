@@ -72,6 +72,25 @@ fn now_str() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M UTC (%A)").to_string()
 }
 
+/// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
+/// AND the defensive auto-publish (so a raw-HTML reply becomes a link, never a wall of HTML in chat).
+fn publish_html(name_hint: &str, html: &str) -> Option<String> {
+    let safe: String = name_hint.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    let safe: String = safe.trim_matches('-').to_lowercase().chars().take(40).collect();
+    let safe = if safe.trim_matches('-').is_empty() { "page".to_string() } else { safe };
+    let dir = std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(format!("{dir}/{safe}.html"), html).ok()?;
+    let base = std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
+    Some(format!("{base}/{safe}.html"))
+}
+
+/// Does this reply look like a raw HTML page the model dumped (instead of publishing it)?
+fn looks_like_html(s: &str) -> bool {
+    let l = s.to_lowercase();
+    l.contains("<!doctype") || l.contains("<html") || l.contains("<table") || (l.contains("<div") && l.contains("</div>")) || (l.contains("<body") && l.contains("</body>"))
+}
+
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
@@ -2147,22 +2166,13 @@ impl ConversationEngine {
                 }
             }
             "publish_page" => {
-                let name = s("name");
-                let html = s("html");
-                if name.is_empty() || html.len() < 10 {
-                    return "(need a page name + html content to publish)".to_string();
+                let (name, html) = (s("name"), s("html"));
+                if html.len() < 10 {
+                    return "(need html content to publish)".to_string();
                 }
-                let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
-                let safe = safe.trim_matches('-').to_lowercase();
-                let safe = if safe.is_empty() { "page".to_string() } else { safe };
-                let dir = std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
-                let _ = std::fs::create_dir_all(&dir);
-                match std::fs::write(format!("{dir}/{safe}.html"), &html) {
-                    Ok(_) => {
-                        let base = std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
-                        format!("Published — view/share it at {base}/{safe}.html")
-                    }
-                    Err(e) => format!("(couldn't publish: {e})"),
+                match publish_html(if name.is_empty() { "page" } else { &name }, &html) {
+                    Some(url) => format!("Published — view/share it at {url}"),
+                    None => "(couldn't publish the page)".to_string(),
                 }
             }
             "discover_tools" | "search_skills" => {
@@ -2229,7 +2239,7 @@ impl ConversationEngine {
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
-- publish_page {name, html}: host an HTML page/dashboard and get a shareable URL to send the user\n\
+- publish_page {name, html}: host an HTML page/dashboard + return a shareable URL — ALWAYS use this for any HTML/dashboard; NEVER paste raw HTML into the chat\n\
 - now {}: the current date and time\n\
 SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
@@ -2245,7 +2255,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. NEVER INVENT specifics about the user — their GitHub username, email, IDs, exact repo names, or dates. If you don't know one, `recall` it or ASK the user; do not guess. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
             let text = match self.inference.chat(messages, GenerationConfig::default()).await {
@@ -2260,8 +2270,23 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             };
             let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
             if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
-                let a = ans.trim().to_string();
+                let mut a = ans.trim().to_string();
                 if !a.is_empty() {
+                    if looks_like_html(&a) {
+                        // The model dumped a raw HTML page instead of using publish_page — HOST it and
+                        // send the link, never a wall of HTML in the chat.
+                        if let Some(url) = publish_html(user_text, &a) {
+                            a = format!("Done — I published it as a page: {url}");
+                        }
+                    } else if !scratch.is_empty() {
+                        // Anti-confabulation: re-ground a factual (tool-using) answer through the recipe
+                        // engine's ThinkCited→Validate, which DETERMINISTICALLY strips uncited claims.
+                        if let Some(re) = &self.recipes {
+                            if let Some(grounded) = re.cited_answer(user_text, &scratch).await {
+                                a = grounded;
+                            }
+                        }
+                    }
                     let _ = self.memory.append_message("user", user_text).await;
                     let _ = self.memory.append_message("assistant", &a).await;
                     return Ok(a);
@@ -2269,7 +2294,12 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             }
             let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
             if tool.is_empty() {
-                let a = if text.trim().is_empty() { "Sorry — could you rephrase that?".to_string() } else { text.trim().to_string() };
+                let mut a = if text.trim().is_empty() { "Sorry — could you rephrase that?".to_string() } else { text.trim().to_string() };
+                if looks_like_html(&a) {
+                    if let Some(url) = publish_html(user_text, &a) {
+                        a = format!("Done — I published it as a page: {url}");
+                    }
+                }
                 let _ = self.memory.append_message("user", user_text).await;
                 let _ = self.memory.append_message("assistant", &a).await;
                 return Ok(a);

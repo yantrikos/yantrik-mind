@@ -71,7 +71,20 @@ git commit -q -m "self-improve: $GOAL"
 git remote set-url origin "https://yantrikdb:${YANTRIKDB_ACC_GIT_TOKEN}@github.com/yantrikos/yantrik-mind.git"
 git push -q -u origin "$BR"
 git remote set-url origin "https://github.com/yantrikos/yantrik-mind.git"   # scrub token from config
-GH_TOKEN="$YANTRIKDB_ACC_GIT_TOKEN" gh pr create --repo yantrikos/yantrik-mind --draft \
-  --head "$BR" --title "self-improve: $GOAL" \
-  --body "Autonomous self-improvement by yantrik-mind, built with Claude Code on the subscription. Compile-verified; harm-gate untouched (enforced). Draft — review before merge."
+# Open the draft PR via the API (no gh dependency on the box).
+python3 - "$GOAL" "$BR" <<'PY'
+import json, os, sys, urllib.request, urllib.error
+goal, br = sys.argv[1], sys.argv[2]
+tok = os.environ["YANTRIKDB_ACC_GIT_TOKEN"]
+body = ("Autonomous self-improvement by yantrik-mind, built with Claude Code on the subscription. "
+        "Compile-verified; harm-gate untouched (enforced). Draft — review before merge.")
+data = json.dumps({"title": f"self-improve: {goal}", "head": br, "base": "main", "draft": True, "body": body}).encode()
+req = urllib.request.Request("https://api.github.com/repos/yantrikos/yantrik-mind/pulls", data=data,
+                             headers={"Authorization": f"token {tok}", "Accept": "application/vnd.github+json", "User-Agent": "ym-selfbuild"})
+try:
+    print("PR:", json.load(urllib.request.urlopen(req))["html_url"])
+except urllib.error.HTTPError as e:
+    print("PR-FAIL", e.code, e.read().decode()[:300])
+    sys.exit(1)
+PY
 echo "==> done: opened a draft PR from $BR"

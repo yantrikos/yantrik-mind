@@ -7,6 +7,7 @@
 //! content is **untrusted-wrapped** (reference data, never instructions). This is the moat made
 //! visible in the product — what flat-RAG assistants can't ground on.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mind_agents::SubAgent;
@@ -293,6 +294,11 @@ pub struct ConversationEngine {
     /// Is the agentic loop the primary turn handler? Default true (overridable by `YM_AGENT=off`);
     /// `with_agent_primary(false)` exercises the legacy deterministic dispatch chain (used by tests).
     agent_primary: bool,
+    /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
+    /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
+    notify_queue: Arc<Mutex<Vec<String>>>,
+    /// How many delegated background jobs are in flight (a soft cap stops runaway fan-out).
+    bg_jobs: Arc<AtomicUsize>,
 }
 
 impl ConversationEngine {
@@ -319,6 +325,8 @@ impl ConversationEngine {
             dmn_phase: Mutex::new(0),
             pending_onboard: Mutex::new(None),
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
+            notify_queue: Arc::new(Mutex::new(Vec::new())),
+            bg_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -327,6 +335,23 @@ impl ConversationEngine {
     pub fn with_agent_primary(mut self, on: bool) -> Self {
         self.agent_primary = on;
         self
+    }
+
+    /// Drain results from finished delegated background jobs (research/code) — the poll loop calls
+    /// this each tick and delivers each to the active chat. Empty when nothing has completed.
+    pub fn take_notifications(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notify_queue.lock().unwrap())
+    }
+
+    /// Reserve a background-job slot (soft cap). Returns false when too many jobs are already running,
+    /// so the caller can decline politely instead of fanning out unboundedly.
+    fn try_acquire_bg(&self, cap: usize) -> bool {
+        if self.bg_jobs.fetch_add(1, Ordering::Relaxed) >= cap {
+            self.bg_jobs.fetch_sub(1, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
     }
 
     fn lang_str(l: CodeLang) -> &'static str {
@@ -2242,9 +2267,62 @@ impl ConversationEngine {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
             },
-            // Heavyweight ops are NOT inline steps — they'd block the chat turn (the coder is a ~5min
-            // job). Return fast guidance; proper background/delegated coding+research is a follow-up.
-            "research" | "code" => "(that's a heavyweight background job, not an inline step — for quick facts use web_fetch; full research/coding will run as a delegated task soon)".to_string(),
+            // Heavyweight ops (deep research, the ~5min coder) run as DELEGATED background jobs: ack
+            // immediately, do the work in a detached task, and deliver the result to the chat via the
+            // poll-loop notify drain. Best-effort (a process restart loses an in-flight job; the recipe
+            // engine is the durable path). A soft cap stops runaway fan-out.
+            "research" => {
+                let topic = { let q = s("query"); if q.is_empty() { s("topic") } else { q } };
+                if topic.len() < 3 {
+                    return "(what should I research? give me a topic)".to_string();
+                }
+                match &self.researcher {
+                    Some(r) => {
+                        if !self.try_acquire_bg(2) {
+                            return "(I've got a couple of background jobs running already — let those finish and ask again.)".to_string();
+                        }
+                        let (r, q, jobs, topic2) = (r.clone(), self.notify_queue.clone(), self.bg_jobs.clone(), topic.clone());
+                        tokio::spawn(async move {
+                            let res = r.run(&topic2).await;
+                            let mut msg = format!("🔎 Research — {topic2}:\n\n{}", res.answer);
+                            if !res.sources.is_empty() {
+                                msg.push_str("\n\nSources:\n");
+                                for u in res.sources.iter().take(6) {
+                                    msg.push_str(&format!("- {u}\n"));
+                                }
+                            }
+                            q.lock().unwrap().push(msg);
+                            jobs.fetch_sub(1, Ordering::Relaxed);
+                        });
+                        format!("On it — researching \"{topic}\" in the background. I'll send what I find here when it's done.")
+                    }
+                    None => "(research isn't configured)".to_string(),
+                }
+            }
+            "code" => {
+                let task = { let t = s("task"); if t.is_empty() { s("query") } else { t } };
+                if task.len() < 3 {
+                    return "(what should I build? describe the script/task)".to_string();
+                }
+                match &self.coder {
+                    Some(c) => {
+                        if !self.try_acquire_bg(2) {
+                            return "(I've got a couple of background jobs running already — let those finish and ask again.)".to_string();
+                        }
+                        let (c, q, jobs, task2) = (c.clone(), self.notify_queue.clone(), self.bg_jobs.clone(), task.clone());
+                        tokio::spawn(async move {
+                            let out = match c.run(&task2).await {
+                                Ok(r) => format!("🛠️ Code — {task2}:\n\n{}", mind_tools::render_coder(&r)),
+                                Err(e) => format!("🛠️ Code — \"{task2}\" failed: {e}"),
+                            };
+                            q.lock().unwrap().push(out);
+                            jobs.fetch_sub(1, Ordering::Relaxed);
+                        });
+                        format!("On it — building \"{task}\" in the background (isolated sandbox; can take a few minutes). I'll send the result here when it's done.")
+                    }
+                    None => "(the coder isn't configured)".to_string(),
+                }
+            }
             "set_monitor" => {
                 let recipes = match &self.recipes {
                     Some(r) => r,
@@ -2419,6 +2497,8 @@ impl ConversationEngine {
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
+- research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
+- code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
@@ -3305,6 +3385,26 @@ mod tests {
         assert!(!html.contains("\\n"), "JSON escapes are decoded: {html}");
         // …and name the page from its <title>, not the user's request text.
         assert_eq!(title_from_html(&html).as_deref(), Some("Top 10 Combos"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn delegated_job_notifications_drain_fifo_and_cap() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+        // nothing queued until a background job finishes
+        assert!(conv.take_notifications().is_empty());
+        conv.notify_queue.lock().unwrap().push("first".into());
+        conv.notify_queue.lock().unwrap().push("second".into());
+        assert_eq!(conv.take_notifications(), vec!["first".to_string(), "second".to_string()], "FIFO");
+        assert!(conv.take_notifications().is_empty(), "draining empties the queue");
+        // soft cap of 2: the third concurrent job is declined until one finishes
+        assert!(conv.try_acquire_bg(2));
+        assert!(conv.try_acquire_bg(2));
+        assert!(!conv.try_acquire_bg(2), "3rd job declined at cap 2");
+        conv.bg_jobs.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(conv.try_acquire_bg(2), "a slot frees up after one finishes");
     }
 
     #[test]

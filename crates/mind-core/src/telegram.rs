@@ -298,6 +298,14 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Delegated background jobs (research/code) deliver their results here when finished.
+        for note in conv.take_notifications() {
+            let target = active_chat.load(Ordering::Relaxed);
+            if target != 0 {
+                let _ = tg_send(&api, target, &note).await;
+            }
+        }
+
         // Consolidation tick: distill new conversation turns into durable typed beliefs (the moat's
         // compounding loop). Self-gates until enough new turns accrue; background, not surfaced.
         let formed = conv.consolidate().await;

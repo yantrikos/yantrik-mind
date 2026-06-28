@@ -104,6 +104,8 @@ pub struct ConversationEngine {
     last_consolidated: Mutex<i64>,
     /// Default-mode ("sleep") phase rotor: rehearse → reconcile → associate, one bounded op per idle tick.
     dmn_phase: Mutex<u64>,
+    /// Ask-drive cursor: which seed get-to-know-you question to ask next (cycles; gated to ≤1/period).
+    ask_cursor: Mutex<usize>,
 }
 
 impl ConversationEngine {
@@ -128,6 +130,7 @@ impl ConversationEngine {
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
             dmn_phase: Mutex::new(0),
+            ask_cursor: Mutex::new(0),
         }
     }
 
@@ -1032,6 +1035,40 @@ impl ConversationEngine {
             let _ = self.memory.discharge_tension(&t.id).await; // surfaced once; don't repeat
         }
         Some(s)
+    }
+
+    /// ASK DRIVE — curiosity turned OUTWARD. A companion shouldn't wait to be fed: when it knows little
+    /// about you, it should ASK. Returns ONE get-to-know-you question while the brain is sparse, then
+    /// goes quiet once it knows enough (so it never pesters). The caller gates it to ≤1 per period +
+    /// idle + quiet-hours. Answers flow back as ordinary chat → consolidation → typed beliefs → the gap
+    /// closes. Reversible + low-cost (a question), per the locked OperatorAsk restraint invariant.
+    pub async fn proactive_ask(&self) -> Option<String> {
+        const SEEDS: &[&str] = &[
+            "What are you working on right now that I should understand?",
+            "Who are the people that matter most in your world — so I know who you mean?",
+            "Is there anything you'd like me to keep an eye on for you (a repo, an inbox, a topic)?",
+            "How do you prefer I talk to you — terse and to the point, or more detail?",
+            "What would make this a good week for you?",
+            "What's a recurring annoyance I could quietly help with?",
+        ];
+        let enough: usize = std::env::var("YM_ASK_ENOUGH").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        // Stop asking once the brain knows enough about you — the ask-drive exists to cure cold-start.
+        let known = self
+            .memory
+            .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None })
+            .await
+            .map(|r| r.len())
+            .unwrap_or(0);
+        if known >= enough {
+            return None;
+        }
+        let i = {
+            let mut c = self.ask_cursor.lock().unwrap();
+            let i = *c % SEEDS.len();
+            *c = c.wrapping_add(1);
+            i
+        };
+        Some(SEEDS[i].to_string())
     }
 
     /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
@@ -2424,6 +2461,33 @@ mod tests {
         assert!((open[0].pressure - 0.9).abs() < 1e-9, "keeps the max pressure, got {}", open[0].pressure);
         assert!(memarc.discharge_tension(&open[0].id).await.unwrap(), "discharge should report it changed");
         assert!(memarc.open_tensions(10).await.unwrap().is_empty(), "discharged tension is no longer open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ask_drive_asks_while_sparse_then_quiets() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        // sparse brain → it ASKS, and cycles seeds rather than repeating
+        let q1 = conv.proactive_ask().await.expect("should ask while sparse");
+        assert!(q1.ends_with('?'), "an ask is a question: {q1}");
+        let q2 = conv.proactive_ask().await.expect("still sparse");
+        assert_ne!(q1, q2, "should cycle through seed questions");
+        // once it knows enough about you, it goes quiet (never pesters)
+        for i in 0..8 {
+            memarc
+                .remember_as_belief(BeliefAssertion {
+                    statement: format!("fact {i} about Pranab's world"),
+                    polarity: 1.0,
+                    weight: 1.0,
+                    source_event: None,
+                    provenance: "test".into(),
+                })
+                .await
+                .unwrap();
+        }
+        assert!(conv.proactive_ask().await.is_none(), "stops asking once it knows enough");
     }
 
     #[test]

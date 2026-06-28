@@ -161,6 +161,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_activity = now_ms();
     let mut last_dmn = 0u64;
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
+    let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -238,27 +239,43 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
-        // Proactive digest: the ONE path that messages you unprompted. Heavily gated — only when you've
-        // been idle, outside quiet hours, at most once per YM_PROACTIVE_SECS (default daily), and only
-        // if an urge clears the pressure bar (else proactive_digest returns None and we stay silent).
+        // Proactive: the unprompted paths — all heavily gated (idle + quiet-hours + a once-per-period
+        // cap) and capped at ONE message per tick. A value DIGEST (urges that cleared the bar) takes
+        // precedence; otherwise, while the brain is still sparse, the ASK-DRIVE poses ONE get-to-know-you
+        // question (curiosity turned outward — cures cold-start instead of waiting to be fed).
         if std::env::var("YM_PROACTIVE").map(|v| v != "off").unwrap_or(true) {
             let idle_secs: u64 =
                 std::env::var("YM_DMN_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
             let pd_secs: u64 =
                 std::env::var("YM_PROACTIVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400);
+            let ask_secs: u64 =
+                std::env::var("YM_ASK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400);
             let now = now_ms();
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
+            let idle_ok = chat != 0
                 && !in_quiet_hours_now()
-                && now.saturating_sub(last_activity) >= idle_secs * 1000
-                && now.saturating_sub(last_digest) >= pd_secs * 1000
-            {
+                && now.saturating_sub(last_activity) >= idle_secs * 1000;
+            let mut spoke = false;
+            if idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 {
                 if let Some(msg) = conv.proactive_digest().await {
                     if tg_send(&api, chat, &msg).await.is_ok() {
                         eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());
+                        spoke = true;
                     }
                 }
-                last_digest = now; // reset the cadence whether or not we spoke (never hammer)
+                last_digest = now; // reset cadence whether or not we spoke (never hammer)
+            }
+            if !spoke
+                && std::env::var("YM_ASK").map(|v| v != "off").unwrap_or(true)
+                && idle_ok
+                && now.saturating_sub(last_ask) >= ask_secs * 1000
+            {
+                if let Some(q) = conv.proactive_ask().await {
+                    if tg_send(&api, chat, &q).await.is_ok() {
+                        eprintln!("[ask] posed a get-to-know-you question");
+                    }
+                }
+                last_ask = now; // reset cadence whether or not it asked
             }
         }
     }

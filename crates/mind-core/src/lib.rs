@@ -22,6 +22,7 @@ pub enum Outcome {
 /// Handle a single REPL line. Commands start with `:`; anything else is a chat turn.
 ///   `:remember + <statement>` / `:remember - <statement>`  assert evidence for/against a belief
 ///   `:beliefs [query]`                                      list top beliefs by confidence (optional semantic filter)
+///   `:reflect [topic]`                                      structured self-reflection from typed memory
 ///   `:conflicts`                                            list open contradictions
 ///   `:explain <statement>`                                  show a belief + its evidence count
 ///   `:quit`
@@ -59,6 +60,42 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
                 Outcome::Said(rs.iter().map(|r| format!("• {} ({:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n"))
             }
             Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
+    if let Some(topic) = t.strip_prefix(":reflect") {
+        let topic = topic.trim();
+        return match mem.reflect(topic).await {
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+            Ok(r) => {
+                let mut out = String::new();
+                let (stable, uncertain): (Vec<_>, Vec<_>) =
+                    r.beliefs.iter().partition(|b| b.confidence >= 0.70);
+                out.push_str("## what I believe\n");
+                if stable.is_empty() {
+                    out.push_str("  (none)\n");
+                } else {
+                    for b in &stable {
+                        out.push_str(&format!("  • {} ({:.2})\n", b.statement, b.confidence));
+                    }
+                }
+                out.push_str("## uncertain / contradicted\n");
+                if uncertain.is_empty() && r.open_conflicts.is_empty() {
+                    out.push_str("  (none)\n");
+                } else {
+                    for b in &uncertain {
+                        out.push_str(&format!("  ? {} ({:.2})\n", b.statement, b.confidence));
+                    }
+                    for c in &r.open_conflicts {
+                        out.push_str(&format!(
+                            "  \u{27c2} \"{}\" vs \"{}\"\n",
+                            c.belief_a, c.belief_b
+                        ));
+                    }
+                }
+                out.push_str("## goals\n  (none stored)\n");
+                out.push_str("## preferences\n  (none stored)");
+                Outcome::Said(out)
+            }
         };
     }
     if t == ":conflicts" {
@@ -339,6 +376,43 @@ mod tests {
         match handle_line(":beliefs sky", &mem, &conv).await {
             Outcome::Said(s) => assert!(s.contains("sky is blue"), ":beliefs <query> should filter: {s}"),
             _ => panic!("expected output"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reflect_command_renders_sections() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = engine(&mem, pool);
+
+        // empty memory → four sections, nothing in beliefs
+        match handle_line(":reflect", &mem, &conv).await {
+            Outcome::Said(s) => {
+                assert!(s.contains("## what I believe"), "missing belief section: {s}");
+                assert!(s.contains("## uncertain / contradicted"), "missing uncertain section: {s}");
+                assert!(s.contains("## goals"), "missing goals section: {s}");
+                assert!(s.contains("## preferences"), "missing preferences section: {s}");
+                assert!(s.contains("(none)"), "should report no beliefs yet: {s}");
+            }
+            _ => panic!("expected Outcome::Said"),
+        }
+
+        // assert a belief and check it surfaces in the reflection
+        handle_line(":remember + I prefer concise answers", &mem, &conv).await;
+        match handle_line(":reflect", &mem, &conv).await {
+            Outcome::Said(s) => {
+                assert!(s.contains("concise answers"), "belief should appear in reflection: {s}");
+            }
+            _ => panic!("expected Outcome::Said"),
+        }
+
+        // optional topic argument is forwarded (belief still surfaces when topic overlaps)
+        match handle_line(":reflect concise", &mem, &conv).await {
+            Outcome::Said(s) => {
+                assert!(s.contains("concise"), ":reflect <topic> should surface related belief: {s}");
+            }
+            _ => panic!("expected Outcome::Said"),
         }
     }
 

@@ -31,6 +31,7 @@ else
   if [ -z "$LAST" ]; then VER="v0.1.0"
   else b="${LAST#v}"; IFS=. read -r MA MI PA <<<"$b"; VER="v${MA}.${MI}.$((PA+1))"; fi
 fi
+HINT="${2:-}"   # optional one-line "what changed since last release" for the notes
 echo "==> releasing $VER"
 
 echo "==> Claude (subscription) writes marketing README + release notes"
@@ -38,7 +39,7 @@ timeout 600 claude -p "You are preparing the $VER release of yantrik-mind and yo
 
 1. Rewrite README.md as a compelling, ACCURATE marketing-grade overview: what yantrik-mind is (a ground-up Rust AI companion built on the YantrikDB typed-memory moat), why it's different from flat-RAG assistants (typed beliefs with Bayesian revision, contradiction detection, consolidation that COMPOUNDS from conversation; commitments; research that revises its own beliefs from cited evidence; multi-LLM routing; an agentic coder on Claude; persistent delegation + inbox/GitHub/web monitors; an NL planner; a parallel worker pool; ALL behind one deterministic, property-tested harm-gate; and it improves its own code via bounded self-build PRs). Include a short feature list, a 'why it's different' section, and a quickstart pointing at BUILD.md/CONTRIBUTING.md. Confident but truthful — no invented benchmarks, no fake testimonials.
 
-2. Write RELEASE_NOTES.md for $VER: a crisp highlights summary of the above capabilities.
+2. Write RELEASE_NOTES.md for $VER: a crisp highlights summary of the above capabilities. ${HINT:+This release specifically adds: $HINT — lead the notes with it.}
 
 Do not touch crates/mind-governance. Do not include any secrets." \
   --permission-mode acceptEdits --allowedTools "Write Edit Read" --output-format text 2>&1 | tail -15

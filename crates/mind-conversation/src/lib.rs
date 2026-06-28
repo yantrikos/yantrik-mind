@@ -2144,6 +2144,14 @@ impl ConversationEngine {
                     format!("(skill '{}' ran but produced nothing)", sk.name)
                 }
             }
+            "discover_tools" | "search_skills" => {
+                let q = s("query");
+                match self.memory.recall_skills(&q, 6).await {
+                    Ok(hits) if !hits.is_empty() => "Skills that may fit (run with run_skill {name, target}):\n".to_string()
+                        + &hits.iter().map(|s| format!("- {} [{}]: {}", s.name, s.lang, s.summary)).collect::<Vec<_>>().join("\n"),
+                    _ => "(no saved skill matches — use build_capability to create one, then run_skill it)".to_string(),
+                }
+            }
             "build_capability" => {
                 let name = s("name");
                 if name.len() < 2 {
@@ -2188,22 +2196,24 @@ impl ConversationEngine {
             .join("\n");
         let skills = self.memory.recall_skills(user_text, 5).await.unwrap_or_default();
         let skill_line = if skills.is_empty() {
-            String::new()
+            "\n(no saved skills surfaced for this — use discover_tools to search, or build_capability)".to_string()
         } else {
-            format!("\nSaved skills that may help: {}", skills.iter().map(|s| format!("{} ({})", s.name, s.summary)).collect::<Vec<_>>().join("; "))
+            format!("\nMost-relevant saved skills (run via run_skill; discover_tools finds more): {}", skills.iter().take(3).map(|s| format!("{} — {}", s.name, s.summary)).collect::<Vec<_>>().join("; "))
         };
-        const TOOLS: &str = "TOOLS (use ONE per step):\n\
+        const TOOLS: &str = "CORE TOOLS (always available; use ONE per step):\n\
 - recall {query}: search your typed memory\n\
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
-- add_reminder {text, when}: mark a date or commitment for the future (a birthday, a deadline) so you ping them when it's due — 'when' like tomorrow / next week / in 3 days / July 23\n\
+- add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
+- web_fetch {url}: read a web page\n\
+- research {topic}: deep multi-source research (use for real, current info instead of guessing)\n\
+- code {task}: write/run code via the agentic coder\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
-- web_fetch {url}: read a web page\n\
-- research {topic}: deep multi-source research (use this for real, current info instead of guessing)\n\
-- code {task}: write/run code via the agentic coder\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
-- run_skill {name, target, url?}: run a previously-saved capability skill\n\
-- build_capability {name, summary, recipe}: author a NEW reusable skill when you're doing a kind of task you'll repeat (e.g. deal-hunting) so next time is one step\n\
+SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
+- discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
+- run_skill {name, target, url?}: run a skill you found via discover_tools\n\
+- build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
 - answer {text}: give the user your final reply";
         let mut scratch = String::new();
         for step in 0..MAX_STEPS {
@@ -2213,7 +2223,7 @@ impl ConversationEngine {
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing; and when you're doing a kind of task you'll repeat (like hunting deals), `build_capability` so it's reusable. If you lack a capability, BUILD it rather than refusing. Output ONLY the JSON object."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
             let text = match self.inference.chat(messages, GenerationConfig::default()).await {

@@ -209,6 +209,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             return Err(anyhow::anyhow!("telegram getMe failed (bad token?): {e}"));
         }
     }
+    // Shared so each turn can be processed in its OWN task — a slow turn (a multi-step agent loop with
+    // big generations) must never freeze the poll loop or the background ticks (the old "no-reply" /
+    // frozen-bot failure mode). The memory actor serializes writes, so concurrent turns are safe.
+    let conv = Arc::new(conv);
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT").ok().and_then(|s| s.trim().parse().ok());
 
     // Proactive reminders run in the background, messaging the last-active chat when a due
@@ -260,15 +264,29 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             if text.is_empty() {
                 continue;
             }
-            let _ = tg_typing(&api, chat_id).await; // show "typing…" while the agent loop works
-            let reply = match handle_line(&text, &mem, &conv).await {
-                Outcome::Quit => "(the mind keeps running — nothing to quit here)".to_string(),
-                Outcome::Said(s) if s.is_empty() => continue,
-                Outcome::Said(s) => s,
-            };
-            if let Err(e) = tg_send(&api, chat_id, &reply).await {
-                eprintln!("[telegram] send error: {e}");
-            }
+            // Process the turn in its OWN task so the poll loop keeps polling + ticking (delegations,
+            // consolidation, DMN, proactive) no matter how long this turn takes. A child timer keeps
+            // the "typing…" indicator alive (Telegram clears it after ~5s) for the full think time.
+            let (api2, mem2, conv2) = (api.clone(), mem.clone(), conv.clone());
+            tokio::spawn(async move {
+                tg_typing(&api2, chat_id).await;
+                let work = handle_line(&text, &mem2, conv2.as_ref());
+                tokio::pin!(work);
+                let outcome = loop {
+                    tokio::select! {
+                        r = &mut work => break r,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => tg_typing(&api2, chat_id).await,
+                    }
+                };
+                let reply = match outcome {
+                    Outcome::Quit => "(the mind keeps running — nothing to quit here)".to_string(),
+                    Outcome::Said(s) if s.is_empty() => return,
+                    Outcome::Said(s) => s,
+                };
+                if let Err(e) = tg_send(&api2, chat_id, &reply).await {
+                    eprintln!("[telegram] send error: {e}");
+                }
+            });
         }
 
         // Persistent-delegation tick: wake any due WaitUntil/WaitForCondition runs and deliver what

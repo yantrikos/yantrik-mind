@@ -383,7 +383,9 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        // This test asserts the LEGACY grounded-chat path (belief reaches the system prompt); the
+        // agentic loop grounds in the user prompt instead, so drive the legacy chain explicitly.
+        let conv = engine(&mem, pool).with_agent_primary(false);
 
         // assert two contradicting beliefs + a link via the REPL
         assert!(matches!(handle_line(":remember + Pranab likes coffee", &mem, &conv).await, Outcome::Said(s) if s.contains("confidence")));

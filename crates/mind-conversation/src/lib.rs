@@ -295,13 +295,28 @@ impl ConversationEngine {
 
     /// True if the text is a monitor request ("watch …", "tell me when …", "monitor …").
     fn is_monitor_verb(low: &str) -> bool {
+        // Generous on the verb — the source gate (is_gh / url / inbox) is what keeps a match specific,
+        // so recognizing more natural phrasings can't hijack ordinary chat. (Missing "track" made the
+        // companion wrongly decline "track my git repos for issues/PRs".)
         low.contains("watch")
             || low.contains("monitor")
-            || low.contains("let me know when")
-            || low.contains("tell me when")
-            || low.contains("notify me when")
-            || low.contains("ping me when")
+            || low.contains("track")
             || low.contains("keep an eye on")
+            || low.contains("keep tabs")
+            || low.contains("keep watch")
+            || low.contains("keep me posted")
+            || low.contains("keep me updated")
+            || low.contains("keep me in the loop")
+            || low.contains("stay on top of")
+            || low.contains("look out for")
+            || low.contains("alert me")
+            || low.contains("notify me")
+            || low.contains("let me know when")
+            || low.contains("let me know about")
+            || low.contains("let me know if")
+            || low.contains("tell me when")
+            || low.contains("ping me when")
+            || low.contains("ping me if")
     }
 
     /// Pull the watched-for target after a connective ("for"/"says"/"shows"/…). Trims trailing noise.
@@ -2563,6 +2578,17 @@ mod tests {
         // follow-ups (here the scripted LLM returns no clean question → None), and never re-asks name.
         let q3 = conv.proactive_ask().await;
         assert!(q3.as_deref().map(|q| !q.to_lowercase().contains("call you")).unwrap_or(true), "never re-asks name once known");
+    }
+
+    #[test]
+    fn github_monitor_routes_natural_phrasings() {
+        // the exact phrasing that failed in the wild — must now route to the github monitor
+        assert!(ConversationEngine::parse_github_watch("track my git repos for any issues created by others or any PRs").is_some(), "must route 'track my repos for issues/PRs'");
+        assert!(ConversationEngine::parse_github_watch("keep an eye on my github for new issues").is_some());
+        assert!(ConversationEngine::parse_github_watch("notify me about new PRs on my repo").is_some());
+        // no github source, or not a monitor ask → no false trigger
+        assert!(ConversationEngine::parse_github_watch("track my fitness goals").is_none(), "'track' without a github source must not trigger");
+        assert!(ConversationEngine::parse_github_watch("what's the status of my repo?").is_none());
     }
 
     #[test]

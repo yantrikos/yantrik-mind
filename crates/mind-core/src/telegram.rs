@@ -30,16 +30,53 @@ async fn tg_get(api: &str, method_query: &str) -> anyhow::Result<serde_json::Val
     Ok(v)
 }
 
+/// Split text into <=max-char chunks on line/char boundaries — Telegram rejects messages over 4096
+/// chars with HTTP 400 (this silently ate long agent replies). Returns at least one chunk.
+fn chunk_text(s: &str, max: usize) -> Vec<String> {
+    if s.chars().count() <= max {
+        return vec![s.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in s.split_inclusive('\n') {
+        if cur.chars().count() + line.chars().count() > max && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if line.chars().count() > max {
+            for ch in line.chars() {
+                if cur.chars().count() >= max {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur.push(ch);
+            }
+        } else {
+            cur.push_str(line);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 async fn tg_send(api: &str, chat_id: i64, text: &str) -> anyhow::Result<()> {
-    let url = format!("{api}/sendMessage");
-    let payload = serde_json::json!({ "chat_id": chat_id, "text": text });
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        ureq::post(&url)
-            .timeout(std::time::Duration::from_secs(30))
-            .send_json(payload)?;
-        Ok(())
-    })
-    .await??;
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    for chunk in chunk_text(text, 4000) {
+        let url = format!("{api}/sendMessage");
+        let api_owned = api.to_string();
+        let payload = serde_json::json!({ "chat_id": chat_id, "text": chunk });
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            ureq::post(&url)
+                .timeout(std::time::Duration::from_secs(30))
+                .send_json(payload)
+                .map_err(|e| anyhow::anyhow!("{}", e.to_string().replace(&api_owned, "https://api.telegram.org/bot<token>")))?;
+            Ok(())
+        })
+        .await??;
+    }
     Ok(())
 }
 
@@ -73,6 +110,22 @@ fn save_offset(n: i64) {
 
 fn reminded_path() -> String {
     format!("{}.reminded", offset_path())
+}
+
+fn active_chat_path() -> String {
+    format!("{}.active_chat", offset_path())
+}
+
+/// Persist the last-active chat id so proactive/reminders/ask survive a restart (active_chat used to
+/// reset to 0 on every restart, leaving the bot unable to reach the operator until they messaged again).
+fn save_active_chat(id: i64) {
+    if let Ok(mut f) = std::fs::File::create(active_chat_path()) {
+        let _ = write!(f, "{id}");
+    }
+}
+
+fn load_active_chat() -> i64 {
+    std::fs::read_to_string(active_chat_path()).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
 fn load_reminded() -> HashSet<String> {
@@ -160,7 +213,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
 
     // Proactive reminders run in the background, messaging the last-active chat when a due
     // commitment arrives. (Disabled with YM_REMINDERS=off.)
-    let active_chat = Arc::new(AtomicI64::new(chat_lock.unwrap_or(0)));
+    let active_chat = Arc::new(AtomicI64::new(chat_lock.unwrap_or_else(load_active_chat)));
     if std::env::var("YM_REMINDERS").map(|v| v != "off").unwrap_or(true) {
         tokio::spawn(reminder_loop(api.clone(), mem.clone(), active_chat.clone()));
     }
@@ -201,6 +254,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // Remember where to push proactive messages, and that the user is active right now (so the
             // default-mode loop stays out of the way until they've been idle a while).
             active_chat.store(chat_id, Ordering::Relaxed);
+            save_active_chat(chat_id); // persist so proactive/reminders/backchannel survive restarts
             last_activity = now_ms();
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
             if text.is_empty() {

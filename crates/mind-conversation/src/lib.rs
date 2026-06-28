@@ -2087,6 +2087,63 @@ impl ConversationEngine {
                     format!("(couldn't start watching: {})", out.error.unwrap_or_else(|| "tool unavailable".into()))
                 }
             }
+            "add_reminder" => {
+                let text = s("text");
+                if text.len() < 3 {
+                    return "(need something to remind about)".to_string();
+                }
+                let when = s("when");
+                let due = parse_due(&when);
+                match self.memory.add_task(&text, "medium", due).await {
+                    Ok(_) if due.is_some() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
+                    Ok(_) => format!("Noted as an open task: \"{text}\" (no date parsed from \"{when}\")."),
+                    Err(e) => format!("(couldn't set reminder: {e})"),
+                }
+            }
+            "run_skill" => {
+                let name = s("name");
+                let sk = match self.memory.get_skill(&name).await {
+                    Ok(Some(x)) => x,
+                    _ => return format!("(no saved skill named '{name}')"),
+                };
+                let recipes = match &self.recipes {
+                    Some(r) => r,
+                    None => return "(engine unavailable)".to_string(),
+                };
+                let spec: serde_json::Value = serde_json::from_str(&sk.code).unwrap_or_else(|_| serde_json::json!({}));
+                let tool_name = spec.get("tool").and_then(|x| x.as_str()).unwrap_or("");
+                if tool_name.is_empty() {
+                    return format!("(skill '{name}' has no runnable recipe spec yet — {})", sk.summary);
+                }
+                let var = spec.get("var").and_then(|x| x.as_str()).unwrap_or("out").to_string();
+                let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&sk.name).to_string();
+                let target = s("target");
+                if target.len() < 2 {
+                    return "(need a target/query to run the skill with)".to_string();
+                }
+                let mut targs = spec.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+                if spec.get("needs_url").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    targs = serde_json::json!({ "url": s("url") });
+                }
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                let rec = Recipe {
+                    id: "skill".into(),
+                    name: format!("run {}: {target}", sk.name),
+                    steps: vec![
+                        RecipeStep::WaitForCondition { tool_name: tool_name.into(), args: targs, store_as: var.clone(), condition: Condition::VarContains { var, substring: target.clone() }, poll_secs: 120, expire_ms: now + 24 * 3600 * 1000 },
+                        RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
+                    ],
+                };
+                let _ = self.memory.record_skill_outcome(&sk.name, true).await;
+                let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                if out.sleeping_until.is_some() {
+                    format!("Running skill '{}' — watching {label} for \"{target}\".", sk.name)
+                } else if !out.notifications.is_empty() {
+                    out.notifications.join("\n")
+                } else {
+                    format!("(skill '{}' ran but produced nothing)", sk.name)
+                }
+            }
             "build_capability" => {
                 let name = s("name");
                 if name.len() < 2 {
@@ -2111,6 +2168,7 @@ impl ConversationEngine {
     /// handler behind the two stateful interceptors (onboarding answer-capture + pending confirmation).
     async fn agent_loop(&self, user_text: &str) -> Result<String> {
         const MAX_STEPS: usize = 5;
+        self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
         let ws = self.memory.hydrate_working_set(user_text).await.unwrap_or_default();
         let mut grounding = String::from("What I know that may be relevant:");
         for b in ws.stable_facts.iter().take(5) {
@@ -2136,14 +2194,16 @@ impl ConversationEngine {
         };
         const TOOLS: &str = "TOOLS (use ONE per step):\n\
 - recall {query}: search your typed memory\n\
-- remember {text}: store a durable fact about the user/world\n\
+- remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
+- add_reminder {text, when}: mark a date or commitment for the future (a birthday, a deadline) so you ping them when it's due — 'when' like tomorrow / next week / in 3 days / July 23\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - web_fetch {url}: read a web page\n\
-- research {topic}: deep multi-source research\n\
+- research {topic}: deep multi-source research (use this for real, current info instead of guessing)\n\
 - code {task}: write/run code via the agentic coder\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
-- build_capability {name, summary, recipe}: author a NEW reusable capability when none fits\n\
+- run_skill {name, target, url?}: run a previously-saved capability skill\n\
+- build_capability {name, summary, recipe}: author a NEW reusable skill when you're doing a kind of task you'll repeat (e.g. deal-hunting) so next time is one step\n\
 - answer {text}: give the user your final reply";
         let mut scratch = String::new();
         for step in 0..MAX_STEPS {
@@ -2153,7 +2213,7 @@ impl ConversationEngine {
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent: think, optionally use ONE tool, observe, repeat, then answer. If you lack a capability, build it rather than refusing. Output ONLY the JSON object."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing; and when you're doing a kind of task you'll repeat (like hunting deals), `build_capability` so it's reusable. If you lack a capability, BUILD it rather than refusing. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
             let text = match self.inference.chat(messages, GenerationConfig::default()).await {

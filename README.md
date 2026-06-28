@@ -40,6 +40,7 @@ This is the move flat-RAG companions structurally cannot make: there is no revis
 - **Contradiction detection** runs against the full cognitive graph. Conflicting beliefs are surfaced with severity scores; the companion hedges rather than asserting either side.
 - **Evidence trails**: every belief records its provenance (`told`, `inferred`, `extracted`, `consolidated`) and every piece of evidence that shaped its confidence.
 - **Consolidation** (`consolidate` / `:consolidate`): distils recent conversation turns into durable typed beliefs and future commitments in a single LLM pass. Runs on a cursor so it never re-chews the same turns. The memory grows and compounds; it doesn't summarise and shrink.
+- **Belief inspection** (`:beliefs [query]`): lists stored beliefs ranked by confidence, with optional semantic filtering — see what the mind actually knows and how sure it is.
 - **Semantic recall** (YantrikDB 0.9.0, bundled model2vec, dim 64): paraphrases retrieve the right belief with no shared keywords — no external server, no download.
 
 ### Research that revises its own beliefs
@@ -82,7 +83,7 @@ One inviolable rule, deterministic (no LLM in the loop — an LLM-evaluated gate
 - Adversarial corpus of known jailbreaks and injections is checked in and must stay denied — any regression is a build break.
 
 ### Bounded self-improvement
-The mind can open bounded self-build pull requests against its own codebase: it compiles the change (no build break → no PR), stages the diff, and posts a draft PR via the GitHub API. Harm-gate carve-outs prevent it from touching its own governance code (`crates/mind-governance`).
+The mind can open bounded self-build pull requests against its own codebase: it compiles the change (no build break → no PR), stages the diff, and posts a draft PR via the GitHub API. Harm-gate carve-outs prevent it from touching its own governance code (`crates/mind-governance`). The `:beliefs` command was itself authored and merged by this self-build pipeline.
 
 ### Always-on, Telegram-native
 Runs as a systemd service on any Linux host (no GPU or local model required for API-backed providers). The Telegram bot interface maps `/command` slash syntax to the same REPL commands available locally. Quiet hours are configurable.
@@ -95,6 +96,8 @@ See [BUILD.md](BUILD.md) for prerequisites, build steps, and the full crate arch
 
 See [deploy/DEPLOY.md](deploy/DEPLOY.md) for running the mind always-on as a Linux service.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines, the testing conventions, and the harm-gate rules.
+
 ```sh
 # build (Rust 1.91+, edition 2021)
 cargo build
@@ -104,6 +107,8 @@ cargo run -p mind-core
 
 # in-REPL commands
 :remember + Pranab prefers terse replies   # assert a belief
+:beliefs                                    # list all beliefs ranked by confidence
+:beliefs rust                              # filter to beliefs about Rust
 :conflicts                                  # list open contradictions
 :explain <belief statement>                 # show evidence trail + confidence
 :tasks                                      # open commitment ledger
@@ -115,6 +120,8 @@ cargo run -p mind-core
 
 ## Contributing
 
-See [BUILD.md](BUILD.md) for the architecture, module map, concurrency rules, and testing conventions. The harm-gate adversarial corpus (`crates/mind-governance`) must never be weakened — any new denial test passing `Allow` is a build break.
+See [BUILD.md](BUILD.md) for the architecture, module map, concurrency rules, and testing conventions. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+
+The harm-gate adversarial corpus (`crates/mind-governance`) must never be weakened — any new denial test passing `Allow` is a build break.
 
 Do not submit changes to `crates/mind-governance` without a paired adversarial corpus extension and a passing `deny_is_stable_under_perturbation` run.

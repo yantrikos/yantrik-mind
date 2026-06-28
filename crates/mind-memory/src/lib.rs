@@ -425,16 +425,24 @@ fn ensure_skills_table(db: &YantrikDB) {
 }
 
 fn ensure_goals_prefs_table(db: &YantrikDB) {
-    let _ = db.conn().execute(
+    let conn = db.conn();
+    let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS mind_goals_prefs \
-         (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL)",
+         (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL, \
+          UNIQUE(kind, text))",
+        [],
+    );
+    // Idempotent migration: add the unique index on existing databases that predate this constraint.
+    let _ = conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_goals_prefs_kind_text \
+         ON mind_goals_prefs(kind, text)",
         [],
     );
 }
 
 fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Result<(), String> {
     db.conn()
-        .execute("INSERT INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [kind, text])
+        .execute("INSERT OR IGNORE INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [kind, text])
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -1262,5 +1270,15 @@ mod tests {
             "the CSV skill should rank first for the paraphrase, got: {:?}",
             hits.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn store_goal_is_idempotent() {
+        let mem = MemoryHandle::spawn(":memory:", 4).unwrap();
+        mem.store_goal("become more self-aware").await.unwrap();
+        mem.store_goal("become more self-aware").await.unwrap();
+        mem.store_goal("become more self-aware").await.unwrap();
+        let goals = mem.list_goals().await.unwrap();
+        assert_eq!(goals.len(), 1, "duplicate store_goal calls must not multiply entries");
     }
 }

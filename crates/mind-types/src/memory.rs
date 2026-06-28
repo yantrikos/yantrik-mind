@@ -104,6 +104,8 @@ pub struct Reflection {
     pub summary: String,
     pub beliefs: Vec<Belief>,
     pub open_conflicts: Vec<Contradiction>,
+    pub goals: Vec<MemoryItem>,
+    pub preferences: Vec<MemoryItem>,
 }
 
 /// A reusable code-tool the mind authored, vetted in the sandbox, and banked for recall. Stored in

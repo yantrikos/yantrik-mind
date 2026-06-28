@@ -56,6 +56,9 @@ enum Cmd {
     ListSkills { reply: Reply<Vec<Skill>> },
     RecallSkills { query: String, limit: usize, reply: Reply<Vec<Skill>> },
     RecordSkillOutcome { name: String, success: bool, reply: Reply<()> },
+    // goals / preferences (plain text CRUD; no Bayesian revision)
+    StoreGoalPref { kind: String, text: String, reply: Reply<()> },
+    ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
@@ -417,6 +420,43 @@ fn ensure_skills_table(db: &YantrikDB) {
     );
 }
 
+fn ensure_goals_prefs_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_goals_prefs \
+         (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, text TEXT NOT NULL)",
+        [],
+    );
+}
+
+fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Result<(), String> {
+    db.conn()
+        .execute("INSERT INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [kind, text])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<MemoryItem>, String> {
+    let kind_enum = if kind == "goal" { MemoryKind::Goal } else { MemoryKind::Preference };
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT id, text FROM mind_goals_prefs WHERE kind = ?1 ORDER BY id ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .map(|(id, text)| MemoryItem {
+            id: id.to_string(),
+            kind: kind_enum,
+            text,
+            confidence: 1.0,
+            certainty: 1.0,
+            updated_ms: 0,
+        })
+        .collect())
+}
+
 fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
     let tags_json: String = r.get(4)?;
     Ok(Skill {
@@ -590,6 +630,7 @@ impl MemoryHandle {
                 };
                 ensure_transcript_table(&db);
                 ensure_skills_table(&db);
+                ensure_goals_prefs_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -669,6 +710,12 @@ impl MemoryHandle {
                         Cmd::RecordSkillOutcome { name, success, reply } => {
                             let _ = reply.send(record_skill_outcome(&db, &name, success));
                         }
+                        Cmd::StoreGoalPref { kind, text, reply } => {
+                            let _ = reply.send(store_goal_pref(&db, &kind, &text));
+                        }
+                        Cmd::ListGoalPrefs { kind, reply } => {
+                            let _ = reply.send(list_goal_prefs(&db, &kind));
+                        }
                         Cmd::RecentMessages { limit, reply } => {
                             let _ = reply.send(recent_messages(&db, limit));
                         }
@@ -704,6 +751,21 @@ impl MemoryHandle {
         let rid = rid.to_string();
         self.call(|reply| Cmd::GetText { rid, reply }).await
     }
+
+    pub async fn store_goal(&self, text: &str) -> Result<()> {
+        let (kind, text) = ("goal".to_string(), text.to_string());
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+    }
+    pub async fn store_preference(&self, text: &str) -> Result<()> {
+        let (kind, text) = ("preference".to_string(), text.to_string());
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+    }
+    pub async fn list_goals(&self) -> Result<Vec<MemoryItem>> {
+        self.call(|reply| Cmd::ListGoalPrefs { kind: "goal".to_string(), reply }).await
+    }
+    pub async fn list_preferences(&self) -> Result<Vec<MemoryItem>> {
+        self.call(|reply| Cmd::ListGoalPrefs { kind: "preference".to_string(), reply }).await
+    }
 }
 
 #[async_trait]
@@ -733,6 +795,8 @@ impl MemoryFacade for MemoryHandle {
     async fn reflect(&self, question: &str) -> Result<Reflection> {
         let recalled = self.recall_typed(RecallQuery { text: question.to_string(), top_k: 5, kind: None }).await?;
         let open_conflicts = self.conflicts().await?;
+        let goals = self.list_goals().await.unwrap_or_default();
+        let preferences = self.list_preferences().await.unwrap_or_default();
         let beliefs: Vec<Belief> = recalled
             .iter()
             .map(|r| Belief {
@@ -747,9 +811,14 @@ impl MemoryFacade for MemoryHandle {
             })
             .collect();
         Ok(Reflection {
-            summary: format!("{} relevant beliefs, {} open conflicts", beliefs.len(), open_conflicts.len()),
+            summary: format!(
+                "{} relevant beliefs, {} open conflicts, {} goals, {} preferences",
+                beliefs.len(), open_conflicts.len(), goals.len(), preferences.len()
+            ),
             beliefs,
             open_conflicts,
+            goals,
+            preferences,
         })
     }
 

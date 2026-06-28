@@ -93,7 +93,7 @@ if [ "${YM_AUTOMERGE:-0}" = "1" ]; then
   # test-PRESENCE gate: a Rust change must ADD a test in the diff. Without this, `cargo test` passes
   # vacuously (ok with 0 new tests) and inert/untested code can auto-merge. No added test => draft.
   if [ "$AUTOMERGE" = "1" ] && git diff --cached --name-only | grep -q '\.rs$'; then
-    if ! git diff --cached -U0 | grep -qE '^\+.*#\[(tokio::)?test'; then
+    if ! git diff --cached -U0 | grep -aqE '^\+.*#\[(tokio::)?test'; then
       echo "auto-merge BLOCKED: Rust changed but no #[test] added in the diff — draft for human"; AUTOMERGE=0
     fi
   fi

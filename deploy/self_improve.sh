@@ -28,14 +28,20 @@ set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 # Force real Claude (drop any MiniMax override that may be in the env).
 unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
 
-WORK="$(mktemp -d /opt/yantrik-mind/selfbuild.XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
-cd "$WORK"
-export HOME="$WORK"   # isolate Claude config to the scratch
+# Clone as a SIBLING of the path-dep repos (../yantrikdb, ../yantrik-companion live under /root/codes)
+# so the relative path deps resolve and the compile-gate can actually build. Claude's config goes in a
+# SEPARATE HOME so its dotfiles never pollute the git tree. Reuse the warm release target + registry.
+WORK="$(mktemp -d /root/codes/ymbuild.XXXXXX)"          # the repo clone (sibling of the path deps)
+CFGHOME="$(mktemp -d /opt/yantrik-mind/ymhome.XXXXXX)"  # Claude config, outside the git tree
+trap 'rm -rf "$WORK" "$CFGHOME"' EXIT
+export HOME="$CFGHOME"
+export CARGO_HOME=/root/.cargo                          # warm crates registry (avoid re-download)
+export PATH="/root/.cargo/bin:$PATH"
+export CARGO_TARGET_DIR=/root/codes/yantrik-mind/target # warm release target -> fast compile-gate
 
-echo "==> clone"
-git clone -q https://github.com/yantrikos/yantrik-mind.git repo
-cd repo
+echo "==> clone (sibling of path-dep repos)"
+git clone -q https://github.com/yantrikos/yantrik-mind.git "$WORK"
+cd "$WORK"
 git config user.name "yantrikdb"
 git config user.email "yantrikdb@gmail.com"
 BR="self/$(date +%s)"
@@ -58,8 +64,8 @@ if git diff --cached --name-only | grep -q '^crates/mind-governance/'; then
   exit 1
 fi
 if git diff --cached --name-only | grep -q '\.rs$'; then
-  echo "==> compile-gate (cargo build)"
-  if ! cargo build -p mind-core 2>&1 | tail -8; then
+  echo "==> compile-gate (cargo build --release — matches the warm target)"
+  if ! cargo build --release -p mind-core 2>&1 | tail -8; then
     echo "ABORT: changes do not compile — no PR"
     exit 1
   fi

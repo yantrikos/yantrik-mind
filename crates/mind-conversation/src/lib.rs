@@ -794,7 +794,7 @@ impl ConversationEngine {
                 .remember_as_belief(BeliefAssertion {
                     statement: stmt,
                     polarity: 1.0,
-                    weight: 0.5 + cert * 1.5,
+                    weight: (0.5 + cert * 1.5).min(1.0),
                     source_event: Some("consolidation".into()),
                     provenance: "consolidated".into(),
                 })
@@ -2091,6 +2091,36 @@ mod tests {
         );
         // cursor advanced — no new turns means no re-processing
         assert_eq!(conv.consolidate().await, 0, "cursor must prevent re-chewing the same turns");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn consolidation_caps_belief_weight_at_one() {
+        // Even at certainty=0.95 the uncapped formula (0.5 + 0.95*1.5 = 1.925) would push
+        // sigmoid confidence to ~0.87. With the cap at weight=1.0, a single consolidation
+        // evidence piece can raise confidence to at most sigmoid(1.0) ≈ 0.731.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let extracted = r#"{"beliefs":[{"statement":"Pranab loves async Rust","certainty":0.95}],"commitments":[]}"#;
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(ScriptedLLM::new(extracted)) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            memarc.append_message(role, &format!("msg {i}")).await.unwrap();
+        }
+        conv.consolidate().await;
+        let results = memarc
+            .recall_typed(mind_types::RecallQuery { text: "async Rust".into(), top_k: 5, kind: None })
+            .await
+            .unwrap();
+        let belief = results.iter().find(|x| x.item.text.contains("async Rust")).expect("belief must be stored");
+        assert!(
+            belief.item.confidence <= 0.75,
+            "machine-consolidated belief confidence must be ≤ 0.75 (sigmoid(1.0)≈0.731), got {}",
+            belief.item.confidence
+        );
     }
 
     #[test]

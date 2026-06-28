@@ -36,6 +36,7 @@ CFGHOME="$(mktemp -d /opt/yantrik-mind/ymhome.XXXXXX)"  # Claude config, outside
 trap 'rm -rf "$WORK" "$CFGHOME"' EXIT
 export HOME="$CFGHOME"
 export CARGO_HOME=/root/.cargo                          # warm crates registry (avoid re-download)
+export RUSTUP_HOME=/root/.rustup                        # keep rustup's default toolchain (HOME moved)
 export PATH="/root/.cargo/bin:$PATH"
 export CARGO_TARGET_DIR=/root/codes/yantrik-mind/target # warm release target -> fast compile-gate
 

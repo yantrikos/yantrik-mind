@@ -73,25 +73,64 @@ if git diff --cached --name-only | grep -q '\.rs$'; then
 fi
 
 echo "==> changed files:"; git diff --cached --name-only | sed 's/^/   /'
-echo "==> commit + push (as yantrikdb) + draft PR"
+
+# ---- auto-merge gate ----------------------------------------------------------------------------
+# Default: always a DRAFT PR for human review. Auto-merge ONLY when YM_AUTOMERGE=1 AND every gate
+# passes: tests green + small diff + no sensitive paths. Anything failing a gate => draft for human.
+# (The harm-gate carve-out above already ABORTs the whole run before here if mind-governance changed.)
+AUTOMERGE=0
+if [ "${YM_AUTOMERGE:-0}" = "1" ]; then
+  AUTOMERGE=1
+  files_changed=$(git diff --cached --name-only | wc -l | tr -d ' ')
+  lines_changed=$(git diff --cached --numstat | awk '{a+=$1; d+=$2} END{print a+d+0}')
+  if git diff --cached --name-only | grep -qE '^(\.github/|deploy/|Cargo\.lock|.*\.env$)'; then
+    echo "auto-merge BLOCKED: touches CI/deploy/lock/env — leaving as draft for human"; AUTOMERGE=0
+  fi
+  if [ "$files_changed" -gt 10 ] || [ "$lines_changed" -gt 400 ]; then
+    echo "auto-merge BLOCKED: diff too large ($files_changed files / $lines_changed lines) — draft for human"; AUTOMERGE=0
+  fi
+  if [ "$AUTOMERGE" = "1" ] && git diff --cached --name-only | grep -q '\.rs$'; then
+    pkgs=$(git diff --cached --name-only | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u)
+    PFLAGS="-p mind-core"; for p in $pkgs; do [ "$p" = "mind-core" ] || PFLAGS="$PFLAGS -p $p"; done
+    echo "==> test-gate (cargo test --release $PFLAGS)"
+    if ! cargo test --release $PFLAGS 2>&1 | tail -15; then
+      echo "auto-merge BLOCKED: tests failed — draft for human (no merge)"; AUTOMERGE=0
+    fi
+  fi
+fi
+
+echo "==> commit + push (as yantrikdb)"
 git commit -q -m "self-improve: $GOAL"
 git remote set-url origin "https://yantrikdb:${YANTRIKDB_ACC_GIT_TOKEN}@github.com/yantrikos/yantrik-mind.git"
 git push -q -u origin "$BR"
 git remote set-url origin "https://github.com/yantrikos/yantrik-mind.git"   # scrub token from config
-# Open the draft PR via the API (no gh dependency on the box).
-python3 - "$GOAL" "$BR" <<'PY'
-import json, os, sys, urllib.request, urllib.error
-goal, br = sys.argv[1], sys.argv[2]
+
+# Open the PR (draft unless every auto-merge gate passed) and, if cleared, squash-merge it.
+python3 - "$GOAL" "$BR" "$AUTOMERGE" <<'PY'
+import json, os, sys, time, urllib.request, urllib.error
+goal, br, automerge = sys.argv[1], sys.argv[2], (sys.argv[3] == "1")
 tok = os.environ["YANTRIKDB_ACC_GIT_TOKEN"]
-body = ("Autonomous self-improvement by yantrik-mind, built with Claude Code on the subscription. "
-        "Compile-verified; harm-gate untouched (enforced). Draft — review before merge.")
-data = json.dumps({"title": f"self-improve: {goal}", "head": br, "base": "main", "draft": True, "body": body}).encode()
-req = urllib.request.Request("https://api.github.com/repos/yantrikos/yantrik-mind/pulls", data=data,
-                             headers={"Authorization": f"token {tok}", "Accept": "application/vnd.github+json", "User-Agent": "ym-selfbuild"})
+api = "https://api.github.com/repos/yantrikos/yantrik-mind"
+def call(method, url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"token {tok}", "Accept": "application/vnd.github+json", "User-Agent": "ym-selfbuild"})
+    return json.load(urllib.request.urlopen(r))
+body = ("Autonomous self-improvement by yantrik-mind (Claude Code on the subscription). "
+        "Compile-verified; harm-gate untouched (enforced). "
+        + ("Tests green + auto-merge gates passed." if automerge else "Draft — review before merge."))
 try:
-    print("PR:", json.load(urllib.request.urlopen(req))["html_url"])
+    pr = call("POST", api + "/pulls", {"title": f"self-improve: {goal}", "head": br, "base": "main",
+                                       "draft": (not automerge), "body": body})
+    print("PR:", pr["html_url"])
 except urllib.error.HTTPError as e:
-    print("PR-FAIL", e.code, e.read().decode()[:300])
-    sys.exit(1)
+    print("PR-FAIL", e.code, e.read().decode()[:300]); sys.exit(1)
+if automerge:
+    time.sleep(3)  # let GitHub compute mergeability
+    try:
+        m = call("PUT", f"{api}/pulls/{pr['number']}/merge", {"merge_method": "squash"})
+        print("MERGED:", (m.get("sha") or "")[:7], "— auto-merged on green")
+    except urllib.error.HTTPError as e:
+        print("MERGE-FAIL", e.code, e.read().decode()[:300])  # PR stays open for a human
 PY
-echo "==> done: opened a draft PR from $BR"
+echo "==> done"

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
-use mind_types::{BeliefAssertion, MemoryFacade};
+use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery};
 
 pub mod telegram;
 
@@ -21,6 +21,7 @@ pub enum Outcome {
 
 /// Handle a single REPL line. Commands start with `:`; anything else is a chat turn.
 ///   `:remember + <statement>` / `:remember - <statement>`  assert evidence for/against a belief
+///   `:beliefs [query]`                                      list top beliefs by confidence (optional semantic filter)
 ///   `:conflicts`                                            list open contradictions
 ///   `:explain <statement>`                                  show a belief + its evidence count
 ///   `:quit`
@@ -48,6 +49,17 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
     }
     if t == ":workers" {
         return Outcome::Said(conv.workers_status().await);
+    }
+    if let Some(query) = t.strip_prefix(":beliefs") {
+        let query = query.trim();
+        return match mem.recall_typed(RecallQuery { text: query.to_string(), top_k: 10, kind: None }).await {
+            Ok(rs) if rs.is_empty() => Outcome::Said("(no beliefs stored)".into()),
+            Ok(mut rs) => {
+                rs.sort_by(|a, b| b.item.confidence.partial_cmp(&a.item.confidence).unwrap_or(std::cmp::Ordering::Equal));
+                Outcome::Said(rs.iter().map(|r| format!("• {} ({:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n"))
+            }
+            Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
     }
     if t == ":conflicts" {
         return match mem.conflicts().await {
@@ -304,6 +316,30 @@ mod tests {
 
         // :quit
         assert!(matches!(handle_line(":quit", &mem, &conv).await, Outcome::Quit));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn beliefs_command_lists_and_filters() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = engine(&mem, pool);
+
+        // no beliefs yet
+        assert!(matches!(handle_line(":beliefs", &mem, &conv).await, Outcome::Said(s) if s.contains("no beliefs")));
+
+        // assert a belief and check it appears in :beliefs
+        handle_line(":remember + sky is blue", &mem, &conv).await;
+        match handle_line(":beliefs", &mem, &conv).await {
+            Outcome::Said(s) => assert!(s.contains("sky is blue"), ":beliefs should list it: {s}"),
+            _ => panic!("expected output"),
+        }
+
+        // query filter
+        match handle_line(":beliefs sky", &mem, &conv).await {
+            Outcome::Said(s) => assert!(s.contains("sky is blue"), ":beliefs <query> should filter: {s}"),
+            _ => panic!("expected output"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

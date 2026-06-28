@@ -108,6 +108,49 @@ pub struct Reflection {
     pub preferences: Vec<MemoryItem>,
 }
 
+/// A typed URGE in the tension economy — a substrate-grounded pressure that a DRIVE emits when it
+/// meets a gap (an open contradiction, a stale-but-important belief, a curiosity gap). Persisted in
+/// yantrikdb; accrues while the mind is idle; the proactive layer later arbitrates which (if any)
+/// clears the bar to surface. Deliberately NOT a free-floating "urge" — it is grounded in measurable
+/// substrate state (so it is ablatable/falsifiable), per the locked salience design.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tension {
+    pub id: String,
+    pub kind: TensionKind,
+    pub pressure: f64, // [0,1] salience/urgency
+    pub about: String, // what it concerns (human-readable)
+    pub created_ms: UnixMillis,
+    pub status: String, // "open" | "discharged"
+}
+
+/// Which DRIVE produced a tension.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TensionKind {
+    Contradiction,    // coherence drive — two beliefs conflict
+    Staleness,        // vigilance drive — an important belief is decaying/unrefreshed
+    Curiosity,        // curiosity drive — a knowledge gap worth exploring
+    VerificationDebt, // rigor drive — believed but unverified
+}
+
+impl TensionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TensionKind::Contradiction => "contradiction",
+            TensionKind::Staleness => "staleness",
+            TensionKind::Curiosity => "curiosity",
+            TensionKind::VerificationDebt => "verification_debt",
+        }
+    }
+    pub fn parse(s: &str) -> TensionKind {
+        match s {
+            "staleness" => TensionKind::Staleness,
+            "curiosity" => TensionKind::Curiosity,
+            "verification_debt" => TensionKind::VerificationDebt,
+            _ => TensionKind::Contradiction,
+        }
+    }
+}
+
 /// A reusable code-tool the mind authored, vetted in the sandbox, and banked for recall. Stored in
 /// YantrikDB. Reuse ALWAYS runs through the sandbox — promotion grants recallability, never authority.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -145,6 +188,14 @@ pub trait MemoryFacade: Send + Sync {
     async fn reflect(&self, question: &str) -> Result<Reflection>;
     /// Currently-open contradictions across stored beliefs.
     async fn conflicts(&self) -> Result<Vec<Contradiction>>;
+
+    // ── tension economy (the "urges": drives emit substrate-grounded pressures; proactive arbitrates) ──
+    /// Record a typed urge emitted by a drive (deduped on (kind, about) so it accrues, not floods).
+    async fn record_tension(&self, kind: TensionKind, pressure: f64, about: &str) -> Result<()>;
+    /// Open tensions, highest pressure first.
+    async fn open_tensions(&self, limit: usize) -> Result<Vec<Tension>>;
+    /// Mark a tension discharged (resolved, or surfaced to the user).
+    async fn discharge_tension(&self, id: &str) -> Result<bool>;
     /// A belief plus its evidence trail (provenance).
     async fn explain_belief(&self, belief_id: &str) -> Result<Option<(Belief, Vec<Evidence>)>>;
     /// Build the typed working-set for a focus/turn.

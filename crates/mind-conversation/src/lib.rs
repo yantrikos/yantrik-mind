@@ -884,7 +884,16 @@ impl ConversationEngine {
                                 provenance: "dmn".into(),
                             })
                             .await;
-                        log.push("[dmn] reconciled 1 contradiction (noted, not auto-revised)".to_string());
+                        // The COHERENCE drive emits an urge — pressure ~ contradiction severity.
+                        let _ = self
+                            .memory
+                            .record_tension(
+                                mind_types::TensionKind::Contradiction,
+                                c.severity.clamp(0.3, 1.0),
+                                &format!("\"{}\" vs \"{}\"", c.belief_a, c.belief_b),
+                            )
+                            .await;
+                        log.push("[dmn] reconciled 1 contradiction (noted + urge recorded)".to_string());
                     }
                 } else {
                     log.push("[dmn] reconcile: no open contradictions".to_string());
@@ -926,7 +935,12 @@ impl ConversationEngine {
                                 provenance: "dmn".into(),
                             })
                             .await;
-                        log.push("[dmn] associated 1 hypothesis".to_string());
+                        // The CURIOSITY drive emits an urge to follow up the hunch (lower pressure).
+                        let _ = self
+                            .memory
+                            .record_tension(mind_types::TensionKind::Curiosity, 0.4, insight)
+                            .await;
+                        log.push("[dmn] associated 1 hypothesis (+ curiosity urge)".to_string());
                     }
                 }
             }
@@ -2276,6 +2290,27 @@ mod tests {
             "a dmn hypothesis must be stored + recallable: {:?}",
             r.iter().map(|x| &x.item.text).collect::<Vec<_>>()
         );
+        // the curiosity DRIVE should also have emitted an urge into the tension ledger
+        let tensions = memarc.open_tensions(10).await.unwrap();
+        assert!(
+            tensions.iter().any(|t| t.kind == mind_types::TensionKind::Curiosity),
+            "associate should emit a curiosity urge: {:?}",
+            tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tension_ledger_records_dedupes_and_discharges() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        memarc.record_tension(mind_types::TensionKind::Staleness, 0.7, "belief X is decaying").await.unwrap();
+        // same (kind, about) accrues rather than duplicating — and keeps the max pressure
+        memarc.record_tension(mind_types::TensionKind::Staleness, 0.9, "belief X is decaying").await.unwrap();
+        let open = memarc.open_tensions(10).await.unwrap();
+        assert_eq!(open.len(), 1, "dedup on (kind, about): {open:?}");
+        assert!((open[0].pressure - 0.9).abs() < 1e-9, "keeps the max pressure, got {}", open[0].pressure);
+        assert!(memarc.discharge_tension(&open[0].id).await.unwrap(), "discharge should report it changed");
+        assert!(memarc.open_tensions(10).await.unwrap().is_empty(), "discharged tension is no longer open");
     }
 
     #[test]

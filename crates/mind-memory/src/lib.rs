@@ -59,6 +59,10 @@ enum Cmd {
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
+    // tension economy (the "urges" drives emit; plain CRUD ledger)
+    RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
+    OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
+    DischargeTension { id: String, reply: Reply<bool> },
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
@@ -457,6 +461,81 @@ fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<Memory
         .collect())
 }
 
+fn ensure_tensions_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_tensions \
+         (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, pressure REAL NOT NULL, \
+          about TEXT NOT NULL, created_ms INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open')",
+        [],
+    );
+}
+
+/// Record a tension, deduped on (kind, about) among OPEN rows so a recurring urge accrues (keeps the
+/// max pressure + refreshes created_ms) rather than flooding the ledger with duplicates.
+fn record_tension_db(db: &YantrikDB, kind: &str, pressure: f64, about: &str, now_ms: i64) -> std::result::Result<(), String> {
+    let conn = db.conn();
+    let existing: Option<(i64, f64)> = conn
+        .query_row(
+            "SELECT id, pressure FROM mind_tensions WHERE kind=?1 AND about=?2 AND status='open' LIMIT 1",
+            rusqlite::params![kind, about],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    match existing {
+        Some((id, prev)) => conn
+            .execute(
+                "UPDATE mind_tensions SET pressure=?1, created_ms=?2 WHERE id=?3",
+                rusqlite::params![prev.max(pressure), now_ms, id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        None => conn
+            .execute(
+                "INSERT INTO mind_tensions (kind, pressure, about, created_ms, status) VALUES (?1,?2,?3,?4,'open')",
+                rusqlite::params![kind, pressure, about, now_ms],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+    }
+}
+
+fn open_tensions_db(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<mind_types::Tension>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT id, kind, pressure, about, created_ms FROM mind_tensions WHERE status='open' ORDER BY pressure DESC, created_ms DESC LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([limit as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .map(|(id, kind, pressure, about, created_ms)| mind_types::Tension {
+            id: id.to_string(),
+            kind: mind_types::TensionKind::parse(&kind),
+            pressure,
+            about,
+            created_ms: created_ms as u64,
+            status: "open".into(),
+        })
+        .collect())
+}
+
+fn discharge_tension_db(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> {
+    let n = db
+        .conn()
+        .execute("UPDATE mind_tensions SET status='discharged' WHERE id=?1 AND status='open'", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
 fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
     let tags_json: String = r.get(4)?;
     Ok(Skill {
@@ -631,6 +710,7 @@ impl MemoryHandle {
                 ensure_transcript_table(&db);
                 ensure_skills_table(&db);
                 ensure_goals_prefs_table(&db);
+                ensure_tensions_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -721,6 +801,19 @@ impl MemoryHandle {
                         }
                         Cmd::MessagesSince { after_id, limit, reply } => {
                             let _ = reply.send(messages_since(&db, after_id, limit));
+                        }
+                        Cmd::RecordTension { kind, pressure, about, reply } => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            let _ = reply.send(record_tension_db(&db, &kind, pressure, &about, now));
+                        }
+                        Cmd::OpenTensions { limit, reply } => {
+                            let _ = reply.send(open_tensions_db(&db, limit));
+                        }
+                        Cmd::DischargeTension { id, reply } => {
+                            let _ = reply.send(discharge_tension_db(&db, &id));
                         }
                     }
                 }
@@ -824,6 +917,18 @@ impl MemoryFacade for MemoryHandle {
 
     async fn conflicts(&self) -> Result<Vec<Contradiction>> {
         self.call(|reply| Cmd::Conflicts { reply }).await
+    }
+
+    async fn record_tension(&self, kind: mind_types::TensionKind, pressure: f64, about: &str) -> Result<()> {
+        let (kind, about) = (kind.as_str().to_string(), about.to_string());
+        self.call(|reply| Cmd::RecordTension { kind, pressure: pressure.clamp(0.0, 1.0), about, reply }).await
+    }
+    async fn open_tensions(&self, limit: usize) -> Result<Vec<mind_types::Tension>> {
+        self.call(|reply| Cmd::OpenTensions { limit, reply }).await
+    }
+    async fn discharge_tension(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.call(|reply| Cmd::DischargeTension { id, reply }).await
     }
 
     async fn explain_belief(&self, belief_id: &str) -> Result<Option<(Belief, Vec<MEvidence>)>> {

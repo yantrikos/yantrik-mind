@@ -21,7 +21,7 @@ pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
 pub use event::{Event, EventBody, EventSource};
 pub use memory::{
     Belief, BeliefAssertion, Contradiction, Evidence, MemoryFacade, MemoryItem, MemoryKind,
-    Recalled, RecallQuery, Reflection, Skill, WorkingSet,
+    Recalled, RecallQuery, Reflection, Skill, Tension, TensionKind, WorkingSet,
 };
 pub use candidate::{Candidate, CandidateKind, ScoreAxes};
 pub use action::{

@@ -51,6 +51,12 @@ pub use weather::{OpenMeteo, ScriptedWeather, WeatherClient};
 pub mod wikipedia;
 pub use wikipedia::{ScriptedWiki, WikiClient, Wikipedia};
 
+pub mod markets;
+pub use markets::{LiveMarkets, MarketsClient, ScriptedMarkets};
+
+pub mod translate;
+pub use translate::{GoogleTranslate, ScriptedTranslator, Translator};
+
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).

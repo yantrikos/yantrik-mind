@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{render_home_digest, render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, NewsClient, Sandbox, WeatherClient, WebSearch, WikiClient, WorkerPool};
+use mind_tools::{render_home_digest, render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, MarketsClient, NewsClient, Sandbox, Translator, WeatherClient, WebSearch, WikiClient, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -527,6 +527,10 @@ pub struct ConversationEngine {
     weather: Option<Arc<dyn WeatherClient>>,
     /// Wikipedia — keyless factual lookups (search + intro extract). Untrusted reference text.
     wiki: Option<Arc<dyn WikiClient>>,
+    /// Markets — keyless crypto (CoinGecko) + stock (stooq) quotes. Reference data, not advice.
+    markets: Option<Arc<dyn MarketsClient>>,
+    /// Translator — keyless translation (Google translate_a, source auto-detected). Untrusted output.
+    translator: Option<Arc<dyn Translator>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -596,6 +600,8 @@ impl ConversationEngine {
             news_seen: Mutex::new(std::collections::HashSet::new()),
             weather: None,
             wiki: None,
+            markets: None,
+            translator: None,
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -1944,6 +1950,18 @@ impl ConversationEngine {
         self
     }
 
+    /// Give the mind keyless crypto + stock quotes (reference data, not advice).
+    pub fn with_markets(mut self, markets: Arc<dyn MarketsClient>) -> Self {
+        self.markets = Some(markets);
+        self
+    }
+
+    /// Give the mind keyless translation (source auto-detected). Output is untrusted.
+    pub fn with_translator(mut self, translator: Arc<dyn Translator>) -> Self {
+        self.translator = Some(translator);
+        self
+    }
+
     /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
     /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
     /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
@@ -2491,6 +2509,19 @@ impl ConversationEngine {
             "weather" | "wx" if !rest.is_empty() => self.run_agent_tool("weather", &serde_json::json!({ "place": rest })).await,
             "wiki" | "wikipedia" if !rest.is_empty() => self.run_agent_tool("wikipedia", &serde_json::json!({ "query": rest })).await,
             "calc" | "calculate" | "math" if !rest.is_empty() => calc(&rest),
+            "crypto" | "coin" if !rest.is_empty() => self.run_agent_tool("crypto", &serde_json::json!({ "coin": rest })).await,
+            "stock" | "ticker" if !rest.is_empty() => self.run_agent_tool("stock", &serde_json::json!({ "symbol": rest })).await,
+            "translate" | "tr" if !rest.is_empty() => {
+                // `ym translate <lang> <text…>` — first token is the target language.
+                let mut p = rest.splitn(2, char::is_whitespace);
+                let lang = p.next().unwrap_or("");
+                let text = p.next().unwrap_or("").trim();
+                if text.is_empty() {
+                    "Usage: ym translate <language> <text>  (e.g. ym translate french good morning)".to_string()
+                } else {
+                    self.run_agent_tool("translate", &serde_json::json!({ "to": lang, "text": text })).await
+                }
+            }
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // --- finance plugin: subscriptions + money overview (no bank data needed) ---
@@ -2542,6 +2573,8 @@ impl ConversationEngine {
             "ym weather <place>       current weather + today's forecast".to_string(),
             "ym wiki <query>          a factual Wikipedia summary".to_string(),
             "ym calc <expression>     do arithmetic (e.g. 12*7+3)".to_string(),
+            "ym crypto <coin> · ym stock <ticker>     market quotes".to_string(),
+            "ym translate <lang> <text>               translate (source auto-detected)".to_string(),
             "ym recall <query>        search memory".to_string(),
             "ym remember <text>       store a fact".to_string(),
         ];
@@ -3300,6 +3333,18 @@ impl ConversationEngine {
                 None => "(wikipedia isn't configured)".to_string(),
             },
             "calc" | "calculate" | "math" => calc(&{ let e = s("expression"); if e.is_empty() { s("expr") } else { e } }),
+            "crypto" | "coin" => match &self.markets {
+                Some(m) => match m.crypto(&{ let c = s("coin"); if c.is_empty() { s("query") } else { c } }).await { Ok(r) => r, Err(e) => format!("(crypto: {e})") },
+                None => "(markets aren't configured)".to_string(),
+            },
+            "stock" | "ticker" => match &self.markets {
+                Some(m) => match m.stock(&{ let t = s("symbol"); if t.is_empty() { s("ticker") } else { t } }).await { Ok(r) => r, Err(e) => format!("(stock: {e})") },
+                None => "(markets aren't configured)".to_string(),
+            },
+            "translate" => match &self.translator {
+                Some(tr) => match tr.translate(&{ let l = s("to"); if l.is_empty() { s("language") } else { l } }, &s("text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
+                None => "(translator isn't configured)".to_string(),
+            },
             "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => self.discover_subscriptions().await,
             "bills" => self.bills_list().await,
             "budget" | "budget_overview" => self.budget_overview().await,
@@ -3569,6 +3614,9 @@ impl ConversationEngine {
 - weather {place}: current conditions + today's forecast for a city/town\n\
 - wikipedia {query}: a factual summary from Wikipedia (what/who is X)\n\
 - calc {expression}: do arithmetic locally (e.g. 12*7+3, (1500*0.18))\n\
+- crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)\n\
+- stock {symbol}: a stock quote (US ticker, e.g. AAPL)\n\
+- translate {to, text}: translate text into a language ('to' like french/hi/es; source auto-detected)\n\
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
@@ -4647,6 +4695,19 @@ mod tests {
         assert_eq!(calc("$1,200 / 12"), "= 100"); // currency/commas ignored
         assert!(calc("1/0").contains("couldn't"), "div by zero is rejected");
         assert!(calc("hello").contains("couldn't"), "non-math rejected");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn markets_and_translate_route_via_cli() {
+        use mind_tools::{ScriptedMarkets, ScriptedTranslator};
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+            .with_markets(Arc::new(ScriptedMarkets { crypto: "💰 Bitcoin (BTC): $67,000 ▲2%".into(), stock: "📈 Apple (AAPL): $211".into() }))
+            .with_translator(Arc::new(ScriptedTranslator { text: "🌐 (en→fr) bonjour".into() }));
+        assert!(conv.cli_dispatch("crypto btc").await.contains("Bitcoin"), "crypto routes");
+        assert!(conv.cli_dispatch("stock AAPL").await.contains("Apple"), "stock routes");
+        assert!(conv.cli_dispatch("translate french good morning").await.contains("bonjour"), "translate routes (first token = lang)");
+        assert!(conv.cli_dispatch("translate french").await.contains("Usage"), "translate without text shows usage");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

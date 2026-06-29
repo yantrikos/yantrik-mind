@@ -265,7 +265,9 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_searcher(Arc::new(mind_tools::DdgSearch::new())) // keyless web search, always on
         .with_news(Arc::new(mind_tools::GoogleNews::new())) // keyless news, always on
         .with_weather(Arc::new(mind_tools::OpenMeteo::new())) // keyless weather, always on
-        .with_wiki(Arc::new(mind_tools::Wikipedia::new())); // keyless Wikipedia, always on
+        .with_wiki(Arc::new(mind_tools::Wikipedia::new())) // keyless Wikipedia, always on
+        .with_markets(Arc::new(mind_tools::LiveMarkets::new())) // keyless crypto + stock quotes
+        .with_translator(Arc::new(mind_tools::GoogleTranslate::new())); // keyless translation
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
     }

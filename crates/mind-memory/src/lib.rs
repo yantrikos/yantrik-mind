@@ -363,6 +363,30 @@ fn all_task_nodes(db: &YantrikDB) -> Vec<CognitiveNode> {
     db.load_cognitive_nodes_by_kind(NodeKind::Task).unwrap_or_default()
 }
 
+/// Content-word set of a task description (lowercased, stopwords + short tokens dropped) — the basis
+/// for de-duplicating paraphrased tasks (commitment-extraction re-creates the same task as slightly
+/// different wording every consolidation pass; this caused ~40 duplicate gift/page reminders).
+fn task_word_set(s: &str) -> std::collections::HashSet<String> {
+    // Generic stopwords ONLY — domain words (gift/order/build/page…) carry the meaning that keeps
+    // distinct intents apart, so they must stay in the signature.
+    const STOP: &[&str] = &[
+        "the", "and", "for", "his", "her", "with", "under", "are", "was", "you", "your",
+        "into", "from", "that", "this", "ensure", "possibly", "within",
+    ];
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2 && !STOP.contains(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    a.intersection(b).count() as f64 / a.union(b).count() as f64
+}
+
 fn add_task(
     db: &YantrikDB,
     alloc: &mut NodeIdAllocator,
@@ -370,6 +394,20 @@ fn add_task(
     priority: &str,
     due_ms: Option<u64>,
 ) -> std::result::Result<Task, String> {
+    // Dedup: if an OPEN task is a close paraphrase of this one, reuse it instead of piling up.
+    let new_sig = task_word_set(description);
+    if !new_sig.is_empty() {
+        for n in all_task_nodes(db) {
+            if let NodePayload::Task(ref t) = n.payload {
+                if matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled) {
+                    continue;
+                }
+                if jaccard(&new_sig, &task_word_set(&t.description)) >= 0.6 {
+                    return task_dto(&n).ok_or_else(|| "task build failed".to_string());
+                }
+            }
+        }
+    }
     let id = alloc.alloc(NodeKind::Task);
     let node = CognitiveNode::new(
         id,
@@ -1202,6 +1240,22 @@ mod tests {
         mem.add_task("call the dentist", "medium", None).await.unwrap();
         let ws = mem.hydrate_working_set("what's on my plate").await.unwrap();
         assert!(ws.commitments.iter().any(|c| c.text.contains("dentist")), "open task should surface in working-set");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn add_task_dedups_paraphrases_keeps_distinct_intents() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        // commitment-extraction re-creates the SAME task as different wording each pass — these must collapse
+        mem.add_task("Build a live-updating web page tracking top 10 handbag + watch combos under $200", "medium", None).await.unwrap();
+        mem.add_task("Build and deliver a live-updating web page tracking the top 10 handbag and watch combos under $200", "medium", None).await.unwrap();
+        mem.add_task("Build a live-updating web page with the top 10 handbag and watch combos under $200", "medium", None).await.unwrap();
+        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 1, "paraphrased page tasks collapse to one");
+        // a genuinely different intent is NOT swallowed
+        mem.add_task("Order wife's birthday gift by July 17th to ensure delivery by July 23rd", "high", None).await.unwrap();
+        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 2, "distinct intent stays separate");
+        // and its own paraphrase dedups against it
+        mem.add_task("Order wife's birthday gift (handbag + watch combo) by July 17th to ensure delivery by July 23rd", "high", None).await.unwrap();
+        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 2, "gift paraphrase collapses too");
     }
 
     /// THE EMBEDDER MOAT (yantrikdb 0.9.0): at dim 64 the engine auto-attaches its bundled

@@ -268,6 +268,14 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     if let Some(g) = &github_read {
         eng = eng.with_github(g.clone());
     }
+    // Smart-home awareness (Home Assistant): read-only entity states, when YM_HA_URL + YM_HA_TOKEN
+    // are set. The first domain of the full-life world-model; control comes later, harm-gated.
+    if let (Some(url), Some(tok)) = (
+        std::env::var("YM_HA_URL").ok().filter(|u| !u.trim().is_empty()),
+        std::env::var("YM_HA_TOKEN").ok().filter(|t| !t.trim().is_empty()),
+    ) {
+        eng = eng.with_home(Arc::new(mind_tools::ApiHomeAssistantClient::new(url, tok)));
+    }
 
     // Hands: an outward-action runtime, harm-gated + confirmation-required. Grants SendMessage when a
     // transport (email send and/or github comment) is configured. Every action rides the harm-gate.

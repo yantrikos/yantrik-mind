@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{Coder, Fetcher, GithubClient, MailClient, Sandbox, WorkerPool};
+use mind_tools::{render_home_digest, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, Sandbox, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -331,6 +331,9 @@ pub struct ConversationEngine {
     mail: Option<Arc<dyn MailClient>>,
     /// GitHub client — when set, a "check my github" turn pulls notifications (read-only, untrusted).
     github: Option<Arc<dyn GithubClient>>,
+    /// Home Assistant client — when set, the mind can read the smart-home world (states: climate,
+    /// presence, sensors, weather). Read-only + untrusted; control is a later, harm-gated capability.
+    home: Option<Arc<dyn HomeAssistantClient>>,
     /// Action runtime — when set, OUTWARD actions (e.g. send email) are proposed, harm-gated, and
     /// require explicit confirmation before they run.
     runtime: Option<Arc<dyn ActionRuntime>>,
@@ -380,6 +383,7 @@ impl ConversationEngine {
             web: None,
             mail: None,
             github: None,
+            home: None,
             runtime: None,
             pending: Mutex::new(None),
             pending_question: Mutex::new(None),
@@ -1643,6 +1647,12 @@ impl ConversationEngine {
         self
     }
 
+    /// Give the mind read-only smart-home awareness (Home Assistant). Control is a later, gated step.
+    pub fn with_home(mut self, home: Arc<dyn HomeAssistantClient>) -> Self {
+        self.home = Some(home);
+        self
+    }
+
     /// Does this turn ask the mind to check email? Tight match — casual "email" mentions don't fire.
     fn wants_inbox(text: &str) -> bool {
         let l = text.to_lowercase();
@@ -2361,6 +2371,13 @@ impl ConversationEngine {
                 Some(g) => match g.notifications(15).await { Ok(n) => mind_tools::render_github_digest(&n), Err(e) => format!("(error: {e})") },
                 None => "(github not configured)".to_string(),
             },
+            "home" | "home_status" | "house" | "smart_home" => match &self.home {
+                Some(h) => match h.states().await {
+                    Ok(ents) => render_home_digest(&ents),
+                    Err(e) => format!("(couldn't reach Home Assistant: {e})"),
+                },
+                None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
+            },
             "web_fetch" => match &self.web {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
@@ -2605,6 +2622,7 @@ impl ConversationEngine {
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
+- home {}: check the smart home (Home Assistant) — who's home, thermostat/climate, weather, what's on\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
@@ -3558,6 +3576,31 @@ mod tests {
         assert!(!html.contains("\\n"), "JSON escapes are decoded: {html}");
         // …and name the page from its <title>, not the user's request text.
         assert_eq!(title_from_html(&html).as_deref(), Some("Top 10 Combos"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn home_tool_reads_smart_home_states() {
+        use mind_tools::{HaEntity, ScriptedHomeAssistantClient};
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let ents = vec![
+            HaEntity { entity_id: "person.pranab".into(), domain: "person".into(), state: "home".into(), friendly_name: "Pranab".into(), attributes: serde_json::json!({}) },
+            HaEntity { entity_id: "climate.lr".into(), domain: "climate".into(), state: "heat".into(), friendly_name: "Living Room".into(), attributes: serde_json::json!({"current_temperature": 19.5, "temperature": 22, "hvac_action": "heating"}) },
+        ];
+        let conv = ConversationEngine::new(
+            Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        )
+        .with_home(Arc::new(ScriptedHomeAssistantClient::new(ents)));
+        let out = conv.run_agent_tool("home", &serde_json::json!({})).await;
+        assert!(out.contains("Pranab: home") && out.contains("Living Room") && out.contains("heating"), "home digest: {out}");
+        // not configured → a clear, non-confabulated message
+        let conv2 = ConversationEngine::new(
+            Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>,
+            InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1),
+            "JARVIS",
+        );
+        assert!(conv2.run_agent_tool("home", &serde_json::json!({})).await.contains("not configured"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

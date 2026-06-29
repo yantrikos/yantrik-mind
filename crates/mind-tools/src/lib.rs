@@ -36,6 +36,12 @@ pub use github::{
     ScriptedGithubClient, ScriptedGithubWriter,
 };
 
+pub mod homeassistant;
+pub use homeassistant::{
+    render_home_digest, ApiHomeAssistantClient, HaEntity, HomeAssistantClient,
+    ScriptedHomeAssistantClient,
+};
+
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).

@@ -244,11 +244,14 @@ fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt
     let body = String::from_utf8_lossy(&body).trim().to_string();
 
     let (status, reply) = match (method, path.split('?').next().unwrap_or(path)) {
+        // `ym <name> <args>` — the top-level CLI router (core commands + skill-registered commands +
+        // chat fallback). Data-driven: a new capability skill becomes a new `ym` command, no recompile.
+        ("POST", "/cli") if !body.is_empty() => ("200 OK", rt.block_on(conv.cli_dispatch(&body))),
         ("POST", "/chat") if !body.is_empty() => {
             let r = rt.block_on(conv.handle_turn(&body)).unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
         }
-        ("POST", "/chat") => ("400 Bad Request", "(empty message)".to_string()),
+        ("POST", "/chat") | ("POST", "/cli") => ("400 Bad Request", "(empty message)".to_string()),
         ("GET", "/status") => ("200 OK", "ok".to_string()),
         _ => ("404 Not Found", "not found".to_string()),
     };

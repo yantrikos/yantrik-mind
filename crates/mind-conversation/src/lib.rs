@@ -1653,6 +1653,59 @@ impl ConversationEngine {
         self
     }
 
+    /// `ym` CLI dispatcher — top-level `ym <plugin> <args>`. The namespaces are the wired PLUGINS/TOOLS
+    /// (Home Assistant, GitHub, web, memory) — NOT authored skills — and a plugin's command exists only
+    /// when that plugin is actually configured (the "hook": present plugin → live command). Anything
+    /// that isn't a plugin command falls through to a full chat turn (shared live memory).
+    pub async fn cli_dispatch(&self, line: &str) -> String {
+        let line = line.trim();
+        let mut it = line.splitn(2, char::is_whitespace);
+        let cmd = it.next().unwrap_or("").to_lowercase();
+        let rest = it.next().unwrap_or("").trim().to_string();
+        match cmd.as_str() {
+            "" => "ym — say something, or `ym commands` to see the plugins you have.".to_string(),
+            "commands" | "cmds" | "?" => self.cli_commands(),
+            "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
+            "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
+            "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
+            // --- plugins/tools: each owns a namespace, present only when wired ---
+            "home" | "house" if self.home.is_some() => self.run_agent_tool("home", &serde_json::json!({})).await,
+            "github" | "gh" if self.github.is_some() => {
+                if rest.contains('/') {
+                    self.run_agent_tool("github_repo_items", &serde_json::json!({ "repo": rest })).await
+                } else {
+                    self.run_agent_tool("github_notifications", &serde_json::json!({})).await
+                }
+            }
+            "web" | "fetch" if self.web.is_some() && !rest.is_empty() => {
+                self.run_agent_tool("web_fetch", &serde_json::json!({ "url": rest })).await
+            }
+            // Not a plugin command — treat the whole line as chat (full agent loop, live memory).
+            _ => self.handle_turn(line).await.unwrap_or_else(|e| format!("(error: {e})")),
+        }
+    }
+
+    /// List the `ym` commands = always-on core + every wired PLUGIN's namespace (a plugin appears only
+    /// when configured, so this reflects what's actually connected right now).
+    fn cli_commands(&self) -> String {
+        let mut lines = vec![
+            "ym now                   date/time".to_string(),
+            "ym recall <query>        search memory".to_string(),
+            "ym remember <text>       store a fact".to_string(),
+        ];
+        if self.home.is_some() {
+            lines.push("ym home                  smart home (Home Assistant)".to_string());
+        }
+        if self.github.is_some() {
+            lines.push("ym github [owner/repo]   GitHub triage (notifications, or a repo's issues/PRs)".to_string());
+        }
+        if self.web.is_some() {
+            lines.push("ym web <url>             fetch a page".to_string());
+        }
+        lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
+        format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
+    }
+
     /// Does this turn ask the mind to check email? Tight match — casual "email" mentions don't fire.
     fn wants_inbox(text: &str) -> bool {
         let l = text.to_lowercase();
@@ -3611,6 +3664,24 @@ mod tests {
             "JARVIS",
         );
         assert!(conv2.run_agent_tool("home", &serde_json::json!({})).await.contains("not configured"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cli_dispatch_routes_plugins_and_chat() {
+        use mind_tools::{HaEntity, ScriptedHomeAssistantClient};
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        // wire the HOME plugin (a tool/integration), but deliberately NOT github
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS").with_home(Arc::new(ScriptedHomeAssistantClient::new(vec![
+            HaEntity { entity_id: "person.pranab".into(), domain: "person".into(), state: "home".into(), friendly_name: "Pranab".into(), attributes: serde_json::json!({}) },
+        ])));
+        // the home PLUGIN command routes to the HA tool
+        assert!(conv.cli_dispatch("home").await.contains("Pranab: home"), "home plugin → HA tool");
+        // `commands` lists only WIRED plugins — home present, github absent (present-plugin → live-command)
+        let cmds = conv.cli_dispatch("commands").await;
+        assert!(cmds.contains("ym home") && !cmds.contains("ym github"), "lists only wired plugins: {cmds}");
+        // unknown → chat fallback (doesn't error)
+        assert!(!conv.cli_dispatch("hey what's up").await.is_empty(), "unknown → chat");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

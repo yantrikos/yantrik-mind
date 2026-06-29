@@ -196,6 +196,88 @@ async fn reminder_loop(api: String, mem: MemoryHandle, active_chat: Arc<AtomicI6
     }
 }
 
+fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// One control request from `ym`: `POST /chat` (body = message → handle_turn → reply) or
+/// `GET /status` (liveness). Runs the async turn on the shared runtime via `rt.block_on` (this is a
+/// plain OS thread, not a runtime worker, so block_on is allowed). Shares the live conv → live memory.
+fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
+    use std::io::{Read, Write};
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(150)));
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 4096];
+    // read until the headers are complete
+    let hend = loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => return,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(p) = find_sub(&buf, b"\r\n\r\n") {
+                    break p;
+                }
+                if buf.len() > 2_000_000 {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..hend]).to_string();
+    let mut first = head.lines().next().unwrap_or("").split_whitespace();
+    let method = first.next().unwrap_or("");
+    let path = first.next().unwrap_or("/");
+    let clen: usize = head
+        .lines()
+        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+        .unwrap_or(0);
+    // body = whatever followed the headers, plus any remaining content-length bytes
+    let mut body = buf[hend + 4..].to_vec();
+    while body.len() < clen {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&tmp[..n]),
+            Err(_) => break,
+        }
+    }
+    let body = String::from_utf8_lossy(&body).trim().to_string();
+
+    let (status, reply) = match (method, path.split('?').next().unwrap_or(path)) {
+        ("POST", "/chat") if !body.is_empty() => {
+            let r = rt.block_on(conv.handle_turn(&body)).unwrap_or_else(|e| format!("(error: {e})"));
+            ("200 OK", r)
+        }
+        ("POST", "/chat") => ("400 Bad Request", "(empty message)".to_string()),
+        ("GET", "/status") => ("200 OK", "ok".to_string()),
+        _ => ("404 Not Found", "not found".to_string()),
+    };
+    let resp = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+        reply.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+}
+
+/// Tiny localhost-only control server (own thread) backing the `ym` CLI. Lets a terminal talk to the
+/// SAME running companion as telegram (shared memory). 127.0.0.1 only; YM_CTL=off disables.
+fn spawn_control_server(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
+    if std::env::var("YM_CTL").map(|v| v == "off").unwrap_or(false) {
+        return;
+    }
+    let port: u16 = std::env::var("YM_CTL_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8077);
+    std::thread::spawn(move || match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            eprintln!("[ctl] control endpoint on 127.0.0.1:{port} (for the `ym` CLI)");
+            for stream in listener.incoming().flatten() {
+                let (conv, rt) = (conv.clone(), rt.clone());
+                std::thread::spawn(move || ctl_handle(stream, conv, rt));
+            }
+        }
+        Err(e) => eprintln!("[ctl] could not bind 127.0.0.1:{port}: {e}"),
+    });
+}
+
 /// Run the telegram channel until killed. `chat_lock` (YM_TELEGRAM_CHAT) optionally restricts to a
 /// single chat id; if unset, the first chatter is accepted (single-user companion).
 pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
@@ -213,6 +295,12 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // big generations) must never freeze the poll loop or the background ticks (the old "no-reply" /
     // frozen-bot failure mode). The memory actor serializes writes, so concurrent turns are safe.
     let conv = Arc::new(conv);
+
+    // Local control endpoint for the `ym` CLI: same running process → SHARES live memory/continuity
+    // with the telegram channel (one mind, two surfaces). Bound to 127.0.0.1 only (no new LAN port;
+    // SSH stays the trust boundary). Disable with YM_CTL=off.
+    spawn_control_server(conv.clone(), tokio::runtime::Handle::current());
+
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT").ok().and_then(|s| s.trim().parse().ok());
 
     // Proactive reminders run in the background, messaging the last-active chat when a due

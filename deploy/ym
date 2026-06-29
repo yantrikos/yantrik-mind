@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ym — your terminal line to yantrik-mind (LIVE: shares the running companion's memory & continuity).
+# Chat + ops over SSH to the box. The chat endpoint is localhost-only on the box, so SSH is the trust
+# boundary (no LAN-exposed control port). Override BOX/KEY/CTL via env if your setup differs.
+set -uo pipefail
+BOX="${YM_BOX:-root@192.168.4.90}"
+KEY="${YM_KEY:-$HOME/.ssh/id_deploy}"
+CTL="${YM_CTL_URL:-http://127.0.0.1:8077}"
+ssh_box() { ssh -i "$KEY" -o ConnectTimeout=8 "$BOX" "$@"; }
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+
+case "$cmd" in
+  ""|-h|--help|help)
+    cat <<'EOF'
+ym — talk to yantrik-mind (live, shared memory)
+  ym <message...>       chat with the running companion
+  ym home               smart-home digest
+  ym status             service + control-endpoint health
+  ym logs [-f] [-n N]   companion logs (flags pass through to journalctl)
+  ym deploy             build + stop/cp/start from /root/codes/yantrik-mind
+EOF
+    ;;
+  status)
+    printf 'service:  '; ssh_box 'systemctl is-active yantrik-mind'
+    printf 'endpoint: '; ssh_box "curl -s -m 6 $CTL/status || echo UNREACHABLE"
+    ;;
+  logs)
+    ssh_box "journalctl -u yantrik-mind --no-pager ${*:--n 40}"
+    ;;
+  deploy)
+    ssh_box 'cd /root/codes/yantrik-mind && CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/usr/local/bin:/root/.cargo/bin:/usr/bin:/bin cargo build --release -p mind-core 2>&1 | tail -2 && systemctl stop yantrik-mind && cp target/release/mind-core /opt/yantrik-mind/mind-core && chown yantrikmind:yantrikmind /opt/yantrik-mind/mind-core && systemctl start yantrik-mind && sleep 3 && systemctl is-active yantrik-mind'
+    ;;
+  home)
+    printf '%s' "check the house — what is happening at home right now?" | ssh_box "curl -s -m 140 --data-binary @- $CTL/chat"; echo
+    ;;
+  *)
+    # everything is the chat message; piped via stdin so spaces/quotes never hit a shell
+    printf '%s' "$cmd $*" | ssh_box "curl -s -m 140 --data-binary @- $CTL/chat"; echo
+    ;;
+esac

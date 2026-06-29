@@ -1131,14 +1131,43 @@ impl ConversationEngine {
         match phase {
             // REHEARSE — re-touch the most load-bearing beliefs (recall refreshes recency/access; we do
             // NOT add evidence, which would inflate confidence — rehearsal strengthens, it doesn't vote).
+            // VIGILANCE (staleness rung): emit a Staleness tension for any high-confidence belief whose
+            // last update is older than YM_STALE_BELIEF_DAYS (default 30). This surfaces long-lived
+            // certainties for re-verification via the proactive digest instead of serving them indefinitely.
             0 => {
+                let stale_threshold_ms: u64 = std::env::var("YM_STALE_BELIEF_DAYS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30)
+                    .saturating_mul(86_400_000u64);
+                let now = Self::now_ms();
                 let rs = self
                     .memory
                     .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None })
                     .await
                     .unwrap_or_default();
+                let mut stale = 0u32;
+                for r in &rs {
+                    if r.item.kind == mind_types::MemoryKind::Belief
+                        && r.item.confidence >= 0.7
+                        && now.saturating_sub(r.item.updated_ms) > stale_threshold_ms
+                    {
+                        let snippet: String = r.item.text.chars().take(60).collect();
+                        let _ = self
+                            .memory
+                            .record_tension(
+                                mind_types::TensionKind::Staleness,
+                                r.item.confidence.clamp(0.5, 1.0),
+                                &format!("\"{snippet}\""),
+                            )
+                            .await;
+                        stale += 1;
+                    }
+                }
                 log.push(if rs.is_empty() {
                     "[dmn] rehearse: nothing stored yet".to_string()
+                } else if stale > 0 {
+                    format!("[dmn] rehearsed {} memories ({stale} stale belief(s) flagged)", rs.len())
                 } else {
                     format!("[dmn] rehearsed {} memories", rs.len())
                 });
@@ -3298,6 +3327,65 @@ mod tests {
             "associate should emit a curiosity urge: {:?}",
             tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dmn_rehearse_flags_stale_high_confidence_belief() {
+        // The rehearse phase must emit a Staleness tension for high-confidence beliefs that have not
+        // been updated within the configured window. We set YM_STALE_BELIEF_DAYS=0 so any stored
+        // belief (even a fresh one) counts as stale, making the assertion deterministic.
+        // Safety: this is the only test that touches YM_STALE_BELIEF_DAYS, so there is no
+        // concurrent mutation of this env var.
+        unsafe { std::env::set_var("YM_STALE_BELIEF_DAYS", "0") };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        // weight=1.0 → log_odds=1.0 → confidence≈0.73 (above the 0.7 threshold) → must be flagged.
+        memarc
+            .remember_as_belief(BeliefAssertion {
+                statement: "Pranab values fast iteration over perfect design".into(),
+                polarity: 1.0,
+                weight: 1.0,
+                source_event: None,
+                provenance: "test".into(),
+            })
+            .await
+            .unwrap();
+        // weight=0.1 → confidence≈0.52 (below 0.7) → must NOT be flagged.
+        memarc
+            .remember_as_belief(BeliefAssertion {
+                statement: "Pranab might prefer morning meetings".into(),
+                polarity: 1.0,
+                weight: 0.1,
+                source_event: None,
+                provenance: "test".into(),
+            })
+            .await
+            .unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        // Phase 0 = rehearse; the other two phases are irrelevant for this assertion.
+        let log = conv.dmn_tick().await;
+        assert!(
+            log.iter().any(|l| l.contains("stale")),
+            "rehearse log should mention stale belief(s): {log:?}"
+        );
+        let tensions = memarc.open_tensions(10).await.unwrap();
+        assert!(
+            tensions.iter().any(|t| t.kind == mind_types::TensionKind::Staleness
+                && t.about.contains("fast iteration")),
+            "high-confidence belief should generate a Staleness tension: {:?}",
+            tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
+        );
+        assert!(
+            !tensions.iter().any(|t| t.kind == mind_types::TensionKind::Staleness
+                && t.about.contains("morning")),
+            "low-confidence belief must not be flagged: {:?}",
+            tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
+        );
+        unsafe { std::env::remove_var("YM_STALE_BELIEF_DAYS") };
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

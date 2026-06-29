@@ -92,6 +92,38 @@ fn looks_like_html(s: &str) -> bool {
     l.contains("<!doctype") || l.contains("<html") || l.contains("<table") || (l.contains("<div") && l.contains("</div>")) || (l.contains("<body") && l.contains("</body>"))
 }
 
+/// Validate a just-published page actually SERVES before we hand the user the link: a local GET to
+/// the web server (127.0.0.1:<YM_WEB_PORT>) must return 200. Catches a dead link (e.g. the web server
+/// is disabled or the file didn't land) instead of sending a URL that 404s. Best-effort, 3s timeout.
+async fn verify_served(url: &str) -> bool {
+    let port: u16 = std::env::var("YM_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8088);
+    let path = match url.rfind('/') {
+        Some(i) => url[i..].to_string(),
+        None => return false,
+    };
+    tokio::task::spawn_blocking(move || -> bool {
+        use std::io::{Read, Write};
+        let mut s = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let to = std::time::Duration::from_secs(3);
+        let _ = s.set_read_timeout(Some(to));
+        let _ = s.set_write_timeout(Some(to));
+        let req = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        if s.write_all(req.as_bytes()).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 64];
+        match s.read(&mut buf) {
+            Ok(n) => String::from_utf8_lossy(&buf[..n]).contains(" 200 "),
+            Err(_) => false,
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Is this string itself a (possibly broken/truncated) agent tool-call JSON wrapper — NOT a real
 /// answer? A truncated `publish_page` call contains `<!doctype` inside its `html` arg, so it would
 /// fool `looks_like_html`; we must never host the JSON wrapper as a "page". Guards that path.
@@ -2447,7 +2479,8 @@ impl ConversationEngine {
                     return "(need html content to publish)".to_string();
                 }
                 match publish_html(if name.is_empty() { "page" } else { &name }, &html) {
-                    Some(url) => format!("Published — open it here (works on your home network):\n{url}"),
+                    Some(url) if verify_served(&url).await => format!("Published — open it here (works on your home network):\n{url}"),
+                    Some(url) => format!("I saved the page but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check it."),
                     None => "(couldn't publish the page)".to_string(),
                 }
             }
@@ -2461,7 +2494,8 @@ impl ConversationEngine {
                 let html = render_dashboard(args);
                 let name = if title.is_empty() { "dashboard".to_string() } else { title };
                 match publish_html(&name, &html) {
-                    Some(url) => format!("Done — your dashboard is here (works on your home network):\n{url}"),
+                    Some(url) if verify_served(&url).await => format!("Done — your dashboard is here (works on your home network):\n{url}"),
+                    Some(url) => format!("I built the dashboard but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check it."),
                     None => "(couldn't publish the dashboard)".to_string(),
                 }
             }

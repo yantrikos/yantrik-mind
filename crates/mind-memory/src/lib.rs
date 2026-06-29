@@ -235,6 +235,7 @@ fn belief_item(n: &CognitiveNode) -> MemoryItem {
         confidence: n.attrs.confidence,
         certainty: n.attrs.confidence,
         updated_ms: n.attrs.last_updated_ms,
+        evidence_count: evidence_count(n),
     }
 }
 
@@ -503,6 +504,7 @@ fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<Memory
             confidence: 1.0,
             certainty: 1.0,
             updated_ms: 0,
+            evidence_count: 0,
         })
         .collect())
 }
@@ -1022,6 +1024,7 @@ impl MemoryFacade for MemoryHandle {
                 confidence: 1.0,
                 certainty: 1.0,
                 updated_ms: t.due_ms.unwrap_or(0),
+                evidence_count: 0,
             });
         }
         Ok(ws)
@@ -1324,6 +1327,45 @@ mod tests {
             "the CSV skill should rank first for the paraphrase, got: {:?}",
             hits.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    /// recall_typed must carry evidence_count so the rehearse phase can detect fragile
+    /// single-source certainty and emit a VerificationDebt tension.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_typed_item_carries_evidence_count() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "the earth orbits the sun".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: Some("astronomy class".into()),
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        let recalled = mem
+            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None })
+            .await
+            .unwrap();
+        let hit = recalled.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
+        assert_eq!(hit.item.evidence_count, 1, "one assertion → evidence_count must be 1");
+
+        // A second assertion on the same belief increments the count.
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "the earth orbits the sun".into(),
+            polarity: 1.0,
+            weight: 1.5,
+            source_event: None,
+            provenance: "inferred".into(),
+        })
+        .await
+        .unwrap();
+        let recalled2 = mem
+            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None })
+            .await
+            .unwrap();
+        let hit2 = recalled2.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
+        assert_eq!(hit2.item.evidence_count, 2, "two assertions → evidence_count must be 2");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

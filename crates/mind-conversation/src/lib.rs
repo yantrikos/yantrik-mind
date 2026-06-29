@@ -1286,9 +1286,12 @@ impl ConversationEngine {
                     .await
                     .unwrap_or_default();
                 let mut stale = 0u32;
+                let mut fragile = 0u32;
                 for r in &rs {
-                    if r.item.kind == mind_types::MemoryKind::Belief
-                        && r.item.confidence >= 0.7
+                    if r.item.kind != mind_types::MemoryKind::Belief {
+                        continue;
+                    }
+                    if r.item.confidence >= 0.7
                         && now.saturating_sub(r.item.updated_ms) > stale_threshold_ms
                     {
                         let snippet: String = r.item.text.chars().take(60).collect();
@@ -1302,13 +1305,28 @@ impl ConversationEngine {
                             .await;
                         stale += 1;
                     }
+                    // Single-source certainty: high confidence backed by only one piece of
+                    // evidence is fragile — surface it for re-verification before it hardens.
+                    if r.item.confidence >= 0.8 && r.item.evidence_count == 1 {
+                        let snippet: String = r.item.text.chars().take(60).collect();
+                        let _ = self
+                            .memory
+                            .record_tension(
+                                mind_types::TensionKind::VerificationDebt,
+                                r.item.confidence.clamp(0.5, 1.0),
+                                &format!("\"{snippet}\""),
+                            )
+                            .await;
+                        fragile += 1;
+                    }
                 }
                 log.push(if rs.is_empty() {
                     "[dmn] rehearse: nothing stored yet".to_string()
-                } else if stale > 0 {
-                    format!("[dmn] rehearsed {} memories ({stale} stale belief(s) flagged)", rs.len())
                 } else {
-                    format!("[dmn] rehearsed {} memories", rs.len())
+                    let mut parts = vec![format!("rehearsed {} memories", rs.len())];
+                    if stale > 0 { parts.push(format!("{stale} stale")); }
+                    if fragile > 0 { parts.push(format!("{fragile} fragile")); }
+                    format!("[dmn] {}", parts.join(", "))
                 });
             }
             // RECONCILE — judge ONE open contradiction, apply the verdict as signed evidence on the

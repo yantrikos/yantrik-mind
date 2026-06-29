@@ -62,6 +62,8 @@ pub struct MemoryItem {
     pub confidence: f64,
     pub certainty: f64,
     pub updated_ms: UnixMillis,
+    #[serde(default)]
+    pub evidence_count: u32,
 }
 
 /// The retrieval/ranking moat bundle hydrated for a turn — this is where the moat lives in

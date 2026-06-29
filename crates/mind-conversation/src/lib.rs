@@ -67,10 +67,24 @@ fn parse_due(s: &str) -> Option<u64> {
     None
 }
 
+/// Minutes to add to UTC for the user's LOCAL timezone (YM_TZ_OFFSET_MINUTES, e.g. 330 for IST). The
+/// box runs UTC; without this, quiet hours + "now" are off by the user's offset (a reminder at 2am IST
+/// slipped through a UTC quiet window). India has no DST, so a fixed offset is exact.
+fn tz_offset_minutes() -> i64 {
+    std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// "now" in the user's local timezone (a UTC datetime shifted by the configured offset).
+fn local_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::minutes(tz_offset_minutes())
+}
+
 /// Current date/time, human-readable — injected into the agent prompt every turn so it never guesses
-/// "now" (it was hallucinating things like "5 days away"). UTC + weekday; unambiguous for date math.
+/// "now". Shown in the user's local timezone (YM_TZ_LABEL) so date math + reminders line up with them.
 fn now_str() -> String {
-    chrono::Utc::now().format("%Y-%m-%d %H:%M UTC (%A)").to_string()
+    let label = std::env::var("YM_TZ_LABEL").unwrap_or_else(|_| "UTC".to_string());
+    let n = local_now();
+    format!("{} {} ({})", n.format("%Y-%m-%d %H:%M"), label, n.format("%A"))
 }
 
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
@@ -324,15 +338,15 @@ fn strip_currency(t: &str) -> &str {
     t.trim_start_matches(|c| c == '$' || c == '₹' || c == '€' || c == '£')
 }
 
-/// Current year-month ("2026-06") for bucketing expenses + bill reminders by month.
+/// Current year-month ("2026-06") for bucketing expenses + bill reminders by month (local timezone).
 fn current_ym() -> String {
-    chrono::Utc::now().format("%Y-%m").to_string()
+    local_now().format("%Y-%m").to_string()
 }
 
 /// Days from today until a monthly bill's `due_day` (negative if it already passed this month).
 fn bill_days_until(due_day: u32) -> i64 {
     use chrono::Datelike;
-    due_day as i64 - chrono::Utc::now().day() as i64
+    due_day as i64 - local_now().day() as i64
 }
 
 /// "st"/"nd"/"rd"/"th" for a day number.
@@ -2185,6 +2199,17 @@ impl ConversationEngine {
             }
             "budget" | "budgets" => self.budget_set(&rest).await,
             "spent" | "spend" | "expense" => self.expense_log(&rest).await,
+            // --- tasks/reminders: list + complete (clears stale ones) ---
+            "tasks" | "todos" | "todo" | "reminders" => match self.memory.list_tasks(false).await {
+                Ok(ts) if !ts.is_empty() => ts.iter().map(|t| format!("• {} — {}", t.id, t.description)).collect::<Vec<_>>().join("\n"),
+                Ok(_) => "No open tasks/reminders.".to_string(),
+                Err(e) => format!("(couldn't list tasks: {e})"),
+            },
+            "done" | "complete" if !rest.is_empty() => match self.memory.complete_task(rest.trim()).await {
+                Ok(true) => format!("Marked {} done.", rest.trim()),
+                Ok(false) => format!("No open task '{}'.", rest.trim()),
+                Err(e) => format!("(error: {e})"),
+            },
             // --- plugins/tools: each owns a namespace, present only when wired ---
             "home" | "house" if self.home.is_some() => self.run_agent_tool("home", &serde_json::json!({})).await,
             "github" | "gh" if self.github.is_some() => {

@@ -1734,8 +1734,9 @@ impl ConversationEngine {
                 match action.as_str() {
                     "add" | "+" => self.sub_add(arg).await,
                     "rm" | "remove" | "cancel" | "del" | "-" => self.sub_remove(arg).await,
+                    "discover" | "scan" | "find" => self.discover_subscriptions().await,
                     "" | "list" | "ls" => self.subs_list().await,
-                    _ => "Usage: ym sub add <name> <amount> [monthly|yearly|weekly] · ym sub rm <name> · ym subs".to_string(),
+                    _ => "Usage: ym sub add <name> <amount> [monthly|yearly|weekly] · ym sub rm <name> · ym sub discover · ym subs".to_string(),
                 }
             }
             _ => self.money_overview().await, // "money" / "finance"
@@ -1800,7 +1801,7 @@ impl ConversationEngine {
     async fn money_overview(&self) -> String {
         let subs = self.load_subs().await;
         if subs.is_empty() {
-            return "💸 Money: nothing tracked yet. Start with subscriptions — `ym sub add <name> <amount> [cycle]`.".to_string();
+            return "💸 Money: nothing tracked yet. Start with subscriptions — `ym sub add <name> <amount> [cycle]`, or `ym discover` to find them in your email.".to_string();
         }
         let total: f64 = subs
             .iter()
@@ -1808,6 +1809,83 @@ impl ConversationEngine {
             .sum();
         let cur = subs[0].get("currency").and_then(|x| x.as_str()).unwrap_or("$");
         format!("💸 Tracking {} subscription(s), ~{cur}{total:.2}/mo (~{cur}{:.0}/yr). `ym subs` for the breakdown.", subs.len(), total * 12.0)
+    }
+
+    /// Email auto-discovery: scan the inbox (sender + subject headers), LLM-extract recurring
+    /// subscriptions, auto-track the ones with a clear price, and list the rest for the user to
+    /// confirm an amount. "JARVIS already knows your money" — turns manual entry into discovery.
+    /// Headers-only (no bodies), so prices are often absent → those become add-prompts, not guesses.
+    async fn discover_subscriptions(&self) -> String {
+        let mail = match &self.mail {
+            Some(m) => m,
+            None => return "Email isn't configured, so I can't scan it. (set YM_EMAIL / YM_EMAIL_PASSWORD)".to_string(),
+        };
+        let msgs = match mail.inbox(80).await {
+            Ok(m) => m,
+            Err(e) => return format!("Couldn't read your email: {e}"),
+        };
+        if msgs.is_empty() {
+            return "No email to scan right now.".to_string();
+        }
+        let block: String = msgs.iter().map(|m| format!("- {} | {}", m.from, m.subject)).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "These are recent emails (sender | subject). Identify the user's RECURRING paid subscriptions/services \
+             (streaming, SaaS, gym, insurance, cloud, memberships). IGNORE one-off purchases, shipping/delivery, \
+             OTP/login codes, newsletters, and promotions. For each subscription give name, amount (a number if it \
+             actually appears, else null), and cycle (\"monthly\" or \"yearly\" if known, else null). Output ONLY a \
+             JSON array, e.g. [{{\"name\":\"Netflix\",\"amount\":15.99,\"cycle\":\"monthly\"}}].\n\nEMAILS:\n{block}"
+        );
+        let cfg = GenerationConfig { max_tokens: 1500, ..GenerationConfig::default() };
+        let text = match self
+            .inference
+            .chat(vec![ChatMessage::system("You extract recurring subscriptions from email metadata. Output only a JSON array."), ChatMessage::user(&prompt)], cfg)
+            .await
+        {
+            Ok(r) => r.text,
+            Err(e) => return format!("Couldn't analyze the email: {e}"),
+        };
+        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let arr: Vec<serde_json::Value> = match (body.find('['), body.rfind(']')) {
+            (Some(a), Some(b)) if b > a => serde_json::from_str(&body[a..=b]).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if arr.is_empty() {
+            return "I scanned your inbox but didn't spot any clear subscriptions.".to_string();
+        }
+        let mut tracked = self.load_subs().await;
+        let already: std::collections::HashSet<String> =
+            tracked.iter().filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|n| n.to_lowercase())).collect();
+        let (mut added, mut no_amount) = (Vec::new(), Vec::new());
+        let mut changed = false;
+        for item in &arr {
+            let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if name.len() < 2 || already.contains(&name.to_lowercase()) {
+                continue;
+            }
+            let cycle = item.get("cycle").and_then(|x| x.as_str()).unwrap_or("monthly").to_string();
+            match item.get("amount").and_then(|x| x.as_f64()) {
+                Some(a) if a > 0.0 => {
+                    tracked.push(serde_json::json!({ "name": name, "amount": a, "cycle": cycle, "currency": "$" }));
+                    added.push(format!("{name} (${a} {cycle})"));
+                    changed = true;
+                }
+                _ => no_amount.push(name),
+            }
+        }
+        if changed {
+            self.save_subs(&tracked).await;
+        }
+        let mut out = String::new();
+        if !added.is_empty() {
+            out.push_str(&format!("📬 Found + tracked {} subscription(s) from your mail: {}.\n", added.len(), added.join(", ")));
+        }
+        if !no_amount.is_empty() {
+            out.push_str(&format!("I also see these but couldn't read a price — add with `ym sub add <name> <amount>`: {}.\n", no_amount.join(", ")));
+        }
+        if out.is_empty() {
+            out = "I scanned your inbox — nothing new beyond what you already track.".to_string();
+        }
+        out.trim().to_string()
     }
 
     /// `ym` CLI dispatcher — top-level `ym <plugin> <args>`. The namespaces are the wired PLUGINS/TOOLS
@@ -1827,6 +1905,7 @@ impl ConversationEngine {
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // --- finance plugin: subscriptions + money overview (no bank data needed) ---
             "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => self.finance_cmd(&cmd, &rest).await,
+            "discover" | "scan" => self.discover_subscriptions().await,
             // --- plugins/tools: each owns a namespace, present only when wired ---
             "home" | "house" if self.home.is_some() => self.run_agent_tool("home", &serde_json::json!({})).await,
             "github" | "gh" if self.github.is_some() => {
@@ -1863,6 +1942,7 @@ impl ConversationEngine {
         }
         lines.push("ym money                 finances (subscriptions + monthly total)".to_string());
         lines.push("ym sub add <name> <amt> [cycle] · ym subs · ym sub rm <name>".to_string());
+        lines.push("ym discover              find subscriptions in your email + track them".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -2593,6 +2673,7 @@ impl ConversationEngine {
                 None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
             },
             "money" | "subscriptions" | "finance" => self.money_overview().await,
+            "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => self.discover_subscriptions().await,
             "web_fetch" => match &self.web {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
@@ -2839,6 +2920,7 @@ impl ConversationEngine {
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
 - home {}: check the smart home (Home Assistant) — who's home, thermostat/climate, weather, what's on\n\
 - money {}: the user's finances overview — tracked subscriptions + monthly total (use when they ask about subscriptions/spending)\n\
+- discover_subscriptions {}: scan the user's EMAIL to find recurring subscriptions + auto-track them (use when they ask to find/discover their subscriptions)\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
@@ -3847,6 +3929,28 @@ mod tests {
         assert!(conv.finance_cmd("sub", "rm Netflix").await.contains("Removed"));
         let after = conv.finance_cmd("subs", "").await;
         assert!(after.contains("Amazon Prime") && !after.contains("Netflix"), "removal persisted: {after}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn discovers_subscriptions_from_email() {
+        use mind_tools::{EmailMsg, ScriptedMailClient};
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        // the LLM is scripted to return the extraction JSON (one with a price, one without)
+        let pool = InferencePool::new(
+            Arc::new(ScriptedLLM::new(r#"[{"name":"Netflix","amount":15.99,"cycle":"monthly"},{"name":"Spotify","amount":null,"cycle":"monthly"}]"#)) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let inbox = vec![
+            EmailMsg { id: "1".into(), from: "info@netflix.com".into(), subject: "Your receipt".into(), date: "today".into() },
+            EmailMsg { id: "2".into(), from: "no-reply@spotify.com".into(), subject: "Spotify Premium".into(), date: "today".into() },
+        ];
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS").with_mail(Arc::new(ScriptedMailClient::new(inbox)));
+        let out = conv.discover_subscriptions().await;
+        assert!(out.contains("Netflix"), "auto-tracked the priced one: {out}");
+        assert!(out.contains("Spotify"), "listed the price-less one to confirm: {out}");
+        // Netflix (had a price) is now actually tracked; Spotify (no price) is not auto-added
+        let subs = conv.finance_cmd("subs", "").await;
+        assert!(subs.contains("Netflix") && !subs.contains("Spotify"), "only priced subs auto-tracked: {subs}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

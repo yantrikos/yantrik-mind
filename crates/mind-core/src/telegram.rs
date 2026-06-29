@@ -412,6 +412,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     for alert in conv.home_watch().await {
                         let _ = tg_send(&api, chat, &alert).await;
                     }
+                    // Bills due soon (deduped once per month) ride the same cadence.
+                    for note in conv.bill_watch().await {
+                        let _ = tg_send(&api, chat, &note).await;
+                    }
                 }
             }
         }

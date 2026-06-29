@@ -324,6 +324,30 @@ fn strip_currency(t: &str) -> &str {
     t.trim_start_matches(|c| c == '$' || c == '₹' || c == '€' || c == '£')
 }
 
+/// Current year-month ("2026-06") for bucketing expenses + bill reminders by month.
+fn current_ym() -> String {
+    chrono::Utc::now().format("%Y-%m").to_string()
+}
+
+/// Days from today until a monthly bill's `due_day` (negative if it already passed this month).
+fn bill_days_until(due_day: u32) -> i64 {
+    use chrono::Datelike;
+    due_day as i64 - chrono::Utc::now().day() as i64
+}
+
+/// "st"/"nd"/"rd"/"th" for a day number.
+fn ordinal(n: u32) -> &'static str {
+    if (11..=13).contains(&(n % 100)) {
+        return "th";
+    }
+    match n % 10 {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        _ => "th",
+    }
+}
+
 /// Normalize a subscription's cost (charged per `cycle`) to a per-MONTH figure so totals across
 /// monthly/yearly/weekly subscriptions are comparable. The finance plugin's one bit of math.
 fn sub_monthly(amount: f64, cycle: &str) -> f64 {
@@ -357,6 +381,8 @@ pub struct ConversationEngine {
     /// Dedup state for the proactive home watch — keys of alerts already surfaced. `None` until primed:
     /// the first tick records current conditions SILENTLY so a restart doesn't re-announce them.
     home_alerts_seen: Mutex<Option<std::collections::HashSet<String>>>,
+    /// Bills already reminded this month, keyed "name:YYYY-MM" so a due bill pings once per cycle.
+    bills_reminded: Mutex<std::collections::HashSet<String>>,
     /// Action runtime — when set, OUTWARD actions (e.g. send email) are proposed, harm-gated, and
     /// require explicit confirmation before they run.
     runtime: Option<Arc<dyn ActionRuntime>>,
@@ -409,6 +435,7 @@ impl ConversationEngine {
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
+            bills_reminded: Mutex::new(std::collections::HashSet::new()),
             runtime: None,
             pending: Mutex::new(None),
             pending_question: Mutex::new(None),
@@ -1927,6 +1954,211 @@ impl ConversationEngine {
         out.trim().to_string()
     }
 
+    // ── Bills (recurring) — set once, get reminded. Stored as JSON in the profile (no bank data). ──
+
+    async fn load_bills(&self) -> Vec<serde_json::Value> {
+        self.memory.profile_get("bills").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    async fn save_bills(&self, bills: &[serde_json::Value]) {
+        let _ = self.memory.profile_set("bills", &serde_json::Value::Array(bills.to_vec()).to_string()).await;
+    }
+
+    async fn bill_cmd(&self, action: &str, arg: &str) -> String {
+        match action {
+            "add" | "+" => self.bill_add(arg).await,
+            "rm" | "remove" | "del" | "-" => self.bill_remove(arg).await,
+            "" | "list" | "ls" => self.bills_list().await,
+            _ => "Usage: ym bill add <name> <amount> <due-day> [monthly|yearly] · ym bills · ym bill rm <name>".to_string(),
+        }
+    }
+
+    async fn bill_add(&self, arg: &str) -> String {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        let amt_idx = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok());
+        let Some(i) = amt_idx else {
+            return "Usage: ym bill add <name> <amount> <due-day> [monthly|yearly]".to_string();
+        };
+        let name = toks[..i].join(" ");
+        if name.is_empty() {
+            return "Need a name — ym bill add <name> <amount> <due-day>".to_string();
+        }
+        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
+        let currency = if toks[i].starts_with('₹') { "₹" } else if toks[i].starts_with('€') { "€" } else if toks[i].starts_with('£') { "£" } else { "$" };
+        let (mut due_day, mut cycle) = (1u32, "monthly".to_string());
+        for t in &toks[i + 1..] {
+            let tl = t.trim_end_matches(|c: char| c.is_alphabetic()).to_lowercase(); // "23rd" → "23"
+            if let Ok(d) = tl.parse::<u32>() {
+                if (1..=31).contains(&d) {
+                    due_day = d;
+                }
+            } else if ["monthly", "yearly", "annual", "annually", "weekly", "quarterly"].contains(&t.to_lowercase().as_str()) {
+                cycle = t.to_lowercase();
+            }
+        }
+        let mut bills = self.load_bills().await;
+        bills.retain(|b| !b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false));
+        bills.push(serde_json::json!({ "name": name, "amount": amount, "due_day": due_day, "cycle": cycle, "currency": currency }));
+        self.save_bills(&bills).await;
+        format!("Got it — {name} {currency}{amount}, due the {due_day}{} ({cycle}). I'll remind you before it's due.", ordinal(due_day))
+    }
+
+    async fn bill_remove(&self, name: &str) -> String {
+        if name.is_empty() {
+            return "Which one? ym bill rm <name>".to_string();
+        }
+        let mut bills = self.load_bills().await;
+        let before = bills.len();
+        bills.retain(|b| !b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false));
+        if bills.len() == before {
+            return format!("No bill named '{name}'. `ym bills` to see them.");
+        }
+        self.save_bills(&bills).await;
+        format!("Removed {name}. {} bill(s) left.", bills.len())
+    }
+
+    async fn bills_list(&self) -> String {
+        let bills = self.load_bills().await;
+        if bills.is_empty() {
+            return "No bills tracked — add one: `ym bill add electric 120 23 monthly`".to_string();
+        }
+        let cur = bills[0].get("currency").and_then(|x| x.as_str()).unwrap_or("$").to_string();
+        let mut total = 0.0;
+        let mut lines = Vec::new();
+        for b in &bills {
+            let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+            let amount = b.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let cycle = b.get("cycle").and_then(|x| x.as_str()).unwrap_or("monthly");
+            let due_day = b.get("due_day").and_then(|x| x.as_u64()).unwrap_or(1) as u32;
+            let c = b.get("currency").and_then(|x| x.as_str()).unwrap_or("$");
+            total += sub_monthly(amount, cycle);
+            let d = bill_days_until(due_day);
+            let due = if d == 0 { " — due TODAY".to_string() } else if d > 0 && d <= 5 { format!(" — due in {d}d") } else { String::new() };
+            lines.push(format!("• {name} — {c}{amount}, the {due_day}{} ({cycle}){due}", ordinal(due_day)));
+        }
+        format!("{}\n— {} bills, ~{cur}{total:.2}/mo", lines.join("\n"), bills.len())
+    }
+
+    /// Proactive bill reminder: any bill due within ~2 days that hasn't been flagged this month.
+    /// Deduped by "name:YYYY-MM" so it fires once per cycle. Pushed to the chat by the poll loop.
+    pub async fn bill_watch(&self) -> Vec<String> {
+        let bills = self.load_bills().await;
+        if bills.is_empty() {
+            return Vec::new();
+        }
+        let ym = current_ym();
+        let mut reminded = self.bills_reminded.lock().unwrap();
+        let mut out = Vec::new();
+        for b in &bills {
+            let due_day = b.get("due_day").and_then(|x| x.as_u64()).unwrap_or(1) as u32;
+            let d = bill_days_until(due_day);
+            if !(0..=2).contains(&d) {
+                continue;
+            }
+            let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("a bill").to_string();
+            let key = format!("{name}:{ym}");
+            if reminded.contains(&key) {
+                continue;
+            }
+            reminded.insert(key);
+            let amount = b.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let cur = b.get("currency").and_then(|x| x.as_str()).unwrap_or("$");
+            let when = if d == 0 { "today".to_string() } else { format!("in {d} day(s)") };
+            out.push(format!("🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).", ordinal(due_day)));
+        }
+        out
+    }
+
+    // ── Budget + expenses (this month) — `ym budget <cat> <amt>` to set, `ym spent <amt> <cat>` to log ──
+
+    async fn load_budgets(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.memory.profile_get("budgets").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    }
+
+    async fn load_expenses(&self) -> Vec<serde_json::Value> {
+        self.memory.profile_get("expenses").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    /// Set a monthly budget for a category, or (no args) show the overview.
+    async fn budget_set(&self, arg: &str) -> String {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return self.budget_overview().await;
+        }
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        let Some(i) = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok()) else {
+            return "Usage: ym budget <category> <amount>  (or just `ym budget` for the overview)".to_string();
+        };
+        let category = toks.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, t)| *t).collect::<Vec<_>>().join(" ").to_lowercase();
+        if category.is_empty() {
+            return "Which category? ym budget <category> <amount>".to_string();
+        }
+        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
+        let mut budgets = self.load_budgets().await;
+        budgets.insert(category.clone(), serde_json::json!(amount));
+        let _ = self.memory.profile_set("budgets", &serde_json::Value::Object(budgets).to_string()).await;
+        format!("Budget set: {category} ${amount:.0}/mo. Log spend with `ym spent <amount> {category}`.")
+    }
+
+    /// Log an expense ("45 dining" or "dining 45") into the current month.
+    async fn expense_log(&self, arg: &str) -> String {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        let Some(i) = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok()) else {
+            return "Usage: ym spent <amount> <category>".to_string();
+        };
+        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
+        let category = toks.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, t)| *t).collect::<Vec<_>>().join(" ").to_lowercase();
+        if category.is_empty() {
+            return "What category? ym spent <amount> <category>".to_string();
+        }
+        let ym = current_ym();
+        let mut exp = self.load_expenses().await;
+        exp.push(serde_json::json!({ "amount": amount, "category": category, "ym": ym }));
+        let _ = self.memory.profile_set("expenses", &serde_json::Value::Array(exp.clone()).to_string()).await;
+        // show the category's status after logging
+        let spent: f64 = exp.iter().filter(|e| e.get("ym").and_then(|x| x.as_str()) == Some(ym.as_str()) && e.get("category").and_then(|x| x.as_str()) == Some(category.as_str())).filter_map(|e| e.get("amount").and_then(|x| x.as_f64())).sum();
+        let budgets = self.load_budgets().await;
+        match budgets.get(&category).and_then(|x| x.as_f64()) {
+            Some(b) => format!("Logged ${amount:.2} on {category}. This month: ${spent:.2} / ${b:.0} ({}).", if spent > b { format!("${:.0} OVER", spent - b) } else { format!("${:.0} left", b - spent) }),
+            None => format!("Logged ${amount:.2} on {category}. (${spent:.2} this month; set a budget with `ym budget {category} <amount>`.)"),
+        }
+    }
+
+    async fn budget_overview(&self) -> String {
+        let budgets = self.load_budgets().await;
+        let exp = self.load_expenses().await;
+        let ym = current_ym();
+        if budgets.is_empty() && exp.iter().all(|e| e.get("ym").and_then(|x| x.as_str()) != Some(ym.as_str())) {
+            return "No budgets or spend tracked this month. Set one: `ym budget dining 400`, log: `ym spent 45 dining`.".to_string();
+        }
+        let mut lines = Vec::new();
+        let mut cats: Vec<String> = budgets.keys().cloned().collect();
+        for e in &exp {
+            if let Some(c) = e.get("category").and_then(|x| x.as_str()) {
+                if !cats.contains(&c.to_string()) {
+                    cats.push(c.to_string());
+                }
+            }
+        }
+        for cat in &cats {
+            let spent: f64 = exp.iter().filter(|e| e.get("ym").and_then(|x| x.as_str()) == Some(ym.as_str()) && e.get("category").and_then(|x| x.as_str()) == Some(cat.as_str())).filter_map(|e| e.get("amount").and_then(|x| x.as_f64())).sum();
+            match budgets.get(cat).and_then(|x| x.as_f64()) {
+                Some(b) => lines.push(format!("• {cat}: ${spent:.0} / ${b:.0} {}", if spent > b { format!("⚠ ${:.0} OVER", spent - b) } else { format!("(${:.0} left)", b - spent) })),
+                None => lines.push(format!("• {cat}: ${spent:.0} spent (no budget set)")),
+            }
+        }
+        format!("📊 This month:\n{}", lines.join("\n"))
+    }
+
     /// `ym` CLI dispatcher — top-level `ym <plugin> <args>`. The namespaces are the wired PLUGINS/TOOLS
     /// (Home Assistant, GitHub, web, memory) — NOT authored skills — and a plugin's command exists only
     /// when that plugin is actually configured (the "hook": present plugin → live command). Anything
@@ -1945,6 +2177,14 @@ impl ConversationEngine {
             // --- finance plugin: subscriptions + money overview (no bank data needed) ---
             "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => self.finance_cmd(&cmd, &rest).await,
             "discover" | "scan" => self.discover_subscriptions().await,
+            "bills" => self.bill_cmd("list", "").await,
+            "bill" => {
+                let mut p = rest.trim().splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                self.bill_cmd(&action, p.next().unwrap_or("").trim()).await
+            }
+            "budget" | "budgets" => self.budget_set(&rest).await,
+            "spent" | "spend" | "expense" => self.expense_log(&rest).await,
             // --- plugins/tools: each owns a namespace, present only when wired ---
             "home" | "house" if self.home.is_some() => self.run_agent_tool("home", &serde_json::json!({})).await,
             "github" | "gh" if self.github.is_some() => {
@@ -1981,6 +2221,8 @@ impl ConversationEngine {
         }
         lines.push("ym money                 finances (subscriptions + monthly total)".to_string());
         lines.push("ym sub add <name> <amt> [cycle] · ym subs · ym sub rm <name>".to_string());
+        lines.push("ym bill add <name> <amt> <due-day> [cycle] · ym bills    recurring bills + reminders".to_string());
+        lines.push("ym budget <cat> <amt> · ym spent <amt> <cat> · ym budget   budget vs spend".to_string());
         lines.push("ym discover              find subscriptions in your email + track them".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
@@ -2713,6 +2955,8 @@ impl ConversationEngine {
             },
             "money" | "subscriptions" | "finance" => self.money_overview().await,
             "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => self.discover_subscriptions().await,
+            "bills" => self.bills_list().await,
+            "budget" | "budget_overview" => self.budget_overview().await,
             "web_fetch" => match &self.web {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
@@ -2960,6 +3204,8 @@ impl ConversationEngine {
 - home {}: check the smart home (Home Assistant) — who's home, thermostat/climate, weather, what's on\n\
 - money {}: the user's finances overview — tracked subscriptions + monthly total (use when they ask about subscriptions/spending)\n\
 - discover_subscriptions {}: scan the user's EMAIL to find recurring subscriptions + auto-track them (use when they ask to find/discover their subscriptions)\n\
+- bills {}: the user's tracked recurring bills + when they're due\n\
+- budget {}: the user's budget vs spend for this month, by category\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
@@ -4041,6 +4287,27 @@ mod tests {
         assert!(conv.finance_cmd("sub", "rm Netflix").await.contains("Removed"));
         let after = conv.finance_cmd("subs", "").await;
         assert!(after.contains("Amazon Prime") && !after.contains("Netflix"), "removal persisted: {after}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bills_and_budget_track_and_warn() {
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+        // bills: add + list + monthly total (electric monthly + insurance yearly→/12)
+        conv.bill_cmd("add", "electric 120 23 monthly").await;
+        conv.bill_cmd("add", "car insurance 1200 5 yearly").await;
+        let bills = conv.bill_cmd("list", "").await;
+        assert!(bills.contains("electric") && bills.contains("car insurance"), "lists bills: {bills}");
+        assert!(bills.contains("23rd") && bills.contains("5th"), "ordinal due days: {bills}");
+        assert!(bills.contains("2 bills"), "count: {bills}");
+        // budget: set + over-spend warns
+        conv.budget_set("dining 400").await;
+        conv.expense_log("250 dining").await;
+        let over = conv.expense_log("200 dining").await; // 450 > 400
+        assert!(over.contains("OVER") || over.contains("450"), "over-budget surfaced: {over}");
+        let overview = conv.budget_overview().await;
+        assert!(overview.contains("dining") && overview.contains("450"), "overview totals spend: {overview}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

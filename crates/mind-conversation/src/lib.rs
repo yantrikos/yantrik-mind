@@ -92,36 +92,73 @@ fn looks_like_html(s: &str) -> bool {
     l.contains("<!doctype") || l.contains("<html") || l.contains("<table") || (l.contains("<div") && l.contains("</div>")) || (l.contains("<body") && l.contains("</body>"))
 }
 
-/// Validate a just-published page actually SERVES before we hand the user the link: a local GET to
-/// the web server (127.0.0.1:<YM_WEB_PORT>) must return 200. Catches a dead link (e.g. the web server
-/// is disabled or the file didn't land) instead of sending a URL that 404s. Best-effort, 3s timeout.
-async fn verify_served(url: &str) -> bool {
+/// Result of fetching a just-published page back off the web server.
+#[derive(Debug, PartialEq, Eq)]
+enum PageServe {
+    /// 200 AND the body served is exactly the content we published.
+    Ok,
+    /// 200 but the body doesn't match what we wrote (stale/partial/wrong file).
+    Mismatch,
+    /// no 200 / unreachable (web server off, file didn't land).
+    Down,
+}
+
+/// End-to-end validation before we hand the user a link: actually GET the URL off the web server
+/// (127.0.0.1:<YM_WEB_PORT>) and confirm BOTH that it returns 200 AND that the body served back is
+/// exactly the page we just published. The static server returns the file bytes verbatim, so a real
+/// page round-trips to `Ok`; anything else (down, 404, stale/partial bytes) is surfaced honestly
+/// instead of handing over a link that's dead or shows the wrong content. Best-effort, 4s timeout.
+async fn verify_served(url: &str, expected: &str) -> PageServe {
     let port: u16 = std::env::var("YM_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8088);
     let path = match url.rfind('/') {
         Some(i) => url[i..].to_string(),
-        None => return false,
+        None => return PageServe::Down,
     };
-    tokio::task::spawn_blocking(move || -> bool {
+    let expected = expected.to_string();
+    tokio::task::spawn_blocking(move || -> PageServe {
         use std::io::{Read, Write};
         let mut s = match std::net::TcpStream::connect(("127.0.0.1", port)) {
             Ok(s) => s,
-            Err(_) => return false,
+            Err(_) => return PageServe::Down,
         };
-        let to = std::time::Duration::from_secs(3);
+        let to = std::time::Duration::from_secs(4);
         let _ = s.set_read_timeout(Some(to));
         let _ = s.set_write_timeout(Some(to));
         let req = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         if s.write_all(req.as_bytes()).is_err() {
-            return false;
+            return PageServe::Down;
         }
-        let mut buf = [0u8; 64];
-        match s.read(&mut buf) {
-            Ok(n) => String::from_utf8_lossy(&buf[..n]).contains(" 200 "),
-            Err(_) => false,
+        // Read the whole response (headers + body); pages are small, cap to be safe.
+        let mut raw: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.len() > 1_048_576 {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let resp = String::from_utf8_lossy(&raw);
+        let status_ok = resp.lines().next().map(|l| l.contains(" 200 ")).unwrap_or(false);
+        if !status_ok {
+            return PageServe::Down;
+        }
+        // Body is everything after the blank line; the file is served verbatim, so it must equal what
+        // we wrote (trailing-whitespace tolerant).
+        let body = resp.find("\r\n\r\n").map(|i| &resp[i + 4..]).unwrap_or("");
+        if body.trim_end() == expected.trim_end() {
+            PageServe::Ok
+        } else {
+            PageServe::Mismatch
         }
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(PageServe::Down)
 }
 
 /// Is this string itself a (possibly broken/truncated) agent tool-call JSON wrapper — NOT a real
@@ -2479,8 +2516,11 @@ impl ConversationEngine {
                     return "(need html content to publish)".to_string();
                 }
                 match publish_html(if name.is_empty() { "page" } else { &name }, &html) {
-                    Some(url) if verify_served(&url).await => format!("Published — open it here (works on your home network):\n{url}"),
-                    Some(url) => format!("I saved the page but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check it."),
+                    Some(url) => match verify_served(&url, &html).await {
+                        PageServe::Ok => format!("Published & verified live — the page loads with the right content (works on your home network):\n{url}"),
+                        PageServe::Mismatch => format!("Published, and the server responds, but the content served back didn't match what I generated (possibly a stale file) — worth a look:\n{url}"),
+                        PageServe::Down => format!("I saved the page but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check the server."),
+                    },
                     None => "(couldn't publish the page)".to_string(),
                 }
             }
@@ -2494,8 +2534,11 @@ impl ConversationEngine {
                 let html = render_dashboard(args);
                 let name = if title.is_empty() { "dashboard".to_string() } else { title };
                 match publish_html(&name, &html) {
-                    Some(url) if verify_served(&url).await => format!("Done — your dashboard is here (works on your home network):\n{url}"),
-                    Some(url) => format!("I built the dashboard but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check it."),
+                    Some(url) => match verify_served(&url, &html).await {
+                        PageServe::Ok => format!("Done & verified live — the dashboard loads with the right content (works on your home network):\n{url}"),
+                        PageServe::Mismatch => format!("Built it, and the server responds, but the content served back didn't match what I generated (possibly a stale file) — worth a look:\n{url}"),
+                        PageServe::Down => format!("I built the dashboard but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check the server."),
+                    },
                     None => "(couldn't publish the dashboard)".to_string(),
                 }
             }
@@ -3535,6 +3578,37 @@ mod tests {
         assert!(!conv.try_acquire_bg(2), "3rd job declined at cap 2");
         conv.bg_jobs.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         assert!(conv.try_acquire_bg(2), "a slot frees up after one finishes");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn verify_served_checks_status_and_body() {
+        use std::io::{Read, Write};
+        let port = 18091u16;
+        std::env::set_var("YM_WEB_PORT", port.to_string());
+        let body = "<!DOCTYPE html><html><head><title>X</title></head><body>hi</body></html>".to_string();
+        let b2 = body.clone();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        // one-shot server: case 0 = exact body, case 1 = different body, case 2 = 404
+        std::thread::spawn(move || {
+            for case in 0..3 {
+                if let Ok((mut s, _)) = listener.accept() {
+                    let mut b = [0u8; 1024];
+                    let _ = s.read(&mut b);
+                    let resp = match case {
+                        0 => format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", b2.len(), b2),
+                        1 => "HTTP/1.1 200 OK\r\nContent-Length: 22\r\nConnection: close\r\n\r\n<html>different!!</html>".to_string(),
+                        _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found".to_string(),
+                    };
+                    let _ = s.write_all(resp.as_bytes());
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/x.html");
+        assert_eq!(verify_served(&url, &body).await, PageServe::Ok, "200 + matching body → Ok");
+        assert_eq!(verify_served(&url, &body).await, PageServe::Mismatch, "200 + wrong body → Mismatch");
+        assert_eq!(verify_served(&url, &body).await, PageServe::Down, "404 → Down");
+        // nothing listening on this port → Down
+        assert_eq!(verify_served("http://127.0.0.1:18092/x.html", &body).await, PageServe::Down, "no server → Down");
     }
 
     #[test]

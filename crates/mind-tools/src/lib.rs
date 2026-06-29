@@ -38,7 +38,7 @@ pub use github::{
 
 pub mod homeassistant;
 pub use homeassistant::{
-    render_home_digest, ApiHomeAssistantClient, HaEntity, HomeAssistantClient,
+    home_alerts, render_home_digest, ApiHomeAssistantClient, HaEntity, HomeAssistantClient,
     ScriptedHomeAssistantClient,
 };
 

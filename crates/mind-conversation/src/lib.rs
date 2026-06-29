@@ -334,6 +334,9 @@ pub struct ConversationEngine {
     /// Home Assistant client — when set, the mind can read the smart-home world (states: climate,
     /// presence, sensors, weather). Read-only + untrusted; control is a later, harm-gated capability.
     home: Option<Arc<dyn HomeAssistantClient>>,
+    /// Dedup state for the proactive home watch — keys of alerts already surfaced. `None` until primed:
+    /// the first tick records current conditions SILENTLY so a restart doesn't re-announce them.
+    home_alerts_seen: Mutex<Option<std::collections::HashSet<String>>>,
     /// Action runtime — when set, OUTWARD actions (e.g. send email) are proposed, harm-gated, and
     /// require explicit confirmation before they run.
     runtime: Option<Arc<dyn ActionRuntime>>,
@@ -384,6 +387,7 @@ impl ConversationEngine {
             mail: None,
             github: None,
             home: None,
+            home_alerts_seen: Mutex::new(None),
             runtime: None,
             pending: Mutex::new(None),
             pending_question: Mutex::new(None),
@@ -1651,6 +1655,35 @@ impl ConversationEngine {
     pub fn with_home(mut self, home: Arc<dyn HomeAssistantClient>) -> Self {
         self.home = Some(home);
         self
+    }
+
+    /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
+    /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
+    /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
+    /// what this returns to the user's chat (paced + quiet-hours-gated) — JARVIS noticing, unprompted.
+    pub async fn home_watch(&self) -> Vec<String> {
+        let home = match &self.home {
+            Some(h) => h,
+            None => return Vec::new(),
+        };
+        let states = match home.states().await {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let alerts = mind_tools::home_alerts(&states);
+        let current: std::collections::HashSet<String> = alerts.iter().map(|(k, _)| k.clone()).collect();
+        let mut guard = self.home_alerts_seen.lock().unwrap();
+        match guard.as_ref() {
+            None => {
+                *guard = Some(current); // prime silently — don't announce what was already true at boot
+                Vec::new()
+            }
+            Some(seen) => {
+                let fresh: Vec<String> = alerts.iter().filter(|(k, _)| !seen.contains(k)).map(|(_, m)| m.clone()).collect();
+                *guard = Some(current);
+                fresh
+            }
+        }
     }
 
     /// `ym` CLI dispatcher — top-level `ym <plugin> <args>`. The namespaces are the wired PLUGINS/TOOLS
@@ -3664,6 +3697,37 @@ mod tests {
             "JARVIS",
         );
         assert!(conv2.run_agent_tool("home", &serde_json::json!({})).await.contains("not configured"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn home_watch_primes_then_fires_new_alerts() {
+        use mind_tools::{HaEntity, HomeAssistantClient};
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+        struct SeqHa {
+            i: AtomicUsize,
+            frames: Vec<Vec<HaEntity>>,
+        }
+        #[async_trait::async_trait]
+        impl HomeAssistantClient for SeqHa {
+            async fn states(&self) -> anyhow::Result<Vec<HaEntity>> {
+                let n = self.i.fetch_add(1, O::SeqCst).min(self.frames.len() - 1);
+                Ok(self.frames[n].clone())
+            }
+        }
+        let p = |s: &str| HaEntity { entity_id: "person.pranab".into(), domain: "person".into(), state: s.into(), friendly_name: "Pranab".into(), attributes: serde_json::json!({}) };
+        let tv = HaEntity { entity_id: "media_player.tv".into(), domain: "media_player".into(), state: "playing".into(), friendly_name: "TV".into(), attributes: serde_json::json!({}) };
+        // frame0: home (no alerts) primes; frame1: away + TV on → FIRES; frame2: same → deduped
+        let frames = vec![vec![p("home")], vec![p("not_home"), tv.clone()], vec![p("not_home"), tv.clone()]];
+        let conv = ConversationEngine::new(
+            Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>,
+            InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1),
+            "JARVIS",
+        )
+        .with_home(Arc::new(SeqHa { i: AtomicUsize::new(0), frames }));
+        assert!(conv.home_watch().await.is_empty(), "first tick primes silently");
+        let fired = conv.home_watch().await;
+        assert!(fired.iter().any(|m| m.contains("nobody's home")), "new TV-while-away alert fires: {fired:?}");
+        assert!(conv.home_watch().await.is_empty(), "same condition is deduped — no repeat ping");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

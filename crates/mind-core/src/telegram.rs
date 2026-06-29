@@ -321,6 +321,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_dmn = 0u64;
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
+    let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -394,6 +395,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let target = active_chat.load(Ordering::Relaxed);
             if target != 0 {
                 let _ = tg_send(&api, target, &note).await;
+            }
+        }
+
+        // Proactive HOME WATCH — the moat in action: flag grounded home anomalies (TV on while away,
+        // internet down, door unlocked, low ink) UNPROMPTED. Deduped (fires once per condition until it
+        // clears), paced (YM_HOME_WATCH_SECS, default 120s), quiet-hours-gated. YM_HOME_WATCH=off disables.
+        if std::env::var("YM_HOME_WATCH").map(|v| v != "off").unwrap_or(true) {
+            let period: u64 =
+                std::env::var("YM_HOME_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+            let now = now_ms();
+            if now.saturating_sub(last_home_watch) >= period * 1000 {
+                last_home_watch = now;
+                let chat = active_chat.load(Ordering::Relaxed);
+                if chat != 0 && !in_quiet_hours_now() {
+                    for alert in conv.home_watch().await {
+                        let _ = tg_send(&api, chat, &alert).await;
+                    }
+                }
             }
         }
 

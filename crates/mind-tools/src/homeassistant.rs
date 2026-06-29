@@ -92,6 +92,50 @@ pub fn render_home_digest(entities: &[HaEntity]) -> String {
     format!("{}\n({} entities total)", lines.join("\n"), entities.len())
 }
 
+/// Deterministic, GROUNDED home-anomaly detection over a state snapshot — the proactive surface's
+/// rule set. Returns `(dedup_key, human_message)` per fired alert. No LLM (no confabulation), and
+/// CONSERVATIVE: away-alerts fire only when presence is *explicitly* away (someone not_home, nobody
+/// home) — never on merely-unknown presence (avoids false nags). This is the cross-domain magic a
+/// flat assistant can't do: presence × device, grounded in real state.
+pub fn home_alerts(entities: &[HaEntity]) -> Vec<(String, String)> {
+    let presence: Vec<&HaEntity> = entities.iter().filter(|e| e.domain == "person" || e.domain == "device_tracker").collect();
+    let anyone_home = presence.iter().any(|e| e.state == "home");
+    let anyone_away = presence.iter().any(|e| e.state == "not_home" || e.state == "away");
+    let away = !anyone_home && anyone_away;
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    if away {
+        for e in entities.iter().filter(|e| e.domain == "media_player" && matches!(e.state.as_str(), "playing" | "on")) {
+            out.push((format!("tv_on_away:{}", e.entity_id), format!("📺 {} is on but nobody's home.", e.name())));
+        }
+        for e in entities.iter().filter(|e| e.domain == "climate") {
+            if let Some(a) = e.attr_str("hvac_action") {
+                if a == "heating" || a == "cooling" {
+                    out.push((format!("climate_away:{}", e.entity_id), format!("🌡 {} is {} but nobody's home.", e.name(), a)));
+                }
+            }
+        }
+        for e in entities.iter().filter(|e| e.domain == "lock" && e.state == "unlocked") {
+            out.push((format!("unlocked_away:{}", e.entity_id), format!("🔓 {} is unlocked while you're out.", e.name())));
+        }
+    }
+    // Internet down (a connectivity binary_sensor reading off) — relevant regardless of presence.
+    for e in entities.iter().filter(|e| e.domain == "binary_sensor" && e.state == "off") {
+        if e.attr_str("device_class").as_deref() == Some("connectivity") {
+            out.push((format!("net_down:{}", e.entity_id), format!("📡 {} — the internet looks down.", e.name())));
+        }
+    }
+    // Low printer ink (<15%).
+    for e in entities.iter().filter(|e| e.entity_id.contains("ink")) {
+        if let Ok(v) = e.state.parse::<f64>() {
+            if v < 15.0 {
+                out.push((format!("ink_low:{}", e.entity_id), format!("🖨 {} is low ({}%).", e.name(), e.state)));
+            }
+        }
+    }
+    out
+}
+
 /// Deterministic HA client for tests/evals.
 pub struct ScriptedHomeAssistantClient {
     pub entities: Vec<HaEntity>,
@@ -191,5 +235,32 @@ mod tests {
         assert!(render_home_digest(&[]).contains("no entities"));
         let quiet = vec![ent("sensor.cpu", "3.1", "CPU", serde_json::json!({}))];
         assert!(render_home_digest(&quiet).contains("quiet"));
+    }
+
+    #[test]
+    fn home_alerts_fire_only_when_explicitly_away() {
+        let tv = ent("media_player.tv", "playing", "Living Room TV", serde_json::json!({}));
+        let net_down = ent("binary_sensor.wan", "off", "WAN", serde_json::json!({ "device_class": "connectivity" }));
+        // AWAY (person not_home, nobody home): TV-on-while-away fires, plus the always-on net-down rule
+        let away = vec![ent("person.pranab", "not_home", "Pranab", serde_json::json!({})), tv.clone(), net_down.clone()];
+        let keys: Vec<String> = home_alerts(&away).into_iter().map(|(k, _)| k).collect();
+        assert!(keys.iter().any(|k| k.starts_with("tv_on_away")), "TV-on-while-away fires: {keys:?}");
+        assert!(keys.iter().any(|k| k.starts_with("net_down")), "internet-down fires regardless of presence");
+        // HOME: the same TV does NOT fire an away-alert (presence × device), but net-down still does
+        let home = vec![ent("person.pranab", "home", "Pranab", serde_json::json!({})), tv.clone(), net_down.clone()];
+        let hk: Vec<String> = home_alerts(&home).into_iter().map(|(k, _)| k).collect();
+        assert!(!hk.iter().any(|k| k.starts_with("tv_on_away")), "no away-alert when home: {hk:?}");
+        assert!(hk.iter().any(|k| k.starts_with("net_down")));
+        // UNKNOWN presence (no explicit away) → conservative: no away-alerts (no false nags)
+        let unknown = vec![ent("person.pranab", "unknown", "Pranab", serde_json::json!({})), tv];
+        assert!(home_alerts(&unknown).is_empty(), "unknown presence must not nag");
+    }
+
+    #[test]
+    fn home_alerts_low_ink() {
+        let low = vec![ent("sensor.printer_black_ink", "8", "Printer black ink", serde_json::json!({}))];
+        assert!(home_alerts(&low).iter().any(|(k, _)| k.starts_with("ink_low")), "low ink fires");
+        let ok = vec![ent("sensor.printer_black_ink", "80", "Printer black ink", serde_json::json!({}))];
+        assert!(home_alerts(&ok).is_empty(), "healthy ink is quiet");
     }
 }

@@ -2447,7 +2447,7 @@ impl ConversationEngine {
                     return "(need html content to publish)".to_string();
                 }
                 match publish_html(if name.is_empty() { "page" } else { &name }, &html) {
-                    Some(url) => format!("Published — view/share it at {url}"),
+                    Some(url) => format!("Published — open it here (works on your home network):\n{url}"),
                     None => "(couldn't publish the page)".to_string(),
                 }
             }
@@ -2461,7 +2461,7 @@ impl ConversationEngine {
                 let html = render_dashboard(args);
                 let name = if title.is_empty() { "dashboard".to_string() } else { title };
                 match publish_html(&name, &html) {
-                    Some(url) => format!("Published the dashboard — view/share it at {url}"),
+                    Some(url) => format!("Done — your dashboard is here (works on your home network):\n{url}"),
                     None => "(couldn't publish the dashboard)".to_string(),
                 }
             }
@@ -2573,7 +2573,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
                     if looks_like_html(&html) {
                         let name = title_from_html(&html).unwrap_or_else(|| "page".to_string());
                         if let Some(url) = publish_html(&name, &html) {
-                            let a = format!("Done — I published it as a page: {url}");
+                            let a = format!("Done — I published it as a page (works on your home network):\n{url}");
                             let _ = self.memory.append_message("user", user_text).await;
                             let _ = self.memory.append_message("assistant", &a).await;
                             return Ok(a);
@@ -2589,7 +2589,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
                         // send the link, never a wall of HTML in the chat.
                         let name = title_from_html(&a).unwrap_or_else(|| "page".to_string());
                         if let Some(url) = publish_html(&name, &a) {
-                            a = format!("Done — I published it as a page: {url}");
+                            a = format!("Done — I published it as a page (works on your home network):\n{url}");
                         }
                     } else if !scratch.is_empty() {
                         // Anti-confabulation: re-ground a factual (tool-using) answer through the recipe
@@ -2620,7 +2620,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
                 if !is_tool_call_blob(&a) && looks_like_html(&a) {
                     let name = title_from_html(&a).unwrap_or_else(|| "page".to_string());
                     if let Some(url) = publish_html(&name, &a) {
-                        a = format!("Done — I published it as a page: {url}");
+                        a = format!("Done — I published it as a page (works on your home network):\n{url}");
                     }
                 }
                 let _ = self.memory.append_message("user", user_text).await;
@@ -2630,6 +2630,14 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             let args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
             let obs = self.run_agent_tool(&tool, &args).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
+            // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
+            // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
+            // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).
+            if matches!(tool.as_str(), "publish_page" | "make_dashboard") && obs.contains("http") {
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &obs).await;
+                return Ok(obs);
+            }
             scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
         }
         let wrap = format!("Give the user a concise, direct final answer based on this work log.\n{scratch}\n\nUser: {user_text}");

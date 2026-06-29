@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{render_home_digest, render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, NewsClient, Sandbox, WebSearch, WorkerPool};
+use mind_tools::{render_home_digest, render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, NewsClient, Sandbox, WeatherClient, WebSearch, WikiClient, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -362,6 +362,141 @@ fn ordinal(n: u32) -> &'static str {
     }
 }
 
+// ── local calculator (no network): a tiny recursive-descent evaluator for + - * / % ^ ( ) ──
+
+#[derive(Clone)]
+enum CalcTok {
+    Num(f64),
+    Op(char),
+    L,
+    R,
+}
+
+fn calc_tokens(s: &str) -> Option<Vec<CalcTok>> {
+    let cs: Vec<char> = s.chars().collect();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_digit() || c == '.' {
+            let start = i;
+            while i < cs.len() && (cs[i].is_ascii_digit() || cs[i] == '.' || cs[i] == ',') {
+                i += 1;
+            }
+            // commas are thousands separators inside a number — strip before parsing
+            let num: String = cs[start..i].iter().filter(|c| **c != ',').collect();
+            toks.push(CalcTok::Num(num.parse().ok()?));
+            continue;
+        }
+        match c {
+            '+' | '-' | '*' | '/' | '^' | '%' => toks.push(CalcTok::Op(c)),
+            'x' | 'X' | '×' => toks.push(CalcTok::Op('*')),
+            '÷' => toks.push(CalcTok::Op('/')),
+            '(' | '[' => toks.push(CalcTok::L),
+            ')' | ']' => toks.push(CalcTok::R),
+            ',' | '$' | '₹' | '€' | '£' => {} // stray separators/currency — ignore
+            _ => return None,
+        }
+        i += 1;
+    }
+    (!toks.is_empty()).then_some(toks)
+}
+
+struct CalcParser {
+    toks: Vec<CalcTok>,
+    i: usize,
+}
+
+impl CalcParser {
+    fn peek(&self) -> Option<&CalcTok> {
+        self.toks.get(self.i)
+    }
+    fn expr(&mut self) -> Option<f64> {
+        let mut v = self.term()?;
+        while let Some(CalcTok::Op(c @ ('+' | '-'))) = self.peek() {
+            let c = *c;
+            self.i += 1;
+            let r = self.term()?;
+            v = if c == '+' { v + r } else { v - r };
+        }
+        Some(v)
+    }
+    fn term(&mut self) -> Option<f64> {
+        let mut v = self.factor()?;
+        while let Some(CalcTok::Op(c @ ('*' | '/' | '%'))) = self.peek() {
+            let c = *c;
+            self.i += 1;
+            let r = self.factor()?;
+            v = match c {
+                '*' => v * r,
+                '%' => v % r,
+                _ if r == 0.0 => return None,
+                _ => v / r,
+            };
+        }
+        Some(v)
+    }
+    fn factor(&mut self) -> Option<f64> {
+        match self.peek()? {
+            CalcTok::Op('-') => {
+                self.i += 1;
+                Some(-self.factor()?)
+            }
+            CalcTok::Op('+') => {
+                self.i += 1;
+                self.factor()
+            }
+            CalcTok::L => {
+                self.i += 1;
+                let v = self.expr()?;
+                matches!(self.peek(), Some(CalcTok::R)).then(|| self.i += 1)?;
+                self.pow(v)
+            }
+            CalcTok::Num(n) => {
+                let n = *n;
+                self.i += 1;
+                self.pow(n)
+            }
+            _ => None,
+        }
+    }
+    fn pow(&mut self, base: f64) -> Option<f64> {
+        if matches!(self.peek(), Some(CalcTok::Op('^'))) {
+            self.i += 1;
+            Some(base.powf(self.factor()?))
+        } else {
+            Some(base)
+        }
+    }
+}
+
+/// Evaluate an arithmetic expression locally (no network). None on a parse error.
+fn calc_eval(expr: &str) -> Option<f64> {
+    let toks = calc_tokens(expr)?;
+    let mut p = CalcParser { toks, i: 0 };
+    let v = p.expr()?;
+    (p.i == p.toks.len()).then_some(v)
+}
+
+/// `ym calc <expr>` — format the result tidily (ints without a decimal, floats trimmed).
+fn calc(expr: &str) -> String {
+    match calc_eval(expr) {
+        Some(v) if v.is_finite() => {
+            let s = if (v.fract()).abs() < 1e-9 && v.abs() < 1e15 {
+                format!("{}", v.round() as i64)
+            } else {
+                format!("{:.6}", v).trim_end_matches('0').trim_end_matches('.').to_string()
+            };
+            format!("= {s}")
+        }
+        _ => "(couldn't work that out — try a plain arithmetic expression like 12*7+3)".to_string(),
+    }
+}
+
 /// Normalize a subscription's cost (charged per `cycle`) to a per-MONTH figure so totals across
 /// monthly/yearly/weekly subscriptions are comparable. The finance plugin's one bit of math.
 fn sub_monthly(amount: f64, cycle: &str) -> f64 {
@@ -388,6 +523,10 @@ pub struct ConversationEngine {
     news: Option<Arc<dyn NewsClient>>,
     /// Dedup state for the proactive news watch — keys of headlines already surfaced per tracked topic.
     news_seen: Mutex<std::collections::HashSet<String>>,
+    /// Weather — keyless open-meteo (current + today's forecast for a place name).
+    weather: Option<Arc<dyn WeatherClient>>,
+    /// Wikipedia — keyless factual lookups (search + intro extract). Untrusted reference text.
+    wiki: Option<Arc<dyn WikiClient>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -455,6 +594,8 @@ impl ConversationEngine {
             searcher: None,
             news: None,
             news_seen: Mutex::new(std::collections::HashSet::new()),
+            weather: None,
+            wiki: None,
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -1791,6 +1932,18 @@ impl ConversationEngine {
         self
     }
 
+    /// Give the mind keyless weather (open-meteo) for a place name.
+    pub fn with_weather(mut self, weather: Arc<dyn WeatherClient>) -> Self {
+        self.weather = Some(weather);
+        self
+    }
+
+    /// Give the mind keyless Wikipedia lookups (search + intro). Untrusted reference text.
+    pub fn with_wiki(mut self, wiki: Arc<dyn WikiClient>) -> Self {
+        self.wiki = Some(wiki);
+        self
+    }
+
     /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
     /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
     /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
@@ -2335,6 +2488,9 @@ impl ConversationEngine {
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
             "search" | "google" | "ddg" if !rest.is_empty() => self.run_agent_tool("search", &serde_json::json!({ "query": rest })).await,
             "news" | "headlines" => self.news_cmd(&rest).await,
+            "weather" | "wx" if !rest.is_empty() => self.run_agent_tool("weather", &serde_json::json!({ "place": rest })).await,
+            "wiki" | "wikipedia" if !rest.is_empty() => self.run_agent_tool("wikipedia", &serde_json::json!({ "query": rest })).await,
+            "calc" | "calculate" | "math" if !rest.is_empty() => calc(&rest),
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // --- finance plugin: subscriptions + money overview (no bank data needed) ---
@@ -2383,6 +2539,9 @@ impl ConversationEngine {
             "ym now                   date/time".to_string(),
             "ym search <query>        web search (find pages/answers)".to_string(),
             "ym news [topic]          news headlines · ym news track <topic> to follow it".to_string(),
+            "ym weather <place>       current weather + today's forecast".to_string(),
+            "ym wiki <query>          a factual Wikipedia summary".to_string(),
+            "ym calc <expression>     do arithmetic (e.g. 12*7+3)".to_string(),
             "ym recall <query>        search memory".to_string(),
             "ym remember <text>       store a fact".to_string(),
         ];
@@ -3132,6 +3291,15 @@ impl ConversationEngine {
             "money" | "subscriptions" | "finance" => self.money_overview().await,
             "news" | "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
             "track_news" | "follow_news" => self.news_track(&s("topic")).await,
+            "weather" => match &self.weather {
+                Some(w) => match w.report(&{ let p = s("place"); if p.is_empty() { s("city") } else { p } }).await { Ok(r) => r, Err(e) => format!("(weather: {e})") },
+                None => "(weather isn't configured)".to_string(),
+            },
+            "wikipedia" | "wiki" => match &self.wiki {
+                Some(w) => match w.lookup(&{ let q = s("query"); if q.is_empty() { s("topic") } else { q } }).await { Ok(r) => r, Err(e) => format!("(wikipedia: {e})") },
+                None => "(wikipedia isn't configured)".to_string(),
+            },
+            "calc" | "calculate" | "math" => calc(&{ let e = s("expression"); if e.is_empty() { s("expr") } else { e } }),
             "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => self.discover_subscriptions().await,
             "bills" => self.bills_list().await,
             "budget" | "budget_overview" => self.budget_overview().await,
@@ -3398,6 +3566,9 @@ impl ConversationEngine {
 - search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one\n\
 - news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything\n\
 - track_news {topic}: have the companion TRACK a topic + proactively surface fresh headlines (e.g. geopolitics)\n\
+- weather {place}: current conditions + today's forecast for a city/town\n\
+- wikipedia {query}: a factual summary from Wikipedia (what/who is X)\n\
+- calc {expression}: do arithmetic locally (e.g. 12*7+3, (1500*0.18))\n\
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
@@ -4465,6 +4636,29 @@ mod tests {
         let _ = conv.news_watch().await;
         assert!(conv.news_watch().await.is_empty(), "deduped after prime");
         assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
+    }
+
+    #[test]
+    fn calculator_evaluates_expressions() {
+        assert_eq!(calc("12*7+3"), "= 87");
+        assert_eq!(calc("(5-1)/2"), "= 2");
+        assert_eq!(calc("2^10"), "= 1024");
+        assert_eq!(calc("1500 * 0.18"), "= 270");
+        assert_eq!(calc("$1,200 / 12"), "= 100"); // currency/commas ignored
+        assert!(calc("1/0").contains("couldn't"), "div by zero is rejected");
+        assert!(calc("hello").contains("couldn't"), "non-math rejected");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn weather_and_wiki_route_via_cli() {
+        use mind_tools::{ScriptedWeather, ScriptedWiki};
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+            .with_weather(Arc::new(ScriptedWeather::new("🌦 London: rain, 14°C")))
+            .with_wiki(Arc::new(ScriptedWiki::new("📖 Rust\nA systems language.")));
+        assert!(conv.cli_dispatch("weather london").await.contains("London: rain"), "weather routes");
+        assert!(conv.cli_dispatch("wiki rust language").await.contains("systems language"), "wiki routes");
+        assert!(conv.cli_dispatch("calc 6*7").await.contains("= 42"), "calc routes");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

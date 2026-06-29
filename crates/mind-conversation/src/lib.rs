@@ -346,6 +346,9 @@ pub struct ConversationEngine {
     web: Option<Arc<dyn Fetcher>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
+    /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
+    /// subscription receipts live), distinct from the bot's own `mail` identity. Falls back to `mail`.
+    scan_mail: Option<Arc<dyn MailClient>>,
     /// GitHub client — when set, a "check my github" turn pulls notifications (read-only, untrusted).
     github: Option<Arc<dyn GithubClient>>,
     /// Home Assistant client — when set, the mind can read the smart-home world (states: climate,
@@ -403,6 +406,7 @@ impl ConversationEngine {
             web: None,
             mail: None,
             github: None,
+            scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
             runtime: None,
@@ -1662,6 +1666,13 @@ impl ConversationEngine {
         self
     }
 
+    /// Give finance discovery a SEPARATE read-only inbox (the user's personal mailbox), kept distinct
+    /// from the bot's own `mail` identity. Discovery prefers this; falls back to `mail` if unset.
+    pub fn with_scan_mail(mut self, mail: Arc<dyn MailClient>) -> Self {
+        self.scan_mail = Some(mail);
+        self
+    }
+
     /// Give the mind read-only GitHub triage. (Commenting/PRs are a separate, harm-gated capability.)
     pub fn with_github(mut self, github: Arc<dyn GithubClient>) -> Self {
         self.github = Some(github);
@@ -1816,9 +1827,11 @@ impl ConversationEngine {
     /// confirm an amount. "JARVIS already knows your money" — turns manual entry into discovery.
     /// Headers-only (no bodies), so prices are often absent → those become add-prompts, not guesses.
     async fn discover_subscriptions(&self) -> String {
-        let mail = match &self.mail {
+        // Prefer the dedicated personal scan-inbox (where the user's subscription receipts live); the
+        // bot's own mailbox is usually empty of personal subscriptions.
+        let mail = match self.scan_mail.as_ref().or(self.mail.as_ref()) {
             Some(m) => m,
-            None => return "Email isn't configured, so I can't scan it. (set YM_EMAIL / YM_EMAIL_PASSWORD)".to_string(),
+            None => return "I don't have an inbox to scan yet. Point me at your personal email (YM_SCAN_EMAIL + an app password) and I'll find your subscriptions.".to_string(),
         };
         let msgs = match mail.inbox(80).await {
             Ok(m) => m,

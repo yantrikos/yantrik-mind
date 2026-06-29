@@ -265,6 +265,15 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
     }
+    // A SEPARATE read-only personal inbox for finance discovery (the user's mailbox where subscription
+    // receipts live), distinct from the bot's own account. Gmail needs a 16-char App Password.
+    if let (Ok(addr), Ok(pw)) = (std::env::var("YM_SCAN_EMAIL"), std::env::var("YM_SCAN_PASSWORD")) {
+        if !addr.is_empty() && !pw.is_empty() {
+            if let Some(c) = mind_tools::ImapClient::for_address(&addr, pw) {
+                eng = eng.with_scan_mail(Arc::new(c) as Arc<dyn mind_tools::MailClient>);
+            }
+        }
+    }
     if let Some(g) = &github_read {
         eng = eng.with_github(g.clone());
     }

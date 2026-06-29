@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{render_home_digest, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, Sandbox, WorkerPool};
+use mind_tools::{render_home_digest, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, Sandbox, WebSearch, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -382,6 +382,8 @@ pub struct ConversationEngine {
     recent_window: usize,
     /// Web fetcher — when set, a URL in a message is browsed and grounded (read-only, untrusted).
     web: Option<Arc<dyn Fetcher>>,
+    /// Web search — keyless DuckDuckGo; the discovery half (find a page, then web_fetch it). Untrusted.
+    searcher: Option<Arc<dyn WebSearch>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -446,6 +448,7 @@ impl ConversationEngine {
             web: None,
             mail: None,
             github: None,
+            searcher: None,
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -1770,6 +1773,12 @@ impl ConversationEngine {
         self
     }
 
+    /// Give the mind keyless web search (find a page; then web_fetch reads it). Results are untrusted.
+    pub fn with_searcher(mut self, searcher: Arc<dyn WebSearch>) -> Self {
+        self.searcher = Some(searcher);
+        self
+    }
+
     /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
     /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
     /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
@@ -2204,6 +2213,7 @@ impl ConversationEngine {
             "" => "ym — say something, or `ym commands` to see the plugins you have.".to_string(),
             "commands" | "cmds" | "?" => self.cli_commands(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
+            "search" | "google" | "ddg" if !rest.is_empty() => self.run_agent_tool("search", &serde_json::json!({ "query": rest })).await,
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // --- finance plugin: subscriptions + money overview (no bank data needed) ---
@@ -2250,6 +2260,7 @@ impl ConversationEngine {
     fn cli_commands(&self) -> String {
         let mut lines = vec![
             "ym now                   date/time".to_string(),
+            "ym search <query>        web search (find pages/answers)".to_string(),
             "ym recall <query>        search memory".to_string(),
             "ym remember <text>       store a fact".to_string(),
         ];
@@ -3004,6 +3015,19 @@ impl ConversationEngine {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
             },
+            "search" | "web_search" => match &self.searcher {
+                Some(se) => {
+                    let q = { let a = s("query"); if a.is_empty() { s("q") } else { a } };
+                    if q.len() < 2 {
+                        return "(what should I search for?)".to_string();
+                    }
+                    match se.search(&q, 6).await {
+                        Ok(hits) => render_search(&hits),
+                        Err(e) => format!("(search error: {e})"),
+                    }
+                }
+                None => "(search not configured)".to_string(),
+            },
             // Heavyweight ops (deep research, the ~5min coder) run as DELEGATED background jobs: ack
             // immediately, do the work in a detached task, and deliver the result to the chat via the
             // poll-loop notify drain. Best-effort (a process restart loses an in-flight job; the recipe
@@ -3241,6 +3265,7 @@ impl ConversationEngine {
 - recall {query}: search your typed memory\n\
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
+- search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one\n\
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
@@ -4285,6 +4310,31 @@ mod tests {
         assert!(!html.contains("\\n"), "JSON escapes are decoded: {html}");
         // …and name the page from its <title>, not the user's request text.
         assert_eq!(title_from_html(&html).as_deref(), Some("Top 10 Combos"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn search_plugin_routes_and_renders() {
+        use mind_tools::{ScriptedSearch, SearchHit};
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        )
+        .with_searcher(Arc::new(ScriptedSearch::new(vec![SearchHit {
+            title: "Rust async".into(),
+            url: "https://rust-lang.org".into(),
+            snippet: "a guide".into(),
+        }])));
+        let out = conv.cli_dispatch("search rust async").await;
+        assert!(out.contains("Rust async") && out.contains("https://rust-lang.org"), "search renders results: {out}");
+        // not configured → clear message, no confabulation
+        let conv2 = ConversationEngine::new(
+            Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>,
+            InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1),
+            "JARVIS",
+        );
+        assert!(conv2.run_agent_tool("search", &serde_json::json!({ "query": "x" })).await.contains("not configured"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

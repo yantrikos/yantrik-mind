@@ -1232,6 +1232,11 @@ impl ConversationEngine {
             // VIGILANCE (staleness rung): emit a Staleness tension for any high-confidence belief whose
             // last update is older than YM_STALE_BELIEF_DAYS (default 30). This surfaces long-lived
             // certainties for re-verification via the proactive digest instead of serving them indefinitely.
+            // RIGOR (verification-debt rung): emit a VerificationDebt tension for any high-confidence
+            // belief whose provenance is Inferred (covers both "inferred" and "dmn" input tags, since both
+            // map to Provenance::Inferred) and whose evidence_count is ≤ 1 — beliefs that drifted to
+            // high confidence through machine reasoning alone, without direct corroborating evidence,
+            // must surface for user re-verification rather than being silently served as settled fact.
             0 => {
                 let stale_threshold_ms: u64 = std::env::var("YM_STALE_BELIEF_DAYS")
                     .ok()
@@ -1245,27 +1250,44 @@ impl ConversationEngine {
                     .await
                     .unwrap_or_default();
                 let mut stale = 0u32;
+                let mut unverified = 0u32;
                 for r in &rs {
-                    if r.item.kind == mind_types::MemoryKind::Belief
-                        && r.item.confidence >= 0.7
-                        && now.saturating_sub(r.item.updated_ms) > stale_threshold_ms
-                    {
-                        let snippet: String = r.item.text.chars().take(60).collect();
-                        let _ = self
-                            .memory
-                            .record_tension(
-                                mind_types::TensionKind::Staleness,
-                                r.item.confidence.clamp(0.5, 1.0),
-                                &format!("\"{snippet}\""),
-                            )
-                            .await;
-                        stale += 1;
+                    if r.item.kind == mind_types::MemoryKind::Belief && r.item.confidence >= 0.7 {
+                        if now.saturating_sub(r.item.updated_ms) > stale_threshold_ms {
+                            let snippet: String = r.item.text.chars().take(60).collect();
+                            let _ = self
+                                .memory
+                                .record_tension(
+                                    mind_types::TensionKind::Staleness,
+                                    r.item.confidence.clamp(0.5, 1.0),
+                                    &format!("\"{snippet}\""),
+                                )
+                                .await;
+                            stale += 1;
+                        }
+                        if let Ok(Some((b, _))) = self.memory.explain_belief(&r.item.id).await {
+                            if b.provenance == "Inferred" && b.evidence_count <= 1 {
+                                let snippet: String = r.item.text.chars().take(60).collect();
+                                let _ = self
+                                    .memory
+                                    .record_tension(
+                                        mind_types::TensionKind::VerificationDebt,
+                                        r.item.confidence.clamp(0.5, 1.0),
+                                        &format!("\"{snippet}\""),
+                                    )
+                                    .await;
+                                unverified += 1;
+                            }
+                        }
                     }
                 }
                 log.push(if rs.is_empty() {
                     "[dmn] rehearse: nothing stored yet".to_string()
-                } else if stale > 0 {
-                    format!("[dmn] rehearsed {} memories ({stale} stale belief(s) flagged)", rs.len())
+                } else if stale > 0 || unverified > 0 {
+                    format!(
+                        "[dmn] rehearsed {} memories ({stale} stale, {unverified} unverified belief(s) flagged)",
+                        rs.len()
+                    )
                 } else {
                     format!("[dmn] rehearsed {} memories", rs.len())
                 });
@@ -3810,6 +3832,75 @@ mod tests {
             tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
         );
         unsafe { std::env::remove_var("YM_STALE_BELIEF_DAYS") };
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dmn_rehearse_emits_verification_debt_for_inferred_beliefs() {
+        // A high-confidence belief (≥ 0.7) whose provenance is "inferred" or "dmn" and whose
+        // evidence_count is ≤ 1 must produce a VerificationDebt tension in the rehearse phase.
+        // Beliefs with "observed"/"told" provenance must NOT be flagged even at the same confidence.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        // weight=1.0 → confidence≈0.73, provenance="inferred", 1 evidence piece → MUST flag.
+        memarc
+            .remember_as_belief(BeliefAssertion {
+                statement: "Pranab prefers async communication".into(),
+                polarity: 1.0,
+                weight: 1.0,
+                source_event: None,
+                provenance: "inferred".into(),
+            })
+            .await
+            .unwrap();
+        // provenance="dmn" (machine-reconcile output) also maps to Inferred → MUST flag.
+        memarc
+            .remember_as_belief(BeliefAssertion {
+                statement: "Pranab works best in the mornings".into(),
+                polarity: 1.0,
+                weight: 1.0,
+                source_event: None,
+                provenance: "dmn".into(),
+            })
+            .await
+            .unwrap();
+        // Same confidence but provenance="told" → direct-observation-class; must NOT flag.
+        memarc
+            .remember_as_belief(BeliefAssertion {
+                statement: "Pranab uses a standing desk".into(),
+                polarity: 1.0,
+                weight: 1.0,
+                source_event: None,
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+        let pool =
+            mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+        let log = conv.dmn_tick().await; // phase 0 = rehearse
+        assert!(
+            log.iter().any(|l| l.contains("unverified")),
+            "rehearse log should mention unverified belief(s): {log:?}"
+        );
+        let tensions = memarc.open_tensions(10).await.unwrap();
+        assert!(
+            tensions.iter().any(|t| t.kind == mind_types::TensionKind::VerificationDebt
+                && t.about.contains("async communication")),
+            "inferred high-confidence belief must emit VerificationDebt: {:?}",
+            tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
+        );
+        assert!(
+            tensions.iter().any(|t| t.kind == mind_types::TensionKind::VerificationDebt
+                && t.about.contains("mornings")),
+            "dmn-provenance high-confidence belief must emit VerificationDebt: {:?}",
+            tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
+        );
+        assert!(
+            !tensions.iter().any(|t| t.kind == mind_types::TensionKind::VerificationDebt
+                && t.about.contains("standing desk")),
+            "told-provenance belief must not emit VerificationDebt: {:?}",
+            tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

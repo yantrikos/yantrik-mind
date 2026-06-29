@@ -85,7 +85,7 @@ fn now_secs() -> f64 {
 fn prov(s: &str) -> Provenance {
     match s.to_ascii_lowercase().as_str() {
         "told" => Provenance::Told,
-        "inferred" => Provenance::Inferred,
+        "inferred" | "dmn" => Provenance::Inferred,
         "extracted" => Provenance::Extracted,
         "experimented" => Provenance::Experimented,
         "consolidated" => Provenance::Consolidated,

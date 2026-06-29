@@ -2639,6 +2639,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
         let cfg = GenerationConfig { max_tokens: 8000, ..GenerationConfig::default() };
         let mut scratch = String::new();
+        let mut last_call = String::new();
         for step in 0..MAX_STEPS {
             let prompt = format!(
                 "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
@@ -2723,6 +2724,15 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
                 return Ok(a);
             }
             let args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            // Loop-guard: a weaker chat model often re-issues the SAME tool call instead of answering
+            // (it spun on `home` 5× in testing). If the call is identical to the last one, we already
+            // have that result in the work log — stop and compose the answer instead of refetching.
+            let call_sig = format!("{tool}|{args}");
+            if call_sig == last_call {
+                eprintln!("[agent] step {step}: repeated {tool} call — answering from the work log");
+                break;
+            }
+            last_call = call_sig;
             let obs = self.run_agent_tool(&tool, &args).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The

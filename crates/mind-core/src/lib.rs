@@ -262,7 +262,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
 
     let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
         .with_web(Arc::new(mind_tools::HttpFetcher::new()))
-        .with_searcher(Arc::new(mind_tools::DdgSearch::new())); // keyless web search, always on
+        .with_searcher(Arc::new(mind_tools::DdgSearch::new())) // keyless web search, always on
+        .with_news(Arc::new(mind_tools::GoogleNews::new())); // keyless news, always on
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
     }

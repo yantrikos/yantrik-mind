@@ -420,6 +420,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     for note in conv.bill_watch().await {
                         let _ = tg_send(&api, chat, &note).await;
                     }
+                    // Tracked news topics: surface fresh headlines (deduped per topic).
+                    for note in conv.news_watch().await {
+                        let _ = tg_send(&api, chat, &note).await;
+                    }
                 }
             }
         }

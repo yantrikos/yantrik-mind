@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{render_home_digest, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, Sandbox, WebSearch, WorkerPool};
+use mind_tools::{render_home_digest, render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, NewsClient, Sandbox, WebSearch, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -384,6 +384,10 @@ pub struct ConversationEngine {
     web: Option<Arc<dyn Fetcher>>,
     /// Web search — keyless DuckDuckGo; the discovery half (find a page, then web_fetch it). Untrusted.
     searcher: Option<Arc<dyn WebSearch>>,
+    /// News — keyless Google News RSS (works for any topic, incl. outlets that block direct scraping).
+    news: Option<Arc<dyn NewsClient>>,
+    /// Dedup state for the proactive news watch — keys of headlines already surfaced per tracked topic.
+    news_seen: Mutex<std::collections::HashSet<String>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -449,6 +453,8 @@ impl ConversationEngine {
             mail: None,
             github: None,
             searcher: None,
+            news: None,
+            news_seen: Mutex::new(std::collections::HashSet::new()),
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -1779,6 +1785,12 @@ impl ConversationEngine {
         self
     }
 
+    /// Give the mind keyless news headlines (Google News RSS — any topic, incl. blocked outlets).
+    pub fn with_news(mut self, news: Arc<dyn NewsClient>) -> Self {
+        self.news = Some(news);
+        self
+    }
+
     /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
     /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
     /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
@@ -1806,6 +1818,114 @@ impl ConversationEngine {
                 fresh
             }
         }
+    }
+
+    // ── News (keyless Google News RSS): on-demand headlines + topic tracking + a proactive watch ──
+
+    async fn news_cmd(&self, rest: &str) -> String {
+        let rest = rest.trim();
+        let mut it = rest.splitn(2, char::is_whitespace);
+        let first = it.next().unwrap_or("").to_lowercase();
+        match first.as_str() {
+            "track" | "watch" | "follow" => self.news_track(it.next().unwrap_or("").trim()).await,
+            "untrack" | "unwatch" | "unfollow" | "stop" => self.news_untrack(it.next().unwrap_or("").trim()).await,
+            "tracking" | "tracked" | "topics" => self.news_tracked_list().await,
+            _ => self.news_headlines(if rest.is_empty() { None } else { Some(rest) }).await,
+        }
+    }
+
+    async fn news_headlines(&self, topic: Option<&str>) -> String {
+        let news = match &self.news {
+            Some(n) => n,
+            None => return "(news isn't configured)".to_string(),
+        };
+        match news.headlines(topic, 6).await {
+            Ok(items) => {
+                let head = match topic {
+                    Some(t) => format!("📰 {t}:\n"),
+                    None => "📰 Top headlines:\n".to_string(),
+                };
+                format!("{head}{}", render_news(&items))
+            }
+            Err(e) => format!("(couldn't fetch news: {e})"),
+        }
+    }
+
+    async fn load_news_topics(&self) -> Vec<String> {
+        self.memory.profile_get("news_topics").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_news_topics(&self, t: &[String]) {
+        let _ = self.memory.profile_set("news_topics", &serde_json::to_string(t).unwrap_or_else(|_| "[]".into())).await;
+    }
+
+    async fn news_track(&self, topic: &str) -> String {
+        if topic.len() < 2 {
+            return "What should I track? e.g. `ym news track geopolitics`".to_string();
+        }
+        let mut topics = self.load_news_topics().await;
+        if topics.iter().any(|t| t.eq_ignore_ascii_case(topic)) {
+            return format!("Already tracking \"{topic}\".");
+        }
+        topics.push(topic.to_string());
+        self.save_news_topics(&topics).await;
+        format!("Tracking \"{topic}\" — I'll surface fresh headlines as they appear. ({} topic(s) tracked)", topics.len())
+    }
+
+    async fn news_untrack(&self, topic: &str) -> String {
+        let mut topics = self.load_news_topics().await;
+        let before = topics.len();
+        topics.retain(|t| !t.eq_ignore_ascii_case(topic));
+        if topics.len() == before {
+            return format!("Not tracking \"{topic}\".");
+        }
+        self.save_news_topics(&topics).await;
+        format!("Stopped tracking \"{topic}\". ({} left)", topics.len())
+    }
+
+    async fn news_tracked_list(&self) -> String {
+        let topics = self.load_news_topics().await;
+        if topics.is_empty() {
+            return "Not tracking any news topics yet. Add one: `ym news track <topic>` (e.g. geopolitics).".to_string();
+        }
+        format!("📰 Tracking: {}", topics.join(", "))
+    }
+
+    /// Proactive news watch: for each tracked topic, surface NEW headlines (deduped). Primes silently
+    /// per topic so a restart doesn't replay. The poll loop pushes these to the chat (quiet-hours-gated).
+    pub async fn news_watch(&self) -> Vec<String> {
+        let news = match &self.news {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        let topics = self.load_news_topics().await;
+        if topics.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for topic in topics {
+            let items = match news.headlines(Some(&topic), 5).await {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let mut fresh = Vec::new();
+            {
+                let mut seen = self.news_seen.lock().unwrap();
+                let primed = seen.iter().any(|k| k.starts_with(&format!("{topic}|")));
+                for it in &items {
+                    let key = format!("{topic}|{}", it.url);
+                    if seen.insert(key) && primed {
+                        fresh.push(it.clone());
+                    }
+                }
+            }
+            if !fresh.is_empty() {
+                out.push(format!("📰 {topic} — new:\n{}", render_news(&fresh)));
+            }
+        }
+        out
     }
 
     // ── Finance plugin: subscription tracking + a money overview ──────────────────────────────────
@@ -2214,6 +2334,7 @@ impl ConversationEngine {
             "commands" | "cmds" | "?" => self.cli_commands(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
             "search" | "google" | "ddg" if !rest.is_empty() => self.run_agent_tool("search", &serde_json::json!({ "query": rest })).await,
+            "news" | "headlines" => self.news_cmd(&rest).await,
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // --- finance plugin: subscriptions + money overview (no bank data needed) ---
@@ -2261,6 +2382,7 @@ impl ConversationEngine {
         let mut lines = vec![
             "ym now                   date/time".to_string(),
             "ym search <query>        web search (find pages/answers)".to_string(),
+            "ym news [topic]          news headlines · ym news track <topic> to follow it".to_string(),
             "ym recall <query>        search memory".to_string(),
             "ym remember <text>       store a fact".to_string(),
         ];
@@ -3008,6 +3130,8 @@ impl ConversationEngine {
                 None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
             },
             "money" | "subscriptions" | "finance" => self.money_overview().await,
+            "news" | "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
+            "track_news" | "follow_news" => self.news_track(&s("topic")).await,
             "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => self.discover_subscriptions().await,
             "bills" => self.bills_list().await,
             "budget" | "budget_overview" => self.budget_overview().await,
@@ -3266,6 +3390,8 @@ impl ConversationEngine {
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
 - search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one\n\
+- news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything\n\
+- track_news {topic}: have the companion TRACK a topic + proactively surface fresh headlines (e.g. geopolitics)\n\
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
@@ -4310,6 +4436,29 @@ mod tests {
         assert!(!html.contains("\\n"), "JSON escapes are decoded: {html}");
         // …and name the page from its <title>, not the user's request text.
         assert_eq!(title_from_html(&html).as_deref(), Some("Top 10 Combos"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn news_plugin_headlines_and_tracking() {
+        use mind_tools::{NewsItem, ScriptedNews};
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS").with_news(Arc::new(ScriptedNews::new(vec![NewsItem {
+            title: "Talks stall in Geneva".into(),
+            url: "https://news.google.com/a".into(),
+            source: "Reuters".into(),
+            published: "Mon, 29 Jun 2026 14:00:00 GMT".into(),
+        }])));
+        // on-demand headlines on a topic
+        let h = conv.cli_dispatch("news geopolitics").await;
+        assert!(h.contains("Talks stall in Geneva") && h.contains("Reuters"), "headlines: {h}");
+        // tracking: add → list → remove
+        assert!(conv.cli_dispatch("news track geopolitics").await.contains("Tracking"));
+        assert!(conv.cli_dispatch("news tracking").await.contains("geopolitics"), "tracked list");
+        // watch primes silently, then dedups identical items (no repeat spam)
+        let _ = conv.news_watch().await;
+        assert!(conv.news_watch().await.is_empty(), "deduped after prime");
+        assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

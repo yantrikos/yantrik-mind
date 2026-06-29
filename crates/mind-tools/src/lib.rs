@@ -42,6 +42,9 @@ pub use homeassistant::{
     ScriptedHomeAssistantClient,
 };
 
+pub mod news;
+pub use news::{render_news, GoogleNews, NewsClient, NewsItem, ScriptedNews};
+
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).

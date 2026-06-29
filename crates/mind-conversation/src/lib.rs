@@ -319,6 +319,23 @@ h1{{font-size:1.7rem;color:#fff;margin-bottom:.3rem}}\
     )
 }
 
+/// Strip a leading currency sign so an amount token like "$15.99" / "₹499" parses as a number.
+fn strip_currency(t: &str) -> &str {
+    t.trim_start_matches(|c| c == '$' || c == '₹' || c == '€' || c == '£')
+}
+
+/// Normalize a subscription's cost (charged per `cycle`) to a per-MONTH figure so totals across
+/// monthly/yearly/weekly subscriptions are comparable. The finance plugin's one bit of math.
+fn sub_monthly(amount: f64, cycle: &str) -> f64 {
+    match cycle.to_lowercase().as_str() {
+        "year" | "yearly" | "annual" | "annually" | "yr" | "y" => amount / 12.0,
+        "week" | "weekly" | "wk" | "w" => amount * 52.0 / 12.0,
+        "day" | "daily" | "d" => amount * 365.0 / 12.0,
+        "quarter" | "quarterly" | "q" => amount / 3.0,
+        _ => amount, // monthly is the default
+    }
+}
+
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
@@ -1686,6 +1703,113 @@ impl ConversationEngine {
         }
     }
 
+    // ── Finance plugin: subscription tracking + a money overview ──────────────────────────────────
+    // Storage is a JSON blob in the profile key "subscriptions" — no bank data, no schema. The user
+    // tells it (or email-parsing fills it later); the advisor value is a normalized monthly total +
+    // count, which makes zombie subscriptions visible. Bills already ride the reminder/task tier.
+
+    async fn load_subs(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("subscriptions")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    async fn save_subs(&self, subs: &[serde_json::Value]) {
+        let _ = self.memory.profile_set("subscriptions", &serde_json::Value::Array(subs.to_vec()).to_string()).await;
+    }
+
+    /// The finance command router (used by `ym money`/`ym sub(s)` and the chat tool).
+    async fn finance_cmd(&self, cmd: &str, rest: &str) -> String {
+        match cmd {
+            "subs" | "subscriptions" => self.subs_list().await,
+            "sub" | "subscription" => {
+                let mut p = rest.trim().splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                let arg = p.next().unwrap_or("").trim();
+                match action.as_str() {
+                    "add" | "+" => self.sub_add(arg).await,
+                    "rm" | "remove" | "cancel" | "del" | "-" => self.sub_remove(arg).await,
+                    "" | "list" | "ls" => self.subs_list().await,
+                    _ => "Usage: ym sub add <name> <amount> [monthly|yearly|weekly] · ym sub rm <name> · ym subs".to_string(),
+                }
+            }
+            _ => self.money_overview().await, // "money" / "finance"
+        }
+    }
+
+    async fn sub_add(&self, arg: &str) -> String {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        let amt_idx = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok());
+        let Some(i) = amt_idx else {
+            return "Usage: ym sub add <name> <amount> [monthly|yearly|weekly]".to_string();
+        };
+        let name = toks[..i].join(" ");
+        if name.is_empty() {
+            return "Need a name — ym sub add <name> <amount> [cycle]".to_string();
+        }
+        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
+        let currency = if toks[i].starts_with('₹') { "₹" } else if toks[i].starts_with('€') { "€" } else if toks[i].starts_with('£') { "£" } else { "$" };
+        let cycle = toks.get(i + 1).map(|s| s.to_lowercase()).unwrap_or_else(|| "monthly".to_string());
+        let mut subs = self.load_subs().await;
+        subs.retain(|s| !s.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false));
+        subs.push(serde_json::json!({ "name": name, "amount": amount, "cycle": cycle, "currency": currency }));
+        self.save_subs(&subs).await;
+        format!("Added {name} — {currency}{amount} {cycle} (~{currency}{:.2}/mo). Tracking {} subscription(s) now.", sub_monthly(amount, &cycle), subs.len())
+    }
+
+    async fn sub_remove(&self, name: &str) -> String {
+        if name.is_empty() {
+            return "Which one? ym sub rm <name>".to_string();
+        }
+        let mut subs = self.load_subs().await;
+        let before = subs.len();
+        subs.retain(|s| !s.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false));
+        if subs.len() == before {
+            return format!("No subscription named '{name}'. `ym subs` to see them.");
+        }
+        self.save_subs(&subs).await;
+        format!("Removed {name}. {} left.", subs.len())
+    }
+
+    async fn subs_list(&self) -> String {
+        let subs = self.load_subs().await;
+        if subs.is_empty() {
+            return "No subscriptions tracked yet — add one: `ym sub add Netflix 15.99 monthly`".to_string();
+        }
+        let get_str = |s: &serde_json::Value, k: &str, d: &str| s.get(k).and_then(|x| x.as_str()).unwrap_or(d).to_string();
+        let cur = get_str(&subs[0], "currency", "$");
+        let mut total = 0.0;
+        let mut lines = Vec::new();
+        for s in &subs {
+            let name = get_str(s, "name", "?");
+            let amount = s.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let cycle = get_str(s, "cycle", "monthly");
+            let c = get_str(s, "currency", "$");
+            let m = sub_monthly(amount, &cycle);
+            total += m;
+            lines.push(format!("• {name} — {c}{amount} {cycle} (~{c}{m:.2}/mo)"));
+        }
+        format!("{}\n— {} subscriptions, ~{cur}{total:.2}/mo (~{cur}{:.0}/yr)", lines.join("\n"), subs.len(), total * 12.0)
+    }
+
+    async fn money_overview(&self) -> String {
+        let subs = self.load_subs().await;
+        if subs.is_empty() {
+            return "💸 Money: nothing tracked yet. Start with subscriptions — `ym sub add <name> <amount> [cycle]`.".to_string();
+        }
+        let total: f64 = subs
+            .iter()
+            .map(|s| sub_monthly(s.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0), s.get("cycle").and_then(|x| x.as_str()).unwrap_or("monthly")))
+            .sum();
+        let cur = subs[0].get("currency").and_then(|x| x.as_str()).unwrap_or("$");
+        format!("💸 Tracking {} subscription(s), ~{cur}{total:.2}/mo (~{cur}{:.0}/yr). `ym subs` for the breakdown.", subs.len(), total * 12.0)
+    }
+
     /// `ym` CLI dispatcher — top-level `ym <plugin> <args>`. The namespaces are the wired PLUGINS/TOOLS
     /// (Home Assistant, GitHub, web, memory) — NOT authored skills — and a plugin's command exists only
     /// when that plugin is actually configured (the "hook": present plugin → live command). Anything
@@ -1701,6 +1825,8 @@ impl ConversationEngine {
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
+            // --- finance plugin: subscriptions + money overview (no bank data needed) ---
+            "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => self.finance_cmd(&cmd, &rest).await,
             // --- plugins/tools: each owns a namespace, present only when wired ---
             "home" | "house" if self.home.is_some() => self.run_agent_tool("home", &serde_json::json!({})).await,
             "github" | "gh" if self.github.is_some() => {
@@ -1735,6 +1861,8 @@ impl ConversationEngine {
         if self.web.is_some() {
             lines.push("ym web <url>             fetch a page".to_string());
         }
+        lines.push("ym money                 finances (subscriptions + monthly total)".to_string());
+        lines.push("ym sub add <name> <amt> [cycle] · ym subs · ym sub rm <name>".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -2464,6 +2592,7 @@ impl ConversationEngine {
                 },
                 None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
             },
+            "money" | "subscriptions" | "finance" => self.money_overview().await,
             "web_fetch" => match &self.web {
                 Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
@@ -2709,6 +2838,7 @@ impl ConversationEngine {
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
 - code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
 - home {}: check the smart home (Home Assistant) — who's home, thermostat/climate, weather, what's on\n\
+- money {}: the user's finances overview — tracked subscriptions + monthly total (use when they ask about subscriptions/spending)\n\
 - github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
 - github_notifications {}: your GitHub notifications\n\
 - set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
@@ -3697,6 +3827,26 @@ mod tests {
             "JARVIS",
         );
         assert!(conv2.run_agent_tool("home", &serde_json::json!({})).await.contains("not configured"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn finance_tracks_subscriptions_and_normalizes_total() {
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+        // add a monthly + a yearly (139/12 = 11.58/mo); name can be multi-word
+        conv.finance_cmd("sub", "add Netflix 15.99 monthly").await;
+        conv.finance_cmd("sub", "add Amazon Prime 139 yearly").await;
+        let list = conv.finance_cmd("subs", "").await;
+        assert!(list.contains("Netflix") && list.contains("Amazon Prime"), "lists both: {list}");
+        // monthly total = 15.99 + 11.58 = ~27.57, count = 2
+        let money = conv.finance_cmd("money", "").await;
+        assert!(money.contains("2 subscription"), "counts subs: {money}");
+        assert!(money.contains("27.5") || money.contains("27.6"), "normalized monthly total ~27.57: {money}");
+        // remove one + it persists (round-trips through the profile store)
+        assert!(conv.finance_cmd("sub", "rm Netflix").await.contains("Removed"));
+        let after = conv.finance_cmd("subs", "").await;
+        assert!(after.contains("Amazon Prime") && !after.contains("Netflix"), "removal persisted: {after}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

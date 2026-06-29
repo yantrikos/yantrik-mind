@@ -94,15 +94,59 @@ fn ssrf_check(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Real HTTP fetcher: GET → strip HTML to readable text → truncate. Blocking ureq on the blocking
-/// pool so it never stalls the async runtime.
+/// Remove every `<tag …>…</tag>` block (case-insensitive, boundary-checked so `<nav>` ≠ `<navbar>`).
+/// Used to strip boilerplate/noise (scripts, nav, footers…) BEFORE html→text, so the reader sees the
+/// article instead of menus — the difference between a usable web fetch and a wall of chrome.
+fn strip_block(html: &str, tag: &str) -> String {
+    let lower = html.to_lowercase();
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < html.len() {
+        match lower[i..].find(&open) {
+            Some(rel) => {
+                let start = i + rel;
+                let after = lower[start + open.len()..].chars().next();
+                // require a real tag boundary after "<tag"
+                if !matches!(after, Some('>') | Some('/') | Some(' ') | Some('\t') | Some('\n') | Some('\r') | None) {
+                    out.push_str(&html[i..start + open.len()]);
+                    i = start + open.len();
+                    continue;
+                }
+                out.push_str(&html[i..start]);
+                match lower[start..].find(&close) {
+                    Some(crel) => i = start + crel + close.len(),
+                    None => i = html.len(), // unclosed → drop the rest
+                }
+            }
+            None => {
+                out.push_str(&html[i..]);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Readability-lite: drop the non-content blocks so the extracted text is the actual article. Keeps
+/// <head> so html2text still emits the page <title>.
+fn declutter(html: &str) -> String {
+    let mut s = html.to_string();
+    for tag in ["script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form", "iframe", "button", "select"] {
+        s = strip_block(&s, tag);
+    }
+    s
+}
+
+/// Real HTTP fetcher: GET → declutter → HTML→readable text → bound length. Blocking ureq on the
+/// blocking pool so it never stalls the async runtime.
 pub struct HttpFetcher {
     max_chars: usize,
 }
 
 impl Default for HttpFetcher {
     fn default() -> Self {
-        Self { max_chars: 4000 }
+        Self { max_chars: 8000 }
     }
 }
 
@@ -132,7 +176,25 @@ impl Fetcher for HttpFetcher {
             // Cap the download (2 MB) so a hostile/huge page can't exhaust memory.
             let mut bytes = Vec::new();
             resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?;
-            Ok(html2text::from_read(&bytes[..], 100))
+            // Declutter (drop nav/scripts/etc.) → HTML→readable text. Collapse the runs of blank
+            // lines html2text leaves behind so the content is dense, not sparse.
+            let cleaned = declutter(&String::from_utf8_lossy(&bytes));
+            let text = html2text::from_read(cleaned.as_bytes(), 100);
+            let mut compact = String::with_capacity(text.len());
+            let mut blanks = 0;
+            for line in text.lines() {
+                if line.trim().is_empty() {
+                    blanks += 1;
+                    if blanks <= 1 {
+                        compact.push('\n');
+                    }
+                } else {
+                    blanks = 0;
+                    compact.push_str(line.trim_end());
+                    compact.push('\n');
+                }
+            }
+            Ok(compact)
         })
         .await??;
         let mut t = text.trim().to_string();
@@ -189,6 +251,23 @@ mod tests {
         assert_eq!(first_url("see https://example.com/x, thanks").as_deref(), Some("https://example.com/x"));
         assert_eq!(first_url("no link here"), None);
         assert_eq!(first_url("(http://a.b/c)").as_deref(), Some("http://a.b/c"));
+    }
+
+    #[test]
+    fn declutter_drops_noise_keeps_content() {
+        let html = "<html><head><title>Hi</title></head><body>\
+            <nav>menu home about</nav>\
+            <script>var x = 1; track();</script>\
+            <article>The real article text.</article>\
+            <footer>copyright junk</footer>\
+            <navbar>keep this</navbar></body></html>";
+        let out = declutter(html);
+        assert!(out.contains("The real article text."), "keeps article: {out}");
+        assert!(out.contains("<title>Hi</title>"), "keeps head/title");
+        assert!(!out.contains("track()"), "drops script");
+        assert!(!out.contains("menu home about"), "drops nav");
+        assert!(!out.contains("copyright junk"), "drops footer");
+        assert!(out.contains("keep this"), "boundary: <navbar> is NOT <nav>");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

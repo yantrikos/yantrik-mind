@@ -3136,7 +3136,7 @@ impl ConversationEngine {
             "bills" => self.bills_list().await,
             "budget" | "budget_overview" => self.budget_overview().await,
             "web_fetch" => match &self.web {
-                Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(1500).collect(), Err(e) => format!("(fetch error: {e})") },
+                Some(w) => match w.fetch(&s("url")).await { Ok(t) => t.chars().take(6000).collect(), Err(e) => format!("(fetch error: {e})") },
                 None => "(web not configured)".to_string(),
             },
             "search" | "web_search" => match &self.searcher {

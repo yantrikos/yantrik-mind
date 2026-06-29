@@ -62,33 +62,42 @@ impl MarketsClient for LiveMarkets {
     }
 
     async fn stock(&self, symbol: &str) -> anyhow::Result<String> {
-        let sym = symbol.trim().to_lowercase();
+        let sym = symbol.trim().to_uppercase();
         if sym.is_empty() {
             anyhow::bail!("which ticker?");
         }
-        // stooq wants an exchange suffix; default US.
-        let s = if sym.contains('.') { sym.clone() } else { format!("{sym}.us") };
         tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let csv = ureq::get("https://stooq.com/q/l/")
+            // Yahoo Finance chart endpoint (no key) — needs a browser UA or it 401/429s.
+            let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}");
+            let v: serde_json::Value = ureq::get(&url)
                 .timeout(std::time::Duration::from_secs(15))
-                .query("s", &s)
-                .query("f", "sd2t2ohlcvn")
-                .query("h", "")
-                .query("e", "csv")
+                .set("User-Agent", "Mozilla/5.0 (compatible; yantrik-mind/1.0)")
+                .query("interval", "1d")
+                .query("range", "1d")
                 .call()?
-                .into_string()?;
-            // header line + one data line: Symbol,Date,Time,Open,High,Low,Close,Volume,Name
-            let data = csv.lines().nth(1).ok_or_else(|| anyhow::anyhow!("no quote for {s}"))?;
-            let cols: Vec<&str> = data.split(',').collect();
-            if cols.len() < 7 || cols[6] == "N/D" {
-                anyhow::bail!("no quote for \"{}\" (try the exact ticker)", s.trim_end_matches(".us"));
-            }
-            let close: f64 = cols[6].parse().map_err(|_| anyhow::anyhow!("no price for {s}"))?;
-            let name = cols.get(8).map(|n| n.trim()).filter(|n| !n.is_empty()).unwrap_or(cols[0]);
-            Ok(format!("📈 {name} ({}): ${}", cols[0].to_uppercase(), fmt_money(close)))
+                .into_json()?;
+            let meta = v["chart"]["result"].get(0).map(|r| r["meta"].clone()).ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\" (check the ticker)"))?;
+            let price = meta["regularMarketPrice"].as_f64().ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\""))?;
+            let prev = meta["chartPreviousClose"].as_f64().or_else(|| meta["previousClose"].as_f64()).unwrap_or(price);
+            let name = meta["shortName"].as_str().or_else(|| meta["longName"].as_str()).unwrap_or(&sym).to_string();
+            let cur = match meta["currency"].as_str().unwrap_or("USD") {
+                "USD" => "$",
+                "INR" => "₹",
+                "EUR" => "€",
+                "GBP" => "£",
+                "JPY" => "¥",
+                other => return Ok(quote_line(&name, &sym, price, prev, &format!("{other} "))),
+            };
+            Ok(quote_line(&name, &sym, price, prev, cur))
         })
         .await?
     }
+}
+
+fn quote_line(name: &str, sym: &str, price: f64, prev: f64, cur: &str) -> String {
+    let chg = if prev != 0.0 { (price - prev) / prev * 100.0 } else { 0.0 };
+    let arrow = if chg >= 0.0 { "▲" } else { "▼" };
+    format!("📈 {name} ({sym}): {cur}{} {arrow}{:.2}% (today)", fmt_money(price), chg.abs())
 }
 
 /// Money with thousands separators + sensible precision (sub-$1 → more decimals).

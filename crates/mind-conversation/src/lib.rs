@@ -1270,9 +1270,9 @@ impl ConversationEngine {
                     format!("[dmn] rehearsed {} memories", rs.len())
                 });
             }
-            // RECONCILE — judge ONE open contradiction and record the judgment as a low-certainty NOTE.
-            // We deliberately do NOT auto-revise the beliefs: entrenching a wrong side unattended is
-            // worse than leaving the tension for the user. The note is recallable; resolution waits.
+            // RECONCILE — judge ONE open contradiction, apply the verdict as signed evidence on the
+            // winning and losing belief nodes so confidence scores actually shift, then bank an
+            // observability note and emit a COHERENCE tension. UNRESOLVED leaves scores unchanged.
             1 => {
                 let cs = self.memory.conflicts().await.unwrap_or_default();
                 if let Some(c) = cs.first() {
@@ -1286,8 +1286,34 @@ impl ConversationEngine {
                         ChatMessage::user(&prompt),
                     ];
                     if let Ok(r) = self.inference.chat(messages, GenerationConfig::default()).await {
+                        let verdict = r.text.trim();
+                        let verdict_upper = verdict.to_uppercase();
+                        let (winner, loser, verdict_label) =
+                            if verdict_upper.starts_with('A') {
+                                (Some(c.belief_a.as_str()), Some(c.belief_b.as_str()), "→ A wins")
+                            } else if verdict_upper.starts_with('B') {
+                                (Some(c.belief_b.as_str()), Some(c.belief_a.as_str()), "→ B wins")
+                            } else {
+                                (None, None, "→ unresolved")
+                            };
+                        if let (Some(w), Some(l)) = (winner, loser) {
+                            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                                statement: w.to_string(),
+                                polarity: 1.0,
+                                weight: 0.5,
+                                source_event: Some("dmn_reconcile".into()),
+                                provenance: "dmn".into(),
+                            }).await;
+                            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                                statement: l.to_string(),
+                                polarity: -1.0,
+                                weight: 0.5,
+                                source_event: Some("dmn_reconcile".into()),
+                                provenance: "dmn".into(),
+                            }).await;
+                        }
                         let note: String =
-                            format!("On the tension '{}' vs '{}': {}", c.belief_a, c.belief_b, r.text.trim())
+                            format!("On the tension '{}' vs '{}': {}", c.belief_a, c.belief_b, verdict)
                                 .chars()
                                 .take(400)
                                 .collect();
@@ -1296,7 +1322,7 @@ impl ConversationEngine {
                             .remember_as_belief(BeliefAssertion {
                                 statement: note,
                                 polarity: 1.0,
-                                weight: 0.3, // low → low confidence; a note, not a verdict
+                                weight: 0.3, // low-certainty note for observability
                                 source_event: Some("dmn_reconcile".into()),
                                 provenance: "dmn".into(),
                             })
@@ -1310,7 +1336,7 @@ impl ConversationEngine {
                                 &format!("\"{}\" vs \"{}\"", c.belief_a, c.belief_b),
                             )
                             .await;
-                        log.push("[dmn] reconciled 1 contradiction (noted + urge recorded)".to_string());
+                        log.push(format!("[dmn] reconciled 1 contradiction ({verdict_label}; evidence applied + urge recorded)"));
                     }
                 } else {
                     log.push("[dmn] reconcile: no open contradictions".to_string());
@@ -3810,6 +3836,79 @@ mod tests {
             tensions.iter().map(|t| (t.kind, &t.about)).collect::<Vec<_>>()
         );
         unsafe { std::env::remove_var("YM_STALE_BELIEF_DAYS") };
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dmn_reconcile_applies_signed_evidence_to_contradicting_beliefs() {
+        // The RECONCILE phase must parse the LLM verdict (A/B/UNRESOLVED) and apply signed
+        // evidence to the winning and losing belief nodes, not just record a dead note.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+
+        let belief_a_text = "exercise improves mood";
+        let belief_b_text = "exercise has no effect on mood";
+
+        for text in [belief_a_text, belief_b_text] {
+            memarc
+                .remember_as_belief(BeliefAssertion {
+                    statement: text.into(),
+                    polarity: 1.0,
+                    weight: 1.0, // identical starting confidence for both
+                    source_event: None,
+                    provenance: "test".into(),
+                })
+                .await
+                .unwrap();
+        }
+        memarc.relate(belief_a_text, belief_b_text, "contradicts", 0.9).await.unwrap();
+        assert!(!memarc.conflicts().await.unwrap().is_empty(), "contradiction must be detected");
+
+        let conf_a_before = memarc.explain_belief(belief_a_text).await.unwrap()
+            .map(|(b, _)| b.confidence)
+            .expect("belief should exist before reconcile");
+        let conf_b_before = memarc.explain_belief(belief_b_text).await.unwrap()
+            .map(|(b, _)| b.confidence)
+            .expect("belief should exist before reconcile");
+
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(ScriptedLLM::new("A is better supported by scientific evidence.")) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+
+        let _ = conv.dmn_tick().await; // phase 0: rehearse
+        let log = conv.dmn_tick().await; // phase 1: reconcile
+
+        assert!(
+            log.iter().any(|l| l.contains("wins")),
+            "reconcile log must report a winner (not 'unresolved'): {log:?}",
+        );
+
+        let conf_a_after = memarc.explain_belief(belief_a_text).await.unwrap()
+            .map(|(b, _)| b.confidence)
+            .expect("belief should still exist after reconcile");
+        let conf_b_after = memarc.explain_belief(belief_b_text).await.unwrap()
+            .map(|(b, _)| b.confidence)
+            .expect("belief should still exist after reconcile");
+
+        let delta_a = conf_a_after - conf_a_before;
+        let delta_b = conf_b_after - conf_b_before;
+
+        // Winner's confidence must rise, loser's must fall — they must move in opposite directions.
+        assert!(
+            delta_a.abs() > 1e-4 && delta_b.abs() > 1e-4,
+            "both beliefs must shift confidence; Δa={delta_a:.4}, Δb={delta_b:.4}",
+        );
+        assert!(
+            (delta_a > 0.0) != (delta_b > 0.0),
+            "winner must gain and loser must lose confidence; Δa={delta_a:.4}, Δb={delta_b:.4}",
+        );
+
+        let tensions = memarc.open_tensions(10).await.unwrap();
+        assert!(
+            tensions.iter().any(|t| t.kind == mind_types::TensionKind::Contradiction),
+            "reconcile must still emit a Contradiction tension: {tensions:?}",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

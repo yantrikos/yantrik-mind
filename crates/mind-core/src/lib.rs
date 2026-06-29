@@ -292,6 +292,31 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         eng = eng.with_home(Arc::new(mind_tools::ApiHomeAssistantClient::new(url, tok)));
     }
 
+    // MCP integrations — THE FORCE MULTIPLIER. A JSON config (YM_MCP_CONFIG, default
+    // /etc/yantrik-mind/mcp.json, in the de-facto `mcpServers` shape) lists servers; we connect them on
+    // a BACKGROUND thread (a cold `npx` start downloads the package → slow) so startup isn't blocked.
+    // The (initially-empty) hub is wired now; its tool catalog fills as servers come online. Read-only
+    // tools then run freely in the agent loop; mutating tools are gated (no un-gated write path).
+    {
+        let path = std::env::var("YM_MCP_CONFIG").unwrap_or_else(|_| "/etc/yantrik-mind/mcp.json".to_string());
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) => {
+                    let configs = mind_tools::McpServerConfig::from_json(&v);
+                    if !configs.is_empty() {
+                        let n = configs.len();
+                        let hub = Arc::new(mind_tools::McpHub::new());
+                        let h = hub.clone();
+                        std::thread::spawn(move || h.connect_all(&configs));
+                        eng = eng.with_mcp(hub);
+                        eprintln!("[mcp] connecting {n} configured server(s) from {path} in the background");
+                    }
+                }
+                Err(e) => eprintln!("[mcp] bad config at {path}: {e}"),
+            }
+        }
+    }
+
     // Hands: an outward-action runtime, harm-gated + confirmation-required. Grants SendMessage when a
     // transport (email send and/or github comment) is configured. Every action rides the harm-gate.
     let mut executor = mind_tools::ToolActionExecutor::new();

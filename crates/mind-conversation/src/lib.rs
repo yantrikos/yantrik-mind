@@ -531,6 +531,10 @@ pub struct ConversationEngine {
     markets: Option<Arc<dyn MarketsClient>>,
     /// Translator — keyless translation (Google translate_a, source auto-detected). Untrusted output.
     translator: Option<Arc<dyn Translator>>,
+    /// MCP hub — the force multiplier: any configured Model-Context-Protocol server (Gmail, Notion,
+    /// Slack, Maps, GitHub…) exposes its tools here. Read-only run freely; writes route via the gate.
+    /// Output is untrusted third-party data (prompt-injection surface) — wrapped like any web content.
+    mcp: Option<Arc<mind_tools::McpHub>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -602,6 +606,7 @@ impl ConversationEngine {
             wiki: None,
             markets: None,
             translator: None,
+            mcp: None,
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -1962,6 +1967,14 @@ impl ConversationEngine {
         self
     }
 
+    /// Connect the MCP hub — the force multiplier. Every tool any configured MCP server exposes
+    /// becomes selectable in the agent loop as `mcp.<server>.<tool>`. Read-only tools run freely;
+    /// mutating tools route through the harm-gate (deny-by-default for v1 — no un-gated write path).
+    pub fn with_mcp(mut self, hub: Arc<mind_tools::McpHub>) -> Self {
+        self.mcp = Some(hub);
+        self
+    }
+
     /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
     /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
     /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
@@ -2558,6 +2571,28 @@ impl ConversationEngine {
             "web" | "fetch" if self.web.is_some() && !rest.is_empty() => {
                 self.run_agent_tool("web_fetch", &serde_json::json!({ "url": rest })).await
             }
+            // --- mcp: inspect + directly invoke connected integrations (deterministic, no LLM) ---
+            "mcp" if self.mcp.is_some() => {
+                let hub = self.mcp.as_ref().unwrap();
+                let mut p = rest.splitn(2, char::is_whitespace);
+                let sub = p.next().unwrap_or("list").to_lowercase();
+                let arg = p.next().unwrap_or("").trim().to_string();
+                match sub.as_str() {
+                    "" | "list" | "tools" => {
+                        let cat = hub.catalog();
+                        if cat.is_empty() { "(no integrations connected yet — they may still be starting)".to_string() } else { format!("Connected integrations:{cat}") }
+                    }
+                    "call" => {
+                        // ym mcp call <mcp.server.tool> <json-args>
+                        let mut q = arg.splitn(2, char::is_whitespace);
+                        let id = q.next().unwrap_or("").trim().to_string();
+                        let json = q.next().unwrap_or("{}").trim();
+                        let args: serde_json::Value = serde_json::from_str(json).unwrap_or_else(|_| serde_json::json!({}));
+                        if id.is_empty() { "Usage: ym mcp call <mcp.server.tool> <json-args>".to_string() } else { self.run_agent_tool(&id, &args).await }
+                    }
+                    _ => "Usage: ym mcp list  |  ym mcp call <mcp.server.tool> <json-args>".to_string(),
+                }
+            }
             // Not a plugin command — treat the whole line as chat (full agent loop, live memory).
             _ => self.handle_turn(line).await.unwrap_or_else(|e| format!("(error: {e})")),
         }
@@ -2586,6 +2621,9 @@ impl ConversationEngine {
         }
         if self.web.is_some() {
             lines.push("ym web <url>             fetch a page".to_string());
+        }
+        if self.mcp.as_ref().map(|h| !h.is_empty()).unwrap_or(false) {
+            lines.push("ym mcp list · ym mcp call <mcp.server.tool> <json>   connected integrations (MCP)".to_string());
         }
         lines.push("ym money                 finances (subscriptions + monthly total)".to_string());
         lines.push("ym sub add <name> <amt> [cycle] · ym subs · ym sub rm <name>".to_string());
@@ -3570,6 +3608,30 @@ impl ConversationEngine {
                     Err(e) => format!("(couldn't save '{name}': {e})"),
                 }
             }
+            // MCP integrations (the force multiplier): `mcp.<server>.<tool>`. Read-only tools run
+            // freely; mutating tools are gated — there is NO un-gated write path through an integration.
+            name if name.starts_with("mcp.") => match &self.mcp {
+                Some(hub) => match hub.lookup(name) {
+                    Some(t) if t.read_only => {
+                        let (hub, q, a) = (hub.clone(), name.to_string(), args.clone());
+                        match tokio::task::spawn_blocking(move || hub.call_blocking(&q, &a)).await {
+                            // Untrusted third-party data — bounded; the persona treats tool output as reference, not instructions.
+                            Ok(Ok(out)) => {
+                                let out: String = out.chars().take(6000).collect();
+                                if out.trim().is_empty() { format!("({name}: no result)") } else { out }
+                            }
+                            Ok(Err(e)) => format!("({name}: {e})"),
+                            Err(e) => format!("({name}: {e})"),
+                        }
+                    }
+                    Some(t) => format!(
+                        "({name} is a WRITE/outward action via the {} integration — I keep outward effects behind your explicit confirmation, and confirmed integration-writes aren't wired yet. Tell me directly what you'd like done and I'll set it up.)",
+                        t.server
+                    ),
+                    None => format!("(no such integration tool: {name} — it may not have connected)"),
+                },
+                None => "(no integrations are connected)".to_string(),
+            },
             _ => format!("(unknown tool: {tool})"),
         }
     }
@@ -3604,6 +3666,9 @@ impl ConversationEngine {
         } else {
             format!("\nMost-relevant saved skills (run via run_skill; discover_tools finds more): {}", skills.iter().take(3).map(|s| format!("{} — {}", s.name, s.summary)).collect::<Vec<_>>().join("; "))
         };
+        // The MCP force-multiplier: whatever integrations have connected expose their tools here,
+        // appended live to the catalog so the model can select `mcp.<server>.<tool>` directly.
+        let mcp_line = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
         const TOOLS: &str = "CORE TOOLS (always available; use ONE per step):\n\
 - recall {query}: search your typed memory\n\
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
@@ -3644,7 +3709,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
         let mut last_call = String::new();
         for step in 0..MAX_STEPS {
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
+                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}{mcp_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let messages = vec![

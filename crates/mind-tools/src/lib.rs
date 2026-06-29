@@ -57,6 +57,9 @@ pub use markets::{LiveMarkets, MarketsClient, ScriptedMarkets};
 pub mod translate;
 pub use translate::{GoogleTranslate, ScriptedTranslator, Translator};
 
+pub mod mcp;
+pub use mcp::{McpHub, McpServerConfig, McpTool};
+
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).

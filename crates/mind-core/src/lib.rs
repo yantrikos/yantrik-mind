@@ -297,6 +297,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // a BACKGROUND thread (a cold `npx` start downloads the package → slow) so startup isn't blocked.
     // The (initially-empty) hub is wired now; its tool catalog fills as servers come online. Read-only
     // tools then run freely in the agent loop; mutating tools are gated (no un-gated write path).
+    let mut mcp_hub: Option<Arc<mind_tools::McpHub>> = None;
     {
         let path = std::env::var("YM_MCP_CONFIG").unwrap_or_else(|_| "/etc/yantrik-mind/mcp.json".to_string());
         if let Ok(raw) = std::fs::read_to_string(&path) {
@@ -308,7 +309,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
                         let hub = Arc::new(mind_tools::McpHub::new());
                         let h = hub.clone();
                         std::thread::spawn(move || h.connect_all(&configs));
-                        eng = eng.with_mcp(hub);
+                        eng = eng.with_mcp(hub.clone());
+                        mcp_hub = Some(hub); // also hand to the executor so confirmed MCP *writes* can run
                         eprintln!("[mcp] connecting {n} configured server(s) from {path} in the background");
                     }
                 }
@@ -332,6 +334,13 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         if !granted.contains(&mind_types::Capability::SendMessage) {
             granted.push(mind_types::Capability::SendMessage);
         }
+    }
+    // MCP writes: grant the outward Network capability + hand the executor the hub so a confirmed
+    // `mcp_call` action (a mutating integration tool) can actually run. Still fully gated — every MCP
+    // write rides the harm-gate and the same "confirm with yes" handshake as email/github.
+    if let Some(hub) = &mcp_hub {
+        executor = executor.with_mcp_hub(hub.clone());
+        granted.push(mind_types::Capability::Network);
     }
     let runtime: Option<Arc<dyn mind_types::ActionRuntime>> = if granted.is_empty() {
         None

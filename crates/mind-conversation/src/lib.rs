@@ -3624,10 +3624,38 @@ impl ConversationEngine {
                             Err(e) => format!("({name}: {e})"),
                         }
                     }
-                    Some(t) => format!(
-                        "({name} is a WRITE/outward action via the {} integration — I keep outward effects behind your explicit confirmation, and confirmed integration-writes aren't wired yet. Tell me directly what you'd like done and I'll set it up.)",
-                        t.server
-                    ),
+                    // A mutating integration tool — route through the SAME harm-gate + confirmation
+                    // handshake as native email/github writes. There is no un-gated write path.
+                    Some(t) => match &self.runtime {
+                        Some(runtime) => {
+                            let intent = ActionIntent {
+                                kind: "mcp_call".into(),
+                                target: name.to_string(), // the qualified id mcp.<server>.<tool>
+                                summary: format!("run {} via the {} integration", t.name, t.server),
+                                payload: Some(args.to_string()),
+                                capabilities: vec![Capability::Network],
+                                risk: RiskLevel::Medium,
+                                reversible: false,
+                            };
+                            let req = self.new_request(intent);
+                            let ctx = Self::dummy_ctx(&req, "");
+                            match runtime.decide(&req, &ctx).await {
+                                ActionDecision::Deny { reason } => format!("(I can't run {name} — {reason}.)"),
+                                ActionDecision::Execute => match runtime.execute(req).await {
+                                    Ok(r) if r.ok => format!("Done — {}", r.output),
+                                    Ok(r) => format!("That didn't go through: {}", r.output),
+                                    Err(e) => format!("That didn't go through: {e}"),
+                                },
+                                ActionDecision::RequireConfirmation { .. } => {
+                                    let summary = req.intent.summary.clone();
+                                    let preview: String = args.to_string().chars().take(300).collect();
+                                    *self.pending.lock().unwrap() = Some(req);
+                                    format!("Ready to {summary} — confirm with \"yes\":\n{preview}")
+                                }
+                            }
+                        }
+                        None => format!("({name} is a write/outward action and no harm-gated action runtime is configured to run it safely.)"),
+                    },
                     None => format!("(no such integration tool: {name} — it may not have connected)"),
                 },
                 None => "(no integrations are connected)".to_string(),
@@ -3806,6 +3834,16 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
             // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
             // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).
             if matches!(tool.as_str(), "publish_page" | "make_dashboard") && obs.contains("http") {
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &obs).await;
+                return Ok(obs);
+            }
+            // A mutating MCP integration tool is TERMINAL: its result is a confirmation prompt the user
+            // must see verbatim (a pending confirmation pauses the turn), a denial, or a done — never
+            // something the loop should keep working past.
+            if tool.starts_with("mcp.")
+                && self.mcp.as_ref().and_then(|h| h.lookup(&tool)).map(|t| !t.read_only).unwrap_or(false)
+            {
                 let _ = self.memory.append_message("user", user_text).await;
                 let _ = self.memory.append_message("assistant", &obs).await;
                 return Ok(obs);

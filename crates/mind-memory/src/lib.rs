@@ -150,8 +150,18 @@ fn to_belief_dto(n: &CognitiveNode) -> Belief {
     }
 }
 
+/// Normalize a proposition for dedup: lowercase, collapse whitespace, drop trailing punctuation.
+/// Merges trivial formatting/case restatements ("July 23" / "july 23.") WITHOUT touching content —
+/// "…Rust is 1.70" and "…Rust is 1.96" stay DISTINCT, so contradictions remain separate nodes.
+/// (Word-overlap dedup is unsafe here: it strips the very tokens — numbers/versions — that
+/// distinguish contradicting claims.)
+fn norm_prop(s: &str) -> String {
+    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(['.', '!', '?', ',']).to_string()
+}
+
 fn find_belief(db: &YantrikDB, statement: &str) -> Option<CognitiveNode> {
-    all_beliefs(db).into_iter().find(|n| node_prop(n) == Some(statement))
+    let target = norm_prop(statement);
+    all_beliefs(db).into_iter().find(|n| node_prop(n).map(|p| norm_prop(p) == target).unwrap_or(false))
 }
 
 fn assert_belief(
@@ -496,6 +506,18 @@ fn ensure_goals_prefs_table(db: &YantrikDB) {
 }
 
 fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Result<(), String> {
+    // Dedup paraphrases: consolidation re-extracts the same goal/preference with slightly different
+    // wording every pass (this flooded the store with ~280 near-dup goals/prefs). Goals/prefs have NO
+    // contradiction semantics, so a moderate 0.6 word-overlap safely collapses re-phrasings of the same
+    // intent while keeping distinct intents (gift vs repo-tracking) apart. Keeps the FIRST phrasing.
+    let sig = task_word_set(text);
+    if sig.len() >= 2 {
+        if let Ok(existing) = list_goal_prefs(db, kind) {
+            if existing.iter().any(|m| jaccard(&task_word_set(&m.text), &sig) >= 0.6) {
+                return Ok(()); // a paraphrase already on file — no-op
+            }
+        }
+    }
     db.conn()
         .execute("INSERT OR IGNORE INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [kind, text])
         .map(|_| ())
@@ -1236,6 +1258,44 @@ mod tests {
         mem.profile_set("name", "Pranab").await.unwrap();
         assert_eq!(mem.profile_get("name").await.unwrap().as_deref(), Some("Pranab"));
         assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn goals_prefs_dedup_paraphrases_keep_distinct() {
+        // Regression: consolidation re-phrases the same goal/pref every pass — paraphrases must collapse
+        // (they flooded the store with ~280 near-dups), while distinct intents stay separate.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.store_preference("Prefers terse one-line summaries").await.unwrap();
+        mem.store_preference("Prefers terse, one-line summaries when possible").await.unwrap(); // paraphrase
+        mem.store_preference("Likes dark mode in the editor").await.unwrap(); // distinct
+        let prefs = mem.list_preferences().await.unwrap();
+        assert_eq!(prefs.len(), 2, "paraphrase collapses, distinct stays: {:?}", prefs.iter().map(|p| &p.text).collect::<Vec<_>>());
+
+        mem.store_goal("Buy a handbag and watch combo for wife by July 23").await.unwrap();
+        mem.store_goal("buy a handbag + watch combo under $200 for wife before July 23, 2026").await.unwrap(); // paraphrase
+        mem.store_goal("Track GitHub repositories for new issues").await.unwrap(); // distinct
+        let goals = mem.list_goals().await.unwrap();
+        assert_eq!(goals.len(), 2, "gift paraphrase collapses, repo-tracking stays: {:?}", goals.iter().map(|g| &g.text).collect::<Vec<_>>());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn beliefs_reinforce_restatement_keep_contradiction_separate() {
+        // A near-identical restatement reinforces the SAME node; a contradicting version (low overlap)
+        // stays a SEPARATE node so contradiction detection survives.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let assert = |s: &str| {
+            let s = s.to_string();
+            let m = mem.clone();
+            async move {
+                m.remember_as_belief(BeliefAssertion { statement: s, polarity: 1.0, weight: 0.8, source_event: None, provenance: "test".into() }).await.unwrap()
+            }
+        };
+        assert("The latest stable Rust release is 1.70").await;
+        assert("the latest stable Rust release is 1.70.").await; // formatting/case variant → SAME node
+        assert("The latest stable Rust release is 1.96").await; // different content → SEPARATE node
+        let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }).await.unwrap();
+        let rust: Vec<_> = hits.iter().filter(|r| r.item.text.contains("Rust release")).collect();
+        assert_eq!(rust.len(), 2, "formatting variant merges, contradiction (1.70 vs 1.96) stays separate: {:?}", rust.iter().map(|r| &r.item.text).collect::<Vec<_>>());
     }
 
     /// THE MOAT: typed belief + Bayesian revision + contradiction detection + explanation,

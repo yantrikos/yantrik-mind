@@ -1331,6 +1331,19 @@ impl ConversationEngine {
     /// model of the user + world that grounds every future reply. Raw transcript is untouched
     /// (provenance-preserving). Runs on the heartbeat; self-gates until enough new turns accrue.
     pub async fn consolidate(&self) -> usize {
+        // Resume the cursor across restarts. Without this, every restart re-distills the last 40 turns
+        // and the extractor re-phrases each fact slightly differently → the goal/belief store re-floods
+        // with paraphrase-dups (this was the #1 driver of the ~280 dup goals/prefs + 454 beliefs).
+        if *self.last_consolidated.lock().unwrap() == 0 {
+            if let Ok(Some(v)) = self.memory.profile_get("last_consolidated").await {
+                if let Ok(saved) = v.trim().parse::<i64>() {
+                    let mut cur = self.last_consolidated.lock().unwrap();
+                    if *cur == 0 {
+                        *cur = saved;
+                    }
+                }
+            }
+        }
         let after = *self.last_consolidated.lock().unwrap();
         let msgs = match self.memory.messages_since(after, 40).await {
             Ok(m) => m,
@@ -1426,6 +1439,7 @@ impl ConversationEngine {
             }
         }
         *self.last_consolidated.lock().unwrap() = max_id;
+        let _ = self.memory.profile_set("last_consolidated", &max_id.to_string()).await; // survive restarts
         count
     }
 

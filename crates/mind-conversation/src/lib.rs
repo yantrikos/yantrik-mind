@@ -58,7 +58,7 @@ impl TurnIdentity {
 }
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
-    MemoryFacade, MindError, Result, RiskLevel, Skill, Task, WorkingSet,
+    MemoryFacade, MindError, Result, RiskLevel, Skill, Task, UncertaintyReason, WorkingSet,
 };
 use yantrik_ml::{ChatMessage, GenerationConfig};
 
@@ -5775,9 +5775,19 @@ impl ConversationEngine {
             }
         }
         if !ws.uncertain_beliefs.is_empty() {
-            s.push_str("What you believe but aren't sure of (HEDGE — say \"I think\"):\n");
+            s.push_str("What you believe but aren't sure of:\n");
             for b in &ws.uncertain_beliefs {
-                s.push_str(&format!("- {} (confidence {:.2})\n", b.statement, b.confidence));
+                let hedge = match b.uncertainty_reason {
+                    Some(UncertaintyReason::Decayed) =>
+                        "memory may be outdated — say \"last I recall\"",
+                    Some(UncertaintyReason::Contradicted) =>
+                        "conflicting info — say \"I have conflicting information about this\"",
+                    Some(UncertaintyReason::Sparse) =>
+                        "thin evidence — say \"I'm not certain, but I think\"",
+                    Some(UncertaintyReason::LowPrior) | None =>
+                        "low confidence — say \"I think\"",
+                };
+                s.push_str(&format!("- {} (confidence {:.2}; {hedge})\n", b.statement, b.confidence));
             }
         }
         if !ws.active_contradictions.is_empty() {
@@ -6369,7 +6379,13 @@ impl ConversationEngine {
             grounding.push_str(&format!("\n- {}", b.text));
         }
         for b in ws.uncertain_beliefs.iter().take(3) {
-            grounding.push_str(&format!("\n- {} (uncertain {:.2})", b.statement, b.confidence));
+            let rtag = match b.uncertainty_reason {
+                Some(UncertaintyReason::Decayed) => "decayed",
+                Some(UncertaintyReason::Contradicted) => "contradicted",
+                Some(UncertaintyReason::Sparse) => "sparse",
+                Some(UncertaintyReason::LowPrior) | None => "low-prior",
+            };
+            grounding.push_str(&format!("\n- {} (uncertain:{rtag} {:.2})", b.statement, b.confidence));
         }
         // ALWAYS ground the people in the user's life from the canonical people layer — it's clean +
         // deduped, unlike the belief store whose top-k ranking can bury a high-confidence identity fact
@@ -8195,8 +8211,12 @@ mod tests {
         assert!(sys.contains("terse"), "working-set belief should reach the prompt:\n{sys}");
         // ...the contradiction was surfaced as ask-don't-assert...
         assert!(sys.contains("conflicts with"), "contradiction should be surfaced:\n{sys}");
-        // ...uncertain beliefs were hedged...
-        assert!(sys.contains("confidence"), "uncertain beliefs should be hedged:\n{sys}");
+        // ...uncertain beliefs were hedged with confidence and a specific epistemic reason...
+        assert!(sys.contains("confidence"), "uncertain beliefs should include confidence:\n{sys}");
+        assert!(
+            sys.contains("conflicting info") || sys.contains("thin evidence") || sys.contains("last I recall") || sys.contains("I think"),
+            "uncertain belief should carry a specific epistemic hedge:\n{sys}"
+        );
         // ...and recalled memory was untrusted-wrapped.
         assert!(sys.contains("NOT instructions"), "memory must be untrusted-wrapped:\n{sys}");
     }

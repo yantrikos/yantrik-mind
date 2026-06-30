@@ -17,7 +17,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use mind_types::{
     Belief, BeliefAssertion, Contradiction, Evidence as MEvidence, MemoryFacade, MemoryItem,
-    MemoryKind, MindError, RecallQuery, Recalled, Reflection, Result, Skill, Task, WorkingSet,
+    MemoryKind, MindError, RecallQuery, Recalled, Reflection, Result, Skill, Task,
+    UncertaintyReason, WorkingSet,
 };
 
 use yantrikdb_core::belief::{BeliefRevisionConfig, Evidence as YEvidence};
@@ -101,6 +102,26 @@ fn decay_confidence(asserted: f64, age_ms: u64, halflife_days: f64) -> f64 {
     0.5 + (asserted - 0.5) * 0.5f64.powf(age_days / halflife_days)
 }
 
+/// Classify why a belief is uncertain, in precedence order.
+fn classify_uncertainty(
+    original_conf: f64,
+    decayed_conf: f64,
+    evidence_count: u32,
+    statement: &str,
+    open: &[Contradiction],
+) -> UncertaintyReason {
+    if open.iter().any(|c| c.belief_a == statement || c.belief_b == statement) {
+        return UncertaintyReason::Contradicted;
+    }
+    if original_conf - decayed_conf > 0.05 {
+        return UncertaintyReason::Decayed;
+    }
+    if evidence_count < 2 {
+        return UncertaintyReason::Sparse;
+    }
+    UncertaintyReason::LowPrior
+}
+
 fn prov(s: &str) -> Provenance {
     match s.to_ascii_lowercase().as_str() {
         "told" => Provenance::Told,
@@ -150,6 +171,7 @@ fn to_belief_dto(n: &CognitiveNode) -> Belief {
         evidence_count: evidence_count(n),
         updated_ms: n.attrs.last_updated_ms,
         status: "active".into(),
+        uncertainty_reason: None,
     }
 }
 
@@ -1167,6 +1189,7 @@ impl MemoryFacade for MemoryHandle {
                 evidence_count: r.item.evidence_count,
                 updated_ms: r.item.updated_ms,
                 status: "active".into(),
+                uncertainty_reason: None,
             })
             .collect();
         Ok(Reflection {
@@ -1223,19 +1246,22 @@ impl MemoryFacade for MemoryHandle {
         let now_ms = (now_secs() * 1000.0) as u64;
         for r in recalled {
             let age_ms = now_ms.saturating_sub(r.item.updated_ms);
-            let eff = decay_confidence(r.item.confidence, age_ms, halflife_days);
+            let original_conf = r.item.confidence;
+            let eff = decay_confidence(original_conf, age_ms, halflife_days);
             if eff >= 0.7 {
                 ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
             } else {
+                let reason = classify_uncertainty(original_conf, eff, r.item.evidence_count, &r.item.text, &open);
                 ws.uncertain_beliefs.push(Belief {
                     id: r.item.id.clone(),
                     statement: r.item.text.clone(),
                     confidence: eff,
                     certainty: r.item.certainty,
                     provenance: "recalled".into(),
-                    evidence_count: 0,
+                    evidence_count: r.item.evidence_count,
                     updated_ms: r.item.updated_ms,
                     status: "active".into(),
+                    uncertainty_reason: Some(reason),
                 });
             }
         }

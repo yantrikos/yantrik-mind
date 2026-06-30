@@ -23,6 +23,19 @@ pub enum MemoryKind {
     Routine,
 }
 
+/// Why a belief landed in the uncertain bucket — the specific epistemic cause, not a generic hedge.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UncertaintyReason {
+    /// Confidence fell over time via exponential half-life decay.
+    Decayed,
+    /// Belief has an active contradiction with another stored belief.
+    Contradicted,
+    /// Fewer than two pieces of evidence — not enough to anchor confidently.
+    Sparse,
+    /// The asserted prior was already below the stable threshold; no single cause dominates.
+    LowPrior,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Belief {
     pub id: String,
@@ -33,6 +46,9 @@ pub struct Belief {
     pub evidence_count: u32,
     pub updated_ms: UnixMillis,
     pub status: String, // active/contradicted/...
+    /// Set when this belief lives in `WorkingSet::uncertain_beliefs`; None for all other uses.
+    #[serde(default)]
+    pub uncertainty_reason: Option<UncertaintyReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

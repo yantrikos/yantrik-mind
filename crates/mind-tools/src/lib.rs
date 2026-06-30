@@ -210,6 +210,32 @@ fn fetch_direct(url: &str) -> anyhow::Result<String> {
     Ok(compact_blanks(&html2text::from_read(cleaned.as_bytes(), 100)))
 }
 
+/// Tier-3 fetch: a LOCAL headless Chromium (Playwright + stealth) renders the page with a real browser
+/// → readable text. Beats JS-rendered + most bot-walled sites that block both direct and the reader
+/// proxy. A no-op (bails) when the helper script isn't present, so non-box builds are unaffected.
+/// `timeout` hard-kills a hung chromium; the script also bounds its own navigation.
+fn fetch_headless(url: &str) -> anyhow::Result<String> {
+    let script = std::env::var("YM_HEADLESS_SCRIPT").unwrap_or_else(|_| "/opt/yantrik-mind/headless_fetch.js".to_string());
+    if !std::path::Path::new(&script).exists() {
+        anyhow::bail!("headless fetch not available");
+    }
+    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH").unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
+    let dir = std::path::Path::new(&script).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let out = std::process::Command::new("timeout")
+        .arg("45")
+        .arg("node")
+        .arg(&script)
+        .arg(url)
+        .current_dir(&dir) // so node resolves ./node_modules (playwright)
+        .env("PLAYWRIGHT_BROWSERS_PATH", browsers)
+        .output()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if text.trim().chars().count() < 80 {
+        anyhow::bail!("headless returned nothing useful");
+    }
+    Ok(compact_blanks(&text))
+}
+
 /// Reader-proxy fallback: a server-side reader renders the page with a REAL browser and returns clean
 /// markdown — getting content from sites that block our direct request (bot/TLS/JS walls). The target
 /// is already SSRF-checked + public; the fetched text remains untrusted reference data.
@@ -243,12 +269,18 @@ impl Fetcher for HttpFetcher {
                     return Ok(t.clone());
                 }
             }
-            // 2. Blocked/empty/too-thin → the reader proxy (real browser server-side). This is the
-            //    "browser capability to read any site" path.
-            match fetch_reader(&url) {
-                Ok(t) if t.trim().chars().count() > 80 => Ok(t),
-                _ => direct.or_else(|_| anyhow::bail!("couldn't fetch (direct + reader both failed)")),
+            // 2. Blocked/empty/too-thin → the reader proxy (real browser server-side, free keyless).
+            if let Ok(t) = fetch_reader(&url) {
+                if t.trim().chars().count() > 80 {
+                    return Ok(t);
+                }
             }
+            // 3. Still nothing → a LOCAL headless browser (real Chrome, our IP). Beats JS-rendered +
+            //    most bot walls the proxy can't. This is the "browser capability to read any site" path.
+            if let Ok(t) = fetch_headless(&url) {
+                return Ok(t);
+            }
+            direct.or_else(|_| anyhow::bail!("couldn't fetch (direct + reader + headless all failed)"))
         })
         .await??;
         let mut t = text.trim().to_string();

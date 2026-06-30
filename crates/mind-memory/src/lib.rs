@@ -82,6 +82,20 @@ fn now_secs() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
+/// Exponential half-life decay toward the 0.5 uninformed prior.
+///
+/// `asserted` — the stored [0,1] posterior; `age_ms` — milliseconds since last update;
+/// `halflife_days` — time at which the delta from 0.5 halves (env: `YM_BELIEF_HALFLIFE_DAYS`).
+///
+/// Formula: `0.5 + (asserted − 0.5) × 0.5^(age_days / halflife_days)`
+fn decay_confidence(asserted: f64, age_ms: u64, halflife_days: f64) -> f64 {
+    if halflife_days <= 0.0 {
+        return asserted;
+    }
+    let age_days = age_ms as f64 / 86_400_000.0;
+    0.5 + (asserted - 0.5) * 0.5f64.powf(age_days / halflife_days)
+}
+
 fn prov(s: &str) -> Provenance {
     match s.to_ascii_lowercase().as_str() {
         "told" => Provenance::Told,
@@ -998,14 +1012,21 @@ impl MemoryFacade for MemoryHandle {
         let recalled = self.recall_typed(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }).await?;
         let open = self.conflicts().await?;
         let mut ws = WorkingSet::default();
+        let halflife_days: f64 = std::env::var("YM_BELIEF_HALFLIFE_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(90.0);
+        let now_ms = (now_secs() * 1000.0) as u64;
         for r in recalled {
-            if r.item.confidence >= 0.7 {
-                ws.stable_facts.push(r.item);
+            let age_ms = now_ms.saturating_sub(r.item.updated_ms);
+            let eff = decay_confidence(r.item.confidence, age_ms, halflife_days);
+            if eff >= 0.7 {
+                ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
             } else {
                 ws.uncertain_beliefs.push(Belief {
                     id: r.item.id.clone(),
                     statement: r.item.text.clone(),
-                    confidence: r.item.confidence,
+                    confidence: eff,
                     certainty: r.item.certainty,
                     provenance: "recalled".into(),
                     evidence_count: 0,
@@ -1100,6 +1121,22 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decay_confidence_halves_toward_prior() {
+        // fresh belief — no decay
+        assert!((decay_confidence(0.9, 0, 90.0) - 0.9).abs() < 1e-9);
+        // exactly one halflife: delta from 0.5 halves → (0.9-0.5)*0.5 + 0.5 = 0.7
+        let one_hl_ms = (90.0_f64 * 86_400_000.0) as u64;
+        assert!((decay_confidence(0.9, one_hl_ms, 90.0) - 0.7).abs() < 1e-6);
+        // confidence below 0.5 also decays toward 0.5: (0.2-0.5)*0.5 + 0.5 = 0.35
+        assert!((decay_confidence(0.2, one_hl_ms, 90.0) - 0.35).abs() < 1e-6);
+        // many halflives → asymptotically approaches 0.5
+        let many_hl_ms = (900.0_f64 * 86_400_000.0) as u64;
+        assert!((decay_confidence(0.99, many_hl_ms, 90.0) - 0.5).abs() < 0.001);
+        // zero halflife disables decay
+        assert!((decay_confidence(0.9, one_hl_ms, 0.0) - 0.9).abs() < 1e-9);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn actor_round_trips_a_write_then_read() {

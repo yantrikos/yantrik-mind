@@ -332,6 +332,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
+    let mut last_patterns = now_ms(); // pattern-finder surface cadence (don't fire right after boot)
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -511,6 +512,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                 }
                 last_ask = now; // reset cadence whether or not it asked
+            }
+            // Pattern-finder surface — the flagship "learn from memory" loop turned outward. On its own
+            // slow cadence (default ~2 days), while idle + awake, run the cross-domain pattern analysis;
+            // it SAVES survivors as learned beliefs regardless, but only MESSAGES the user when it found
+            // a real, grounded one (the 💡 marker). Never competes with a digest/ask in the same tick.
+            let pat_secs: u64 =
+                std::env::var("YM_PATTERNS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(172_800);
+            if !spoke
+                && std::env::var("YM_PATTERNS").map(|v| v != "off").unwrap_or(true)
+                && idle_ok
+                && now.saturating_sub(last_patterns) >= pat_secs * 1000
+            {
+                let msg = conv.find_patterns().await;
+                if msg.starts_with('\u{1f4a1}') && tg_send(&api, chat, &msg).await.is_ok() {
+                    eprintln!("[patterns] surfaced a learned pattern ({} chars)", msg.len());
+                }
+                last_patterns = now; // reset cadence whether or not it found one
             }
         }
     }

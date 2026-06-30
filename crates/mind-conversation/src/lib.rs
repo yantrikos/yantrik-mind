@@ -1489,6 +1489,145 @@ impl ConversationEngine {
         count
     }
 
+    /// PATTERN FINDER — the flagship analysis loop. Reads a broad, cross-domain sample of what I know
+    /// about the user (typed beliefs), asks the model for up to two NON-OBVIOUS patterns that emerge
+    /// from *combining* facts, then HARD-GATES each against confabulation — a pattern is kept only if
+    /// it cites ≥2 of the actual numbered facts it was handed. Survivors are SAVED as revisable learned
+    /// beliefs (provenance=pattern). That is "learn from memory and save the learned belief": the output
+    /// is itself typed, contradictable knowledge the mind can later reinforce, surface, or revise.
+    ///
+    /// This is the durable version of the throwaway DMN `associate` phase — it differs in three ways
+    /// that matter: cross-domain sampling (not just recency), a grounding wall (the #1 spurious-pattern
+    /// risk), and dedup-on-write so re-finding the same pattern reinforces instead of flooding.
+    pub async fn find_patterns(&self) -> String {
+        // Cross-domain coverage: recall along several facets so the sample isn't just the most-recent
+        // turns (the associate phase's blind spot). Merge + dedup by a cheap normalized key.
+        let norm = |s: &str| -> String {
+            s.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let facets = [
+            "the user's work, projects, and technical decisions",
+            "the user's family, relationships, and the people in their life",
+            "the user's finances, money, holdings, and spending",
+            "the user's habits, health, routines, likes and dislikes",
+            "the user's plans, goals, worries, and recurring concerns",
+        ];
+        let mut seen = std::collections::HashSet::new();
+        let mut facts: Vec<(String, f64)> = Vec::new();
+        for f in facets {
+            let rs = self
+                .memory
+                .recall_typed(mind_types::RecallQuery { text: f.into(), top_k: 8, kind: None })
+                .await
+                .unwrap_or_default();
+            for r in rs {
+                // ANTI-ECHO-CHAMBER: never feed the mind's OWN speculation back into pattern-finding.
+                // DMN free-associations ("(hypothesis) …") and prior pattern beliefs ("Pattern: …") are
+                // guesses, not ground truth about the user — analysing them would mine our own outputs.
+                let low = r.item.text.trim_start().to_lowercase();
+                if low.starts_with("(hypothesis)") || low.starts_with("pattern:") {
+                    continue;
+                }
+                let key = norm(&r.item.text);
+                if key.len() >= 5 && seen.insert(key) {
+                    facts.push((r.item.text.clone(), r.item.confidence));
+                }
+            }
+        }
+        if facts.len() < 6 {
+            return "I don't know enough about you yet to find real patterns — the more we talk, the more dots I can connect.".to_string();
+        }
+        facts.truncate(40);
+        let numbered: String = facts
+            .iter()
+            .enumerate()
+            .map(|(i, (txt, c))| format!("[{}] {} (conf {:.2})", i + 1, txt, c))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = format!(
+            "Below are numbered facts I hold about the user. Find UP TO TWO NON-OBVIOUS patterns — each \
+             must EMERGE from combining two or more facts, not restate a single fact, and not be generic \
+             filler. For each, cite the fact NUMBERS it rests on. If nothing non-obvious emerges, return \
+             an empty array.\n\nFACTS:\n{numbered}\n\nOutput ONLY JSON: \
+             {{\"patterns\":[{{\"insight\":\"<one specific sentence>\",\"basis\":[<fact numbers>],\"confidence\":0.0-1.0}}]}}"
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You find non-obvious cross-domain patterns and ground every claim in the cited facts. Never invent facts. Output ONLY the JSON object."),
+            ChatMessage::user(&prompt),
+        ];
+        let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+        let text = match self.inference.chat(messages, cfg).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("Couldn't run the analysis ({e})."),
+        };
+        // Robust object extraction (tolerates <think> preambles + ```json fences).
+        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+        let obj = match (body.find('{'), body.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &body[s..=e],
+            _ => "{}",
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+
+        let mut surfaced: Vec<String> = Vec::new();
+        let mut saved = 0usize;
+        for p in v.get("patterns").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let insight = p.get("insight").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if insight.len() < 12 {
+                continue;
+            }
+            // HALLUCINATION GATE — the wall. A pattern survives only if it rests on ≥2 of the ACTUAL
+            // facts I handed the model. Cited indices must be in range and distinct; anything ungrounded
+            // (the model free-associating beyond the evidence) is dropped, not stored.
+            let mut uniq: Vec<usize> = p
+                .get("basis")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| n.as_u64())
+                        .map(|n| n as usize)
+                        .filter(|&n| n >= 1 && n <= facts.len())
+                        .collect()
+                })
+                .unwrap_or_default();
+            uniq.sort_unstable();
+            uniq.dedup();
+            if uniq.len() < 2 {
+                continue;
+            }
+            let conf = p.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.1, 0.9);
+            if conf < 0.45 {
+                continue;
+            }
+            let basis_txt: Vec<String> = uniq.iter().map(|&i| facts[i - 1].0.clone()).collect();
+            // SAVE as a revisable learned belief — contradictable, dedup-keyed (re-finding reinforces).
+            let statement: String = format!("Pattern: {insight}").chars().take(400).collect();
+            if self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement,
+                    polarity: 1.0,
+                    weight: (0.4 + conf).min(1.0),
+                    source_event: Some("pattern_finder".into()),
+                    provenance: "pattern".into(),
+                })
+                .await
+                .is_ok()
+            {
+                saved += 1;
+            }
+            surfaced.push(format!("• {insight}\n   \u{21b3} from: {}", basis_txt.join(" / ")));
+        }
+        if surfaced.is_empty() {
+            return "I looked across what I know about you and didn't find a confident, non-obvious pattern this time — nothing I'd stake a claim on. I'll keep watching.".to_string();
+        }
+        format!(
+            "\u{1f4a1} Patterns I found in what I know about you (saved {saved} as learned beliefs \u{2014} tell me if any are off):\n\n{}",
+            surfaced.join("\n\n")
+        )
+    }
+
     /// SELF-VIGILANCE (self-healing) — read the mind's own self-build cron log and, if its most recent
     /// run FAILED, emit an Operational urge so the failure surfaces (via the digest) instead of dying
     /// silently. Observation-only (rung 1–2): it never remediates, just notices + records. Cheap (a
@@ -3288,6 +3427,8 @@ impl ConversationEngine {
                     _ => "Usage: ym mcp list  |  ym mcp call <mcp.server.tool> <json-args>".to_string(),
                 }
             }
+            // --- pattern finder: analyse my own typed memory for non-obvious patterns + learn them ---
+            "patterns" | "insights" | "insight" | "pattern" => self.find_patterns().await,
             // Not a plugin command — treat the whole line as chat (full agent loop, live memory).
             _ => self.handle_turn(line).await.unwrap_or_else(|e| format!("(error: {e})")),
         }

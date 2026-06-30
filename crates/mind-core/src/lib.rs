@@ -32,6 +32,7 @@ const HELP_TEXT: &str = "\
 :task <desc>         add a new task
 :done <id>           mark a task complete
 :consolidate         fold recent turns into durable beliefs
+:patterns            find non-obvious patterns across what I know + save them as beliefs
 :workers             show remote worker-pool status
 :help / :commands    show this help
 :quit / :q           exit";
@@ -81,6 +82,9 @@ pub async fn handle_line_as(
     }
     if t == ":workers" {
         return Outcome::Said(conv.workers_status().await);
+    }
+    if t == ":patterns" || t == ":insights" {
+        return Outcome::Said(conv.find_patterns().await);
     }
     if let Some(query) = t.strip_prefix(":beliefs") {
         let query = query.trim();

@@ -976,7 +976,7 @@ impl MemoryFacade for MemoryHandle {
                 confidence: r.item.confidence,
                 certainty: r.item.certainty,
                 provenance: "recalled".into(),
-                evidence_count: 0,
+                evidence_count: r.item.evidence_count,
                 updated_ms: r.item.updated_ms,
                 status: "active".into(),
             })
@@ -1438,6 +1438,40 @@ mod tests {
             .unwrap();
         let hit2 = recalled2.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
         assert_eq!(hit2.item.evidence_count, 2, "two assertions → evidence_count must be 2");
+    }
+
+    /// reflect() must surface each belief's true evidence_count so that single-source
+    /// fragility is visible to the DMN's VerificationDebt logic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reflect_belief_carries_evidence_count() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "the sky is blue".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: Some("observation".into()),
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        // Single-source: reflect must report evidence_count == 1 (not 0).
+        let reflection = mem.reflect("sky colour").await.unwrap();
+        let belief = reflection.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from reflection");
+        assert_eq!(belief.evidence_count, 1, "reflect must propagate evidence_count from recalled item, got 0");
+
+        // A second assertion increments to 2 — reflect tracks it too.
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "the sky is blue".into(),
+            polarity: 1.0,
+            weight: 1.0,
+            source_event: None,
+            provenance: "inferred".into(),
+        })
+        .await
+        .unwrap();
+        let reflection2 = mem.reflect("sky colour").await.unwrap();
+        let belief2 = reflection2.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from second reflection");
+        assert_eq!(belief2.evidence_count, 2, "reflect must track accumulated evidence_count");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

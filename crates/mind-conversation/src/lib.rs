@@ -24,6 +24,38 @@ enum CodeLang {
     Python,
     Rust,
 }
+
+/// Who is speaking this turn + whether the channel is shared — drives memory read-isolation so a
+/// private fact from one household member never leaks to another (the group-chat moat).
+#[derive(Clone, Debug)]
+pub struct TurnIdentity {
+    /// The speaker's person id ("primary", or a registered member's slug).
+    pub owner: String,
+    /// True when the message came from the SHARED group channel (facts written are shared).
+    pub shared: bool,
+}
+
+impl TurnIdentity {
+    /// The primary member, private context — the `ym` CLI + every legacy single-user path.
+    pub fn primary() -> Self {
+        Self { owner: mind_types::PRIMARY.to_string(), shared: false }
+    }
+    pub fn new(owner: impl Into<String>, shared: bool) -> Self {
+        Self { owner: owner.into(), shared }
+    }
+    /// What this person may SEE: shared facts + their own private facts.
+    pub fn viewer(&self) -> mind_types::Scope {
+        mind_types::Scope::Private(self.owner.clone())
+    }
+    /// How a fact written this turn is tagged: shared (group) or private to the speaker (DM).
+    pub fn write_scope(&self) -> mind_types::Scope {
+        if self.shared {
+            mind_types::Scope::Shared
+        } else {
+            mind_types::Scope::Private(self.owner.clone())
+        }
+    }
+}
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
     MemoryFacade, MindError, Result, RiskLevel, Skill, WorkingSet,
@@ -2199,6 +2231,98 @@ impl ConversationEngine {
         let _ = self.memory.profile_set("news_topics", &serde_json::to_string(t).unwrap_or_else(|_| "[]".into())).await;
     }
 
+    // ── household members: a registry mapping a Telegram user → a memory OWNER slug, so each member
+    // gets their own private memory + the shared household memory, read-isolated from one another. ──
+    async fn load_people(&self) -> Vec<serde_json::Value> {
+        self.memory.profile_get("people").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned()).unwrap_or_default()
+    }
+    async fn save_people(&self, p: &[serde_json::Value]) {
+        let _ = self.memory.profile_set("people", &serde_json::Value::Array(p.to_vec()).to_string()).await;
+    }
+
+    /// The owner slug for a Telegram user id (registered member, or the primary if it's the primary's
+    /// id), else None (an unknown guest — isolated to shared-only).
+    async fn owner_for_tg(&self, tg_id: i64) -> Option<String> {
+        if self.memory.profile_get("primary_tg").await.ok().flatten().and_then(|s| s.trim().parse::<i64>().ok()) == Some(tg_id) {
+            return Some(mind_types::PRIMARY.to_string());
+        }
+        self.load_people().await.iter().find(|p| p.get("tg_id").and_then(|x| x.as_i64()) == Some(tg_id))
+            .and_then(|p| p.get("slug").and_then(|x| x.as_str()).map(String::from))
+    }
+
+    /// Telegram user id → memory owner slug. Registered member → their slug; the FIRST private-DM
+    /// user becomes the primary (the companion's owner, so an existing single user keeps their memory);
+    /// any other unregistered user is an isolated guest (sees only shared facts).
+    pub async fn resolve_owner(&self, tg_id: i64, shared_channel: bool) -> String {
+        if let Some(o) = self.owner_for_tg(tg_id).await {
+            return o;
+        }
+        if !shared_channel && self.memory.profile_get("primary_tg").await.ok().flatten().is_none() {
+            let _ = self.memory.profile_set("primary_tg", &tg_id.to_string()).await;
+            return mind_types::PRIMARY.to_string();
+        }
+        format!("guest:{tg_id}")
+    }
+
+    async fn person_add(&self, arg: &str) -> String {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        if toks.len() < 2 {
+            return "Usage: ym person add <slug> <name> [telegram-id] [relationship]  (slug = a short id like 'wife')".to_string();
+        }
+        let slug = toks[0].to_lowercase();
+        if slug == mind_types::PRIMARY || slug == "shared" {
+            return "('primary' and 'shared' are reserved slugs)".to_string();
+        }
+        let (mut tg_id, mut rel, mut name_toks) = (None, String::new(), Vec::new());
+        for t in &toks[1..] {
+            if let Ok(n) = t.parse::<i64>() {
+                tg_id = Some(n);
+            } else if ["wife", "husband", "spouse", "partner", "son", "daughter", "child", "friend", "roommate"].contains(&t.to_lowercase().as_str()) {
+                rel = t.to_lowercase();
+            } else {
+                name_toks.push(*t);
+            }
+        }
+        let name = name_toks.join(" ");
+        let mut people = self.load_people().await;
+        people.retain(|p| p.get("slug").and_then(|x| x.as_str()) != Some(slug.as_str()));
+        people.push(serde_json::json!({ "slug": slug, "name": name, "tg_id": tg_id, "relationship": rel }));
+        self.save_people(&people).await;
+        format!(
+            "Added '{slug}'{}. They get their own private memory; shared (group) facts are visible to everyone, and your private DMs stay yours.{}",
+            if name.is_empty() { String::new() } else { format!(" — {name}") },
+            if tg_id.is_some() { String::new() } else { " Add their Telegram id so I recognize them (`ym person add <slug> <name> <tg-id>`), or have them message me once.".to_string() }
+        )
+    }
+
+    async fn person_remove(&self, slug: &str) -> String {
+        let slug = slug.trim().to_lowercase();
+        let mut people = self.load_people().await;
+        let before = people.len();
+        people.retain(|p| p.get("slug").and_then(|x| x.as_str()) != Some(slug.as_str()));
+        if people.len() == before {
+            return format!("No member '{slug}'.");
+        }
+        self.save_people(&people).await;
+        format!("Removed '{slug}'. (Their memory is kept but no longer reachable; tell me to forget it if you want.)")
+    }
+
+    async fn people_list(&self) -> String {
+        let people = self.load_people().await;
+        let mut lines = vec!["👥 Household (each has private memory + shared household memory):".to_string(), "  • primary (you) — owner".to_string()];
+        for p in &people {
+            let slug = p.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+            let tg = if p.get("tg_id").and_then(|x| x.as_i64()).is_some() { "" } else { "  (no telegram id yet)" };
+            lines.push(format!("  • {slug}{}{}{tg}", if name.is_empty() { String::new() } else { format!(" — {name}") }, if rel.is_empty() { String::new() } else { format!(" ({rel})") }));
+        }
+        lines.push("\nAdd one: `ym person add wife Priya <telegram-id> wife`. Speak as them: `ym as wife <message>`.".to_string());
+        lines.join("\n")
+    }
+
     async fn news_track(&self, topic: &str) -> String {
         if topic.len() < 2 {
             return "What should I track? e.g. `ym news track geopolitics`".to_string();
@@ -3007,6 +3131,30 @@ impl ConversationEngine {
                 self.run_agent_tool("web_fetch", &serde_json::json!({ "url": rest })).await
             }
             // --- plugins: the declarative registry — list + enable/disable (persisted to manifest) ---
+            // --- household: people registry + speak-as (group-chat read-isolation) ---
+            "people" | "household" => self.people_list().await,
+            "person" => {
+                let mut p = rest.splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                let arg = p.next().unwrap_or("").trim().to_string();
+                match action.as_str() {
+                    "add" => self.person_add(&arg).await,
+                    "rm" | "remove" => self.person_remove(&arg).await,
+                    "" | "list" => self.people_list().await,
+                    _ => "Usage: ym person add <slug> <name> [telegram-id] [relationship] · ym people".to_string(),
+                }
+            }
+            // Speak AS a household member (their private DM context) — proves/uses read-isolation.
+            "as" if !rest.is_empty() => {
+                let mut p = rest.splitn(2, char::is_whitespace);
+                let slug = p.next().unwrap_or("").trim().to_lowercase();
+                let msg = p.next().unwrap_or("").trim();
+                if slug.is_empty() || msg.is_empty() {
+                    "Usage: ym as <person-slug> <message>  (e.g. ym as wife what's my birthday gift?)".to_string()
+                } else {
+                    self.handle_turn_as(msg, TurnIdentity::new(slug, false)).await.unwrap_or_else(|e| format!("(error: {e})"))
+                }
+            }
             "plugins" => self.plugins.lock().unwrap().render_list(),
             "plugin" => {
                 let mut p = rest.splitn(2, char::is_whitespace);
@@ -3780,7 +3928,12 @@ impl ConversationEngine {
     /// typed memory → reply.
     /// Execute ONE agent tool, returning a short observation. Read/compose tools; outward effects stay
     /// gated on their own paths. `build_capability` is the self-extension hook (author + save a skill).
+    /// Unscoped tool dispatch (the `ym` CLI + non-chat paths) — acts as the primary member.
     async fn run_agent_tool(&self, tool: &str, args: &serde_json::Value) -> String {
+        self.run_agent_tool_as(tool, args, &TurnIdentity::primary()).await
+    }
+
+    async fn run_agent_tool_as(&self, tool: &str, args: &serde_json::Value, id: &TurnIdentity) -> String {
         let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         // Plugin gate: a tool owned by a DISABLED plugin is refused here (one check covers every tool).
         // Core tools (owned by no plugin) always pass; MCP tools are governed by their own catalog.
@@ -3810,7 +3963,7 @@ impl ConversationEngine {
                 if t.len() < 4 {
                     return "(nothing to remember)".to_string();
                 }
-                let _ = self.memory.remember_as_belief(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }).await;
+                let _ = self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await;
                 "(remembered)".to_string()
             }
             "github_repo_items" => match &self.github {
@@ -4164,10 +4317,12 @@ impl ConversationEngine {
     /// observe → iterate → answer. Tools = primitives + the build_capability self-extension hook, so
     /// "I can't" becomes "I didn't have that, so I built it." Bounded to MAX_STEPS. This is the PRIMARY
     /// handler behind the two stateful interceptors (onboarding answer-capture + pending confirmation).
-    async fn agent_loop(&self, user_text: &str) -> Result<String> {
+    async fn agent_loop(&self, user_text: &str, id: &TurnIdentity) -> Result<String> {
         const MAX_STEPS: usize = 5;
         self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
-        let ws = self.memory.hydrate_working_set(user_text).await.unwrap_or_default();
+        // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
+        // private fact from another household member never reaches the model (the surprise-gift wall).
+        let ws = self.memory.hydrate_working_set_as(user_text, id.viewer()).await.unwrap_or_default();
         let mut grounding = String::from("What I know that may be relevant:");
         for b in ws.stable_facts.iter().take(5) {
             grounding.push_str(&format!("\n- {}", b.text));
@@ -4177,7 +4332,7 @@ impl ConversationEngine {
         }
         let recent = self
             .memory
-            .recent_messages(self.recent_window)
+            .recent_messages_as(self.recent_window, id.viewer())
             .await
             .unwrap_or_default()
             .iter()
@@ -4245,8 +4400,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                         let name = title_from_html(&html).unwrap_or_else(|| "page".to_string());
                         if let Some(url) = publish_html(&name, &html) {
                             let a = format!("Done — I published it as a page (works on your home network):\n{url}");
-                            let _ = self.memory.append_message("user", user_text).await;
-                            let _ = self.memory.append_message("assistant", &a).await;
+                            let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                            let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                             return Ok(a);
                         }
                     }
@@ -4271,8 +4426,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                             }
                         }
                     }
-                    let _ = self.memory.append_message("user", user_text).await;
-                    let _ = self.memory.append_message("assistant", &a).await;
+                    let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                    let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                     return Ok(a);
                 }
             }
@@ -4294,8 +4449,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                         a = format!("Done — I published it as a page (works on your home network):\n{url}");
                     }
                 }
-                let _ = self.memory.append_message("user", user_text).await;
-                let _ = self.memory.append_message("assistant", &a).await;
+                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                 return Ok(a);
             }
             let args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
@@ -4308,22 +4463,22 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 break;
             }
             last_call = call_sig;
-            let obs = self.run_agent_tool(&tool, &args).await;
+            let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
             // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
             // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).
             if matches!(tool.as_str(), "publish_page" | "make_dashboard") && obs.contains("http") {
-                let _ = self.memory.append_message("user", user_text).await;
-                let _ = self.memory.append_message("assistant", &obs).await;
+                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
                 return Ok(obs);
             }
             // Rich, self-contained synthesis (news brief / ticker analysis / portfolio) is TERMINAL:
             // it already cites its sources and is balanced — re-paraphrasing it through the compose
             // step drops the source links and dilutes it. Deliver it verbatim.
             if matches!(tool.as_str(), "news" | "analyze" | "analyze_stock" | "stock_analysis" | "portfolio" | "holdings" | "my_stocks") && obs.chars().count() > 200 {
-                let _ = self.memory.append_message("user", user_text).await;
-                let _ = self.memory.append_message("assistant", &obs).await;
+                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
                 return Ok(obs);
             }
             // A mutating MCP integration tool is TERMINAL: its result is a confirmation prompt the user
@@ -4332,8 +4487,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             if tool.starts_with("mcp.")
                 && self.mcp.as_ref().and_then(|h| h.lookup(&tool)).map(|t| !t.read_only).unwrap_or(false)
             {
-                let _ = self.memory.append_message("user", user_text).await;
-                let _ = self.memory.append_message("assistant", &obs).await;
+                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
                 return Ok(obs);
             }
             scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
@@ -4345,26 +4500,33 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             .await
             .map(|r| r.text.trim().to_string())
             .unwrap_or_else(|_| "I looked into it but couldn't wrap up cleanly.".to_string());
-        let _ = self.memory.append_message("user", user_text).await;
-        let _ = self.memory.append_message("assistant", &ans).await;
+        let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+        let _ = self.memory.append_message_scoped("assistant", &ans, id.write_scope()).await;
         Ok(ans)
     }
 
+    /// Single-user entry — acts as the primary member (the `ym` CLI + legacy callers).
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
+        self.handle_turn_as(user_text, TurnIdentity::primary()).await
+    }
+
+    /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
+    pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        let ws = id.write_scope(); // how this turn's transcript lines are tagged
         // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         let onboard = self.pending_onboard.lock().unwrap().take();
         if let Some(slot) = onboard {
             let reply = self.capture_onboard(&slot, user_text).await;
-            let _ = self.memory.append_message("user", user_text).await;
-            let _ = self.memory.append_message("assistant", &reply).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
         }
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.
         if let Some(reply) = self.handle_action(user_text).await {
-            let _ = self.memory.append_message("user", user_text).await;
-            let _ = self.memory.append_message("assistant", &reply).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
         }
         // Proactive news loop: if the user just reacted with interest to a surfaced news ping ("tell me
@@ -4372,8 +4534,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // it and put it together" behavior, without them having to re-name the topic.
         if let Some(topic) = self.interest_in_recent_news(user_text) {
             let brief = self.news_brief(&topic).await;
-            let _ = self.memory.append_message("user", user_text).await;
-            let _ = self.memory.append_message("assistant", &brief).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &brief, ws).await;
             return Ok(brief);
         }
         // PRIMARY: the agentic loop (reason → pick ONE tool → observe → iterate → answer, with the
@@ -4381,7 +4543,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // code, monitors, grounded chat — as tools. The stateful interceptors (onboarding capture +
         // pending confirmation) already ran above. YM_AGENT=off falls back to the legacy dispatch chain.
         if self.agent_primary {
-            return self.agent_loop(user_text).await;
+            return self.agent_loop(user_text, &id).await;
         }
         // Research sub-agent: parallel deep-dive first, then the single-agent path.
         if self.researcher.is_some() {
@@ -5239,7 +5401,7 @@ mod tests {
             1,
         );
         let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
-        let r = conv.agent_loop("hi").await.unwrap();
+        let r = conv.agent_loop("hi", &TurnIdentity::primary()).await.unwrap();
         assert!(r.contains("Pranab"), "agent should return its answer: {r}");
         // and the turn is recorded in the transcript
         let recent = memarc.recent_messages(4).await.unwrap();

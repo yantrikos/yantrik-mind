@@ -45,6 +45,16 @@ const HELP_TEXT: &str = "\
 ///   `:help` / `:commands`                                   print every command with a one-line description
 ///   `:quit`
 pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngine) -> Outcome {
+    handle_line_as(line, mem, conv, mind_conversation::TurnIdentity::primary()).await
+}
+
+/// As `handle_line`, but the chat turn is attributed to a known household member (read-isolation).
+pub async fn handle_line_as(
+    line: &str,
+    mem: &MemoryHandle,
+    conv: &ConversationEngine,
+    identity: mind_conversation::TurnIdentity,
+) -> Outcome {
     let raw = line.trim();
     if raw.is_empty() {
         return Outcome::Said(String::new());
@@ -220,8 +230,8 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
             Err(e) => Outcome::Said(format!("(error: {e})")),
         };
     }
-    // plain chat turn
-    match conv.handle_turn(t).await {
+    // plain chat turn — attributed to the speaker (group-chat read-isolation)
+    match conv.handle_turn_as(t, identity).await {
         Ok(r) => Outcome::Said(r),
         Err(e) => Outcome::Said(format!("(error: {e})")),
     }

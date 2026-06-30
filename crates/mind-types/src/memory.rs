@@ -85,6 +85,54 @@ pub struct RecallQuery {
     pub kind: Option<MemoryKind>,
 }
 
+/// Who can see a memory / who is reading it. The household read-isolation primitive: a private fact
+/// from one person must NEVER surface to another. (See the surprise-gift adversarial test.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scope {
+    /// Visible to all household members (a shared/group fact).
+    Shared,
+    /// Visible ONLY to this person id (a private-DM fact).
+    Private(String),
+}
+
+/// The primary household member (the companion's owner). Legacy/untagged memory is private to them,
+/// so pre-multi-user facts never leak to a later-added member.
+pub const PRIMARY: &str = "primary";
+
+impl Scope {
+    /// The primary member's private scope.
+    pub fn primary() -> Scope {
+        Scope::Private(PRIMARY.to_string())
+    }
+    /// Storage form: "shared" or "private:<owner>".
+    pub fn as_tag(&self) -> String {
+        match self {
+            Scope::Shared => "shared".into(),
+            Scope::Private(o) => format!("private:{o}"),
+        }
+    }
+    pub fn parse(tag: &str) -> Scope {
+        match tag.strip_prefix("private:") {
+            Some(o) => Scope::Private(o.to_string()),
+            None => Scope::Shared,
+        }
+    }
+    /// Can `viewer` see an item stored with `stored` scope tag? Shared → everyone; Private → only the
+    /// owner. An untagged/legacy item (stored=None) is private to the PRIMARY (so old single-user facts
+    /// never leak to a later-added member). `None` viewer = unrestricted (system/single-user).
+    pub fn visible_to(stored: Option<&str>, viewer: Option<&Scope>) -> bool {
+        let viewer = match viewer {
+            None => return true, // unrestricted
+            Some(v) => v,
+        };
+        match stored.map(Scope::parse) {
+            None => matches!(viewer, Scope::Private(v) if v == PRIMARY), // legacy → primary only
+            Some(Scope::Shared) => true,
+            Some(Scope::Private(owner)) => matches!(viewer, Scope::Private(v) if *v == owner),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recalled {
     pub item: MemoryItem,
@@ -184,6 +232,29 @@ pub trait MemoryFacade: Send + Sync {
     async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>>;
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;
+
+    // ── group-chat read-isolation (scoped variants; the unscoped methods above = unrestricted) ──
+    /// Recall, FILTERED to what `viewer` may see (shared facts + their own private). Default: ignores
+    /// scope (delegates to recall_typed) so non-isolating impls need no change.
+    async fn recall_typed_as(&self, q: RecallQuery, _viewer: Scope) -> Result<Vec<Recalled>> {
+        self.recall_typed(q).await
+    }
+    /// Assert a belief tagged with a visibility `scope`. Default: ignores scope.
+    async fn remember_as_belief_scoped(&self, a: BeliefAssertion, _scope: Scope) -> Result<Belief> {
+        self.remember_as_belief(a).await
+    }
+    /// Working-set hydration, FILTERED to what `viewer` may see. Default: unrestricted.
+    async fn hydrate_working_set_as(&self, focus: &str, _viewer: Scope) -> Result<WorkingSet> {
+        self.hydrate_working_set(focus).await
+    }
+    /// Append a transcript line tagged with a visibility `scope`. Default: ignores scope.
+    async fn append_message_scoped(&self, role: &str, text: &str, _scope: Scope) -> Result<()> {
+        self.append_message(role, text).await
+    }
+    /// Recent transcript lines FILTERED to what `viewer` may see. Default: unrestricted.
+    async fn recent_messages_as(&self, limit: usize, _viewer: Scope) -> Result<Vec<(String, String)>> {
+        self.recent_messages(limit).await
+    }
     /// Write a machine-derived OBSERVATION (skill/tool/sub-agent/web output) — provenance-tagged,
     /// secret-scanned, NEVER a naked Belief. This is the gated inward boundary for the moat.
     async fn remember_observation(&self, text: &str, source: crate::safety::ProvenanceCategory) -> Result<String>;

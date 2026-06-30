@@ -15,7 +15,7 @@ use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
 use mind_types::MemoryFacade;
 
-use crate::{handle_line, Outcome};
+use crate::{handle_line_as, Outcome};
 
 async fn tg_get(api: &str, method_query: &str) -> anyhow::Result<serde_json::Value> {
     let url = format!("{api}/{method_query}");
@@ -360,13 +360,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             if text.is_empty() {
                 continue;
             }
+            // Group-chat read-isolation: WHO is speaking (from.id) + on WHAT channel (private DM vs a
+            // shared group). The owner resolves to a memory scope so a private fact never leaks across
+            // members; a shared group's facts are visible to everyone in it.
+            let from_id = msg["from"]["id"].as_i64().unwrap_or(0);
+            let chat_type = msg["chat"]["type"].as_str().unwrap_or("private").to_string();
+            let shared_channel = chat_type == "group" || chat_type == "supergroup";
             // Process the turn in its OWN task so the poll loop keeps polling + ticking (delegations,
             // consolidation, DMN, proactive) no matter how long this turn takes. A child timer keeps
             // the "typing…" indicator alive (Telegram clears it after ~5s) for the full think time.
             let (api2, mem2, conv2) = (api.clone(), mem.clone(), conv.clone());
             tokio::spawn(async move {
                 tg_typing(&api2, chat_id).await;
-                let work = handle_line(&text, &mem2, conv2.as_ref());
+                let owner = conv2.resolve_owner(from_id, shared_channel).await;
+                let identity = mind_conversation::TurnIdentity::new(owner, shared_channel);
+                let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity);
                 tokio::pin!(work);
                 let outcome = loop {
                     tokio::select! {

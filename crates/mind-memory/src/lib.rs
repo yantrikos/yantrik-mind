@@ -47,8 +47,8 @@ enum Cmd {
     ListTasks { include_done: bool, reply: Reply<Vec<Task>> },
     CompleteTask { id: String, reply: Reply<bool> },
     // cheap raw transcript (immediate context; isolated table, not the cognitive graph)
-    AppendMessage { role: String, text: String, reply: Reply<()> },
-    RecentMessages { limit: usize, reply: Reply<Vec<(String, String)>> },
+    AppendMessage { role: String, text: String, scope: String, reply: Reply<()> },
+    RecentMessages { limit: usize, viewer: Option<String>, reply: Reply<Vec<(String, String)>> },
     MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
     // skill library
     SaveSkill { skill: Skill, reply: Reply<()> },
@@ -61,6 +61,9 @@ enum Cmd {
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
     // profile KV (single value per key, latest-wins — distinct from append-distinct goals/prefs)
     SetProfile { key: String, value: String, reply: Reply<()> },
+    // group-chat read-isolation: per-belief visibility scope (keyed by proposition)
+    SetBeliefScope { proposition: String, scope: String, reply: Reply<()> },
+    BeliefScopeMap { reply: Reply<std::collections::HashMap<String, String>> },
     // tension economy (the "urges" drives emit; plain CRUD ledger)
     RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
@@ -471,11 +474,16 @@ fn complete_task(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> 
 // ── cheap raw transcript (dedicated isolated table; plain SQL, no cognitive ops) ──
 
 fn ensure_transcript_table(db: &YantrikDB) {
-    let _ = db.conn().execute(
+    let c = db.conn();
+    let _ = c.execute(
         "CREATE TABLE IF NOT EXISTS mind_transcript \
-         (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, ts REAL NOT NULL)",
+         (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, text TEXT NOT NULL, ts REAL NOT NULL, \
+          scope TEXT NOT NULL DEFAULT 'private:primary')",
         [],
     );
+    // Migrate pre-existing tables: add the scope column; existing rows default to primary-private so a
+    // later-added household member never sees the prior single-user transcript. (Errors if column exists.)
+    let _ = c.execute("ALTER TABLE mind_transcript ADD COLUMN scope TEXT NOT NULL DEFAULT 'private:primary'", []);
 }
 
 // ── skill library (code-tools; same store, plain SQL; reuse always runs in the sandbox) ──
@@ -533,6 +541,35 @@ fn set_profile(db: &YantrikDB, key: &str, value: &str) -> std::result::Result<()
     conn.execute("DELETE FROM mind_goals_prefs WHERE kind = ?1", [key]).map_err(|e| e.to_string())?;
     conn.execute("INSERT INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [key, value]).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Per-belief visibility scope (group-chat read-isolation), keyed by the belief's canonical
+/// proposition. "shared" | "private:<owner>". A belief with no row = legacy (primary-only).
+fn ensure_belief_scope_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_belief_scope (proposition TEXT PRIMARY KEY, scope TEXT NOT NULL)",
+        [],
+    );
+}
+
+fn set_belief_scope(db: &YantrikDB, proposition: &str, scope: &str) -> std::result::Result<(), String> {
+    db.conn()
+        .execute(
+            "INSERT INTO mind_belief_scope (proposition, scope) VALUES (?1, ?2) \
+             ON CONFLICT(proposition) DO UPDATE SET scope=excluded.scope",
+            [proposition, scope],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn belief_scope_map(db: &YantrikDB) -> std::result::Result<std::collections::HashMap<String, String>, String> {
+    let conn = db.conn();
+    let mut stmt = conn.prepare("SELECT proposition, scope FROM mind_belief_scope").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<MemoryItem>, String> {
@@ -739,27 +776,41 @@ fn record_skill_outcome(db: &YantrikDB, name: &str, success: bool) -> std::resul
     Ok(())
 }
 
-fn append_message(db: &YantrikDB, role: &str, text: &str) -> std::result::Result<(), String> {
+fn append_message(db: &YantrikDB, role: &str, text: &str, scope: &str) -> std::result::Result<(), String> {
     db.conn()
         .execute(
-            "INSERT INTO mind_transcript (role, text, ts) VALUES (?1, ?2, ?3)",
-            rusqlite::params![role, text, now_secs()],
+            "INSERT INTO mind_transcript (role, text, ts, scope) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![role, text, now_secs(), scope],
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
-fn recent_messages(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<(String, String)>, String> {
+fn recent_messages(db: &YantrikDB, limit: usize, viewer: Option<&str>) -> std::result::Result<Vec<(String, String)>, String> {
     // 0.9.0's `conn()` returns a temporary guard (was `&Connection`); bind it so the prepared
-    // statement doesn't outlive a dropped temporary.
+    // statement doesn't outlive a dropped temporary. When a `viewer` tag is given, read-ISOLATE the
+    // transcript to shared lines + that viewer's own private lines (group-chat privacy).
     let conn = db.conn();
-    let mut stmt = conn
-        .prepare("SELECT role, text FROM mind_transcript ORDER BY id DESC LIMIT ?1")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| e.to_string())?;
-    let mut v: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
+    let mut v: Vec<(String, String)> = match viewer {
+        Some(tag) => {
+            let mut stmt = conn
+                .prepare("SELECT role, text FROM mind_transcript WHERE scope='shared' OR scope=?1 ORDER BY id DESC LIMIT ?2")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![tag, limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        }
+        None => {
+            let mut stmt = conn
+                .prepare("SELECT role, text FROM mind_transcript ORDER BY id DESC LIMIT ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        }
+    };
     v.reverse(); // newest-first SQL -> chronological for the prompt
     Ok(v)
 }
@@ -808,6 +859,7 @@ impl MemoryHandle {
                 ensure_skills_table(&db);
                 ensure_goals_prefs_table(&db);
                 ensure_tensions_table(&db);
+                ensure_belief_scope_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -885,8 +937,8 @@ impl MemoryHandle {
                         Cmd::CompleteTask { id, reply } => {
                             let _ = reply.send(complete_task(&db, &id));
                         }
-                        Cmd::AppendMessage { role, text, reply } => {
-                            let _ = reply.send(append_message(&db, &role, &text));
+                        Cmd::AppendMessage { role, text, scope, reply } => {
+                            let _ = reply.send(append_message(&db, &role, &text, &scope));
                         }
                         Cmd::SaveSkill { skill, reply } => {
                             let _ = reply.send(save_skill(&db, &skill));
@@ -912,8 +964,14 @@ impl MemoryHandle {
                         Cmd::SetProfile { key, value, reply } => {
                             let _ = reply.send(set_profile(&db, &key, &value));
                         }
-                        Cmd::RecentMessages { limit, reply } => {
-                            let _ = reply.send(recent_messages(&db, limit));
+                        Cmd::SetBeliefScope { proposition, scope, reply } => {
+                            let _ = reply.send(set_belief_scope(&db, &proposition, &scope));
+                        }
+                        Cmd::BeliefScopeMap { reply } => {
+                            let _ = reply.send(belief_scope_map(&db));
+                        }
+                        Cmd::RecentMessages { limit, viewer, reply } => {
+                            let _ = reply.send(recent_messages(&db, limit, viewer.as_deref()));
                         }
                         Cmd::MessagesSince { after_id, limit, reply } => {
                             let _ = reply.send(messages_since(&db, after_id, limit));
@@ -994,6 +1052,67 @@ impl MemoryFacade for MemoryHandle {
         let signed_weight = a.polarity * a.weight.abs();
         let (statement, source, provenance) = (a.statement, a.source_event.unwrap_or_default(), a.provenance);
         self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, reply }).await
+    }
+
+    // ── group-chat read-isolation (real impls; default trait methods are unrestricted) ──
+    async fn remember_as_belief_scoped(&self, a: BeliefAssertion, scope: mind_types::Scope) -> Result<Belief> {
+        let belief = self.remember_as_belief(a).await?;
+        // Tag by the CANONICAL proposition (find_belief may have merged a paraphrase into an existing node).
+        let (proposition, tag) = (belief.statement.clone(), scope.as_tag());
+        let _ = self.call(|reply| Cmd::SetBeliefScope { proposition, scope: tag, reply }).await;
+        Ok(belief)
+    }
+
+    async fn recall_typed_as(&self, q: RecallQuery, viewer: mind_types::Scope) -> Result<Vec<Recalled>> {
+        let recalled = self.recall_typed(q).await?;
+        let scopes = self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default();
+        Ok(recalled
+            .into_iter()
+            .filter(|r| mind_types::Scope::visible_to(scopes.get(&r.item.text).map(|s| s.as_str()), Some(&viewer)))
+            .collect())
+    }
+
+    async fn hydrate_working_set_as(&self, focus: &str, viewer: mind_types::Scope) -> Result<WorkingSet> {
+        // Same shape as hydrate_working_set, but the belief recall is read-ISOLATED to the viewer, and
+        // task commitments surface only to the primary (tasks aren't per-task scoped yet).
+        let recalled = self.recall_typed_as(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }, viewer.clone()).await?;
+        let open = self.conflicts().await?;
+        let mut ws = WorkingSet::default();
+        let halflife_days: f64 = std::env::var("YM_BELIEF_HALFLIFE_DAYS").ok().and_then(|s| s.parse().ok()).unwrap_or(90.0);
+        let now_ms = (now_secs() * 1000.0) as u64;
+        for r in recalled {
+            let age_ms = now_ms.saturating_sub(r.item.updated_ms);
+            let eff = decay_confidence(r.item.confidence, age_ms, halflife_days);
+            if eff >= 0.7 {
+                ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
+            } else {
+                ws.uncertain_beliefs.push(Belief {
+                    id: r.item.id.clone(),
+                    statement: r.item.text.clone(),
+                    confidence: eff,
+                    certainty: r.item.certainty,
+                    provenance: "recalled".into(),
+                    evidence_count: 0,
+                    updated_ms: r.item.updated_ms,
+                    status: "active".into(),
+                });
+            }
+        }
+        ws.active_contradictions = open;
+        if matches!(&viewer, mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            for t in self.list_tasks(false).await.unwrap_or_default() {
+                ws.commitments.push(MemoryItem {
+                    id: t.id,
+                    kind: MemoryKind::Task,
+                    text: t.description,
+                    confidence: 1.0,
+                    certainty: 1.0,
+                    updated_ms: t.due_ms.unwrap_or(0),
+                    evidence_count: 0,
+                });
+            }
+        }
+        Ok(ws)
     }
 
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()> {
@@ -1161,14 +1280,21 @@ impl MemoryFacade for MemoryHandle {
     }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {
-        let (role, text) = (role.to_string(), text.to_string());
-        self.call(|reply| Cmd::AppendMessage { role, text, reply }).await
+        // Unscoped append = primary's private context (single-user default; never leaks to a member).
+        self.append_message_scoped(role, text, mind_types::Scope::primary()).await
+    }
+    async fn append_message_scoped(&self, role: &str, text: &str, scope: mind_types::Scope) -> Result<()> {
+        let (role, text, scope) = (role.to_string(), text.to_string(), scope.as_tag());
+        self.call(|reply| Cmd::AppendMessage { role, text, scope, reply }).await
     }
     async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>> {
         self.call(|reply| Cmd::MessagesSince { after_id, limit, reply }).await
     }
     async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>> {
-        self.call(|reply| Cmd::RecentMessages { limit, reply }).await
+        self.call(|reply| Cmd::RecentMessages { limit, viewer: None, reply }).await
+    }
+    async fn recent_messages_as(&self, limit: usize, viewer: mind_types::Scope) -> Result<Vec<(String, String)>> {
+        self.call(|reply| Cmd::RecentMessages { limit, viewer: Some(viewer.as_tag()), reply }).await
     }
 }
 
@@ -1296,6 +1422,34 @@ mod tests {
         let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }).await.unwrap();
         let rust: Vec<_> = hits.iter().filter(|r| r.item.text.contains("Rust release")).collect();
         assert_eq!(rust.len(), 2, "formatting variant merges, contradiction (1.70 vs 1.96) stays separate: {:?}", rust.iter().map(|r| &r.item.text).collect::<Vec<_>>());
+    }
+
+    /// THE GROUP-CHAT MOAT: a private fact from one member must NEVER surface to another. The
+    /// surprise-gift guarantee — cannot be prompt-engineered open because it's filtered at recall.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn read_isolation_keeps_a_private_belief_from_another_member() {
+        use mind_types::Scope;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let (primary, wife) = (Scope::Private("primary".into()), Scope::Private("wife".into()));
+        // Pranab (primary), in a private DM, tells the bot his surprise gift plan.
+        mem.remember_as_belief_scoped(BeliefAssertion { statement: "I am getting my wife a gold watch for her birthday".into(), polarity: 1.0, weight: 0.9, source_event: None, provenance: "told".into() }, primary.clone()).await.unwrap();
+        // A SHARED household fact (told in the group).
+        mem.remember_as_belief_scoped(BeliefAssertion { statement: "The household is out of milk".into(), polarity: 1.0, weight: 0.8, source_event: None, provenance: "told".into() }, Scope::Shared).await.unwrap();
+        let q = |t: &str| RecallQuery { text: t.into(), top_k: 10, kind: None };
+
+        // The WIFE must NOT see the private gift belief.
+        let wife_view = mem.recall_typed_as(q("birthday gift watch"), wife.clone()).await.unwrap();
+        assert!(!wife_view.iter().any(|r| r.item.text.contains("gold watch")), "LEAK: wife saw the surprise: {:?}", wife_view.iter().map(|r| &r.item.text).collect::<Vec<_>>());
+        // Pranab MUST see his own private belief.
+        let p_view = mem.recall_typed_as(q("birthday gift watch"), primary.clone()).await.unwrap();
+        assert!(p_view.iter().any(|r| r.item.text.contains("gold watch")), "primary must see his own private belief");
+        // BOTH see the shared milk fact.
+        assert!(mem.recall_typed_as(q("out of milk"), wife.clone()).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "wife sees shared");
+        assert!(mem.recall_typed_as(q("out of milk"), primary).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "primary sees shared");
+        // The wife's GROUNDING (working set) must also exclude the gift — the LLM never even sees it.
+        let ws = mem.hydrate_working_set_as("birthday gift watch", wife).await.unwrap();
+        let grounded: Vec<String> = ws.stable_facts.iter().map(|m| m.text.clone()).chain(ws.uncertain_beliefs.iter().map(|b| b.statement.clone())).collect();
+        assert!(!grounded.iter().any(|t| t.contains("gold watch")), "LEAK in grounding: {grounded:?}");
     }
 
     /// THE MOAT: typed belief + Bayesian revision + contradiction detection + explanation,

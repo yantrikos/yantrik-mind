@@ -3950,9 +3950,11 @@ impl ConversationEngine {
         }
         match tool {
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
+            // READ-ISOLATED: the recall tool sees only what THIS speaker may (so the agent can't read
+            // around the grounding isolation to reach another member's private facts).
             "recall" => match self
                 .memory
-                .recall_typed(mind_types::RecallQuery { text: s("query"), top_k: 6, kind: None })
+                .recall_typed_as(mind_types::RecallQuery { text: s("query"), top_k: 6, kind: None }, id.viewer())
                 .await
             {
                 Ok(rs) if !rs.is_empty() => rs.iter().map(|r| format!("- {} ({:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n"),

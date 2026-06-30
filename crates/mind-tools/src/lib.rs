@@ -52,7 +52,7 @@ pub mod wikipedia;
 pub use wikipedia::{ScriptedWiki, WikiClient, Wikipedia};
 
 pub mod markets;
-pub use markets::{LiveMarkets, MarketsClient, ScriptedMarkets};
+pub use markets::{LiveMarkets, MarketsClient, Quote, ScriptedMarkets};
 
 pub mod translate;
 pub use translate::{GoogleTranslate, ScriptedTranslator, Translator};

@@ -509,6 +509,41 @@ fn sub_monthly(amount: f64, cycle: &str) -> f64 {
     }
 }
 
+/// Common crypto tickers — route a holding/analysis to the crypto source without an explicit hint.
+fn is_crypto_symbol(s: &str) -> bool {
+    const C: [&str; 20] = [
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "BNB", "USDT", "USDC", "MATIC", "DOT", "AVAX",
+        "LINK", "LTC", "TRX", "SHIB", "ATOM", "NEAR", "XLM", "BCH",
+    ];
+    C.contains(&s.to_uppercase().as_str())
+}
+
+/// Money with thousands separators + 2dp (e.g. 33010.5 → "33,010.50").
+fn money(v: f64) -> String {
+    let s = format!("{v:.2}");
+    let (int, frac) = s.split_once('.').unwrap_or((&s, "00"));
+    let neg = int.starts_with('-');
+    let digits = int.trim_start_matches('-');
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    let int_fmt: String = grouped.chars().rev().collect();
+    format!("{}{int_fmt}.{frac}", if neg { "-" } else { "" })
+}
+
+/// Format a share/coin count without trailing-zero noise (10.0 → "10", 0.5 → "0.5").
+fn fmt_shares(v: f64) -> String {
+    if (v.fract()).abs() < 1e-9 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
@@ -2220,6 +2255,241 @@ impl ConversationEngine {
         format!("💸 Tracking {} subscription(s), ~{cur}{total:.2}/mo (~{cur}{:.0}/yr). `ym subs` for the breakdown.", subs.len(), total * 12.0)
     }
 
+    // ---- Portfolio: holdings in the profile store (access-free, like subs/bills), valued LIVE via
+    // the markets natives. Honest by construction — positions + P&L + allocation, never a "buy" tip.
+
+    async fn load_holdings(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("holdings")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    async fn save_holdings(&self, h: &[serde_json::Value]) {
+        let _ = self.memory.profile_set("holdings", &serde_json::Value::Array(h.to_vec()).to_string()).await;
+    }
+
+    /// `ym holding ...` router.
+    async fn holding_cmd(&self, action: &str, arg: &str) -> String {
+        match action {
+            "add" | "+" | "buy" => self.holding_add(arg).await,
+            "rm" | "remove" | "del" | "sell" | "-" => self.holding_remove(arg).await,
+            "" | "list" | "ls" => self.portfolio_overview().await,
+            _ => "Usage: ym holding add <ticker> <shares> [cost] [crypto] · ym holding rm <ticker> · ym portfolio".to_string(),
+        }
+    }
+
+    /// Record a position. `<ticker> <shares> [cost-basis] [crypto|stock]`; kind auto-detected for
+    /// common coins. Cost basis is optional (without it we show value but not P&L).
+    async fn holding_add(&self, arg: &str) -> String {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        if toks.len() < 2 {
+            return "Usage: ym holding add <ticker> <shares> [cost-basis] [crypto]  (e.g. ym holding add AAPL 10 175.50)".to_string();
+        }
+        let ticker = toks[0].to_uppercase();
+        let shares: f64 = toks[1].replace(',', "").parse().unwrap_or(0.0);
+        if shares <= 0.0 {
+            return format!("How many {ticker}? Give a positive number of shares/units.");
+        }
+        let mut cost: Option<f64> = None;
+        let mut kind = if is_crypto_symbol(&ticker) { "crypto" } else { "stock" };
+        for t in &toks[2..] {
+            let tl = t.to_lowercase();
+            if tl == "crypto" || tl == "coin" {
+                kind = "crypto";
+            } else if tl == "stock" || tl == "equity" {
+                kind = "stock";
+            } else if let Ok(c) = strip_currency(t).replace(',', "").parse::<f64>() {
+                cost = Some(c);
+            }
+        }
+        let mut holdings = self.load_holdings().await;
+        holdings.retain(|h| !h.get("ticker").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(&ticker)).unwrap_or(false));
+        holdings.push(serde_json::json!({ "ticker": ticker, "shares": shares, "cost": cost, "kind": kind }));
+        self.save_holdings(&holdings).await;
+        let costnote = cost.map(|c| format!(" @ ${}", money(c))).unwrap_or_default();
+        format!("Added {} {ticker}{costnote} ({kind}). Tracking {} position(s) — `ym portfolio` to value them.", fmt_shares(shares), holdings.len())
+    }
+
+    async fn holding_remove(&self, ticker: &str) -> String {
+        let ticker = ticker.trim();
+        if ticker.is_empty() {
+            return "Which one? ym holding rm <ticker>".to_string();
+        }
+        let mut holdings = self.load_holdings().await;
+        let before = holdings.len();
+        holdings.retain(|h| !h.get("ticker").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(ticker)).unwrap_or(false));
+        if holdings.len() == before {
+            return format!("No holding '{}'. `ym portfolio` to see them.", ticker.to_uppercase());
+        }
+        self.save_holdings(&holdings).await;
+        format!("Removed {}. {} position(s) left.", ticker.to_uppercase(), holdings.len())
+    }
+
+    /// Live valuation: each position's price, value, P&L vs cost, allocation %, + a concentration
+    /// flag. Factual — the moat is that it PERSISTS and reasons across sessions, not a hot tip.
+    async fn portfolio_overview(&self) -> String {
+        let holdings = self.load_holdings().await;
+        if holdings.is_empty() {
+            return "📊 No holdings tracked yet. Add one: `ym holding add AAPL 10 175.50` (shares + optional cost basis). Crypto too: `ym holding add BTC 0.5 crypto`.".to_string();
+        }
+        let markets = match &self.markets {
+            Some(m) => m,
+            None => return "(markets aren't configured — can't value the portfolio)".to_string(),
+        };
+        struct Row {
+            ticker: String,
+            shares: f64,
+            cost: Option<f64>,
+            value: Option<f64>,
+            chg: f64,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        // Sequential — small N, and gentle on the free quote APIs (no concurrent rate-limit hit).
+        for h in &holdings {
+            let ticker = h.get("ticker").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+            let shares = h.get("shares").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let cost = h.get("cost").and_then(|x| x.as_f64());
+            let kind = h.get("kind").and_then(|x| x.as_str()).unwrap_or("stock");
+            let q = if kind == "crypto" { markets.crypto_quote(&ticker).await } else { markets.stock_quote(&ticker).await };
+            match q {
+                Ok(quote) => rows.push(Row { ticker, shares, cost, value: Some(shares * quote.price), chg: quote.change_pct }),
+                Err(_) => rows.push(Row { ticker, shares, cost, value: None, chg: 0.0 }),
+            }
+        }
+        let total: f64 = rows.iter().filter_map(|r| r.value).sum();
+        let total_cost: f64 = rows.iter().filter_map(|r| r.cost.map(|c| c * r.shares)).sum();
+        let mut lines = Vec::new();
+        for r in &rows {
+            let Some(value) = r.value else {
+                lines.push(format!("• {} {} — (no live quote)", fmt_shares(r.shares), r.ticker));
+                continue;
+            };
+            let alloc = if total > 0.0 { value / total * 100.0 } else { 0.0 };
+            let arrow = if r.chg >= 0.0 { "▲" } else { "▼" };
+            let pl = match r.cost {
+                Some(c) if c > 0.0 => {
+                    let plpct = (value - c * r.shares) / (c * r.shares) * 100.0;
+                    format!("  {}{:.1}% P&L", if plpct >= 0.0 { "+" } else { "" }, plpct)
+                }
+                _ => String::new(),
+            };
+            lines.push(format!("• {} {} → ${}  {arrow}{:.1}%{pl}   ({alloc:.0}%)", fmt_shares(r.shares), r.ticker, money(value), r.chg.abs()));
+        }
+        let mut header = format!("📊 Portfolio — ${}", money(total));
+        if total_cost > 0.0 {
+            let pl = total - total_cost;
+            let plpct = pl / total_cost * 100.0;
+            let arrow = if pl >= 0.0 { "▲" } else { "▼" };
+            let sign = if pl >= 0.0 { "+" } else { "-" };
+            header.push_str(&format!("  ({arrow} {sign}${}, {sign}{:.1}%)", money(pl.abs()), plpct.abs()));
+        }
+        // Concentration observation (factual, not advice): the biggest single position.
+        let mut note = String::new();
+        if total > 0.0 {
+            if let Some(top) = rows.iter().filter(|r| r.value.is_some()).max_by(|a, b| {
+                a.value.unwrap_or(0.0).partial_cmp(&b.value.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                let alloc = top.value.unwrap_or(0.0) / total * 100.0;
+                if alloc >= 40.0 {
+                    note = format!("\n⚠ {} is {:.0}% of the portfolio — that's concentrated (an observation, not advice).", top.ticker, alloc);
+                }
+            }
+        }
+        format!("{header}\n{}{note}", lines.join("\n"))
+    }
+
+    /// Deep, MULTI-SOURCE ticker analysis — the honest answer to "stock tips". Gathers several
+    /// INDEPENDENT sources (a live quote, a Wikipedia profile, recent news, and a web-search sweep
+    /// with the top results actually read), then SYNTHESIZES a balanced briefing: what it is, recent
+    /// action, what the sources collectively say (agreement/disagreement), the bull case AND the bear
+    /// case, and key risks — cited, no price targets, no buy/sell, framed as analysis not advice.
+    /// Cross-references the user's own portfolio (the moat). Tool output is untrusted reference data.
+    async fn analyze_ticker(&self, raw: &str) -> String {
+        let toks: Vec<&str> = raw.split_whitespace().collect();
+        if toks.is_empty() {
+            return "Analyze what? e.g. `ym analyze AAPL` (or `ym analyze BTC crypto`).".to_string();
+        }
+        let ticker = toks[0].to_uppercase();
+        let kind = if toks.iter().any(|t| t.eq_ignore_ascii_case("crypto")) || is_crypto_symbol(&ticker) { "crypto" } else { "stock" };
+        let markets = match &self.markets {
+            Some(m) => m,
+            None => return "(markets aren't configured)".to_string(),
+        };
+        // 1. The live quote (and the proper name to search the other sources by).
+        let quote = if kind == "crypto" { markets.crypto_quote(&ticker).await } else { markets.stock_quote(&ticker).await };
+        let quote = match quote {
+            Ok(q) => q,
+            Err(e) => return format!("Couldn't get a quote for {ticker}: {e}. Check the symbol?"),
+        };
+        let name = quote.name.clone();
+        let qline = if kind == "crypto" { quote.render_crypto() } else { quote.render_stock() };
+
+        // 2. Gather INDEPENDENT sources (bounded). Each is untrusted reference data.
+        let wiki = match &self.wiki {
+            Some(w) => w.lookup(&name).await.unwrap_or_default(),
+            None => String::new(),
+        };
+        let news: Vec<String> = match &self.news {
+            Some(n) => n
+                .headlines(Some(&format!("{name} {ticker} stock")), 6)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|i| format!("- {} ({})", i.title, i.source))
+                .collect(),
+            None => vec![],
+        };
+        let mut web_text = String::new();
+        if let Some(se) = &self.searcher {
+            if let Ok(hits) = se.search(&format!("{name} {ticker} stock analysis outlook risks"), 6).await {
+                for h in hits.iter().take(6) {
+                    web_text.push_str(&format!("- {} — {} [{}]\n", h.title, h.snippet, h.url));
+                }
+                // Read the top 2 pages for substance beyond snippets.
+                if let Some(web) = &self.web {
+                    for h in hits.iter().take(2) {
+                        if let Ok(body) = web.fetch(&h.url).await {
+                            let excerpt: String = body.chars().take(1400).collect();
+                            web_text.push_str(&format!("\n[excerpt from {}]\n{excerpt}\n", h.url));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Portfolio cross-reference — personalized but still factual (the moat).
+        let holdings = self.load_holdings().await;
+        let portfolio_note = holdings
+            .iter()
+            .find(|h| h.get("ticker").and_then(|x| x.as_str()).map(|t| t.eq_ignore_ascii_case(&ticker)).unwrap_or(false))
+            .map(|h| {
+                let shares = h.get("shares").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                format!("\n\nNOTE: the user HOLDS this — {} {} (~${} now). Work that in, including any concentration consideration.", fmt_shares(shares), ticker, money(shares * quote.price))
+            })
+            .unwrap_or_default();
+
+        // 4. Synthesize across sources. Strict: no invented numbers, no buy/sell, mandatory disclaimer.
+        let evidence = format!(
+            "LIVE QUOTE: {qline}\n\nWIKIPEDIA PROFILE:\n{}\n\nRECENT HEADLINES:\n{}\n\nWEB SOURCES (titles, snippets, and excerpts read from the top pages):\n{}",
+            if wiki.trim().is_empty() { "(none)" } else { wiki.trim() },
+            if news.is_empty() { "(none)".to_string() } else { news.join("\n") },
+            if web_text.trim().is_empty() { "(none)".to_string() } else { web_text.trim().to_string() },
+        );
+        let prompt = format!(
+            "You are a careful financial ANALYST (NOT an advisor) briefing the user on {name} ({ticker}). Use ONLY the multi-source evidence below, and CONSOLIDATE across the sources — note where they agree and where they disagree, don't just relay headlines.\n\n=== EVIDENCE ===\n{evidence}{portfolio_note}\n\n=== WRITE ===\n1. What {name} is/does — one line, from the profile.\n2. Recent price action — cite the live-quote figure.\n3. What the sources collectively say (consolidated; flag any disagreement).\n4. The BULL case and the BEAR case — both, balanced.\n5. Key RISKS / what to watch.\n\nHARD RULES: Do NOT invent any number, price, ratio, or target not present in the evidence. Do NOT say buy/sell/hold and do NOT predict the price. Stay balanced (always include the bear case). Under 230 words. End with exactly this line: 'This is analysis to consider — not financial advice. You decide.'"
+        );
+        let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
+        match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => format!("📊 {name} ({ticker}) — {qline}\n\n{}", r.text.trim()),
+            Err(e) => format!("(couldn't complete the analysis: {e})"),
+        }
+    }
+
     /// Email auto-discovery: scan the inbox (sender + subject headers), LLM-extract recurring
     /// subscriptions, auto-track the ones with a clear price, and list the rest for the user to
     /// confirm an amount. "JARVIS already knows your money" — turns manual entry into discovery.
@@ -2548,6 +2818,14 @@ impl ConversationEngine {
             }
             "budget" | "budgets" => self.budget_set(&rest).await,
             "spent" | "spend" | "expense" => self.expense_log(&rest).await,
+            // --- investing: portfolio tracking (live P&L) + deep multi-source analysis (not advice) ---
+            "portfolio" | "holdings" | "stocks" => self.portfolio_overview().await,
+            "holding" | "position" => {
+                let mut p = rest.trim().splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                self.holding_cmd(&action, p.next().unwrap_or("").trim()).await
+            }
+            "analyze" | "analyse" | "analysis" if !rest.is_empty() => self.analyze_ticker(&rest).await,
             // --- tasks/reminders: list + complete (clears stale ones) ---
             "tasks" | "todos" | "todo" | "reminders" => match self.memory.list_tasks(false).await {
                 Ok(ts) if !ts.is_empty() => ts.iter().map(|t| format!("• {} — {}", t.id, t.description)).collect::<Vec<_>>().join("\n"),
@@ -2629,6 +2907,8 @@ impl ConversationEngine {
         lines.push("ym sub add <name> <amt> [cycle] · ym subs · ym sub rm <name>".to_string());
         lines.push("ym bill add <name> <amt> <due-day> [cycle] · ym bills    recurring bills + reminders".to_string());
         lines.push("ym budget <cat> <amt> · ym spent <amt> <cat> · ym budget   budget vs spend".to_string());
+        lines.push("ym holding add <ticker> <shares> [cost] · ym portfolio   holdings, valued live (P&L + allocation)".to_string());
+        lines.push("ym analyze <ticker>      deep multi-source stock/crypto analysis (not advice)".to_string());
         lines.push("ym discover              find subscriptions in your email + track them".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
@@ -3379,6 +3659,20 @@ impl ConversationEngine {
                 Some(m) => match m.stock(&{ let t = s("symbol"); if t.is_empty() { s("ticker") } else { t } }).await { Ok(r) => r, Err(e) => format!("(stock: {e})") },
                 None => "(markets aren't configured)".to_string(),
             },
+            "portfolio" | "holdings" | "my_stocks" => self.portfolio_overview().await,
+            "analyze" | "analyze_stock" | "stock_analysis" => {
+                let t = { let a = s("ticker"); if a.is_empty() { s("symbol") } else { a } };
+                if t.is_empty() { "(which stock/crypto should I analyze? give a ticker)".to_string() } else { self.analyze_ticker(&t).await }
+            }
+            "add_holding" | "track_holding" => {
+                let ticker = s("ticker");
+                let shares = s("shares");
+                if ticker.is_empty() || shares.is_empty() {
+                    "(to track a holding I need a ticker + number of shares)".to_string()
+                } else {
+                    self.holding_add(format!("{ticker} {shares} {}", s("cost")).trim()).await
+                }
+            }
             "translate" => match &self.translator {
                 Some(tr) => match tr.translate(&{ let l = s("to"); if l.is_empty() { s("language") } else { l } }, &s("text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
                 None => "(translator isn't configured)".to_string(),
@@ -3709,6 +4003,9 @@ impl ConversationEngine {
 - calc {expression}: do arithmetic locally (e.g. 12*7+3, (1500*0.18))\n\
 - crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)\n\
 - stock {symbol}: a stock quote (US ticker, e.g. AAPL)\n\
+- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation). Use when they ask about their stocks/holdings/portfolio\n\
+- analyze {ticker}: a DEEP multi-source analysis of a stock/crypto — pulls a live quote + company profile + recent news + a web sweep and SYNTHESIZES a balanced briefing (what it is, recent action, bull case, bear case, risks). Use for 'what do you think of X', 'analyze X', stock research. It is ANALYSIS, never a buy/sell tip\n\
+- add_holding {ticker, shares, cost?}: record a position the user says they own (so portfolio can value it)\n\
 - translate {to, text}: translate text into a language ('to' like french/hi/es; source auto-detected)\n\
 - web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
 - research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
@@ -4805,7 +5102,7 @@ mod tests {
         use mind_tools::{ScriptedMarkets, ScriptedTranslator};
         let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
         let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
-            .with_markets(Arc::new(ScriptedMarkets { crypto: "💰 Bitcoin (BTC): $67,000 ▲2%".into(), stock: "📈 Apple (AAPL): $211".into() }))
+            .with_markets(Arc::new(ScriptedMarkets { crypto: "💰 Bitcoin (BTC): $67,000 ▲2%".into(), stock: "📈 Apple (AAPL): $211".into(), price: 200.0 }))
             .with_translator(Arc::new(ScriptedTranslator { text: "🌐 (en→fr) bonjour".into() }));
         assert!(conv.cli_dispatch("crypto btc").await.contains("Bitcoin"), "crypto routes");
         assert!(conv.cli_dispatch("stock AAPL").await.contains("Apple"), "stock routes");
@@ -4914,6 +5211,30 @@ mod tests {
         assert!(over.contains("OVER") || over.contains("450"), "over-budget surfaced: {over}");
         let overview = conv.budget_overview().await;
         assert!(overview.contains("dining") && overview.contains("450"), "overview totals spend: {overview}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn portfolio_tracks_holdings_and_values_live() {
+        use mind_tools::ScriptedMarkets;
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        // Every quote returns price=200 → deterministic valuation.
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS")
+            .with_markets(Arc::new(ScriptedMarkets { crypto: "x".into(), stock: "x".into(), price: 200.0 }));
+        // 10 AAPL @ cost 175 → live @200 = $2,000, P&L = (2000-1750)/1750 = +14.3%
+        conv.holding_cmd("add", "AAPL 10 175").await;
+        // 5 MSFT, no cost basis → value only ($1,000)
+        conv.holding_cmd("add", "MSFT 5").await;
+        let p = conv.portfolio_overview().await;
+        assert!(p.contains("AAPL") && p.contains("MSFT"), "lists positions: {p}");
+        assert!(p.contains("2,000"), "values 10 AAPL @ $200 = $2,000: {p}");
+        assert!(p.contains("14.3"), "P&L vs cost 175 = +14.3%: {p}");
+        assert!(p.contains("3,000"), "portfolio total $3,000: {p}");
+        assert!(p.contains("66%") || p.to_lowercase().contains("concentrated"), "concentration surfaced (AAPL 66%): {p}");
+        // removal round-trips through the profile store
+        assert!(conv.holding_cmd("rm", "AAPL").await.contains("Removed"));
+        let after = conv.portfolio_overview().await;
+        assert!(after.contains("MSFT") && !after.contains("AAPL"), "removal persisted: {after}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

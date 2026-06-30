@@ -3,12 +3,45 @@
 
 use async_trait::async_trait;
 
+/// A raw, structured quote — the numbers, so callers (e.g. a portfolio) can do math. The formatted
+/// chat strings (`crypto`/`stock`) are rendered on top of this.
+#[derive(Clone, Debug)]
+pub struct Quote {
+    pub name: String,
+    pub symbol: String,
+    pub price: f64,
+    pub change_pct: f64,
+    pub currency: String, // a symbol like "$"/"₹"/"€", or a bare code for the rest
+}
+
+impl Quote {
+    fn render(&self, icon: &str, span: &str) -> String {
+        let arrow = if self.change_pct >= 0.0 { "▲" } else { "▼" };
+        format!("{icon} {} ({}): {}{} {arrow}{:.2}% ({span})", self.name, self.symbol, self.currency, fmt_money(self.price), self.change_pct.abs())
+    }
+    pub fn render_crypto(&self) -> String {
+        self.render("💰", "24h")
+    }
+    pub fn render_stock(&self) -> String {
+        self.render("📈", "today")
+    }
+}
+
 #[async_trait]
 pub trait MarketsClient: Send + Sync {
-    /// Crypto price for a free-text coin query (e.g. "btc", "ethereum").
-    async fn crypto(&self, query: &str) -> anyhow::Result<String>;
-    /// Stock quote for a ticker (e.g. "AAPL"); US tickers assumed.
-    async fn stock(&self, symbol: &str) -> anyhow::Result<String>;
+    /// Structured crypto quote for a free-text coin query (e.g. "btc", "ethereum").
+    async fn crypto_quote(&self, query: &str) -> anyhow::Result<Quote>;
+    /// Structured stock quote for a ticker (e.g. "AAPL"); US tickers assumed.
+    async fn stock_quote(&self, symbol: &str) -> anyhow::Result<Quote>;
+
+    /// Crypto price as a chat-ready line. Default = render the structured quote.
+    async fn crypto(&self, query: &str) -> anyhow::Result<String> {
+        Ok(self.crypto_quote(query).await?.render_crypto())
+    }
+    /// Stock quote as a chat-ready line. Default = render the structured quote.
+    async fn stock(&self, symbol: &str) -> anyhow::Result<String> {
+        Ok(self.stock_quote(symbol).await?.render_stock())
+    }
 }
 
 /// Live markets (CoinGecko + stooq).
@@ -28,12 +61,12 @@ impl Default for LiveMarkets {
 
 #[async_trait]
 impl MarketsClient for LiveMarkets {
-    async fn crypto(&self, query: &str) -> anyhow::Result<String> {
+    async fn crypto_quote(&self, query: &str) -> anyhow::Result<Quote> {
         let q = query.trim().to_string();
         if q.is_empty() {
             anyhow::bail!("which coin?");
         }
-        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Quote> {
             // search → the top (highest market-cap) coin's id/name/symbol
             let s: serde_json::Value = ureq::get("https://api.coingecko.com/api/v3/search")
                 .timeout(std::time::Duration::from_secs(15))
@@ -54,19 +87,18 @@ impl MarketsClient for LiveMarkets {
                 .into_json()?;
             let row = &p[&id];
             let price = row["usd"].as_f64().ok_or_else(|| anyhow::anyhow!("no price for {name}"))?;
-            let chg = row["usd_24h_change"].as_f64().unwrap_or(0.0);
-            let arrow = if chg >= 0.0 { "▲" } else { "▼" };
-            Ok(format!("💰 {name} ({sym}): ${} {arrow}{:.2}% (24h)", fmt_money(price), chg.abs()))
+            let change_pct = row["usd_24h_change"].as_f64().unwrap_or(0.0);
+            Ok(Quote { name, symbol: sym, price, change_pct, currency: "$".into() })
         })
         .await?
     }
 
-    async fn stock(&self, symbol: &str) -> anyhow::Result<String> {
+    async fn stock_quote(&self, symbol: &str) -> anyhow::Result<Quote> {
         let sym = symbol.trim().to_uppercase();
         if sym.is_empty() {
             anyhow::bail!("which ticker?");
         }
-        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Quote> {
             // Yahoo Finance chart endpoint (no key) — needs a browser UA or it 401/429s.
             let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}");
             let v: serde_json::Value = ureq::get(&url)
@@ -79,25 +111,20 @@ impl MarketsClient for LiveMarkets {
             let meta = v["chart"]["result"].get(0).map(|r| r["meta"].clone()).ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\" (check the ticker)"))?;
             let price = meta["regularMarketPrice"].as_f64().ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\""))?;
             let prev = meta["chartPreviousClose"].as_f64().or_else(|| meta["previousClose"].as_f64()).unwrap_or(price);
+            let change_pct = if prev != 0.0 { (price - prev) / prev * 100.0 } else { 0.0 };
             let name = meta["shortName"].as_str().or_else(|| meta["longName"].as_str()).unwrap_or(&sym).to_string();
-            let cur = match meta["currency"].as_str().unwrap_or("USD") {
-                "USD" => "$",
-                "INR" => "₹",
-                "EUR" => "€",
-                "GBP" => "£",
-                "JPY" => "¥",
-                other => return Ok(quote_line(&name, &sym, price, prev, &format!("{other} "))),
+            let currency = match meta["currency"].as_str().unwrap_or("USD") {
+                "USD" => "$".to_string(),
+                "INR" => "₹".to_string(),
+                "EUR" => "€".to_string(),
+                "GBP" => "£".to_string(),
+                "JPY" => "¥".to_string(),
+                other => format!("{other} "),
             };
-            Ok(quote_line(&name, &sym, price, prev, cur))
+            Ok(Quote { name, symbol: sym, price, change_pct, currency })
         })
         .await?
     }
-}
-
-fn quote_line(name: &str, sym: &str, price: f64, prev: f64, cur: &str) -> String {
-    let chg = if prev != 0.0 { (price - prev) / prev * 100.0 } else { 0.0 };
-    let arrow = if chg >= 0.0 { "▲" } else { "▼" };
-    format!("📈 {name} ({sym}): {cur}{} {arrow}{:.2}% (today)", fmt_money(price), chg.abs())
 }
 
 /// Money with thousands separators + sensible precision (sub-$1 → more decimals).
@@ -119,14 +146,22 @@ fn fmt_money(v: f64) -> String {
     format!("{}{}{}", if neg { "-" } else { "" }, int_fmt, if frac.is_empty() { String::new() } else { format!(".{frac}") })
 }
 
-/// Deterministic markets for tests.
+/// Deterministic markets for tests. `crypto`/`stock` are the canned chat lines; `price` is the
+/// number every `*_quote` returns (so a portfolio can be valued deterministically).
 pub struct ScriptedMarkets {
     pub crypto: String,
     pub stock: String,
+    pub price: f64,
 }
 
 #[async_trait]
 impl MarketsClient for ScriptedMarkets {
+    async fn crypto_quote(&self, q: &str) -> anyhow::Result<Quote> {
+        Ok(Quote { name: q.to_string(), symbol: q.to_uppercase(), price: self.price, change_pct: 0.0, currency: "$".into() })
+    }
+    async fn stock_quote(&self, s: &str) -> anyhow::Result<Quote> {
+        Ok(Quote { name: s.to_string(), symbol: s.to_uppercase(), price: self.price, change_pct: 0.0, currency: "$".into() })
+    }
     async fn crypto(&self, _q: &str) -> anyhow::Result<String> {
         Ok(self.crypto.clone())
     }

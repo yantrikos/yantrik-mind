@@ -2362,7 +2362,20 @@ impl ConversationEngine {
             }
         }
         let total: f64 = rows.iter().filter_map(|r| r.value).sum();
-        let total_cost: f64 = rows.iter().filter_map(|r| r.cost.map(|c| c * r.shares)).sum();
+        // P&L must compare like-for-like: only positions that HAVE a cost basis, current-value vs cost.
+        // (Mixing all-positions' value against the cost-basis subset's cost gives a nonsense %.)
+        let mut cost_basis_value = 0.0;
+        let mut total_cost = 0.0;
+        let mut priced = 0usize; // positions counted in the P&L
+        for r in &rows {
+            if let (Some(v), Some(c)) = (r.value, r.cost) {
+                if c > 0.0 {
+                    cost_basis_value += v;
+                    total_cost += c * r.shares;
+                    priced += 1;
+                }
+            }
+        }
         let mut lines = Vec::new();
         for r in &rows {
             let Some(value) = r.value else {
@@ -2382,11 +2395,13 @@ impl ConversationEngine {
         }
         let mut header = format!("📊 Portfolio — ${}", money(total));
         if total_cost > 0.0 {
-            let pl = total - total_cost;
+            let pl = cost_basis_value - total_cost;
             let plpct = pl / total_cost * 100.0;
             let arrow = if pl >= 0.0 { "▲" } else { "▼" };
             let sign = if pl >= 0.0 { "+" } else { "-" };
-            header.push_str(&format!("  ({arrow} {sign}${}, {sign}{:.1}%)", money(pl.abs()), plpct.abs()));
+            // Note when the P&L only covers some positions (the rest have no cost basis recorded).
+            let scope = if priced < rows.len() { format!(" on {priced} of {} positions", rows.len()) } else { String::new() };
+            header.push_str(&format!("  ({arrow} {sign}${}, {sign}{:.1}%{scope})", money(pl.abs()), plpct.abs()));
         }
         // Concentration observation (factual, not advice): the biggest single position.
         let mut note = String::new();

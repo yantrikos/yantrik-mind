@@ -2095,7 +2095,7 @@ impl ConversationEngine {
     /// articles, then SYNTHESIZES: what's happening, why it matters, the key angles (consolidated
     /// across outlets, noting agreement/disagreement), and what to watch — with the real SOURCE LINKS
     /// listed at the end. Fetched content is untrusted reference data (prompt-injection surface).
-    async fn news_brief(&self, topic: &str) -> String {
+    pub async fn news_brief(&self, topic: &str) -> String {
         let topic = topic.trim();
         if topic.len() < 2 {
             return "What's the story? e.g. `ym news AI regulation`".to_string();
@@ -2216,9 +2216,11 @@ impl ConversationEngine {
         format!("📰 Tracking: {}", topics.join(", "))
     }
 
-    /// Proactive news watch: for each tracked topic, surface NEW headlines (deduped). Primes silently
-    /// per topic so a restart doesn't replay. The poll loop pushes these to the chat (quiet-hours-gated).
-    pub async fn news_watch(&self) -> Vec<String> {
+    /// Proactive news watch: for each tracked topic, detect NEW headlines (deduped, primed silently so
+    /// a restart doesn't replay) and return the fresh STORIES to research — `(topic, headline)`. The
+    /// poll loop turns each into a full multi-source BRIEF before sending (research-then-send, not a
+    /// raw headline). Capped per tick so it's quality, not spam. Sets last_news_topic for "tell me more".
+    pub async fn news_fresh_items(&self) -> Vec<(String, String)> {
         let news = match &self.news {
             Some(n) => n,
             None => return Vec::new(),
@@ -2240,16 +2242,17 @@ impl ConversationEngine {
                 for it in &items {
                     let key = format!("{topic}|{}", it.url);
                     if seen.insert(key) && primed {
-                        fresh.push(it.clone());
+                        fresh.push(it.title.clone());
                     }
                 }
             }
             if !fresh.is_empty() {
-                out.push(format!("📰 {topic} — new:\n{}\n(reply \"tell me more\" and I'll dig into it.)", render_news(&fresh)));
-                // Remember this topic so a follow-up "tell me more" triggers a full multi-source brief.
                 *self.last_news_topic.lock().unwrap() = Some(topic.clone());
+                // Brief the TOP fresh story per topic this tick (the rest will surface next ticks).
+                out.push((topic.clone(), fresh.remove(0)));
             }
         }
+        out.truncate(2); // cap proactive briefs per tick — research quality over a flood of pings
         out
     }
 
@@ -5264,8 +5267,8 @@ mod tests {
         assert!(conv.cli_dispatch("news track geopolitics").await.contains("Tracking"));
         assert!(conv.cli_dispatch("news tracking").await.contains("geopolitics"), "tracked list");
         // watch primes silently, then dedups identical items (no repeat spam)
-        let _ = conv.news_watch().await;
-        assert!(conv.news_watch().await.is_empty(), "deduped after prime");
+        let _ = conv.news_fresh_items().await;
+        assert!(conv.news_fresh_items().await.is_empty(), "deduped after prime");
         assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
     }
 

@@ -420,9 +420,15 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     for note in conv.bill_watch().await {
                         let _ = tg_send(&api, chat, &note).await;
                     }
-                    // Tracked news topics: surface fresh headlines (deduped per topic).
-                    for note in conv.news_watch().await {
-                        let _ = tg_send(&api, chat, &note).await;
+                    // Tracked news: for each fresh story, RESEARCH it into a full multi-source brief
+                    // BEFORE sending (research-then-send, not a raw headline). The brief (~15s, 3
+                    // fetches + synth) runs in a detached task so it never stalls the poll loop.
+                    for (topic, headline) in conv.news_fresh_items().await {
+                        let (c, api2) = (conv.clone(), api.clone());
+                        tokio::spawn(async move {
+                            let brief = c.news_brief(&headline).await;
+                            let _ = tg_send(&api2, chat, &format!("📰 New on {topic}:\n\n{brief}")).await;
+                        });
                     }
                 }
             }

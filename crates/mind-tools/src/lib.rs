@@ -174,6 +174,56 @@ impl HttpFetcher {
     }
 }
 
+/// A real Chrome UA — header-less requests get blocked or served junk by many sites.
+const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+/// Collapse html2text's runs of blank lines so the content is dense, not sparse.
+fn compact_blanks(text: &str) -> String {
+    let mut compact = String::with_capacity(text.len());
+    let mut blanks = 0;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks <= 1 {
+                compact.push('\n');
+            }
+        } else {
+            blanks = 0;
+            compact.push_str(line.trim_end());
+            compact.push('\n');
+        }
+    }
+    compact
+}
+
+/// Direct fetch with real browser headers + redirect-following → declutter → readable text.
+fn fetch_direct(url: &str) -> anyhow::Result<String> {
+    let resp = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(20))
+        .set("User-Agent", BROWSER_UA)
+        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .set("Accept-Language", "en-US,en;q=0.9")
+        .call()?;
+    let mut bytes = Vec::new();
+    resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?; // 2 MB cap (memory wall)
+    let cleaned = declutter(&String::from_utf8_lossy(&bytes));
+    Ok(compact_blanks(&html2text::from_read(cleaned.as_bytes(), 100)))
+}
+
+/// Reader-proxy fallback: a server-side reader renders the page with a REAL browser and returns clean
+/// markdown — getting content from sites that block our direct request (bot/TLS/JS walls). The target
+/// is already SSRF-checked + public; the fetched text remains untrusted reference data.
+fn fetch_reader(url: &str) -> anyhow::Result<String> {
+    let resp = ureq::get(&format!("https://r.jina.ai/{url}"))
+        .timeout(std::time::Duration::from_secs(30))
+        .set("User-Agent", BROWSER_UA)
+        .set("X-Return-Format", "markdown")
+        .call()?;
+    let mut bytes = Vec::new();
+    resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?;
+    Ok(compact_blanks(&String::from_utf8_lossy(&bytes)))
+}
+
 #[async_trait]
 impl Fetcher for HttpFetcher {
     async fn fetch(&self, url: &str) -> anyhow::Result<String> {
@@ -183,39 +233,22 @@ impl Fetcher for HttpFetcher {
         let url = url.to_string();
         let max = self.max_chars;
         let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            // SSRF guard: never let an (injected) URL pull from the local/internal network.
+            // SSRF guard FIRST: never let an (injected) URL pull from the local/internal network
+            // (this also gates what we'd hand to the reader proxy).
             ssrf_check(&url)?;
-            // Real browser headers — many sites (esp. news) block or serve junk to a header-less
-            // request. With these + redirect-following (ureq default), we get the actual article from
-            // most sites. (Output stays untrusted reference data — a real UA doesn't change that.)
-            let resp = ureq::get(&url)
-                .timeout(std::time::Duration::from_secs(20))
-                .set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-                .set("Accept-Language", "en-US,en;q=0.9")
-                .call()?;
-            // Cap the download (2 MB) so a hostile/huge page can't exhaust memory.
-            let mut bytes = Vec::new();
-            resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?;
-            // Declutter (drop nav/scripts/etc.) → HTML→readable text. Collapse the runs of blank
-            // lines html2text leaves behind so the content is dense, not sparse.
-            let cleaned = declutter(&String::from_utf8_lossy(&bytes));
-            let text = html2text::from_read(cleaned.as_bytes(), 100);
-            let mut compact = String::with_capacity(text.len());
-            let mut blanks = 0;
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    blanks += 1;
-                    if blanks <= 1 {
-                        compact.push('\n');
-                    }
-                } else {
-                    blanks = 0;
-                    compact.push_str(line.trim_end());
-                    compact.push('\n');
+            // 1. Direct (fast, private). Accept it if it returned real content.
+            let direct = fetch_direct(&url);
+            if let Ok(t) = &direct {
+                if t.trim().chars().count() >= 250 {
+                    return Ok(t.clone());
                 }
             }
-            Ok(compact)
+            // 2. Blocked/empty/too-thin → the reader proxy (real browser server-side). This is the
+            //    "browser capability to read any site" path.
+            match fetch_reader(&url) {
+                Ok(t) if t.trim().chars().count() > 80 => Ok(t),
+                _ => direct.or_else(|_| anyhow::bail!("couldn't fetch (direct + reader both failed)")),
+            }
         })
         .await??;
         let mut t = text.trim().to_string();

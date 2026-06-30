@@ -155,11 +155,17 @@ fn in_quiet_hours_now() -> bool {
     use chrono::Timelike;
     let start = std::env::var("YM_QUIET_START").ok().and_then(|s| s.parse().ok()).unwrap_or(22);
     let end = std::env::var("YM_QUIET_END").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
-    // The box runs UTC; quiet hours must be the USER's local time (YM_TZ_OFFSET_MINUTES, e.g. 330 IST),
-    // else a "2am" reminder slips through a UTC quiet window. chrono::Local == UTC on the box, so shift.
-    let off: i64 = std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let local = chrono::Utc::now() + chrono::Duration::minutes(off);
-    is_quiet_hour(local.hour(), start, end)
+    // The box runs UTC; quiet hours must be the USER's local time. DST-aware via YM_TZ (IANA name, e.g.
+    // America/Chicago — CDT↔CST auto); else the fixed YM_TZ_OFFSET_MINUTES. Else a "2am" reminder slips
+    // a UTC quiet window — and a wrong tz silently suppresses ALL proactive surfaces at active hours.
+    let utc = chrono::Utc::now();
+    let hour = if let Some(tz) = std::env::var("YM_TZ").ok().and_then(|n| n.trim().parse::<chrono_tz::Tz>().ok()) {
+        utc.with_timezone(&tz).hour()
+    } else {
+        let off: i64 = std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        (utc + chrono::Duration::minutes(off)).hour()
+    };
+    is_quiet_hour(hour, start, end)
 }
 
 fn now_ms() -> u64 {

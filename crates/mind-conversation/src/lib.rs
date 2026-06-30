@@ -102,24 +102,38 @@ fn parse_due(s: &str) -> Option<u64> {
     None
 }
 
-/// Minutes to add to UTC for the user's LOCAL timezone (YM_TZ_OFFSET_MINUTES, e.g. 330 for IST). The
-/// box runs UTC; without this, quiet hours + "now" are off by the user's offset (a reminder at 2am IST
-/// slipped through a UTC quiet window). India has no DST, so a fixed offset is exact.
-fn tz_offset_minutes() -> i64 {
-    std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+/// "now" in the user's LOCAL timezone. DST-aware: when YM_TZ is an IANA name (e.g. America/Chicago) it
+/// uses real tz data (CDT↔CST flips automatically); else it falls back to the fixed YM_TZ_OFFSET_MINUTES
+/// (back-compat). The box runs UTC, so without this quiet hours + "now" are off (a 2am reminder slipped a
+/// UTC quiet window). Returns a real fixed-offset datetime so date math + formatting are in local time.
+fn local_now() -> chrono::DateTime<chrono::FixedOffset> {
+    let utc = chrono::Utc::now();
+    if let Ok(name) = std::env::var("YM_TZ") {
+        if let Ok(tz) = name.trim().parse::<chrono_tz::Tz>() {
+            return utc.with_timezone(&tz).fixed_offset();
+        }
+    }
+    let off = std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+    let fo = chrono::FixedOffset::east_opt(off * 60).unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
+    utc.with_timezone(&fo)
 }
 
-/// "now" in the user's local timezone (a UTC datetime shifted by the configured offset).
-fn local_now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now() + chrono::Duration::minutes(tz_offset_minutes())
+/// The user's tz abbreviation for display — auto-derived from the IANA zone (CDT/CST/IST/…) when YM_TZ
+/// is set, else the explicit YM_TZ_LABEL, else "UTC".
+fn tz_label() -> String {
+    if let Ok(name) = std::env::var("YM_TZ") {
+        if let Ok(tz) = name.trim().parse::<chrono_tz::Tz>() {
+            return chrono::Utc::now().with_timezone(&tz).format("%Z").to_string();
+        }
+    }
+    std::env::var("YM_TZ_LABEL").unwrap_or_else(|_| "UTC".to_string())
 }
 
 /// Current date/time, human-readable — injected into the agent prompt every turn so it never guesses
-/// "now". Shown in the user's local timezone (YM_TZ_LABEL) so date math + reminders line up with them.
+/// "now". Shown in the user's local timezone so date math + reminders line up with them.
 fn now_str() -> String {
-    let label = std::env::var("YM_TZ_LABEL").unwrap_or_else(|_| "UTC".to_string());
     let n = local_now();
-    format!("{} {} ({})", n.format("%Y-%m-%d %H:%M"), label, n.format("%A"))
+    format!("{} {} ({})", n.format("%Y-%m-%d %H:%M"), tz_label(), n.format("%A"))
 }
 
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool

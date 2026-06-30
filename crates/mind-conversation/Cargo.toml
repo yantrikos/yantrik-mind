@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["clock"] }
+chrono-tz = "0.10"
 
 [dev-dependencies]
 mind-memory = { workspace = true }

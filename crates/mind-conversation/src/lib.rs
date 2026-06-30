@@ -561,6 +561,9 @@ pub struct ConversationEngine {
     news: Option<Arc<dyn NewsClient>>,
     /// Dedup state for the proactive news watch — keys of headlines already surfaced per tracked topic.
     news_seen: Mutex<std::collections::HashSet<String>>,
+    /// The most-recently surfaced news topic (set by news_watch), so a follow-up "tell me more" has a
+    /// referent → the companion proactively researches it into a full brief. Consumed on use.
+    last_news_topic: Mutex<Option<String>>,
     /// Weather — keyless open-meteo (current + today's forecast for a place name).
     weather: Option<Arc<dyn WeatherClient>>,
     /// Wikipedia — keyless factual lookups (search + intro extract). Untrusted reference text.
@@ -646,6 +649,7 @@ impl ConversationEngine {
             searcher: None,
             news: None,
             news_seen: Mutex::new(std::collections::HashSet::new()),
+            last_news_topic: Mutex::new(None),
             weather: None,
             wiki: None,
             markets: None,
@@ -2079,8 +2083,78 @@ impl ConversationEngine {
             "track" | "watch" | "follow" => self.news_track(it.next().unwrap_or("").trim()).await,
             "untrack" | "unwatch" | "unfollow" | "stop" => self.news_untrack(it.next().unwrap_or("").trim()).await,
             "tracking" | "tracked" | "topics" => self.news_tracked_list().await,
-            _ => self.news_headlines(if rest.is_empty() { None } else { Some(rest) }).await,
+            "headlines" | "quick" | "list" => self.news_headlines({ let r = it.next().unwrap_or("").trim(); if r.is_empty() { None } else { Some(r) } }).await,
+            // A bare `ym news` = quick top headlines; `ym news <topic>` = the in-depth, multi-source brief.
+            _ if rest.is_empty() => self.news_headlines(None).await,
+            _ => self.news_brief(rest).await,
         }
+    }
+
+    /// In-depth, MULTI-SOURCE news brief — the upgrade from a headline dump. Gathers headlines (which
+    /// outlets, recency) + a web-search sweep (real article URLs + snippets) + reads the top few
+    /// articles, then SYNTHESIZES: what's happening, why it matters, the key angles (consolidated
+    /// across outlets, noting agreement/disagreement), and what to watch — with the real SOURCE LINKS
+    /// listed at the end. Fetched content is untrusted reference data (prompt-injection surface).
+    async fn news_brief(&self, topic: &str) -> String {
+        let topic = topic.trim();
+        if topic.len() < 2 {
+            return "What's the story? e.g. `ym news AI regulation`".to_string();
+        }
+        // 1. Headlines — outlet names + recency (Google News indexes paywalled outlets too).
+        let headlines: Vec<String> = match &self.news {
+            Some(n) => n
+                .headlines(Some(topic), 8)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|i| format!("- {} ({})", i.title, i.source))
+                .collect(),
+            None => vec![],
+        };
+        // 2. Web search — REAL article URLs + snippets (the clean source links).
+        let hits: Vec<mind_tools::SearchHit> = match &self.searcher {
+            Some(se) => se.search(&format!("{topic} news analysis"), 8).await.unwrap_or_default(),
+            None => vec![],
+        };
+        if headlines.is_empty() && hits.is_empty() {
+            return format!("I couldn't find current coverage on \"{topic}\" right now.");
+        }
+        let snippets: String = hits.iter().take(8).map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url)).collect::<Vec<_>>().join("\n");
+        // 3. Read the top 3 articles for substance beyond snippets.
+        let mut excerpts = String::new();
+        if let Some(web) = &self.web {
+            for h in hits.iter().take(3) {
+                if let Ok(body) = web.fetch(&h.url).await {
+                    let ex: String = body.chars().take(1400).collect();
+                    excerpts.push_str(&format!("\n[from {}]\n{ex}\n", h.url));
+                }
+            }
+        }
+        // 4. Synthesize across sources.
+        let evidence = format!(
+            "HEADLINES (outlet + title):\n{}\n\nWEB RESULTS (title — snippet — url):\n{}\n\nARTICLE EXCERPTS:\n{}",
+            if headlines.is_empty() { "(none)".to_string() } else { headlines.join("\n") },
+            if snippets.is_empty() { "(none)".to_string() } else { snippets },
+            if excerpts.trim().is_empty() { "(none)".to_string() } else { excerpts.trim().to_string() },
+        );
+        let prompt = format!(
+            "You are a sharp, neutral news analyst briefing the user on \"{topic}\". Using ONLY the multi-source evidence below, write an IN-DEPTH brief that CONSOLIDATES across sources — do NOT just relay headlines.\n\n=== EVIDENCE ===\n{evidence}\n\n=== WRITE ===\n1. **What's happening** — the core development(s).\n2. **Why it matters** — context / background.\n3. **The angles** — how different outlets/sides frame it; note where they AGREE and where they DIFFER, attributing contested claims to a source.\n4. **What to watch** — what's next / still uncertain.\n\nRULES: factual + balanced; attribute contested claims; do NOT invent specifics, numbers, or quotes not in the evidence. Under 280 words. Do NOT list the source URLs yourself (they're appended separately)."
+        );
+        let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
+        let body = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text.trim().to_string(),
+            Err(e) => return format!("(couldn't complete the brief: {e})"),
+        };
+        // 5. Append the real source links (deduped clean URLs from the web search).
+        let mut seen = std::collections::HashSet::new();
+        let sources: Vec<String> = hits
+            .iter()
+            .filter(|h| !h.url.is_empty() && seen.insert(h.url.clone()))
+            .take(6)
+            .map(|h| format!("- {} — {}", h.title, h.url))
+            .collect();
+        let src_block = if sources.is_empty() { String::new() } else { format!("\n\n📎 Sources:\n{}", sources.join("\n")) };
+        format!("📰 {topic} — in-depth\n\n{body}{src_block}")
     }
 
     async fn news_headlines(&self, topic: Option<&str>) -> String {
@@ -2171,10 +2245,30 @@ impl ConversationEngine {
                 }
             }
             if !fresh.is_empty() {
-                out.push(format!("📰 {topic} — new:\n{}", render_news(&fresh)));
+                out.push(format!("📰 {topic} — new:\n{}\n(reply \"tell me more\" and I'll dig into it.)", render_news(&fresh)));
+                // Remember this topic so a follow-up "tell me more" triggers a full multi-source brief.
+                *self.last_news_topic.lock().unwrap() = Some(topic.clone());
             }
         }
         out
+    }
+
+    /// If the user is reacting with INTEREST to a just-surfaced news ping ("tell me more", "go
+    /// deeper", "what's the latest"), return that topic (consumed) so we proactively brief it.
+    fn interest_in_recent_news(&self, text: &str) -> Option<String> {
+        let l = text.trim().to_lowercase();
+        const SIGNALS: [&str; 14] = [
+            "tell me more", "more on that", "more on this", "more about that", "go deeper", "dig in",
+            "dig deeper", "dig into", "what's the latest", "whats the latest", "look into that",
+            "research that", "more details", "expand on that",
+        ];
+        let interested = (l.len() <= 40 && (l == "more" || l == "go on" || l == "details"))
+            || SIGNALS.iter().any(|s| l.contains(s));
+        if interested {
+            self.last_news_topic.lock().unwrap().take()
+        } else {
+            None
+        }
     }
 
     // ── Finance plugin: subscription tracking + a money overview ──────────────────────────────────
@@ -3725,7 +3819,12 @@ impl ConversationEngine {
                 None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
             },
             "money" | "subscriptions" | "finance" => self.money_overview().await,
-            "news" | "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
+            "news" => {
+                // `news {topic}` → the in-depth multi-source brief; no topic → quick top headlines.
+                let t = { let a = s("topic"); if a.is_empty() { s("query") } else { a } };
+                if t.is_empty() { self.news_headlines(None).await } else { self.news_brief(&t).await }
+            }
+            "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
             "track_news" | "follow_news" => self.news_track(&s("topic")).await,
             "weather" => match &self.weather {
                 Some(w) => match w.report(&{ let p = s("place"); if p.is_empty() { s("city") } else { p } }).await { Ok(r) => r, Err(e) => format!("(weather: {e})") },
@@ -4201,6 +4300,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 let _ = self.memory.append_message("assistant", &obs).await;
                 return Ok(obs);
             }
+            // Rich, self-contained synthesis (news brief / ticker analysis / portfolio) is TERMINAL:
+            // it already cites its sources and is balanced — re-paraphrasing it through the compose
+            // step drops the source links and dilutes it. Deliver it verbatim.
+            if matches!(tool.as_str(), "news" | "analyze" | "analyze_stock" | "stock_analysis" | "portfolio" | "holdings" | "my_stocks") && obs.chars().count() > 200 {
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &obs).await;
+                return Ok(obs);
+            }
             // A mutating MCP integration tool is TERMINAL: its result is a confirmation prompt the user
             // must see verbatim (a pending confirmation pauses the turn), a denial, or a done — never
             // something the loop should keep working past.
@@ -4241,6 +4348,15 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message("user", user_text).await;
             let _ = self.memory.append_message("assistant", &reply).await;
             return Ok(reply);
+        }
+        // Proactive news loop: if the user just reacted with interest to a surfaced news ping ("tell me
+        // more"), dig into THAT topic with a full multi-source brief — the "show interest → I research
+        // it and put it together" behavior, without them having to re-name the topic.
+        if let Some(topic) = self.interest_in_recent_news(user_text) {
+            let brief = self.news_brief(&topic).await;
+            let _ = self.memory.append_message("user", user_text).await;
+            let _ = self.memory.append_message("assistant", &brief).await;
+            return Ok(brief);
         }
         // PRIMARY: the agentic loop (reason → pick ONE tool → observe → iterate → answer, with the
         // build_capability self-extension hook). It subsumes the capability paths below — research,
@@ -5140,8 +5256,9 @@ mod tests {
             source: "Reuters".into(),
             published: "Mon, 29 Jun 2026 14:00:00 GMT".into(),
         }])));
-        // on-demand headlines on a topic
-        let h = conv.cli_dispatch("news geopolitics").await;
+        // on-demand quick headlines on a topic (`news <topic>` is now the in-depth brief; `news
+        // headlines <topic>` is the fast list)
+        let h = conv.cli_dispatch("news headlines geopolitics").await;
         assert!(h.contains("Talks stall in Geneva") && h.contains("Reuters"), "headlines: {h}");
         // tracking: add → list → remove
         assert!(conv.cli_dispatch("news track geopolitics").await.contains("Tracking"));
@@ -5277,6 +5394,23 @@ mod tests {
         assert!(over.contains("OVER") || over.contains("450"), "over-budget surfaced: {over}");
         let overview = conv.budget_overview().await;
         assert!(overview.contains("dining") && overview.contains("450"), "overview totals spend: {overview}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn news_interest_signal_consumes_last_topic() {
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+        // No topic surfaced yet → an interest signal has no referent.
+        assert_eq!(conv.interest_in_recent_news("tell me more"), None);
+        // Simulate news_watch having surfaced a topic.
+        *conv.last_news_topic.lock().unwrap() = Some("AI regulation".into());
+        // A non-interest message must NOT consume it.
+        assert_eq!(conv.interest_in_recent_news("what's the weather like"), None);
+        assert!(conv.last_news_topic.lock().unwrap().is_some());
+        // An interest signal returns the topic AND consumes it (so it fires once per ping).
+        assert_eq!(conv.interest_in_recent_news("tell me more").as_deref(), Some("AI regulation"));
+        assert!(conv.last_news_topic.lock().unwrap().is_none(), "topic consumed after use");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

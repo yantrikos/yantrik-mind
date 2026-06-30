@@ -15,6 +15,11 @@ pub struct SearchHit {
 #[async_trait]
 pub trait WebSearch: Send + Sync {
     async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>>;
+    /// A NEWS-biased search — returns specific recent articles (real dated URLs), not topic portals.
+    /// Default = a normal search; SearXNG overrides it with its `news` category.
+    async fn search_news(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+        self.search(query, limit).await
+    }
 }
 
 /// Render hits as a compact, numbered list for an agent's observation.
@@ -82,30 +87,45 @@ impl SearxngSearch {
     }
 }
 
-#[async_trait]
-impl WebSearch for SearxngSearch {
-    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+impl SearxngSearch {
+    /// One SearXNG JSON query; `categories` biases the engine set (e.g. "news" for recent articles).
+    async fn query(&self, query: &str, limit: usize, categories: Option<&'static str>) -> anyhow::Result<Vec<SearchHit>> {
         let url = format!("{}/search", self.base);
         let (q, want) = (query.to_string(), limit.max(1));
-        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchHit>> {
-            let v: serde_json::Value = ureq::get(&url)
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchHit>> {
+            let mut req = ureq::get(&url)
                 .timeout(std::time::Duration::from_secs(15))
                 .set("User-Agent", "Mozilla/5.0 (compatible; yantrik-mind/1.0)")
                 .query("q", &q)
                 .query("format", "json")
-                .query("language", "en")
-                .call()?
-                .into_json()?;
-            Ok(parse_searxng(&v, want))
+                .query("language", "en");
+            if let Some(cat) = categories {
+                req = req.query("categories", cat);
+            }
+            Ok(parse_searxng(&req.call()?.into_json()?, want))
         })
-        .await?;
-        // On error OR empty, fall back to the backup searcher if one is wired.
-        match res {
+        .await?
+    }
+}
+
+#[async_trait]
+impl WebSearch for SearxngSearch {
+    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+        match self.query(query, limit, None).await {
             Ok(hits) if !hits.is_empty() => Ok(hits),
             other => match &self.fallback {
                 Some(fb) => fb.search(query, limit).await,
                 None => other,
             },
+        }
+    }
+
+    async fn search_news(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+        // News category → specific recent articles (real dated URLs). Fall back to a general SearXNG
+        // search (then the backup searcher) if the news category is empty for this query.
+        match self.query(query, limit, Some("news")).await {
+            Ok(hits) if !hits.is_empty() => Ok(hits),
+            _ => self.search(query, limit).await,
         }
     }
 }

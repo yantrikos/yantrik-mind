@@ -2111,9 +2111,10 @@ impl ConversationEngine {
                 .collect(),
             None => vec![],
         };
-        // 2. Web search — REAL article URLs + snippets (the clean source links).
+        // 2. NEWS search (SearXNG news category when available) — specific recent ARTICLES with real
+        // dated URLs (not topic-portal homepages), which become both the evidence and the source links.
         let hits: Vec<mind_tools::SearchHit> = match &self.searcher {
-            Some(se) => se.search(&format!("{topic} news analysis"), 8).await.unwrap_or_default(),
+            Some(se) => se.search_news(topic, 8).await.unwrap_or_default(),
             None => vec![],
         };
         if headlines.is_empty() && hits.is_empty() {

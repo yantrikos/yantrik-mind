@@ -19,7 +19,7 @@ pub mod executor;
 pub use executor::ToolActionExecutor;
 
 pub mod search;
-pub use search::{render_search, DdgSearch, ScriptedSearch, SearchHit, WebSearch};
+pub use search::{render_search, DdgSearch, ScriptedSearch, SearchHit, SearxngSearch, WebSearch};
 
 pub mod sandbox;
 pub use sandbox::{ExecResult, Limits, Sandbox};

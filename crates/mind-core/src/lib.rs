@@ -260,9 +260,20 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     let research_pool = router.pool("research");
     let util_pool = router.pool("util");
 
+    // Web search backend: a self-hosted SearXNG instance (YM_SEARXNG_URL) when available — aggregates
+    // many engines, no bot-challenge/rate-limit, indexes sites our direct fetch can't reach — with
+    // keyless DuckDuckGo as the fallback. Falls back to plain DDG when no instance is configured.
+    let searcher: Arc<dyn mind_tools::WebSearch> = match std::env::var("YM_SEARXNG_URL").ok().filter(|u| !u.trim().is_empty()) {
+        Some(url) => {
+            eprintln!("[search] using SearXNG at {url} (DDG fallback)");
+            Arc::new(mind_tools::SearxngSearch::new(url).with_fallback(Arc::new(mind_tools::DdgSearch::new())))
+        }
+        None => Arc::new(mind_tools::DdgSearch::new()),
+    };
+
     let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
         .with_web(Arc::new(mind_tools::HttpFetcher::new()))
-        .with_searcher(Arc::new(mind_tools::DdgSearch::new())) // keyless web search, always on
+        .with_searcher(searcher.clone()) // SearXNG (or DDG) — the discovery half of research
         .with_news(Arc::new(mind_tools::GoogleNews::new())) // keyless news, always on
         .with_weather(Arc::new(mind_tools::OpenMeteo::new())) // keyless weather, always on
         .with_wiki(Arc::new(mind_tools::Wikipedia::new())) // keyless Wikipedia, always on
@@ -361,10 +372,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // research tools (keyless DuckDuckGo search + SSRF-guarded fetch).
     let host: Arc<dyn mind_recipes::RecipeHost> = Arc::new(
         mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone())
-            .with_web(
-                Arc::new(mind_tools::HttpFetcher::new()),
-                Arc::new(mind_tools::DdgSearch::new()),
-            ),
+            .with_web(Arc::new(mind_tools::HttpFetcher::new()), searcher.clone()),
     );
 
     // A research sub-agent: web search + fetch + the mind's own read tools. Bounded ReAct, read-only.

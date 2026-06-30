@@ -3,6 +3,7 @@
 //! Results are UNTRUSTED (titles/snippets are attacker-controllable) — the caller wraps them.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
@@ -60,6 +61,74 @@ impl WebSearch for DdgSearch {
         })
         .await?
     }
+}
+
+/// Self-hosted SearXNG metasearch via its JSON API — aggregates many engines (Google/Bing/Brave/…),
+/// no bot-challenge, no rate limit, private, and it indexes sites our direct fetch can't reach. A
+/// strict upgrade over scraping DDG. Falls back to a backup searcher (e.g. DDG) on error/empty so a
+/// down instance never blanks search. Results are UNTRUSTED (the caller wraps them).
+pub struct SearxngSearch {
+    base: String,
+    fallback: Option<Arc<dyn WebSearch>>,
+}
+
+impl SearxngSearch {
+    pub fn new(base: impl Into<String>) -> Self {
+        Self { base: base.into().trim_end_matches('/').to_string(), fallback: None }
+    }
+    pub fn with_fallback(mut self, fb: Arc<dyn WebSearch>) -> Self {
+        self.fallback = Some(fb);
+        self
+    }
+}
+
+#[async_trait]
+impl WebSearch for SearxngSearch {
+    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+        let url = format!("{}/search", self.base);
+        let (q, want) = (query.to_string(), limit.max(1));
+        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchHit>> {
+            let v: serde_json::Value = ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(15))
+                .set("User-Agent", "Mozilla/5.0 (compatible; yantrik-mind/1.0)")
+                .query("q", &q)
+                .query("format", "json")
+                .query("language", "en")
+                .call()?
+                .into_json()?;
+            Ok(parse_searxng(&v, want))
+        })
+        .await?;
+        // On error OR empty, fall back to the backup searcher if one is wired.
+        match res {
+            Ok(hits) if !hits.is_empty() => Ok(hits),
+            other => match &self.fallback {
+                Some(fb) => fb.search(query, limit).await,
+                None => other,
+            },
+        }
+    }
+}
+
+/// Map a SearXNG JSON response (`{results:[{title,url,content}]}`) to hits.
+fn parse_searxng(v: &serde_json::Value, limit: usize) -> Vec<SearchHit> {
+    v.get("results")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if !url.starts_with("http") || title.is_empty() {
+                        return None;
+                    }
+                    let snippet = r.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    Some(SearchHit { title, url, snippet })
+                })
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Deterministic search for tests.
@@ -180,6 +249,26 @@ mod tests {
         assert_eq!(hits[0].title, "Rust Async & You");
         assert!(hits[0].snippet.contains("async in Rust"));
         assert_eq!(hits[1].url, "https://tokio.rs/", "uddg redirect must be decoded");
+    }
+
+    #[test]
+    fn parse_searxng_json_to_hits() {
+        let v = serde_json::json!({
+            "results": [
+                {"title": "Rust Async", "url": "https://rust-lang.org/async", "content": "A guide."},
+                {"title": "No URL", "url": "", "content": "skip me"},
+                {"title": "Tokio", "url": "https://tokio.rs/", "content": "The runtime."}
+            ]
+        });
+        let hits = parse_searxng(&v, 5);
+        assert_eq!(hits.len(), 2, "drops the result with no http url");
+        assert_eq!(hits[0].url, "https://rust-lang.org/async");
+        assert_eq!(hits[0].snippet, "A guide.");
+        assert_eq!(hits[1].title, "Tokio");
+        // limit is respected
+        assert_eq!(parse_searxng(&v, 1).len(), 1);
+        // a malformed response → empty (so the caller can fall back)
+        assert!(parse_searxng(&serde_json::json!({"oops": true}), 5).is_empty());
     }
 
     #[test]

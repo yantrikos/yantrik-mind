@@ -428,14 +428,15 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     for note in conv.bill_watch().await {
                         let _ = tg_send(&api, chat, &note).await;
                     }
-                    // Tracked news: for each fresh story, RESEARCH it into a full multi-source brief
-                    // BEFORE sending (research-then-send, not a raw headline). The brief (~15s, 3
-                    // fetches + synth) runs in a detached task so it never stalls the poll loop.
-                    for (topic, headline) in conv.news_fresh_items().await {
+                    // Tracked news: when a topic is DUE for a digest (fresh developments + paced, state
+                    // PERSISTED so restarts don't swallow updates), research it into a full CROSS-DOMAIN
+                    // situation brief (news × live oil/markets × the user's portfolio) and send it. The
+                    // ~15s brief runs detached so it never stalls the poll loop.
+                    for topic in conv.news_digests_due().await {
                         let (c, api2) = (conv.clone(), api.clone());
                         tokio::spawn(async move {
-                            let brief = c.news_brief(&headline).await;
-                            let _ = tg_send(&api2, chat, &format!("📰 New on {topic}:\n\n{brief}")).await;
+                            let brief = c.news_brief(&topic).await;
+                            let _ = tg_send(&api2, chat, &format!("📡 Situation update — {topic}:\n\n{brief}")).await;
                         });
                     }
                 }

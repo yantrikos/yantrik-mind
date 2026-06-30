@@ -2141,6 +2141,41 @@ impl ConversationEngine {
     /// articles, then SYNTHESIZES: what's happening, why it matters, the key angles (consolidated
     /// across outlets, noting agreement/disagreement), and what to watch — with the real SOURCE LINKS
     /// listed at the end. Fetched content is untrusted reference data (prompt-injection surface).
+    /// Live market context for a geopolitics/markets/oil/economy topic — Brent + WTI crude + the user's
+    /// holdings — so a news brief can thread the situation through to its market + portfolio impact.
+    /// None when the topic isn't market-relevant. (Cross-domain: news × markets × the user's world.)
+    async fn market_context(&self, topic: &str) -> Option<String> {
+        let t = topic.to_lowercase();
+        const KEYS: [&str; 22] = [
+            "geopolit", "war", "conflict", "oil", "crude", "energy", "econom", "market", "inflation",
+            "fed", "rate", "opec", "middle east", "hormuz", "russia", "ukraine", "iran", "israel",
+            "gaza", "trade war", "tariff", "sanction",
+        ];
+        if !KEYS.iter().any(|k| t.contains(k)) {
+            return None;
+        }
+        let m = self.markets.as_ref()?;
+        let mut parts = Vec::new();
+        for (sym, name) in [("BZ=F", "Brent"), ("CL=F", "WTI")] {
+            if let Ok(q) = m.stock_quote(sym).await {
+                let arrow = if q.change_pct >= 0.0 { "▲" } else { "▼" };
+                parts.push(format!("{name} crude ${:.2} {arrow}{:.1}%", q.price, q.change_pct.abs()));
+            }
+        }
+        let holdings = self.load_holdings().await;
+        if !holdings.is_empty() {
+            let tickers: Vec<String> = holdings.iter().filter_map(|h| h.get("ticker").and_then(|x| x.as_str()).map(String::from)).collect();
+            if !tickers.is_empty() {
+                parts.push(format!("user's holdings: {}", tickers.join(", ")));
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
     pub async fn news_brief(&self, topic: &str) -> String {
         let topic = topic.trim();
         if topic.len() < 2 {
@@ -2177,15 +2212,25 @@ impl ConversationEngine {
                 }
             }
         }
+        // 3b. CROSS-DOMAIN: for geopolitics/markets/oil/economy topics, pull LIVE market data so the
+        // brief connects the SITUATION to its market ripples + the user's own portfolio — the thing a
+        // single-domain news app structurally can't do.
+        let market = self.market_context(topic).await;
         // 4. Synthesize across sources.
         let evidence = format!(
-            "HEADLINES (outlet + title):\n{}\n\nWEB RESULTS (title — snippet — url):\n{}\n\nARTICLE EXCERPTS:\n{}",
+            "HEADLINES (outlet + title):\n{}\n\nWEB RESULTS (title — snippet — url):\n{}\n\nARTICLE EXCERPTS:\n{}\n\nLIVE MARKET CONTEXT:\n{}",
             if headlines.is_empty() { "(none)".to_string() } else { headlines.join("\n") },
             if snippets.is_empty() { "(none)".to_string() } else { snippets },
             if excerpts.trim().is_empty() { "(none)".to_string() } else { excerpts.trim().to_string() },
+            market.as_deref().unwrap_or("(not market-relevant)"),
         );
+        let market_instr = if market.is_some() {
+            "5. **Market angle** — CONNECT the situation to the LIVE market context above: how it's moving oil/markets, and (if holdings are listed) what it means for the user's portfolio. Cite the live figures."
+        } else {
+            ""
+        };
         let prompt = format!(
-            "You are a sharp, neutral news analyst briefing the user on \"{topic}\". Using ONLY the multi-source evidence below, write an IN-DEPTH brief that CONSOLIDATES across sources — do NOT just relay headlines.\n\n=== EVIDENCE ===\n{evidence}\n\n=== WRITE ===\n1. **What's happening** — the core development(s).\n2. **Why it matters** — context / background.\n3. **The angles** — how different outlets/sides frame it; note where they AGREE and where they DIFFER, attributing contested claims to a source.\n4. **What to watch** — what's next / still uncertain.\n\nRULES: factual + balanced; attribute contested claims; do NOT invent specifics, numbers, or quotes not in the evidence. Under 280 words. Do NOT list the source URLs yourself (they're appended separately)."
+            "You are a sharp, neutral news analyst briefing the user on \"{topic}\". Using ONLY the multi-source evidence below, write an IN-DEPTH brief that CONSOLIDATES across sources — do NOT just relay headlines.\n\n=== EVIDENCE ===\n{evidence}\n\n=== WRITE ===\n1. **What's happening** — the core development(s).\n2. **Why it matters** — context / background.\n3. **The angles** — how different outlets/sides frame it; note where they AGREE and where they DIFFER, attributing contested claims to a source.\n4. **What to watch** — what's next / still uncertain.\n{market_instr}\n\nRULES: factual + balanced; attribute contested claims; do NOT invent specifics, numbers, or quotes not in the evidence. Use the live market figures verbatim. Under 300 words. Do NOT list the source URLs yourself (they're appended separately)."
         );
         let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
         let body = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
@@ -2359,7 +2404,12 @@ impl ConversationEngine {
     /// a restart doesn't replay) and return the fresh STORIES to research — `(topic, headline)`. The
     /// poll loop turns each into a full multi-source BRIEF before sending (research-then-send, not a
     /// raw headline). Capped per tick so it's quality, not spam. Sets last_news_topic for "tell me more".
-    pub async fn news_fresh_items(&self) -> Vec<(String, String)> {
+    /// Which tracked topics are DUE for a proactive situation digest. State is PERSISTED (profile
+    /// "news_digest_state": per-topic seen-urls + last-sent-ms) so a restart no longer re-primes and
+    /// silently swallows every update — the bug that made the proactive watch never fire. Paced per
+    /// topic (YM_NEWS_DIGEST_HOURS, default 6h) so it's analytical UPDATES, not a per-headline flood.
+    /// The poll loop turns each due topic into a full cross-domain `news_brief` (news × live markets).
+    pub async fn news_digests_due(&self) -> Vec<String> {
         let news = match &self.news {
             Some(n) => n,
             None => return Vec::new(),
@@ -2368,31 +2418,53 @@ impl ConversationEngine {
         if topics.is_empty() {
             return Vec::new();
         }
-        let mut out = Vec::new();
-        for topic in topics {
-            let items = match news.headlines(Some(&topic), 5).await {
+        let pace_ms: u64 = std::env::var("YM_NEWS_DIGEST_HOURS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(6) * 3_600_000;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let mut state: serde_json::Value = self
+            .memory
+            .profile_get("news_digest_state")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut due = Vec::new();
+        for topic in &topics {
+            let items = match news.headlines(Some(topic), 6).await {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let mut fresh = Vec::new();
-            {
-                let mut seen = self.news_seen.lock().unwrap();
-                let primed = seen.iter().any(|k| k.starts_with(&format!("{topic}|")));
-                for it in &items {
-                    let key = format!("{topic}|{}", it.url);
-                    if seen.insert(key) && primed {
-                        fresh.push(it.title.clone());
-                    }
+            let urls: Vec<String> = items.iter().map(|i| i.url.clone()).filter(|u| !u.is_empty()).collect();
+            let entry = state.get(topic);
+            let primed = entry.is_some();
+            let mut seen: std::collections::HashSet<String> = entry
+                .and_then(|e| e.get("seen"))
+                .and_then(|s| s.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let last_ms = entry.and_then(|e| e.get("last_ms")).and_then(|x| x.as_u64()).unwrap_or(0);
+            let fresh: Vec<String> = urls.iter().filter(|u| !seen.contains(*u)).cloned().collect();
+            if !primed {
+                // First time we've ever watched this topic → prime silently (don't dump old news).
+                seen.extend(urls);
+                state[topic] = serde_json::json!({ "seen": seen.into_iter().collect::<Vec<_>>(), "last_ms": now });
+            } else if !fresh.is_empty() && now.saturating_sub(last_ms) >= pace_ms {
+                // Fresh developments + the pace window has elapsed → a digest is due.
+                seen.extend(fresh);
+                let mut seen_vec: Vec<String> = seen.into_iter().collect();
+                if seen_vec.len() > 200 {
+                    let drop = seen_vec.len() - 200;
+                    seen_vec.drain(0..drop); // bound growth
                 }
-            }
-            if !fresh.is_empty() {
+                state[topic] = serde_json::json!({ "seen": seen_vec, "last_ms": now });
                 *self.last_news_topic.lock().unwrap() = Some(topic.clone());
-                // Brief the TOP fresh story per topic this tick (the rest will surface next ticks).
-                out.push((topic.clone(), fresh.remove(0)));
+                due.push(topic.clone());
             }
+            // else: fresh stays UNSEEN (so the next pace window still fires) or there's nothing new.
         }
-        out.truncate(2); // cap proactive briefs per tick — research quality over a flood of pings
-        out
+        let _ = self.memory.profile_set("news_digest_state", &state.to_string()).await;
+        due.truncate(2); // at most 2 topic-digests per tick
+        due
     }
 
     /// If the user is reacting with INTEREST to a just-surfaced news ping ("tell me more", "go
@@ -5445,9 +5517,9 @@ mod tests {
         // tracking: add → list → remove
         assert!(conv.cli_dispatch("news track geopolitics").await.contains("Tracking"));
         assert!(conv.cli_dispatch("news tracking").await.contains("geopolitics"), "tracked list");
-        // watch primes silently, then dedups identical items (no repeat spam)
-        let _ = conv.news_fresh_items().await;
-        assert!(conv.news_fresh_items().await.is_empty(), "deduped after prime");
+        // digest watch primes silently on first call, then dedups identical items (no repeat spam)
+        let _ = conv.news_digests_due().await;
+        assert!(conv.news_digests_due().await.is_empty(), "deduped after prime");
         assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
     }
 

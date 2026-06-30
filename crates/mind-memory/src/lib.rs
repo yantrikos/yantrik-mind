@@ -59,6 +59,8 @@ enum Cmd {
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
+    // profile KV (single value per key, latest-wins — distinct from append-distinct goals/prefs)
+    SetProfile { key: String, value: String, reply: Reply<()> },
     // tension economy (the "urges" drives emit; plain CRUD ledger)
     RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
@@ -500,6 +502,17 @@ fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Resul
         .map_err(|e| e.to_string())
 }
 
+/// Profile KV write: ONE value per key, latest wins. Distinct from `store_goal_pref` (append-distinct):
+/// a profile key (holdings/subscriptions/bills/name/…) must overwrite. The old code reused the
+/// INSERT-OR-IGNORE goals path, so re-storing any previously-seen value was silently dropped and the
+/// reader returned a stale older row. Delete-then-insert guarantees a single fresh row per key.
+fn set_profile(db: &YantrikDB, key: &str, value: &str) -> std::result::Result<(), String> {
+    let conn = db.conn();
+    conn.execute("DELETE FROM mind_goals_prefs WHERE kind = ?1", [key]).map_err(|e| e.to_string())?;
+    conn.execute("INSERT INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [key, value]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<MemoryItem>, String> {
     let kind_enum = if kind == "goal" { MemoryKind::Goal } else { MemoryKind::Preference };
     let conn = db.conn();
@@ -858,6 +871,9 @@ impl MemoryHandle {
                         Cmd::ListGoalPrefs { kind, reply } => {
                             let _ = reply.send(list_goal_prefs(&db, &kind));
                         }
+                        Cmd::SetProfile { key, value, reply } => {
+                            let _ = reply.send(set_profile(&db, &key, &value));
+                        }
                         Cmd::RecentMessages { limit, reply } => {
                             let _ = reply.send(recent_messages(&db, limit));
                         }
@@ -982,8 +998,8 @@ impl MemoryFacade for MemoryHandle {
     }
 
     async fn profile_set(&self, key: &str, value: &str) -> Result<()> {
-        let (kind, text) = (key.to_string(), value.to_string());
-        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+        let (key, value) = (key.to_string(), value.to_string());
+        self.call(|reply| Cmd::SetProfile { key, value, reply }).await
     }
     async fn profile_get(&self, key: &str) -> Result<Option<String>> {
         let kind = key.to_string();
@@ -1185,6 +1201,25 @@ mod tests {
         }
         let unique: std::collections::HashSet<_> = rids.iter().collect();
         assert_eq!(unique.len(), 50);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn profile_kv_is_single_value_latest_wins() {
+        // Regression: profile_set must OVERWRITE (one value per key) — including re-storing a value
+        // seen before. The old INSERT-OR-IGNORE goals path silently dropped repeat (kind,text) writes,
+        // so the reader returned a STALE older row, breaking holdings/subs/bills on any repeated value.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.profile_set("holdings", "[A]").await.unwrap();
+        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"));
+        mem.profile_set("holdings", "[A,B]").await.unwrap();
+        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A,B]"));
+        // re-store a value seen earlier — MUST read back, not the stale "[A,B]"
+        mem.profile_set("holdings", "[A]").await.unwrap();
+        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"), "re-stored prior value must win");
+        // a different key stays independent
+        mem.profile_set("name", "Pranab").await.unwrap();
+        assert_eq!(mem.profile_get("name").await.unwrap().as_deref(), Some("Pranab"));
+        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"));
     }
 
     /// THE MOAT: typed belief + Bayesian revision + contradiction detection + explanation,

@@ -808,7 +808,23 @@ impl MemoryHandle {
                             let _ = reply.send(r);
                         }
                         Cmd::AssertBelief { statement, signed_weight, source, provenance, reply } => {
-                            let _ = reply.send(assert_belief(&db, &mut alloc, &statement, signed_weight, &source, &provenance));
+                            let result = assert_belief(&db, &mut alloc, &statement, signed_weight, &source, &provenance);
+                            if result.is_ok() {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as i64)
+                                    .unwrap_or(0);
+                                for c in detect_conflicts(&db) {
+                                    let _ = record_tension_db(
+                                        &db,
+                                        "contradiction",
+                                        c.severity.clamp(0.3, 1.0),
+                                        &format!("conflict: {} vs {}", c.belief_a, c.belief_b),
+                                        now,
+                                    );
+                                }
+                            }
+                            let _ = reply.send(result);
                         }
                         Cmd::RecallTyped { text, top_k, reply } => {
                             let _ = reply.send(Ok(recall_beliefs(&db, &text, top_k)));
@@ -1482,5 +1498,66 @@ mod tests {
         mem.store_goal("become more self-aware").await.unwrap();
         let goals = mem.list_goals().await.unwrap();
         assert_eq!(goals.len(), 1, "duplicate store_goal calls must not multiply entries");
+    }
+
+    /// assert_belief must immediately emit a Contradiction tension for any conflict that exists
+    /// at the time the belief is persisted — no explicit rehearsal sweep required.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assert_belief_emits_contradiction_tension() {
+        let mem = MemoryHandle::spawn(":memory:", 4).unwrap();
+
+        // Establish two contradicting beliefs and link them.
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "Pranab sleeps early".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: None,
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "Pranab stays up late".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: None,
+            provenance: "observed".into(),
+        })
+        .await
+        .unwrap();
+        mem.relate("Pranab sleeps early", "Pranab stays up late", "contradicts", 0.8)
+            .await
+            .unwrap();
+
+        // Before the next assert_belief there should be no tension yet.
+        let before = mem.open_tensions(20).await.unwrap();
+        assert!(
+            before.iter().all(|t| !matches!(t.kind, mind_types::TensionKind::Contradiction)),
+            "no contradiction tension expected before any assert_belief triggers the scan"
+        );
+
+        // A new assert_belief triggers the scan — the pre-existing conflict must now appear.
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "Pranab sleeps early".into(),
+            polarity: 1.0,
+            weight: 0.5,
+            source_event: Some("second observation".into()),
+            provenance: "inferred".into(),
+        })
+        .await
+        .unwrap();
+
+        let after = mem.open_tensions(20).await.unwrap();
+        assert!(
+            after.iter().any(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)),
+            "assert_belief should have emitted a Contradiction tension for the known conflict"
+        );
+        let tension = after.iter().find(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)).unwrap();
+        assert!(
+            tension.about.contains("sleeps early") || tension.about.contains("stays up late"),
+            "tension description should name the conflicting beliefs, got: {}",
+            tension.about
+        );
+        assert!(tension.pressure >= 0.3, "pressure should be clamped to at least 0.3, got {}", tension.pressure);
     }
 }

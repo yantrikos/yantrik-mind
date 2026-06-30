@@ -267,7 +267,9 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_weather(Arc::new(mind_tools::OpenMeteo::new())) // keyless weather, always on
         .with_wiki(Arc::new(mind_tools::Wikipedia::new())) // keyless Wikipedia, always on
         .with_markets(Arc::new(mind_tools::LiveMarkets::new())) // keyless crypto + stock quotes
-        .with_translator(Arc::new(mind_tools::GoogleTranslate::new())); // keyless translation
+        .with_translator(Arc::new(mind_tools::GoogleTranslate::new())) // keyless translation
+        // Declarative plugin manifest: enable/disable + security level, no code edits. Toggles persist.
+        .with_plugins_manifest(std::env::var("YM_PLUGINS_CONFIG").unwrap_or_else(|_| "/var/lib/yantrik-mind/plugins.json".to_string()));
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
     }

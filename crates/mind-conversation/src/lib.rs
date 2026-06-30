@@ -10,6 +10,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub mod plugins;
+pub use plugins::{PluginRegistry, PluginSpec, SecurityLevel};
+
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
@@ -570,6 +573,12 @@ pub struct ConversationEngine {
     /// Slack, Maps, GitHub…) exposes its tools here. Read-only run freely; writes route via the gate.
     /// Output is untrusted third-party data (prompt-injection surface) — wrapped like any web content.
     mcp: Option<Arc<mind_tools::McpHub>>,
+    /// Declarative plugin registry — the single source of truth for which native plugins exist, are
+    /// enabled, and their security level. The agent catalog is generated from the ENABLED entries, so
+    /// a disabled plugin disappears everywhere. Overlaid from `plugins.json`; toggles persist back.
+    plugins: Mutex<PluginRegistry>,
+    /// Where to persist plugin-manifest changes (so `ym plugin disable X` survives a restart).
+    plugins_path: Option<String>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -642,6 +651,8 @@ impl ConversationEngine {
             markets: None,
             translator: None,
             mcp: None,
+            plugins: Mutex::new(PluginRegistry::builtin()),
+            plugins_path: None,
             scan_mail: None,
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -2010,6 +2021,25 @@ impl ConversationEngine {
         self
     }
 
+    /// Load the plugin manifest (enable/disable + security overlay) from a JSON file and remember the
+    /// path so toggles persist. Missing/garbage file → built-in defaults (all on).
+    pub fn with_plugins_manifest(mut self, path: impl Into<String>) -> Self {
+        let path = path.into();
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            self.plugins.lock().unwrap().apply_manifest(&raw);
+        }
+        self.plugins_path = Some(path);
+        self
+    }
+
+    /// Persist the current plugin states back to the manifest (best-effort).
+    fn save_plugins(&self) {
+        if let Some(path) = &self.plugins_path {
+            let snapshot = self.plugins.lock().unwrap().to_manifest();
+            let _ = std::fs::write(path, snapshot);
+        }
+    }
+
     /// Proactive home watch — the moat in action: read HA, run the grounded anomaly rules, and return
     /// only NEWLY-fired alerts (deduped; a condition that clears can fire again later). Primes silently
     /// on the first call so a restart doesn't re-announce pre-existing conditions. The poll loop pushes
@@ -2864,6 +2894,32 @@ impl ConversationEngine {
             "web" | "fetch" if self.web.is_some() && !rest.is_empty() => {
                 self.run_agent_tool("web_fetch", &serde_json::json!({ "url": rest })).await
             }
+            // --- plugins: the declarative registry — list + enable/disable (persisted to manifest) ---
+            "plugins" => self.plugins.lock().unwrap().render_list(),
+            "plugin" => {
+                let mut p = rest.splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                let name = p.next().unwrap_or("").trim().to_string();
+                match action.as_str() {
+                    "" | "list" | "ls" => self.plugins.lock().unwrap().render_list(),
+                    "enable" | "on" | "disable" | "off" => {
+                        let on = matches!(action.as_str(), "enable" | "on");
+                        if name.is_empty() {
+                            "Usage: ym plugin enable|disable <name>  (see `ym plugins`)".to_string()
+                        } else {
+                            let resolved = self.plugins.lock().unwrap().set_enabled(&name, on);
+                            match resolved {
+                                Some(id) => {
+                                    self.save_plugins();
+                                    format!("Plugin '{id}' is now {}.", if on { "ON 🟢" } else { "OFF" })
+                                }
+                                None => format!("No plugin '{name}'. `ym plugins` to see them."),
+                            }
+                        }
+                    }
+                    _ => "Usage: ym plugins  ·  ym plugin enable|disable <name>".to_string(),
+                }
+            }
             // --- mcp: inspect + directly invoke connected integrations (deterministic, no LLM) ---
             "mcp" if self.mcp.is_some() => {
                 let hub = self.mcp.as_ref().unwrap();
@@ -2925,6 +2981,7 @@ impl ConversationEngine {
         lines.push("ym holding add <ticker> <shares> [cost] · ym portfolio   holdings, valued live (P&L + allocation)".to_string());
         lines.push("ym analyze <ticker>      deep multi-source stock/crypto analysis (not advice)".to_string());
         lines.push("ym discover              find subscriptions in your email + track them".to_string());
+        lines.push("ym plugins · ym plugin enable|disable <name>   manage plugins (toggle + security)".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -3613,6 +3670,19 @@ impl ConversationEngine {
     /// gated on their own paths. `build_capability` is the self-extension hook (author + save a skill).
     async fn run_agent_tool(&self, tool: &str, args: &serde_json::Value) -> String {
         let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        // Plugin gate: a tool owned by a DISABLED plugin is refused here (one check covers every tool).
+        // Core tools (owned by no plugin) always pass; MCP tools are governed by their own catalog.
+        let disabled_id = {
+            let reg = self.plugins.lock().unwrap();
+            if !tool.starts_with("mcp.") && !reg.is_tool_enabled(tool) {
+                reg.plugin_for_tool(tool).map(|p| p.id.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(id) = disabled_id {
+            return format!("(the {id} plugin is turned off — `ym plugin enable {id}` to use it)");
+        }
         match tool {
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
             "recall" => match self
@@ -4006,41 +4076,22 @@ impl ConversationEngine {
         // The MCP force-multiplier: whatever integrations have connected expose their tools here,
         // appended live to the catalog so the model can select `mcp.<server>.<tool>` directly.
         let mcp_line = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
-        const TOOLS: &str = "CORE TOOLS (always available; use ONE per step):\n\
+        // CORE tools (always on) + the SKILL LIBRARY section. The PLUGIN tools in between are generated
+        // from the registry's ENABLED entries (a disabled plugin simply isn't offered) — so capabilities
+        // are configured, not hardcoded into this prompt.
+        const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per step):\n\
 - recall {query}: search your typed memory\n\
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
-- search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one\n\
-- news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything\n\
-- track_news {topic}: have the companion TRACK a topic + proactively surface fresh headlines (e.g. geopolitics)\n\
-- weather {place}: current conditions + today's forecast for a city/town\n\
-- wikipedia {query}: a factual summary from Wikipedia (what/who is X)\n\
-- calc {expression}: do arithmetic locally (e.g. 12*7+3, (1500*0.18))\n\
-- crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)\n\
-- stock {symbol}: a stock quote (US ticker, e.g. AAPL)\n\
-- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation). Use when they ask about their stocks/holdings/portfolio\n\
-- analyze {ticker}: a DEEP multi-source analysis of a stock/crypto — pulls a live quote + company profile + recent news + a web sweep and SYNTHESIZES a balanced briefing (what it is, recent action, bull case, bear case, risks). Use for 'what do you think of X', 'analyze X', stock research. It is ANALYSIS, never a buy/sell tip\n\
-- add_holding {ticker, shares, cost?}: record a position the user says they own (so portfolio can value it)\n\
-- translate {to, text}: translate text into a language ('to' like french/hi/es; source auto-detected)\n\
-- web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)\n\
-- research {query}: kick off a DEEP background research job (multi-source) — use for big questions, not quick facts; acks now, delivers findings here when done\n\
-- code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox) — acks now, delivers the result here when done\n\
-- home {}: check the smart home (Home Assistant) — who's home, thermostat/climate, weather, what's on\n\
-- money {}: the user's finances overview — tracked subscriptions + monthly total (use when they ask about subscriptions/spending)\n\
-- discover_subscriptions {}: scan the user's EMAIL to find recurring subscriptions + auto-track them (use when they ask to find/discover their subscriptions)\n\
-- bills {}: the user's tracked recurring bills + when they're due\n\
-- budget {}: the user's budget vs spend for this month, by category\n\
-- github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
-- github_notifications {}: your GitHub notifications\n\
-- set_monitor {source: github|web|inbox, target, url?}: watch a source + ping on a match\n\
-- make_dashboard {title, subtitle?, sections:[{heading, items:[{label, value?, url?, note?}]}]}: BEST way to make a dashboard/list/comparison page — give STRUCTURED data, it renders + hosts styled HTML + returns a URL. Prefer this over writing HTML by hand.\n\
-- publish_page {name, html}: host a raw HTML page you wrote + return a URL (use only when make_dashboard doesn't fit; keep the html small). NEVER paste raw HTML into the chat\n\
 - now {}: the current date and time\n\
-SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
+PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
+        const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
 - run_skill {name, target, url?}: run a skill you found via discover_tools\n\
 - build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
 - answer {text}: give the user your final reply";
+        let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
+        let tools = format!("{CORE_HEAD}\n{plugin_catalog}\n{SKILL_SECTION}");
         let now = now_str();
         // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
@@ -4049,7 +4100,7 @@ SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
         let mut last_call = String::new();
         for step in 0..MAX_STEPS {
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{TOOLS}{skill_line}{mcp_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
+                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}{mcp_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let messages = vec![

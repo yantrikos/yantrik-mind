@@ -64,6 +64,12 @@ pub use mcp::{McpHub, McpServerConfig, McpTool};
 pub trait Fetcher: Send + Sync {
     /// Fetch a URL and return readable text (HTML stripped, bounded length).
     async fn fetch(&self, url: &str) -> anyhow::Result<String>;
+
+    /// Render a HOSTILE page with a headful real browser (beats headless-fingerprint walls — Amazon,
+    /// Target). Slow; use only when the normal ladder gets walled. Default delegates to `fetch`.
+    async fn fetch_rendered(&self, url: &str) -> anyhow::Result<String> {
+        self.fetch(url).await
+    }
 }
 
 /// Pull the host out of an http(s) URL (handles userinfo + bracketed IPv6).
@@ -236,6 +242,33 @@ fn fetch_headless(url: &str) -> anyhow::Result<String> {
     Ok(compact_blanks(&text))
 }
 
+/// Tier-4: a HEADFUL (on-screen, via Xvfb) real Chromium — defeats the headless-fingerprint walls that
+/// block tier-3 (Amazon, Target render real product grids under headful where headless gets 0 chars).
+/// Slower + heavier, so it's only used deliberately (hostile retail), never in the default `fetch` ladder.
+fn fetch_headful(url: &str) -> anyhow::Result<String> {
+    let script = std::env::var("YM_HEADFUL_SCRIPT").unwrap_or_else(|_| "/opt/yantrik-mind/headful_fetch.js".to_string());
+    if !std::path::Path::new(&script).exists() {
+        anyhow::bail!("headful fetch not available");
+    }
+    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH").unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
+    let dir = std::path::Path::new(&script).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let out = std::process::Command::new("timeout")
+        .arg("85")
+        .arg("xvfb-run")
+        .arg("-a")
+        .arg("node")
+        .arg(&script)
+        .arg(url)
+        .current_dir(&dir)
+        .env("PLAYWRIGHT_BROWSERS_PATH", browsers)
+        .output()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if text.trim().chars().count() < 80 {
+        anyhow::bail!("headful returned nothing useful");
+    }
+    Ok(compact_blanks(&text))
+}
+
 /// Reader-proxy fallback: a server-side reader renders the page with a REAL browser and returns clean
 /// markdown — getting content from sites that block our direct request (bot/TLS/JS walls). The target
 /// is already SSRF-checked + public; the fetched text remains untrusted reference data.
@@ -295,6 +328,34 @@ impl Fetcher for HttpFetcher {
             t.push_str("\n…(truncated)");
         }
         Ok(t)
+    }
+
+    async fn fetch_rendered(&self, url: &str) -> anyhow::Result<String> {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            anyhow::bail!("only http(s) urls are fetchable");
+        }
+        let u = url.to_string();
+        let max = self.max_chars;
+        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            ssrf_check(&u)?;
+            fetch_headful(&u)
+        })
+        .await?;
+        match res {
+            Ok(mut t) => {
+                t = t.trim().to_string();
+                if t.len() > max {
+                    let mut end = max.min(t.len());
+                    while end > 0 && !t.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    t.truncate(end);
+                }
+                Ok(t)
+            }
+            // Headful failed/blocked → fall back to the normal ladder rather than error.
+            Err(_) => self.fetch(url).await,
+        }
     }
 }
 

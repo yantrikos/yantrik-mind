@@ -3364,6 +3364,19 @@ impl ConversationEngine {
                 }
             }
         }
+        // Direct Amazon search via a HEADFUL browser — the real unlock: it returns an actual product grid
+        // WITH prices, sidestepping both the category-page problem AND the bot-wall (headful defeats the
+        // headless fingerprint; proven on Amazon/Target — Walmart's press-and-hold challenge still blocks,
+        // so it's skipped). One retailer keeps the reply timely + resource-light; falls back silently.
+        if let Some(web) = &self.web {
+            let amz = format!("https://www.amazon.com/s?k={}", sq.replace(' ', "+"));
+            if let Ok(Ok(b)) = tokio::time::timeout(std::time::Duration::from_secs(95), web.fetch_rendered(&amz)).await {
+                if b.trim().len() > 200 {
+                    let ex: String = b.chars().take(4000).collect();
+                    excerpts.push_str(&format!("\n[from {amz} — live Amazon results]\n{ex}\n"));
+                }
+            }
+        }
         let snippets: String = hits.iter().take(10).map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url)).collect::<Vec<_>>().join("\n");
         let budget_line = budget
             .map(|b| format!("HARD BUDGET: ${b:.0}. Only recommend items at or under this; call out anything over."))

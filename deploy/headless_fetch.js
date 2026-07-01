@@ -29,9 +29,11 @@ chromium.use(stealth);
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"], // --no-sandbox: unprivileged LXC
   });
   try {
+    // Let Chromium send its own UA (self-consistent with its real version + Sec-CH-UA client hints);
+    // a spoofed stale UA contradicts the real engine and is itself a bot signal.
     const ctx = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      locale: "en-US",
+      extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
     });
     const page = await ctx.newPage();
     // Prefer network-idle so client-side content (price grids, product tiles) has loaded; fall back to

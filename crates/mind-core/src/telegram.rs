@@ -512,6 +512,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Morning-briefing tick: ONE warm briefing per day — the "JARVIS every morning" felt-presence.
+        // briefing_due() self-gates (morning window + persisted once-per-date, survives restarts), so
+        // this fires on the first non-quiet tick of the morning and stays silent the rest of the day.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() {
+                if let Some(msg) = conv.briefing_due().await {
+                    if tg_send(&api, chat, &msg).await.is_ok() {
+                        eprintln!("[briefing] sent the daily morning briefing ({} chars)", msg.len());
+                    }
+                }
+            }
+        }
+
         // Price-watch tick: re-price tracked items and ping on a genuine drop / target hit. Paced
         // (YM_WATCH_SECS, default 12h), quiet-gated. The deal-finder's compounding half.
         {

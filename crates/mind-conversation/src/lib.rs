@@ -3972,6 +3972,95 @@ impl ConversationEngine {
         out
     }
 
+    /// The DAILY MORNING BRIEFING — one warm, scannable message each morning that always surfaces
+    /// something worth reading. The generic-assistant briefing (upcoming dates + open reminders +
+    /// what I'm keeping an eye on) PLUS the moat OpenClaw/hermes structurally can't have: I know the
+    /// people in *your* life and bring their dates up — with the gift/plan I noted — before you'd
+    /// have to remember them. Deterministic + fast so it ALWAYS composes and fires (no LLM in the
+    /// hot path); news synthesis + patterns can enrich it later without changing the contract.
+    pub async fn morning_briefing(&self) -> String {
+        let now = local_now();
+        let mut out = format!("☀️ Good morning, Pranab — {}.", now.format("%A, %B %-d"));
+
+        // 1) Coming up — the people in your life (the moat), with any gift/plan I've already noted.
+        let upcoming = self.upcoming_people_dates(35).await;
+        if !upcoming.is_empty() {
+            let people = self.load_people_profiles().await;
+            out.push_str("\n\n📅 Coming up:");
+            for (name, label, days, mmdd) in upcoming.iter().take(4) {
+                let plan = people
+                    .iter()
+                    .find(|p| person_matches(p, &name.to_lowercase()))
+                    .and_then(|p| p.get("facts").and_then(|x| x.as_array()))
+                    .and_then(|a| {
+                        a.iter()
+                            .filter_map(|f| f.as_str())
+                            .find(|f| {
+                                let l = f.to_lowercase();
+                                l.contains("gift") || l.contains("watch") || l.contains("budget")
+                                    || l.contains("plan") || l.contains('$') || l.contains("idea")
+                            })
+                            .map(String::from)
+                    })
+                    .unwrap_or_default();
+                let when = if *days == 0 { "today 🎉".to_string() } else { format!("in {days} days ({mmdd})") };
+                let plan_s = if plan.is_empty() { String::new() } else { format!(" — {plan}") };
+                out.push_str(&format!("\n  • {name}'s {label} {when}{plan_s}"));
+            }
+        }
+
+        // 2) Open reminders / tasks I'm holding for you.
+        if let Ok(tasks) = self.memory.list_tasks(false).await {
+            let open: Vec<_> = tasks.iter().filter(|t| t.is_open()).collect();
+            if !open.is_empty() {
+                out.push_str(&format!("\n\n✅ Open ({}):", open.len()));
+                for t in open.iter().take(5) {
+                    out.push_str(&format!("\n  • {}", t.description));
+                }
+            }
+        }
+
+        // 3) What I'm keeping an eye on (tracked topics) — a pointer, not a consume (the separate
+        //    news tick owns the actual situation digests so the briefing never double-fires them).
+        let topics = self.load_news_topics().await;
+        if !topics.is_empty() {
+            out.push_str(&format!(
+                "\n\n📰 Watching: {}. Say \"catch me up on {}\" for the latest read.",
+                topics.join(", "),
+                topics.first().cloned().unwrap_or_default()
+            ));
+        }
+
+        // 4) Quiet day → still offer presence, not a bare date line.
+        if upcoming.is_empty() && topics.is_empty() {
+            out.push_str("\n\nNothing time-sensitive on my radar. Tell me what's on your plate today and I'll carry it.");
+        }
+        out
+    }
+
+    /// Proactive gate for the morning briefing: if today's briefing hasn't gone out yet AND we're
+    /// inside the morning window (YM_BRIEF_HOUR..YM_BRIEF_UNTIL, local), compose it, mark today done,
+    /// and hand it back for the poll loop to send. Persisted by DATE (not an in-memory timer) so a
+    /// mid-day service restart never re-briefs — the wired-but-re-fires-on-restart bug class we've
+    /// already been bitten by. Returns None the rest of the day (cheap fast-path).
+    pub async fn briefing_due(&self) -> Option<String> {
+        let now = local_now();
+        let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(12);
+        let start_h: u32 = std::env::var("YM_BRIEF_HOUR").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+        let end_h: u32 = std::env::var("YM_BRIEF_UNTIL").ok().and_then(|s| s.parse().ok()).unwrap_or(11);
+        if hour < start_h || hour >= end_h {
+            return None;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let last = self.memory.profile_get("briefing_last_date").await.ok().flatten().unwrap_or_default();
+        if last == today {
+            return None;
+        }
+        let msg = self.morning_briefing().await;
+        let _ = self.memory.profile_set("briefing_last_date", &today).await;
+        Some(msg)
+    }
+
     async fn news_track(&self, topic: &str) -> String {
         if topic.len() < 2 {
             return "What should I track? e.g. `ym news track geopolitics`".to_string();
@@ -4844,6 +4933,8 @@ impl ConversationEngine {
             "people" | "household" => self.people_list().await,
             // --- family/people layer: living per-person profiles kept current from conversation ---
             "family" | "relationships" => self.family_view().await,
+            // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
+            "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,

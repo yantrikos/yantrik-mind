@@ -442,8 +442,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     for topic in conv.news_digests_due().await {
                         let (c, api2) = (conv.clone(), api.clone());
                         tokio::spawn(async move {
-                            let brief = c.news_brief(&topic).await;
-                            let _ = tg_send(&api2, chat, &format!("📡 Situation update — {topic}:\n\n{brief}")).await;
+                            // Learn-by-comparing: recall the held understanding, fetch fresh, and surface
+                            // the DELTA ("since I last checked…") rather than re-briefing from scratch.
+                            let update = c.evolve_understanding(&topic).await;
+                            let _ = tg_send(&api2, chat, &update).await;
                         });
                     }
                 }

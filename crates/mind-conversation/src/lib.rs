@@ -65,6 +65,33 @@ use yantrik_ml::{ChatMessage, GenerationConfig};
 /// Parse a loose due expression ("tomorrow", "tonight", "next week", "in 3 days", "in 2 hours") to
 /// an absolute epoch-ms. None for null/empty/unparseable — the commitment still becomes an open task,
 /// just without an auto-reminder. Calendar dates + weekday names are a later refinement.
+/// Tolerant JSON-object extraction from a model reply (handles `<think>` preambles + ```json fences).
+/// Returns `{}` on failure so callers can `.get(...)` safely.
+fn parse_json_obj(text: &str) -> serde_json::Value {
+    let body = text.rsplit("</think>").next().unwrap_or(text);
+    let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+    let obj = match (body.find('{'), body.rfind('}')) {
+        (Some(s), Some(e)) if e > s => &body[s..=e],
+        _ => "{}",
+    };
+    serde_json::from_str(obj).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// Human-friendly "how long ago" for the evolving-understanding surface (min/h/d).
+fn ago_str(then_ms: i64, now_ms: i64) -> String {
+    if then_ms <= 0 {
+        return "a while ago".to_string();
+    }
+    let secs = ((now_ms - then_ms).max(0)) / 1000;
+    if secs < 3600 {
+        format!("{} min ago", (secs / 60).max(1))
+    } else if secs < 86_400 {
+        format!("{} h ago", secs / 3600)
+    } else {
+        format!("{} d ago", secs / 86_400)
+    }
+}
+
 fn parse_due(s: &str) -> Option<u64> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2402,6 +2429,228 @@ impl ConversationEngine {
         format!("📰 {topic} — in-depth\n\n{body}{src_block}")
     }
 
+    /// Gather multi-source evidence on a subject: outlet headlines + dated news-search articles + the
+    /// top-3 article bodies + (for market-relevant subjects) live market context. Returns the evidence
+    /// block, the deduped real (title,url) sources, and whether anything was found. Shared by the
+    /// on-demand brief and the evolving-understanding learn loop so both read the same way.
+    async fn gather_evidence(&self, subject: &str) -> (String, Vec<(String, String)>, bool) {
+        let headlines: Vec<String> = match &self.news {
+            Some(n) => n
+                .headlines(Some(subject), 8)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|i| format!("- {} ({})", i.title, i.source))
+                .collect(),
+            None => vec![],
+        };
+        let hits: Vec<mind_tools::SearchHit> = match &self.searcher {
+            Some(se) => se.search_news(subject, 8).await.unwrap_or_default(),
+            None => vec![],
+        };
+        let has_content = !(headlines.is_empty() && hits.is_empty());
+        let snippets: String = hits.iter().take(8).map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url)).collect::<Vec<_>>().join("\n");
+        let mut excerpts = String::new();
+        if let Some(web) = &self.web {
+            for h in hits.iter().take(3) {
+                if let Ok(body) = web.fetch(&h.url).await {
+                    let ex: String = body.chars().take(1400).collect();
+                    excerpts.push_str(&format!("\n[from {}]\n{ex}\n", h.url));
+                }
+            }
+        }
+        let market = self.market_context(subject).await;
+        let evidence = format!(
+            "HEADLINES (outlet + title):\n{}\n\nWEB RESULTS (title — snippet — url):\n{}\n\nARTICLE EXCERPTS:\n{}\n\nLIVE MARKET CONTEXT:\n{}",
+            if headlines.is_empty() { "(none)".to_string() } else { headlines.join("\n") },
+            if snippets.is_empty() { "(none)".to_string() } else { snippets },
+            if excerpts.trim().is_empty() { "(none)".to_string() } else { excerpts.trim().to_string() },
+            market.as_deref().unwrap_or("(not market-relevant)"),
+        );
+        let mut seen = std::collections::HashSet::new();
+        let sources: Vec<(String, String)> = hits
+            .iter()
+            .filter(|h| !h.url.is_empty() && seen.insert(h.url.clone()))
+            .take(6)
+            .map(|h| (h.title.clone(), h.url.clone()))
+            .collect();
+        (evidence, sources, has_content)
+    }
+
+    /// LEARN-BY-COMPARING — the mind's core loop for anything ongoing (a war, a market, a project, a
+    /// person's situation). It holds ONE living understanding of a subject; each time it re-checks, it
+    /// RECALLS what it held, FETCHES fresh, DIFFS the two (what's new / changed / confirmed / now-wrong),
+    /// and REVISES the same understanding in place — the delta IS the learning, not fact-accumulation.
+    /// One evolving belief per subject with a short evolution log, plus key claims mirrored into revisable
+    /// typed beliefs so the Bayesian + contradiction layer engages. Returns the delta to surface (or the
+    /// first-contact read when blank). This is what `news_brief` couldn't do: it re-synthesized from
+    /// scratch every time and never compared against its prior understanding.
+    pub async fn evolve_understanding(&self, subject: &str) -> String {
+        let subject = subject.trim();
+        if subject.len() < 2 {
+            return "Track what? e.g. `ym track US-Iran war`".to_string();
+        }
+        let key = format!("understanding:{}", subject.to_lowercase());
+        // 1. RECALL what I currently hold about this subject.
+        let held: Option<serde_json::Value> = self
+            .memory
+            .profile_get(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        // 2. FETCH fresh multi-source evidence.
+        let (evidence, sources, has_content) = self.gather_evidence(subject).await;
+        if !has_content {
+            return format!("I couldn't find current information on \"{subject}\" to update my understanding.");
+        }
+        let src_block = if sources.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n📎 Sources:\n{}",
+                sources.iter().map(|(t, u)| format!("- {t} — {u}")).collect::<Vec<_>>().join("\n")
+            )
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Shared: parse the model's JSON (tolerant of <think>/```json), pull the updated understanding +
+        // key claims, persist the evolving state, and mirror claims as revisable beliefs.
+        let persist_and_beliefs = |v: &serde_json::Value, prior_log: Vec<serde_json::Value>, delta: &str| {
+            let summary: String = v
+                .get("understanding")
+                .or_else(|| v.get("updated_understanding"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(1400)
+                .collect();
+            let claims: Vec<(String, f64)> = v
+                .get("key_claims")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| {
+                            let s = c.get("claim").and_then(|x| x.as_str())?.trim().to_string();
+                            if s.len() < 6 {
+                                return None;
+                            }
+                            let cert = c.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.6).clamp(0.1, 0.95);
+                            Some((s, cert))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut log = prior_log;
+            if !delta.is_empty() {
+                log.push(serde_json::json!({ "ts": now_ms, "delta": delta }));
+            }
+            // keep only the last 8 evolution steps — this is a living understanding, not an archive
+            let log_tail: Vec<serde_json::Value> = log.iter().rev().take(8).rev().cloned().collect();
+            let checks = v.get("_checks").and_then(|x| x.as_i64()).unwrap_or(0);
+            (summary, claims, log_tail, checks)
+        };
+
+        match held {
+            None => {
+                // BLANK → first contact: form the initial understanding and save it.
+                let prompt = format!(
+                    "You are forming your FIRST understanding of \"{subject}\" from the evidence below. Write a \
+                     compact, factual CURRENT-STATE understanding (4–7 sentences): what's happening, why, and the \
+                     key facts as of now. Then list the standalone key claims.\n\n=== EVIDENCE ===\n{evidence}\n\n\
+                     Output ONLY JSON: {{\"understanding\":\"<compact current-state read>\",\
+                     \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}]}}"
+                );
+                let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
+                let text = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                    Ok(r) => r.text,
+                    Err(e) => return format!("(couldn't form an understanding: {e})"),
+                };
+                let v = parse_json_obj(&text);
+                let (summary, claims, _log, _checks) = persist_and_beliefs(&v, vec![], "");
+                if summary.is_empty() {
+                    return format!("I gathered coverage on \"{subject}\" but couldn't distill a clear picture yet.");
+                }
+                let state = serde_json::json!({ "summary": summary, "updated_ms": now_ms, "checks": 1, "log": [] });
+                let _ = self.memory.profile_set(&key, &state.to_string()).await;
+                for (claim, cert) in &claims {
+                    let _ = self
+                        .memory
+                        .remember_as_belief(BeliefAssertion {
+                            statement: claim.clone(),
+                            polarity: 1.0,
+                            weight: (0.5 + cert * 1.2).min(1.0),
+                            source_event: Some(format!("understanding:{subject}")),
+                            provenance: "tracked".into(),
+                        })
+                        .await;
+                }
+                format!("🌱 Started tracking \"{subject}\" — here's what I understand so far:\n\n{summary}{src_block}")
+            }
+            Some(state) => {
+                let prior = state.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let prior_ms = state.get("updated_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+                let prior_checks = state.get("checks").and_then(|x| x.as_i64()).unwrap_or(1);
+                let prior_log: Vec<serde_json::Value> =
+                    state.get("log").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                let ago = ago_str(prior_ms, now_ms);
+                // 3. COMPARE held understanding vs fresh evidence — the diff is the learning.
+                let prompt = format!(
+                    "You are RE-CHECKING \"{subject}\". You LAST understood it as (from {ago}):\n\"\"\"\n{prior}\n\"\"\"\n\n\
+                     Here is FRESH evidence now:\n=== EVIDENCE ===\n{evidence}\n\n\
+                     COMPARE the two. Identify what is genuinely NEW, what CHANGED, what is CONFIRMED, and what is now \
+                     OUTDATED or wrong. Then write the UPDATED current-state understanding that SUPERSEDES the old one \
+                     (fold in the changes; drop what's stale). If nothing material changed, say so plainly.\n\n\
+                     Output ONLY JSON: {{\"delta\":\"<one crisp line: what changed since last check, or 'no material change'>\",\
+                     \"changed\":[\"...\"],\"new\":[\"...\"],\"confirmed\":[\"...\"],\"outdated\":[\"...\"],\
+                     \"updated_understanding\":\"<new compact current-state read>\",\
+                     \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}]}}"
+                );
+                let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
+                let text = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                    Ok(r) => r.text,
+                    Err(e) => return format!("(couldn't re-check \"{subject}\": {e})"),
+                };
+                let v = parse_json_obj(&text);
+                let delta = v.get("delta").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let (summary, claims, log_tail, _c) = persist_and_beliefs(&v, prior_log, &delta);
+                // Persist the REVISED understanding in place (supersedes the old summary).
+                let new_summary = if summary.is_empty() { prior.clone() } else { summary };
+                let state = serde_json::json!({ "summary": new_summary, "updated_ms": now_ms, "checks": prior_checks + 1, "log": log_tail });
+                let _ = self.memory.profile_set(&key, &state.to_string()).await;
+                // Mirror fresh key claims into revisable beliefs (contradiction detection engages here:
+                // a claim that clashes with a held belief surfaces as an open conflict to reconcile).
+                for (claim, cert) in &claims {
+                    let _ = self
+                        .memory
+                        .remember_as_belief(BeliefAssertion {
+                            statement: claim.clone(),
+                            polarity: 1.0,
+                            weight: (0.5 + cert * 1.2).min(1.0),
+                            source_event: Some(format!("understanding:{subject}")),
+                            provenance: "tracked".into(),
+                        })
+                        .await;
+                }
+                // Surface the DELTA — what changed since last check (the human "hmm, what's new" moment).
+                let section = |label: &str, arr: Option<&Vec<serde_json::Value>>| -> String {
+                    let items: Vec<String> = arr
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).map(|s| format!("  • {s}")).collect())
+                        .unwrap_or_default();
+                    if items.is_empty() { String::new() } else { format!("\n{label}:\n{}", items.join("\n")) }
+                };
+                let changed = section("Changed", v.get("changed").and_then(|x| x.as_array()));
+                let fresh = section("New", v.get("new").and_then(|x| x.as_array()));
+                let outdated = section("No longer true", v.get("outdated").and_then(|x| x.as_array()));
+                let delta_line = if delta.is_empty() { "re-checked".to_string() } else { delta };
+                format!(
+                    "🔄 \"{subject}\" — since I last checked ({ago}):\n\n{delta_line}{changed}{fresh}{outdated}{src_block}"
+                )
+            }
+        }
+    }
+
     async fn news_headlines(&self, topic: Option<&str>) -> String {
         let news = match &self.news {
             Some(n) => n,
@@ -3429,6 +3678,12 @@ impl ConversationEngine {
             }
             // --- pattern finder: analyse my own typed memory for non-obvious patterns + learn them ---
             "patterns" | "insights" | "insight" | "pattern" => self.find_patterns().await,
+            // --- learn-by-comparing: hold a living understanding of a subject; each call recalls it,
+            //     fetches fresh, DIFFS, and revises in place (the delta is the learning) ---
+            "track" | "recheck" | "follow" | "update" | "understanding" if !rest.is_empty() => {
+                self.evolve_understanding(&rest).await
+            }
+            "track" | "understanding" => "Track what? e.g. `ym track US-Iran war` — then re-run it later and I'll tell you what changed.".to_string(),
             // Not a plugin command — treat the whole line as chat (full agent loop, live memory).
             _ => self.handle_turn(line).await.unwrap_or_else(|e| format!("(error: {e})")),
         }

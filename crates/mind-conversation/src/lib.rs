@@ -331,6 +331,55 @@ fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>)
     None
 }
 
+/// A pending get-to-know-you question must not swallow a turn that clearly ISN'T an answer — a
+/// command ("weather"), a question back at us, or a pasted URL. Conservative: only obvious cases,
+/// so genuine answers (which rarely look like commands) always capture.
+fn looks_like_non_answer(text: &str) -> bool {
+    let t = text.trim();
+    if t.ends_with('?') || t.starts_with('/') || t.starts_with("http://") || t.starts_with("https://") {
+        return true;
+    }
+    let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
+    const CMDS: [&str; 26] = [
+        "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
+        "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
+        "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
+    ];
+    CMDS.contains(&first.as_str())
+}
+
+/// Parse a trailing " at 6pm" / " at 18:30" clock time from event text. Returns (hour, minute).
+/// Uses the LAST " at " so "Dinner at Olive Garden at 7pm" parses 7pm (and a non-time "at Olive
+/// Garden" simply fails the digit parse and is ignored).
+fn parse_time_hm(text: &str) -> Option<(u32, u32)> {
+    let low = text.to_lowercase();
+    let i = low.rfind(" at ")?;
+    let rest = low[i + 4..].trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    let mut h: u32 = digits.parse().ok()?;
+    let mut after = &rest[digits.len()..];
+    let mut m: u32 = 0;
+    if let Some(r) = after.strip_prefix(':') {
+        let md: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+        m = md.parse().ok()?;
+        after = &r[md.len()..];
+    }
+    let after = after.trim_start();
+    if after.starts_with("pm") && h < 12 {
+        h += 12;
+    }
+    if after.starts_with("am") && h == 12 {
+        h = 0;
+    }
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some((h, m))
+}
+
 /// Minimal ICS (iCal) VEVENT extraction: (title, start_ms) for events inside [from_ms, to_ms].
 /// Handles DTSTART with/without params, date-only (→ midday local) and datetime (Z → UTC, else
 /// local). Deliberately tolerant — a read-only subscription feed, not a full RFC 5545 parser.
@@ -2419,6 +2468,37 @@ impl ConversationEngine {
             return None;
         }
         self.purpose_followup(&purpose.unwrap_or_default()).await
+    }
+
+    /// Curiosity as NORMAL conversation: occasionally close a reply with one get-to-know-you
+    /// question instead of quarantining all asks behind idle gates. Paced (YM_ASK_PIGGYBACK_SECS,
+    /// default 4h), skipped while a question is already pending. Most of the "how much do you
+    /// actually know about me" gaps close here — in the flow of talk, not in scheduled pings.
+    async fn maybe_piggyback_ask(&self) -> Option<String> {
+        if std::env::var("YM_ASK_PIGGYBACK").map(|v| v == "off").unwrap_or(false) {
+            return None;
+        }
+        if self.pending_onboard.lock().unwrap().is_some() {
+            return None;
+        }
+        let period_ms: i64 = std::env::var("YM_ASK_PIGGYBACK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(14_400) * 1000;
+        let now = chrono::Utc::now().timestamp_millis();
+        let last: i64 = self
+            .memory
+            .profile_get("ask_piggyback_ms")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if now - last < period_ms {
+            return None;
+        }
+        let covered = self.ask_covered().await;
+        let (key, q) = INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k))?;
+        *self.pending_onboard.lock().unwrap() = Some(format!("interest:{key}"));
+        let _ = self.memory.profile_set("ask_piggyback_ms", &now.to_string()).await;
+        Some(q.to_string())
     }
 
     /// Which interest dimensions the ask-drive has already covered (persisted, so it never re-asks).
@@ -4866,14 +4946,42 @@ impl ConversationEngine {
     pub async fn calendar_add(&self, text: &str) -> String {
         let text = text.trim();
         let today = local_now();
-        let (title, when) = match text.to_lowercase().rfind(" on ") {
+        let (mut title, when) = match text.to_lowercase().rfind(" on ") {
             Some(i) if parse_text_date_ms(&text[i + 4..], &today).is_some() => {
                 (text[..i].trim().to_string(), parse_text_date_ms(&text[i + 4..], &today))
             }
             _ => (text.to_string(), parse_text_date_ms(text, &today)),
         };
+        // Optional clock time ("at 6pm" / "at 18:30"): applied to the parsed date, or to today when
+        // only a time is given (rolling to tomorrow if that moment already passed).
+        let time = parse_time_hm(text);
+        let when = match (when, time) {
+            (Some(ms), Some((h, m))) => chrono::DateTime::from_timestamp_millis(ms)
+                .map(|t| t.with_timezone(today.offset()).date_naive())
+                .and_then(|d| d.and_hms_opt(h, m, 0))
+                .and_then(|dt| dt.and_local_timezone(*today.offset()).single())
+                .map(|t| t.timestamp_millis())
+                .or(Some(ms)),
+            (None, Some((h, m))) => {
+                let mut dt = today.date_naive().and_hms_opt(h, m, 0);
+                if let Some(d) = dt {
+                    if d.and_local_timezone(*today.offset()).single().map(|t| t.timestamp_millis() <= today.timestamp_millis()).unwrap_or(false) {
+                        dt = (today.date_naive() + chrono::Duration::days(1)).and_hms_opt(h, m, 0);
+                    }
+                }
+                dt.and_then(|d| d.and_local_timezone(*today.offset()).single()).map(|t| t.timestamp_millis())
+            }
+            (ms, None) => ms,
+        };
+        if time.is_some() {
+            if let Some(j) = title.to_lowercase().rfind(" at ") {
+                if parse_time_hm(&title).is_some() {
+                    title = title[..j].trim().to_string();
+                }
+            }
+        }
         let Some(ms) = when else {
-            return "I couldn't find a date in that — try `ym calendar add Dinner with Brishti on July 4`.".to_string();
+            return "I couldn't find a date or time in that — try `ym calendar add Dinner with Brishti on July 4 at 7pm`.".to_string();
         };
         if title.len() < 2 {
             return "What's the event? e.g. `ym calendar add Dentist on July 9`.".to_string();
@@ -4917,7 +5025,10 @@ impl ConversationEngine {
         for t in &reminders {
             if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
                 if ms <= horizon {
-                    let short: String = t.description.chars().take(70).collect();
+                    let mut short: String = t.description.chars().take(70).collect();
+                    if t.description.chars().count() > 70 {
+                        short.push('…'); // a silent mid-phrase cut ("…by July 1") reads as wrong data
+                    }
                     let when = chrono::DateTime::from_timestamp_millis(ms)
                         .map(|x| x.with_timezone(today.offset()).format("%a %b %-d").to_string())
                         .unwrap_or_default();
@@ -4977,6 +5088,104 @@ impl ConversationEngine {
         }
         self.save_calendar(&evs).await;
         n
+    }
+
+    /// PRE-EVENT PREP, part 1 (cheap): calendar events starting within the lead window
+    /// (YM_PREP_LEAD_MIN, default 90) that haven't been prepped — marked immediately (persisted)
+    /// so each event preps exactly once, restart-safe. The poll loop composes+sends detached.
+    pub async fn events_needing_prep(&self) -> Vec<(String, i64)> {
+        let lead_min: i64 = std::env::var("YM_PREP_LEAD_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+        let now = local_now().timestamp_millis();
+        let evs = self.load_calendar().await;
+        let mut prepped: Vec<String> = self
+            .memory
+            .profile_get("events_prepped")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut due = Vec::new();
+        for e in &evs {
+            let Some(ms) = e.get("when_ms").and_then(|x| x.as_i64()) else { continue };
+            let Some(title) = e.get("title").and_then(|x| x.as_str()) else { continue };
+            let key = format!("{title}|{ms}");
+            if ms > now && ms - now <= lead_min * 60_000 && !prepped.contains(&key) {
+                prepped.push(key);
+                due.push((title.to_string(), ms));
+            }
+        }
+        if !due.is_empty() {
+            if prepped.len() > 200 {
+                let cut = prepped.len() - 200;
+                prepped.drain(0..cut);
+            }
+            let _ = self
+                .memory
+                .profile_set("events_prepped", &serde_json::to_string(&prepped).unwrap_or_else(|_| "[]".into()))
+                .await;
+        }
+        due
+    }
+
+    /// PRE-EVENT PREP, part 2 (the JARVIS move): shortly before an event, pull what I know about
+    /// the people/context involved — the small personal things a great assistant remembers — plus
+    /// today's weather, and compose a short heads-up. The note nobody else can write, because
+    /// nobody else holds the memories.
+    pub async fn compose_event_prep(&self, title: &str, when_ms: i64) -> Option<String> {
+        let now = local_now();
+        let in_min = ((when_ms - now.timestamp_millis()) / 60_000).max(1);
+        // Memories relevant to the event text (semantic recall over the typed store).
+        let recalled = self
+            .memory
+            .recall_typed(mind_types::RecallQuery { text: title.to_string(), top_k: 6, kind: None })
+            .await
+            .unwrap_or_default();
+        let mut ctx = String::new();
+        for r in recalled.iter().take(6) {
+            ctx.push_str(&format!("- {}\n", r.item.text.chars().take(200).collect::<String>()));
+        }
+        // People layer: anyone named in the event title brings their living profile along.
+        let tl = title.to_lowercase();
+        for p in self.load_people_profiles().await {
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let hit = !name.is_empty() && tl.contains(&name.to_lowercase())
+                || p.get("aliases").and_then(|x| x.as_array()).map(|a| {
+                    a.iter().filter_map(|x| x.as_str()).any(|al| al.len() > 2 && tl.contains(&al.to_lowercase()))
+                }).unwrap_or(false);
+            if hit {
+                let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+                let facts: Vec<&str> = p.get("facts").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+                ctx.push_str(&format!("About {name} ({rel}): {}\n", facts.join("; ")));
+            }
+        }
+        // Practicals: today's weather, for the leave-early / bring-an-umbrella note.
+        if let Some(w) = &self.weather {
+            let place = std::env::var("YM_WEATHER_PLACE").unwrap_or_else(|_| "Bentonville".to_string());
+            if let Ok(rep) = w.report(&place).await {
+                ctx.push_str(&format!("Weather now: {}\n", rep));
+            }
+        }
+        if ctx.trim().is_empty() {
+            // Nothing personal to add — a bare reminder beats an LLM inventing substance.
+            return Some(format!("🎗 Heads-up: {title} in {in_min} min."));
+        }
+        let prompt = format!(
+            "Write a SHORT prep note (2-4 sentences, warm, no preamble) for the user's upcoming event \
+             \"{title}\" starting in {in_min} minutes. Use ONLY the context below: weave in at most TWO \
+             genuinely relevant personal details a great assistant would remember, and one practical note \
+             (weather/timing) only if actually relevant. Do not invent anything.\n\n=== CONTEXT ===\n{ctx}"
+        );
+        let cfg = GenerationConfig { max_tokens: 260, ..GenerationConfig::default() };
+        let body = self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .await
+            .ok()?
+            .text
+            .trim()
+            .to_string();
+        Some(format!("🎗 {title} — in {in_min} min.\n\n{body}"))
     }
 
     /// FOLLOW-THROUGH — the difference between filing a reminder and CARRYING it: open reminders
@@ -7523,6 +7732,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             .await
             .map(|r| r.text.trim().to_string())
             .unwrap_or_else(|_| "I looked into it but couldn't wrap up cleanly.".to_string());
+        // Curiosity in the flow of talk: occasionally end the reply with ONE get-to-know-you
+        // question (primary user only — the interest profile is his).
+        let mut ans = ans;
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            if let Some(q) = self.maybe_piggyback_ask().await {
+                ans.push_str(&format!("\n\nBtw — {q}"));
+            }
+        }
         let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
         let _ = self.memory.append_message_scoped("assistant", &ans, id.write_scope()).await;
         Ok(ans)
@@ -7540,10 +7757,16 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         let onboard = self.pending_onboard.lock().unwrap().take();
         if let Some(slot) = onboard {
-            let reply = self.capture_onboard(&slot, user_text).await;
-            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
-            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
-            return Ok(reply);
+            if looks_like_non_answer(user_text) {
+                // They asked for something else instead of answering — don't capture a command or a
+                // counter-question as a profile fact. Keep the question pending; handle the turn normally.
+                *self.pending_onboard.lock().unwrap() = Some(slot);
+            } else {
+                let reply = self.capture_onboard(&slot, user_text).await;
+                let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+                let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+                return Ok(reply);
+            }
         }
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.

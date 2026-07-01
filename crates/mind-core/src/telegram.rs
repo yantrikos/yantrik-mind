@@ -567,6 +567,26 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Pre-event prep tick — the "JARVIS move": shortly before anything on the calendar, a
+        // memory-grounded heads-up (what I know about the people involved + practicals). Marked
+        // once per event (persisted) by events_needing_prep; composition is LLM+weather so it runs
+        // detached. Quiet-gated like every outward surface.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() {
+                for (title, ms) in conv.events_needing_prep().await {
+                    let (c, api2) = (conv.clone(), api.clone());
+                    tokio::spawn(async move {
+                        if let Some(msg) = c.compose_event_prep(&title, ms).await {
+                            if tg_send(&api2, chat, &msg).await.is_ok() {
+                                eprintln!("[prep] sent pre-event prep for {title}");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
         // Price-watch tick: re-price tracked items and ping on a genuine drop / target hit. Paced
         // (YM_WATCH_SECS, default 12h), quiet-gated. The deal-finder's compounding half.
         {
@@ -636,7 +656,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let pd_secs: u64 =
                 std::env::var("YM_PROACTIVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400);
             let ask_secs: u64 =
-                std::env::var("YM_ASK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400);
+                std::env::var("YM_ASK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(7_200);
             let now = now_ms();
             let chat = active_chat.load(Ordering::Relaxed);
             let idle_ok = chat != 0
@@ -652,9 +672,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 }
                 last_digest = now; // reset cadence whether or not we spoke (never hammer)
             }
+            // Asking is NORMAL conversation, not a rare scheduled event — so the ask-drive gets its
+            // own LIGHT gate (a 2-min lull, not the 10-min deep-idle the heavier surfaces use).
+            let ask_idle: u64 =
+                std::env::var("YM_ASK_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+            let ask_ok = chat != 0
+                && !in_quiet_hours_now()
+                && now.saturating_sub(last_activity) >= ask_idle * 1000;
             if !spoke
                 && std::env::var("YM_ASK").map(|v| v != "off").unwrap_or(true)
-                && idle_ok
+                && ask_ok
                 && now.saturating_sub(last_ask) >= ask_secs * 1000
             {
                 if let Some(q) = conv.proactive_ask().await {

@@ -268,56 +268,82 @@ fn belief_item(n: &CognitiveNode) -> MemoryItem {
     }
 }
 
+// ── BeliefScorer — pluggable ranking strategy for recall_beliefs ──────────────
+
+struct BeliefScore {
+    score: f64,
+    why:   Vec<String>,
+    node:  CognitiveNode,
+}
+
+trait BeliefScorer {
+    fn score(&self, query: &str, beliefs: Vec<CognitiveNode>) -> Vec<BeliefScore>;
+}
+
+struct EmbedderScorer<'a> {
+    db: &'a YantrikDB,
+}
+
+impl<'a> BeliefScorer for EmbedderScorer<'a> {
+    fn score(&self, query: &str, beliefs: Vec<CognitiveNode>) -> Vec<BeliefScore> {
+        let Ok(q) = self.db.embed(query) else {
+            return KeywordScorer.score(query, beliefs);
+        };
+        beliefs
+            .into_iter()
+            .map(|n| {
+                let prop = node_prop(&n).unwrap_or("");
+                let sim = self.db.embed(prop).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
+                let score = sim + 0.1 * n.attrs.confidence;
+                BeliefScore {
+                    score,
+                    why: vec![format!("semantic {:.2}, confidence {:.2}", sim, n.attrs.confidence)],
+                    node: n,
+                }
+            })
+            .collect()
+    }
+}
+
+struct KeywordScorer;
+
+impl BeliefScorer for KeywordScorer {
+    fn score(&self, query: &str, beliefs: Vec<CognitiveNode>) -> Vec<BeliefScore> {
+        let qwords: Vec<String> =
+            query.to_ascii_lowercase().split_whitespace().map(|w| w.to_string()).collect();
+        beliefs
+            .into_iter()
+            .map(|n| {
+                let p = node_prop(&n).unwrap_or("").to_ascii_lowercase();
+                let overlap = qwords.iter().filter(|w| p.contains(w.as_str())).count() as f64;
+                let score = overlap + n.attrs.confidence;
+                BeliefScore {
+                    score,
+                    why: vec![format!("confidence {:.2}", n.attrs.confidence)],
+                    node: n,
+                }
+            })
+            .collect()
+    }
+}
+
 /// Belief recall. Beliefs live in `cognitive_nodes` (not the flat HNSW index), so when an embedder
 /// is attached we rank by cosine similarity of the query vs each proposition (model2vec is in-process
 /// and fast), blended with a small confidence prior so a confident near-match outranks a vague exact
 /// one. With no embedder (test builds) we fall back to keyword overlap + confidence — the prior shape.
 fn recall_beliefs(db: &YantrikDB, text: &str, top_k: usize) -> Vec<Recalled> {
     let beliefs = all_beliefs(db);
-
-    if db.has_embedder() {
-        if let Ok(q) = db.embed(text) {
-            let mut scored: Vec<(f64, f64, CognitiveNode)> = beliefs
-                .into_iter()
-                .map(|n| {
-                    let prop = node_prop(&n).unwrap_or("");
-                    let sim = db.embed(prop).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
-                    let blended = sim + 0.1 * n.attrs.confidence;
-                    (blended, sim, n)
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            return scored
-                .into_iter()
-                .take(top_k.max(1))
-                .map(|(blended, sim, n)| Recalled {
-                    score: blended,
-                    why: vec![format!("semantic {:.2}, confidence {:.2}", sim, n.attrs.confidence)],
-                    item: belief_item(&n),
-                })
-                .collect();
-        }
-    }
-
-    // keyword fallback (no embedder)
-    let qwords: Vec<String> = text.to_ascii_lowercase().split_whitespace().map(|w| w.to_string()).collect();
-    let mut scored: Vec<(f64, CognitiveNode)> = beliefs
-        .into_iter()
-        .map(|n| {
-            let p = node_prop(&n).unwrap_or("").to_ascii_lowercase();
-            let overlap = qwords.iter().filter(|w| p.contains(w.as_str())).count() as f64;
-            (overlap + n.attrs.confidence, n)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let scorer: Box<dyn BeliefScorer + '_> = if db.has_embedder() {
+        Box::new(EmbedderScorer { db })
+    } else {
+        Box::new(KeywordScorer)
+    };
+    let mut scored = scorer.score(text, beliefs);
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     scored
         .into_iter()
         .take(top_k.max(1))
-        .map(|(score, n)| Recalled {
-            score,
-            why: vec![format!("confidence {:.2}", n.attrs.confidence)],
-            item: belief_item(&n),
-        })
+        .map(|s| Recalled { score: s.score, why: s.why, item: belief_item(&s.node) })
         .collect()
 }
 
@@ -1773,5 +1799,73 @@ mod tests {
             tension.about
         );
         assert!(tension.pressure >= 0.3, "pressure should be clamped to at least 0.3, got {}", tension.pressure);
+    }
+
+    /// KeywordScorer: confidence breaks the tie when two beliefs have identical keyword overlap.
+    /// Both "flower" and "red car" have exactly 1 match with query "red flower"; "flower" earns
+    /// higher confidence via 5 Bayesian updates vs 1, so it must rank first. Exercises the same
+    /// BeliefScorer → sort → truncate → Recalled pipeline as EmbedderScorer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn keyword_scorer_confidence_breaks_overlap_tie() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+
+        // 5 positive assertions → high posterior confidence.
+        for _ in 0..5 {
+            mem.remember_as_belief(BeliefAssertion {
+                statement: "a lovely flower grows here".into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+        }
+        // 1 assertion → lower confidence (same prior, same weight, fewer updates).
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "the red car is fast".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: None,
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        // Zero overlap with "red flower" — must rank last regardless of confidence.
+        mem.remember_as_belief(BeliefAssertion {
+            statement: "the sky is completely blue".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: None,
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+
+        let hits = mem
+            .recall_typed(RecallQuery { text: "red flower".into(), top_k: 10, kind: None })
+            .await
+            .unwrap();
+
+        let flower_pos = hits.iter().position(|r| r.item.text.contains("flower")).expect("flower belief missing");
+        let red_pos = hits.iter().position(|r| r.item.text.contains("red car")).expect("red car belief missing");
+        let sky_pos = hits.iter().position(|r| r.item.text.contains("blue")).expect("sky belief missing");
+
+        assert!(
+            flower_pos < red_pos,
+            "higher-confidence belief (5 assertions) must outrank equal-overlap lower-confidence one (1 assertion); got: {:?}",
+            hits.iter().map(|r| (&r.item.text, r.score)).collect::<Vec<_>>()
+        );
+        assert!(
+            sky_pos > red_pos,
+            "zero-overlap belief must rank below any one-overlap belief; got: {:?}",
+            hits.iter().map(|r| (&r.item.text, r.score)).collect::<Vec<_>>()
+        );
+        // KeywordScorer always emits "confidence" in the why — distinguishes it from embedder path.
+        assert!(
+            hits.iter().all(|r| r.why.iter().any(|w| w.contains("confidence"))),
+            "KeywordScorer why strings must contain 'confidence'; got: {:?}",
+            hits.iter().map(|r| &r.why).collect::<Vec<_>>()
+        );
     }
 }

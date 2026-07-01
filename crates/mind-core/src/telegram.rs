@@ -336,6 +336,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_resolve = 0u64; // prediction-resolver cadence (grade due predictions, surface verdicts)
     let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
+    let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -505,6 +506,22 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                 }
                 last_family = now;
+            }
+        }
+
+        // Price-watch tick: re-price tracked items and ping on a genuine drop / target hit. Paced
+        // (YM_WATCH_SECS, default 12h), quiet-gated. The deal-finder's compounding half.
+        {
+            let period: u64 = std::env::var("YM_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(43_200);
+            let now = now_ms();
+            if now.saturating_sub(last_pricewatch) >= period * 1000 {
+                let chat = active_chat.load(Ordering::Relaxed);
+                if chat != 0 && !in_quiet_hours_now() {
+                    for alert in conv.check_price_watches().await {
+                        let _ = tg_send(&api, chat, &alert).await;
+                    }
+                }
+                last_pricewatch = now;
             }
         }
 

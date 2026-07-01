@@ -3376,7 +3376,9 @@ impl ConversationEngine {
              Compare them, then name ONE '⭐ Best pick' with a one-line why. Do NOT invent prices or products that aren't in the \
              evidence; if the evidence is thin, say so and suggest the best next search rather than fabricating. Prefer in-budget, \
              well-reviewed, good value.\n\n=== SEARCH RESULTS ===\n{snippets}\n\n=== PAGE EXCERPTS ===\n{}\n\n\
-             Format: a scannable shortlist (one line per option), then the best pick.",
+             Format: a scannable shortlist (one line per option), then the '⭐ Best pick', then a one-line \
+             '💡 Price read:' saying whether the best pick's price is LOW / FAIR / HIGH versus the typical \
+             range you can see in the evidence (say 'not enough data' if you can't tell).",
             if excerpts.trim().is_empty() { "(none readable — retailer bot-walls; rely on the search results)".to_string() } else { excerpts.trim().to_string() }
         );
         let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
@@ -3386,6 +3388,209 @@ impl ConversationEngine {
         };
         let cap = budget.map(|b| format!(" · under ${b:.0}")).unwrap_or_default();
         format!("🛍️ Deals — {query}{cap}\n\n{body}")
+    }
+
+    // ===== PRICE WATCH — the defining deal-finder feature: track an item, ping on a real drop =====
+    // The compare loop pointed at prices: hold the best-seen price, re-check on a cadence, surface only a
+    // genuine improvement (new low, or your target hit). What CamelCamelCamel/Keepa/Honey do — but tied to
+    // your budget + the person it's for, and grounded (real listing + link, never an invented price).
+
+    /// Structured "single cheapest real listing" for a query — the price-comparison primitive the watch
+    /// loop diffs on. Returns (name, price_usd, retailer, url), or None if no concrete price surfaced.
+    async fn best_offer(&self, query: &str, gender: &str) -> Option<(String, f64, String, String)> {
+        let searcher = self.searcher.as_ref()?;
+        let sq = if gender.is_empty() { query.to_string() } else { format!("{gender} {query}") };
+        let mut hits: Vec<mind_tools::SearchHit> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for q in [format!("{sq} best price buy online"), format!("{sq} price")] {
+            if let Ok(rs) = searcher.search(&q, 8).await {
+                for h in rs {
+                    if !h.url.is_empty() && seen.insert(h.url.clone()) {
+                        hits.push(h);
+                    }
+                }
+            }
+        }
+        if hits.is_empty() {
+            return None;
+        }
+        let mut excerpts = String::new();
+        if let Some(web) = &self.web {
+            let start = chrono::Utc::now().timestamp_millis();
+            let mut read = 0;
+            for h in hits.iter().take(4) {
+                if read >= 2 || chrono::Utc::now().timestamp_millis() - start > 50_000 {
+                    break;
+                }
+                if let Ok(Ok(b)) = tokio::time::timeout(std::time::Duration::from_secs(18), web.fetch(&h.url)).await {
+                    if b.trim().len() > 60 {
+                        read += 1;
+                        let ex: String = b.chars().take(2000).collect();
+                        excerpts.push_str(&format!("\n[from {}]\n{ex}\n", h.url));
+                    }
+                }
+            }
+        }
+        let snippets: String = hits.iter().take(10).map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url)).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "Find the SINGLE cheapest real, in-stock listing for \"{query}\" in the evidence below. Use ONLY a \
+             price that actually appears in the evidence — never invent one. Output ONLY JSON: \
+             {{\"name\":\"...\",\"price_usd\":0.0,\"retailer\":\"...\",\"url\":\"...\"}} — or {{}} if no concrete \
+             priced listing is present.\n\n=== SEARCH RESULTS ===\n{snippets}\n\n=== PAGE EXCERPTS ===\n{}",
+            if excerpts.trim().is_empty() { "(none readable)".to_string() } else { excerpts.trim().to_string() }
+        );
+        let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+        let v = parse_json_obj(&self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await.ok()?.text);
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let price = v.get("price_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let retailer = v.get("retailer").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        if name.len() >= 4 && price > 1.0 {
+            Some((name, price, retailer, url))
+        } else {
+            None
+        }
+    }
+
+    async fn load_watches(&self) -> Vec<serde_json::Value> {
+        self.memory.profile_get("price_watches").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned()).unwrap_or_default()
+    }
+    async fn save_watches(&self, w: &[serde_json::Value]) {
+        let _ = self.memory.profile_set("price_watches", &serde_json::Value::Array(w.to_vec()).to_string()).await;
+    }
+
+    /// `ym watch <item> [target$]` — start tracking an item's price; I baseline the best price now and
+    /// ping you when it drops (or hits your target). Personalized like the finder (gender/taste).
+    pub async fn watch_price(&self, args: &str) -> String {
+        let args = args.trim();
+        if args.len() < 2 {
+            return "Watch what? e.g. `ym watch sony wh-1000xm5 300` (trailing number = your target price).".to_string();
+        }
+        let mut target: Option<f64> = None;
+        let mut toks: Vec<String> = Vec::new();
+        for t in args.split_whitespace() {
+            let c = t.trim_start_matches('$').replace(',', "");
+            if let Ok(n) = c.parse::<f64>() {
+                if n >= 5.0 { target = Some(n); continue; }
+            }
+            toks.push(t.to_string());
+        }
+        let query = toks.join(" ");
+        // Personalize gender from a named/relationship target (same as the finder).
+        let people = self.load_people_profiles().await;
+        let ql = query.to_lowercase();
+        let gender = people.iter()
+            .find(|p| person_matches(p, &ql) || p.get("relationship").and_then(|x| x.as_str()).map(|r| !r.is_empty() && ql.contains(r)).unwrap_or(false))
+            .and_then(|p| p.get("relationship").and_then(|x| x.as_str()))
+            .map(|r| { let r = r.to_lowercase(); if ["wife","mother","mom","daughter","girlfriend","sister"].iter().any(|w| r.contains(w)) { "women's" } else if ["husband","father","dad","son","boyfriend","brother"].iter().any(|w| r.contains(w)) { "men's" } else { "" } })
+            .unwrap_or("");
+        let offer = self.best_offer(&query, gender).await;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut watches = self.load_watches().await;
+        watches.retain(|w| w.get("query").and_then(|x| x.as_str()).map(|q| q.to_lowercase()) != Some(ql.clone()));
+        let (base_price, base_retailer, base_url) = match &offer {
+            Some((_, p, r, u)) => (*p, r.clone(), u.clone()),
+            None => (0.0, String::new(), String::new()),
+        };
+        watches.push(serde_json::json!({
+            "query": query, "gender": gender, "target": target,
+            "best_price": base_price, "best_retailer": base_retailer, "best_url": base_url,
+            "added_ms": now, "last_ms": now,
+        }));
+        self.save_watches(&watches).await;
+        match offer {
+            Some((name, p, r, _)) => format!(
+                "👁 Watching \"{query}\" — best right now: ${p:.2} ({name}{}).{} I'll ping you when it drops{}.",
+                if r.is_empty() { String::new() } else { format!(" at {r}") },
+                target.map(|t| if p <= t { format!(" That's already at/under your ${t:.0} target! 🎯") } else { format!(" It's ${:.2} above your ${t:.0} target.", p - t) }).unwrap_or_default(),
+                target.map(|t| format!(" below ${t:.0}")).unwrap_or_else(|| " to a new low".to_string()),
+            ),
+            None => format!("👁 Watching \"{query}\" — I couldn't pin a price this moment, but I'll keep checking and ping you when I find a good one{}.", target.map(|t| format!(" under ${t:.0}")).unwrap_or_default()),
+        }
+    }
+
+    /// `ym watches` — active price watches with the best price seen so far.
+    pub async fn watches_view(&self) -> String {
+        let watches = self.load_watches().await;
+        if watches.is_empty() {
+            return "No price watches yet. `ym watch <item> [target$]` and I'll track it + ping you on a drop.".to_string();
+        }
+        let mut lines = vec![format!("👁 Price watches ({}):", watches.len())];
+        for w in &watches {
+            let q = w.get("query").and_then(|x| x.as_str()).unwrap_or("?");
+            let p = w.get("best_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let r = w.get("best_retailer").and_then(|x| x.as_str()).unwrap_or("");
+            let t = w.get("target").and_then(|x| x.as_f64());
+            let price_str = if p > 0.0 { format!("best ${p:.2}{}", if r.is_empty() { String::new() } else { format!(" @ {r}") }) } else { "no price yet".to_string() };
+            let tgt = t.map(|t| format!(" · target ${t:.0}")).unwrap_or_default();
+            lines.push(format!("• {q} — {price_str}{tgt}"));
+        }
+        lines.push("\n`ym unwatch <item>` to stop.".to_string());
+        lines.join("\n")
+    }
+
+    /// `ym unwatch <item>` — stop tracking.
+    pub async fn unwatch_price(&self, name: &str) -> String {
+        let q = name.trim().to_lowercase();
+        let mut watches = self.load_watches().await;
+        let before = watches.len();
+        watches.retain(|w| !w.get("query").and_then(|x| x.as_str()).map(|s| s.to_lowercase().contains(&q)).unwrap_or(false));
+        if watches.len() == before {
+            return format!("No watch matching \"{}\".", name.trim());
+        }
+        self.save_watches(&watches).await;
+        "Stopped watching that.".to_string()
+    }
+
+    /// Periodic drop-check — re-price each watch, and surface only a GENUINE improvement (a new low, or the
+    /// target hit for the first time). Updates the stored best in place (the compare-loop delta). Returns
+    /// alert lines for the poll loop.
+    pub async fn check_price_watches(&self) -> Vec<String> {
+        let mut watches = self.load_watches().await;
+        if watches.is_empty() {
+            return Vec::new();
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut out = Vec::new();
+        let mut changed = false;
+        for w in watches.iter_mut() {
+            let query = w.get("query").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if query.is_empty() {
+                continue;
+            }
+            let gender = w.get("gender").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let prev = w.get("best_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let target = w.get("target").and_then(|x| x.as_f64());
+            if let Some((name, price, retailer, url)) = self.best_offer(&query, &gender).await {
+                w["last_ms"] = serde_json::json!(now);
+                // A genuine improvement = strictly lower than the best we'd seen (or first price we've found).
+                let new_low = prev <= 0.0 || price < prev - 0.01;
+                let target_hit = target.map(|t| price <= t).unwrap_or(false);
+                let already_hit = w.get("notified_target").and_then(|x| x.as_bool()).unwrap_or(false);
+                if new_low {
+                    let was = if prev > 0.0 { format!(" (was ${prev:.2})") } else { String::new() };
+                    let tgt = if target_hit { " — at/under your target! 🎯".to_string() } else { String::new() };
+                    out.push(format!("💰 Price drop — {query}: now ${price:.2}{was} — {name}{}{tgt}\n{url}", if retailer.is_empty() { String::new() } else { format!(" @ {retailer}") }));
+                    w["best_price"] = serde_json::json!(price);
+                    w["best_retailer"] = serde_json::json!(retailer);
+                    w["best_url"] = serde_json::json!(url);
+                    changed = true;
+                } else if target_hit && !already_hit {
+                    out.push(format!("🎯 Target hit — {query}: ${price:.2} (≤ your ${:.0}) — {name}\n{url}", target.unwrap_or(0.0)));
+                    changed = true;
+                }
+                if target_hit {
+                    w["notified_target"] = serde_json::json!(true);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_watches(&watches).await;
+        }
+        out
     }
 
     async fn news_headlines(&self, topic: Option<&str>) -> String {
@@ -4588,6 +4793,10 @@ impl ConversationEngine {
             // --- deal finder: grounded, budget-aware, gift-personalized shopping ---
             "deals" | "deal" | "shop" | "shopping" if !rest.is_empty() => self.find_deals(&rest).await,
             "deals" | "deal" | "shop" | "shopping" => "What are you shopping for? e.g. `ym deals gold watch 200`".to_string(),
+            // --- price watch: track an item, ping on a real drop (the defining deal-finder feature) ---
+            "watch" | "track-price" | "pricewatch" if !rest.is_empty() => self.watch_price(&rest).await,
+            "watches" | "watching" | "watchlist" => self.watches_view().await,
+            "unwatch" | "untrack-price" if !rest.is_empty() => self.unwatch_price(&rest).await,
             "consolidate" | "distill" => format!("Distilled {} new item(s) from recent conversation into memory.", self.consolidate_force().await),
             "person" => {
                 let mut p = rest.splitn(2, char::is_whitespace);

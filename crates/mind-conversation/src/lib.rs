@@ -231,11 +231,49 @@ fn task_similar(a: &str, b: &str) -> bool {
 }
 
 /// True if a person record matches a lowercase query by name OR any nickname (substring either way).
+/// How a needle is compared against stored text. The loose `Substring` mode is right for fuzzy
+/// lookup ("priya" finds "Priya Sharma"), but wrong for destructive ops: a short needle like a name
+/// could delete an unrelated record by matching a substring — e.g. `ana` inside `banana`, or inside a
+/// parenthetical alias `(Susana)`. Destructive callers (forget) default to `WordBoundary`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatchMode {
+    /// Match either string inside the other (case-insensitive). Loose; good for lookup.
+    Substring,
+    /// The shorter string must occur in the longer as a whole word (bounded by non-alphanumerics).
+    WordBoundary,
+}
+
+/// True if `needle` occurs in `haystack` as a whole word — bounded on both sides by a
+/// non-alphanumeric char (or a string edge). Both are expected already lowercased. `ana` matches
+/// `an ana` and `ana (x)` but not `banana` or `anastasia`.
+fn word_boundary_contains(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bound = |c: Option<char>| c.map_or(true, |c| !c.is_alphanumeric());
+    haystack.match_indices(needle).any(|(i, m)| bound(haystack[..i].chars().next_back()) && bound(haystack[i + m.len()..].chars().next()))
+}
+
+/// Does `q` (already lowercased) match `field` under `mode`? Empty fields never match.
+fn field_matches(field: &str, q: &str, mode: MatchMode) -> bool {
+    let sl = field.to_lowercase();
+    if sl.is_empty() {
+        return false;
+    }
+    match mode {
+        MatchMode::Substring => sl.contains(q) || q.contains(&sl),
+        // Bidirectional so a longer query still matches a shorter stored name and vice-versa, but the
+        // shorter side must land on word boundaries in the longer one.
+        MatchMode::WordBoundary => word_boundary_contains(&sl, q) || word_boundary_contains(q, &sl),
+    }
+}
+
 fn person_matches(p: &serde_json::Value, q: &str) -> bool {
-    let hit = |s: &str| {
-        let sl = s.to_lowercase();
-        !sl.is_empty() && (sl.contains(q) || q.contains(&sl))
-    };
+    person_matches_mode(p, q, MatchMode::Substring)
+}
+
+fn person_matches_mode(p: &serde_json::Value, q: &str, mode: MatchMode) -> bool {
+    let hit = |s: &str| field_matches(s, q, mode);
     if p.get("name").and_then(|x| x.as_str()).map(hit).unwrap_or(false) {
         return true;
     }
@@ -3972,8 +4010,10 @@ impl ConversationEngine {
         }
         let mut store = self.load_people_profiles().await;
         let before = store.len();
-        let removed: Vec<String> = store.iter().filter(|p| person_matches(p, &q)).filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from)).collect();
-        store.retain(|p| !person_matches(p, &q));
+        // Word-boundary matching: a short name can't delete an unrelated person via a substring of
+        // their name/alias (e.g. "Ana" removing "Susana" or "Anastasia").
+        let removed: Vec<String> = store.iter().filter(|p| person_matches_mode(p, &q, MatchMode::WordBoundary)).filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from)).collect();
+        store.retain(|p| !person_matches_mode(p, &q, MatchMode::WordBoundary));
         if store.len() == before {
             return format!("I don't have anyone matching \"{}\" in your family layer.", name.trim());
         }
@@ -4963,7 +5003,9 @@ impl ConversationEngine {
                 .unwrap_or_default();
             let mut hit = false;
             for r in rs {
-                if r.item.text.to_lowercase().contains(&needle) {
+                // Word-boundary match so a short needle (a name) can't purge a belief that merely
+                // contains it as a substring (e.g. "ana" inside "banana" or a parenthetical alias).
+                if word_boundary_contains(&r.item.text.to_lowercase(), &needle) {
                     if self.memory.forget(&r.item.id).await.unwrap_or(false) {
                         forgotten += 1;
                         hit = true;
@@ -7136,6 +7178,33 @@ mod tests {
         let p = scripted.last_prompt();
         assert!(p.contains("BRIEFMAIL") && p.contains("BRIEFGH"), "briefing must compose both sources:\n{p}");
         assert!(p.contains("NOT instructions"), "briefing data must be untrusted-wrapped:\n{p}");
+    }
+
+    #[test]
+    fn word_boundary_contains_respects_boundaries() {
+        // whole-word hits (start, middle, end, punctuation-bounded)
+        assert!(word_boundary_contains("ana", "ana"));
+        assert!(word_boundary_contains("ana lee", "ana"));
+        assert!(word_boundary_contains("lee ana", "ana"));
+        assert!(word_boundary_contains("wife (ana)", "ana"));
+        // substrings inside a larger word must NOT match
+        assert!(!word_boundary_contains("banana", "ana"));
+        assert!(!word_boundary_contains("anastasia", "ana"));
+        assert!(!word_boundary_contains("susana", "ana"));
+        assert!(!word_boundary_contains("ana", ""));
+    }
+
+    #[test]
+    fn forget_person_matching_is_word_bounded() {
+        let susana = serde_json::json!({ "name": "Susana", "aliases": ["Su"] });
+        // Word-boundary mode: "Ana" must not clobber "Susana" via a substring…
+        assert!(!person_matches_mode(&susana, "ana", MatchMode::WordBoundary));
+        // …but the loose lookup mode still finds her (fuzzy).
+        assert!(person_matches_mode(&susana, "ana", MatchMode::Substring));
+
+        // A real match on the whole name still forgets under word-boundary mode.
+        let ana = serde_json::json!({ "name": "Ana", "aliases": ["Ana (from work)"] });
+        assert!(person_matches_mode(&ana, "ana", MatchMode::WordBoundary));
     }
 
     #[test]

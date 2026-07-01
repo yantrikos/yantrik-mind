@@ -112,6 +112,75 @@ fn follow_ok(url: &str, seed_host: &str) -> bool {
     IDENTITY.iter().any(|d| h == *d) || h.ends_with(".github.io")
 }
 
+/// Parse a month-day from "MM-DD", "M/D", "Month DD", or "DD Month" into a normalized "MM-DD". None if
+/// it can't be read. Used for people's key dates (birthday/anniversary), which recur yearly.
+fn parse_monthday(s: &str) -> Option<String> {
+    let t = s.trim().to_lowercase();
+    if t.len() < 3 {
+        return None;
+    }
+    let months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+    if t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        let parts: Vec<&str> = t.split(['-', '/', '.']).collect();
+        if parts.len() >= 2 {
+            let a: u32 = parts[0].trim().parse().ok()?;
+            let b: u32 = parts[1].trim().parse().ok()?;
+            let (m, d) = if a > 12 { (b, a) } else { (a, b) };
+            if (1..=12).contains(&m) && (1..=31).contains(&d) {
+                return Some(format!("{m:02}-{d:02}"));
+            }
+        }
+        return None;
+    }
+    let (mut month, mut day) = (None, None);
+    for tok in t.split(|c: char| c == ' ' || c == ',').filter(|x| !x.is_empty()) {
+        if tok.len() >= 3 {
+            if let Some(mi) = months.iter().position(|m| m.starts_with(tok)) {
+                month = Some((mi + 1) as u32);
+                continue;
+            }
+        }
+        if let Ok(n) = tok.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<u32>() {
+            if (1..=31).contains(&n) {
+                day = Some(n);
+            }
+        }
+    }
+    match (month, day) {
+        (Some(m), Some(d)) => Some(format!("{m:02}-{d:02}")),
+        _ => None,
+    }
+}
+
+/// Days until the next occurrence of a "MM-DD" from `today` (rolls into next year if already passed).
+fn days_until_mmdd(mmdd: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
+    use chrono::Datelike;
+    let mut parts = mmdd.split('-');
+    let m: u32 = parts.next()?.trim().parse().ok()?;
+    let d: u32 = parts.next()?.trim().parse().ok()?;
+    let today_naive = today.date_naive();
+    let year = today_naive.year();
+    let target = chrono::NaiveDate::from_ymd_opt(year, m, d)
+        .filter(|t| *t >= today_naive)
+        .or_else(|| chrono::NaiveDate::from_ymd_opt(year + 1, m, d))?;
+    Some((target - today_naive).num_days())
+}
+
+/// The soonest upcoming key date for a person, as a short "label in Nd" line. None if they have none.
+fn next_date_line(p: &serde_json::Value, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<String> {
+    let mut best: Option<(i64, String)> = None;
+    for d in p.get("dates").and_then(|x| x.as_array())? {
+        let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date");
+        let mmdd = d.get("mmdd").and_then(|x| x.as_str()).unwrap_or("");
+        if let Some(days) = days_until_mmdd(mmdd, today) {
+            if best.as_ref().map(|(b, _)| days < *b).unwrap_or(true) {
+                best = Some((days, format!("{label} in {days}d")));
+            }
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Parse a "YYYY-MM-DD" date into epoch-ms at UTC midnight. None if unparseable.
 fn parse_ymd_ms(s: &str) -> Option<i64> {
     let d = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()?;
@@ -1490,19 +1559,23 @@ impl ConversationEngine {
         // ONE pass extracts four typed slices: durable FACTS (-> beliefs), explicit GOALS and
         // PREFERENCES (-> named capture surfaced by :reflect), and future COMMITMENTS (-> tasks).
         let prompt = format!(
-            "From this conversation excerpt, extract four things:\n\
+            "From this conversation excerpt, extract five things:\n\
              1. DURABLE facts about the user and their world (long-term, third-person).\n\
              2. Explicit GOALS the user has stated (aspirations, intentions: \"I want to...\").\n\
              3. Explicit PREFERENCES the user has stated (style, likes/dislikes: \"I prefer...\").\n\
              4. The user's future COMMITMENTS or intentions, with any deadline mentioned.\n\
+             5. PEOPLE in the user's life mentioned (family, friends): for each, their name, relationship \
+             to the user, any durable facts about THEM, and any key DATES (birthday/anniversary).\n\
              Skip greetings, ephemera, and transient chatter. Output ONLY JSON:\n\
              {{\"beliefs\":[{{\"statement\":\"...\",\"certainty\":0.0-1.0}}], \
              \"goals\":[{{\"goal\":\"...\"}}], \
              \"preferences\":[{{\"preference\":\"...\"}}], \
-             \"commitments\":[{{\"task\":\"...\",\"due\":\"tomorrow|tonight|next week|in 3 days|in 2 hours|null\"}}]}}\n\
+             \"commitments\":[{{\"task\":\"...\",\"due\":\"tomorrow|tonight|next week|in 3 days|in 2 hours|null\"}}], \
+             \"people\":[{{\"name\":\"...\",\"relationship\":\"wife|son|friend|...\",\"facts\":[\"...\"],\"dates\":[{{\"label\":\"birthday\",\"date\":\"MM-DD or Month DD\"}}]}}]}}\n\
              Beliefs are standalone + third-person (e.g. \"Pranab uses async Rust\"). Goals and \
              preferences are plain text (e.g. \"learn Rust\", \"terse replies\"). Tasks are \
-             imperative (e.g. \"send Pranab the Q3 report\"). Use empty arrays if none.\n\nCONVERSATION:\n{transcript}"
+             imperative (e.g. \"send Pranab the Q3 report\"). People facts are about the PERSON, not the \
+             user (e.g. \"enjoys hiking\", \"allergic to nuts\"). Use empty arrays if none.\n\nCONVERSATION:\n{transcript}"
         );
         let messages = vec![
             ChatMessage::system(&self.persona),
@@ -1570,6 +1643,11 @@ impl ConversationEngine {
                 count += 1;
             }
         }
+        // (4) PEOPLE — merge into the family/people layer (living per-person profiles + key dates), kept
+        // current from every conversation for free (rides this same extraction call). This is how
+        // "personal + family always kept updated" is honored without a per-turn cost.
+        let people = v.get("people").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        count += self.merge_people(people).await;
         *self.last_consolidated.lock().unwrap() = max_id;
         let _ = self.memory.profile_set("last_consolidated", &max_id.to_string()).await; // survive restarts
         count
@@ -3276,6 +3354,192 @@ impl ConversationEngine {
         lines.join("\n")
     }
 
+    // ===== PEOPLE / FAMILY LAYER — living per-person profiles, kept current from conversation =====
+    // Distinct from the household read-isolation registry above (that's about WHO can see WHAT). This is
+    // the mind's knowledge OF the people in the user's life: a profile per person, auto-updated from every
+    // conversation (via `consolidate`), with key dates it proactively tends. Stored in profile KV
+    // "people_profiles" = [{name, relationship, facts:[..], dates:[{label, mmdd}], updated_ms}].
+
+    async fn load_people_profiles(&self) -> Vec<serde_json::Value> {
+        self.memory.profile_get("people_profiles").await.ok().flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned()).unwrap_or_default()
+    }
+    async fn save_people_profiles(&self, p: &[serde_json::Value]) {
+        let _ = self.memory.profile_set("people_profiles", &serde_json::Value::Array(p.to_vec()).to_string()).await;
+    }
+
+    /// Merge freshly-extracted people into the living profiles: upsert by name, dedupe facts, refresh the
+    /// relationship, and upsert key dates by label. Returns how many people were touched (for the
+    /// consolidation counter). Revise-in-place — one evolving profile per person, not an ever-growing pile.
+    async fn merge_people(&self, people: Vec<serde_json::Value>) -> usize {
+        if people.is_empty() {
+            return 0;
+        }
+        let norm = |s: &str| -> String { s.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ") };
+        let mut store = self.load_people_profiles().await;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut touched = 0usize;
+        for pv in people {
+            let name = pv.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if name.len() < 2 {
+                continue;
+            }
+            let key = norm(&name);
+            let idx = store.iter().position(|p| p.get("name").and_then(|x| x.as_str()).map(|n| norm(n)) == Some(key.clone()));
+            let mut rec = match idx {
+                Some(i) => store.remove(i),
+                None => serde_json::json!({ "name": name, "relationship": "", "facts": [], "dates": [] }),
+            };
+            if let Some(r) = pv.get("relationship").and_then(|x| x.as_str()) {
+                if !r.trim().is_empty() {
+                    rec["relationship"] = serde_json::json!(r.trim().to_lowercase());
+                }
+            }
+            // facts — dedupe by normalized text, keep the most recent ~24
+            let mut facts: Vec<serde_json::Value> = rec.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let mut fkeys: std::collections::HashSet<String> = facts.iter().filter_map(|f| f.as_str()).map(norm).collect();
+            for f in pv.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                if let Some(s) = f.as_str() {
+                    let s = s.trim();
+                    if s.len() >= 4 && fkeys.insert(norm(s)) {
+                        facts.push(serde_json::json!(s));
+                    }
+                }
+            }
+            if facts.len() > 24 {
+                facts = facts.split_off(facts.len() - 24);
+            }
+            rec["facts"] = serde_json::json!(facts);
+            // dates — upsert by label (normalized to MM-DD)
+            let mut dates: Vec<serde_json::Value> = rec.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            for d in pv.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date").trim().to_lowercase();
+                if let Some(mmdd) = d.get("date").and_then(|x| x.as_str()).and_then(parse_monthday) {
+                    dates.retain(|e| e.get("label").and_then(|x| x.as_str()) != Some(label.as_str()));
+                    dates.push(serde_json::json!({ "label": label, "mmdd": mmdd }));
+                }
+            }
+            rec["dates"] = serde_json::json!(dates);
+            rec["updated_ms"] = serde_json::json!(now);
+            store.push(rec);
+            touched += 1;
+        }
+        self.save_people_profiles(&store).await;
+        touched
+    }
+
+    /// `ym family` — everyone I know about, with each one's next key date (rolled to its next occurrence).
+    pub async fn family_view(&self) -> String {
+        let store = self.load_people_profiles().await;
+        if store.is_empty() {
+            return "I don't know anyone in your life yet — mention your family/friends and I'll start keeping track (birthdays, what they're into, plans).".to_string();
+        }
+        let today = local_now();
+        let mut lines = vec![format!("👪 People I keep track of ({}):", store.len())];
+        for p in &store {
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+            let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+            let nfacts = p.get("facts").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            let next = next_date_line(p, &today);
+            let rel_tag = if rel.is_empty() { String::new() } else { format!(" ({rel})") };
+            lines.push(format!("• {name}{rel_tag} — {nfacts} thing(s) I know{}", next.map(|n| format!("; {n}")).unwrap_or_default()));
+        }
+        lines.push("\n`ym about <name>` for the full picture on someone.".to_string());
+        lines.join("\n")
+    }
+
+    /// `ym about <name>` — the full living profile of one person: relationship, what I know, key dates.
+    pub async fn person_about(&self, name: &str) -> String {
+        let norm = |s: &str| s.to_lowercase();
+        let store = self.load_people_profiles().await;
+        let q = norm(name.trim());
+        let p = match store.iter().find(|p| p.get("name").and_then(|x| x.as_str()).map(|n| norm(n).contains(&q)).unwrap_or(false)) {
+            Some(p) => p,
+            None => return format!("I don't know anyone called \"{}\" yet.", name.trim()),
+        };
+        let pname = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+        let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+        let mut out = vec![format!("👤 {pname}{}", if rel.is_empty() { String::new() } else { format!(" — your {rel}") })];
+        let today = local_now();
+        let dates: Vec<&serde_json::Value> = p.get("dates").and_then(|x| x.as_array()).map(|a| a.iter().collect()).unwrap_or_default();
+        if !dates.is_empty() {
+            out.push("\nKey dates:".to_string());
+            for d in dates {
+                let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date");
+                let mmdd = d.get("mmdd").and_then(|x| x.as_str()).unwrap_or("");
+                let days = days_until_mmdd(mmdd, &today);
+                let when = days.map(|n| if n == 0 { " (today! 🎉)".to_string() } else { format!(" (in {n} day(s))") }).unwrap_or_default();
+                out.push(format!("  • {label}: {mmdd}{when}"));
+            }
+        }
+        let facts: Vec<&str> = p.get("facts").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+        if facts.is_empty() {
+            out.push("\n(I don't have specifics yet — tell me about them.)".to_string());
+        } else {
+            out.push("\nWhat I know:".to_string());
+            for f in facts {
+                out.push(format!("  • {f}"));
+            }
+        }
+        out.join("\n")
+    }
+
+    /// Upcoming key dates across everyone, within `within_days`. Returns (name, label, days, mmdd) for
+    /// the proactive tick to surface. Rolls each date to its next occurrence from today.
+    pub async fn upcoming_people_dates(&self, within_days: i64) -> Vec<(String, String, i64, String)> {
+        let store = self.load_people_profiles().await;
+        let today = local_now();
+        let mut out = Vec::new();
+        for p in &store {
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date").to_string();
+                let mmdd = d.get("mmdd").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                if let Some(days) = days_until_mmdd(&mmdd, &today) {
+                    if days <= within_days {
+                        out.push((name.clone(), label, days, mmdd));
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|(_, _, d, _)| *d);
+        out
+    }
+
+    /// Proactive family tick — surface upcoming key dates once each (deduped by name|label|year), with a
+    /// gentle nudge to plan. Returns lines for the poll loop to send. The "always keep family updated"
+    /// promise, made visible: I bring up the birthday before you'd have to remember it.
+    pub async fn family_date_nudges(&self, within_days: i64) -> Vec<String> {
+        let upcoming = self.upcoming_people_dates(within_days).await;
+        if upcoming.is_empty() {
+            return Vec::new();
+        }
+        let year = local_now().format("%Y").to_string();
+        let mut reminded: std::collections::HashSet<String> = self
+            .memory
+            .profile_get("people_reminded")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .map(|v| v.into_iter().collect())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (name, label, days, mmdd) in upcoming {
+            let key = format!("{name}|{label}|{year}");
+            if !reminded.insert(key) {
+                continue;
+            }
+            let when = if days == 0 { "today".to_string() } else { format!("in {days} day(s) ({mmdd})") };
+            out.push(format!("🎂 {name}'s {label} is {when}. Want me to help you plan something?"));
+        }
+        if !out.is_empty() {
+            let _ = self.memory.profile_set("people_reminded", &serde_json::to_string(&reminded.iter().collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())).await;
+        }
+        out
+    }
+
     async fn news_track(&self, topic: &str) -> String {
         if topic.len() < 2 {
             return "What should I track? e.g. `ym news track geopolitics`".to_string();
@@ -4113,6 +4377,10 @@ impl ConversationEngine {
             // --- plugins: the declarative registry — list + enable/disable (persisted to manifest) ---
             // --- household: people registry + speak-as (group-chat read-isolation) ---
             "people" | "household" => self.people_list().await,
+            // --- family/people layer: living per-person profiles kept current from conversation ---
+            "family" | "relationships" => self.family_view().await,
+            "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
+            "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "person" => {
                 let mut p = rest.splitn(2, char::is_whitespace);
                 let action = p.next().unwrap_or("").to_lowercase();

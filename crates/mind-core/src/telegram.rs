@@ -335,6 +335,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_patterns = now_ms(); // pattern-finder surface cadence (don't fire right after boot)
     let mut last_resolve = 0u64; // prediction-resolver cadence (grade due predictions, surface verdicts)
     let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
+    let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -487,6 +488,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                 }
                 last_profile = now;
+            }
+        }
+
+        // Family tick: surface upcoming key dates (birthdays/anniversaries) before they arrive — the
+        // "keep family updated" promise made proactive. Paced (YM_FAMILY_SECS, default 12h), quiet-gated,
+        // deduped once-per-year per date inside family_date_nudges.
+        {
+            let period: u64 = std::env::var("YM_FAMILY_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(43_200);
+            let now = now_ms();
+            if now.saturating_sub(last_family) >= period * 1000 {
+                let chat = active_chat.load(Ordering::Relaxed);
+                if chat != 0 && !in_quiet_hours_now() {
+                    for nudge in conv.family_date_nudges(21).await {
+                        let _ = tg_send(&api, chat, &nudge).await;
+                    }
+                }
+                last_family = now;
             }
         }
 

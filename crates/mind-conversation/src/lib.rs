@@ -2512,11 +2512,12 @@ impl ConversationEngine {
                 sources.iter().map(|(t, u)| format!("- {t} — {u}")).collect::<Vec<_>>().join("\n")
             )
         };
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let wall_ms = chrono::Utc::now().timestamp_millis();
 
         // Shared: parse the model's JSON (tolerant of <think>/```json), pull the updated understanding +
-        // key claims, persist the evolving state, and mirror claims as revisable beliefs.
-        let persist_and_beliefs = |v: &serde_json::Value, prior_log: Vec<serde_json::Value>, delta: &str| {
+        // key claims, persist the evolving state, and mirror claims as revisable beliefs. `write_ms` is
+        // the MONOTONIC timestamp stamped on this revision (never earlier than the prior one).
+        let persist_and_beliefs = |v: &serde_json::Value, prior_log: Vec<serde_json::Value>, delta: &str, write_ms: i64| {
             let summary: String = v
                 .get("understanding")
                 .or_else(|| v.get("updated_understanding"))
@@ -2544,7 +2545,7 @@ impl ConversationEngine {
                 .unwrap_or_default();
             let mut log = prior_log;
             if !delta.is_empty() {
-                log.push(serde_json::json!({ "ts": now_ms, "delta": delta }));
+                log.push(serde_json::json!({ "ts": write_ms, "delta": delta }));
             }
             // keep only the last 8 evolution steps — this is a living understanding, not an archive
             let log_tail: Vec<serde_json::Value> = log.iter().rev().take(8).rev().cloned().collect();
@@ -2558,8 +2559,10 @@ impl ConversationEngine {
                 let prompt = format!(
                     "You are forming your FIRST understanding of \"{subject}\" from the evidence below. Write a \
                      compact, factual CURRENT-STATE understanding (4–7 sentences): what's happening, why, and the \
-                     key facts as of now. Then list the standalone key claims.\n\n=== EVIDENCE ===\n{evidence}\n\n\
+                     key facts as of now. Then list the standalone key claims, and report the DATE the newest \
+                     development in the evidence is from.\n\n=== EVIDENCE ===\n{evidence}\n\n\
                      Output ONLY JSON: {{\"understanding\":\"<compact current-state read>\",\
+                     \"as_of\":\"<YYYY-MM-DD of the newest development, or 'unknown'>\",\
                      \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}]}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
@@ -2568,11 +2571,13 @@ impl ConversationEngine {
                     Err(e) => return format!("(couldn't form an understanding: {e})"),
                 };
                 let v = parse_json_obj(&text);
-                let (summary, claims, _log, _checks) = persist_and_beliefs(&v, vec![], "");
+                let (summary, claims, _log, _checks) = persist_and_beliefs(&v, vec![], "", wall_ms);
                 if summary.is_empty() {
                     return format!("I gathered coverage on \"{subject}\" but couldn't distill a clear picture yet.");
                 }
-                let state = serde_json::json!({ "summary": summary, "updated_ms": now_ms, "checks": 1, "log": [] });
+                let as_of = v.get("as_of").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                // updated_ms = when I learned it (monotonic); as_of = the date the content itself reflects.
+                let state = serde_json::json!({ "summary": summary, "as_of": as_of, "updated_ms": wall_ms, "checks": 1, "log": [] });
                 let _ = self.memory.profile_set(&key, &state.to_string()).await;
                 for (claim, cert) in &claims {
                     let _ = self
@@ -2586,24 +2591,40 @@ impl ConversationEngine {
                         })
                         .await;
                 }
-                format!("🌱 Started tracking \"{subject}\" — here's what I understand so far:\n\n{summary}{src_block}")
+                let as_of_tag = if as_of.is_empty() || as_of == "unknown" { String::new() } else { format!(" (as of {as_of})") };
+                format!("🌱 Started tracking \"{subject}\"{as_of_tag} — here's what I understand so far:\n\n{summary}{src_block}")
             }
             Some(state) => {
                 let prior = state.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let prior_ms = state.get("updated_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+                let prior_as_of = state.get("as_of").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let prior_checks = state.get("checks").and_then(|x| x.as_i64()).unwrap_or(1);
                 let prior_log: Vec<serde_json::Value> =
                     state.get("log").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-                let ago = ago_str(prior_ms, now_ms);
-                // 3. COMPARE held understanding vs fresh evidence — the diff is the learning.
+                // MONOTONIC write-time: the stored timestamp can never move backwards, even if the wall
+                // clock jumped back — we are, by construction, never "going backwards" in the record.
+                let write_ms = wall_ms.max(prior_ms + 1);
+                let ago = ago_str(prior_ms, wall_ms);
+                let asof_clause = if prior_as_of.is_empty() || prior_as_of == "unknown" {
+                    String::new()
+                } else {
+                    format!(" — with the latest development then dated {prior_as_of}")
+                };
+                // 3. COMPARE held understanding vs fresh evidence — the diff is the learning. The as-of
+                // cutoff is the ANTI-REGRESSION instruction: only fold in developments NEWER than what we
+                // already held, so a stale/cached article can't drag the understanding backwards.
                 let prompt = format!(
-                    "You are RE-CHECKING \"{subject}\". You LAST understood it as (from {ago}):\n\"\"\"\n{prior}\n\"\"\"\n\n\
+                    "You are RE-CHECKING \"{subject}\". You LAST understood it as (from {ago}{asof_clause}):\n\"\"\"\n{prior}\n\"\"\"\n\n\
                      Here is FRESH evidence now:\n=== EVIDENCE ===\n{evidence}\n\n\
-                     COMPARE the two. Identify what is genuinely NEW, what CHANGED, what is CONFIRMED, and what is now \
-                     OUTDATED or wrong. Then write the UPDATED current-state understanding that SUPERSEDES the old one \
-                     (fold in the changes; drop what's stale). If nothing material changed, say so plainly.\n\n\
+                     COMPARE the two. Only treat as NEW or CHANGED things that developed AFTER your prior understanding \
+                     ({prior_as_of}); if the fresh evidence is not actually newer than that, report NO material change and \
+                     do NOT invent movement or rewrite what you already knew. Identify what is genuinely NEW, what CHANGED, \
+                     what is CONFIRMED, and what is now OUTDATED. Then write the UPDATED current-state understanding that \
+                     SUPERSEDES the old one (fold in the changes; keep everything still true; drop only what's stale). Also \
+                     report the date of the newest development now.\n\n\
                      Output ONLY JSON: {{\"delta\":\"<one crisp line: what changed since last check, or 'no material change'>\",\
                      \"changed\":[\"...\"],\"new\":[\"...\"],\"confirmed\":[\"...\"],\"outdated\":[\"...\"],\
+                     \"as_of\":\"<YYYY-MM-DD of the newest development now, or 'unknown'>\",\
                      \"updated_understanding\":\"<new compact current-state read>\",\
                      \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}]}}"
                 );
@@ -2614,11 +2635,35 @@ impl ConversationEngine {
                 };
                 let v = parse_json_obj(&text);
                 let delta = v.get("delta").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-                let (summary, claims, log_tail, _c) = persist_and_beliefs(&v, prior_log, &delta);
-                // Persist the REVISED understanding in place (supersedes the old summary).
-                let new_summary = if summary.is_empty() { prior.clone() } else { summary };
-                let state = serde_json::json!({ "summary": new_summary, "updated_ms": now_ms, "checks": prior_checks + 1, "log": log_tail });
+                let new_as_of = v.get("as_of").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                // MATERIAL-CHANGE gate — the second anti-regression guard. Only overwrite the understanding
+                // when there is genuinely new/changed/outdated content. A no-news recheck must NOT rewrite
+                // the summary (a re-synthesis can silently drop detail = knowledge going backwards); we
+                // preserve the prior understanding verbatim and only bump the check count + timestamp.
+                let count = |k: &str| v.get(k).and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                let material = count("changed") + count("new") + count("outdated") > 0;
+                let (summary, claims, log_tail, _c) =
+                    persist_and_beliefs(&v, prior_log, if material { &delta } else { "" }, write_ms);
+                let new_summary = if material && !summary.is_empty() { summary } else { prior.clone() };
+                // as_of only advances (never regresses to an older content date).
+                let effective_as_of = if material && !new_as_of.is_empty() && new_as_of != "unknown" {
+                    new_as_of.clone()
+                } else {
+                    prior_as_of.clone()
+                };
+                let state = serde_json::json!({ "summary": new_summary, "as_of": effective_as_of, "updated_ms": write_ms, "checks": prior_checks + 1, "log": log_tail });
                 let _ = self.memory.profile_set(&key, &state.to_string()).await;
+                let asof_tag = if effective_as_of.is_empty() || effective_as_of == "unknown" {
+                    String::new()
+                } else {
+                    format!(" · latest as of {effective_as_of}")
+                };
+                // No material change → hold. Don't fabricate a delta; don't re-mirror claims; don't erode.
+                if !material {
+                    return format!(
+                        "🔄 \"{subject}\" — re-checked {ago}{asof_tag}: nothing materially new since last time. Holding my current understanding.{src_block}"
+                    );
+                }
                 // Mirror fresh key claims into revisable beliefs (contradiction detection engages here:
                 // a claim that clashes with a held belief surfaces as an open conflict to reconcile).
                 for (claim, cert) in &claims {
@@ -2645,7 +2690,7 @@ impl ConversationEngine {
                 let outdated = section("No longer true", v.get("outdated").and_then(|x| x.as_array()));
                 let delta_line = if delta.is_empty() { "re-checked".to_string() } else { delta };
                 format!(
-                    "🔄 \"{subject}\" — since I last checked ({ago}):\n\n{delta_line}{changed}{fresh}{outdated}{src_block}"
+                    "🔄 \"{subject}\" — since I last checked ({ago}){asof_tag}:\n\n{delta_line}{changed}{fresh}{outdated}{src_block}"
                 )
             }
         }

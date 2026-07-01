@@ -501,7 +501,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             if now.saturating_sub(last_family) >= period * 1000 {
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
-                    for nudge in conv.family_date_nudges(21).await {
+                    // Birthdays deserve LEAD TIME to plan/shop — a 21-day window was too conservative
+                    // (it read as "not doing anything" until the last minute). Default 28 days, tunable.
+                    let window: i64 = std::env::var("YM_FAMILY_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
+                    for nudge in conv.family_date_nudges(window).await {
                         let _ = tg_send(&api, chat, &nudge).await;
                     }
                 }

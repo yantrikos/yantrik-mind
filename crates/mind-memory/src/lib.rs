@@ -53,6 +53,8 @@ enum Cmd {
     MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
     RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
     RecordEpisode { label: String, reply: Reply<()> },
+    RecordToolOutcome { tool: String, ok: bool, reply: Reply<()> },
+    ToolTrackRecord { reply: Reply<Vec<(String, f64, u64)>> },
     ActivityRhythm { local_offset_hours: i32, reply: Reply<Option<String>> },
     ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
     MetacogNote { reply: Reply<Option<String>> },
@@ -1031,6 +1033,35 @@ impl MemoryHandle {
                         Cmd::RecentMessages { limit, viewer, reply } => {
                             let _ = reply.send(recent_messages(&db, limit, viewer.as_deref()));
                         }
+                        Cmd::RecordToolOutcome { tool, ok, reply } => {
+                            let outcome = if ok { InteractionOutcome::Accepted } else { InteractionOutcome::Rejected };
+                            let r = db
+                                .record_learning_interaction(format!("tool:{tool}"), 0.5, outcome, [0.0; 4])
+                                .map_err(|e| e.to_string());
+                            let _ = reply.send(r);
+                        }
+                        Cmd::ToolTrackRecord { reply } => {
+                            // Per-tool Beta posteriors from the bandit registry, worst first — the
+                            // mind's measured self-knowledge about its own tools.
+                            let v = db
+                                .load_learning_state()
+                                .map(|st| {
+                                    let mut v: Vec<(String, f64, u64)> = st
+                                        .bandits
+                                        .bandits
+                                        .into_iter()
+                                        .filter_map(|(k, b)| {
+                                            k.strip_prefix("tool:").map(|t| {
+                                                (t.to_string(), b.alpha / (b.alpha + b.beta), b.total)
+                                            })
+                                        })
+                                        .collect();
+                                    v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                                    v
+                                })
+                                .unwrap_or_default();
+                            let _ = reply.send(Ok(v));
+                        }
                         Cmd::RecordEpisode { label, reply } => {
                             // Life-events feed the engine's TEMPORAL layer (periodicity, bursts,
                             // hour/day histograms). Without episodes that whole layer starves.
@@ -1442,6 +1473,13 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn activity_rhythm(&self, local_offset_hours: i32) -> Result<Option<String>> {
         self.call(move |reply| Cmd::ActivityRhythm { local_offset_hours, reply }).await
+    }
+    async fn record_tool_outcome(&self, tool: &str, ok: bool) -> Result<()> {
+        let tool = tool.to_string();
+        self.call(move |reply| Cmd::RecordToolOutcome { tool, ok, reply }).await
+    }
+    async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
+        self.call(|reply| Cmd::ToolTrackRecord { reply }).await
     }
 }
 

@@ -360,4 +360,13 @@ pub trait MemoryFacade: Send + Sync {
     async fn activity_rhythm(&self, _local_offset_hours: i32) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Record a tool call's outcome into the engine's bandit ("tool:<name>") — the mind learning
+    /// which of its OWN tools are reliable.
+    async fn record_tool_outcome(&self, _tool: &str, _ok: bool) -> Result<()> {
+        Ok(())
+    }
+    /// Measured per-tool reliability: Vec<(tool, success_rate, observations)>, worst first.
+    async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
+        Ok(vec![])
+    }
 }

@@ -6325,6 +6325,17 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         out.push_str(&format!("\n• {short}…"));
                     }
                 }
+                if let Ok(tr) = self.memory.tool_track_record().await {
+                    let seen: Vec<String> = tr
+                        .iter()
+                        .filter(|(_, _, n)| *n >= 2)
+                        .map(|(t, rate, n)| format!("{t} {:.0}% (n={n})", rate * 100.0))
+                        .take(8)
+                        .collect();
+                    if !seen.is_empty() {
+                        out.push_str(&format!("\n\n🔧 Tool reliability (measured, worst first): {}", seen.join(" · ")));
+                    }
+                }
                 out
             }
             "reflect" | "state" => match self.memory.reflect(rest.trim()).await {
@@ -7646,6 +7657,25 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
 "
             ));
         }
+        // Measured self-knowledge about tools: warn the reasoning loop about its own weak tools
+        // (the driver-seat reflections literally flagged "my deal-finding is unreliable and I
+        // don't know it upfront" — now it knows, from data).
+        if let Ok(tr) = self.memory.tool_track_record().await {
+            let weak: Vec<String> = tr
+                .iter()
+                .filter(|(_, rate, n)| *rate < 0.5 && *n >= 3)
+                .take(4)
+                .map(|(t, rate, n)| format!("{t} {:.0}% over {n} uses", rate * 100.0))
+                .collect();
+            if !weak.is_empty() {
+                grounding.push_str(&format!(
+                    "MEASURED TOOL RELIABILITY — these tools have been unreliable lately: {}. Double-check their output and tell the user plainly when a result is uncertain or empty.
+
+",
+                    weak.join(", ")
+                ));
+            }
+        }
         grounding.push_str("What I know that may be relevant:");
         for b in ws.stable_facts.iter().take(5) {
             grounding.push_str(&format!("\n- {}", b.text));
@@ -7839,6 +7869,12 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             last_call = call_sig;
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
+            // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
+            // reliability becomes measured self-knowledge instead of a blind spot.
+            let tool_ok = obs.chars().count() > 10
+                && !(obs.trim_start().starts_with('(')
+                    && (obs.contains("error") || obs.contains("couldn't") || obs.contains("failed") || obs.contains("isn't configured")));
+            let _ = self.memory.record_tool_outcome(&tool, tool_ok).await;
             // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
             // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
             // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).

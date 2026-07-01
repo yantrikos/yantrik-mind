@@ -5689,6 +5689,39 @@ impl ConversationEngine {
                 None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
             },
             "money" | "subscriptions" | "finance" => self.money_overview().await,
+            // NATIVE life/shopping tools — reachable from chat, not just the `ym` CLI.
+            "deals" | "shop" | "shopping" | "find_deals" | "deal" => {
+                let q = { let a = s("query"); if !a.is_empty() { a } else { let b = s("item"); if !b.is_empty() { b } else { s("text") } } };
+                if q.is_empty() { return "What should I find deals on?".to_string(); }
+                // fold an optional budget/max into the query string (find_deals parses a trailing number)
+                let budget = args.get("budget").or_else(|| args.get("max")).and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|v| v.trim().trim_start_matches('$').replace(',', "").parse().ok())));
+                let full = match budget { Some(b) => format!("{q} {}", b as i64), None => q };
+                self.find_deals(&full).await
+            }
+            "watch_price" | "track_price" | "pricewatch" | "watch_deal" => {
+                let q = { let a = s("query"); if !a.is_empty() { a } else { s("item") } };
+                if q.is_empty() { return "What item should I price-watch?".to_string(); }
+                let target = args.get("target").or_else(|| args.get("budget")).and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|v| v.trim().trim_start_matches('$').replace(',', "").parse().ok())));
+                let full = match target { Some(t) => format!("{q} {}", t as i64), None => q };
+                self.watch_price(&full).await
+            }
+            "watches" | "watchlist" | "watching" => self.watches_view().await,
+            "learn_about" | "learn" | "study" => {
+                let u = { let a = s("url"); if !a.is_empty() { a } else { s("query") } };
+                if u.is_empty() { return "Give me a link to learn from.".to_string(); }
+                self.learn_profile(&u).await
+            }
+            "track_subject" | "follow_subject" => {
+                let sub = { let a = s("subject"); if !a.is_empty() { a } else { s("query") } };
+                if sub.is_empty() { return "What subject should I track?".to_string(); }
+                self.evolve_understanding(&sub).await
+            }
+            "patterns" | "insights" => self.find_patterns().await,
+            "family" | "relationships" => self.family_view().await,
+            "about_person" | "person" => {
+                let n = { let a = s("name"); if !a.is_empty() { a } else { s("query") } };
+                if n.is_empty() { self.family_view().await } else { self.person_about(&n).await }
+            }
             "news" => {
                 // `news {topic}` → the in-depth multi-source brief; no topic → quick top headlines.
                 let t = { let a = s("topic"); if a.is_empty() { s("query") } else { a } };
@@ -6056,13 +6089,24 @@ impl ConversationEngine {
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
 - now {}: the current date and time\n\
 PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
+        // NATIVE life/shopping capabilities — always available, and preferred over building a skill for
+        // these tasks (the deal-tracker-skill confabulation came from these NOT being in the catalog).
+        const LIFE_SECTION: &str = "\nLIFE & SHOPPING TOOLS (native — prefer these; do NOT build a skill for these tasks):\n\
+- deals {query, budget?}: find + compare REAL deals on something (great for gifts — I factor in who it's for + budget)\n\
+- watch_price {query, target?}: start tracking an item's price and ping on a real drop / when it hits a target\n\
+- watches {}: list what I'm currently price-watching\n\
+- learn_about {url}: follow a link and learn about a person/thing (recursive: their profiles too)\n\
+- track_subject {subject}: keep a living, evolving understanding of an ongoing topic (re-run → what changed)\n\
+- patterns {}: surface non-obvious patterns across what I know about the user\n\
+- family {}: the people I keep track of + their upcoming key dates\n\
+- about_person {name}: what I know about someone in the user's life";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
 - run_skill {name, target, url?}: run a skill you found via discover_tools\n\
 - build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
 - answer {text}: give the user your final reply";
         let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
-        let tools = format!("{CORE_HEAD}\n{plugin_catalog}\n{SKILL_SECTION}");
+        let tools = format!("{CORE_HEAD}\n{plugin_catalog}\n{LIFE_SECTION}\n{SKILL_SECTION}");
         let now = now_str();
         // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
@@ -6076,7 +6120,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES BEYOND THE CORE: you have a growing skill library — for any task the core tools don't directly cover, FIRST `discover_tools` to search it, then `run_skill` what you find; if nothing fits, `build_capability` (especially for a kind of task you'll repeat, like deal-hunting) and then run it. Never just refuse — discover, or build. Output ONLY the JSON object."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
             let text = match self.inference.chat(messages, cfg.clone()).await {

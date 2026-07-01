@@ -3258,6 +3258,136 @@ impl ConversationEngine {
         if out.starts_with('\u{1f9ed}') { Some(out) } else { None }
     }
 
+    // ===== DEAL FINDER — grounded, personalized shopping (compare across sources) =====
+    // Not a generic price box: searches multiple sources, reads the top results, ranks REAL listings
+    // within budget (real prices + real links, no invented numbers), and — when the item is a gift for
+    // someone in your life — factors in what I know about them. The price-WATCH (track an item, ping on a
+    // real drop) is the fast-follow that makes it compounding, reusing the same compare loop as tracking.
+
+    /// `ym deals <what> [max$]` — find + compare deals. Trailing number = hard budget.
+    pub async fn find_deals(&self, args: &str) -> String {
+        let args = args.trim();
+        if args.len() < 2 {
+            return "What are you shopping for? e.g. `ym deals gold watch 200` (a trailing number = your max budget).".to_string();
+        }
+        // Budget = a trailing number (optionally $-prefixed); the rest is the query.
+        let mut budget: Option<f64> = None;
+        let mut raw_tokens: Vec<String> = Vec::new();
+        for t in args.split_whitespace() {
+            let c = t.trim_start_matches('$').replace(',', "");
+            if let Ok(n) = c.parse::<f64>() {
+                if n >= 5.0 {
+                    budget = Some(n);
+                    continue;
+                }
+            }
+            raw_tokens.push(t.to_string());
+        }
+        // Resolve the gift target (by name/nickname, or by a relationship word) BEFORE building the search
+        // query: a person's name IN the query pollutes it (it hits product brands, not the person — the
+        // "Brishti brand kids' watch" failure). The name personalizes the PICK; only the item goes to search.
+        let people = self.load_people_profiles().await;
+        let ql_full = raw_tokens.join(" ").to_lowercase();
+        let rel_words = ["wife", "husband", "daughter", "son", "mom", "dad", "mother", "father", "friend", "partner", "girlfriend", "boyfriend", "kid", "child"];
+        let target = people.iter().find(|p| person_matches(p, &ql_full)).or_else(|| {
+            people.iter().find(|p| p.get("relationship").and_then(|x| x.as_str()).map(|r| !r.is_empty() && ql_full.contains(r)).unwrap_or(false))
+        });
+        // Clean product query: drop the target's name/nickname, relationship words, and gift filler.
+        let stop = ["for", "gift", "gifts", "to", "my", "a", "an", "the", "present", "buy", "get", "some"];
+        let product: Vec<String> = raw_tokens.iter().filter(|t| {
+            let tl = t.to_lowercase();
+            let is_name = target.map(|p| person_matches(p, &tl)).unwrap_or(false);
+            !is_name && !stop.contains(&tl.as_str()) && !rel_words.contains(&tl.as_str())
+        }).cloned().collect();
+        let query = if product.is_empty() { raw_tokens.join(" ") } else { product.join(" ") };
+        // Personalization context from the resolved target.
+        let persona_ctx = match target {
+            Some(p) => {
+                let nm = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+                let facts: Vec<&str> = p.get("facts").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+                format!("\nThis is a gift for {nm} ({rel}). What I know about them: {}. Factor their taste in.", if facts.is_empty() { "—".to_string() } else { facts.join("; ") })
+            }
+            None => String::new(),
+        };
+        let searcher = match &self.searcher {
+            Some(s) => s,
+            None => return "(search isn't configured, so I can't shop yet)".to_string(),
+        };
+        // Gender hint from the target's relationship — so "gold watch for my wife" searches women's, not
+        // a generic (men's-defaulted) listing. Only the search terms; the display query stays clean.
+        let gender = target
+            .and_then(|p| p.get("relationship").and_then(|x| x.as_str()))
+            .map(|r| {
+                let r = r.to_lowercase();
+                if ["wife", "mother", "mom", "daughter", "girlfriend", "sister"].iter().any(|w| r.contains(w)) {
+                    "women's"
+                } else if ["husband", "father", "dad", "son", "boyfriend", "brother"].iter().any(|w| r.contains(w)) {
+                    "men's"
+                } else {
+                    ""
+                }
+            })
+            .unwrap_or("");
+        let sq = if gender.is_empty() { query.clone() } else { format!("{gender} {query}") };
+        // 1. Multi-source search — two angles (buy + deal) merged and deduped.
+        let mut hits: Vec<mind_tools::SearchHit> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for q in [format!("{sq} best price buy online"), format!("{sq} deal discount review")] {
+            if let Ok(rs) = searcher.search(&q, 8).await {
+                for h in rs {
+                    if !h.url.is_empty() && seen.insert(h.url.clone()) {
+                        hits.push(h);
+                    }
+                }
+            }
+        }
+        if hits.is_empty() {
+            return format!("I couldn't pull up shopping results for \"{query}\" right now.");
+        }
+        // 2. Read a few top pages for real prices/detail (bounded: ≤3 pages, per-page 20s, ~70s total —
+        //    many retailers bot-wall, so this is best-effort and we fall back to search snippets).
+        let mut excerpts = String::new();
+        if let Some(web) = &self.web {
+            let start = chrono::Utc::now().timestamp_millis();
+            let mut read = 0;
+            for h in hits.iter().take(6) {
+                if read >= 3 || chrono::Utc::now().timestamp_millis() - start > 70_000 {
+                    break;
+                }
+                if let Ok(Ok(b)) = tokio::time::timeout(std::time::Duration::from_secs(20), web.fetch(&h.url)).await {
+                    if b.trim().len() > 60 {
+                        read += 1;
+                        let ex: String = b.chars().take(2000).collect();
+                        excerpts.push_str(&format!("\n[from {}]\n{ex}\n", h.url));
+                    }
+                }
+            }
+        }
+        let snippets: String = hits.iter().take(10).map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url)).collect::<Vec<_>>().join("\n");
+        let budget_line = budget
+            .map(|b| format!("HARD BUDGET: ${b:.0}. Only recommend items at or under this; call out anything over."))
+            .unwrap_or_else(|| "No explicit budget given — note prices anyway.".to_string());
+        // 4. One grounded synthesis — rank REAL listings, name a best pick. No invented prices/products.
+        let prompt = format!(
+            "You are a sharp, honest shopping assistant finding great deals on \"{query}\".{persona_ctx}\n{budget_line}\n\n\
+             Using ONLY the evidence below (search results + page excerpts), give the best 3–6 REAL options. For each: \
+             product name — price in USD (ONLY if it actually appears in the evidence, else 'price not listed') — retailer — the link. \
+             Compare them, then name ONE '⭐ Best pick' with a one-line why. Do NOT invent prices or products that aren't in the \
+             evidence; if the evidence is thin, say so and suggest the best next search rather than fabricating. Prefer in-budget, \
+             well-reviewed, good value.\n\n=== SEARCH RESULTS ===\n{snippets}\n\n=== PAGE EXCERPTS ===\n{}\n\n\
+             Format: a scannable shortlist (one line per option), then the best pick.",
+            if excerpts.trim().is_empty() { "(none readable — retailer bot-walls; rely on the search results)".to_string() } else { excerpts.trim().to_string() }
+        );
+        let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
+        let body = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text.trim().to_string(),
+            Err(e) => return format!("(couldn't complete the deal search: {e})"),
+        };
+        let cap = budget.map(|b| format!(" · under ${b:.0}")).unwrap_or_default();
+        format!("🛍️ Deals — {query}{cap}\n\n{body}")
+    }
+
     async fn news_headlines(&self, topic: Option<&str>) -> String {
         let news = match &self.news {
             Some(n) => n,
@@ -4455,6 +4585,9 @@ impl ConversationEngine {
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,
+            // --- deal finder: grounded, budget-aware, gift-personalized shopping ---
+            "deals" | "deal" | "shop" | "shopping" if !rest.is_empty() => self.find_deals(&rest).await,
+            "deals" | "deal" | "shop" | "shopping" => "What are you shopping for? e.g. `ym deals gold watch 200`".to_string(),
             "consolidate" | "distill" => format!("Distilled {} new item(s) from recent conversation into memory.", self.consolidate_force().await),
             "person" => {
                 let mut p = rest.splitn(2, char::is_whitespace);

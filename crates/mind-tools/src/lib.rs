@@ -285,7 +285,13 @@ impl Fetcher for HttpFetcher {
         .await??;
         let mut t = text.trim().to_string();
         if t.len() > max {
-            t.truncate(max);
+            // Truncate on a CHAR boundary — a raw byte-index truncate panics when `max` lands inside a
+            // multi-byte UTF-8 char (em-dash, accented letters, emoji), which arbitrary web pages contain.
+            let mut end = max.min(t.len());
+            while end > 0 && !t.is_char_boundary(end) {
+                end -= 1;
+            }
+            t.truncate(end);
             t.push_str("\n…(truncated)");
         }
         Ok(t)

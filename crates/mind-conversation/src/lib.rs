@@ -77,6 +77,41 @@ fn parse_json_obj(text: &str) -> serde_json::Value {
     serde_json::from_str(obj).unwrap_or_else(|_| serde_json::json!({}))
 }
 
+/// Host of a URL, lowercased, with a leading "www." stripped. "" if it can't be parsed.
+fn url_host(url: &str) -> String {
+    let after = url.split("://").nth(1).unwrap_or(url);
+    let host = after.split(['/', '?', '#']).next().unwrap_or("");
+    host.trim().to_lowercase().strip_prefix("www.").map(|s| s.to_string()).unwrap_or_else(|| host.trim().to_lowercase())
+}
+
+/// Dedup key for a URL: scheme-less, lowercased, no trailing slash / query / fragment.
+fn norm_url(url: &str) -> String {
+    let after = url.split("://").nth(1).unwrap_or(url);
+    let base = after.split(['?', '#']).next().unwrap_or(after);
+    base.trim_end_matches('/').to_lowercase()
+}
+
+/// The bounded-recursion allowlist: only follow links that belong to the SAME person — their own site
+/// (same host) or a known identity/profile host. Everything else (news, ads, third-party sites) is
+/// refused, so the crawl can't wander off into the open web.
+fn follow_ok(url: &str, seed_host: &str) -> bool {
+    if !url.starts_with("http") {
+        return false;
+    }
+    let h = url_host(url);
+    if h.is_empty() {
+        return false;
+    }
+    if h == seed_host || h.ends_with(&format!(".{seed_host}")) || seed_host.ends_with(&format!(".{h}")) {
+        return true;
+    }
+    const IDENTITY: [&str; 11] = [
+        "github.com", "gitlab.com", "linkedin.com", "orcid.org", "x.com", "twitter.com",
+        "medium.com", "scholar.google.com", "huggingface.co", "dev.to", "substack.com",
+    ];
+    IDENTITY.iter().any(|d| h == *d) || h.ends_with(".github.io")
+}
+
 /// Parse a "YYYY-MM-DD" date into epoch-ms at UTC midnight. None if unparseable.
 fn parse_ymd_ms(s: &str) -> Option<i64> {
     let d = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()?;
@@ -2964,6 +2999,164 @@ impl ConversationEngine {
         lines.join("\n")
     }
 
+    // ===== SHARED-LINK LEARNING — the mind follows a link to learn about you =====
+    // A link is a door, not a datapoint. Given one, the mind does a BOUNDED-recursive crawl of the
+    // person's own presence (their site's sections + the identity/profile links it points to — GitHub,
+    // LinkedIn, ORCID — never off into news/ads), extracts durable person-facts from each page, saves
+    // them as timestamped revisable beliefs, synthesizes a living profile, and registers every source
+    // so a periodic pass can re-check and surface what CHANGED. Reuses the 3-tier fetcher + belief store
+    // + the same timestamp discipline as the compare loop.
+
+    /// `ym learn <url>` — bounded-recursive profile builder. Follows only same-person links (own domain +
+    /// known identity hosts), capped by depth + page budget + dedup (logged, never silently truncated).
+    pub async fn learn_profile(&self, seed: &str) -> String {
+        let web = match &self.web {
+            Some(w) => w.clone(),
+            None => return "(web fetch isn't wired, so I can't follow links yet)".to_string(),
+        };
+        let seed = seed.trim();
+        if seed.len() < 4 {
+            return "Give me a link and I'll go learn about you. e.g. `ym learn https://pranab.co.in`".to_string();
+        }
+        let seed_url = if seed.starts_with("http") { seed.to_string() } else { format!("https://{seed}") };
+        let seed_host = url_host(&seed_url);
+        let max_pages: usize = std::env::var("YM_LEARN_MAX_PAGES").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+        let max_depth: usize = std::env::var("YM_LEARN_MAX_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+        // Total wall-clock budget for the whole crawl. Sites that block scrapers (LinkedIn, etc.) burn the
+        // full 3-tier fetch ladder; without a budget one hanging page starves the rest and nothing saves.
+        let budget_ms: i64 = std::env::var("YM_LEARN_BUDGET_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(100) * 1000;
+        let start_ms = chrono::Utc::now().timestamp_millis();
+
+        let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        queue.push_back((seed_url.clone(), 0));
+        seen.insert(norm_url(&seed_url));
+        let mut fetched: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        let mut facts: Vec<String> = Vec::new();
+        let mut fact_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while let Some((url, depth)) = queue.pop_front() {
+            if fetched.len() >= max_pages || chrono::Utc::now().timestamp_millis() - start_ms > budget_ms {
+                skipped += 1 + queue.len();
+                break;
+            }
+            // Per-page fetch timeout so a single blocking site can't stall the whole crawl on the headless
+            // fallback's long timeout — skip it and move on.
+            let body = match tokio::time::timeout(std::time::Duration::from_secs(22), web.fetch(&url)).await {
+                Ok(Ok(b)) if b.trim().len() > 40 => b,
+                _ => continue,
+            };
+            fetched.push(url.clone());
+            let excerpt: String = body.chars().take(6000).collect();
+            let prompt = format!(
+                "You are learning about a PERSON from their own shared link ({seed_url}). From this page, \
+                 extract (1) durable FACTS about the person — third-person, standalone, specific (role, employer, \
+                 education, projects, publications, skills, location, interests, achievements); and (2) up to 6 URLs \
+                 worth following to learn MORE about the SAME person: their other profiles (GitHub, LinkedIn, ORCID, \
+                 Twitter/X, Scholar), project/repo pages, or other sections of their own site. Give ABSOLUTE https \
+                 URLs. Do NOT include news articles, ads, or unrelated third-party sites.\n\n\
+                 === PAGE ({url}) ===\n{excerpt}\n\n\
+                 Output ONLY JSON: {{\"facts\":[\"...\"],\"follow\":[\"https://...\"]}}"
+            );
+            let cfg = GenerationConfig { max_tokens: 800, ..GenerationConfig::default() };
+            let v = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                Ok(r) => parse_json_obj(&r.text),
+                Err(_) => continue,
+            };
+            for f in v.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                if let Some(s) = f.as_str() {
+                    let s = s.trim();
+                    let key: String = s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+                    if s.len() >= 8 && key.len() >= 5 && fact_keys.insert(key) {
+                        facts.push(s.to_string());
+                    }
+                }
+            }
+            if depth < max_depth {
+                for l in v.get("follow").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                    if let Some(u) = l.as_str() {
+                        let u = u.trim();
+                        if follow_ok(u, &seed_host) && seen.insert(norm_url(u)) {
+                            queue.push_back((u.to_string(), depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("[learn] crawled {} page(s), {} fact(s) from {seed_url}", fetched.len(), facts.len());
+        if facts.is_empty() {
+            return format!("I fetched {} page(s) from {seed_url} but couldn't extract a clear picture of you.", fetched.len());
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // Save each fact as a revisable, timestamped belief (contradiction detection engages on updates).
+        let mut saved = 0usize;
+        for f in &facts {
+            if self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: f.clone(),
+                    polarity: 1.0,
+                    weight: 0.85,
+                    source_event: Some(format!("profile:{seed_host}")),
+                    provenance: "profile".into(),
+                })
+                .await
+                .is_ok()
+            {
+                saved += 1;
+            }
+        }
+        // Register the crawled sources for periodic re-check (diff-based updates later).
+        let sources_json = serde_json::json!(fetched.iter().map(|u| serde_json::json!({"url": u, "last_ms": now_ms})).collect::<Vec<_>>());
+        let _ = self.memory.profile_set("profile_sources", &sources_json.to_string()).await;
+        let _ = self.memory.profile_set("profile_seed", &seed_url).await;
+        // Synthesize a living profile + name the gaps (so the ask-loop can fill them).
+        let facts_block = facts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+        let synth_prompt = format!(
+            "From these facts I gathered about the user across their own online presence, write a warm, concise \
+             SECOND-PERSON summary of who they are (4–6 sentences, addressed to \"you\"), then list 2–4 specific \
+             things I still DON'T know and should ask to round out my picture.\n\n=== FACTS ===\n{facts_block}\n\n\
+             Output ONLY JSON: {{\"profile\":\"<second-person summary>\",\"gaps\":[\"<question>\"]}}"
+        );
+        let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+        let (profile, gaps) = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&synth_prompt)], cfg).await {
+            Ok(r) => {
+                let v = parse_json_obj(&r.text);
+                let p = v.get("profile").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let g: Vec<String> = v.get("gaps").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+                (p, g)
+            }
+            Err(_) => (String::new(), Vec::new()),
+        };
+        // Persist the synthesized profile so it survives + can be diffed on the next periodic pass.
+        if !profile.is_empty() {
+            let _ = self.memory.profile_set("self_profile", &profile).await;
+        }
+        let src_list = fetched.iter().map(|u| format!("  • {u}")).collect::<Vec<_>>().join("\n");
+        let gap_block = if gaps.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nTo round out my picture, tell me:\n{}", gaps.iter().map(|g| format!("  • {g}")).collect::<Vec<_>>().join("\n"))
+        };
+        let skip_note = if skipped > 0 { format!(" ({skipped} more link(s) left unfollowed — page budget)") } else { String::new() };
+        let profile_line = if profile.is_empty() { String::new() } else { format!("\n\n{profile}") };
+        format!(
+            "🧭 I followed your link and read {} page(s) across your presence{skip_note}, and learned {saved} things about you:\n{src_list}{profile_line}{gap_block}",
+            fetched.len()
+        )
+    }
+
+    /// Periodic profile refresh — re-crawl the registered seed to catch what changed (new paper, repo, role).
+    /// Reuses learn_profile (beliefs dedupe/reinforce; genuinely new facts get added). Returns a surface if
+    /// it re-learned, else None. Paced by the caller.
+    pub async fn refresh_profile(&self) -> Option<String> {
+        let seed = self.memory.profile_get("profile_seed").await.ok().flatten()?;
+        let out = self.learn_profile(&seed).await;
+        if out.starts_with('\u{1f9ed}') { Some(out) } else { None }
+    }
+
     async fn news_headlines(&self, topic: Option<&str>) -> String {
         let news = match &self.news {
             Some(n) => n,
@@ -3997,6 +4190,17 @@ impl ConversationEngine {
                 self.evolve_understanding(&rest).await
             }
             "track" | "understanding" => "Track what? e.g. `ym track US-Iran war` — then re-run it later and I'll tell you what changed.".to_string(),
+            // --- shared-link learning: follow a link and learn about the person (bounded-recursive) ---
+            "learn" | "study" | "profileof" if !rest.is_empty() => self.learn_profile(&rest).await,
+            "learn" | "study" => "Give me a link and I'll go learn about you (I'll follow your profiles too). e.g. `ym learn https://pranab.co.in`".to_string(),
+            "profile" | "aboutme" | "whoami" => {
+                if matches!(rest.to_lowercase().as_str(), "refresh" | "update" | "recheck") {
+                    self.refresh_profile().await.unwrap_or_else(|| "Nothing new to add to your profile right now.".to_string())
+                } else {
+                    self.memory.profile_get("self_profile").await.ok().flatten()
+                        .unwrap_or_else(|| "I don't have a profile of you yet — share a link with `ym learn <url>` and I'll build one.".to_string())
+                }
+            }
             // --- calibration: the learning curve — predictions, self-scoring, hit-rate per domain ---
             "predictions" | "bets" | "forecasts" => self.predictions_view().await,
             "calibration" | "curve" | "scorecard" => self.calibration_view().await,

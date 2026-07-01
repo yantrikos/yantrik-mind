@@ -334,6 +334,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
     let mut last_patterns = now_ms(); // pattern-finder surface cadence (don't fire right after boot)
     let mut last_resolve = 0u64; // prediction-resolver cadence (grade due predictions, surface verdicts)
+    let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -468,6 +469,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                 }
                 last_resolve = now;
+            }
+        }
+
+        // Periodic profile refresh: re-crawl the registered personal seed (site + linked profiles) so
+        // personal facts stay current — a new paper, a role change, a new project surfaces on its own.
+        // Paced (YM_PROFILE_REFRESH_SECS, default ~3 days); beliefs dedupe/reinforce, only genuinely new
+        // facts are added. Background; a re-learn summary is surfaced when quiet-hours allow.
+        {
+            let period: u64 = std::env::var("YM_PROFILE_REFRESH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(259_200);
+            let now = now_ms();
+            if now.saturating_sub(last_profile) >= period * 1000 {
+                if let Some(update) = conv.refresh_profile().await {
+                    let chat = active_chat.load(Ordering::Relaxed);
+                    if chat != 0 && !in_quiet_hours_now() {
+                        let _ = tg_send(&api, chat, &format!("🧭 Refreshed what I know about you:\n\n{update}")).await;
+                    }
+                }
+                last_profile = now;
             }
         }
 

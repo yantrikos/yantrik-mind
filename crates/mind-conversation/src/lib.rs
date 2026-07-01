@@ -5576,6 +5576,37 @@ impl ConversationEngine {
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,
             // --- memory hygiene: purge stale/wrong beliefs by text match (+ compact state for retrospect) ---
             "forget-belief" | "unbelieve" if !rest.is_empty() => self.forget_beliefs_matching(&rest).await,
+            // --- self-evolution scorecard: what the self-build loop has done, what's queued, kill state ---
+            "evolution" | "selfbuild" => {
+                let dir = std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".to_string());
+                let log = std::fs::read_to_string(format!("{dir}/evolution.log")).unwrap_or_default();
+                let recent: Vec<&str> = log.lines().rev().take(12).collect();
+                let queue = std::fs::read_to_string(format!("{dir}/selfbuild-goals.txt")).unwrap_or_default();
+                let queued: Vec<&str> = queue.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+                let paused = std::path::Path::new(&format!("{dir}/SELF_IMPROVE_OFF")).exists();
+                let mut out = format!(
+                    "🧬 Self-evolution — {} · {} goal(s) queued\n",
+                    if paused { "PAUSED (kill-switch)" } else { "ACTIVE (builds every 6h, retrospective daily)" },
+                    queued.len()
+                );
+                if recent.is_empty() {
+                    out.push_str("\nNo recorded outcomes yet — the ledger starts with the next build tick.");
+                } else {
+                    out.push_str("\nRecent outcomes (newest first):");
+                    for l in &recent {
+                        let short: String = l.chars().take(160).collect();
+                        out.push_str(&format!("\n• {short}"));
+                    }
+                }
+                if !queued.is_empty() {
+                    out.push_str("\n\nNext up:");
+                    for g in queued.iter().take(3) {
+                        let short: String = g.chars().take(110).collect();
+                        out.push_str(&format!("\n• {short}…"));
+                    }
+                }
+                out
+            }
             "reflect" | "state" => match self.memory.reflect(rest.trim()).await {
                 Ok(r) => {
                     let mut out = String::from("BELIEFS (top by confidence):\n");

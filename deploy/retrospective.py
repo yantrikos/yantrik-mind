@@ -72,16 +72,29 @@ def main():
     except Exception:
         shipped = ""
 
+    # 1c) operational PAIN — recent runtime errors/panics from the journal. The retrospective should
+    # fix what actually hurts in production first, not only what the memory-state suggests.
+    try:
+        pain = subprocess.run(
+            ["bash", "-c",
+             "journalctl -u yantrik-mind --since '24 hours ago' --no-pager -o cat "
+             "| grep -iE 'panic|error|failed' | grep -v 'poll error' | tail -15"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()[:2000]
+    except Exception:
+        pain = ""
+
     prompt = (
         "You are JARVIS running a DAILY RETROSPECTIVE to improve your own Rust code (crates/mind-* in the "
-        "yantrik-mind workspace). Below is your current typed-memory state and the work you've RECENTLY "
-        "SHIPPED. Based on the state and your known weaknesses, propose exactly ONE concrete, buildable "
-        "CODE improvement — a specific change a developer could implement in a few hours (e.g. 'Dedupe "
-        "near-duplicate beliefs on write by merging entries above a similarity threshold and combining "
-        "their evidence/confidence'). It must be a code change, not a one-off data fix, and it MUST NOT "
-        "duplicate or trivially restate anything under RECENTLY SHIPPED — pick a genuinely new gap. Output "
-        "ONLY the goal as a single imperative sentence — no preamble, no markdown, no numbering.\n\n"
-        "=== RECENTLY SHIPPED (do NOT re-propose these) ===\n" + (shipped or "(unavailable)") +
+        "yantrik-mind workspace). Below are your RUNTIME ERRORS from the last 24h, your current typed-memory "
+        "state, and the work you've RECENTLY SHIPPED. Propose exactly ONE concrete, buildable CODE "
+        "improvement — a specific change a developer could implement in a few hours. PRIORITIZE fixing a "
+        "runtime error's root cause when one exists; otherwise pick the highest-value gap from the state. "
+        "It must be a code change, not a one-off data fix, and it MUST NOT duplicate or trivially restate "
+        "anything under RECENTLY SHIPPED. Output ONLY the goal as a single imperative sentence — no "
+        "preamble, no markdown, no numbering.\n\n"
+        "=== RUNTIME ERRORS (last 24h) ===\n" + (pain or "(none — clean day)") +
+        "\n\n=== RECENTLY SHIPPED (do NOT re-propose these) ===\n" + (shipped or "(unavailable)") +
         "\n\n=== CURRENT MEMORY STATE ===\n" + (state or "(state unavailable)")
     )
     body = json.dumps({

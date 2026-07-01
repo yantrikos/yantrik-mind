@@ -19,6 +19,7 @@ set -euo pipefail
 
 GOAL="${1:?usage: self_improve.sh '<improvement goal>'}"
 KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
+EVLOG=/var/lib/yantrik-mind/evolution.log   # outcome ledger — read by `ym evolution`
 [ -f "$KILL" ] && { echo "kill-switch present ($KILL) — self-build disabled"; exit 0; }
 
 # Auth: subscription token for Claude, yantrikdb token for the push. (root:600 env.)
@@ -50,25 +51,31 @@ BR="self/$(date +%s)"
 git checkout -q -b "$BR"
 
 echo "==> Claude Code (subscription) implementing: $GOAL"
-timeout 900 claude -p "You are improving the yantrik-mind codebase (you are the companion improving your own code). GOAL: $GOAL
+# Cargo-scoped Bash so the builder can SELF-VERIFY (write a test, run it, prove green) — this is what
+# lets good changes clear the auto-merge test-gate instead of piling up as drafts. Only cargo
+# build/test/check are allowed; any other shell command is denied by the tool allowlist.
+timeout 1500 claude -p "You are improving the yantrik-mind codebase (you are the companion improving your own code). GOAL: $GOAL
 
-Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under crates/mind-governance (the harm-gate is off-limits). If you change Rust, keep it compiling. Add or update a test when it makes sense. Do not touch secrets or CI auth." \
-  --permission-mode acceptEdits --allowedTools "Write Edit Read" --output-format text 2>&1 | tail -25
+Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under crates/mind-governance (the harm-gate is off-limits). If you change Rust, keep it compiling. ADD a #[test] covering your change and RUN it (you can execute cargo build / cargo test / cargo check) — verify green before you finish. Do not touch secrets or CI auth." \
+  --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25
 
 echo "==> enforce bounds"
 git add -A   # stage everything incl. NEW files (git diff alone ignores untracked)
 if git diff --cached --quiet; then
   echo "no changes produced — nothing to PR"
+  echo "$(date -u +%FT%TZ) | build | NO-CHANGE | $GOAL" >> "$EVLOG"
   exit 0
 fi
 if git diff --cached --name-only | grep -q '^crates/mind-governance/'; then
   echo "ABORT: change touched the harm-gate (crates/mind-governance) — human-only. No PR."
+  echo "$(date -u +%FT%TZ) | build | ABORT-HARMGATE | $GOAL" >> "$EVLOG"
   exit 1
 fi
 if git diff --cached --name-only | grep -q '\.rs$'; then
   echo "==> compile-gate (cargo build --release — matches the warm target)"
   if ! cargo build --release -p mind-core 2>&1 | tail -8; then
     echo "ABORT: changes do not compile — no PR"
+    echo "$(date -u +%FT%TZ) | build | ABORT-COMPILE | $GOAL" >> "$EVLOG"
     exit 1
   fi
 fi
@@ -114,7 +121,7 @@ git push -q -u origin "$BR"
 git remote set-url origin "https://github.com/yantrikos/yantrik-mind.git"   # scrub token from config
 
 # Open the PR (draft unless every auto-merge gate passed) and, if cleared, squash-merge it.
-python3 - "$GOAL" "$BR" "$AUTOMERGE" <<'PY'
+PYOUT=$(python3 - "$GOAL" "$BR" "$AUTOMERGE" <<'PY'
 import json, os, sys, time, urllib.request, urllib.error
 goal, br, automerge = sys.argv[1], sys.argv[2], (sys.argv[3] == "1")
 tok = os.environ["YANTRIKDB_ACC_GIT_TOKEN"]
@@ -157,4 +164,16 @@ if automerge:
         except urllib.error.HTTPError as e:
             print("MERGE-FAIL", e.code, e.read().decode()[:300])  # PR stays open for a human
 PY
+)
+echo "$PYOUT"
+# The last mile: a merge that only lands on GitHub is not self-improvement of the RUNNING system.
+# On a green auto-merge, hand off to self_deploy.sh (health-checked, auto-rollback) so the live
+# service updates itself. Uses the script from THIS clone — the deploy logic is itself self-updating.
+if echo "$PYOUT" | grep -q "^MERGED:"; then
+  echo "$(date -u +%FT%TZ) | build | MERGED | $GOAL" >> "$EVLOG"
+  echo "==> merged on green — self-deploying"
+  bash "$WORK/deploy/self_deploy.sh" || echo "==> self-deploy failed or rolled back (see evolution.log)"
+elif echo "$PYOUT" | grep -q "^PR:"; then
+  echo "$(date -u +%FT%TZ) | build | DRAFT-FOR-HUMAN | $GOAL" >> "$EVLOG"
+fi
 echo "==> done"

@@ -341,6 +341,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
+    let mut last_ics = 0u64; // external-calendar (ICS) refresh cadence
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
@@ -587,6 +588,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         let formed = conv.consolidate().await;
         if formed > 0 {
             eprintln!("[consolidate] formed {formed} durable memories");
+        }
+
+        // Compaction tick: absorb aging turns into the persisted rolling summary (continuity beyond
+        // the raw-turn window; survives restarts). Cheap early-return until enough turns accrue.
+        conv.compact_conversation().await;
+
+        // External-calendar refresh: re-pull the read-only ICS feed if one is connected. Paced
+        // (YM_ICS_SECS, default 6h); no chat gating — it only updates stored events, sends nothing.
+        {
+            let period: u64 = std::env::var("YM_ICS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(21_600);
+            let now = now_ms();
+            if now.saturating_sub(last_ics) >= period * 1000 {
+                let n = conv.refresh_ics().await;
+                if n > 0 {
+                    eprintln!("[calendar] refreshed {n} external event(s)");
+                }
+                last_ics = now;
+            }
         }
 
         // Default-mode ("sleep") tick: when the user has been idle past the threshold, run ONE bounded

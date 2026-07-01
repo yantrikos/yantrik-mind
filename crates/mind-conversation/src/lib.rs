@@ -331,6 +331,57 @@ fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>)
     None
 }
 
+/// Minimal ICS (iCal) VEVENT extraction: (title, start_ms) for events inside [from_ms, to_ms].
+/// Handles DTSTART with/without params, date-only (→ midday local) and datetime (Z → UTC, else
+/// local). Deliberately tolerant — a read-only subscription feed, not a full RFC 5545 parser.
+fn parse_ics_events(body: &str, offset: chrono::FixedOffset, from_ms: i64, to_ms: i64) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for block in body.split("BEGIN:VEVENT").skip(1) {
+        let block = block.split("END:VEVENT").next().unwrap_or("");
+        let mut title = String::new();
+        let mut start_ms: Option<i64> = None;
+        for line in block.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("SUMMARY") {
+                if let Some(v) = rest.splitn(2, ':').nth(1) {
+                    title = v.trim().chars().take(120).collect();
+                }
+            } else if let Some(rest) = line.strip_prefix("DTSTART") {
+                let Some(v) = rest.splitn(2, ':').nth(1) else { continue };
+                let v = v.trim();
+                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+                if digits.len() < 8 {
+                    continue;
+                }
+                let (y, mo, d) = (
+                    digits[0..4].parse::<i32>().unwrap_or(0),
+                    digits[4..6].parse::<u32>().unwrap_or(0),
+                    digits[6..8].parse::<u32>().unwrap_or(0),
+                );
+                let (h, mi) = if digits.len() >= 12 {
+                    (digits[8..10].parse::<u32>().unwrap_or(12), digits[10..12].parse::<u32>().unwrap_or(0))
+                } else {
+                    (12, 0) // date-only → midday local so day-math is stable
+                };
+                let Some(nd) = chrono::NaiveDate::from_ymd_opt(y, mo, d).and_then(|x| x.and_hms_opt(h, mi, 0)) else {
+                    continue;
+                };
+                start_ms = if v.ends_with('Z') && digits.len() >= 12 {
+                    Some(nd.and_utc().timestamp_millis())
+                } else {
+                    nd.and_local_timezone(offset).single().map(|t| t.timestamp_millis())
+                };
+            }
+        }
+        if let Some(ms) = start_ms {
+            if !title.is_empty() && ms >= from_ms && ms <= to_ms {
+                out.push((title, ms));
+            }
+        }
+    }
+    out
+}
+
 fn person_matches(p: &serde_json::Value, q: &str) -> bool {
     person_matches_mode(p, q, MatchMode::Substring)
 }
@@ -4566,6 +4617,32 @@ impl ConversationEngine {
             }
         }
 
+        // 0b) Today on the calendar — your events (own + external feed) falling today.
+        {
+            let today_str = now.format("%Y-%m-%d").to_string();
+            let todays: Vec<String> = self
+                .load_calendar()
+                .await
+                .iter()
+                .filter_map(|e| {
+                    let ms = e.get("when_ms").and_then(|x| x.as_i64())?;
+                    let t = chrono::DateTime::from_timestamp_millis(ms)?.with_timezone(now.offset());
+                    if t.format("%Y-%m-%d").to_string() == today_str {
+                        let title = e.get("title").and_then(|x| x.as_str())?;
+                        Some(format!("{} — {}", t.format("%H:%M"), title))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !todays.is_empty() {
+                out.push_str("\n\n📅 Today:");
+                for l in todays.iter().take(6) {
+                    out.push_str(&format!("\n  • {l}"));
+                }
+            }
+        }
+
         // 1) Coming up — the people in your life (the moat), with any gift/plan I've already noted.
         let upcoming = self.upcoming_people_dates(35).await;
         if !upcoming.is_empty() {
@@ -4671,6 +4748,65 @@ impl ConversationEngine {
         Some(msg)
     }
 
+    /// CONVERSATION COMPACTION — the fixed 20-message window was a hard amnesia line: turn 21 fell
+    /// off and the morning's thread was gone. Instead, a persisted ROLLING SUMMARY absorbs older
+    /// turns (merge-summarized with the prior summary) while the recent tail stays verbatim;
+    /// handle_turn injects it into grounding. Cursor-based over transcript ids (the same pattern
+    /// consolidation uses) and persisted in the profile KV — so continuity survives restarts and
+    /// spans sessions. Runs from the poll loop's background lane, never on the reply hot path.
+    pub async fn compact_conversation(&self) -> bool {
+        let threshold: usize = std::env::var("YM_COMPACT_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
+        let keep_tail: usize = 12;
+        let cursor: i64 = self
+            .memory
+            .profile_get("compact_cursor")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let msgs = match self.memory.messages_since(cursor, threshold + keep_tail).await {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if msgs.len() < threshold + keep_tail {
+            return false; // not enough new conversation yet — stay cheap
+        }
+        let cut = msgs.len() - keep_tail;
+        let older = &msgs[..cut];
+        let new_cursor = older.last().map(|(id, _, _)| *id).unwrap_or(cursor);
+        let prior = self.memory.profile_get("conversation_summary").await.ok().flatten().unwrap_or_default();
+        let mut transcript = String::new();
+        for (_, role, text) in older {
+            let t: String = text.chars().take(400).collect();
+            transcript.push_str(&format!("{role}: {t}\n"));
+        }
+        let transcript: String = transcript.chars().take(6000).collect();
+        let prompt = format!(
+            "Merge the PRIOR SUMMARY and the NEW TURNS into ONE updated rolling summary of this ongoing \
+             companion conversation. Keep: topics in play, decisions + preferences the user expressed, \
+             open threads (unanswered questions, promised follow-ups, things to return to), and important \
+             facts/dates. Drop pleasantries and resolved chit-chat. Under 220 words. Output ONLY the \
+             summary text.\n\n=== PRIOR SUMMARY ===\n{}\n\n=== NEW TURNS (oldest first) ===\n{transcript}",
+            if prior.trim().is_empty() { "(none yet)" } else { prior.as_str() },
+        );
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+        match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => {
+                let sum = r.text.trim();
+                if sum.chars().count() < 20 {
+                    return false; // don't overwrite a good summary with a degenerate one
+                }
+                let sum: String = sum.chars().take(2200).collect();
+                let _ = self.memory.profile_set("conversation_summary", &sum).await;
+                let _ = self.memory.profile_set("compact_cursor", &new_cursor.to_string()).await;
+                eprintln!("[compact] absorbed {} older turns into the rolling summary", older.len());
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// The AFTERNOON FORESIGHT beat — one unprompted forecast a day, rotating through the tracked
     /// subjects plus "me" (self-anticipation). Morning = briefing, afternoon = a prediction: two
     /// GUARANTEED daily touches, so the presence is felt, not exception-only. Persisted by date
@@ -4695,6 +4831,152 @@ impl ConversationEngine {
         let _ = self.memory.profile_set("foresight_last_date", &today).await;
         let _ = self.memory.profile_set("foresight_rot", &((idx + 1) % subjects.len()).to_string()).await;
         Some(subject)
+    }
+
+    // ---------- calendar: OUR OWN time-spine (substrate-backed) + read-only ICS bridge ----------
+    // Not a new feature so much as the unification of the five time-shaped things that already
+    // exist (people dates, task deadlines, bill due-days, prediction resolve-bys, watch cadences)
+    // plus user-added events and an external feed. Events live in the substrate, so they can link
+    // to people/tasks/predictions — the thing an external calendar can never do.
+
+    async fn load_calendar(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("calendar_events")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_calendar(&self, evs: &[serde_json::Value]) {
+        let mut evs: Vec<serde_json::Value> = evs.to_vec();
+        evs.sort_by_key(|e| e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX));
+        if evs.len() > 400 {
+            evs.truncate(400); // bound growth (soonest-first, far future trimmed)
+        }
+        let _ = self
+            .memory
+            .profile_set("calendar_events", &serde_json::to_string(&evs).unwrap_or_else(|_| "[]".into()))
+            .await;
+    }
+
+    /// `ym calendar add Dinner with Brishti on July 4` — title before the last " on ", date after
+    /// (falls back to any date found in the whole text). Stored in the substrate.
+    pub async fn calendar_add(&self, text: &str) -> String {
+        let text = text.trim();
+        let today = local_now();
+        let (title, when) = match text.to_lowercase().rfind(" on ") {
+            Some(i) if parse_text_date_ms(&text[i + 4..], &today).is_some() => {
+                (text[..i].trim().to_string(), parse_text_date_ms(&text[i + 4..], &today))
+            }
+            _ => (text.to_string(), parse_text_date_ms(text, &today)),
+        };
+        let Some(ms) = when else {
+            return "I couldn't find a date in that — try `ym calendar add Dinner with Brishti on July 4`.".to_string();
+        };
+        if title.len() < 2 {
+            return "What's the event? e.g. `ym calendar add Dentist on July 9`.".to_string();
+        }
+        let mut evs = self.load_calendar().await;
+        evs.push(serde_json::json!({
+            "id": chrono::Utc::now().timestamp_millis(),
+            "title": title,
+            "when_ms": ms,
+            "source": "user",
+        }));
+        self.save_calendar(&evs).await;
+        let date = chrono::DateTime::from_timestamp_millis(ms)
+            .map(|t| t.with_timezone(today.offset()).format("%A, %B %-d").to_string())
+            .unwrap_or_default();
+        format!("📅 Added: {title} — {date}. It'll show in the morning briefing and I'll bring it up around the day.")
+    }
+
+    /// Everything time-shaped in the next `days`, unified: calendar events (yours + external),
+    /// people key dates, and reminder deadlines. Returns (ms, line) sorted soonest-first.
+    async fn upcoming_spine(&self, days: i64) -> Vec<(i64, String)> {
+        let today = local_now();
+        let now = today.timestamp_millis();
+        let horizon = now + days * 86_400_000;
+        let mut out: Vec<(i64, String)> = Vec::new();
+        for e in self.load_calendar().await {
+            let ms = e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+            if ms >= now - 86_400_000 / 2 && ms <= horizon {
+                let title = e.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+                let src = if e.get("source").and_then(|x| x.as_str()) == Some("ics") { " (ext)" } else { "" };
+                let when = chrono::DateTime::from_timestamp_millis(ms)
+                    .map(|t| t.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                    .unwrap_or_default();
+                out.push((ms, format!("{when}: {title}{src}")));
+            }
+        }
+        for (name, label, d, mmdd) in self.upcoming_people_dates(days).await {
+            out.push((now + d * 86_400_000, format!("{mmdd}: {name}'s {label}")));
+        }
+        let (reminders, _) = self.split_tasks().await;
+        for t in &reminders {
+            if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
+                if ms <= horizon {
+                    let short: String = t.description.chars().take(70).collect();
+                    let when = chrono::DateTime::from_timestamp_millis(ms)
+                        .map(|x| x.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                        .unwrap_or_default();
+                    out.push((ms, format!("{when}: ⏰ {short}")));
+                }
+            }
+        }
+        out.sort_by_key(|(ms, _)| *ms);
+        out
+    }
+
+    /// `ym calendar` — the unified 14-day view.
+    pub async fn calendar_view(&self) -> String {
+        let spine = self.upcoming_spine(14).await;
+        if spine.is_empty() {
+            return "📅 Nothing on the spine for the next 14 days. `ym calendar add <what> on <date>` — or `ym calendar connect <ics-url>` to bring your external calendar in.".to_string();
+        }
+        let mut out = String::from("📅 Next 14 days:");
+        for (_, line) in spine.iter().take(14) {
+            out.push_str(&format!("\n  • {line}"));
+        }
+        out
+    }
+
+    /// `ym calendar connect <ics-url>` — read-only external feed (Google Calendar's "secret iCal
+    /// address" etc.). One URL, no OAuth. Refreshed periodically by the poll loop.
+    pub async fn calendar_connect(&self, url: &str) -> String {
+        let url = url.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return "That doesn't look like a URL — paste your calendar's secret iCal address (Google Calendar → Settings → 'Secret address in iCal format').".to_string();
+        }
+        let _ = self.memory.profile_set("calendar_ics_url", url).await;
+        let n = self.refresh_ics().await;
+        format!("🔗 Connected. Pulled {n} upcoming event(s) from your external calendar — they'll show in `ym calendar` and the briefing, refreshed every few hours.")
+    }
+
+    /// Re-pull the external ICS feed (if connected): replaces all `source:"ics"` events with the
+    /// fresh window. Read-only — we never write to the external calendar.
+    pub async fn refresh_ics(&self) -> usize {
+        let Some(url) = self.memory.profile_get("calendar_ics_url").await.ok().flatten() else {
+            return 0;
+        };
+        let Some(web) = &self.web else { return 0 };
+        let Ok(body) = web.fetch(&url).await else { return 0 };
+        let today = local_now();
+        let now = today.timestamp_millis();
+        let fresh = parse_ics_events(&body, *today.offset(), now - 86_400_000, now + 60 * 86_400_000);
+        let n = fresh.len();
+        let mut evs: Vec<serde_json::Value> = self
+            .load_calendar()
+            .await
+            .into_iter()
+            .filter(|e| e.get("source").and_then(|x| x.as_str()) != Some("ics"))
+            .collect();
+        for (title, ms) in fresh {
+            evs.push(serde_json::json!({ "id": ms, "title": title, "when_ms": ms, "source": "ics" }));
+        }
+        self.save_calendar(&evs).await;
+        n
     }
 
     /// FOLLOW-THROUGH — the difference between filing a reminder and CARRYING it: open reminders
@@ -5648,6 +5930,20 @@ impl ConversationEngine {
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             // --- get-to-know-you: surface the next proactive question on demand (same drive that fires idle) ---
             "ask" | "getting-to-know" if rest.is_empty() => self.proactive_ask().await.unwrap_or_else(|| "I've got a good feel for you right now — nothing I need to ask.".to_string()),
+            // --- calendar: the unified time-spine + read-only external (ICS) bridge ---
+            "calendar" | "cal" | "agenda" => {
+                let r = rest.trim();
+                if let Some(x) = r.strip_prefix("add ") {
+                    self.calendar_add(x).await
+                } else if let Some(u) = r.strip_prefix("connect ") {
+                    self.calendar_connect(u).await
+                } else if r == "refresh" {
+                    let n = self.refresh_ics().await;
+                    format!("🔄 Refreshed — {n} upcoming external event(s) in the 60-day window.")
+                } else {
+                    self.calendar_view().await
+                }
+            }
             // --- foresight: model any entity (or you) → predict next moves → recommend, self-scored ---
             "foresee" | "forecast" | "predict" | "anticipate" if !rest.is_empty() => self.foresee(&rest).await,
             "foresee" | "forecast" | "predict" | "anticipate" => "Foresee what or whom? e.g. `ym foresee Walmart`, `ym foresee oil`, or `ym foresee me`.".to_string(),
@@ -6986,7 +7282,20 @@ impl ConversationEngine {
         // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
         // private fact from another household member never reaches the model (the surprise-gift wall).
         let ws = self.memory.hydrate_working_set_as(user_text, id.viewer()).await.unwrap_or_default();
-        let mut grounding = String::from("What I know that may be relevant:");
+        let mut grounding = String::new();
+        // Continuity summary — PRIMARY VIEWER ONLY. The rolling summary is distilled from the primary
+        // transcript; surfacing it to another household member would leak private conversation
+        // straight through the read-isolation wall.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
+                if !sum.trim().is_empty() {
+                    grounding.push_str(&format!(
+                        "EARLIER CONVERSATION (rolling summary of older turns — the verbatim recent turns follow):\n{sum}\n\n"
+                    ));
+                }
+            }
+        }
+        grounding.push_str("What I know that may be relevant:");
         for b in ws.stable_facts.iter().take(5) {
             grounding.push_str(&format!("\n- {}", b.text));
         }
@@ -7527,7 +7836,16 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // Cheap immediate context: the last few raw turns (prior to this one).
         let recent = self.memory.recent_messages(self.recent_window).await.unwrap_or_default();
         let ws = self.memory.hydrate_working_set(user_text).await?;
-        let grounding = Self::render_grounding(&ws);
+        let mut grounding = Self::render_grounding(&ws);
+        // Continuity beyond the raw-turn window: the rolling summary of everything older (compaction
+        // absorbs aging turns into it in the background). Rides inside the untrusted memory block.
+        if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
+            if !sum.trim().is_empty() {
+                grounding = format!(
+                    "EARLIER CONVERSATION (rolling summary of older turns — the verbatim recent turns follow):\n{sum}\n\n{grounding}"
+                );
+            }
+        }
         let messages = self.build_prompt(
             &grounding,
             web_page.as_ref(),
@@ -8232,6 +8550,20 @@ mod tests {
         let _ = conv.news_digests_due().await;
         assert!(conv.news_digests_due().await.is_empty(), "deduped after prime");
         assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
+    }
+
+    #[test]
+    fn parses_ics_vevents() {
+        let offset = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART;VALUE=DATE:20260710\nSUMMARY:Dentist\nEND:VEVENT\n\
+                   BEGIN:VEVENT\nDTSTART:20260712T183000Z\nSUMMARY:Team dinner\nEND:VEVENT\n\
+                   BEGIN:VEVENT\nDTSTART:19990101\nSUMMARY:Ancient\nEND:VEVENT\nEND:VCALENDAR";
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+        let to = from + 60 * 86_400_000;
+        let evs = parse_ics_events(ics, offset, from, to);
+        assert_eq!(evs.len(), 2, "in-window events parsed, ancient filtered: {evs:?}");
+        assert_eq!(evs[0].0, "Dentist");
+        assert_eq!(evs[1].0, "Team dinner");
     }
 
     #[test]

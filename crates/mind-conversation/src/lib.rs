@@ -166,6 +166,36 @@ fn days_until_mmdd(mmdd: &str, today: &chrono::DateTime<chrono::FixedOffset>) ->
     Some((target - today_naive).num_days())
 }
 
+/// First ~2 sentences of a longer read, capped at `max_chars`, for a scannable briefing line.
+/// Char-indexed (never splits a multi-byte boundary); appends an ellipsis when it truncated.
+fn brief_excerpt(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.trim().chars().collect();
+    let mut sentences = 0;
+    let mut cut = chars.len().min(max_chars);
+    for (i, &ch) in chars.iter().enumerate() {
+        if i >= max_chars {
+            cut = max_chars;
+            break;
+        }
+        // A terminal period only ends a sentence if it's followed by whitespace or end-of-text —
+        // this skips "U.S." / "e.g." mid-word periods that would otherwise cut awkwardly.
+        let ends_sentence = matches!(ch, '.' | '!' | '?')
+            && chars.get(i + 1).map(|n| n.is_whitespace()).unwrap_or(true);
+        if ends_sentence {
+            sentences += 1;
+            if sentences >= 2 {
+                cut = i + 1;
+                break;
+            }
+        }
+    }
+    let mut s: String = chars[..cut].iter().collect::<String>().trim().to_string();
+    if cut < chars.len() && !s.ends_with(['.', '!', '?', '…']) {
+        s.push('…');
+    }
+    s
+}
+
 /// True if a person record matches a lowercase query by name OR any nickname (substring either way).
 fn person_matches(p: &serde_json::Value, q: &str) -> bool {
     let hit = |s: &str| {
@@ -4020,15 +4050,22 @@ impl ConversationEngine {
             }
         }
 
-        // 3) What I'm keeping an eye on (tracked topics) — a pointer, not a consume (the separate
-        //    news tick owns the actual situation digests so the briefing never double-fires them).
+        // 3) What I'm keeping an eye on — the latest situation READ I already hold on each tracked
+        //    topic (the evolve_understanding state the news tick keeps current, ≤6h old), trimmed to
+        //    a sentence or two. Fast: a stored, already-synthesized read looked up by key, NOT a live
+        //    re-synthesis in the hot path (keeps the "always composes and fires" contract). Falls back
+        //    to a pointer for a topic I haven't formed a read on yet.
         let topics = self.load_news_topics().await;
         if !topics.is_empty() {
-            out.push_str(&format!(
-                "\n\n📰 Watching: {}. Say \"catch me up on {}\" for the latest read.",
-                topics.join(", "),
-                topics.first().cloned().unwrap_or_default()
-            ));
+            out.push_str("\n\n📰 Watching:");
+            for topic in topics.iter().take(3) {
+                if let Some((summary, as_of)) = self.held_understanding(topic).await {
+                    let as_of_tag = if as_of.is_empty() || as_of == "unknown" { String::new() } else { format!(" (as of {as_of})") };
+                    out.push_str(&format!("\n  • {topic}{as_of_tag}: {}", brief_excerpt(&summary, 260)));
+                } else {
+                    out.push_str(&format!("\n  • {topic} — say \"catch me up on {topic}\" for a read."));
+                }
+            }
         }
 
         // 4) Quiet day → still offer presence, not a bare date line.
@@ -4036,6 +4073,26 @@ impl ConversationEngine {
             out.push_str("\n\nNothing time-sensitive on my radar. Tell me what's on your plate today and I'll carry it.");
         }
         out
+    }
+
+    /// The latest situation read I hold on a tracked subject — the `evolve_understanding` state the
+    /// news tick keeps current (`understanding:<subject>` = {summary, as_of, updated_ms, …}). Returns
+    /// (summary, as_of). Cheap: one KV lookup of an already-synthesized read, no live fetch/LLM.
+    async fn held_understanding(&self, subject: &str) -> Option<(String, String)> {
+        let key = format!("understanding:{}", subject.to_lowercase());
+        let state: serde_json::Value = self
+            .memory
+            .profile_get(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())?;
+        let summary = state.get("summary").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        if summary.is_empty() {
+            return None;
+        }
+        let as_of = state.get("as_of").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        Some((summary, as_of))
     }
 
     /// Proactive gate for the morning briefing: if today's briefing hasn't gone out yet AND we're

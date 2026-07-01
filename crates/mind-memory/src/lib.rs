@@ -1139,6 +1139,7 @@ impl MemoryFacade for MemoryHandle {
             if eff >= 0.7 {
                 ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
             } else {
+                let reason = classify_uncertainty(r.item.confidence, eff, r.item.evidence_count, &r.item.text, &open);
                 ws.uncertain_beliefs.push(Belief {
                     id: r.item.id.clone(),
                     statement: r.item.text.clone(),
@@ -1148,6 +1149,7 @@ impl MemoryFacade for MemoryHandle {
                     evidence_count: 0,
                     updated_ms: r.item.updated_ms,
                     status: "active".into(),
+                    uncertainty_reason: Some(reason),
                 });
             }
         }

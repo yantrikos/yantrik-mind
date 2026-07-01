@@ -77,6 +77,30 @@ fn parse_json_obj(text: &str) -> serde_json::Value {
     serde_json::from_str(obj).unwrap_or_else(|_| serde_json::json!({}))
 }
 
+/// Parse a "YYYY-MM-DD" date into epoch-ms at UTC midnight. None if unparseable.
+fn parse_ymd_ms(s: &str) -> Option<i64> {
+    let d = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()?;
+    let dt = d.and_hms_opt(0, 0, 0)?;
+    Some(dt.and_utc().timestamp_millis())
+}
+
+/// Coarse domain bucket for a tracked subject — the axis the learning curve is sliced by. Cheap keyword
+/// routing; "general" when nothing matches. Kept deliberately small so the per-domain sample isn't too
+/// sparse to calibrate.
+fn domain_of(subject: &str) -> String {
+    let s = subject.to_lowercase();
+    let has = |ks: &[&str]| ks.iter().any(|k| s.contains(*k));
+    if has(&["war", "geopolit", "conflict", "iran", "russia", "ukraine", "israel", "china", "election", "sanction", "ceasefire", "military"]) {
+        "geopolitics".to_string()
+    } else if has(&["oil", "crude", "brent", "wti", "market", "stock", "econom", "inflation", "fed", "rate", "opec", "gdp", "crypto", "bitcoin"]) {
+        "markets".to_string()
+    } else if has(&["ai", "model", "llm", "openai", "anthropic", "google", "chip", "nvidia", "software", "tech", "startup"]) {
+        "tech".to_string()
+    } else {
+        "general".to_string()
+    }
+}
+
 /// Human-friendly "how long ago" for the evolving-understanding surface (min/h/d).
 fn ago_str(then_ms: i64, now_ms: i64) -> String {
     if then_ms <= 0 {
@@ -2559,11 +2583,15 @@ impl ConversationEngine {
                 let prompt = format!(
                     "You are forming your FIRST understanding of \"{subject}\" from the evidence below. Write a \
                      compact, factual CURRENT-STATE understanding (4–7 sentences): what's happening, why, and the \
-                     key facts as of now. Then list the standalone key claims, and report the DATE the newest \
-                     development in the evidence is from.\n\n=== EVIDENCE ===\n{evidence}\n\n\
+                     key facts as of now. Then list the standalone key claims, report the DATE the newest \
+                     development in the evidence is from, and make ONE FALSIFIABLE PREDICTION about what happens \
+                     next — concrete enough to be scored later (a specific observable, a number/level or a clear \
+                     yes/no event, and a resolve-by date a few weeks out). If you can't make a confident, concrete \
+                     one, use null.\n\n=== EVIDENCE ===\n{evidence}\n\n\
                      Output ONLY JSON: {{\"understanding\":\"<compact current-state read>\",\
                      \"as_of\":\"<YYYY-MM-DD of the newest development, or 'unknown'>\",\
-                     \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}]}}"
+                     \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}],\
+                     \"prediction\":{{\"claim\":\"<what will/won't happen next>\",\"threshold\":\"<concrete observable + level, or the yes/no event>\",\"resolve_by\":\"<YYYY-MM-DD>\",\"confidence\":0.0-1.0}}}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
                 let text = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
@@ -2591,8 +2619,10 @@ impl ConversationEngine {
                         })
                         .await;
                 }
+                let pred_line = self.maybe_store_prediction(subject, &v, wall_ms, &as_of).await;
                 let as_of_tag = if as_of.is_empty() || as_of == "unknown" { String::new() } else { format!(" (as of {as_of})") };
-                format!("🌱 Started tracking \"{subject}\"{as_of_tag} — here's what I understand so far:\n\n{summary}{src_block}")
+                let pred_block = pred_line.map(|p| format!("\n\n{p}")).unwrap_or_default();
+                format!("🌱 Started tracking \"{subject}\"{as_of_tag} — here's what I understand so far:\n\n{summary}{src_block}{pred_block}")
             }
             Some(state) => {
                 let prior = state.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -2621,12 +2651,15 @@ impl ConversationEngine {
                      do NOT invent movement or rewrite what you already knew. Identify what is genuinely NEW, what CHANGED, \
                      what is CONFIRMED, and what is now OUTDATED. Then write the UPDATED current-state understanding that \
                      SUPERSEDES the old one (fold in the changes; keep everything still true; drop only what's stale). Also \
-                     report the date of the newest development now.\n\n\
+                     report the date of the newest development now, and make ONE FALSIFIABLE PREDICTION about what \
+                     happens next — concrete enough to score later (a specific observable + level or a clear yes/no \
+                     event, and a resolve-by date a few weeks out); use null if you can't make a confident concrete one.\n\n\
                      Output ONLY JSON: {{\"delta\":\"<one crisp line: what changed since last check, or 'no material change'>\",\
                      \"changed\":[\"...\"],\"new\":[\"...\"],\"confirmed\":[\"...\"],\"outdated\":[\"...\"],\
                      \"as_of\":\"<YYYY-MM-DD of the newest development now, or 'unknown'>\",\
                      \"updated_understanding\":\"<new compact current-state read>\",\
-                     \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}]}}"
+                     \"key_claims\":[{{\"claim\":\"<standalone third-person fact>\",\"certainty\":0.0-1.0}}],\
+                     \"prediction\":{{\"claim\":\"<what will/won't happen next>\",\"threshold\":\"<concrete observable + level, or the yes/no event>\",\"resolve_by\":\"<YYYY-MM-DD>\",\"confidence\":0.0-1.0}}}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
                 let text = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
@@ -2685,15 +2718,250 @@ impl ConversationEngine {
                         .unwrap_or_default();
                     if items.is_empty() { String::new() } else { format!("\n{label}:\n{}", items.join("\n")) }
                 };
+                let pred_line = self.maybe_store_prediction(subject, &v, write_ms, &effective_as_of).await;
                 let changed = section("Changed", v.get("changed").and_then(|x| x.as_array()));
                 let fresh = section("New", v.get("new").and_then(|x| x.as_array()));
                 let outdated = section("No longer true", v.get("outdated").and_then(|x| x.as_array()));
                 let delta_line = if delta.is_empty() { "re-checked".to_string() } else { delta };
+                let pred_block = pred_line.map(|p| format!("\n\n{p}")).unwrap_or_default();
                 format!(
-                    "🔄 \"{subject}\" — since I last checked ({ago}){asof_tag}:\n\n{delta_line}{changed}{fresh}{outdated}{src_block}"
+                    "🔄 \"{subject}\" — since I last checked ({ago}){asof_tag}:\n\n{delta_line}{changed}{fresh}{outdated}{src_block}{pred_block}"
                 )
             }
         }
+    }
+
+    // ===== PREDICTION → SELF-SCORING → CALIBRATION (the learning curve) =====
+    // A held understanding is an expectation; a prediction makes it falsifiable; reality grades it;
+    // the running hit-rate per domain, trending, IS the learning curve. The ledger lives in one profile
+    // KV ("predictions") as an array of records; calibration is derived from it (and mirrored into a
+    // scoped meta-belief per domain so the Bayesian engine tracks P(my reads on <domain> are right)).
+
+    async fn load_predictions(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("predictions")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_predictions(&self, preds: &[serde_json::Value]) {
+        // Keep the ledger bounded: all still-open predictions + the most recent 80 resolved ones.
+        let mut open: Vec<serde_json::Value> = Vec::new();
+        let mut resolved: Vec<serde_json::Value> = Vec::new();
+        for p in preds {
+            if p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open" {
+                open.push(p.clone());
+            } else {
+                resolved.push(p.clone());
+            }
+        }
+        let keep_from = resolved.len().saturating_sub(80);
+        open.extend(resolved.drain(keep_from..));
+        let _ = self.memory.profile_set("predictions", &serde_json::to_string(&open).unwrap_or_else(|_| "[]".into())).await;
+    }
+
+    /// Parse the model's `prediction` object, hallucination-gate it (needs a concrete threshold + a
+    /// future resolve-by date + enough confidence), dedupe (one OPEN prediction per subject at a time),
+    /// append to the ledger, and return a one-line surface. Vague predictions are discarded, not stored —
+    /// same discipline as the pattern-finder: an unscoreable prediction poisons the calibration signal.
+    async fn maybe_store_prediction(&self, subject: &str, v: &serde_json::Value, made_ms: i64, made_as_of: &str) -> Option<String> {
+        let p = v.get("prediction")?;
+        if p.is_null() {
+            return None;
+        }
+        let claim = p.get("claim").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let threshold = p.get("threshold").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let resolve_by = p.get("resolve_by").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let conf = p.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let resolve_by_ms = parse_ymd_ms(&resolve_by)?;
+        // Gate: concrete claim + concrete threshold + a FUTURE deadline + real confidence.
+        if claim.len() < 8 || threshold.len() < 3 || conf < 0.5 || resolve_by_ms <= made_ms {
+            return None;
+        }
+        let mut preds = self.load_predictions().await;
+        // Dedupe: don't stack a second open prediction on a subject that already has one.
+        let already_open = preds.iter().any(|q| {
+            q.get("subject").and_then(|x| x.as_str()) == Some(subject)
+                && q.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open"
+        });
+        if already_open {
+            return None;
+        }
+        let domain = domain_of(subject);
+        preds.push(serde_json::json!({
+            "id": made_ms,
+            "subject": subject,
+            "domain": domain,
+            "claim": claim,
+            "threshold": threshold,
+            "confidence": conf,
+            "made_ms": made_ms,
+            "made_as_of": made_as_of,
+            "resolve_by": resolve_by,
+            "resolve_by_ms": resolve_by_ms,
+            "status": "open",
+        }));
+        self.save_predictions(&preds).await;
+        Some(format!("🔮 Prediction (I'll grade myself): {claim} — by {resolve_by}. [{threshold}]"))
+    }
+
+    /// RESOLVER — the self-scoring half. For every open prediction whose deadline has passed (or all, if
+    /// `force`), read the CURRENT understanding of its subject and have the model judge hit/miss/unclear
+    /// against the stated threshold. The verdict is written as signed evidence into a per-domain
+    /// calibration belief (the Bayesian engine turns the stream of hits/misses into a posterior), and the
+    /// ledger entry is closed. Auto-resolvable for tracked subjects (news/markets) — no user burden.
+    pub async fn resolve_predictions(&self, force: bool) -> Vec<String> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut preds = self.load_predictions().await;
+        let mut out = Vec::new();
+        let mut changed = false;
+        for i in 0..preds.len() {
+            if preds[i].get("status").and_then(|x| x.as_str()).unwrap_or("open") != "open" {
+                continue;
+            }
+            let due = preds[i].get("resolve_by_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX) <= now;
+            if !(force || due) {
+                continue;
+            }
+            let subject = preds[i].get("subject").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let claim = preds[i].get("claim").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let threshold = preds[i].get("threshold").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let made_as_of = preds[i].get("made_as_of").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let resolve_by = preds[i].get("resolve_by").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let domain = preds[i].get("domain").and_then(|x| x.as_str()).unwrap_or("general").to_string();
+            // Read the current understanding to judge against (the tracked loop keeps it fresh).
+            let key = format!("understanding:{}", subject.to_lowercase());
+            let cur = self
+                .memory
+                .profile_get(&key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let (cur_summary, cur_as_of) = match &cur {
+                Some(st) => (
+                    st.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    st.get("as_of").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                ),
+                None => (String::new(), String::new()),
+            };
+            let prompt = format!(
+                "On {made_as_of} you predicted about \"{subject}\":\n  CLAIM: {claim}\n  THRESHOLD (how to score it): {threshold}\n  RESOLVE BY: {resolve_by}\n\n\
+                 The CURRENT understanding of \"{subject}\" (as of {cur_as_of}) is:\n\"\"\"\n{cur_summary}\n\"\"\"\n\n\
+                 Judge the prediction STRICTLY against its threshold. Did it HIT, MISS, or is it genuinely UNCLEAR from what's known? \
+                 Output ONLY JSON: {{\"verdict\":\"hit|miss|unclear\",\"why\":\"<one sentence citing the deciding fact>\"}}"
+            );
+            let verdict = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], GenerationConfig::default()).await {
+                Ok(r) => {
+                    let vv = parse_json_obj(&r.text);
+                    let verd = vv.get("verdict").and_then(|x| x.as_str()).unwrap_or("unclear").to_lowercase();
+                    let why = vv.get("why").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                    (verd, why)
+                }
+                Err(_) => continue, // leave it open; try again next pass
+            };
+            let (verd, why) = verdict;
+            preds[i]["status"] = serde_json::json!(verd);
+            preds[i]["resolved_ms"] = serde_json::json!(now);
+            preds[i]["why"] = serde_json::json!(why);
+            changed = true;
+            // Write the outcome as signed evidence into the per-domain calibration belief. hit=+, miss=-,
+            // unclear contributes nothing (neither rewards nor punishes the domain's track record).
+            let polarity = match verd.as_str() {
+                "hit" => 1.0,
+                "miss" => -1.0,
+                _ => 0.0,
+            };
+            if polarity != 0.0 {
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!("My predictions about {domain} tend to be correct"),
+                        polarity,
+                        weight: 0.7,
+                        source_event: Some(format!("prediction:{}", preds[i].get("id").and_then(|x| x.as_i64()).unwrap_or(0))),
+                        provenance: "calibration".into(),
+                    })
+                    .await;
+            }
+            let mark = match verd.as_str() {
+                "hit" => "✅ HELD",
+                "miss" => "❌ MISSED",
+                _ => "🤷 unclear",
+            };
+            out.push(format!("🎯 Predicted ({made_as_of}): {claim}\n   → {mark}. {why}"));
+        }
+        if changed {
+            self.save_predictions(&preds).await;
+        }
+        out
+    }
+
+    /// `ym predictions` — the open bets (what I've committed to being graded on, and by when).
+    pub async fn predictions_view(&self) -> String {
+        let preds = self.load_predictions().await;
+        let open: Vec<&serde_json::Value> = preds.iter().filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open").collect();
+        if open.is_empty() {
+            return "No open predictions yet. Track a subject (`ym track <x>`) and I'll start making — and grading — calls.".to_string();
+        }
+        let mut lines = vec![format!("🔮 Open predictions ({}):", open.len())];
+        for p in open {
+            let claim = p.get("claim").and_then(|x| x.as_str()).unwrap_or("");
+            let by = p.get("resolve_by").and_then(|x| x.as_str()).unwrap_or("?");
+            let subj = p.get("subject").and_then(|x| x.as_str()).unwrap_or("");
+            lines.push(format!("• [{subj}] {claim} — by {by}"));
+        }
+        lines.join("\n")
+    }
+
+    /// `ym calibration` — the learning curve. Hit-rate per domain over resolved predictions, plus a
+    /// recency trend (recent half vs earlier half) so improvement (or drift) is visible, not just a static
+    /// average. This number trending up over time is the whole thesis made measurable.
+    pub async fn calibration_view(&self) -> String {
+        let preds = self.load_predictions().await;
+        let resolved: Vec<&serde_json::Value> = preds
+            .iter()
+            .filter(|p| matches!(p.get("status").and_then(|x| x.as_str()), Some("hit") | Some("miss")))
+            .collect();
+        if resolved.is_empty() {
+            let open = preds.iter().filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open").count();
+            return format!("No predictions resolved yet — {open} still open. The learning curve starts once deadlines pass (or `ym resolve` to grade due ones now).");
+        }
+        use std::collections::BTreeMap;
+        let mut by_domain: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+        for p in &resolved {
+            let dom = p.get("domain").and_then(|x| x.as_str()).unwrap_or("general").to_string();
+            let hit = p.get("status").and_then(|x| x.as_str()) == Some("hit");
+            by_domain.entry(dom).or_default().push(hit);
+        }
+        let overall_hits = resolved.iter().filter(|p| p.get("status").and_then(|x| x.as_str()) == Some("hit")).count();
+        let mut lines = vec![format!(
+            "📈 Calibration — how often my calls hold (n={}, overall {:.0}%):",
+            resolved.len(),
+            100.0 * overall_hits as f64 / resolved.len() as f64
+        )];
+        for (dom, hits) in &by_domain {
+            let n = hits.len();
+            let h = hits.iter().filter(|b| **b).count();
+            let rate = 100.0 * h as f64 / n as f64;
+            // recency trend: compare the more-recent half to the earlier half (predictions are appended
+            // in time order, so a later slice is more recent).
+            let trend = if n >= 4 {
+                let mid = n / 2;
+                let early = &hits[..mid];
+                let late = &hits[mid..];
+                let er = early.iter().filter(|b| **b).count() as f64 / early.len().max(1) as f64;
+                let lr = late.iter().filter(|b| **b).count() as f64 / late.len().max(1) as f64;
+                if lr > er + 0.15 { " ↑ improving" } else if lr < er - 0.15 { " ↓ slipping" } else { " → steady" }
+            } else {
+                ""
+            };
+            lines.push(format!("• {dom}: {rate:.0}% ({h}/{n}){trend}"));
+        }
+        lines.join("\n")
     }
 
     async fn news_headlines(&self, topic: Option<&str>) -> String {
@@ -3729,6 +3997,19 @@ impl ConversationEngine {
                 self.evolve_understanding(&rest).await
             }
             "track" | "understanding" => "Track what? e.g. `ym track US-Iran war` — then re-run it later and I'll tell you what changed.".to_string(),
+            // --- calibration: the learning curve — predictions, self-scoring, hit-rate per domain ---
+            "predictions" | "bets" | "forecasts" => self.predictions_view().await,
+            "calibration" | "curve" | "scorecard" => self.calibration_view().await,
+            "resolve" | "grade" | "score" => {
+                // `ym resolve` grades due predictions; `ym resolve all` force-grades every open one now.
+                let force = matches!(rest.to_lowercase().as_str(), "all" | "force" | "now");
+                let done = self.resolve_predictions(force).await;
+                if done.is_empty() {
+                    "No predictions were due to grade. (`ym resolve all` to force-grade every open one.)".to_string()
+                } else {
+                    format!("Graded {}:\n\n{}", done.len(), done.join("\n\n"))
+                }
+            }
             // Not a plugin command — treat the whole line as chat (full agent loop, live memory).
             _ => self.handle_turn(line).await.unwrap_or_else(|e| format!("(error: {e})")),
         }

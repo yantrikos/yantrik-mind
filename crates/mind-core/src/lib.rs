@@ -34,6 +34,11 @@ const HELP_TEXT: &str = "\
 :consolidate         fold recent turns into durable beliefs
 :patterns            find non-obvious patterns across what I know + save them as beliefs
 :workers             show remote worker-pool status
+
+(ym-only) track <subject>   hold + evolve a living understanding (re-run → what changed)
+(ym-only) predictions       open predictions I've committed to being graded on
+(ym-only) resolve [all]      grade due predictions against reality (self-scoring)
+(ym-only) calibration        the learning curve — hit-rate per domain, trending
 :help / :commands    show this help
 :quit / :q           exit";
 

@@ -333,6 +333,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
     let mut last_patterns = now_ms(); // pattern-finder surface cadence (don't fire right after boot)
+    let mut last_resolve = 0u64; // prediction-resolver cadence (grade due predictions, surface verdicts)
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -449,6 +450,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         });
                     }
                 }
+            }
+        }
+
+        // Prediction-resolver tick: grade any predictions whose deadline has passed against the current
+        // understanding, write the hit/miss into per-domain calibration, and surface the verdict. Paced
+        // (YM_RESOLVE_SECS, default 1h) and quiet-hours-gated; this is the self-scoring half of the
+        // learning curve running on its own — no user prompt needed for tracked subjects.
+        {
+            let period: u64 = std::env::var("YM_RESOLVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600);
+            let now = now_ms();
+            if now.saturating_sub(last_resolve) >= period * 1000 {
+                let chat = active_chat.load(Ordering::Relaxed);
+                for verdict in conv.resolve_predictions(false).await {
+                    if chat != 0 && !in_quiet_hours_now() {
+                        let _ = tg_send(&api, chat, &verdict).await;
+                    }
+                }
+                last_resolve = now;
             }
         }
 

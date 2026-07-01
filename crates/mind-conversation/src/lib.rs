@@ -230,6 +230,31 @@ fn task_similar(a: &str, b: &str) -> bool {
     inter / uni >= 0.5
 }
 
+/// The dimensions the ask-drive proactively mines to learn the user's world — hobbies + recreation
+/// for companionship, the topics/people/companies they care about to feed grounding, gifts, and the
+/// entity-simulation. Rotated one uncovered dimension at a time; `ask_covered` tracks progress.
+const INTEREST_DIMS: [(&str, &str); 6] = [
+    ("hobbies", "When you get some downtime, what do you actually enjoy doing — any hobbies or things you're into lately?"),
+    ("unwind", "What's your go-to way to unwind after a long day?"),
+    ("follow", "What topics or areas do you love keeping up with? Tell me and I'll start watching them for you."),
+    ("people", "Who are the important people in your life I should know about — family, close friends?"),
+    ("watch", "Any companies, markets, or stocks you keep an eye on? I can track them and even forecast where they're heading."),
+    ("work", "What does a typical work day look like for you? Helps me time things and stay relevant."),
+];
+
+/// Third-person prefix for the durable belief stored from each interest answer.
+fn interest_belief_prefix(key: &str) -> &'static str {
+    match key {
+        "hobbies" => "The user's hobbies / things they enjoy:",
+        "unwind" => "The user unwinds by:",
+        "follow" => "The user likes keeping up with:",
+        "people" => "Important people in the user's life:",
+        "watch" => "Companies/markets the user watches:",
+        "work" => "The user's typical work day:",
+        _ => "About the user:",
+    }
+}
+
 /// True if a person record matches a lowercase query by name OR any nickname (substring either way).
 /// How a needle is compared against stored text. The loose `Substring` mode is right for fuzzy
 /// lookup ("priya" finds "Priya Sharma"), but wrong for destructive ops: a short needle like a name
@@ -2207,6 +2232,14 @@ impl ConversationEngine {
                 name.unwrap_or_default()
             ));
         }
+        // INTERESTS stage — actively learn the user's world (hobbies, what they follow, the people and
+        // companies they care about) so grounding, gifts, and the entity-sim have real material. Asks one
+        // uncovered dimension per tick; once all are covered it falls through to the purpose taper.
+        let covered = self.ask_covered().await;
+        if let Some((key, q)) = INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
+            *self.pending_onboard.lock().unwrap() = Some(format!("interest:{key}"));
+            return Some(q.to_string());
+        }
         // OPEN stage — purpose-grounded follow-ups, but taper once the brain knows enough about you.
         let enough: usize = std::env::var("YM_ASK_ENOUGH").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         let known = self
@@ -2219,6 +2252,25 @@ impl ConversationEngine {
             return None;
         }
         self.purpose_followup(&purpose.unwrap_or_default()).await
+    }
+
+    /// Which interest dimensions the ask-drive has already covered (persisted, so it never re-asks).
+    async fn ask_covered(&self) -> Vec<String> {
+        self.memory
+            .profile_get("ask_covered")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn mark_ask_covered(&self, key: &str) {
+        let mut c = self.ask_covered().await;
+        if !c.iter().any(|x| x == key) {
+            c.push(key.to_string());
+        }
+        let _ = self.memory.profile_set("ask_covered", &serde_json::to_string(&c).unwrap_or_else(|_| "[]".into())).await;
     }
 
     /// Capture the user's answer to the current onboarding question into its slot, then ADVANCE the
@@ -2246,6 +2298,31 @@ impl ConversationEngine {
                 match self.purpose_followup(&purpose).await {
                     Some(q) => format!("Got it — I'll keep that as my north star. {q}"),
                     None => "Got it — I'll keep that as my north star. Tell me more whenever you like.".to_string(),
+                }
+            }
+            s if s.starts_with("interest:") => {
+                let key = s.trim_start_matches("interest:").to_string();
+                let ans: String = text.trim().chars().take(400).collect();
+                let _ = self.memory.profile_set(&format!("interest_{key}"), &ans).await;
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!("{} {ans}", interest_belief_prefix(&key)),
+                        polarity: 1.0,
+                        weight: 0.9,
+                        source_event: Some("onboard".into()),
+                        provenance: "told".into(),
+                    })
+                    .await;
+                self.mark_ask_covered(&key).await;
+                // Chain the next uncovered dimension so it flows as a conversation, not one question a day.
+                let covered = self.ask_covered().await;
+                match INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
+                    Some((nk, nq)) => {
+                        *self.pending_onboard.lock().unwrap() = Some(format!("interest:{nk}"));
+                        format!("Love that — noted. {nq}")
+                    }
+                    None => "Got it — that gives me a real feel for you, and I'll put it to use.".to_string(),
                 }
             }
             _ => "Thanks.".to_string(),
@@ -5122,6 +5199,8 @@ impl ConversationEngine {
             "family" | "relationships" => self.family_view().await,
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
+            // --- get-to-know-you: surface the next proactive question on demand (same drive that fires idle) ---
+            "ask" | "getting-to-know" if rest.is_empty() => self.proactive_ask().await.unwrap_or_else(|| "I've got a good feel for you right now — nothing I need to ask.".to_string()),
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,

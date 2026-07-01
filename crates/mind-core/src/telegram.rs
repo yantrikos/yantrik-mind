@@ -19,10 +19,14 @@ use crate::{handle_line_as, Outcome};
 
 async fn tg_get(api: &str, method_query: &str) -> anyhow::Result<serde_json::Value> {
     let url = format!("{api}/{method_query}");
+    // ureq errors embed the full request URL — which contains the bot token. Redact it from any
+    // error we bubble up, or the token lands verbatim in the journal (it did; see poll-error logs).
+    let api_owned = api.to_string();
     let v = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let body = ureq::get(&url)
             .timeout(std::time::Duration::from_secs(35))
-            .call()?
+            .call()
+            .map_err(|e| anyhow::anyhow!("{}", e.to_string().replace(&api_owned, "https://api.telegram.org/bot<token>")))?
             .into_string()?;
         Ok(serde_json::from_str(&body)?)
     })

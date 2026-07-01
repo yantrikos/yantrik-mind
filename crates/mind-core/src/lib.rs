@@ -8,9 +8,22 @@ use std::sync::Arc;
 
 use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
-use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery};
+use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 
 pub mod telegram;
+
+/// Parse the two conflicting belief statements from a Contradiction tension's `about` field.
+/// Handles both formats emitted by the memory layer:
+///   "conflict: A vs B"   (assert-belief auto-detection path)
+///   "\"A\" vs \"B\""     (DMN reconciliation path)
+fn parse_contradiction_beliefs(about: &str) -> Option<(String, String)> {
+    let s = about.strip_prefix("conflict: ").unwrap_or(about);
+    let (a, b) = s.split_once(" vs ")?;
+    let a = a.trim().trim_matches('"').to_string();
+    let b = b.trim().trim_matches('"').to_string();
+    if a.is_empty() || b.is_empty() { return None; }
+    Some((a, b))
+}
 
 /// One REPL line → an outcome. Split out of `main` so it's deterministically testable with a
 /// `ScriptedLLM` (no real model).
@@ -25,6 +38,7 @@ const HELP_TEXT: &str = "\
 :beliefs [query]     list top beliefs by confidence (optional semantic filter)
 :reflect [topic]     structured self-reflection from typed memory
 :conflicts           list open contradictions
+:resolve <id>        resolve a contradiction tension (weakens the disputed belief)
 :explain <stmt>      show a belief with its evidence count
 :goal <text>         store a goal (surfaces in :reflect)
 :prefer <text>       store a preference (surfaces in :reflect)
@@ -167,6 +181,49 @@ pub async fn handle_line_as(
                     .join("\n"),
             ),
             Err(e) => Outcome::Said(format!("(error: {e})")),
+        };
+    }
+    if let Some(id) = t.strip_prefix(":resolve ") {
+        let id = id.trim();
+        let tensions = match mem.open_tensions(200).await {
+            Ok(ts) => ts,
+            Err(e) => return Outcome::Said(format!("(error: {e})")),
+        };
+        let Some(tension) = tensions.iter().find(|t| t.id == id) else {
+            return Outcome::Said(format!("(no open tension with id {id})"));
+        };
+        if tension.kind != TensionKind::Contradiction {
+            let tid = tension.id.clone();
+            return match mem.discharge_tension(&tid).await {
+                Ok(_) => Outcome::Said("tension discharged".into()),
+                Err(e) => Outcome::Said(format!("(error: {e})")),
+            };
+        }
+        let about = tension.about.clone();
+        let tid = tension.id.clone();
+        let Some((belief_a, belief_b)) = parse_contradiction_beliefs(&about) else {
+            return Outcome::Said(format!("(could not parse beliefs from tension: {about})"));
+        };
+        // Weaken the less-confident side so the contradiction resolves.
+        let conf_a = mem.explain_belief(&belief_a).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
+        let conf_b = mem.explain_belief(&belief_b).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
+        let weaker = if conf_a <= conf_b { belief_a } else { belief_b };
+        let result = mem
+            .remember_as_belief(BeliefAssertion {
+                statement: weaker.clone(),
+                polarity: -1.0,
+                weight: 1.5,
+                source_event: Some("resolve".into()),
+                provenance: "told".into(),
+            })
+            .await;
+        let _ = mem.discharge_tension(&tid).await;
+        return match result {
+            Ok(b) => Outcome::Said(format!(
+                "resolved: weakened \"{}\" (confidence now {:.2}), tension discharged",
+                b.statement, b.confidence
+            )),
+            Err(e) => Outcome::Said(format!("(could not weaken belief: {e}; tension discharged)")),
         };
     }
     if let Some(stmt) = t.strip_prefix(":explain ") {
@@ -462,6 +519,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
 mod tests {
     use super::*;
     use mind_inference::{InferencePool, ScriptedLLM};
+    use mind_types::TensionKind;
     use yantrik_ml::LLMBackend;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -582,6 +640,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resolve_command_weakens_contradicted_belief_and_discharges_tension() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = engine(&mem, pool);
+
+        // Seed two beliefs that will form a contradiction.
+        handle_line(":remember + sky is blue", &mem, &conv).await;
+        handle_line(":remember + sky is green", &mem, &conv).await;
+
+        // Record the contradiction tension directly (as the memory layer does automatically).
+        mem.record_tension(TensionKind::Contradiction, 0.8, "conflict: sky is blue vs sky is green")
+            .await
+            .unwrap();
+
+        let tensions = mem.open_tensions(10).await.unwrap();
+        let t = tensions.iter().find(|t| t.about.contains("sky")).expect("tension should exist");
+        let tid = t.id.clone();
+
+        // Unknown id → helpful error, no crash.
+        match handle_line(":resolve 99999", &mem, &conv).await {
+            Outcome::Said(s) => assert!(s.contains("no open tension"), "expected missing-id message: {s}"),
+            _ => panic!("expected Said"),
+        }
+
+        // Resolve the real tension.
+        match handle_line(&format!(":resolve {tid}"), &mem, &conv).await {
+            Outcome::Said(s) => {
+                assert!(s.contains("weakened"), "should report weakened belief: {s}");
+                assert!(s.contains("discharged"), "should report tension discharged: {s}");
+            }
+            _ => panic!("expected Said"),
+        }
+
+        // Tension must now be gone from the open list.
+        let open = mem.open_tensions(10).await.unwrap();
+        assert!(!open.iter().any(|t| t.id == tid), "resolved tension should no longer be open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn help_command_lists_all_commands() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
@@ -592,7 +690,7 @@ mod tests {
             match handle_line(cmd, &mem, &conv).await {
                 Outcome::Said(s) => {
                     for expected in &[":remember", ":beliefs", ":reflect", ":conflicts",
-                                      ":explain", ":tasks", ":task", ":done",
+                                      ":resolve", ":explain", ":tasks", ":task", ":done",
                                       ":consolidate", ":workers", ":quit"] {
                         assert!(s.contains(expected), "{cmd}: missing {expected} in help:\n{s}");
                     }

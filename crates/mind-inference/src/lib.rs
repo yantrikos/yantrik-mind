@@ -238,6 +238,9 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         "minimax" => ("https://api.minimax.io/v1", "MINIMAX_API_KEY", "MiniMax-M2.7"),
         "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY", "deepseek/deepseek-chat"),
         "grok" => ("https://api.x.ai/v1", "GROK_API_KEY", "grok-2-latest"),
+        // Anthropic direct (OpenAI-compatible endpoint). Default Sonnet 5 (fast + cheap enough for an
+        // always-on brain); swap the model to claude-opus-4-8 or claude-fable-5 (when it un-gates).
+        "anthropic" => ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY", "claude-sonnet-5"),
         _ => return None,
     };
     let key = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty())?;

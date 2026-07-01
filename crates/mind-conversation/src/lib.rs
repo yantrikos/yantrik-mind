@@ -4735,6 +4735,39 @@ impl ConversationEngine {
     /// (Home Assistant, GitHub, web, memory) — NOT authored skills — and a plugin's command exists only
     /// when that plugin is actually configured (the "hook": present plugin → live command). Anything
     /// that isn't a plugin command falls through to a full chat turn (shared live memory).
+    /// Forget every stored belief whose text contains `needle` (case-insensitive). Memory hygiene —
+    /// used to purge stale/wrong facts (e.g. test-data pollution) that consolidation left behind, since
+    /// the belief store is separate from the people/profile layers. Runs a few recall passes so it
+    /// catches matches beyond a single ranked page.
+    pub async fn forget_beliefs_matching(&self, needle: &str) -> String {
+        let needle = needle.trim().to_lowercase();
+        if needle.len() < 3 {
+            return "Give me at least 3 characters to match (e.g. `ym forget-belief Priya`).".to_string();
+        }
+        let mut forgotten = 0usize;
+        // A few passes: each forget shifts the ranking, so re-recall until a pass finds nothing new.
+        for _ in 0..5 {
+            let rs = self
+                .memory
+                .recall_typed(mind_types::RecallQuery { text: needle.clone(), top_k: 50, kind: None })
+                .await
+                .unwrap_or_default();
+            let mut hit = false;
+            for r in rs {
+                if r.item.text.to_lowercase().contains(&needle) {
+                    if self.memory.forget(&r.item.id).await.unwrap_or(false) {
+                        forgotten += 1;
+                        hit = true;
+                    }
+                }
+            }
+            if !hit {
+                break;
+            }
+        }
+        format!("Forgot {forgotten} belief(s) matching \"{needle}\".")
+    }
+
     pub async fn cli_dispatch(&self, line: &str) -> String {
         let line = line.trim();
         let mut it = line.splitn(2, char::is_whitespace);
@@ -4814,6 +4847,32 @@ impl ConversationEngine {
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,
+            // --- memory hygiene: purge stale/wrong beliefs by text match (+ compact state for retrospect) ---
+            "forget-belief" | "unbelieve" if !rest.is_empty() => self.forget_beliefs_matching(&rest).await,
+            "reflect" | "state" => match self.memory.reflect(rest.trim()).await {
+                Ok(r) => {
+                    let mut out = String::from("BELIEFS (top by confidence):\n");
+                    let mut bs = r.beliefs.clone();
+                    bs.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+                    for b in bs.iter().take(30) {
+                        out.push_str(&format!("- {} ({:.2})\n", b.statement, b.confidence));
+                    }
+                    if !r.open_conflicts.is_empty() {
+                        out.push_str("OPEN CONTRADICTIONS:\n");
+                        for c in &r.open_conflicts {
+                            out.push_str(&format!("- \"{}\" vs \"{}\"\n", c.belief_a, c.belief_b));
+                        }
+                    }
+                    if !r.goals.is_empty() {
+                        out.push_str("GOALS:\n");
+                        for g in r.goals.iter().take(10) {
+                            out.push_str(&format!("- {}\n", g.text));
+                        }
+                    }
+                    out
+                }
+                Err(e) => format!("(reflect error: {e})"),
+            },
             // --- deal finder: grounded, budget-aware, gift-personalized shopping ---
             "deals" | "deal" | "shop" | "shopping" if !rest.is_empty() => self.find_deals(&rest).await,
             "deals" | "deal" | "shop" | "shopping" => "What are you shopping for? e.g. `ym deals gold watch 200`".to_string(),

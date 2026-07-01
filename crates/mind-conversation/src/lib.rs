@@ -3123,6 +3123,127 @@ impl ConversationEngine {
         Some(format!("🔮 Prediction (I'll grade myself): {claim} — by {resolve_by}. [{threshold}]"))
     }
 
+    /// FORESIGHT — the flagship. Take any entity (a company, a market, a person you track, or YOU) and
+    /// forecast its likely next moves, then recommend. Reuses the World-Stage insight: model the entity
+    /// as a character (drivers / patterns / red lines / recent behavior) — the character predicts the
+    /// HOW and WHAT, the situation determines the WHEN. The single most-checkable call is stored via
+    /// `maybe_store_prediction`, so the resolver auto-scores it and foresight EARNS its accuracy over
+    /// time instead of asserting it (the honesty World Stage's contaminated backtest lacked).
+    pub async fn foresee(&self, subject: &str) -> String {
+        let subject = subject.trim();
+        if subject.len() < 2 {
+            return "Foresee what or whom? e.g. `ym foresee Walmart`, `ym foresee oil`, or `ym foresee me`.".to_string();
+        }
+        let (ctx, is_self) = self.foresight_context(subject).await;
+        if ctx.trim().is_empty() {
+            return format!("I don't have enough on \"{subject}\" yet to forecast. Tell me about it, or `ym track {subject}` and I'll build a read first.");
+        }
+        let framing = if is_self {
+            "You are forecasting the USER'S OWN likely next moves and needs, so JARVIS can get ahead of them (anticipate, prepare, remind, tee up)."
+        } else {
+            "You are forecasting this entity's likely next moves. Model it as a CHARACTER — its drivers, behavioral patterns, red lines, and recent behavior. The character predicts the HOW and WHAT; the current situation determines the WHEN."
+        };
+        let prompt = format!(
+            "{framing}\n\nUsing ONLY the context below, produce a FORESIGHT read. Be concrete and falsifiable; do NOT invent facts not in the context.\n\n=== CONTEXT ===\n{ctx}\n\n=== OUTPUT — JSON only ===\n{{\"model\":\"<2-3 sentence read of the drivers/patterns that shape what they do next>\",\"moves\":[{{\"move\":\"<a likely next move>\",\"why\":\"<the driver/pattern behind it>\",\"confidence\":0.0-1.0}}],\"recommendation\":\"<ONE concrete thing the user should do given these moves>\",\"prediction\":{{\"claim\":\"<the single most likely + checkable next move>\",\"threshold\":\"<a concrete observable that would confirm it>\",\"resolve_by\":\"<YYYY-MM-DD a few weeks out>\",\"confidence\":0.0-1.0}}}}\nGive 2-4 moves, most likely first."
+        );
+        let cfg = GenerationConfig { max_tokens: 950, ..GenerationConfig::default() };
+        let text = match self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .await
+        {
+            Ok(r) => r.text,
+            Err(e) => return format!("(couldn't complete the forecast: {e})"),
+        };
+        let v = parse_json_obj(&text);
+        let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let moves = v.get("moves").and_then(|x| x.as_array());
+        let rec = v.get("recommendation").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if model.is_empty() && moves.map(|m| m.is_empty()).unwrap_or(true) {
+            return format!("I couldn't form a clear forecast on \"{subject}\" from what I have yet.");
+        }
+        let label = if is_self { "you".to_string() } else { subject.to_string() };
+        let mut out = format!("🔮 Foresight — {label}\n\n{model}");
+        if let Some(ms) = moves {
+            out.push_str("\n\nLikely next moves:");
+            for m in ms.iter().take(4) {
+                let mv = m.get("move").and_then(|x| x.as_str()).unwrap_or("").trim();
+                let why = m.get("why").and_then(|x| x.as_str()).unwrap_or("").trim();
+                let c = m.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                if !mv.is_empty() {
+                    out.push_str(&format!("\n  • {mv} ({:.0}%)", c * 100.0));
+                    if !why.is_empty() {
+                        out.push_str(&format!(" — {why}"));
+                    }
+                }
+            }
+        }
+        if !rec.is_empty() {
+            out.push_str(&format!("\n\n💡 Recommendation: {rec}"));
+        }
+        // Log the single most-checkable call so the resolver grades me later (honest calibration).
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(pline) = self.maybe_store_prediction(subject, &v, now, "").await {
+            out.push_str(&format!("\n\n{pline}"));
+        }
+        out
+    }
+
+    /// Assemble the character/context block a forecast reasons over — reusing everything we already hold:
+    /// the user's own profile+interests (self-anticipation), a person's living profile, my current
+    /// understanding of a tracked subject, live market context, and fresh external evidence. Returns
+    /// (context, is_self). For the self case it never hits the web (forecasting YOU, not searching you).
+    async fn foresight_context(&self, subject: &str) -> (String, bool) {
+        let s = subject.trim().to_lowercase();
+        let name = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default();
+        let is_self = matches!(s.as_str(), "me" | "myself" | "i" | "user" | "pranab")
+            || (!name.is_empty() && s == name.to_lowercase());
+        let mut ctx = String::new();
+        if is_self {
+            if let Some(p) = self.memory.profile_get("self_profile").await.ok().flatten() {
+                ctx.push_str(&format!("USER PROFILE:\n{}\n\n", p.chars().take(1200).collect::<String>()));
+            }
+            if let Some(purpose) = self.memory.profile_get("purpose").await.ok().flatten() {
+                ctx.push_str(&format!("Stated goal for me: {purpose}\n"));
+            }
+            for (k, _) in INTEREST_DIMS {
+                if let Some(v) = self.memory.profile_get(&format!("interest_{k}")).await.ok().flatten() {
+                    if !v.trim().is_empty() {
+                        ctx.push_str(&format!("interest[{k}]: {v}\n"));
+                    }
+                }
+            }
+            let (rem, _) = self.split_tasks().await;
+            if !rem.is_empty() {
+                ctx.push_str("\nOpen reminders:\n");
+                for t in rem.iter().take(6) {
+                    ctx.push_str(&format!("- {}\n", t.description));
+                }
+            }
+            return (ctx, true);
+        }
+        // A person you track → their living profile is the character sheet.
+        let people = self.load_people_profiles().await;
+        if let Some(p) = people.iter().find(|p| person_matches(p, &s)) {
+            let sheet = serde_json::to_string_pretty(p).unwrap_or_default();
+            ctx.push_str(&format!("PERSON PROFILE:\n{}\n\n", sheet.chars().take(1400).collect::<String>()));
+        }
+        // My current living understanding of the subject, if I track it.
+        if let Some((summary, as_of)) = self.held_understanding(subject).await {
+            ctx.push_str(&format!("WHAT I CURRENTLY UNDERSTAND (as of {as_of}):\n{summary}\n\n"));
+        }
+        // Live market context for finance-relevant subjects (threads in Brent/WTI + your holdings).
+        if let Some(m) = self.market_context(subject).await {
+            ctx.push_str(&format!("LIVE MARKET CONTEXT:\n{m}\n\n"));
+        }
+        // Fresh external evidence (news + articles) — the "what's happening now" the WHEN comes from.
+        let (evidence, _sources, has) = self.gather_evidence(subject).await;
+        if has {
+            ctx.push_str(&format!("FRESH EVIDENCE:\n{}\n", evidence.chars().take(3000).collect::<String>()));
+        }
+        (ctx, false)
+    }
+
     /// RESOLVER — the self-scoring half. For every open prediction whose deadline has passed (or all, if
     /// `force`), read the CURRENT understanding of its subject and have the model judge hit/miss/unclear
     /// against the stated threshold. The verdict is written as signed evidence into a per-domain
@@ -5201,6 +5322,9 @@ impl ConversationEngine {
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             // --- get-to-know-you: surface the next proactive question on demand (same drive that fires idle) ---
             "ask" | "getting-to-know" if rest.is_empty() => self.proactive_ask().await.unwrap_or_else(|| "I've got a good feel for you right now — nothing I need to ask.".to_string()),
+            // --- foresight: model any entity (or you) → predict next moves → recommend, self-scored ---
+            "foresee" | "forecast" | "predict" | "anticipate" if !rest.is_empty() => self.foresee(&rest).await,
+            "foresee" | "forecast" | "predict" | "anticipate" => "Foresee what or whom? e.g. `ym foresee Walmart`, `ym foresee oil`, or `ym foresee me`.".to_string(),
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,

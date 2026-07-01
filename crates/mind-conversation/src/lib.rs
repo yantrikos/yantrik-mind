@@ -58,7 +58,7 @@ impl TurnIdentity {
 }
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
-    MemoryFacade, MindError, Result, RiskLevel, Skill, WorkingSet,
+    MemoryFacade, MindError, Result, RiskLevel, Skill, Task, WorkingSet,
 };
 use yantrik_ml::{ChatMessage, GenerationConfig};
 
@@ -194,6 +194,40 @@ fn brief_excerpt(text: &str, max_chars: usize) -> String {
         s.push('…');
     }
     s
+}
+
+/// True if a task reads as a PERSONAL reminder (something for the user to do) rather than internal
+/// agent/dev work. Conservative denylist of internal signals — real reminders pass through; the point
+/// is that "implement X" / "reconcile beliefs" / "check repos" never leak into the user's morning.
+fn is_personal_reminder(desc: &str) -> bool {
+    let d = desc.to_lowercase();
+    const INTERNAL: [&str; 22] = [
+        "implement ", "refactor", "reconcile", "dedup", "de-dup", "confidence-gated",
+        "evidence-quality", "memory reconciliation", "research rust", "async tokio",
+        "github repos", "build a live-updating", "auto-reconciliation", "belief",
+        "canonical belief", "news tracking", "conflict", "purge", "priya", "outdated",
+        "memory entry", "memory pass",
+    ];
+    !INTERNAL.iter().any(|k| d.contains(k))
+}
+
+/// Cheap fuzzy match for reminder dedup: Jaccard over content words. Catches the many near-identical
+/// "buy Brishti a watch/gift" entries the store accrues, without merging genuinely different to-dos.
+fn task_similar(a: &str, b: &str) -> bool {
+    fn words(s: &str) -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2 && !matches!(*w, "the" | "for" | "and" | "buy" | "get" | "her" | "his"))
+            .map(String::from)
+            .collect()
+    }
+    let (wa, wb) = (words(a), words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    let inter = wa.intersection(&wb).count() as f64;
+    let uni = wa.union(&wb).count() as f64;
+    inter / uni >= 0.5
 }
 
 /// True if a person record matches a lowercase query by name OR any nickname (substring either way).
@@ -4002,6 +4036,36 @@ impl ConversationEngine {
         out
     }
 
+    /// Split open tasks into user-facing REMINDERS (deduped, deadline-first) vs INTERNAL agent/dev
+    /// work. The store accrues both; the briefing must only ever show the former, deduped — so ten
+    /// near-identical "buy the gift" entries collapse to one and "implement X" never surfaces.
+    async fn split_tasks(&self) -> (Vec<Task>, Vec<Task>) {
+        let open: Vec<Task> = self
+            .memory
+            .list_tasks(false)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.is_open())
+            .collect();
+        let (mut personal, internal): (Vec<Task>, Vec<Task>) =
+            open.into_iter().partition(|t| is_personal_reminder(&t.description));
+        // Keep the most informative representative of each cluster: due-dated first, then longest.
+        personal.sort_by(|a, b| {
+            (a.due_ms.is_none(), std::cmp::Reverse(a.description.len()))
+                .cmp(&(b.due_ms.is_none(), std::cmp::Reverse(b.description.len())))
+        });
+        let mut kept: Vec<Task> = Vec::new();
+        for t in personal {
+            if !kept.iter().any(|k| task_similar(&k.description, &t.description)) {
+                kept.push(t);
+            }
+        }
+        // Deadline-bearing first for display.
+        kept.sort_by_key(|t| t.due_ms.unwrap_or(u64::MAX));
+        (kept, internal)
+    }
+
     /// The DAILY MORNING BRIEFING — one warm, scannable message each morning that always surfaces
     /// something worth reading. The generic-assistant briefing (upcoming dates + open reminders +
     /// what I'm keeping an eye on) PLUS the moat OpenClaw/hermes structurally can't have: I know the
@@ -4039,14 +4103,13 @@ impl ConversationEngine {
             }
         }
 
-        // 2) Open reminders / tasks I'm holding for you.
-        if let Ok(tasks) = self.memory.list_tasks(false).await {
-            let open: Vec<_> = tasks.iter().filter(|t| t.is_open()).collect();
-            if !open.is_empty() {
-                out.push_str(&format!("\n\n✅ Open ({}):", open.len()));
-                for t in open.iter().take(5) {
-                    out.push_str(&format!("\n  • {}", t.description));
-                }
+        // 2) Personal reminders I'm holding — deduped + deadline-first, and ONLY genuine to-dos
+        //    (internal agent/dev work is split out so it never clutters your morning).
+        let (reminders, _internal) = self.split_tasks().await;
+        if !reminders.is_empty() {
+            out.push_str(&format!("\n\n✅ Reminders ({}):", reminders.len()));
+            for t in reminders.iter().take(5) {
+                out.push_str(&format!("\n  • {}", t.description));
             }
         }
 
@@ -4963,11 +5026,26 @@ impl ConversationEngine {
             }
             "analyze" | "analyse" | "analysis" if !rest.is_empty() => self.analyze_ticker(&rest).await,
             // --- tasks/reminders: list + complete (clears stale ones) ---
-            "tasks" | "todos" | "todo" | "reminders" => match self.memory.list_tasks(false).await {
-                Ok(ts) if !ts.is_empty() => ts.iter().map(|t| format!("• {} — {}", t.id, t.description)).collect::<Vec<_>>().join("\n"),
-                Ok(_) => "No open tasks/reminders.".to_string(),
-                Err(e) => format!("(couldn't list tasks: {e})"),
-            },
+            "tasks" | "todos" | "todo" | "reminders" => {
+                let (reminders, internal) = self.split_tasks().await;
+                if reminders.is_empty() && internal.is_empty() {
+                    "No open tasks/reminders.".to_string()
+                } else {
+                    let mut out = String::new();
+                    if !reminders.is_empty() {
+                        out.push_str(&format!("✅ Reminders ({}):\n", reminders.len()));
+                        out.push_str(&reminders.iter().map(|t| format!("• {} — {}", t.id, t.description)).collect::<Vec<_>>().join("\n"));
+                    }
+                    if !internal.is_empty() {
+                        if !out.is_empty() {
+                            out.push_str("\n\n");
+                        }
+                        out.push_str(&format!("🔧 Internal/dev ({}):\n", internal.len()));
+                        out.push_str(&internal.iter().map(|t| format!("• {} — {}", t.id, t.description)).collect::<Vec<_>>().join("\n"));
+                    }
+                    out
+                }
+            }
             "done" | "complete" if !rest.is_empty() => match self.memory.complete_task(rest.trim()).await {
                 Ok(true) => format!("Marked {} done.", rest.trim()),
                 Ok(false) => format!("No open task '{}'.", rest.trim()),

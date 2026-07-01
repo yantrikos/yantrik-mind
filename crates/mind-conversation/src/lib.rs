@@ -890,7 +890,17 @@ fn sectioned_deals(body: &str) -> String {
             out.push('\n');
         }
     }
-    let tail = extras.join("\n");
+    let tail = extras
+        .iter()
+        .filter(|l| {
+            let t = l.trim().to_lowercase();
+            // An LLM lead-in ("Here are the best ... I can confirm:") reads as an orphan below the
+            // sections — drop it; every real listing already lives in a section.
+            !(t.ends_with(':') && (t.starts_with("here are") || t.starts_with("here's") || t.starts_with("here is")))
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     if !tail.trim().is_empty() {
         out.push('\n');
         out.push_str(tail.trim_end());
@@ -3532,9 +3542,25 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             ));
         }
         let framing = if is_self {
-            "You are forecasting the USER'S OWN likely next moves and needs, so JARVIS can get ahead of them (anticipate, prepare, remind, tee up)."
+            "You are forecasting the USER'S OWN likely next moves and needs, so JARVIS can get ahead of them (anticipate, prepare, remind, tee up).".to_string()
         } else {
-            "You are forecasting this entity's likely next moves. Model it as a CHARACTER — its drivers, behavioral patterns, red lines, and recent behavior. The character predicts the HOW and WHAT; the current situation determines the WHEN."
+            // Personalize the recommendation: a forecast for a Walmart engineer who's a beginner
+            // investor should not read like a consulting deck for an anonymous org.
+            let mut who = String::new();
+            if let Ok(Some(sp)) = self.memory.profile_get("self_profile").await {
+                who.push_str(&sp.chars().take(220).collect::<String>());
+            }
+            if let Ok(Some(fl)) = self.memory.profile_get("interest_follow").await {
+                who.push_str(&format!(" Follows: {}.", fl.chars().take(160).collect::<String>()));
+            }
+            let who_block = if who.trim().is_empty() {
+                String::new()
+            } else {
+                format!("
+
+THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an anonymous organization): {who}")
+            };
+            format!("You are forecasting this entity's likely next moves. Model it as a CHARACTER — its drivers, behavioral patterns, red lines, and recent behavior. The character predicts the HOW and WHAT; the current situation determines the WHEN.{who_block}")
         };
         let today = local_now().format("%Y-%m-%d").to_string();
         let prompt = format!(
@@ -5149,8 +5175,8 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
         for t in &reminders {
             if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
                 if ms <= horizon {
-                    let mut short: String = t.description.chars().take(70).collect();
-                    if t.description.chars().count() > 70 {
+                    let mut short: String = t.description.chars().take(90).collect();
+                    if t.description.chars().count() > 90 {
                         short.push('…'); // a silent mid-phrase cut ("…by July 1") reads as wrong data
                     }
                     let when = chrono::DateTime::from_timestamp_millis(ms)
@@ -7709,6 +7735,28 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let nd = next_date_line(p, &today).map(|s| format!("; {s}")).unwrap_or_default();
                 let fs = if facts.is_empty() { String::new() } else { format!(" — {}", facts.join("; ")) };
                 grounding.push_str(&format!("\n- {name}{rels}{nd}{fs}"));
+            }
+        }
+        // The time-spine + open threads — so answers CONNECT to what's coming, not just what's stored
+        // (a birthday answer should carry the gift plan + its deadline without being asked).
+        let spine = self.upcoming_spine(7).await;
+        if !spine.is_empty() {
+            grounding.push_str("
+Next 7 days:");
+            for (_, line) in spine.iter().take(5) {
+                grounding.push_str(&format!("
+- {line}"));
+            }
+        }
+        {
+            let (rem, _) = self.split_tasks().await;
+            if !rem.is_empty() {
+                grounding.push_str("
+Open reminders you're carrying for them:");
+                for t in rem.iter().take(3) {
+                    grounding.push_str(&format!("
+- {}", t.description));
+                }
             }
         }
         // Self-vigilance: surface OPEN contradictions so the mind flags + asks to resolve them rather than

@@ -4076,6 +4076,16 @@ impl ConversationEngine {
         let now = local_now();
         let mut out = format!("☀️ Good morning, Pranab — {}.", now.format("%A, %B %-d"));
 
+        // 0) Weather for your day — current conditions + today's range (keyless open-meteo). Place is
+        //    configurable (YM_WEATHER_PLACE), defaults to home. A network call, but once/day and it
+        //    degrades to nothing on error/timeout, so it never blocks or breaks the briefing.
+        if let Some(w) = &self.weather {
+            let place = std::env::var("YM_WEATHER_PLACE").unwrap_or_else(|_| "Bentonville".to_string());
+            if let Ok(rep) = w.report(&place).await {
+                out.push_str(&format!("\n\n{}", rep.trim()));
+            }
+        }
+
         // 1) Coming up — the people in your life (the moat), with any gift/plan I've already noted.
         let upcoming = self.upcoming_people_dates(35).await;
         if !upcoming.is_empty() {

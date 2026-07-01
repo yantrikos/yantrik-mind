@@ -540,17 +540,22 @@ fn ensure_goals_prefs_table(db: &YantrikDB) {
 }
 
 fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Result<(), String> {
+    let existing = list_goal_prefs(db, kind).unwrap_or_default();
+    // Normalization dedup: canonicalize (lowercase, collapse whitespace, trim trailing punctuation —
+    // same `norm_prop` the belief path uses) and collapse pure formatting/case variants ("Exercise" /
+    // "exercise.") into the FIRST entry, whatever the word count. This catches short goals the jaccard
+    // check below skips (it needs ≥2 significant words), so single-word restatements no longer duplicate.
+    let canon = norm_prop(text);
+    if existing.iter().any(|m| norm_prop(&m.text) == canon) {
+        return Ok(()); // a canonical-form match already on file — no-op
+    }
     // Dedup paraphrases: consolidation re-extracts the same goal/preference with slightly different
     // wording every pass (this flooded the store with ~280 near-dup goals/prefs). Goals/prefs have NO
     // contradiction semantics, so a moderate 0.6 word-overlap safely collapses re-phrasings of the same
     // intent while keeping distinct intents (gift vs repo-tracking) apart. Keeps the FIRST phrasing.
     let sig = task_word_set(text);
-    if sig.len() >= 2 {
-        if let Ok(existing) = list_goal_prefs(db, kind) {
-            if existing.iter().any(|m| jaccard(&task_word_set(&m.text), &sig) >= 0.6) {
-                return Ok(()); // a paraphrase already on file — no-op
-            }
-        }
+    if sig.len() >= 2 && existing.iter().any(|m| jaccard(&task_word_set(&m.text), &sig) >= 0.6) {
+        return Ok(()); // a paraphrase already on file — no-op
     }
     db.conn()
         .execute("INSERT OR IGNORE INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [kind, text])
@@ -1428,6 +1433,13 @@ mod tests {
         mem.store_goal("Track GitHub repositories for new issues").await.unwrap(); // distinct
         let goals = mem.list_goals().await.unwrap();
         assert_eq!(goals.len(), 2, "gift paraphrase collapses, repo-tracking stays: {:?}", goals.iter().map(|g| &g.text).collect::<Vec<_>>());
+
+        // Normalization dedup: a short goal whose only difference is case/punctuation must collapse even
+        // though jaccard skips it (<2 significant words). "Exercise" / "exercise." → one entry.
+        mem.store_preference("Exercise").await.unwrap();
+        mem.store_preference("exercise.").await.unwrap(); // pure formatting variant → SAME entry
+        let ex: Vec<_> = mem.list_preferences().await.unwrap().into_iter().filter(|p| p.text.to_lowercase().starts_with("exercise")).collect();
+        assert_eq!(ex.len(), 1, "case/punctuation variant of a short goal collapses: {:?}", ex.iter().map(|p| &p.text).collect::<Vec<_>>());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

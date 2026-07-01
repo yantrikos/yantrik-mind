@@ -719,6 +719,84 @@ fn strip_currency(t: &str) -> &str {
     t.trim_start_matches(|c| c == '$' || c == '₹' || c == '€' || c == '£')
 }
 
+/// True if the text carries a concrete price — a currency mark immediately followed (ignoring one
+/// space) by a digit, e.g. "$50", "₹ 1,200". This is what makes a listing *verifiable* on price.
+fn has_price_token(s: &str) -> bool {
+    let cs: Vec<char> = s.chars().collect();
+    cs.iter().enumerate().any(|(i, &c)| {
+        if !"$₹€£".contains(c) {
+            return false;
+        }
+        // allow at most one space between the mark and the digit
+        let mut j = i + 1;
+        if cs.get(j) == Some(&' ') {
+            j += 1;
+        }
+        cs.get(j).is_some_and(|n| n.is_ascii_digit())
+    })
+}
+
+/// Partition an LLM shopping shortlist so verified and unverified listings are never mixed. A
+/// listing line is *confirmed* only when it carries BOTH a concrete price AND a link (http/https);
+/// missing either → unverified. Non-listing lines (⭐ best-pick, 💡 price read, prose, blanks) are
+/// returned as `extras` with order preserved. Listing lines are detected by a bullet/number prefix.
+fn split_deal_listings(body: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut confirmed, mut unverified, mut extras) = (Vec::new(), Vec::new(), Vec::new());
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let first = t.chars().next().unwrap();
+        let is_listing = matches!(first, '-' | '•' | '*' | '·')
+            || (first.is_ascii_digit() && t[first.len_utf8()..].starts_with(['.', ')']));
+        if is_listing {
+            let has_link = t.contains("http://") || t.contains("https://");
+            if has_price_token(t) && has_link {
+                confirmed.push(t.to_string());
+            } else {
+                unverified.push(t.to_string());
+            }
+        } else {
+            extras.push(line.to_string());
+        }
+    }
+    (confirmed, unverified, extras)
+}
+
+/// Render an LLM shopping shortlist into two clearly separated sections — Confirmed (price + link)
+/// and Unverified — so a caller never has to trust a mixed list. Any non-listing prose (best pick,
+/// price read) is kept below the sections.
+fn sectioned_deals(body: &str) -> String {
+    let (confirmed, unverified, extras) = split_deal_listings(body);
+    let mut out = String::new();
+    out.push_str("✅ Confirmed (has price + link)\n");
+    if confirmed.is_empty() {
+        out.push_str("(none — nothing surfaced with both a price and a link)\n");
+    } else {
+        for c in &confirmed {
+            out.push_str(c);
+            out.push('\n');
+        }
+    }
+    out.push_str("\n⚠️ Unverified (missing a price or a link — confirm before trusting)\n");
+    if unverified.is_empty() {
+        out.push_str("(none)\n");
+    } else {
+        for u in &unverified {
+            out.push_str(u);
+            out.push('\n');
+        }
+    }
+    let tail = extras.join("\n");
+    if !tail.trim().is_empty() {
+        out.push('\n');
+        out.push_str(tail.trim_end());
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
 /// Current year-month ("2026-06") for bucketing expenses + bill reminders by month (local timezone).
 fn current_ym() -> String {
     local_now().format("%Y-%m").to_string()
@@ -3862,7 +3940,8 @@ impl ConversationEngine {
              Compare them, then name ONE '⭐ Best pick' with a one-line why. Do NOT invent prices or products that aren't in the \
              evidence; if the evidence is thin, say so and suggest the best next search rather than fabricating. Prefer in-budget, \
              well-reviewed, good value.\n\n=== SEARCH RESULTS ===\n{snippets}\n\n=== PAGE EXCERPTS ===\n{}\n\n\
-             Format: a scannable shortlist (one line per option), then the '⭐ Best pick', then a one-line \
+             Format: a scannable shortlist with each option on its OWN line starting with '- ' \
+             (name — price — retailer — link), then the '⭐ Best pick', then a one-line \
              '💡 Price read:' saying whether the best pick's price is LOW / FAIR / HIGH versus the typical \
              range you can see in the evidence (say 'not enough data' if you can't tell).",
             if excerpts.trim().is_empty() { "(none readable — retailer bot-walls; rely on the search results)".to_string() } else { excerpts.trim().to_string() }
@@ -3873,7 +3952,8 @@ impl ConversationEngine {
             Err(e) => return format!("(couldn't complete the deal search: {e})"),
         };
         let cap = budget.map(|b| format!(" · under ${b:.0}")).unwrap_or_default();
-        format!("🛍️ Deals — {query}{cap}\n\n{body}")
+        // Split the shortlist so verified (price + link) and unverified listings are never mixed.
+        format!("🛍️ Deals — {query}{cap}\n\n{}", sectioned_deals(&body))
     }
 
     // ===== PRICE WATCH — the defining deal-finder feature: track an item, ping on a real drop =====
@@ -7695,6 +7775,50 @@ mod tests {
         // A real match on the whole name still forgets under word-boundary mode.
         let ana = serde_json::json!({ "name": "Ana", "aliases": ["Ana (from work)"] });
         assert!(person_matches_mode(&ana, "ana", MatchMode::WordBoundary));
+    }
+
+    #[test]
+    fn find_deals_splits_confirmed_from_unverified() {
+        // A shortlist mixing verified (price + link) and unverified listings, plus trailing prose.
+        let body = "\
+- Seiko 5 watch — $95 — Amazon — https://amazon.com/seiko5
+- Vintage Omega — price not listed — Etsy — https://etsy.com/omega
+- Casio classic — $30 — Target — https://target.com/casio
+- Mystery brand — $40 — (no link found)
+⭐ Best pick: Seiko 5 — sharp value at $95.
+💡 Price read: FAIR versus the ~$90–$120 range.";
+        let (confirmed, unverified, extras) = split_deal_listings(body);
+
+        // Only listings with BOTH a price and a link are confirmed.
+        assert_eq!(confirmed.len(), 2, "confirmed: {confirmed:?}");
+        assert!(confirmed.iter().any(|c| c.contains("Seiko 5")));
+        assert!(confirmed.iter().any(|c| c.contains("Casio")));
+        // Missing price OR missing link → unverified.
+        assert_eq!(unverified.len(), 2, "unverified: {unverified:?}");
+        assert!(unverified.iter().any(|u| u.contains("Vintage Omega")), "no price → unverified");
+        assert!(unverified.iter().any(|u| u.contains("Mystery brand")), "no link → unverified");
+        // Non-listing prose is preserved, not classified as a listing.
+        assert!(extras.iter().any(|e| e.contains("⭐ Best pick")));
+
+        // The rendered sections keep verified and unverified strictly apart.
+        let out = sectioned_deals(body);
+        let conf_at = out.find("✅ Confirmed").expect("confirmed header");
+        let unv_at = out.find("⚠️ Unverified").expect("unverified header");
+        assert!(conf_at < unv_at, "confirmed section must come first");
+        // Everything before the unverified header is the confirmed block — no unverified item leaks in.
+        let confirmed_block = &out[conf_at..unv_at];
+        assert!(!confirmed_block.contains("Vintage Omega"), "unverified must not appear in confirmed block");
+        assert!(!confirmed_block.contains("Mystery brand"));
+        assert!(confirmed_block.contains("Seiko 5") && confirmed_block.contains("Casio"));
+    }
+
+    #[test]
+    fn find_deals_section_headers_render_when_empty() {
+        // No listings at all → both sections still render (with a "(none)" placeholder each).
+        let out = sectioned_deals("Sorry, the evidence was too thin to name concrete listings.");
+        assert!(out.contains("✅ Confirmed"));
+        assert!(out.contains("⚠️ Unverified"));
+        assert!(out.contains("evidence was too thin"), "prose preserved as extras");
     }
 
     #[test]

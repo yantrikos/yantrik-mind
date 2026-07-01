@@ -55,14 +55,34 @@ def main():
     except Exception:
         state = ""
 
+    # 1b) recently SHIPPED work — so the retrospective never re-proposes something already merged.
+    # (The redundant-goal failure mode: it queued a belief-dedup goal PR #19 had already shipped, wasting
+    # a whole build tick. The self-review path already feeds recent commits; the retrospective didn't.)
+    # yantrik-mind is a public repo, so the merged-PR list needs no token.
+    shipped = ""
+    try:
+        preq = urllib.request.Request(
+            "https://api.github.com/repos/yantrikos/yantrik-mind/pulls"
+            "?state=closed&per_page=25&sort=updated&direction=desc",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "ym-retrospective"},
+        )
+        prs = json.load(urllib.request.urlopen(preq, timeout=30))
+        titles = [p["title"].replace("self-improve: ", "") for p in prs if p.get("merged_at")]
+        shipped = "\n".join(f"- {t}" for t in titles[:20])
+    except Exception:
+        shipped = ""
+
     prompt = (
         "You are JARVIS running a DAILY RETROSPECTIVE to improve your own Rust code (crates/mind-* in the "
-        "yantrik-mind workspace). Below is your current typed-memory state. Based on it and your known "
-        "weaknesses, propose exactly ONE concrete, buildable CODE improvement — a specific change a "
-        "developer could implement in a few hours (e.g. 'Dedupe near-duplicate beliefs on write by merging "
-        "entries above a similarity threshold and combining their evidence/confidence'). It must be a code "
-        "change, not a one-off data fix. Output ONLY the goal as a single imperative sentence — no "
-        "preamble, no markdown, no numbering.\n\n=== CURRENT MEMORY STATE ===\n" + (state or "(state unavailable)")
+        "yantrik-mind workspace). Below is your current typed-memory state and the work you've RECENTLY "
+        "SHIPPED. Based on the state and your known weaknesses, propose exactly ONE concrete, buildable "
+        "CODE improvement — a specific change a developer could implement in a few hours (e.g. 'Dedupe "
+        "near-duplicate beliefs on write by merging entries above a similarity threshold and combining "
+        "their evidence/confidence'). It must be a code change, not a one-off data fix, and it MUST NOT "
+        "duplicate or trivially restate anything under RECENTLY SHIPPED — pick a genuinely new gap. Output "
+        "ONLY the goal as a single imperative sentence — no preamble, no markdown, no numbering.\n\n"
+        "=== RECENTLY SHIPPED (do NOT re-propose these) ===\n" + (shipped or "(unavailable)") +
+        "\n\n=== CURRENT MEMORY STATE ===\n" + (state or "(state unavailable)")
     )
     body = json.dumps({
         "model": model,

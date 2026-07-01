@@ -6167,6 +6167,18 @@ impl ConversationEngine {
                 grounding.push_str(&format!("\n- {name}{rels}{nd}{fs}"));
             }
         }
+        // Self-vigilance: surface OPEN contradictions so the mind flags + asks to resolve them rather than
+        // confidently stating one side. This is the typed-memory moat made felt — a companion that says
+        // "I have conflicting info about X, which is right?" instead of silently guessing.
+        if let Ok(conflicts) = self.memory.conflicts().await {
+            let relevant: Vec<_> = conflicts.iter().take(4).collect();
+            if !relevant.is_empty() {
+                grounding.push_str("\nUNRESOLVED CONTRADICTIONS in my memory (if relevant to their message, flag the conflict + ask which is right — do NOT state one side as settled fact):");
+                for c in relevant {
+                    grounding.push_str(&format!("\n- \"{}\" vs \"{}\"", c.belief_a, c.belief_b));
+                }
+            }
+        }
         let recent = self
             .memory
             .recent_messages_as(self.recent_window, id.viewer())

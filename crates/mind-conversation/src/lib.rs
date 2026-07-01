@@ -4891,6 +4891,17 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             }
         }
 
+        // 3b) Your rhythm — the engine's activity histograms as one line (silent until enough
+        //     life is recorded; no fake rhythm).
+        {
+            let off = now.offset().local_minus_utc() / 3600;
+            if let Ok(Some(r)) = self.memory.activity_rhythm(off).await {
+                out.push_str(&format!("
+
+🕐 Your rhythm: {r}."));
+            }
+        }
+
         // 4) Quiet day → still offer presence, not a bare date line.
         if upcoming.is_empty() && topics.is_empty() {
             out.push_str("\n\nNothing time-sensitive on my radar. Tell me what's on your plate today and I'll carry it.");
@@ -5227,6 +5238,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             if ms > now && ms - now <= lead_min * 60_000 && !prepped.contains(&key) && !locally_done {
                 self.prepped_local.lock().unwrap().insert(key.clone());
                 prepped.push(key);
+                let _ = self.memory.record_episode("calendar-event").await;
                 due.push((title.to_string(), ms));
             }
         }
@@ -6266,6 +6278,14 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     format!("🔄 Refreshed — {n} upcoming external event(s) in the 60-day window.")
                 } else {
                     self.calendar_view().await
+                }
+            }
+            // --- rhythm: the engine's temporal read of your life (episodes → histograms) ---
+            "rhythm" | "routine" => {
+                let off = local_now().offset().local_minus_utc() / 3600;
+                match self.memory.activity_rhythm(off).await {
+                    Ok(Some(r)) => format!("🕐 Your rhythm so far: {r}."),
+                    _ => "Still learning your rhythm — I need a few more days of life recorded before I can see the pattern.".to_string(),
                 }
             }
             // --- foresight: model any entity (or you) → predict next moves → recommend, self-scored ---
@@ -7877,6 +7897,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
         // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
         // (Take the slot first so the lock is released before the await in capture_onboard.)
+        // Feed the temporal layer: every turn is a life-event episode (rhythm/periodicity/bursts).
+        let _ = self.memory.record_episode("chat").await;
         let onboard = self.pending_slot().await;
         if let Some(slot) = onboard {
             if looks_like_non_answer(user_text) {

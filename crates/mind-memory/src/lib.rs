@@ -25,8 +25,8 @@ use yantrikdb_core::belief::{BeliefRevisionConfig, Evidence as YEvidence};
 use yantrikdb_core::belief_query::BeliefPattern;
 use yantrikdb_core::contradiction::ContradictionConfig;
 use yantrikdb_core::state::{
-    sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId,
-    NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
+    sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EpisodePayload,
+    NodeId, NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
 };
 use yantrikdb_core::{InteractionOutcome, YantrikDB};
 
@@ -52,6 +52,8 @@ enum Cmd {
     RecentMessages { limit: usize, viewer: Option<String>, reply: Reply<Vec<(String, String)>> },
     MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
     RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
+    RecordEpisode { label: String, reply: Reply<()> },
+    ActivityRhythm { local_offset_hours: i32, reply: Reply<Option<String>> },
     ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
     MetacogNote { reply: Reply<Option<String>> },
     // skill library
@@ -1029,6 +1031,43 @@ impl MemoryHandle {
                         Cmd::RecentMessages { limit, viewer, reply } => {
                             let _ = reply.send(recent_messages(&db, limit, viewer.as_deref()));
                         }
+                        Cmd::RecordEpisode { label, reply } => {
+                            // Life-events feed the engine's TEMPORAL layer (periodicity, bursts,
+                            // hour/day histograms). Without episodes that whole layer starves.
+                            let r = (|| -> std::result::Result<(), String> {
+                                let id = alloc.alloc(NodeKind::Episode);
+                                let n = CognitiveNode::new(
+                                    id,
+                                    label.clone(),
+                                    NodePayload::Episode(EpisodePayload {
+                                        memory_rid: String::new(),
+                                        summary: label.clone(),
+                                        occurred_at: now_secs(),
+                                        participants: vec!["user".into()],
+                                    }),
+                                );
+                                db.persist_cognitive_node(&n).map_err(|e| e.to_string())?;
+                                db.persist_node_id_allocator(&alloc).map_err(|e| e.to_string())
+                            })();
+                            let _ = reply.send(r);
+                        }
+                        Cmd::ActivityRhythm { local_offset_hours, reply } => {
+                            // Render the engine's activity histograms into one human line. Silent
+                            // until enough life is recorded (>= 30 episodes) — no fake rhythm.
+                            let note = (|| {
+                                let hour = db.episode_hour_histogram().ok()?;
+                                if hour.total < 30 {
+                                    return None;
+                                }
+                                let dow = db.episode_dow_histogram().ok()?;
+                                let ph_utc = hour.counts.iter().enumerate().max_by_key(|(_, c)| **c).map(|(h, _)| h as i32)?;
+                                let ph = (ph_utc + local_offset_hours).rem_euclid(24);
+                                const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                                let pd = dow.counts.iter().enumerate().max_by_key(|(_, c)| **c).and_then(|(d, _)| DAYS.get(d).copied())?;
+                                Some(format!("most active around {ph}:00, busiest on {pd}s ({} moments tracked)", hour.total))
+                            })();
+                            let _ = reply.send(Ok(note));
+                        }
                         Cmd::RecordPredictionOutcome { domain, subject, raw, hit, reply } => {
                             // Two learners per graded call: the action-kind bandit + isotonic
                             // calibration (foresight:<domain>), and per-SUBJECT source reliability.
@@ -1396,6 +1435,13 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn metacog_note(&self) -> Result<Option<String>> {
         self.call(|reply| Cmd::MetacogNote { reply }).await
+    }
+    async fn record_episode(&self, label: &str) -> Result<()> {
+        let label = label.to_string();
+        self.call(move |reply| Cmd::RecordEpisode { label, reply }).await
+    }
+    async fn activity_rhythm(&self, local_offset_hours: i32) -> Result<Option<String>> {
+        self.call(move |reply| Cmd::ActivityRhythm { local_offset_hours, reply }).await
     }
 }
 

@@ -352,4 +352,12 @@ pub trait MemoryFacade: Send + Sync {
     async fn metacog_note(&self) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Record a life-event Episode (feeds the engine's temporal layer: periodicity/bursts/rhythm).
+    async fn record_episode(&self, _label: &str) -> Result<()> {
+        Ok(())
+    }
+    /// One human line about the user's activity rhythm (None until enough episodes accrue).
+    async fn activity_rhythm(&self, _local_offset_hours: i32) -> Result<Option<String>> {
+        Ok(None)
+    }
 }

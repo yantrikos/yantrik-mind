@@ -6145,6 +6145,28 @@ impl ConversationEngine {
         for b in ws.uncertain_beliefs.iter().take(3) {
             grounding.push_str(&format!("\n- {} (uncertain {:.2})", b.statement, b.confidence));
         }
+        // ALWAYS ground the people in the user's life from the canonical people layer — it's clean +
+        // deduped, unlike the belief store whose top-k ranking can bury a high-confidence identity fact
+        // (e.g. a spouse's NAME lost behind their birthday). This is why "what's my wife's name" dropped
+        // the name even though it was stored at 0.91: the name never made the injected working set.
+        let people = self.load_people_profiles().await;
+        if !people.is_empty() {
+            grounding.push_str("\nPeople in your life:");
+            let today = local_now();
+            for p in people.iter().take(8) {
+                let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+                let facts: Vec<&str> = p
+                    .get("facts")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).take(4).collect())
+                    .unwrap_or_default();
+                let rels = if rel.is_empty() { String::new() } else { format!(" (your {rel})") };
+                let nd = next_date_line(p, &today).map(|s| format!("; {s}")).unwrap_or_default();
+                let fs = if facts.is_empty() { String::new() } else { format!(" — {}", facts.join("; ")) };
+                grounding.push_str(&format!("\n- {name}{rels}{nd}{fs}"));
+            }
+        }
         let recent = self
             .memory
             .recent_messages_as(self.recent_window, id.viewer())

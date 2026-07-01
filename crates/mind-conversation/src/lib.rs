@@ -233,8 +233,9 @@ fn task_similar(a: &str, b: &str) -> bool {
 /// The dimensions the ask-drive proactively mines to learn the user's world — hobbies + recreation
 /// for companionship, the topics/people/companies they care about to feed grounding, gifts, and the
 /// entity-simulation. Rotated one uncovered dimension at a time; `ask_covered` tracks progress.
-const INTEREST_DIMS: [(&str, &str); 6] = [
+const INTEREST_DIMS: [(&str, &str); 7] = [
     ("hobbies", "When you get some downtime, what do you actually enjoy doing — any hobbies or things you're into lately?"),
+    ("dates", "When's your wedding anniversary? (And any other dates I should never miss — I'll guard them the way I guard birthdays.)"),
     ("unwind", "What's your go-to way to unwind after a long day?"),
     ("follow", "What topics or areas do you love keeping up with? Tell me and I'll start watching them for you."),
     ("people", "Who are the important people in your life I should know about — family, close friends?"),
@@ -246,6 +247,7 @@ const INTEREST_DIMS: [(&str, &str); 6] = [
 fn interest_belief_prefix(key: &str) -> &'static str {
     match key {
         "hobbies" => "The user's hobbies / things they enjoy:",
+        "dates" => "The user's key dates:",
         "unwind" => "The user unwinds by:",
         "follow" => "The user likes keeping up with:",
         "people" => "Important people in the user's life:",
@@ -1181,7 +1183,6 @@ pub struct ConversationEngine {
     dmn_phase: Mutex<u64>,
     /// Onboarding interview: when set, the mind is awaiting the user's answer to a "name"/"purpose"
     /// question — the next user turn is captured as that slot's value (then the interview advances).
-    pending_onboard: Mutex<Option<String>>,
     /// Is the agentic loop the primary turn handler? Default true (overridable by `YM_AGENT=off`);
     /// `with_agent_primary(false)` exercises the legacy deterministic dispatch chain (used by tests).
     agent_primary: bool,
@@ -1229,7 +1230,6 @@ impl ConversationEngine {
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
             dmn_phase: Mutex::new(0),
-            pending_onboard: Mutex::new(None),
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
@@ -2432,17 +2432,17 @@ impl ConversationEngine {
     /// later answers flow back as ordinary chat → consolidation → typed beliefs.
     pub async fn proactive_ask(&self) -> Option<String> {
         // Don't stack a new question while we're still awaiting an answer to the last one.
-        if self.pending_onboard.lock().unwrap().is_some() {
+        if self.pending_slot().await.is_some() {
             return None;
         }
         let name = self.memory.profile_get("name").await.ok().flatten();
         if name.is_none() {
-            *self.pending_onboard.lock().unwrap() = Some("name".to_string());
+            self.set_pending_slot(Some("name")).await;
             return Some("Before we really get going — what should I call you?".to_string());
         }
         let purpose = self.memory.profile_get("purpose").await.ok().flatten();
         if purpose.is_none() {
-            *self.pending_onboard.lock().unwrap() = Some("purpose".to_string());
+            self.set_pending_slot(Some("purpose")).await;
             return Some(format!(
                 "What would you most like me to help you with, {}? Knowing your main goal lets me be genuinely useful instead of generic.",
                 name.unwrap_or_default()
@@ -2453,7 +2453,7 @@ impl ConversationEngine {
         // uncovered dimension per tick; once all are covered it falls through to the purpose taper.
         let covered = self.ask_covered().await;
         if let Some((key, q)) = INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
-            *self.pending_onboard.lock().unwrap() = Some(format!("interest:{key}"));
+            self.set_pending_slot(Some(&format!("interest:{key}"))).await;
             return Some(q.to_string());
         }
         // OPEN stage — purpose-grounded follow-ups, but taper once the brain knows enough about you.
@@ -2470,6 +2470,24 @@ impl ConversationEngine {
         self.purpose_followup(&purpose.unwrap_or_default()).await
     }
 
+    /// The in-flight get-to-know-you question, PERSISTED in the substrate. This was an in-memory
+    /// Mutex — and every restart (which self-deploy now does several times a day) silently dropped
+    /// it, so the user's answer arrived with no question pending, got treated as ordinary chat, and
+    /// the drive re-asked later ("I already told you!"). The bug class that keeps biting: state
+    /// that gates cross-turn behavior must live in the substrate, not the process.
+    async fn pending_slot(&self) -> Option<String> {
+        self.memory
+            .profile_get("pending_onboard")
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+    }
+
+    async fn set_pending_slot(&self, v: Option<&str>) {
+        let _ = self.memory.profile_set("pending_onboard", v.unwrap_or("")).await;
+    }
+
     /// Curiosity as NORMAL conversation: occasionally close a reply with one get-to-know-you
     /// question instead of quarantining all asks behind idle gates. Paced (YM_ASK_PIGGYBACK_SECS,
     /// default 4h), skipped while a question is already pending. Most of the "how much do you
@@ -2478,7 +2496,7 @@ impl ConversationEngine {
         if std::env::var("YM_ASK_PIGGYBACK").map(|v| v == "off").unwrap_or(false) {
             return None;
         }
-        if self.pending_onboard.lock().unwrap().is_some() {
+        if self.pending_slot().await.is_some() {
             return None;
         }
         let period_ms: i64 = std::env::var("YM_ASK_PIGGYBACK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(14_400) * 1000;
@@ -2496,7 +2514,7 @@ impl ConversationEngine {
         }
         let covered = self.ask_covered().await;
         let (key, q) = INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k))?;
-        *self.pending_onboard.lock().unwrap() = Some(format!("interest:{key}"));
+        self.set_pending_slot(Some(&format!("interest:{key}"))).await;
         let _ = self.memory.profile_set("ask_piggyback_ms", &now.to_string()).await;
         Some(q.to_string())
     }
@@ -2532,7 +2550,7 @@ impl ConversationEngine {
                     statement: format!("The user's name is {name}"),
                     polarity: 1.0, weight: 1.0, source_event: Some("onboard".into()), provenance: "told".into(),
                 }).await;
-                *self.pending_onboard.lock().unwrap() = Some("purpose".to_string());
+                self.set_pending_slot(Some("purpose")).await;
                 format!("Good to meet you, {name}. What would you most like me to help you with — the main thing you'd want from me? Knowing that lets me actually be useful rather than generic.")
             }
             "purpose" => {
@@ -2561,12 +2579,33 @@ impl ConversationEngine {
                         provenance: "told".into(),
                     })
                     .await;
+                // The anniversary is a PEOPLE-LAYER date, not just a belief: parse it and pin it on the
+                // spouse's profile so it rolls into "Coming up" / the briefing like a birthday does.
+                if key == "dates" {
+                    let today = local_now();
+                    if let Some(ms) = parse_text_date_ms(&ans, &today) {
+                        let mmdd = chrono::DateTime::from_timestamp_millis(ms)
+                            .map(|t| t.with_timezone(today.offset()).format("%m-%d").to_string());
+                        if let Some(mmdd) = mmdd {
+                            let mut store = self.load_people_profiles().await;
+                            if let Some(i) = store.iter().position(|p| {
+                                p.get("relationship").and_then(|x| x.as_str()).map(|r| r.contains("wife")).unwrap_or(false)
+                            }) {
+                                let mut dates = store[i].get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                                dates.retain(|d| d.get("label").and_then(|x| x.as_str()) != Some("wedding anniversary"));
+                                dates.push(serde_json::json!({ "label": "wedding anniversary", "mmdd": mmdd }));
+                                store[i]["dates"] = serde_json::json!(dates);
+                                self.save_people_profiles(&store).await;
+                            }
+                        }
+                    }
+                }
                 self.mark_ask_covered(&key).await;
                 // Chain the next uncovered dimension so it flows as a conversation, not one question a day.
                 let covered = self.ask_covered().await;
                 match INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
                     Some((nk, nq)) => {
-                        *self.pending_onboard.lock().unwrap() = Some(format!("interest:{nk}"));
+                        self.set_pending_slot(Some(&format!("interest:{nk}"))).await;
                         format!("Love that — noted. {nq}")
                     }
                     None => "Got it — that gives me a real feel for you, and I'll put it to use.".to_string(),
@@ -7755,13 +7794,13 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
         // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
         // (Take the slot first so the lock is released before the await in capture_onboard.)
-        let onboard = self.pending_onboard.lock().unwrap().take();
+        let onboard = self.pending_slot().await;
         if let Some(slot) = onboard {
             if looks_like_non_answer(user_text) {
                 // They asked for something else instead of answering — don't capture a command or a
-                // counter-question as a profile fact. Keep the question pending; handle the turn normally.
-                *self.pending_onboard.lock().unwrap() = Some(slot);
+                // counter-question as a profile fact. The slot stays persisted; handle the turn normally.
             } else {
+                self.set_pending_slot(None).await; // consumed (capture may arm the next question)
                 let reply = self.capture_onboard(&slot, user_text).await;
                 let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
                 let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;

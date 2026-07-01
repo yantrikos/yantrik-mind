@@ -338,6 +338,14 @@ impl Fetcher for HttpFetcher {
         let max = self.max_chars;
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             ssrf_check(&u)?;
+            // Headless FIRST — with self-consistent headers (real UA + Sec-CH-UA, no stale spoof) it now
+            // clears Amazon/Target and is far lighter/faster than headful. Escalate to headful only if
+            // headless comes back thin (a block page is short; a real product grid is thousands of chars).
+            if let Ok(t) = fetch_headless(&u) {
+                if t.trim().chars().count() > 400 {
+                    return Ok(t);
+                }
+            }
             fetch_headful(&u)
         })
         .await?;

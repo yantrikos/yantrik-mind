@@ -3369,11 +3369,22 @@ impl ConversationEngine {
         // headless fingerprint; proven on Amazon/Target — Walmart's press-and-hold challenge still blocks,
         // so it's skipped). One retailer keeps the reply timely + resource-light; falls back silently.
         if let Some(web) = &self.web {
-            let amz = format!("https://www.amazon.com/s?k={}", sq.replace(' ', "+"));
-            if let Ok(Ok(b)) = tokio::time::timeout(std::time::Duration::from_secs(95), web.fetch_rendered(&amz)).await {
-                if b.trim().len() > 200 {
-                    let ex: String = b.chars().take(4000).collect();
-                    excerpts.push_str(&format!("\n[from {amz} — live Amazon results]\n{ex}\n"));
+            let enc = sq.replace(' ', "+");
+            let amz = format!("https://www.amazon.com/s?k={enc}");
+            let tgt = format!("https://www.target.com/s?searchTerm={enc}");
+            // Both render under headless with consistent headers (fast) — run concurrently. (Walmart is
+            // omitted: its PerimeterX press-and-hold challenge blocks headless AND headful.)
+            let d = std::time::Duration::from_secs(60);
+            let (ra, rt) = tokio::join!(
+                tokio::time::timeout(d, web.fetch_rendered(&amz)),
+                tokio::time::timeout(d, web.fetch_rendered(&tgt)),
+            );
+            for (label, u, r) in [("Amazon", amz, ra), ("Target", tgt, rt)] {
+                if let Ok(Ok(b)) = r {
+                    if b.trim().len() > 200 {
+                        let ex: String = b.chars().take(3500).collect();
+                        excerpts.push_str(&format!("\n[from {u} — live {label} results]\n{ex}\n"));
+                    }
                 }
             }
         }

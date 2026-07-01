@@ -293,6 +293,44 @@ fn field_matches(field: &str, q: &str, mode: MatchMode) -> bool {
     }
 }
 
+/// Parse the first "July 17" / "Jul 17th"-style date in text to its next occurrence (midday local).
+/// Powers deadline follow-through on reminders whose due date lives only in the description text.
+/// Word-boundary guarded so "maybe 5" never parses as May 5.
+fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
+    use chrono::Datelike;
+    const MONTHS: [(&str, u32); 12] = [
+        ("january", 1), ("february", 2), ("march", 3), ("april", 4), ("may", 5), ("june", 6),
+        ("july", 7), ("august", 8), ("september", 9), ("october", 10), ("november", 11), ("december", 12),
+    ];
+    let low = text.to_lowercase();
+    for (name, m) in MONTHS {
+        for pat in [name, &name[..3]] {
+            let mut start = 0;
+            while let Some(pos) = low[start..].find(pat) {
+                let at = start + pos;
+                let end = at + pat.len();
+                let before_ok = at == 0 || !low.as_bytes()[at - 1].is_ascii_alphabetic();
+                let after_ok = low[end..].chars().next().map(|c| !c.is_ascii_alphabetic()).unwrap_or(false);
+                if before_ok && after_ok {
+                    let digits: String = low[end..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if let Ok(d) = digits.parse::<u32>() {
+                        if (1..=31).contains(&d) {
+                            let year = today.year();
+                            let nd = chrono::NaiveDate::from_ymd_opt(year, m, d)
+                                .filter(|t| *t >= today.date_naive())
+                                .or_else(|| chrono::NaiveDate::from_ymd_opt(year + 1, m, d))?;
+                            let ts = nd.and_hms_opt(12, 0, 0)?.and_local_timezone(*today.offset()).single()?;
+                            return Some(ts.timestamp_millis());
+                        }
+                    }
+                }
+                start = end;
+            }
+        }
+    }
+    None
+}
+
 fn person_matches(p: &serde_json::Value, q: &str) -> bool {
     person_matches_mode(p, q, MatchMode::Substring)
 }
@@ -4553,6 +4591,90 @@ impl ConversationEngine {
         Some(msg)
     }
 
+    /// The AFTERNOON FORESIGHT beat — one unprompted forecast a day, rotating through the tracked
+    /// subjects plus "me" (self-anticipation). Morning = briefing, afternoon = a prediction: two
+    /// GUARANTEED daily touches, so the presence is felt, not exception-only. Persisted by date
+    /// (restart-safe) + a rotation cursor. Returns the subject; the poll loop runs the (slow)
+    /// forecast detached.
+    pub async fn foresight_due(&self) -> Option<String> {
+        let now = local_now();
+        let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);
+        let start: u32 = std::env::var("YM_FORESIGHT_HOUR").ok().and_then(|s| s.parse().ok()).unwrap_or(13);
+        if hour < start {
+            return None;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let last = self.memory.profile_get("foresight_last_date").await.ok().flatten().unwrap_or_default();
+        if last == today {
+            return None;
+        }
+        let mut subjects = self.load_news_topics().await;
+        subjects.push("me".to_string());
+        let idx: usize = self.memory.profile_get("foresight_rot").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let subject = subjects[idx % subjects.len()].clone();
+        let _ = self.memory.profile_set("foresight_last_date", &today).await;
+        let _ = self.memory.profile_set("foresight_rot", &((idx + 1) % subjects.len()).to_string()).await;
+        Some(subject)
+    }
+
+    /// FOLLOW-THROUGH — the difference between filing a reminder and CARRYING it: open reminders
+    /// with a deadline (due_ms, or a "by July 17th" date in the text) get escalating nudges as it
+    /// approaches (10 / 5 / 2 days, then overdue), each stage fired once (persisted). A reminder
+    /// that never resurfaces reads as forgotten — this is the anti-"not clicking" behavior.
+    pub async fn deadline_followups(&self) -> Vec<String> {
+        let (reminders, _) = self.split_tasks().await;
+        if reminders.is_empty() {
+            return Vec::new();
+        }
+        let today = local_now();
+        let now = today.timestamp_millis();
+        let mut fired: serde_json::Value = self
+            .memory
+            .profile_get("task_nudges")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut out = Vec::new();
+        let mut changed = false;
+        for t in &reminders {
+            let deadline = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today));
+            let Some(dl) = deadline else { continue };
+            let days_left = (dl - now) / 86_400_000;
+            let stage = if days_left < 0 {
+                "overdue"
+            } else if days_left <= 2 {
+                "2d"
+            } else if days_left <= 5 {
+                "5d"
+            } else if days_left <= 10 {
+                "10d"
+            } else {
+                continue;
+            };
+            let key = format!("{}|{stage}", t.id);
+            if fired.get(&key).is_some() {
+                continue;
+            }
+            fired[key] = serde_json::json!(now);
+            changed = true;
+            out.push(if days_left < 0 {
+                format!("⚠️ This one's now OVERDUE: {} — want to knock it out together right now?", t.description)
+            } else {
+                format!(
+                    "⏰ {} day(s) left: {} — say the word and I'll help move it (options, research, drafting — whatever it takes).",
+                    days_left.max(0),
+                    t.description
+                )
+            });
+        }
+        if changed {
+            let _ = self.memory.profile_set("task_nudges", &fired.to_string()).await;
+        }
+        out
+    }
+
     async fn news_track(&self, topic: &str) -> String {
         if topic.len() < 2 {
             return "What should I track? e.g. `ym news track geopolitics`".to_string();
@@ -7955,6 +8077,21 @@ mod tests {
         let _ = conv.news_digests_due().await;
         assert!(conv.news_digests_due().await.is_empty(), "deduped after prime");
         assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
+    }
+
+    #[test]
+    fn parses_text_dates_for_followups() {
+        let today = chrono::DateTime::parse_from_rfc3339("2026-07-01T10:00:00-05:00").unwrap();
+        // "by July 17th" → the next July 17, midday local.
+        let ms = parse_text_date_ms("Order the gift by July 17th to ensure delivery", &today).unwrap();
+        let days = (ms - today.timestamp_millis()) / 86_400_000;
+        assert!((15..=16).contains(&days), "July 17 is ~16 days out, got {days}");
+        // A past date this year rolls to next year (never negative).
+        let ms = parse_text_date_ms("started on March 2", &today).unwrap();
+        assert!(ms > today.timestamp_millis());
+        // Word-boundary guard: "maybe 5" must NOT parse as May 5; no month → None.
+        assert!(parse_text_date_ms("maybe 5 days more", &today).is_none());
+        assert!(parse_text_date_ms("no dates in here at all", &today).is_none());
     }
 
     #[test]

@@ -340,6 +340,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_resolve = 0u64; // prediction-resolver cadence (grade due predictions, surface verdicts)
     let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
+    let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
@@ -527,6 +528,41 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         eprintln!("[briefing] sent the daily morning briefing ({} chars)", msg.len());
                     }
                 }
+            }
+        }
+
+        // Afternoon-foresight tick: ONE unprompted forecast a day (rotating tracked subjects + "me").
+        // With the morning briefing this makes TWO guaranteed daily beats — presence, not exception.
+        // foresight_due() self-gates (afternoon window + persisted once-per-date + rotation cursor);
+        // the forecast itself takes a minute-plus, so it runs detached and never stalls the poll loop.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() {
+                if let Some(subject) = conv.foresight_due().await {
+                    let (c, api2) = (conv.clone(), api.clone());
+                    tokio::spawn(async move {
+                        let msg = c.foresee(&subject).await;
+                        if tg_send(&api2, chat, &msg).await.is_ok() {
+                            eprintln!("[foresight] sent the daily proactive forecast on {subject}");
+                        }
+                    });
+                }
+            }
+        }
+
+        // Follow-through tick: escalating deadline nudges on open reminders (10/5/2 days + overdue),
+        // each stage once (persisted). Cheap check, paced (YM_FOLLOWUP_SECS, default 6h), quiet-gated.
+        {
+            let period: u64 = std::env::var("YM_FOLLOWUP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(21_600);
+            let now = now_ms();
+            if now.saturating_sub(last_followup) >= period * 1000 {
+                let chat = active_chat.load(Ordering::Relaxed);
+                if chat != 0 && !in_quiet_hours_now() {
+                    for nudge in conv.deadline_followups().await {
+                        let _ = tg_send(&api, chat, &nudge).await;
+                    }
+                }
+                last_followup = now;
             }
         }
 

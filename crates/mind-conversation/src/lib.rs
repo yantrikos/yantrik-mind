@@ -1543,7 +1543,18 @@ impl ConversationEngine {
     /// of truncating old context to oblivion (or summarizing to markdown), it grows a revisable typed
     /// model of the user + world that grounds every future reply. Raw transcript is untouched
     /// (provenance-preserving). Runs on the heartbeat; self-gates until enough new turns accrue.
+    /// Background consolidation — self-gates until enough new turns accrue (avoids re-distilling tiny
+    /// batches into paraphrase-dups). The poll loop calls this.
     pub async fn consolidate(&self) -> usize {
+        self.consolidate_with_min(6).await
+    }
+
+    /// Manual `ym consolidate` — distill whatever is pending now, regardless of batch size.
+    pub async fn consolidate_force(&self) -> usize {
+        self.consolidate_with_min(1).await
+    }
+
+    async fn consolidate_with_min(&self, min: usize) -> usize {
         // Resume the cursor across restarts. Without this, every restart re-distills the last 40 turns
         // and the extractor re-phrases each fact slightly differently → the goal/belief store re-floods
         // with paraphrase-dups (this was the #1 driver of the ~280 dup goals/prefs + 454 beliefs).
@@ -1562,7 +1573,7 @@ impl ConversationEngine {
             Ok(m) => m,
             Err(_) => return 0,
         };
-        if msgs.len() < 6 {
+        if msgs.len() < min {
             return 0; // wait for enough new context to be worth an extraction call
         }
         let max_id = msgs.iter().map(|(id, _, _)| *id).max().unwrap_or(after);
@@ -3397,26 +3408,44 @@ impl ConversationEngine {
             if name.len() < 2 {
                 continue;
             }
-            let key = norm(&name);
-            let idx = store.iter().position(|p| p.get("name").and_then(|x| x.as_str()).map(|n| norm(n)) == Some(key.clone()));
+            // Resolve to an existing person by NAME **or** any nickname (either side) — otherwise the same
+            // person under a nickname (e.g. "Arya" vs "Aadrisha") would fork into a duplicate record.
+            let mut cands: std::collections::HashSet<String> = std::collections::HashSet::new();
+            cands.insert(norm(&name));
+            for a in pv.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                if let Some(s) = a.as_str() {
+                    let n = norm(s);
+                    if !n.is_empty() {
+                        cands.insert(n);
+                    }
+                }
+            }
+            let idx = store.iter().position(|p| {
+                let nm = p.get("name").and_then(|x| x.as_str()).map(norm).unwrap_or_default();
+                cands.contains(&nm)
+                    || p.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).any(|al| cands.contains(&norm(al)))).unwrap_or(false)
+            });
             let mut rec = match idx {
                 Some(i) => store.remove(i),
-                None => serde_json::json!({ "name": name, "relationship": "", "facts": [], "dates": [] }),
+                None => serde_json::json!({ "name": name.clone(), "relationship": "", "facts": [], "dates": [] }),
             };
+            // The canonical stored name wins; anything else this person is called becomes a nickname.
+            let key = rec.get("name").and_then(|x| x.as_str()).map(norm).unwrap_or_else(|| norm(&name));
             if let Some(r) = pv.get("relationship").and_then(|x| x.as_str()) {
                 if !r.trim().is_empty() {
                     rec["relationship"] = serde_json::json!(r.trim().to_lowercase());
                 }
             }
-            // aliases (nicknames) — dedupe, so `ym about <nickname>` resolves to the person
+            // aliases (nicknames) — dedupe, so `ym about <nickname>` resolves to the person. The incoming
+            // name is itself folded in as a nickname when it differs from the canonical stored name.
             let mut aliases: Vec<serde_json::Value> = rec.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default();
             let mut akeys: std::collections::HashSet<String> = aliases.iter().filter_map(|a| a.as_str()).map(norm).collect();
-            for a in pv.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                if let Some(s) = a.as_str() {
-                    let s = s.trim();
-                    if s.len() >= 2 && norm(s) != key && akeys.insert(norm(s)) {
-                        aliases.push(serde_json::json!(s));
-                    }
+            let mut incoming_aliases: Vec<String> = pv.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(String::from).collect()).unwrap_or_default();
+            incoming_aliases.push(name.clone());
+            for s in incoming_aliases {
+                let s = s.trim();
+                if s.len() >= 2 && norm(s) != key && akeys.insert(norm(s)) {
+                    aliases.push(serde_json::json!(s));
                 }
             }
             rec["aliases"] = serde_json::json!(aliases);
@@ -4426,6 +4455,7 @@ impl ConversationEngine {
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,
+            "consolidate" | "distill" => format!("Distilled {} new item(s) from recent conversation into memory.", self.consolidate_force().await),
             "person" => {
                 let mut p = rest.splitn(2, char::is_whitespace);
                 let action = p.next().unwrap_or("").to_lowercase();

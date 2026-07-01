@@ -455,7 +455,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                             // Learn-by-comparing: recall the held understanding, fetch fresh, and surface
                             // the DELTA ("since I last checked…") rather than re-briefing from scratch.
                             let update = c.evolve_understanding(&topic).await;
-                            let _ = tg_send(&api2, chat, &update).await;
+                            if tg_send(&api2, chat, &update).await.is_ok() {
+                                c.note_proactive_sent().await;
+                            }
                         });
                     }
                 }
@@ -511,7 +513,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     // (it read as "not doing anything" until the last minute). Default 28 days, tunable.
                     let window: i64 = std::env::var("YM_FAMILY_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
                     for nudge in conv.family_date_nudges(window).await {
-                        let _ = tg_send(&api, chat, &nudge).await;
+                        if tg_send(&api, chat, &nudge).await.is_ok() {
+                            conv.note_proactive_sent().await;
+                        }
                     }
                 }
                 last_family = now;
@@ -527,6 +531,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 if let Some(msg) = conv.briefing_due().await {
                     if tg_send(&api, chat, &msg).await.is_ok() {
                         eprintln!("[briefing] sent the daily morning briefing ({} chars)", msg.len());
+                        conv.note_proactive_sent().await;
                     }
                 }
             }
@@ -545,6 +550,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         let msg = c.foresee(&subject).await;
                         if tg_send(&api2, chat, &msg).await.is_ok() {
                             eprintln!("[foresight] sent the daily proactive forecast on {subject}");
+                            c.note_proactive_sent().await;
                         }
                     });
                 }
@@ -560,7 +566,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for nudge in conv.deadline_followups().await {
-                        let _ = tg_send(&api, chat, &nudge).await;
+                        if tg_send(&api, chat, &nudge).await.is_ok() {
+                            conv.note_proactive_sent().await;
+                        }
                     }
                 }
                 last_followup = now;
@@ -580,6 +588,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         if let Some(msg) = c.compose_event_prep(&title, ms).await {
                             if tg_send(&api2, chat, &msg).await.is_ok() {
                                 eprintln!("[prep] sent pre-event prep for {title}");
+                                c.note_proactive_sent().await;
                             }
                         }
                     });
@@ -613,6 +622,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Compaction tick: absorb aging turns into the persisted rolling summary (continuity beyond
         // the raw-turn window; survives restarts). Cheap early-return until enough turns accrue.
         conv.compact_conversation().await;
+
+        // Resolve a STALE proactive send (past the 90-min window, no reply) as IGNORED — the world
+        // model learns dead zones from silence just as it learns receptive windows from replies.
+        conv.resolve_proactive(false).await;
 
         // External-calendar refresh: re-pull the read-only ICS feed if one is connected. Paced
         // (YM_ICS_SECS, default 6h); no chat gating — it only updates stored events, sends nothing.
@@ -663,10 +676,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 && !in_quiet_hours_now()
                 && now.saturating_sub(last_activity) >= idle_secs * 1000;
             let mut spoke = false;
-            if idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 {
+            if idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 && conv.proactive_receptivity_ok().await {
                 if let Some(msg) = conv.proactive_digest().await {
                     if tg_send(&api, chat, &msg).await.is_ok() {
                         eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());
+                        conv.note_proactive_sent().await;
                         spoke = true;
                     }
                 }
@@ -683,10 +697,12 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 && std::env::var("YM_ASK").map(|v| v != "off").unwrap_or(true)
                 && ask_ok
                 && now.saturating_sub(last_ask) >= ask_secs * 1000
+                && conv.proactive_receptivity_ok().await
             {
                 if let Some(q) = conv.proactive_ask().await {
                     if tg_send(&api, chat, &q).await.is_ok() {
                         eprintln!("[ask] posed a get-to-know-you question");
+                        conv.note_proactive_sent().await;
                     }
                 }
                 last_ask = now; // reset cadence whether or not it asked
@@ -705,6 +721,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let msg = conv.find_patterns().await;
                 if msg.starts_with('\u{1f4a1}') && tg_send(&api, chat, &msg).await.is_ok() {
                     eprintln!("[patterns] surfaced a learned pattern ({} chars)", msg.len());
+                    conv.note_proactive_sent().await;
                 }
                 last_patterns = now; // reset cadence whether or not it found one
             }

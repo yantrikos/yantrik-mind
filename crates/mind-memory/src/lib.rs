@@ -28,6 +28,8 @@ use yantrikdb_core::state::{
     sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EpisodePayload,
     NodeId, NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
 };
+use yantrikdb_core::personality_bias::BondLevel;
+use yantrikdb_core::world_model::{ActionKind as WmAction, ActionOutcome as WmOutcome, StateFeatures};
 use yantrikdb_core::{InteractionOutcome, YantrikDB};
 
 type Reply<T> = oneshot::Sender<std::result::Result<T, String>>;
@@ -54,6 +56,8 @@ enum Cmd {
     RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
     RecordEpisode { label: String, reply: Reply<()> },
     RecordToolOutcome { tool: String, ok: bool, reply: Reply<()> },
+    RecordProactiveOutcome { sent_ms: i64, engaged: bool, reply: Reply<()> },
+    ProactiveReceptivity { reply: Reply<Option<f64>> },
     ToolTrackRecord { reply: Reply<Vec<(String, f64, u64)>> },
     ActivityRhythm { local_offset_hours: i32, reply: Reply<Option<String>> },
     ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
@@ -1033,6 +1037,43 @@ impl MemoryHandle {
                         Cmd::RecentMessages { limit, viewer, reply } => {
                             let _ = reply.send(recent_messages(&db, limit, viewer.as_deref()));
                         }
+                        Cmd::RecordProactiveOutcome { sent_ms, engaged, reply } => {
+                            // World model: engagement per time-bin (the state at SEND time). This is
+                            // how proactivity learns WHEN the user is receptive instead of assuming.
+                            let feats = StateFeatures::discretize(sent_ms as f64 / 1000.0, 0.5, 0.0, 0.0, 0);
+                            let outcome = if engaged { WmOutcome::Accepted } else { WmOutcome::Ignored };
+                            let r = db.record_transition(feats, WmAction::SendNotification, outcome).map_err(|e| e.to_string());
+                            // Personality: engagement nudges proactivity (and a little warmth) up;
+                            // being ignored nudges proactivity down. Small steps — a relationship, not a switch.
+                            let _ = db.record_personality_feedback(1, if engaged { 0.05 } else { -0.03 });
+                            if engaged {
+                                let _ = db.record_personality_feedback(3, 0.02);
+                            }
+                            // Bond level follows cumulative accepted engagements.
+                            if let Ok(sum) = db.world_model_summary() {
+                                let accepted = (sum.global_positive_rate * sum.total_transitions as f64) as u64;
+                                let bond = match accepted {
+                                    0..=4 => BondLevel::Stranger,
+                                    5..=14 => BondLevel::Acquaintance,
+                                    15..=39 => BondLevel::Familiar,
+                                    40..=99 => BondLevel::Bonded,
+                                    _ => BondLevel::Trusted,
+                                };
+                                let _ = db.set_bond_level(bond);
+                            }
+                            let _ = reply.send(r);
+                        }
+                        Cmd::ProactiveReceptivity { reply } => {
+                            let r = (|| {
+                                let sum = db.world_model_summary().ok()?;
+                                if sum.total_transitions < 20 {
+                                    return None; // not enough relationship data to gate on
+                                }
+                                let feats = StateFeatures::discretize(now_secs(), 0.5, 0.0, 0.0, 0);
+                                db.predict_outcome(&feats, WmAction::SendNotification).ok()
+                            })();
+                            let _ = reply.send(Ok(r));
+                        }
                         Cmd::RecordToolOutcome { tool, ok, reply } => {
                             let outcome = if ok { InteractionOutcome::Accepted } else { InteractionOutcome::Rejected };
                             let r = db
@@ -1480,6 +1521,12 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
         self.call(|reply| Cmd::ToolTrackRecord { reply }).await
+    }
+    async fn record_proactive_outcome(&self, sent_ms: i64, engaged: bool) -> Result<()> {
+        self.call(move |reply| Cmd::RecordProactiveOutcome { sent_ms, engaged, reply }).await
+    }
+    async fn proactive_receptivity(&self) -> Result<Option<f64>> {
+        self.call(|reply| Cmd::ProactiveReceptivity { reply }).await
     }
 }
 

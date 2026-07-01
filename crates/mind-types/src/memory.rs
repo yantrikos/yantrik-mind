@@ -369,4 +369,14 @@ pub trait MemoryFacade: Send + Sync {
     async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
         Ok(vec![])
     }
+    /// Feed a proactive send's fate (engaged vs ignored) into the engine's WORLD MODEL (per-time-bin
+    /// engagement learning), personality feedback, and bond progression.
+    async fn record_proactive_outcome(&self, _sent_ms: i64, _engaged: bool) -> Result<()> {
+        Ok(())
+    }
+    /// Predicted engagement rate for a proactive send RIGHT NOW (None until the world model has
+    /// enough transitions to say anything real).
+    async fn proactive_receptivity(&self) -> Result<Option<f64>> {
+        Ok(None)
+    }
 }

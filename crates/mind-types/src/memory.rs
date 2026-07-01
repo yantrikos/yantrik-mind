@@ -334,4 +334,22 @@ pub trait MemoryFacade: Send + Sync {
     /// Transcript lines with id > `after_id`, ascending: Vec<(id, role, text)>. For the consolidation
     /// pass, which advances a cursor over what it has already distilled into typed memory.
     async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>>;
+
+    // ── engine learning/metacognition (calibration + self-assessment; defaults = inert for fakes) ──
+    /// Feed a graded prediction outcome into the engine's learning layer: the per-action-kind
+    /// bandit + isotonic confidence calibration + per-SUBJECT source reliability. This is how
+    /// foresight EARNS calibrated confidence instead of asserting raw model numbers.
+    async fn record_prediction_outcome(&self, _domain: &str, _subject: &str, _raw_confidence: f64, _hit: bool) -> Result<()> {
+        Ok(())
+    }
+    /// (subject_track_record ∈ [0,1], calibrated_confidence) from the engine's learned state.
+    /// Track record defaults to 0.5 (no data); calibrated falls back to the raw value.
+    async fn foresight_reliability(&self, _subject: &str, raw_confidence: f64) -> Result<(f64, f64)> {
+        Ok((0.5, raw_confidence))
+    }
+    /// A short metacognitive self-check line when reasoning health is DEGRADED (thin evidence /
+    /// high contradiction density). None while healthy — a sound mind doesn't narrate its health.
+    async fn metacog_note(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }

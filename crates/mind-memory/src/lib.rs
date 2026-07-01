@@ -28,7 +28,7 @@ use yantrikdb_core::state::{
     sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId,
     NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
 };
-use yantrikdb_core::YantrikDB;
+use yantrikdb_core::{InteractionOutcome, YantrikDB};
 
 type Reply<T> = oneshot::Sender<std::result::Result<T, String>>;
 
@@ -51,6 +51,9 @@ enum Cmd {
     AppendMessage { role: String, text: String, scope: String, reply: Reply<()> },
     RecentMessages { limit: usize, viewer: Option<String>, reply: Reply<Vec<(String, String)>> },
     MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
+    RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
+    ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
+    MetacogNote { reply: Reply<Option<String>> },
     // skill library
     SaveSkill { skill: Skill, reply: Reply<()> },
     GetSkill { name: String, reply: Reply<Option<Skill>> },
@@ -1026,6 +1029,34 @@ impl MemoryHandle {
                         Cmd::RecentMessages { limit, viewer, reply } => {
                             let _ = reply.send(recent_messages(&db, limit, viewer.as_deref()));
                         }
+                        Cmd::RecordPredictionOutcome { domain, subject, raw, hit, reply } => {
+                            // Two learners per graded call: the action-kind bandit + isotonic
+                            // calibration (foresight:<domain>), and per-SUBJECT source reliability.
+                            let outcome = if hit { InteractionOutcome::Accepted } else { InteractionOutcome::Rejected };
+                            let r1 = db.record_learning_interaction(format!("foresight:{domain}"), raw, outcome, [0.0; 4]);
+                            let r2 = if hit { db.learning_belief_confirmed(&subject) } else { db.learning_belief_contradicted(&subject) };
+                            let _ = reply.send(r1.and(r2).map_err(|e| e.to_string()));
+                        }
+                        Cmd::ForesightReliability { subject, raw, reply } => {
+                            let rel = db.source_reliability(&subject).unwrap_or(0.5);
+                            let cal = db.calibrated_confidence(raw).unwrap_or(raw);
+                            let _ = reply.send(Ok((rel, cal)));
+                        }
+                        Cmd::MetacogNote { reply } => {
+                            // Only speak up when degraded — a healthy mind doesn't narrate its health.
+                            let note = db.metacognitive_assessment().ok().and_then(|r| {
+                                if r.evidence_sparsity > 0.7 || r.contradiction_density > 0.5 {
+                                    Some(format!(
+                                        "evidence sparsity {:.0}%, contradiction density {:.0}%",
+                                        r.evidence_sparsity * 100.0,
+                                        r.contradiction_density * 100.0
+                                    ))
+                                } else {
+                                    None
+                                }
+                            });
+                            let _ = reply.send(Ok(note));
+                        }
                         Cmd::MessagesSince { after_id, limit, reply } => {
                             let _ = reply.send(messages_since(&db, after_id, limit));
                         }
@@ -1354,6 +1385,17 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn recent_messages_as(&self, limit: usize, viewer: mind_types::Scope) -> Result<Vec<(String, String)>> {
         self.call(|reply| Cmd::RecentMessages { limit, viewer: Some(viewer.as_tag()), reply }).await
+    }
+    async fn record_prediction_outcome(&self, domain: &str, subject: &str, raw_confidence: f64, hit: bool) -> Result<()> {
+        let (domain, subject) = (domain.to_string(), subject.to_lowercase());
+        self.call(move |reply| Cmd::RecordPredictionOutcome { domain, subject, raw: raw_confidence, hit, reply }).await
+    }
+    async fn foresight_reliability(&self, subject: &str, raw_confidence: f64) -> Result<(f64, f64)> {
+        let subject = subject.to_lowercase();
+        self.call(move |reply| Cmd::ForesightReliability { subject, raw: raw_confidence, reply }).await
+    }
+    async fn metacog_note(&self) -> Result<Option<String>> {
+        self.call(|reply| Cmd::MetacogNote { reply }).await
     }
 }
 

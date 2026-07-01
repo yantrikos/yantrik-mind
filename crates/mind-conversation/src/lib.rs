@@ -1122,6 +1122,9 @@ pub struct ConversationEngine {
     /// The most-recently surfaced news topic (set by news_watch), so a follow-up "tell me more" has a
     /// referent → the companion proactively researches it into a full brief. Consumed on use.
     last_news_topic: Mutex<Option<String>>,
+    /// In-process guard against double pre-event preps (belt over the persisted events_prepped —
+    /// a tick-timing race once double-sent a prep before the persisted mark was visible).
+    prepped_local: Mutex<std::collections::HashSet<String>>,
     /// Weather — keyless open-meteo (current + today's forecast for a place name).
     weather: Option<Arc<dyn WeatherClient>>,
     /// Wikipedia — keyless factual lookups (search + intro extract). Untrusted reference text.
@@ -1207,6 +1210,7 @@ impl ConversationEngine {
             news: None,
             news_seen: Mutex::new(std::collections::HashSet::new()),
             last_news_topic: Mutex::new(None),
+            prepped_local: Mutex::new(std::collections::HashSet::new()),
             weather: None,
             wiki: None,
             markets: None,
@@ -2601,7 +2605,54 @@ impl ConversationEngine {
                     }
                 }
                 self.mark_ask_covered(&key).await;
-                // Chain the next uncovered dimension so it flows as a conversation, not one question a day.
+                // A rich answer often covers MORE than the asked dimension (anniversary + parents +
+                // topics can arrive in one message). One cheap extraction pass: which OTHER uncovered
+                // dimensions does this message already answer? Store + mark those too — and never
+                // chain a question the user just answered ("Told you all these bro").
+                let covered0 = self.ask_covered().await;
+                let remaining: Vec<(&str, &str)> = INTEREST_DIMS
+                    .iter()
+                    .filter(|(k, _)| !covered0.iter().any(|c| c == k))
+                    .copied()
+                    .collect();
+                if !remaining.is_empty() && ans.chars().count() > 60 {
+                    let dims_list = remaining.iter().map(|(k, q)| format!("- {k}: {q}")).collect::<Vec<_>>().join("
+");
+                    let prompt = format!(
+                        "The user wrote:
+\"\"\"
+{ans}
+\"\"\"
+
+Which of these questions does that message ALREADY answer (fully or partly)? Output ONLY JSON: {{\"answered\":[{{\"key\":\"<key>\",\"answer\":\"<the part of their message that answers it>\"}}]}} — empty list if none.
+
+{dims_list}"
+                    );
+                    let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
+                    if let Ok(r) = self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                        let v = parse_json_obj(&r.text);
+                        for a in v.get("answered").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                            let (Some(k2), Some(ans2)) = (a.get("key").and_then(|x| x.as_str()), a.get("answer").and_then(|x| x.as_str())) else { continue };
+                            if !remaining.iter().any(|(rk, _)| *rk == k2) || ans2.trim().len() < 4 {
+                                continue;
+                            }
+                            let ans2: String = ans2.trim().chars().take(400).collect();
+                            let _ = self.memory.profile_set(&format!("interest_{k2}"), &ans2).await;
+                            let _ = self
+                                .memory
+                                .remember_as_belief(BeliefAssertion {
+                                    statement: format!("{} {ans2}", interest_belief_prefix(k2)),
+                                    polarity: 1.0,
+                                    weight: 0.9,
+                                    source_event: Some("onboard".into()),
+                                    provenance: "told".into(),
+                                })
+                                .await;
+                            self.mark_ask_covered(k2).await;
+                        }
+                    }
+                }
+                // Chain only a question that is STILL genuinely unanswered.
                 let covered = self.ask_covered().await;
                 match INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
                     Some((nk, nq)) => {
@@ -3392,13 +3443,17 @@ impl ConversationEngine {
             return None;
         }
         let domain = domain_of(subject);
+        // Confidence goes through the engine's isotonic calibration map (learned from graded
+        // outcomes) — raw model confidence is stored alongside for the learner.
+        let (_, cal) = self.memory.foresight_reliability(subject, conf).await.unwrap_or((0.5, conf));
         preds.push(serde_json::json!({
             "id": made_ms,
             "subject": subject,
             "domain": domain,
             "claim": claim,
             "threshold": threshold,
-            "confidence": conf,
+            "confidence": cal,
+            "raw_confidence": conf,
             "made_ms": made_ms,
             "made_as_of": made_as_of,
             "resolve_by": resolve_by,
@@ -3463,6 +3518,18 @@ impl ConversationEngine {
                     graded.join("\n")
                 ));
             }
+        }
+        // The engine's LEARNED reliability for this subject (from graded hits/misses) — fed into
+        // the prompt so the model calibrates, and surfaced to the user once there's real signal.
+        let (track, _) = self.memory.foresight_reliability(subject, 0.6).await.unwrap_or((0.5, 0.6));
+        if (track - 0.5).abs() > 0.02 {
+            prior_block.push_str(&format!(
+                "
+
+=== YOUR MEASURED TRACK RECORD ON THIS SUBJECT ===
+{:.0}% of your graded calls held. Calibrate your confidence accordingly — be bolder if it's high, humbler if it's low.",
+                track * 100.0
+            ));
         }
         let framing = if is_self {
             "You are forecasting the USER'S OWN likely next moves and needs, so JARVIS can get ahead of them (anticipate, prepare, remind, tee up)."
@@ -3712,6 +3779,13 @@ impl ConversationEngine {
                         provenance: "calibration".into(),
                     })
                     .await;
+            }
+            // Feed the verdict into the ENGINE's learning layer too: per-domain bandit + isotonic
+            // confidence calibration + per-subject source reliability. This is what turns raw model
+            // confidence into EARNED, calibrated confidence over time.
+            if verd == "hit" || verd == "miss" {
+                let raw = preds[i].get("raw_confidence").or_else(|| preds[i].get("confidence")).and_then(|x| x.as_f64()).unwrap_or(0.6);
+                let _ = self.memory.record_prediction_outcome(&domain, &subject, raw, verd == "hit").await;
             }
             // Feed the verdict back into the subject's living CHARACTER MODEL, so the next forecast
             // reasons over its own graded track record (a MISS corrects the character read — the
@@ -5149,7 +5223,9 @@ impl ConversationEngine {
             let Some(ms) = e.get("when_ms").and_then(|x| x.as_i64()) else { continue };
             let Some(title) = e.get("title").and_then(|x| x.as_str()) else { continue };
             let key = format!("{title}|{ms}");
-            if ms > now && ms - now <= lead_min * 60_000 && !prepped.contains(&key) {
+            let locally_done = self.prepped_local.lock().unwrap().contains(&key);
+            if ms > now && ms - now <= lead_min * 60_000 && !prepped.contains(&key) && !locally_done {
+                self.prepped_local.lock().unwrap().insert(key.clone());
                 prepped.push(key);
                 due.push((title.to_string(), ms));
             }
@@ -7542,6 +7618,13 @@ impl ConversationEngine {
                     ));
                 }
             }
+        }
+        if let Ok(Some(note)) = self.memory.metacog_note().await {
+            grounding.push_str(&format!(
+                "METACOGNITIVE SELF-CHECK (degraded: {note}) — when evidence for their message is thin, say what you don't know rather than guessing.
+
+"
+            ));
         }
         grounding.push_str("What I know that may be relevant:");
         for b in ws.stable_facts.iter().take(5) {

@@ -166,6 +166,18 @@ fn days_until_mmdd(mmdd: &str, today: &chrono::DateTime<chrono::FixedOffset>) ->
     Some((target - today_naive).num_days())
 }
 
+/// True if a person record matches a lowercase query by name OR any nickname (substring either way).
+fn person_matches(p: &serde_json::Value, q: &str) -> bool {
+    let hit = |s: &str| {
+        let sl = s.to_lowercase();
+        !sl.is_empty() && (sl.contains(q) || q.contains(&sl))
+    };
+    if p.get("name").and_then(|x| x.as_str()).map(hit).unwrap_or(false) {
+        return true;
+    }
+    p.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).any(hit)).unwrap_or(false)
+}
+
 /// The soonest upcoming key date for a person, as a short "label in Nd" line. None if they have none.
 fn next_date_line(p: &serde_json::Value, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<String> {
     let mut best: Option<(i64, String)> = None;
@@ -1571,7 +1583,7 @@ impl ConversationEngine {
              \"goals\":[{{\"goal\":\"...\"}}], \
              \"preferences\":[{{\"preference\":\"...\"}}], \
              \"commitments\":[{{\"task\":\"...\",\"due\":\"tomorrow|tonight|next week|in 3 days|in 2 hours|null\"}}], \
-             \"people\":[{{\"name\":\"...\",\"relationship\":\"wife|son|friend|...\",\"facts\":[\"...\"],\"dates\":[{{\"label\":\"birthday\",\"date\":\"MM-DD or Month DD\"}}]}}]}}\n\
+             \"people\":[{{\"name\":\"...\",\"aliases\":[\"nickname\"],\"relationship\":\"wife|daughter|son|friend|...\",\"facts\":[\"...\"],\"dates\":[{{\"label\":\"birthday\",\"date\":\"MM-DD or Month DD\"}}]}}]}}\n\
              Beliefs are standalone + third-person (e.g. \"Pranab uses async Rust\"). Goals and \
              preferences are plain text (e.g. \"learn Rust\", \"terse replies\"). Tasks are \
              imperative (e.g. \"send Pranab the Q3 report\"). People facts are about the PERSON, not the \
@@ -3396,6 +3408,18 @@ impl ConversationEngine {
                     rec["relationship"] = serde_json::json!(r.trim().to_lowercase());
                 }
             }
+            // aliases (nicknames) — dedupe, so `ym about <nickname>` resolves to the person
+            let mut aliases: Vec<serde_json::Value> = rec.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let mut akeys: std::collections::HashSet<String> = aliases.iter().filter_map(|a| a.as_str()).map(norm).collect();
+            for a in pv.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                if let Some(s) = a.as_str() {
+                    let s = s.trim();
+                    if s.len() >= 2 && norm(s) != key && akeys.insert(norm(s)) {
+                        aliases.push(serde_json::json!(s));
+                    }
+                }
+            }
+            rec["aliases"] = serde_json::json!(aliases);
             // facts — dedupe by normalized text, keep the most recent ~24
             let mut facts: Vec<serde_json::Value> = rec.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
             let mut fkeys: std::collections::HashSet<String> = facts.iter().filter_map(|f| f.as_str()).map(norm).collect();
@@ -3450,17 +3474,19 @@ impl ConversationEngine {
     }
 
     /// `ym about <name>` — the full living profile of one person: relationship, what I know, key dates.
+    /// Matches on name OR nickname.
     pub async fn person_about(&self, name: &str) -> String {
-        let norm = |s: &str| s.to_lowercase();
         let store = self.load_people_profiles().await;
-        let q = norm(name.trim());
-        let p = match store.iter().find(|p| p.get("name").and_then(|x| x.as_str()).map(|n| norm(n).contains(&q)).unwrap_or(false)) {
+        let q = name.trim().to_lowercase();
+        let p = match store.iter().find(|p| person_matches(p, &q)) {
             Some(p) => p,
             None => return format!("I don't know anyone called \"{}\" yet.", name.trim()),
         };
         let pname = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
         let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-        let mut out = vec![format!("👤 {pname}{}", if rel.is_empty() { String::new() } else { format!(" — your {rel}") })];
+        let aliases: Vec<&str> = p.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+        let nick = if aliases.is_empty() { String::new() } else { format!(" (aka {})", aliases.join(", ")) };
+        let mut out = vec![format!("👤 {pname}{nick}{}", if rel.is_empty() { String::new() } else { format!(" — your {rel}") })];
         let today = local_now();
         let dates: Vec<&serde_json::Value> = p.get("dates").and_then(|x| x.as_array()).map(|a| a.iter().collect()).unwrap_or_default();
         if !dates.is_empty() {
@@ -3483,6 +3509,24 @@ impl ConversationEngine {
             }
         }
         out.join("\n")
+    }
+
+    /// Correct the family layer — remove a person by name or nickname. Corrections are essential to
+    /// "always kept updated": a store you can only append to goes stale and wrong.
+    pub async fn forget_person(&self, name: &str) -> String {
+        let q = name.trim().to_lowercase();
+        if q.len() < 2 {
+            return "Forget whom? e.g. `ym forget Priya`".to_string();
+        }
+        let mut store = self.load_people_profiles().await;
+        let before = store.len();
+        let removed: Vec<String> = store.iter().filter(|p| person_matches(p, &q)).filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from)).collect();
+        store.retain(|p| !person_matches(p, &q));
+        if store.len() == before {
+            return format!("I don't have anyone matching \"{}\" in your family layer.", name.trim());
+        }
+        self.save_people_profiles(&store).await;
+        format!("Forgotten: {}. (Removed from the people I track.)", removed.join(", "))
     }
 
     /// Upcoming key dates across everyone, within `within_days`. Returns (name, label, days, mmdd) for
@@ -4381,6 +4425,7 @@ impl ConversationEngine {
             "family" | "relationships" => self.family_view().await,
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
+            "forget" if !rest.is_empty() => self.forget_person(&rest).await,
             "person" => {
                 let mut p = rest.splitn(2, char::is_whitespace);
                 let action = p.next().unwrap_or("").to_lowercase();

@@ -2,13 +2,19 @@
 // text. A real browser with our IP/TLS and a stealth-patched fingerprint — gets content from sites
 // that block both the direct request and the reader proxy (JS-rendered + most bot walls).
 //
+// Tuned for JS-rendered commerce/content: waits for network-idle (so client-side content like price
+// grids loads) and SCROLLS to trigger lazy-loaded product tiles, then reads innerText. This recovers
+// friendly/mid-tier retailers (proven: Rosefield $60–$189) that the naive domcontentloaded grab missed.
+// NOTE: this does NOT beat network-level bot walls — Amazon/Walmart/Target return nothing even here;
+// those need a real product API or a scraping aggregator, not a browser.
+//
 // Deploy (on the box, as root, then chown to the service user):
 //   cd /opt/yantrik-mind
 //   npm install playwright playwright-extra puppeteer-extra-plugin-stealth
 //   PLAYWRIGHT_BROWSERS_PATH=/opt/yantrik-mind/pw-browsers npx playwright install --with-deps chromium
 //   chown -R yantrikmind:yantrikmind node_modules pw-browsers headless_fetch.js
 // The Rust HttpFetcher spawns: `timeout 45 node headless_fetch.js <url>` with
-// PLAYWRIGHT_BROWSERS_PATH set and cwd=/opt/yantrik-mind (so node resolves ./node_modules).
+// PLAYWRIGHT_BROWSERS_PATH set (also in /etc/yantrik-mind.env) and cwd=/opt/yantrik-mind.
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 chromium.use(stealth);
@@ -28,8 +34,21 @@ chromium.use(stealth);
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     });
     const page = await ctx.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
-    await page.waitForTimeout(1500); // let late JS settle
+    // Prefer network-idle so client-side content (price grids, product tiles) has loaded; fall back to
+    // domcontentloaded if the site keeps a connection open past the budget.
+    try {
+      await page.goto(url, { waitUntil: "networkidle", timeout: 18000 });
+    } catch (e) {
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 12000 });
+      } catch (_) {}
+    }
+    // Scroll to trigger lazy-loaded product grids (many stores only render tiles/prices on view).
+    for (let i = 0; i < 5; i++) {
+      await page.mouse.wheel(0, 2400);
+      await page.waitForTimeout(600);
+    }
+    await page.waitForTimeout(1200); // final settle
     const text = await page.evaluate(() => (document.body ? document.body.innerText : ""));
     process.stdout.write(text || "");
   } catch (e) {

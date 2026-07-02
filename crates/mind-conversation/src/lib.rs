@@ -342,13 +342,13 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 43] = [
+    const CMDS: [&str; 47] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
         "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
-        "gift", "giftideas",
+        "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -473,6 +473,39 @@ fn is_self_referential(text: &str) -> bool {
         "what have you become",
     ];
     KEYS.iter().any(|k| l.contains(k))
+}
+
+/// Fold vision's item names into canonical types so counts aggregate ("purse"/"tote" → handbag,
+/// "jhumka" → earrings). Unknown types pass through if they look like words.
+fn normalize_item_type(t: &str) -> String {
+    let t = t.trim().to_lowercase();
+    let canon = match t.as_str() {
+        "sari" | "sarees" | "saree" => "saree",
+        "purse" | "bag" | "bags" | "handbags" | "handbag" | "tote" | "clutch" => "handbag",
+        "spectacles" | "specs" | "eyeglasses" | "glasses" => "glasses",
+        "sunglass" | "sunglasses" | "shades" => "sunglasses",
+        "wristwatch" | "watch" | "watches" => "watch",
+        "chain" | "necklaces" | "necklace" | "pendant" | "mangalsutra" => "necklace",
+        "jhumka" | "jhumkas" | "earring" | "earrings" | "studs" => "earrings",
+        "bangle" | "bangles" | "bracelet" | "bracelets" => "bracelet",
+        "sneakers" | "sandals" | "heels" | "shoe" | "shoes" | "flats" | "slippers" => "shoes",
+        "phone" | "smartphone" | "mobile" => "phone",
+        "earbuds" | "airpods" | "headphone" | "headphones" => "headphones",
+        "smartwatch" | "fitness band" | "band" => "smartwatch",
+        "dresses" | "dress" | "gown" | "frock" => "dress",
+        "kurti" | "kurta" => "kurta",
+        "lehengas" | "lehenga" | "ghagra" => "lehenga",
+        "dupatta" | "shawl" | "scarf" | "stole" => "scarf",
+        "ring" | "rings" => "ring",
+        "bindi" => "bindi",
+        "tshirt" | "t-shirt" | "tee" | "top" | "shirt" | "blouse" => "top",
+        other => other,
+    };
+    if canon.len() >= 3 && canon.len() <= 24 && canon.chars().all(|c| c.is_alphabetic() || c == ' ' || c == '-') {
+        canon.to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Photo-edit intent in a caption/message → enhancement mode. Conservative keyword map.
@@ -6607,6 +6640,116 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         std::mem::take(&mut *self.video_queue.lock().unwrap())
     }
 
+    /// ---------- OBJECT INVENTORY ----------
+    /// Structured possession detection: walk a person's photos, extract every visible personal
+    /// item as typed JSON (watch, handbag, saree, sunglasses, ...) → a persistent per-person
+    /// inventory with counts + variants, and an explicit NEVER-SEEN list — the hard gift-gap
+    /// signal. Honest limits: types/colors/materials are reliable; brands are never guessed;
+    /// absence in a photo sample is a hint, not proof. Cached 30 days per person.
+    pub async fn person_inventory(&self, who: &str) -> String {
+        let key = format!("closet:{}", who.trim().to_lowercase());
+        if let Ok(Some(prev)) = self.memory.profile_get(&key).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&prev) {
+                if chrono::Utc::now().timestamp_millis() - v["ts"].as_i64().unwrap_or(0) < 30 * 86_400_000 {
+                    if let Some(t) = v["text"].as_str() {
+                        return format!("{t}\n\n(cached study — `closet {} fresh` to redo)", who.trim());
+                    }
+                }
+            }
+        }
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((i, pid, disp)) = self.resolve_face(&sources, who).await else {
+            return format!("No photo source knows \"{}\" by face yet.", who.trim());
+        };
+        if mind_tools::VisionClient::from_env().is_none() {
+            return "No vision model configured — can't read the photos.".to_string();
+        }
+        let assets = sources[i].assets_of_person(&pid, 20).await;
+        if assets.is_empty() {
+            return format!("The library knows {disp} but returned no photos.");
+        }
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut variants: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let mut read = 0usize;
+        for a in assets.iter().take(16) {
+            let Some(bytes) = sources[i].image_bytes(a).await else { continue };
+            let raw = self
+                .analyze_image_bytes(
+                    bytes,
+                    "image/jpeg",
+                    r#"List every distinct personal item visible on or near the main person (clothing, jewelry, accessories, gadgets). Output ONLY JSON: {"items":[{"type":"<one word like saree/dress/watch/handbag/sunglasses/earrings/necklace/shoes>","desc":"<3-6 words: color, material, style>"}]}. Empty list if none. Do NOT guess brands."#,
+                )
+                .await;
+            let v = parse_json_obj(&raw);
+            let items = v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            if raw.len() > 4 {
+                read += 1;
+            }
+            for it in items {
+                let Some(ty) = it.get("type").and_then(|x| x.as_str()) else { continue };
+                let ty = normalize_item_type(ty);
+                if ty.is_empty() {
+                    continue;
+                }
+                *counts.entry(ty.clone()).or_insert(0) += 1;
+                let d = it.get("desc").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+                let e = variants.entry(ty).or_default();
+                if !d.is_empty() && e.len() < 6 && !e.iter().any(|x| x == &d) {
+                    e.push(d);
+                }
+            }
+        }
+        if counts.is_empty() {
+            return format!("I read {read} of {disp}'s photos but couldn't extract structured items from them.");
+        }
+        let mut owned: Vec<(String, usize)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        owned.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut text = format!("👗 {disp} — object inventory from {read} photos:\n\nSEEN:");
+        for (ty, n) in owned.iter().take(14) {
+            let vars = variants.get(ty).map(|v| v.join("; ")).unwrap_or_default();
+            if vars.is_empty() {
+                text.push_str(&format!("\n• {ty} ×{n}"));
+            } else {
+                text.push_str(&format!("\n• {ty} ×{n} — {vars}"));
+            }
+        }
+        const CHECKLIST: [&str; 11] = [
+            "watch", "handbag", "sunglasses", "earrings", "necklace", "bracelet", "ring", "shoes",
+            "scarf", "smartwatch", "headphones",
+        ];
+        let missing: Vec<&str> = CHECKLIST.iter().filter(|c| !counts.contains_key(**c)).copied().collect();
+        if !missing.is_empty() {
+            text.push_str(&format!(
+                "\n\nNEVER SEEN in this sample: {} — absence is a hint, not proof, but it's where gift gaps live.",
+                missing.join(", ")
+            ));
+        }
+        // Persist: the top possessions and the gap list become durable beliefs.
+        for (ty, n) in owned.iter().take(3) {
+            let vars = variants.get(ty).map(|v| v.join("; ")).unwrap_or_default();
+            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                statement: format!("{disp} (inventory): {n}× {ty} observed in photos{}", if vars.is_empty() { String::new() } else { format!(" — {vars}") }),
+                polarity: 1.0, weight: 0.65, source_event: Some("inventory".into()), provenance: "photos".into(),
+            }).await;
+        }
+        if !missing.is_empty() {
+            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                statement: format!("{disp} (inventory): never seen with {} across {read} recent photos — gift-gap candidates", missing.join(", ")),
+                polarity: 1.0, weight: 0.6, source_event: Some("inventory".into()), provenance: "photos".into(),
+            }).await;
+        }
+        let summary = format!(
+            "{}{}",
+            owned.iter().take(6).map(|(t, n)| format!("{t}×{n}")).collect::<Vec<_>>().join(", "),
+            if missing.is_empty() { String::new() } else { format!("; never seen: {}", missing.join(", ")) }
+        );
+        let _ = self
+            .memory
+            .profile_set(&key, &serde_json::json!({ "ts": chrono::Utc::now().timestamp_millis(), "text": text, "summary": summary }).to_string())
+            .await;
+        text
+    }
+
     /// ---------- GIFT INTELLIGENCE ----------
     /// The photo lane's practical payoff: study a person's actual photos for what they OWN (never
     /// re-gift), their STYLE (colors, materials, aesthetic), and what's visibly MISSING that would
@@ -6670,9 +6813,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 format!("{rel}. {}", facts.join("; "))
             })
             .unwrap_or_default();
+        let closet_note = self
+            .memory
+            .profile_get(&format!("closet:{}", disp.to_lowercase()))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("summary").and_then(|x| x.as_str()).map(String::from))
+            .unwrap_or_default();
         let joined: String = obs.join("\n").chars().take(2400).collect();
         let prompt = format!(
-            "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
+            "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
         );
         let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
         let out = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
@@ -7980,6 +8132,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     "No photos from this exact day in past years (yet — the library index is still growing).".to_string()
                 }
             }
+            "closet" | "wardrobe" | "inventory" | "items" if !rest.trim().is_empty() => {
+                let r = rest.trim();
+                let (name, fresh) = match r.strip_suffix(" fresh") {
+                    Some(n) => (n.trim(), true),
+                    None => (r, false),
+                };
+                if fresh {
+                    let _ = self.memory.profile_set(&format!("closet:{}", name.to_lowercase()), "").await;
+                }
+                self.person_inventory(name).await
+            }
             "gift" | "giftideas" | "gifts" if !rest.trim().is_empty() => {
                 let r = rest.trim();
                 let (name, fresh) = match r.strip_suffix(" fresh") {
@@ -9065,6 +9228,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
             }
+            "person_items" | "inventory" | "closet" => {
+                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                if nm.trim().is_empty() { "Whose photos should I inventory?".to_string() } else { self.person_inventory(nm.trim()).await }
+            }
             "gift_intel" | "gift_ideas" => {
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose photos should I study for gift ideas?".to_string() } else { self.gift_intel(nm.trim()).await }
@@ -9591,6 +9758,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
 - enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
 - gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
+- person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\

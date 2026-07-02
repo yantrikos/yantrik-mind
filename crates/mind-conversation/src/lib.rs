@@ -342,10 +342,11 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 26] = [
+    const CMDS: [&str; 34] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
+        "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
     ];
     CMDS.contains(&first.as_str())
 }

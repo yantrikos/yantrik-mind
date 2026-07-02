@@ -544,8 +544,6 @@ impl VisionClient {
     }
 }
 
-/// Screenshot a rendered page (headless Chromium via snap_page.js) — JPEG bytes. SSRF-guarded like
-/// every fetch path; None on any failure (block/timeout) so callers stay honest about having no image.
 /// Fetch raw image bytes from a public URL (FB CDN photos) for the vision lane. SSRF-guarded,
 /// 8 MB cap, None on any failure.
 pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
@@ -568,6 +566,8 @@ pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
     .ok()?
 }
 
+/// Screenshot a rendered page (headless Chromium via snap_page.js) — JPEG bytes. SSRF-guarded like
+/// every fetch path; None on any failure (block/timeout) so callers stay honest about having no image.
 pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
@@ -755,6 +755,210 @@ impl ImmichClient {
         })
         .await
         .ok()?
+    }
+}
+
+/// ---------- PHOTO-SOURCE PLUGIN LAYER (acquisition) ----------
+/// HOW images arrive is a plugin concern, decoupled from WHAT the mind does with them (the
+/// understanding layer in mind-conversation: pattern learning, retrieval, ask-who-is-who). Each
+/// connected service is one arm of this enum; adding Google Photos / OneDrive / a phone camera
+/// roll later is a new arm + from_env wiring — the learning layer above never changes.
+pub struct PhotoPerson {
+    pub id: String,
+    /// "" = the source clustered this face but has no name yet (ask-who-is-who fuel).
+    pub name: String,
+}
+
+pub struct PhotoAsset {
+    /// Source-native id (Immich asset id; FB uses the image URL itself).
+    pub id: String,
+    /// YYYY-MM-DD when known.
+    pub date: String,
+    /// EXIF city/country when known.
+    pub place: String,
+}
+
+pub enum PhotoSource {
+    Immich(ImmichClient),
+    Facebook(FbClient),
+}
+
+impl PhotoSource {
+    /// Every configured source, moat-first (face-aware Immich before generic FB).
+    pub fn all_from_env() -> Vec<PhotoSource> {
+        let mut v = Vec::new();
+        if let Some(im) = ImmichClient::from_env() {
+            v.push(PhotoSource::Immich(im));
+        }
+        if let Some(fb) = FbClient::from_env() {
+            v.push(PhotoSource::Facebook(fb));
+        }
+        v
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            PhotoSource::Immich(_) => "immich",
+            PhotoSource::Facebook(_) => "facebook",
+        }
+    }
+
+    /// Whether this source knows WHO is in a photo (face recognition). Immich yes; FB's API never
+    /// says (post-2018 lockdown) — that asymmetry is why per-person reads route to face-aware sources.
+    pub fn knows_people(&self) -> bool {
+        matches!(self, PhotoSource::Immich(_))
+    }
+
+    /// Face-clustered people (named + unnamed) — empty for sources without face data.
+    pub async fn list_people(&self) -> Vec<PhotoPerson> {
+        match self {
+            PhotoSource::Immich(im) => im
+                .people()
+                .await
+                .ok()
+                .and_then(|v| v["people"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|p| {
+                    Some(PhotoPerson {
+                        id: p["id"].as_str()?.to_string(),
+                        name: p["name"].as_str().unwrap_or("").trim().to_string(),
+                    })
+                })
+                .collect(),
+            PhotoSource::Facebook(_) => Vec::new(),
+        }
+    }
+
+    pub async fn assets_of_person(&self, person_id: &str, n: usize) -> Vec<PhotoAsset> {
+        match self {
+            PhotoSource::Immich(im) => im
+                .assets_of_person(person_id, n)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .collect(),
+            PhotoSource::Facebook(_) => Vec::new(),
+        }
+    }
+
+    /// Recent photos regardless of who's in them — the generic sweep every source can do.
+    pub async fn recent_assets(&self, n: usize) -> Vec<PhotoAsset> {
+        match self {
+            PhotoSource::Immich(im) => im
+                .recent_assets(n)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .collect(),
+            PhotoSource::Facebook(fb) => {
+                let mut out: Vec<PhotoAsset> = Vec::new();
+                for kind in ["uploaded", "tagged"] {
+                    if let Ok(r) = fb.photos(kind, n).await {
+                        for p in r.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                            if let Some(src) = p["images"].as_array().and_then(|a| a.first()).and_then(|im| im["source"].as_str()) {
+                                if !out.iter().any(|a| a.id == src) {
+                                    out.push(PhotoAsset { id: src.to_string(), date: String::new(), place: String::new() });
+                                }
+                            }
+                        }
+                    }
+                }
+                out.truncate(n);
+                out
+            }
+        }
+    }
+
+    /// The image bytes for an asset (downscaled where the source supports it).
+    pub async fn image_bytes(&self, asset: &PhotoAsset) -> Option<Vec<u8>> {
+        match self {
+            PhotoSource::Immich(im) => im.thumbnail(&asset.id).await,
+            PhotoSource::Facebook(_) => fetch_image_bytes(&asset.id).await,
+        }
+    }
+
+    /// A face-crop thumbnail for a person cluster (who-is-this questions). Face-aware sources only.
+    pub async fn face_thumbnail(&self, person_id: &str) -> Option<Vec<u8>> {
+        match self {
+            PhotoSource::Immich(im) => im.person_thumbnail(person_id).await,
+            PhotoSource::Facebook(_) => None,
+        }
+    }
+
+    /// How many photos a person cluster appears in (ranks which unknown face is worth asking about).
+    pub async fn person_photo_count(&self, person_id: &str) -> Option<u64> {
+        match self {
+            PhotoSource::Immich(im) => im.person_stats(person_id).await,
+            PhotoSource::Facebook(_) => None,
+        }
+    }
+}
+
+impl ImmichClient {
+    /// Asset count for a person (GET /api/people/{id}/statistics — needs the statistics permission).
+    pub async fn person_stats(&self, person_id: &str) -> Option<u64> {
+        let (b, k, id) = (self.base.clone(), self.key.clone(), person_id.to_string());
+        tokio::task::spawn_blocking(move || -> Option<u64> {
+            let v = Self::get_blocking(&b, &k, &format!("/api/people/{id}/statistics")).ok()?;
+            v["assets"].as_u64()
+        })
+        .await
+        .ok()?
+    }
+
+    /// The face-crop thumbnail Immich shows for a person cluster.
+    pub async fn person_thumbnail(&self, person_id: &str) -> Option<Vec<u8>> {
+        let (b, k, id) = (self.base.clone(), self.key.clone(), person_id.to_string());
+        tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            ureq::get(&format!("{b}/api/people/{id}/thumbnail"))
+                .set("x-api-key", &k)
+                .timeout(std::time::Duration::from_secs(25))
+                .call()
+                .ok()?
+                .into_reader()
+                .take(4_000_000)
+                .read_to_end(&mut buf)
+                .ok()?;
+            if buf.len() < 300 { None } else { Some(buf) }
+        })
+        .await
+        .ok()?
+    }
+
+    /// Recent IMAGE assets regardless of person — same shape as assets_of_person, no filter.
+    pub async fn recent_assets(&self, n: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+        let (b, k) = (self.base.clone(), self.key.clone());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+            let body = serde_json::json!({ "size": n, "type": "IMAGE", "order": "desc" });
+            let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(30))
+                .send_json(body)?
+                .into_json()?;
+            let mut out = Vec::new();
+            for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
+                let id = a["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let date = a["fileCreatedAt"].as_str().unwrap_or("").chars().take(10).collect();
+                let ex = &a["exifInfo"];
+                let place = match (ex["city"].as_str(), ex["country"].as_str()) {
+                    (Some(c), Some(co)) => format!("{c}, {co}"),
+                    (Some(c), None) => c.to_string(),
+                    _ => String::new(),
+                };
+                out.push((id, date, place));
+            }
+            Ok(out)
+        })
+        .await?
     }
 }
 

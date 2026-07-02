@@ -212,6 +212,36 @@ async fn tg_send_voice(api: &str, chat_id: i64, text: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Send a photo (JPEG bytes) with a caption — curl multipart like sendVoice (ureq has no
+/// multipart). --form-string for the caption so curl never interprets ; or @ inside the text.
+async fn tg_send_photo(api: &str, chat_id: i64, jpeg: Vec<u8>, caption: &str) -> bool {
+    let api_owned = api.to_string();
+    let caption: String = caption.chars().take(1000).collect();
+    tokio::task::spawn_blocking(move || -> bool {
+        let tag = format!("{}_{}", std::process::id(), now_ms());
+        let path = std::env::temp_dir().join(format!("ym_ph_{tag}.jpg"));
+        if std::fs::write(&path, &jpeg).is_err() {
+            return false;
+        }
+        let out = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "--form-string",
+                &format!("chat_id={chat_id}"),
+                "--form-string",
+                &format!("caption={caption}"),
+                "-F",
+                &format!("photo=@{}", path.to_str().unwrap_or_default()),
+                &format!("{api_owned}/sendPhoto"),
+            ])
+            .output();
+        let _ = std::fs::remove_file(&path);
+        out.map(|o| String::from_utf8_lossy(&o.stdout).contains("\"ok\":true")).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Download a Telegram file by file_id (getFile → /file/bot path). Shared by photo analysis.
 async fn tg_download(api: &str, file_id: &str) -> Option<Vec<u8>> {
     let api_owned = api.to_string();
@@ -828,6 +858,41 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Compaction tick: absorb aging turns into the persisted rolling summary (continuity beyond
         // the raw-turn window; survives restarts). Cheap early-return until enough turns accrue.
         conv.compact_conversation().await;
+
+        // Outbound photo queue: images the conversation layer decided to send (photo retrieval).
+        // Direct answers to the user's own ask, so quiet-hours don't gate them.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 {
+                for (jpeg, caption) in conv.take_outbound_photos() {
+                    if !tg_send_photo(&api, chat, jpeg, &caption).await {
+                        eprintln!("[photo] send failed: {caption}");
+                    }
+                }
+            }
+        }
+
+        // Ask-who-is-who: ONE unknown-face question per period (or immediately via `ym whois`).
+        // The face crop goes as a real photo; the reply lands in the pending-slot interview path
+        // and becomes people-layer knowledge + a local face-name mapping.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 {
+                let forced = conv.whois_forced().await;
+                if forced
+                    || (!in_quiet_hours_now()
+                        && conv.whois_due().await
+                        && conv.proactive_receptivity_ok().await)
+                {
+                    if let Some((caption, jpeg, slot)) = conv.whois_next().await {
+                        if tg_send_photo(&api, chat, jpeg, &caption).await {
+                            conv.whois_arm(&slot).await;
+                            eprintln!("[whois] asked about face {slot}");
+                        }
+                    }
+                }
+            }
+        }
 
         // Facebook refresh: keep the know-me lane current (daily; data-only, sends nothing).
         if conv.fb_sync_due().await {

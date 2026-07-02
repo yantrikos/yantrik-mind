@@ -472,6 +472,31 @@ fn is_self_referential(text: &str) -> bool {
     KEYS.iter().any(|k| l.contains(k))
 }
 
+/// Detect a natural photo-retrieval ask ("send me a photo of Brishti in a red saree", "show me a
+/// pic from the beach trip") and extract the query. Deterministic + conservative: needs an
+/// imperative-ish opener AND a photo noun, so sentences that merely mention photos pass through.
+fn photo_request(text: &str) -> Option<String> {
+    let low = text.trim().to_lowercase();
+    let opener = ["send", "show", "share", "find", "get", "pull", "can you", "could you", "please"];
+    if !opener.iter().any(|o| low.starts_with(o)) {
+        return None;
+    }
+    let nouns = ["picture", "photo", "image", "snap", "pic"];
+    let (at, len) = nouns
+        .iter()
+        .filter_map(|n| low.find(n).map(|i| (i, n.len())))
+        .min_by_key(|(i, len)| (*i, std::cmp::Reverse(*len)))?;
+    let after = &low[at + len..];
+    let after = after.strip_prefix('s').unwrap_or(after).trim();
+    let q = ["of ", "with ", "from ", "where "].iter().find_map(|p| after.strip_prefix(p)).unwrap_or(after);
+    let q = q.trim().trim_end_matches(['?', '!', '.']).trim();
+    if q.len() < 2 || q.contains("http") {
+        None
+    } else {
+        Some(q.to_string())
+    }
+}
+
 fn person_matches(p: &serde_json::Value, q: &str) -> bool {
     person_matches_mode(p, q, MatchMode::Substring)
 }
@@ -1278,6 +1303,9 @@ pub struct ConversationEngine {
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
+    /// Images queued for the home channel (photo-retrieval answers). The poll loop drains and sends
+    /// them as real Telegram photos — the conversation layer itself never touches the transport.
+    photo_queue: Mutex<Vec<(Vec<u8>, String)>>,
     /// How many delegated background jobs are in flight (a soft cap stops runaway fan-out).
     bg_jobs: Arc<AtomicUsize>,
 }
@@ -1322,6 +1350,7 @@ impl ConversationEngine {
             dmn_phase: Mutex::new(0),
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
+            photo_queue: Mutex::new(Vec::new()),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -2747,6 +2776,70 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     }
                     None => "Got it — that gives me a real feel for you, and I'll put it to use.".to_string(),
                 }
+            }
+            s if s.starts_with("whois:") => {
+                // whois:<source>:<person_id>:<count> — the user is answering a who-is-this question.
+                let mut it = s.splitn(4, ':');
+                let (_, source, pid, count) = (it.next(), it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or("?"));
+                let t = text.trim();
+                let low = t.to_lowercase();
+                if ["skip", "pass", "idk", "no idea", "not sure", "dont know", "don't know", "later", "leave it"]
+                    .iter()
+                    .any(|w| low == *w || low.starts_with(w))
+                {
+                    return "No problem — skipping that face; I won't ask about it again.".to_string();
+                }
+                // Natural replies carry more than a name ("that's my cousin Ritu") — extract both.
+                let prompt = format!(
+                    "The user was shown a face photo and asked who it is. They replied: \"{t}\". Output ONLY JSON {{\"name\":\"<the person's name, properly capitalized>\",\"relationship\":\"<their relation to the user (wife/son/cousin/friend/colleague/...), or empty if not stated>\"}}."
+                );
+                let cfg = GenerationConfig { max_tokens: 120, ..GenerationConfig::default() };
+                let v = self
+                    .inference
+                    .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+                    .await
+                    .map(|r| parse_json_obj(&r.text))
+                    .unwrap_or_default();
+                let name = v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| s.len() > 1)
+                    .unwrap_or_else(|| Self::clean_name(t));
+                let rel = v.get("relationship").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                // Local face-name map — the source stays read-only; WE remember which cluster is who,
+                // so `ym photos <name>` and photo retrieval work for this person from now on.
+                let mut fm = self.face_names().await;
+                fm.insert(format!("{source}:{pid}"), name.clone());
+                self.save_face_names(&fm).await;
+                // People layer: enrich an existing profile or start one.
+                let ql = name.to_lowercase();
+                let mut store = self.load_people_profiles().await;
+                let fact = format!("Appears in ~{count} photos in the library ({source} face match)");
+                if let Some(p) = store.iter_mut().find(|p| person_matches(p, &ql)) {
+                    let mut facts = p.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    if !facts.iter().any(|f| f.as_str().map(|s| s.contains("face match")).unwrap_or(false)) {
+                        facts.push(serde_json::json!(fact));
+                        p["facts"] = serde_json::json!(facts);
+                    }
+                    if !rel.is_empty() && p.get("relationship").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
+                        p["relationship"] = serde_json::json!(rel);
+                    }
+                } else {
+                    store.push(serde_json::json!({ "name": name, "relationship": rel, "facts": [fact], "dates": [] }));
+                }
+                self.save_people_profiles(&store).await;
+                let _ = self.memory.remember_as_belief(BeliefAssertion {
+                    statement: format!(
+                        "The face appearing in ~{count} library photos is {name}{}",
+                        if rel.is_empty() { String::new() } else { format!(" (the user's {rel})") }
+                    ),
+                    polarity: 1.0, weight: 0.9, source_event: Some("whois".into()), provenance: "told".into(),
+                }).await;
+                format!(
+                    "Got it — that's {name}{}. I can recognize them across the library now; try `ym photos {name}` sometime. 📸",
+                    if rel.is_empty() { String::new() } else { format!(", your {rel}") }
+                )
             }
             _ => "Thanks.".to_string(),
         }
@@ -5841,165 +5934,413 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!("📘 Facebook synced — {learned} facts learned. {}", lines.join("; "))
     }
 
-    /// IMMICH PERSON PATTERNS — the real per-person photo read. Immich's LOCAL ML already named the
-    /// faces, so this genuinely IS "photos of Brishti": pull that person's recent photos, thumbnail
-    /// each, LOCAL-vision describe (zero cloud), fold in EXIF places, distill into per-person
-    /// preference beliefs. `name` matches a recognized Immich face (Brishti / Aadrisha / ...).
-    pub async fn immich_person_patterns(&self, name: &str, limit: usize) -> String {
-        let Some(im) = mind_tools::ImmichClient::from_env() else {
-            return "Immich isn't connected (IMMICH_SERVER / IMMICH_USER_API_KEY) — honest state.".to_string();
-        };
+    /// ---------- PHOTO UNDERSTANDING LAYER ----------
+    /// Two-layer design: HOW images arrive is the PhotoSource plugin layer in mind-tools (Immich +
+    /// Facebook today; Google Photos / OneDrive are future arms). WHAT the mind does with them
+    /// lives here and never changes when a source is added: pattern LEARNING (photo_patterns),
+    /// RETRIEVAL ("send me a pic of X" -> photo_find_and_send), and ASKING (unknown face clusters
+    /// become who-is-this questions; answers become people-layer knowledge).
+
+    /// Learn preference/pattern beliefs from photos. `who` routes to face-aware sources (Immich's
+    /// named faces + our own ask-who-is-who face_names map); None sweeps recent photos across every
+    /// configured source. All vision is LOCAL (zero cloud).
+    pub async fn photo_patterns(&self, source_filter: Option<&str>, who: Option<&str>, limit: usize) -> String {
+        let sources: Vec<mind_tools::PhotoSource> = mind_tools::PhotoSource::all_from_env()
+            .into_iter()
+            .filter(|s| source_filter.map(|f| s.name() == f).unwrap_or(true))
+            .collect();
+        if sources.is_empty() {
+            return "No photo source is connected (Immich / Facebook) — honest state.".to_string();
+        }
         if mind_tools::VisionClient::from_env().is_none() {
             return "No vision model configured (YM_VISION_MODEL) — can't read the photos.".to_string();
         }
-        // Resolve the name → Immich person id (exact, case-insensitive).
-        let people = match im.people().await {
-            Ok(p) => p,
-            Err(e) => return format!("Couldn't reach Immich ({e})."),
-        };
-        let want = name.trim().to_lowercase();
-        let pid = people["people"].as_array().and_then(|a| {
-            a.iter().find(|p| p["name"].as_str().map(|n| n.to_lowercase() == want).unwrap_or(false))
-                .and_then(|p| p["id"].as_str())
-        });
-        let Some(pid) = pid else {
-            let named: Vec<String> = people["people"].as_array().map(|a| a.iter().filter_map(|p| p["name"].as_str().filter(|n| !n.is_empty()).map(String::from)).take(20).collect()).unwrap_or_default();
-            return format!("Immich doesn't have a face named \"{}\". Named people I can read: {}.", name.trim(), named.join(", "));
-        };
-        let assets = im.assets_of_person(pid, limit.max(4)).await.unwrap_or_default();
-        if assets.is_empty() {
-            return format!("Immich has {} but returned no photos to read.", name.trim());
+        // Gather: per-person via a face-aware source, or a recent sweep across all of them.
+        let mut picked: Vec<(usize, mind_tools::PhotoAsset)> = Vec::new();
+        let mut subject: Option<String> = None;
+        if let Some(w) = who {
+            let Some((i, pid, display)) = self.resolve_face(&sources, w).await else {
+                let mut known: Vec<String> = Vec::new();
+                for src in sources.iter().filter(|s| s.knows_people()) {
+                    known.extend(src.list_people().await.into_iter().filter(|p| !p.name.is_empty()).map(|p| p.name));
+                }
+                known.extend(self.face_names().await.values().cloned());
+                known.sort();
+                known.dedup();
+                return format!(
+                    "No photo source knows a face named \"{}\". People I can read: {}.",
+                    w.trim(),
+                    if known.is_empty() {
+                        "none named yet — answer my who-is-this questions to teach me".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                );
+            };
+            for a in sources[i].assets_of_person(&pid, limit.max(4)).await {
+                picked.push((i, a));
+            }
+            subject = Some(display);
+        } else {
+            for (i, src) in sources.iter().enumerate() {
+                for a in src.recent_assets(limit.max(4)).await {
+                    picked.push((i, a));
+                }
+            }
         }
+        if picked.is_empty() {
+            return "The photo sources returned nothing to read.".to_string();
+        }
+        // Describe each (LOCAL vision), folding EXIF places in.
+        let q = if subject.is_some() {
+            "In ONE short line: the setting, the activity, and the vibe/aesthetic. Do not guess names."
+        } else {
+            "In ONE line: the setting, the activity, who's in it (solo / couple / family / group — do NOT guess names), and the overall vibe/aesthetic."
+        };
         let mut descs: Vec<String> = Vec::new();
         let mut places: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (id, date, place) in assets.iter().take(limit) {
-            if !place.is_empty() {
-                places.insert(place.clone());
+        for (i, a) in picked.iter().take(limit.max(4)) {
+            if !a.place.is_empty() {
+                places.insert(a.place.clone());
             }
-            let Some(bytes) = im.thumbnail(id).await else { continue };
-            let d = self
-                .analyze_image_bytes(bytes, "image/jpeg",
-                    "In ONE short line: the setting, the activity, and the vibe/aesthetic. Do not guess names.")
-                .await;
-            let d1: String = d.lines().next().unwrap_or("").chars().take(150).collect();
+            let Some(bytes) = sources[*i].image_bytes(a).await else { continue };
+            let d = self.analyze_image_bytes(bytes, "image/jpeg", q).await;
+            let d1: String = d.lines().next().unwrap_or("").chars().take(160).collect();
             if d1.len() > 5 {
-                descs.push(format!("[{date}] {d1}"));
+                descs.push(if a.date.is_empty() { d1 } else { format!("[{}] {d1}", a.date) });
             }
         }
         if descs.is_empty() {
-            return format!("Reached {}'s {} photos but couldn't analyze the thumbnails.", name.trim(), assets.len());
+            return "I reached the photo list but couldn't analyze any images.".to_string();
         }
-        let place_line = if places.is_empty() { String::new() } else { format!("\nPlaces (from photo GPS): {}", places.iter().take(8).cloned().collect::<Vec<_>>().join("; ")) };
+        let place_line = if places.is_empty() {
+            String::new()
+        } else {
+            format!("\nPlaces (from photo GPS): {}", places.iter().take(8).cloned().collect::<Vec<_>>().join("; "))
+        };
         let joined = descs.join("\n");
-        let prompt = format!(
-            "These are one-line reads of photos of {} (a real person in the user's life). Infer 4-6 concrete, standalone preferences/patterns about them: what they enjoy, settings/activities that recur, their style/aesthetic. One per line, no preamble, no invented names.\n\n=== PHOTOS ===\n{joined}{place_line}",
-            name.trim()
-        );
+        let prompt = match &subject {
+            Some(nm) => format!(
+                "These are one-line reads of photos of {nm} (a real person in the user's life). Infer 4-6 concrete, standalone preferences/patterns about them: what they enjoy, settings/activities that recur, their style/aesthetic. One per line, no preamble, no invented names.\n\n=== PHOTOS ===\n{joined}{place_line}"
+            ),
+            None => format!(
+                "These are one-line descriptions of the user's recent photos across their libraries. Infer RECURRING patterns: favorite settings, activities, travel/aesthetic tastes, and the kinds of moments they capture. Where a couple or family recurs, note shared preferences (but never invent identities). Output 4-6 concrete statements, one per line, no preamble.\n\n=== PHOTOS ===\n{joined}{place_line}"
+            ),
+        };
         let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
         let insights = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => r.text.trim().to_string(),
-            Err(e) => return format!("Read {} photos of {} but couldn't distill ({e}).", descs.len(), name.trim()),
+            Err(e) => return format!("Read {} photos but couldn't distill patterns ({e}).", descs.len()),
         };
-        // Store as beliefs AND enrich the people-layer profile if we track them.
+        // Store as beliefs; per-person reads also enrich that person's people-layer profile.
         let mut stored = 0;
         let mut new_facts: Vec<String> = Vec::new();
         for line in insights.lines() {
-            let stmt = line.trim().trim_start_matches(['-', '*', '•', '0','1','2','3','4','5','6','7','8','9','.',')']).trim();
+            let stmt = line.trim().trim_start_matches(['-', '*', '•', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ')']).trim();
             if stmt.len() < 12 {
                 continue;
             }
+            let statement = match &subject {
+                Some(nm) => format!("{nm} (photo pattern): {stmt}"),
+                None => format!("{stmt} (pattern from the photo libraries)"),
+            };
             let _ = self.memory.remember_as_belief(BeliefAssertion {
-                statement: format!("{} (photo pattern): {stmt}", name.trim()),
-                polarity: 1.0, weight: 0.6, source_event: Some("immich".into()), provenance: "immich".into(),
+                statement,
+                polarity: 1.0, weight: 0.6, source_event: Some("photos".into()), provenance: "photos".into(),
             }).await;
             new_facts.push(stmt.to_string());
             stored += 1;
         }
-        // Fold the top 2 into the person's profile facts (deduped).
-        let q = name.trim().to_lowercase();
-        let mut store = self.load_people_profiles().await;
-        if let Some(p) = store.iter_mut().find(|p| person_matches(p, &q)) {
-            let mut facts = p.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-            for nf in new_facts.iter().take(2) {
-                if !facts.iter().any(|f| f.as_str().map(|s| s.contains(nf.as_str())).unwrap_or(false)) {
-                    facts.push(serde_json::json!(format!("{nf} (from photos)")));
-                }
-            }
-            p["facts"] = serde_json::json!(facts);
-            self.save_people_profiles(&store).await;
-        }
-        format!("📸 {} — read {} of their photos → {stored} pattern(s):\n\n{insights}{place_line}", name.trim(), descs.len())
-    }
-
-    /// FB PHOTO PATTERNS    /// FB PHOTO PATTERNS — fetch the user's uploaded + tagged photos, vision-describe each, then
-    /// distill recurring themes/activities/aesthetics into interest+preference beliefs. HONEST about
-    /// the Meta limit: the API never says WHO is in a photo, so people are described generically
-    /// (couple/family/solo) and wife-specific reads are inferential, not identified.
-    pub async fn fb_photo_patterns(&self, limit: usize) -> String {
-        let Some(fb) = mind_tools::FbClient::from_env() else {
-            return "Facebook isn't connected — that's the honest state.".to_string();
-        };
-        if mind_tools::VisionClient::from_env().is_none() {
-            return "I can't analyze photos — no vision model is configured (YM_VISION_MODEL).".to_string();
-        }
-        // Gather image URLs from both uploaded and tagged, newest first, deduped.
-        let mut urls: Vec<String> = Vec::new();
-        for kind in ["uploaded", "tagged"] {
-            if let Ok(r) = fb.photos(kind, limit).await {
-                for p in r.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                    if let Some(src) = p.get("images").and_then(|x| x.as_array()).and_then(|a| a.first()).and_then(|im| im.get("source")).and_then(|x| x.as_str()) {
-                        if !urls.contains(&src.to_string()) {
-                            urls.push(src.to_string());
-                        }
+        if let Some(nm) = &subject {
+            let ql = nm.to_lowercase();
+            let mut store = self.load_people_profiles().await;
+            if let Some(p) = store.iter_mut().find(|p| person_matches(p, &ql)) {
+                let mut facts = p.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                for nf in new_facts.iter().take(2) {
+                    if !facts.iter().any(|f| f.as_str().map(|s| s.contains(nf.as_str())).unwrap_or(false)) {
+                        facts.push(serde_json::json!(format!("{nf} (from photos)")));
                     }
                 }
+                p["facts"] = serde_json::json!(facts);
+                self.save_people_profiles(&store).await;
             }
         }
-        urls.truncate(limit);
-        if urls.is_empty() {
-            return "No Facebook photos came back to analyze (the token may lack photo scope or has none).".to_string();
+        match &subject {
+            Some(nm) => format!("📸 {nm} — read {} of their photos → {stored} pattern(s):\n\n{insights}{place_line}", descs.len()),
+            None => format!("📸 Read {} recent photos across your libraries → {stored} pattern(s):\n\n{insights}{place_line}", descs.len()),
         }
-        // Describe each photo (one tight line; never guess names).
-        let mut descriptions: Vec<String> = Vec::new();
-        for u in &urls {
-            let Some(bytes) = mind_tools::fetch_image_bytes(u).await else { continue };
-            let d = self
-                .analyze_image_bytes(bytes, "image/jpeg",
-                    "In ONE line: the setting, the activity, who's in it (solo / couple / family / group — do NOT guess names), and the overall vibe/aesthetic.")
-                .await;
-            descriptions.push(d.lines().next().unwrap_or("").chars().take(160).collect());
-        }
-        if descriptions.is_empty() {
-            return "I could reach the photo list but couldn't fetch/analyze any images.".to_string();
-        }
-        // Distill patterns → concrete interest/preference statements.
-        let joined = descriptions.iter().enumerate().map(|(i, d)| format!("{}. {d}", i + 1)).collect::<Vec<_>>().join("\n");
-        let prompt = format!(
-            "These are one-line descriptions of {}'s Facebook photos (uploaded + tagged). Infer RECURRING patterns: favorite settings, activities, travel/aesthetic tastes, and the kinds of moments they capture. Where a couple or family recurs, note shared preferences (but never invent identities). Output 4-6 concrete statements, each a standalone preference/interest fact, one per line, no preamble.\n\n=== PHOTO DESCRIPTIONS ===\n{joined}",
-            self.memory.profile_get("name").await.ok().flatten().unwrap_or_else(|| "the user".into())
-        );
-        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        let insights = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
-            Ok(r) => r.text.trim().to_string(),
-            Err(e) => return format!("Analyzed {} photos but couldn't distill patterns ({e}).", descriptions.len()),
-        };
-        let mut stored = 0;
-        for line in insights.lines() {
-            let stmt = line.trim().trim_start_matches(['-', '*', '•']).trim();
-            let stmt = stmt.get(stmt.find(char::is_alphabetic).unwrap_or(0)..).unwrap_or(stmt).trim();
-            if stmt.len() < 12 {
-                continue;
-            }
-            let _ = self.memory.remember_as_belief(BeliefAssertion {
-                statement: format!("{stmt} (pattern from Facebook photos)"),
-                polarity: 1.0, weight: 0.6, source_event: Some("facebook-photos".into()), provenance: "facebook".into(),
-            }).await;
-            stored += 1;
-        }
-        format!("📸 Analyzed {} of your Facebook photos → {stored} pattern(s) learned:\n\n{insights}", descriptions.len())
     }
 
-    /// Daily FB refresh gate for the poll loop    /// Daily FB refresh gate for the poll loop (data-only, no user-facing send).
+    /// Resolve a person's name to (source idx, person id, display name). Source-side names first
+    /// (Immich's own labels), then our learned face_names map (ask-who-is-who answers) — a face YOU
+    /// named in chat is as queryable as one named in Immich.
+    async fn resolve_face(&self, sources: &[mind_tools::PhotoSource], who: &str) -> Option<(usize, String, String)> {
+        let want = who.trim().to_lowercase();
+        if want.is_empty() {
+            return None;
+        }
+        let fm = self.face_names().await;
+        for (i, src) in sources.iter().enumerate() {
+            if !src.knows_people() {
+                continue;
+            }
+            for p in src.list_people().await {
+                let display = if p.name.is_empty() {
+                    fm.get(&format!("{}:{}", src.name(), p.id)).cloned().unwrap_or_default()
+                } else {
+                    p.name.clone()
+                };
+                if !display.is_empty() && display.to_lowercase() == want {
+                    return Some((i, p.id, display));
+                }
+            }
+        }
+        None
+    }
+
+    /// PHOTO RETRIEVAL — "send me a photo of Brishti in a red saree" → find the actual image and
+    /// ship it to the home channel. Person terms resolve via face-aware sources; extra descriptors
+    /// are vision-screened (LOCAL) against candidates so the photo genuinely matches. Honest when
+    /// nothing matches — never sends a wrong photo claiming it fits.
+    pub async fn photo_find_and_send(&self, query: &str) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        if sources.is_empty() {
+            return "No photo source is connected (Immich / Facebook) — I have no library to pull from.".to_string();
+        }
+        let ql = query.trim().trim_end_matches(['?', '!', '.']).to_lowercase();
+        // Which known person (if any) does the query mention?
+        let fm = self.face_names().await;
+        let mut person: Option<(usize, String, String)> = None;
+        'outer: for (i, src) in sources.iter().enumerate() {
+            if !src.knows_people() {
+                continue;
+            }
+            for p in src.list_people().await {
+                let nm = if p.name.is_empty() {
+                    fm.get(&format!("{}:{}", src.name(), p.id)).cloned().unwrap_or_default()
+                } else {
+                    p.name.clone()
+                };
+                if nm.len() > 1 && ql.contains(&nm.to_lowercase()) {
+                    person = Some((i, p.id.clone(), nm));
+                    break 'outer;
+                }
+            }
+        }
+        let (idx, cands, label) = match &person {
+            Some((i, pid, nm)) => (*i, sources[*i].assets_of_person(pid, 24).await, nm.clone()),
+            None => (0, sources[0].recent_assets(24).await, String::new()),
+        };
+        if cands.is_empty() {
+            return if label.is_empty() {
+                "The photo library returned nothing to search.".to_string()
+            } else {
+                format!("The library knows {label} but returned no photos of them.")
+            };
+        }
+        // Descriptor = the query minus the person's name and filler words.
+        let mut restq = ql.clone();
+        if !label.is_empty() {
+            restq = restq.replace(&label.to_lowercase(), " ");
+        }
+        let stop = [
+            "photo", "photos", "picture", "pictures", "pic", "pics", "image", "images", "snap",
+            "of", "the", "a", "an", "and", "me", "my", "your", "our", "us", "in", "at", "on",
+            "with", "from", "send", "show", "share", "find", "get", "pull", "please", "can",
+            "could", "you", "some", "any", "one", "wearing", "her", "his", "their",
+        ];
+        let desc = restq.split_whitespace().filter(|w| !stop.contains(w)).collect::<Vec<_>>().join(" ");
+        let chosen: Option<&mind_tools::PhotoAsset>;
+        let mut chosen_bytes: Option<Vec<u8>> = None;
+        if desc.len() >= 3 && mind_tools::VisionClient::from_env().is_some() {
+            // Vision-screen candidates until one clearly matches the descriptor (bounded to 8 looks).
+            let mut hit: Option<&mind_tools::PhotoAsset> = None;
+            for a in cands.iter().take(8) {
+                let Some(bytes) = sources[idx].image_bytes(a).await else { continue };
+                let verdict = self
+                    .analyze_image_bytes(bytes.clone(), "image/jpeg", &format!("Does this photo clearly show: {desc}? Answer only YES or NO."))
+                    .await;
+                if verdict.trim().to_uppercase().starts_with("YES") {
+                    hit = Some(a);
+                    chosen_bytes = Some(bytes);
+                    break;
+                }
+            }
+            if hit.is_none() {
+                return format!(
+                    "I looked through {} recent {} and none clearly shows \"{desc}\" — being straight with you rather than sending a wrong one. Want me to dig further back?",
+                    cands.len().min(8),
+                    if label.is_empty() { "photos".to_string() } else { format!("photos of {label}") }
+                );
+            }
+            chosen = hit;
+        } else {
+            // No descriptor: vary the pick among the newest dozen so repeat asks feel alive.
+            let n = cands.len().min(12).max(1);
+            let pick = (chrono::Utc::now().timestamp_millis() as usize) % n;
+            chosen = cands.get(pick);
+            if let Some(a) = chosen {
+                chosen_bytes = sources[idx].image_bytes(a).await;
+            }
+        }
+        let (Some(a), Some(bytes)) = (chosen, chosen_bytes) else {
+            return "I found a match but couldn't fetch the image bytes.".to_string();
+        };
+        let mut cap = String::from("📸");
+        if !label.is_empty() {
+            cap.push_str(&format!(" {label}"));
+        }
+        if !a.date.is_empty() {
+            cap.push_str(&format!(" · {}", a.date));
+        }
+        if !a.place.is_empty() {
+            cap.push_str(&format!(" · {}", a.place));
+        }
+        if !desc.is_empty() {
+            cap.push_str(&format!(" ({desc})"));
+        }
+        self.photo_queue.lock().unwrap().push((bytes, cap));
+        let what = if label.is_empty() { "one from your library".to_string() } else { format!("one of {label}") };
+        format!(
+            "Found it — sending {what}{} 📸",
+            if a.date.is_empty() { String::new() } else { format!(" from {}", a.date) }
+        )
+    }
+
+    /// Drain images queued for the home channel (the poll loop sends them as real photos).
+    pub fn take_outbound_photos(&self) -> Vec<(Vec<u8>, String)> {
+        std::mem::take(&mut *self.photo_queue.lock().unwrap())
+    }
+
+    /// ---------- ASK-WHO-IS-WHO ----------
+    /// Face-aware sources cluster faces they can't name (Immich: hundreds unnamed). Instead of
+    /// guessing, the mind ASKS: the most-photographed unknown face goes to the home channel as a
+    /// photo question; the answer lands in the people layer + a local face_names map. The source
+    /// itself stays READ-ONLY — we never write names back without an explicit opt-in.
+
+    /// Cadence gate for the poll loop: a people-knowing source exists, no interview question is
+    /// already pending, and YM_WHOIS_SECS (default daily) has elapsed.
+    pub async fn whois_due(&self) -> bool {
+        if !mind_tools::PhotoSource::all_from_env().iter().any(|s| s.knows_people()) {
+            return false;
+        }
+        if self.pending_slot().await.is_some() {
+            return false; // never stack interview questions
+        }
+        let period_ms: i64 = std::env::var("YM_WHOIS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let last: i64 = self.memory.profile_get("whois_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// `ym whois` sets a force flag (the CLI can't carry a photo) — the next poll tick fires it.
+    pub async fn whois_forced(&self) -> bool {
+        let f = self.memory.profile_get("whois_force").await.ok().flatten().unwrap_or_default();
+        if f == "1" {
+            let _ = self.memory.profile_set("whois_force", "").await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pick the next unknown face worth asking about: unnamed in the source, not already
+    /// asked/skipped, ranked by photo count (a face in 400 photos matters; one in 3 doesn't).
+    /// Returns (caption, face JPEG, slot) — the caller sends the photo, then arms the slot.
+    pub async fn whois_next(&self) -> Option<(String, Vec<u8>, String)> {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let mut asked = self.whois_asked().await;
+        for src in sources.iter().filter(|s| s.knows_people()) {
+            let unnamed: Vec<mind_tools::PhotoPerson> = src
+                .list_people()
+                .await
+                .into_iter()
+                .filter(|p| p.name.is_empty() && !asked.contains(&format!("{}:{}", src.name(), p.id)))
+                .collect();
+            if unnamed.is_empty() {
+                continue;
+            }
+            // Rank a small batch by photo count — checking all ~480 would hammer the server.
+            let mut best: Option<(String, u64)> = None;
+            let mut checked: Vec<String> = Vec::new();
+            for p in unnamed.iter().take(15) {
+                let n = src.person_photo_count(&p.id).await.unwrap_or(0);
+                checked.push(p.id.clone());
+                if n > best.as_ref().map_or(0, |b| b.1) {
+                    best = Some((p.id.clone(), n));
+                }
+            }
+            let Some((pid, count)) = best else { continue };
+            if count < 8 {
+                // Nothing question-worthy in this batch — retire it so tomorrow's sample digs
+                // deeper into the pile instead of re-ranking the same minor faces.
+                for id in checked {
+                    asked.push(format!("{}:{id}", src.name()));
+                }
+                self.save_whois_asked(&asked).await;
+                continue;
+            }
+            let Some(jpeg) = src.face_thumbnail(&pid).await else {
+                asked.push(format!("{}:{pid}", src.name()));
+                self.save_whois_asked(&asked).await;
+                continue;
+            };
+            let caption = format!(
+                "👀 I'm learning the people in your photo library — who is this? They're in ~{count} of your photos. (A name, plus how they're related to you if you like. \"skip\" is fine too.)"
+            );
+            let slot = format!("whois:{}:{pid}:{count}", src.name());
+            return Some((caption, jpeg, slot));
+        }
+        None
+    }
+
+    /// After the photo question actually went out: arm the pending slot so the next reply is
+    /// captured as the answer, retire the face from future asks, stamp the cadence.
+    pub async fn whois_arm(&self, slot: &str) {
+        let mut it = slot.split(':');
+        let (_, src, pid) = (it.next(), it.next().unwrap_or(""), it.next().unwrap_or(""));
+        if !pid.is_empty() {
+            let mut asked = self.whois_asked().await;
+            let key = format!("{src}:{pid}");
+            if !asked.contains(&key) {
+                asked.push(key);
+            }
+            self.save_whois_asked(&asked).await;
+        }
+        self.set_pending_slot(Some(slot)).await;
+        let _ = self.memory.profile_set("whois_last", &chrono::Utc::now().timestamp_millis().to_string()).await;
+        self.note_proactive_sent().await;
+    }
+
+    async fn whois_asked(&self) -> Vec<String> {
+        self.memory
+            .profile_get("whois_asked")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_whois_asked(&self, v: &[String]) {
+        let _ = self.memory.profile_set("whois_asked", &serde_json::to_string(v).unwrap_or_default()).await;
+    }
+
+    /// Our own face-id → name map, learned from who-is-this answers (the source stays read-only).
+    async fn face_names(&self) -> std::collections::HashMap<String, String> {
+        self.memory
+            .profile_get("face_names")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_face_names(&self, m: &std::collections::HashMap<String, String>) {
+        let _ = self.memory.profile_set("face_names", &serde_json::to_string(m).unwrap_or_default()).await;
+    }
+
+    /// Daily FB refresh gate for the poll loop (data-only, no user-facing send).
     pub async fn fb_sync_due(&self) -> bool {
         if mind_tools::FbClient::from_env().is_none() {
             return false;
@@ -6996,18 +7337,27 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     self.calendar_view().await
                 }
             }
-            // --- immich: per-person photo patterns from the self-hosted library (local vision) ---
-            "immich" | "photos" | "pics" if !rest.trim().is_empty() => {
-                let mut it = rest.trim().splitn(2, char::is_whitespace);
-                let name = it.next().unwrap_or("").to_string();
-                let n: usize = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(10);
-                self.immich_person_patterns(&name, n).await
+            // --- photo UNDERSTANDING layer: patterns / retrieval / who-is-who over ALL sources ---
+            "photos" | "pics" | "immich" => {
+                let r = rest.trim();
+                if r.is_empty() || r == "recent" {
+                    self.photo_patterns(None, None, 10).await
+                } else {
+                    let mut it = r.splitn(2, char::is_whitespace);
+                    let name = it.next().unwrap_or("").to_string();
+                    let n: usize = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(10);
+                    self.photo_patterns(None, Some(&name), n).await
+                }
             }
-            "immich" | "photos" | "pics" => "Whose photos? e.g. `ym immich Brishti` or `ym immich Aadrisha 12`.".to_string(),
+            "photo" | "pic" if !rest.trim().is_empty() => self.photo_find_and_send(rest.trim()).await,
+            "whois" | "who-is-this" => {
+                let _ = self.memory.profile_set("whois_force", "1").await;
+                "👀 On it — sending the next unknown face to Telegram; reply there with who it is (or \"skip\").".to_string()
+            }
             // --- facebook: read-only sync of the user's own profile (know-me lane) ---
             "fb" | "facebook" if rest.trim().starts_with("photo") => {
                 let n: usize = rest.split_whitespace().nth(1).and_then(|x| x.parse().ok()).unwrap_or(10);
-                self.fb_photo_patterns(n).await
+                self.photo_patterns(Some("facebook"), None, n).await
             }
             "fb" | "facebook" => self.fb_sync().await,
             // --- bond: the relationship as the engine sees it (bias vector + mode + bursts) ---
@@ -8766,6 +9116,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &brief, ws).await;
             return Ok(brief);
+        }
+        // Photo retrieval in the flow of chat: "send/show me a photo of X" → find it in the photo
+        // sources and ship the actual image to the home channel (queued; the poll loop sends it).
+        if let Some(q) = photo_request(user_text) {
+            let reply = self.photo_find_and_send(&q).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
         }
         // PRIMARY: the agentic loop (reason → pick ONE tool → observe → iterate → answer, with the
         // build_capability self-extension hook). It subsumes the capability paths below — research,

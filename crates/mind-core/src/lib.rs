@@ -360,13 +360,28 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
     }
-    // A SEPARATE read-only personal inbox for finance discovery (the user's mailbox where subscription
-    // receipts live), distinct from the bot's own account. Gmail needs a 16-char App Password.
-    if let (Ok(addr), Ok(pw)) = (std::env::var("YM_SCAN_EMAIL"), std::env::var("YM_SCAN_PASSWORD")) {
-        if !addr.is_empty() && !pw.is_empty() {
-            if let Some(c) = mind_tools::ImapClient::for_address(&addr, pw) {
-                eng = eng.with_scan_mail(Arc::new(c) as Arc<dyn mind_tools::MailClient>);
+    // PERSONAL scan inboxes (read-only analytics), distinct from the bot's own account. Multiple
+    // accounts: YM_SCAN_EMAIL + YM_SCAN_PASSWORD, then YM_SCAN_EMAIL_2/YM_SCAN_PASSWORD_2 … _6;
+    // custom-domain IMAP hosts via YM_SCAN_HOST[_n]. Gmail/Yahoo need app passwords.
+    for n in 1..=6u8 {
+        let (ke, kp, kh) = if n == 1 {
+            ("YM_SCAN_EMAIL".to_string(), "YM_SCAN_PASSWORD".to_string(), "YM_SCAN_HOST".to_string())
+        } else {
+            (format!("YM_SCAN_EMAIL_{n}"), format!("YM_SCAN_PASSWORD_{n}"), format!("YM_SCAN_HOST_{n}"))
+        };
+        let (Ok(addr), Ok(pw)) = (std::env::var(&ke), std::env::var(&kp)) else { continue };
+        if addr.is_empty() || pw.is_empty() {
+            continue;
+        }
+        let client: Option<Arc<dyn mind_tools::MailClient>> = match std::env::var(&kh) {
+            Ok(host) if !host.is_empty() => {
+                Some(Arc::new(mind_tools::ImapClient::new(host, 993, addr.clone(), pw)) as Arc<dyn mind_tools::MailClient>)
             }
+            _ => mind_tools::ImapClient::for_address(&addr, pw).map(|c| Arc::new(c) as Arc<dyn mind_tools::MailClient>),
+        };
+        if let Some(c) = client {
+            eprintln!("[mail] scan inbox connected: {addr}");
+            eng = eng.with_scan_inbox(addr, c);
         }
     }
     if let Some(g) = &github_read {

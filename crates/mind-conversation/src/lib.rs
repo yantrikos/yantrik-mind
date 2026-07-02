@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 54] = [
+    const CMDS: [&str; 57] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -350,6 +350,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
+        "inboxes", "mailscan", "emailscan",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -1959,7 +1960,7 @@ pub struct ConversationEngine {
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
     /// subscription receipts live), distinct from the bot's own `mail` identity. Falls back to `mail`.
-    scan_mail: Option<Arc<dyn MailClient>>,
+    scan_mail: Vec<(String, Arc<dyn MailClient>)>,
     /// GitHub client — when set, a "check my github" turn pulls notifications (read-only, untrusted).
     github: Option<Arc<dyn GithubClient>>,
     /// Home Assistant client — when set, the mind can read the smart-home world (states: climate,
@@ -2041,7 +2042,7 @@ impl ConversationEngine {
             mcp: None,
             plugins: Mutex::new(PluginRegistry::builtin()),
             plugins_path: None,
-            scan_mail: None,
+            scan_mail: Vec::new(),
             home: None,
             home_alerts_seen: Mutex::new(None),
             bills_reminded: Mutex::new(std::collections::HashSet::new()),
@@ -3780,7 +3781,13 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
     /// Give finance discovery a SEPARATE read-only inbox (the user's personal mailbox), kept distinct
     /// from the bot's own `mail` identity. Discovery prefers this; falls back to `mail` if unset.
     pub fn with_scan_mail(mut self, mail: Arc<dyn MailClient>) -> Self {
-        self.scan_mail = Some(mail);
+        self.scan_mail.push(("inbox".to_string(), mail));
+        self
+    }
+
+    /// Add one labeled read-only scan inbox (label = the address). Call once per account.
+    pub fn with_scan_inbox(mut self, label: impl Into<String>, mail: Arc<dyn MailClient>) -> Self {
+        self.scan_mail.push((label.into(), mail));
         self
     }
 
@@ -8407,6 +8414,58 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
     }
 
+    /// Every connected read-only scan inbox (falls back to the bot's own mailbox when none).
+    fn scan_inboxes(&self) -> Vec<(String, Arc<dyn MailClient>)> {
+        if !self.scan_mail.is_empty() {
+            return self.scan_mail.clone();
+        }
+        self.mail.as_ref().map(|m| ("inbox".to_string(), m.clone())).into_iter().collect()
+    }
+
+    /// CROSS-ACCOUNT EMAIL ANALYTICS: headers from every connected inbox, one pass → what needs
+    /// action, where money is moving, what's worth a look, what's noise — tagged per account.
+    /// Read-only by construction (headers only, nothing opened, nothing marked).
+    pub async fn inbox_analytics(&self, per_account: usize) -> String {
+        let inboxes = self.scan_inboxes();
+        if inboxes.is_empty() {
+            return "No inboxes connected yet — set YM_SCAN_EMAIL (+ _2.._6 for more accounts) with app passwords.".to_string();
+        }
+        let n = per_account.clamp(10, 60);
+        let mut blocks: Vec<String> = Vec::new();
+        let mut counts: Vec<String> = Vec::new();
+        for (label, m) in &inboxes {
+            match m.inbox(n).await {
+                Ok(msgs) => {
+                    counts.push(format!("{label} ✓{}", msgs.len()));
+                    blocks.push(
+                        msgs.iter()
+                            .map(|x| format!("- [{label}] {} | {}", x.from, x.subject))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                Err(e) => counts.push(format!("{label} ✗ ({e})")),
+            }
+        }
+        if blocks.is_empty() {
+            return format!("Couldn't read any inbox — {}.", counts.join("; "));
+        }
+        let prompt = format!(
+            "Recent email HEADERS from the user's {} account(s), tagged [account]. Produce a terse cross-account digest with EXACTLY these sections:\nNEEDS ACTION: things a human must handle (deadlines, replies, bills due) — one line each, keep the [account] tag\nMONEY: bills/receipts/renewals — amounts ONLY if visible in the subject, never invented\nWORTH A LOOK: genuinely important or interesting\nNOISE: one line — rough count + top 3 promo senders\n\n{}",
+            inboxes.len(),
+            blocks.join("\n")
+        );
+        let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
+        match self
+            .inference
+            .chat(vec![ChatMessage::system("You analyze email header lists. Terse, factual, never invent amounts or senders."), ChatMessage::user(&prompt)], cfg)
+            .await
+        {
+            Ok(r) => format!("📬 {} — {}\n\n{}", if inboxes.len() == 1 { "1 inbox".to_string() } else { format!("{} inboxes", inboxes.len()) }, counts.join(" · "), r.text.trim()),
+            Err(e) => format!("Read the inboxes ({}) but couldn't analyze: {e}", counts.join(" · ")),
+        }
+    }
+
     /// Email auto-discovery: scan the inbox (sender + subject headers), LLM-extract recurring
     /// subscriptions, auto-track the ones with a clear price, and list the rest for the user to
     /// confirm an amount. "JARVIS already knows your money" — turns manual entry into discovery.
@@ -8414,18 +8473,22 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     async fn discover_subscriptions(&self) -> String {
         // Prefer the dedicated personal scan-inbox (where the user's subscription receipts live); the
         // bot's own mailbox is usually empty of personal subscriptions.
-        let mail = match self.scan_mail.as_ref().or(self.mail.as_ref()) {
-            Some(m) => m,
-            None => return "I don't have an inbox to scan yet. Point me at your personal email (YM_SCAN_EMAIL + an app password) and I'll find your subscriptions.".to_string(),
-        };
-        let msgs = match mail.inbox(80).await {
-            Ok(m) => m,
-            Err(e) => return format!("Couldn't read your email: {e}"),
-        };
-        if msgs.is_empty() {
-            return "No email to scan right now.".to_string();
+        let inboxes = self.scan_inboxes();
+        if inboxes.is_empty() {
+            return "I don't have an inbox to scan yet. Point me at your personal email (YM_SCAN_EMAIL + an app password; _2.._6 for more accounts) and I'll find your subscriptions.".to_string();
         }
-        let block: String = msgs.iter().map(|m| format!("- {} | {}", m.from, m.subject)).collect::<Vec<_>>().join("\n");
+        let mut lines: Vec<String> = Vec::new();
+        for (label, m) in &inboxes {
+            if let Ok(msgs) = m.inbox(80).await {
+                for msg in msgs {
+                    lines.push(format!("- [{label}] {} | {}", msg.from, msg.subject));
+                }
+            }
+        }
+        if lines.is_empty() {
+            return "No email to scan right now (none of the connected inboxes returned mail).".to_string();
+        }
+        let block: String = lines.join("\n");
         let prompt = format!(
             "These are recent emails (sender | subject). Identify the user's RECURRING paid subscriptions/services \
              (streaming, SaaS, gym, insurance, cloud, memberships). IGNORE one-off purchases, shipping/delivery, \
@@ -8922,6 +8985,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let _ = self.memory.profile_set(&format!("closet:{}", name.to_lowercase()), "").await;
                 }
                 self.person_inventory(name).await
+            }
+            "inboxes" | "mailscan" | "emailscan" => {
+                let n: usize = rest.trim().parse().unwrap_or(30);
+                self.inbox_analytics(n).await
             }
             "gift" | "giftideas" | "gifts" if !rest.trim().is_empty() => {
                 let r = rest.trim();
@@ -10020,6 +10087,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose photos should I inventory?".to_string() } else { self.person_inventory(nm.trim()).await }
             }
+            "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
             "gift_intel" | "gift_ideas" => {
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose photos should I study for gift ideas?".to_string() } else { self.gift_intel(nm.trim()).await }
@@ -10546,6 +10614,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
 - enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
 - gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
+- inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action, money, worth-a-look, noise (read-only, headers only)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\

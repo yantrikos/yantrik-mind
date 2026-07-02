@@ -5365,6 +5365,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Telegram user id → memory owner slug. Registered member → their slug; the FIRST private-DM
     /// user becomes the primary (the companion's owner, so an existing single user keeps their memory);
     /// any other unregistered user is an isolated guest (sees only shared facts).
+    /// The primary's telegram id (0 = not yet known) — the boot-time proactive routing seed.
+    pub async fn memory_handle_primary_tg(&self) -> anyhow::Result<Option<i64>> {
+        Ok(self
+            .memory
+            .profile_get("primary_tg")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<i64>().ok()))
+    }
+
     pub async fn resolve_owner(&self, tg_id: i64, shared_channel: bool) -> String {
         if let Some(o) = self.owner_for_tg(tg_id).await {
             return o;
@@ -10653,7 +10664,11 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // Resolve any outstanding proactive send: replying now (within the window) counts as
         // ENGAGED — the world model learns when pings actually land.
         self.resolve_proactive(true).await;
-        let onboard = self.pending_slot().await;
+        let onboard = if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            self.pending_slot().await
+        } else {
+            None // interview slots (whois / onboarding / interests) belong to the primary only
+        };
         if let Some(slot) = onboard {
             if looks_like_non_answer(user_text) {
                 // They asked for something else instead of answering — don't capture a command or a

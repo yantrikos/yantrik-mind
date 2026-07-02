@@ -530,6 +530,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // Proactive reminders run in the background, messaging the last-active chat when a due
     // commitment arrives. (Disabled with YM_REMINDERS=off.)
     let active_chat = Arc::new(AtomicI64::new(chat_lock.unwrap_or_else(load_active_chat)));
+    // Pin proactive routing to the primary's DM from boot (Telegram private-chat id == their user
+    // id), so even a fresh box never targets whoever happened to message last.
+    if chat_lock.is_none() {
+        if let Ok(Some(p)) = conv.memory_handle_primary_tg().await {
+            if p != 0 {
+                active_chat.store(p, Ordering::Relaxed);
+                save_active_chat(p);
+            }
+        }
+    }
     if std::env::var("YM_REMINDERS").map(|v| v != "off").unwrap_or(true) {
         tokio::spawn(reminder_loop(api.clone(), mem.clone(), active_chat.clone()));
     }
@@ -575,10 +585,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     continue;
                 }
             }
-            // Remember where to push proactive messages, and that the user is active right now (so the
-            // default-mode loop stays out of the way until they've been idle a while).
-            active_chat.store(chat_id, Ordering::Relaxed);
-            save_active_chat(chat_id); // persist so proactive/reminders/backchannel survive restarts
+            // The user is active right now (the default-mode loop stays out of the way). Proactive
+            // routing is pinned to the PRIMARY's chat and set only after the owner resolves below —
+            // a family member messaging can never redirect briefings/studies/gift-intel to their DM.
             last_activity = now_ms();
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
             // A voice note is a first-class turn: transcribed in the spawned task (whisper takes a
@@ -607,16 +616,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // consolidation, DMN, proactive) no matter how long this turn takes. A child timer keeps
             // the "typing…" indicator alive (Telegram clears it after ~5s) for the full think time.
             let (api2, mem2, conv2) = (api.clone(), mem.clone(), conv.clone());
+            let ac2 = active_chat.clone();
             tokio::spawn(async move {
                 tg_typing(&api2, chat_id).await;
                 // Photo turn: download → vision-analyze (caption as the question) → reply. Recorded
                 // in the transcript so the conversation stays coherent.
                 if let Some(fid) = photo_fid {
+                    let owner = conv2.resolve_owner(from_id, shared_channel).await;
+                    if owner == mind_types::PRIMARY {
+                        ac2.store(chat_id, Ordering::Relaxed);
+                        save_active_chat(chat_id);
+                    }
                     let reply = match tg_download(&api2, &fid).await {
                         Some(bytes) => conv2.analyze_photo_turn(bytes, &caption).await,
                         None => "I couldn't download that photo from Telegram — mind sending it again?".to_string(),
                     };
-                    let _ = mem2.append_message("user", &format!("[sent a photo] {caption}")).await;
+                    let who = if owner == mind_types::PRIMARY { "[sent a photo]".to_string() } else { format!("[{owner} sent a photo]") };
+                    let _ = mem2.append_message("user", &format!("{who} {caption}")).await;
                     let _ = mem2.append_message("assistant", &reply).await;
                     if let Err(e) = tg_send(&api2, chat_id, &reply).await {
                         eprintln!("[telegram] send error: {e}");
@@ -638,6 +654,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     (text, false)
                 };
                 let owner = conv2.resolve_owner(from_id, shared_channel).await;
+                if owner == mind_types::PRIMARY {
+                    ac2.store(chat_id, Ordering::Relaxed);
+                    save_active_chat(chat_id);
+                }
                 let identity = mind_conversation::TurnIdentity::new(owner, shared_channel);
                 let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity);
                 tokio::pin!(work);

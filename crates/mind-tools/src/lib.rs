@@ -477,10 +477,16 @@ pub struct VisionClient {
 
 impl VisionClient {
     pub fn from_env() -> Option<VisionClient> {
-        // Default: qwen3.5 on ollama-cloud — probed to genuinely see (nano-gpt silently STRIPS the
-        // image and the model guesses; a red square came back "Blue" — never default there).
-        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-cloud:qwen3.5:397b".into());
-        let (prov, model) = spec.split_once(':').unwrap_or(("nanogpt", spec.as_str()));
+        // Default: LOCAL vision on the LAN GPU box (gemma4:31b, probed to genuinely see) — zero cloud
+        // cost. Note: qwen3.5/3.6 are TEXT-only and silently return empty on images (same trap as
+        // nano-gpt), so a VL/gemma model is required. "provider:model", model may contain ':'.
+        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-local:gemma4:31b".into());
+        let (prov, model) = spec.split_once(':').unwrap_or(("ollama-local", spec.as_str()));
+        // Local ollama needs no API key — short-circuit before the key requirement below.
+        if prov == "ollama-local" || prov == "local" {
+            let base = std::env::var("YM_OLLAMA_LOCAL_URL").unwrap_or_else(|_| "http://192.168.4.35:11434/v1".into());
+            return Some(VisionClient { base, key: "ollama".into(), model: model.to_string() });
+        }
         let (base, key_env) = match prov {
             "ollama-cloud" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY"),
             "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY"),
@@ -644,6 +650,93 @@ impl FbClient {
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
         Some((exp - now) / 86_400)
+    }
+}
+
+/// Immich (self-hosted photo server, READ-ONLY). The real "know my life in pictures" lane: its
+/// LOCAL ML already named faces (Brishti, Aadrisha, ...) and indexed every asset — we just query it.
+/// Env: IMMICH_SERVER (host or URL), IMMICH_USER_API_KEY (x-api-key). Nothing is ever written.
+pub struct ImmichClient {
+    base: String,
+    key: String,
+}
+
+impl ImmichClient {
+    pub fn from_env() -> Option<ImmichClient> {
+        let raw = std::env::var("IMMICH_SERVER").ok()?;
+        let raw = raw.trim().trim_end_matches('/');
+        if raw.is_empty() {
+            return None;
+        }
+        let base = if raw.starts_with("http") { raw.to_string() } else { format!("http://{raw}") };
+        let key = std::env::var("IMMICH_USER_API_KEY").ok().filter(|k| k.len() > 8)?;
+        Some(ImmichClient { base, key })
+    }
+
+    fn get_blocking(base: &str, key: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+        Ok(ureq::get(&format!("{base}{path}"))
+            .set("x-api-key", key)
+            .timeout(std::time::Duration::from_secs(25))
+            .call()?
+            .into_json()?)
+    }
+
+    pub async fn people(&self) -> anyhow::Result<serde_json::Value> {
+        let (b, k) = (self.base.clone(), self.key.clone());
+        tokio::task::spawn_blocking(move || Self::get_blocking(&b, &k, "/api/people?withHidden=false")).await?
+    }
+
+    /// Photo assets (IMAGE only) for a recognized person, newest first. Returns Vec<(asset_id,
+    /// date, place)> for the caller to thumbnail + vision-analyze.
+    pub async fn assets_of_person(&self, person_id: &str, size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+        let (b, k, pid) = (self.base.clone(), self.key.clone(), person_id.to_string());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+            let body = serde_json::json!({ "personIds": [pid], "size": size, "type": "IMAGE" });
+            let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(30))
+                .send_json(body)?
+                .into_json()?;
+            let mut out = Vec::new();
+            for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
+                let id = a["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let date = a["fileCreatedAt"].as_str().unwrap_or("").chars().take(10).collect();
+                let ex = &a["exifInfo"];
+                let place = match (ex["city"].as_str(), ex["country"].as_str()) {
+                    (Some(c), Some(co)) => format!("{c}, {co}"),
+                    (Some(c), None) => c.to_string(),
+                    _ => String::new(),
+                };
+                out.push((id, date, place));
+            }
+            Ok(out)
+        })
+        .await?
+    }
+
+    /// A downscaled thumbnail JPEG for an asset (perfect + cheap for a vision model).
+    pub async fn thumbnail(&self, asset_id: &str) -> Option<Vec<u8>> {
+        let (b, k, id) = (self.base.clone(), self.key.clone(), asset_id.to_string());
+        tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            ureq::get(&format!("{b}/api/assets/{id}/thumbnail?size=preview"))
+                .set("x-api-key", &k)
+                .timeout(std::time::Duration::from_secs(25))
+                .call()
+                .ok()?
+                .into_reader()
+                .take(8_000_000)
+                .read_to_end(&mut buf)
+                .ok()?;
+            if buf.len() < 500 { None } else { Some(buf) }
+        })
+        .await
+        .ok()?
     }
 }
 

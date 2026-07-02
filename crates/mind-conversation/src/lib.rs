@@ -5841,7 +5841,97 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!("📘 Facebook synced — {learned} facts learned. {}", lines.join("; "))
     }
 
-    /// FB PHOTO PATTERNS — fetch the user's uploaded + tagged photos, vision-describe each, then
+    /// IMMICH PERSON PATTERNS — the real per-person photo read. Immich's LOCAL ML already named the
+    /// faces, so this genuinely IS "photos of Brishti": pull that person's recent photos, thumbnail
+    /// each, LOCAL-vision describe (zero cloud), fold in EXIF places, distill into per-person
+    /// preference beliefs. `name` matches a recognized Immich face (Brishti / Aadrisha / ...).
+    pub async fn immich_person_patterns(&self, name: &str, limit: usize) -> String {
+        let Some(im) = mind_tools::ImmichClient::from_env() else {
+            return "Immich isn't connected (IMMICH_SERVER / IMMICH_USER_API_KEY) — honest state.".to_string();
+        };
+        if mind_tools::VisionClient::from_env().is_none() {
+            return "No vision model configured (YM_VISION_MODEL) — can't read the photos.".to_string();
+        }
+        // Resolve the name → Immich person id (exact, case-insensitive).
+        let people = match im.people().await {
+            Ok(p) => p,
+            Err(e) => return format!("Couldn't reach Immich ({e})."),
+        };
+        let want = name.trim().to_lowercase();
+        let pid = people["people"].as_array().and_then(|a| {
+            a.iter().find(|p| p["name"].as_str().map(|n| n.to_lowercase() == want).unwrap_or(false))
+                .and_then(|p| p["id"].as_str())
+        });
+        let Some(pid) = pid else {
+            let named: Vec<String> = people["people"].as_array().map(|a| a.iter().filter_map(|p| p["name"].as_str().filter(|n| !n.is_empty()).map(String::from)).take(20).collect()).unwrap_or_default();
+            return format!("Immich doesn't have a face named \"{}\". Named people I can read: {}.", name.trim(), named.join(", "));
+        };
+        let assets = im.assets_of_person(pid, limit.max(4)).await.unwrap_or_default();
+        if assets.is_empty() {
+            return format!("Immich has {} but returned no photos to read.", name.trim());
+        }
+        let mut descs: Vec<String> = Vec::new();
+        let mut places: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (id, date, place) in assets.iter().take(limit) {
+            if !place.is_empty() {
+                places.insert(place.clone());
+            }
+            let Some(bytes) = im.thumbnail(id).await else { continue };
+            let d = self
+                .analyze_image_bytes(bytes, "image/jpeg",
+                    "In ONE short line: the setting, the activity, and the vibe/aesthetic. Do not guess names.")
+                .await;
+            let d1: String = d.lines().next().unwrap_or("").chars().take(150).collect();
+            if d1.len() > 5 {
+                descs.push(format!("[{date}] {d1}"));
+            }
+        }
+        if descs.is_empty() {
+            return format!("Reached {}'s {} photos but couldn't analyze the thumbnails.", name.trim(), assets.len());
+        }
+        let place_line = if places.is_empty() { String::new() } else { format!("\nPlaces (from photo GPS): {}", places.iter().take(8).cloned().collect::<Vec<_>>().join("; ")) };
+        let joined = descs.join("\n");
+        let prompt = format!(
+            "These are one-line reads of photos of {} (a real person in the user's life). Infer 4-6 concrete, standalone preferences/patterns about them: what they enjoy, settings/activities that recur, their style/aesthetic. One per line, no preamble, no invented names.\n\n=== PHOTOS ===\n{joined}{place_line}",
+            name.trim()
+        );
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+        let insights = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text.trim().to_string(),
+            Err(e) => return format!("Read {} photos of {} but couldn't distill ({e}).", descs.len(), name.trim()),
+        };
+        // Store as beliefs AND enrich the people-layer profile if we track them.
+        let mut stored = 0;
+        let mut new_facts: Vec<String> = Vec::new();
+        for line in insights.lines() {
+            let stmt = line.trim().trim_start_matches(['-', '*', '•', '0','1','2','3','4','5','6','7','8','9','.',')']).trim();
+            if stmt.len() < 12 {
+                continue;
+            }
+            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                statement: format!("{} (photo pattern): {stmt}", name.trim()),
+                polarity: 1.0, weight: 0.6, source_event: Some("immich".into()), provenance: "immich".into(),
+            }).await;
+            new_facts.push(stmt.to_string());
+            stored += 1;
+        }
+        // Fold the top 2 into the person's profile facts (deduped).
+        let q = name.trim().to_lowercase();
+        let mut store = self.load_people_profiles().await;
+        if let Some(p) = store.iter_mut().find(|p| person_matches(p, &q)) {
+            let mut facts = p.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            for nf in new_facts.iter().take(2) {
+                if !facts.iter().any(|f| f.as_str().map(|s| s.contains(nf.as_str())).unwrap_or(false)) {
+                    facts.push(serde_json::json!(format!("{nf} (from photos)")));
+                }
+            }
+            p["facts"] = serde_json::json!(facts);
+            self.save_people_profiles(&store).await;
+        }
+        format!("📸 {} — read {} of their photos → {stored} pattern(s):\n\n{insights}{place_line}", name.trim(), descs.len())
+    }
+
+    /// FB PHOTO PATTERNS    /// FB PHOTO PATTERNS — fetch the user's uploaded + tagged photos, vision-describe each, then
     /// distill recurring themes/activities/aesthetics into interest+preference beliefs. HONEST about
     /// the Meta limit: the API never says WHO is in a photo, so people are described generically
     /// (couple/family/solo) and wife-specific reads are inferential, not identified.
@@ -6906,6 +6996,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     self.calendar_view().await
                 }
             }
+            // --- immich: per-person photo patterns from the self-hosted library (local vision) ---
+            "immich" | "photos" | "pics" if !rest.trim().is_empty() => {
+                let mut it = rest.trim().splitn(2, char::is_whitespace);
+                let name = it.next().unwrap_or("").to_string();
+                let n: usize = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(10);
+                self.immich_person_patterns(&name, n).await
+            }
+            "immich" | "photos" | "pics" => "Whose photos? e.g. `ym immich Brishti` or `ym immich Aadrisha 12`.".to_string(),
             // --- facebook: read-only sync of the user's own profile (know-me lane) ---
             "fb" | "facebook" if rest.trim().starts_with("photo") => {
                 let n: usize = rest.split_whitespace().nth(1).and_then(|x| x.parse().ok()).unwrap_or(10);

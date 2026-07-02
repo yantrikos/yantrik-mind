@@ -904,10 +904,10 @@ impl PhotoSource {
     }
 
     /// Photos containing ALL the given people (couple/group shots).
-    pub async fn assets_of_people(&self, person_ids: &[String], n: usize) -> Vec<PhotoAsset> {
+    pub async fn assets_of_people(&self, person_ids: &[String], n: usize, oldest_first: bool) -> Vec<PhotoAsset> {
         match self {
             PhotoSource::Immich(im) => im
-                .assets_of_people(person_ids, n)
+                .assets_of_people(person_ids, n, oldest_first)
                 .await
                 .unwrap_or_default()
                 .into_iter()
@@ -1044,10 +1044,10 @@ impl ImmichClient {
     }
 
     /// Photo assets containing ALL the given people (AND filter) — couples/groups.
-    pub async fn assets_of_people(&self, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub async fn assets_of_people(&self, person_ids: &[String], size: usize, oldest_first: bool) -> anyhow::Result<Vec<(String, String, String)>> {
         let (b, k, pids) = (self.base.clone(), self.key.clone(), person_ids.to_vec());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
-            let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE" });
+            let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE", "order": if oldest_first { "asc" } else { "desc" } });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
                 .set("content-type", "application/json")

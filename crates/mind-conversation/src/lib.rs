@@ -5351,6 +5351,71 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         n
     }
 
+    /// Remove calendar events whose title matches (case-insensitive substring). The tool the
+    /// open-house incident proved we owed the user: "please remove that date" must WORK from chat —
+    /// the agent had no removal tool, so it confabulated success while the nudge engine kept firing.
+    pub async fn calendar_remove(&self, text: &str) -> String {
+        let q = text.trim().to_lowercase();
+        if q.len() < 3 {
+            return "Remove which event? e.g. `ym calendar remove open house`".to_string();
+        }
+        let evs = self.load_calendar().await;
+        let (gone, keep): (Vec<_>, Vec<_>) = evs.into_iter().partition(|e| {
+            e.get("title").and_then(|x| x.as_str()).map(|t| t.to_lowercase().contains(&q)).unwrap_or(false)
+        });
+        if gone.is_empty() {
+            return format!("No calendar event matches \"{}\".", text.trim());
+        }
+        self.save_calendar(&keep).await;
+        let names: Vec<String> = gone
+            .iter()
+            .filter_map(|e| e.get("title").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+        format!("🗑 Removed from the calendar: {}.", names.join(", "))
+    }
+
+    /// Remove one DATE entry from a person's profile (e.g. a wrong "open house") — the person and
+    /// their other dates stay. Also clears that date's nudge-dedup key so a corrected date can
+    /// nudge fresh when it lands.
+    pub async fn forget_person_date(&self, name: &str, label: &str) -> String {
+        let nq = name.trim().to_lowercase();
+        let lq = label.trim().to_lowercase();
+        if nq.len() < 2 || lq.len() < 2 {
+            return "Whose date, and which one? e.g. `ym forget-date Aadrisha open house`".to_string();
+        }
+        let mut store = self.load_people_profiles().await;
+        let mut removed: Option<(String, usize)> = None;
+        for p in store.iter_mut() {
+            if !person_matches(p, &nq) {
+                continue;
+            }
+            let dates: Vec<serde_json::Value> = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let before = dates.len();
+            let kept: Vec<serde_json::Value> = dates
+                .into_iter()
+                .filter(|d| d.get("label").and_then(|x| x.as_str()).map(|l| !l.to_lowercase().contains(&lq)).unwrap_or(true))
+                .collect();
+            if kept.len() < before {
+                removed = Some((p.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(), before - kept.len()));
+                p["dates"] = serde_json::json!(kept);
+            }
+        }
+        let Some((who, n)) = removed else {
+            return format!("I don't have a \"{}\" date on {}.", label.trim(), name.trim());
+        };
+        self.save_people_profiles(&store).await;
+        if let Ok(Some(r)) = self.memory.profile_get("people_reminded").await {
+            if let Ok(mut v) = serde_json::from_str::<Vec<String>>(&r) {
+                v.retain(|k| !(k.starts_with(&format!("{who}|")) && k.to_lowercase().contains(&lq)));
+                let _ = self
+                    .memory
+                    .profile_set("people_reminded", &serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()))
+                    .await;
+            }
+        }
+        format!("🗑 Removed {n} \"{}\" date(s) from {who}'s profile.", label.trim())
+    }
+
     /// PRE-EVENT PREP, part 1 (cheap): calendar events starting within the lead window
     /// (YM_PREP_LEAD_MIN, default 90) that haven't been prepped — marked immediately (persisted)
     /// so each event preps exactly once, restart-safe. The poll loop composes+sends detached.
@@ -6453,6 +6518,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     self.calendar_add(x).await
                 } else if let Some(u) = r.strip_prefix("connect ") {
                     self.calendar_connect(u).await
+                } else if let Some(x) = r.strip_prefix("remove ").or_else(|| r.strip_prefix("rm ")) {
+                    self.calendar_remove(x).await
                 } else if r == "refresh" {
                     let n = self.refresh_ics().await;
                     format!("🔄 Refreshed — {n} upcoming external event(s) in the 60-day window.")
@@ -6477,6 +6544,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- correct a canonical name, then flag beliefs still naming the old one (confirm or purge) ---
             "rename" | "rename-person" if !rest.is_empty() => self.rename_person(&rest).await,
             // --- memory hygiene: purge stale/wrong beliefs by text match (+ compact state for retrospect) ---
+            "forget-date" | "remove-date" if !rest.is_empty() => {
+                let mut it = rest.splitn(2, char::is_whitespace);
+                let name = it.next().unwrap_or("").to_string();
+                let label = it.next().unwrap_or("").to_string();
+                self.forget_person_date(&name, &label).await
+            }
             "forget-belief" | "unbelieve" if !rest.is_empty() => self.forget_beliefs_matching(&rest).await,
             // --- self-evolution scorecard: what the self-build loop has done, what's queued, kill state ---
             "evolution" | "selfbuild" => {
@@ -7493,6 +7566,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
             "track_news" | "follow_news" => self.news_track(&s("topic")).await,
+            "calendar_remove" | "remove_event" => {
+                let t = { let a = s("title"); if a.is_empty() { s("query") } else { a } };
+                self.calendar_remove(&t).await
+            }
+            "forget_date" | "remove_date" => self.forget_person_date(&s("name"), &s("label")).await,
+            "calendar_add" | "add_event" => self.calendar_add(&s("text")).await,
+            "calendar_view" | "calendar" => self.calendar_view().await,
             "weather" => match &self.weather {
                 Some(w) => match w.report(&{ let p = s("place"); if p.is_empty() { s("city") } else { p } }).await { Ok(r) => r, Err(e) => format!("(weather: {e})") },
                 None => "(weather isn't configured)".to_string(),
@@ -7964,7 +8044,11 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - track_subject {subject}: keep a living, evolving understanding of an ongoing topic (re-run → what changed)\n\
 - patterns {}: surface non-obvious patterns across what I know about the user\n\
 - family {}: the people I keep track of + their upcoming key dates\n\
-- about_person {name}: what I know about someone in the user's life";
+- about_person {name}: what I know about someone in the user's life\n\
+- calendar {}: the unified upcoming view · calendar_add {text}: add an event (Dinner on July 4 at 7pm)\n\
+- calendar_remove {title}: remove a calendar event by (partial) title — USE THIS when the user says an event/date is wrong or should go\n\
+- forget_date {name, label}: remove one dated entry (e.g. open house) from a person's profile — the other place a wrong date can live\n\
+- NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
 - run_skill {name, target, url?}: run a skill you found via discover_tools\n\

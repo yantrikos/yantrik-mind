@@ -922,6 +922,25 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Gift scout: someone's day within 25 days → study their photos unprompted and deliver
+        // gift intelligence while there's still shipping time. Daily-capped, quiet-gated, detached
+        // (12 vision reads take minutes and must never stall the poll loop).
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() && conv.gift_scout_due().await && conv.proactive_receptivity_ok().await {
+                let c = conv.clone();
+                let api2 = api.clone();
+                tokio::spawn(async move {
+                    if let Some(msg) = c.gift_scout_run().await {
+                        if tg_send(&api2, chat, &msg).await.is_ok() {
+                            eprintln!("[gift] proactive gift intel delivered");
+                            c.note_proactive_sent().await;
+                        }
+                    }
+                });
+            }
+        }
+
         // Ask-who-is-who: ONE unknown-face question per period (or immediately via `ym whois`).
         // The face crop goes as a real photo; the reply lands in the pending-slot interview path
         // and becomes people-layer knowledge + a local face-name mapping.

@@ -342,12 +342,13 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 41] = [
+    const CMDS: [&str; 43] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
         "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
+        "gift", "giftideas",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -6606,6 +6607,152 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         std::mem::take(&mut *self.video_queue.lock().unwrap())
     }
 
+    /// ---------- GIFT INTELLIGENCE ----------
+    /// The photo lane's practical payoff: study a person's actual photos for what they OWN (never
+    /// re-gift), their STYLE (colors, materials, aesthetic), and what's visibly MISSING that would
+    /// complement it — fused with people-layer facts, distilled into buyable ideas that chain
+    /// straight into the deal-finder. Cached ~30 days per person (12 vision reads aren't free).
+    pub async fn gift_intel(&self, who: &str) -> String {
+        let name_key = format!("gift_intel:{}", who.trim().to_lowercase());
+        // Fresh study already on file? Reuse it (say so) unless it's stale.
+        if let Ok(Some(prev)) = self.memory.profile_get(&name_key).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&prev) {
+                let ts = v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0);
+                if chrono::Utc::now().timestamp_millis() - ts < 30 * 86_400_000 {
+                    if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
+                        return format!("{t}\n\n(from my photo study — say `gift {} fresh` to redo it)", who.trim());
+                    }
+                }
+            }
+        }
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((i, pid, disp)) = self.resolve_face(&sources, who).await else {
+            return format!("No photo source knows \"{}\" by face yet — I can't study their photos for gift ideas.", who.trim());
+        };
+        if mind_tools::VisionClient::from_env().is_none() {
+            return "No vision model configured — I can't read the photos.".to_string();
+        }
+        let assets = sources[i].assets_of_person(&pid, 14).await;
+        if assets.is_empty() {
+            return format!("The library knows {disp} but returned no photos to study.");
+        }
+        // Observation pass: personal effects only — this is a WHAT-THEY-OWN read, not a scene read.
+        let mut obs: Vec<String> = Vec::new();
+        for a in assets.iter().take(12) {
+            let Some(bytes) = sources[i].image_bytes(a).await else { continue };
+            let d = self
+                .analyze_image_bytes(
+                    bytes,
+                    "image/jpeg",
+                    "List ONLY visible personal effects in ONE line: clothing style + colors, jewelry (type/metal), accessories (watch, bag, sunglasses), gadgets, hobby items, notable decor. No people descriptions, no names.",
+                )
+                .await;
+            let d1: String = d.lines().next().unwrap_or("").chars().take(170).collect();
+            if d1.len() > 8 {
+                obs.push(format!("[{}] {d1}", a.date));
+            }
+        }
+        if obs.is_empty() {
+            return format!("I reached {disp}'s photos but couldn't read any of them.");
+        }
+        // Fuse with what the substrate already knows about them.
+        let store = self.load_people_profiles().await;
+        let known = store
+            .iter()
+            .find(|p| p.get("name").and_then(|x| x.as_str()).map(|s| s.eq_ignore_ascii_case(&disp)).unwrap_or(false))
+            .map(|p| {
+                let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+                let facts: Vec<String> = p
+                    .get("facts")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).take(8).collect())
+                    .unwrap_or_default();
+                format!("{rel}. {}", facts.join("; "))
+            })
+            .unwrap_or_default();
+        let joined: String = obs.join("\n").chars().take(2400).collect();
+        let prompt = format!(
+            "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
+        );
+        let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+        let out = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text.trim().to_string(),
+            Err(e) => return format!("Studied {} photos of {disp} but couldn't distill ({e}).", obs.len()),
+        };
+        // Persist: STYLE + MISSING become beliefs (the deal-finder and future asks build on them).
+        for line in out.lines() {
+            let l = line.trim();
+            if let Some(rest) = l.strip_prefix("STYLE:").or_else(|| l.strip_prefix("MISSING:")) {
+                if rest.trim().len() > 8 {
+                    let _ = self.memory.remember_as_belief(BeliefAssertion {
+                        statement: format!("{disp} (gift intel): {}", rest.trim()),
+                        polarity: 1.0, weight: 0.65, source_event: Some("gift-intel".into()), provenance: "photos".into(),
+                    }).await;
+                }
+            }
+        }
+        let text = format!("🎁 {disp} — gift intelligence from {} of their photos:\n\n{out}\n\nSay `deals <idea>` and I'll find real listings in budget.", obs.len());
+        let _ = self
+            .memory
+            .profile_set(&name_key, &serde_json::json!({ "ts": chrono::Utc::now().timestamp_millis(), "text": text }).to_string())
+            .await;
+        text
+    }
+
+    /// Proactive gift scout gate: at most one study per period, only when photo sources exist.
+    pub async fn gift_scout_due(&self) -> bool {
+        if !mind_tools::PhotoSource::all_from_env().iter().any(|s| s.knows_people()) {
+            return false;
+        }
+        let period_ms: i64 = std::env::var("YM_GIFTSCOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let last: i64 = self.memory.profile_get("gift_scout_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// Someone's day within 25 days and no fresh study → run gift intelligence unprompted. The
+    /// companion move: the ideas arrive BEFORE the user thinks to ask, while there's shipping time.
+    pub async fn gift_scout_run(&self) -> Option<String> {
+        let _ = self
+            .memory
+            .profile_set("gift_scout_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .await;
+        let today = local_now();
+        let store = self.load_people_profiles().await;
+        for p in &store {
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let (Some(mmdd), Some(label)) = (
+                    d.get("mmdd").and_then(|x| x.as_str()),
+                    d.get("label").and_then(|x| x.as_str()),
+                ) else {
+                    continue;
+                };
+                let Some(days) = days_until_mmdd(mmdd, &today) else { continue };
+                if !(0..=25).contains(&days) {
+                    continue;
+                }
+                // Already studied recently? gift_intel reuses its cache — only surface NEW studies.
+                let key = format!("gift_intel:{}", name.to_lowercase());
+                if let Ok(Some(prev)) = self.memory.profile_get(&key).await {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&prev) {
+                        if chrono::Utc::now().timestamp_millis() - v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0) < 30 * 86_400_000 {
+                            continue;
+                        }
+                    }
+                }
+                let intel = self.gift_intel(name).await;
+                if intel.len() < 120 || intel.starts_with("No photo source") {
+                    continue;
+                }
+                return Some(format!("{name}'s {label} is in {days} day(s) — so I studied their photos.\n\n{intel}"));
+            }
+        }
+        None
+    }
+
     /// ---------- ASK-WHO-IS-WHO ----------
     /// Face-aware sources cluster faces they can't name (Immich: hundreds unnamed). Instead of
     /// guessing, the mind ASKS: the most-photographed unknown face goes to the home channel as a
@@ -7833,6 +7980,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     "No photos from this exact day in past years (yet — the library index is still growing).".to_string()
                 }
             }
+            "gift" | "giftideas" | "gifts" if !rest.trim().is_empty() => {
+                let r = rest.trim();
+                let (name, fresh) = match r.strip_suffix(" fresh") {
+                    Some(n) => (n.trim(), true),
+                    None => (r, false),
+                };
+                if fresh {
+                    let _ = self.memory.profile_set(&format!("gift_intel:{}", name.to_lowercase()), "").await;
+                }
+                self.gift_intel(name).await
+            }
             "whois" | "who-is-this" => {
                 let _ = self.memory.profile_set("whois_force", "1").await;
                 "👀 On it — sending the next unknown face to Telegram; reply there with who it is (or \"skip\").".to_string()
@@ -8907,6 +9065,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
             }
+            "gift_intel" | "gift_ideas" => {
+                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                if nm.trim().is_empty() { "Whose photos should I study for gift ideas?".to_string() } else { self.gift_intel(nm.trim()).await }
+            }
             "enhance_photo" => {
                 let img = self.last_photo.lock().unwrap().clone();
                 match img {
@@ -9428,6 +9590,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - growup_reel {name}: build a time-lapse FILM of a person growing up (best face per month across the whole photo archive) and send it — pure magic for family\n\
 - on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
 - enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
+- gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\

@@ -635,6 +635,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // shared group). The owner resolves to a memory scope so a private fact never leaks across
             // members; a shared group's facts are visible to everyone in it.
             let from_id = msg["from"]["id"].as_i64().unwrap_or(0);
+            let from_name = msg["from"]["first_name"].as_str().unwrap_or("someone").to_string();
             let chat_type = msg["chat"]["type"].as_str().unwrap_or("private").to_string();
             let shared_channel = chat_type == "group" || chat_type == "supergroup";
             // Process the turn in its OWN task so the poll loop keeps polling + ticking (delegations,
@@ -651,6 +652,14 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     if owner == mind_types::PRIMARY {
                         ac2.store(chat_id, Ordering::Relaxed);
                         save_active_chat(chat_id);
+                    }
+                    if owner.starts_with("guest:") && std::env::var("YM_TG_OPEN").map(|v| v != "on").unwrap_or(true) {
+                        let _ = tg_send(&api2, chat_id, "Hi! I'm a private family assistant, so I can't chat until you're added — I've let the family know. 🙏").await;
+                        let primary = ac2.load(Ordering::Relaxed);
+                        if primary != 0 && primary != chat_id {
+                            let _ = tg_send(&api2, primary, &format!("👋 {from_name} sent me a photo but isn't registered (telegram id {from_id}). Share their contact card, or: person add <slug> {from_name} {from_id}")).await;
+                        }
+                        return;
                     }
                     let reply = match tg_download(&api2, &fid).await {
                         Some(bytes) => conv2.analyze_photo_turn(bytes, &caption).await,
@@ -682,6 +691,18 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 if owner == mind_types::PRIMARY {
                     ac2.store(chat_id, Ordering::Relaxed);
                     save_active_chat(chat_id);
+                }
+                // FAMILY-ONLY (default): unregistered senders get a polite hello and the primary
+                // gets an approval ping with the id — one contact-card share or `person add` lets
+                // them in. YM_TG_OPEN=on re-enables anonymous guest conversations.
+                if owner.starts_with("guest:") && std::env::var("YM_TG_OPEN").map(|v| v != "on").unwrap_or(true) {
+                    eprintln!("[members] unregistered sender {from_name} tg_id={from_id}");
+                    let _ = tg_send(&api2, chat_id, "Hi! I'm a private family assistant, so I can't chat until you're added — I've let the family know you said hello. 🙏").await;
+                    let primary = ac2.load(Ordering::Relaxed);
+                    if primary != 0 && primary != chat_id {
+                        let _ = tg_send(&api2, primary, &format!("👋 {from_name} just messaged me but isn't registered (telegram id {from_id}). Share their contact card with me, or say: person add <slug> {from_name} {from_id}")).await;
+                    }
+                    return;
                 }
                 let identity = mind_conversation::TurnIdentity::new(owner, shared_channel);
                 let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity);

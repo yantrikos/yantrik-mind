@@ -1185,19 +1185,11 @@ fn photo_request(text: &str) -> Option<String> {
         return None;
     }
     let nouns = ["picture", "photo", "image", "snap", "pic"];
-    let (at, len) = nouns
-        .iter()
-        .filter_map(|n| low.find(n).map(|i| (i, n.len())))
-        .min_by_key(|(i, len)| (*i, std::cmp::Reverse(*len)))?;
-    let after = &low[at + len..];
-    let after = after.strip_prefix('s').unwrap_or(after).trim();
-    let q = ["of ", "with ", "from ", "where "].iter().find_map(|p| after.strip_prefix(p)).unwrap_or(after);
-    let q = q.trim().trim_end_matches(['?', '!', '.']).trim();
-    if q.len() >= 2 && !q.contains("http") {
-        return Some(q.to_string());
+    if !nouns.iter().any(|n| low.contains(n)) {
+        return None;
     }
-    // Descriptor BEFORE the noun ("our wedding photo") — pass the whole ask; the retrieval layer
-    // stop-filters it down to the real terms.
+    // Pass the WHOLE ask — retrieval stop-filters it and resolves people/dates itself. (Post-noun
+    // extraction used to drop pre-noun modifiers: 'old photo of us' lost the 'old'.)
     let whole = low.trim_end_matches(['?', '!', '.']).trim();
     if whole.contains("http") || whole.len() < 2 {
         None

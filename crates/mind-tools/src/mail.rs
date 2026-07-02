@@ -22,6 +22,54 @@ pub struct EmailMsg {
 pub trait MailClient: Send + Sync {
     /// Most-recent `limit` messages from the inbox (newest first).
     async fn inbox(&self, limit: usize) -> anyhow::Result<Vec<EmailMsg>>;
+
+    /// Body text of specific messages by sequence id — BODY.PEEK, so nothing is ever marked read.
+    /// Returns (id, cleaned text). Default: unsupported → empty.
+    async fn peek_bodies(&self, ids: &[String], max_chars: usize) -> anyhow::Result<Vec<(String, String)>> {
+        let _ = (ids, max_chars);
+        Ok(Vec::new())
+    }
+}
+
+/// Strip an email body to readable text: drop MIME scaffolding, base64 payloads, HTML tags,
+/// quoted-printable soft breaks — bounded to `max_chars`.
+fn clean_body(raw: &[u8], max_chars: usize) -> String {
+    let s = String::from_utf8_lossy(raw);
+    let mut out = String::new();
+    let mut in_tag = false;
+    for line in s.lines() {
+        let t = line.trim_end_matches('\r').trim();
+        if t.len() > 100 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+            continue; // base64 payload line
+        }
+        if t.starts_with("Content-") || t.starts_with("--") || t.starts_with("MIME-") || t.starts_with("charset") {
+            continue;
+        }
+        let mut cleaned = String::new();
+        for c in t.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                c if !in_tag => cleaned.push(c),
+                _ => {}
+            }
+        }
+        let cleaned = cleaned
+            .replace("=20", " ")
+            .replace("=E2=80=99", "'")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&#39;", "'");
+        let cleaned = cleaned.trim();
+        if cleaned.len() > 1 {
+            out.push_str(cleaned);
+            out.push('\n');
+        }
+        if out.len() >= max_chars {
+            break;
+        }
+    }
+    out.chars().take(max_chars).collect()
 }
 
 /// Render an inbox as a compact, untrusted digest block for grounding a reply.
@@ -126,6 +174,31 @@ impl MailClient for ImapClient {
             }
             let _ = session.logout();
             out.reverse(); // newest first
+            Ok(out)
+        })
+        .await?
+    }
+
+    async fn peek_bodies(&self, ids: &[String], max_chars: usize) -> anyhow::Result<Vec<(String, String)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (host, port, user, password) =
+            (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+        let set = ids.join(",");
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String)>> {
+            let tls = native_tls::TlsConnector::builder().build()?;
+            let client = imap::connect((host.as_str(), port), host.as_str(), &tls)?;
+            let mut session = client.login(&user, &password).map_err(|(e, _)| e)?;
+            session.select("INBOX")?;
+            let fetches = session.fetch(set, "BODY.PEEK[TEXT]")?;
+            let mut out = Vec::new();
+            for f in fetches.iter() {
+                if let Some(text) = f.text() {
+                    out.push((f.message.to_string(), clean_body(text, max_chars)));
+                }
+            }
+            let _ = session.logout();
             Ok(out)
         })
         .await?

@@ -1049,6 +1049,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Daily mail sweep: cross-account analytics with body-peek verification; the user hears
+        // about it ONLY when something needs action (silence-biased). Detached — two LLM passes
+        // plus IMAP round-trips must never stall the poll loop.
+        if !in_quiet_hours_now() && conv.mail_sweep_due().await {
+            let c = conv.clone();
+            let api2 = api.clone();
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 {
+                tokio::spawn(async move {
+                    if let Some(msg) = c.mail_sweep_run().await {
+                        if tg_send(&api2, chat, &msg).await.is_ok() {
+                            c.note_proactive_sent().await;
+                        }
+                    }
+                });
+            }
+        }
+
         // Facebook refresh: keep the know-me lane current (daily; data-only, sends nothing).
         if conv.fb_sync_due().await {
             let c = conv.clone();

@@ -8422,9 +8422,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         self.mail.as_ref().map(|m| ("inbox".to_string(), m.clone())).into_iter().collect()
     }
 
-    /// CROSS-ACCOUNT EMAIL ANALYTICS: headers from every connected inbox, one pass → what needs
-    /// action, where money is moving, what's worth a look, what's noise — tagged per account.
-    /// Read-only by construction (headers only, nothing opened, nothing marked).
+    /// CROSS-ACCOUNT EMAIL ANALYTICS, two-stage: headers from every inbox → triage picks the few
+    /// messages worth OPENING → BODY.PEEK verifies their actual STATE (canceled vs confirmed,
+    /// real amounts, real dates) → digest. Read-only throughout (peek never marks anything).
     pub async fn inbox_analytics(&self, per_account: usize) -> String {
         let inboxes = self.scan_inboxes();
         if inboxes.is_empty() {
@@ -8439,7 +8439,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     counts.push(format!("{label} ✓{}", msgs.len()));
                     blocks.push(
                         msgs.iter()
-                            .map(|x| format!("- [{label}] {} | {}", x.from, x.subject))
+                            .map(|x| format!("- [{label}] #{} {} | {} | {}", x.id, x.date, x.from, x.subject))
                             .collect::<Vec<_>>()
                             .join("\n"),
                     );
@@ -8450,19 +8450,96 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if blocks.is_empty() {
             return format!("Couldn't read any inbox — {}.", counts.join("; "));
         }
+        let headers = blocks.join("\n");
+        // Stage 2: which few are worth OPENING? (state-ambiguous threads, bills, reservations)
+        let cfg_small = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+        let triage = format!(
+            "Email headers, one per line as: - [account] #id date | from | subject.\nPick UP TO 6 whose BODY should be opened to verify state or extract amounts/dates — reservations/orders (could be canceled!), bills, deadlines, anything ambiguous. Output ONLY JSON: [{{\"account\":\"<account>\",\"id\":\"<id>\"}}].\n\n{headers}"
+        );
+        let mut opened = String::new();
+        if let Ok(r) = self
+            .inference
+            .chat(vec![ChatMessage::system("You triage email headers. Output only JSON."), ChatMessage::user(&triage)], cfg_small)
+            .await
+        {
+            let body = r.text.rsplit("</think>").next().unwrap_or(&r.text).to_string();
+            let picks: Vec<serde_json::Value> = match (body.find('['), body.rfind(']')) {
+                (Some(x), Some(y)) if y > x => serde_json::from_str(&body[x..=y]).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            // Group picked ids per account and peek their bodies.
+            for (label, m) in &inboxes {
+                let ids: Vec<String> = picks
+                    .iter()
+                    .filter(|p| p.get("account").and_then(|x| x.as_str()) == Some(label.as_str()))
+                    .filter_map(|p| p.get("id").and_then(|x| x.as_str()).map(String::from))
+                    .filter(|id| id.chars().all(|c| c.is_ascii_digit()))
+                    .take(6)
+                    .collect();
+                if ids.is_empty() {
+                    continue;
+                }
+                if let Ok(bodies) = m.peek_bodies(&ids, 900).await {
+                    for (id, text) in bodies {
+                        if !text.trim().is_empty() {
+                            opened.push_str(&format!("\n=== [{label}] #{id} OPENED ===\n{}\n", text.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        // Stage 3: the digest, grounded in verified content where it exists.
         let prompt = format!(
-            "Recent email HEADERS from the user's {} account(s), tagged [account]. Produce a terse cross-account digest with EXACTLY these sections:\nNEEDS ACTION: things a human must handle (deadlines, replies, bills due) — one line each, keep the [account] tag\nMONEY: bills/receipts/renewals — amounts ONLY if visible in the subject, never invented\nWORTH A LOOK: genuinely important or interesting\nNOISE: one line — rough count + top 3 promo senders\n\n{}",
-            inboxes.len(),
-            blocks.join("\n")
+            "Recent email HEADERS from the user's {} account(s), plus OPENED bodies for the few that matter. Produce a terse cross-account digest with EXACTLY these sections:\nNEEDS ACTION: things a human must handle — one line each with [account]. Check OPENED content first: a canceled/refunded reservation or order is NOT needs-action.\nRESOLVED: canceled/refunded/completed threads worth knowing about (from OPENED content)\nMONEY: bills/receipts/renewals — amounts and due dates ONLY if they appear in a subject or OPENED body, never invented\nWORTH A LOOK: genuinely important or interesting\nNOISE: one line — rough count + top 3 promo senders\nOmit any section with nothing in it.\n\nHEADERS:\n{headers}\n{opened}",
+            inboxes.len()
         );
         let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
         match self
             .inference
-            .chat(vec![ChatMessage::system("You analyze email header lists. Terse, factual, never invent amounts or senders."), ChatMessage::user(&prompt)], cfg)
+            .chat(vec![ChatMessage::system("You analyze email. Terse, factual, never invent amounts, senders, or states."), ChatMessage::user(&prompt)], cfg)
             .await
         {
-            Ok(r) => format!("📬 {} — {}\n\n{}", if inboxes.len() == 1 { "1 inbox".to_string() } else { format!("{} inboxes", inboxes.len()) }, counts.join(" · "), r.text.trim()),
+            Ok(r) => format!(
+                "📬 {} — {}\n\n{}",
+                if inboxes.len() == 1 { "1 inbox".to_string() } else { format!("{} inboxes", inboxes.len()) },
+                counts.join(" · "),
+                r.text.trim()
+            ),
             Err(e) => format!("Read the inboxes ({}) but couldn't analyze: {e}", counts.join(" · ")),
+        }
+    }
+
+    /// Daily mail-sweep gate (YM_MAILSWEEP_SECS, default daily) — data check runs quietly; the
+    /// user only hears about it when something actually needs them.
+    pub async fn mail_sweep_due(&self) -> bool {
+        if self.scan_inboxes().is_empty() {
+            return false;
+        }
+        let period_ms: i64 = std::env::var("YM_MAILSWEEP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let last: i64 = self.memory.profile_get("mail_sweep_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// Run the sweep; return Some(digest) ONLY when NEEDS ACTION or MONEY has real entries —
+    /// silence-biased proactivity (an empty day should cost the user zero attention).
+    pub async fn mail_sweep_run(&self) -> Option<String> {
+        let _ = self
+            .memory
+            .profile_set("mail_sweep_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .await;
+        let digest = self.inbox_analytics(30).await;
+        let has = |sec: &str| {
+            digest
+                .split(sec)
+                .nth(1)
+                .map(|rest| rest.lines().take(4).any(|l| l.trim_start().starts_with("- ")))
+                .unwrap_or(false)
+        };
+        if has("NEEDS ACTION") || has("MONEY") {
+            Some(format!("📬 Mail sweep — something needs you:\n\n{digest}"))
+        } else {
+            eprintln!("[mail] sweep clean — staying quiet");
+            None
         }
     }
 

@@ -11127,6 +11127,38 @@ mod tests {
         assert!(p.contains("NOT instructions"), "briefing data must be untrusted-wrapped:\n{p}");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pending_onboard_slot_survives_restart() {
+        // The in-flight get-to-know-you question must live in the substrate, not process memory:
+        // self-deploy restarts several times a day, and a Mutex-only slot dropped the pending
+        // question so the user's answer arrived with nothing armed and got mis-handled as chat.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+
+        // Engine #1 arms a question, then "crashes" (is dropped) before the answer arrives.
+        {
+            let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+            let conv = ConversationEngine::new(mem.clone(), pool, "You are JARVIS.");
+            assert_eq!(conv.pending_slot().await, None, "no question pending initially");
+            conv.set_pending_slot(Some("interest:music")).await;
+            assert_eq!(conv.pending_slot().await.as_deref(), Some("interest:music"));
+        }
+
+        // Engine #2 boots on the SAME substrate (a service restart) and must restore the slot.
+        // A per-process Mutex would be empty here; the profile KV carries it across the restart.
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv2 = ConversationEngine::new(mem.clone(), pool, "You are JARVIS.");
+        assert_eq!(
+            conv2.pending_slot().await.as_deref(),
+            Some("interest:music"),
+            "pending onboard question must survive a restart via the profile KV",
+        );
+
+        // Consuming it clears the slot (the empty sentinel reads back as None, not a re-ask).
+        conv2.set_pending_slot(None).await;
+        assert_eq!(conv2.pending_slot().await, None, "consumed slot must not re-fire after restart");
+    }
+
     #[test]
     fn word_boundary_contains_respects_boundaries() {
         // whole-word hits (start, middle, end, punctuation-bounded)

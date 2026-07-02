@@ -676,7 +676,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         for note in conv.take_notifications() {
             let target = active_chat.load(Ordering::Relaxed);
             if target != 0 {
-                let _ = tg_send(&api, target, &note).await;
+                let ok = tg_send(&api, target, &note).await.is_ok();
+                eprintln!("[notify] delivered={ok}: {}", note.chars().take(80).collect::<String>());
             }
         }
 

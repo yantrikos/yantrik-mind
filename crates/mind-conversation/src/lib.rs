@@ -476,7 +476,9 @@ fn is_self_referential(text: &str) -> bool {
     KEYS.iter().any(|k| l.contains(k))
 }
 
-/// Background body of a taste-study pass (detached; returns the message to deliver).
+/// Background body of a taste-study pass (detached; returns the message to deliver). Each photo
+/// yields occasion + outfit + jewelry pieces + watch style; counts accumulate flat AND per
+/// occasion, so distributions answer "what does she wear AT parties" — not just "what does she wear".
 async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, mem: Arc<dyn MemoryFacade>) -> Option<String> {
     let sources = mind_tools::PhotoSource::all_from_env();
     let src = sources.into_iter().find(|s| s.name() == src_name)?;
@@ -488,7 +490,7 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "total": 0 }));
+        .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "cross": {}, "cross_totals": {}, "total": 0 }));
     let seen: std::collections::HashSet<String> = acc["seen"]
         .as_array()
         .cloned()
@@ -504,22 +506,41 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
             acc["total"]
         ));
     }
-    let prompt = r#"Analyze the MAIN person's appearance and the scene. Output ONLY JSON: {"outfit":"<type like saree/dress/kurta/casual-western or none>","outfit_color":"<dominant color or none>","jewelry_tone":"<gold/silver/mixed/none>","setting":"<home/outdoor/travel/restaurant/party/temple/studio>","vibe":"<festive/casual/formal/cozy>","items":["<other notable personal items>"]}. No brands, no names."#;
+    let prompt = r#"Analyze the MAIN person's appearance and the occasion. Output ONLY JSON: {"occasion":"<party/festival/wedding/casual/home/work/travel/outdoor>","outfit":"<type like saree/dress/kurta/casual-western or none>","outfit_color":"<dominant color or none>","jewelry":["<each visible piece with metal + type, like gold jhumka earrings / red bangles / thin gold chain>"],"watch":"<style if visible: black digital / gold analog / silver dress / smartwatch / none>","setting":"<home/outdoor/travel/restaurant/party/temple/studio>","vibe":"<festive/casual/formal/cozy>"}. No brands, no names."#;
     let mut n_new = 0u64;
     for a in &todo {
         let Some(bytes) = src.image_bytes(a).await else { continue };
         let Ok(raw) = vc.analyze(prompt, bytes, "image/jpeg").await else { continue };
         let v = parse_json_obj(&raw);
-        for cat in ["outfit", "outfit_color", "jewelry_tone", "setting", "vibe"] {
+        for cat in ["occasion", "outfit", "outfit_color", "watch", "setting", "vibe"] {
             if let Some(val) = v.get(cat).and_then(|x| x.as_str()) {
                 bump_count(&mut acc, cat, val);
             }
         }
-        for it in v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-            if let Some(t) = it.as_str() {
-                let ty = normalize_item_type(t);
-                if !ty.is_empty() {
-                    bump_count(&mut acc, "item", &ty);
+        let occ = v.get("occasion").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+        let occ_ok = occ.len() > 2 && occ != "none";
+        if occ_ok {
+            let t = acc["cross_totals"][&occ].as_u64().unwrap_or(0);
+            acc["cross_totals"][&occ] = serde_json::json!(t + 1);
+        }
+        if let Some(color) = v.get("outfit_color").and_then(|x| x.as_str()) {
+            if occ_ok {
+                bump_cross(&mut acc, &occ, &format!("{} outfit", color.trim().to_lowercase()));
+            }
+        }
+        if let Some(w) = v.get("watch").and_then(|x| x.as_str()) {
+            if occ_ok && w.trim().to_lowercase() != "none" {
+                bump_cross(&mut acc, &occ, &format!("{} watch", w.trim().to_lowercase()));
+            }
+        }
+        for piece in v.get("jewelry").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            if let Some(p) = piece.as_str() {
+                let p = p.trim().to_lowercase();
+                if p.len() > 3 && p.len() < 34 {
+                    bump_count(&mut acc, "jewelry", &p);
+                    if occ_ok {
+                        bump_cross(&mut acc, &occ, &p);
+                    }
                 }
             }
         }
@@ -531,7 +552,7 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
     let total = acc["total"].as_u64().unwrap_or(0) + n_new;
     acc["total"] = serde_json::json!(total);
     let _ = mem.profile_set(&key, &acc.to_string()).await;
-    // Milestone beliefs: dominant values become weight-encoded preference probabilities.
+    // Milestone beliefs: flat dominants + per-occasion signatures, weights encode confidence.
     if n_new > 0 && total / 40 != (total - n_new) / 40 {
         if let Some(counts) = acc["counts"].as_object() {
             for (cat, vals) in counts {
@@ -557,6 +578,36 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
                             })
                             .await;
                     }
+                }
+            }
+        }
+        if let Some(cross) = acc["cross"].as_object() {
+            let totals = acc["cross_totals"].as_object().cloned().unwrap_or_default();
+            let mut occs: Vec<(String, u64)> = totals.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect();
+            occs.sort_by(|a, b| b.1.cmp(&a.1));
+            for (occ, occ_n) in occs.iter().take(3) {
+                if *occ_n < 12 {
+                    continue;
+                }
+                let Some(vals) = cross.get(occ).and_then(|x| x.as_object()) else { continue };
+                let mut v: Vec<(String, u64)> = vals.iter().map(|(k, n)| (k.clone(), n.as_u64().unwrap_or(0))).collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1));
+                let tops = v
+                    .iter()
+                    .take(3)
+                    .map(|(k, n)| format!("{k} ({:.0}%)", *n as f64 * 100.0 / *occ_n as f64))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !tops.is_empty() {
+                    let _ = mem
+                        .remember_as_belief(BeliefAssertion {
+                            statement: format!("{disp} (taste at {occ}, {occ_n} photos): typically {tops}"),
+                            polarity: 1.0,
+                            weight: if *occ_n >= 40 { 0.8 } else { 0.65 },
+                            source_event: Some("taste-study".into()),
+                            provenance: "photos".into(),
+                        })
+                        .await;
                 }
             }
         }
@@ -684,6 +735,7 @@ async fn gift_task(
     disp: String,
     known: String,
     closet_note: String,
+    tastes_note: String,
     mem: Arc<dyn MemoryFacade>,
     inference: InferencePool,
     persona: String,
@@ -718,7 +770,7 @@ async fn gift_task(
     }
     let joined: String = obs.join("\n").chars().take(2400).collect();
     let prompt = format!(
-        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
+        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\nTASTE DISTRIBUTIONS (statistical, by occasion): {tastes_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
     );
     let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
     let out = match inference.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
@@ -759,11 +811,13 @@ fn render_tastes(acc: &serde_json::Value, disp: &str) -> String {
     let total = acc["total"].as_u64().unwrap_or(0);
     let mut out = format!("📊 {disp} — preference distributions from {total} photos:");
     let counts = acc["counts"].as_object().cloned().unwrap_or_default();
-    let order = ["outfit", "outfit_color", "jewelry_tone", "setting", "vibe", "item"];
+    let order = ["occasion", "outfit", "outfit_color", "jewelry", "watch", "setting", "vibe", "item"];
     let label = |c: &str| match c {
+        "occasion" => "Occasions",
         "outfit" => "Outfit",
         "outfit_color" => "Outfit color",
-        "jewelry_tone" => "Jewelry tone",
+        "jewelry" => "Jewelry pieces",
+        "watch" => "Watch styles",
         "setting" => "Setting",
         "vibe" => "Vibe",
         _ => "Recurring items",
@@ -785,6 +839,36 @@ fn render_tastes(acc: &serde_json::Value, disp: &str) -> String {
             .join(" · ");
         out.push_str(&format!("\n• {}: {tops} — {conf}", label(cat)));
     }
+    // The cross-tab: what she wears BY OCCASION — where gift decisions actually live.
+    let totals = acc["cross_totals"].as_object().cloned().unwrap_or_default();
+    if !totals.is_empty() {
+        let cross = acc["cross"].as_object().cloned().unwrap_or_default();
+        let mut occs: Vec<(String, u64)> = totals.iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0))).collect();
+        occs.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut wrote_header = false;
+        for (occ, n) in occs.iter().take(5) {
+            if *n < 6 {
+                continue;
+            }
+            let Some(vals) = cross.get(occ).and_then(|x| x.as_object()) else { continue };
+            let mut v: Vec<(String, u64)> = vals.iter().map(|(k, c)| (k.clone(), c.as_u64().unwrap_or(0))).collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            let tops = v
+                .iter()
+                .take(3)
+                .map(|(k, c)| format!("{k} {:.0}%", *c as f64 * 100.0 / *n as f64))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            if tops.is_empty() {
+                continue;
+            }
+            if !wrote_header {
+                out.push_str("\n\nBY OCCASION:");
+                wrote_header = true;
+            }
+            out.push_str(&format!("\n• {occ} ({n} photos): {tops}"));
+        }
+    }
     if total == 0 {
         out.push_str("\n(no photos studied yet)");
     } else if total < 30 {
@@ -805,6 +889,20 @@ fn bump_count(acc: &mut serde_json::Value, cat: &str, val: &str) {
     }
     let n = c[&val].as_u64().unwrap_or(0);
     c[&val] = serde_json::json!(n + 1);
+}
+
+/// Count one observation into the per-occasion cross-tab.
+fn bump_cross(acc: &mut serde_json::Value, occ: &str, key: &str) {
+    let key = key.trim().to_lowercase();
+    if key.len() < 3 || key.len() > 40 {
+        return;
+    }
+    let c = &mut acc["cross"][occ];
+    if c.is_null() {
+        *c = serde_json::json!({});
+    }
+    let n = c[&key].as_u64().unwrap_or(0);
+    c[&key] = serde_json::json!(n + 1);
 }
 
 /// Fold vision's item names into canonical types so counts aggregate ("purse"/"tote" → handbag,
@@ -7108,6 +7206,16 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.get("summary").and_then(|x| x.as_str()).map(String::from))
             .unwrap_or_default();
+        let tastes_note = self
+            .memory
+            .profile_get(&format!("tastes:{}", disp.to_lowercase()))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .filter(|v| v["total"].as_u64().unwrap_or(0) >= 20)
+            .map(|v| render_tastes(&v, &disp))
+            .unwrap_or_default();
         let guard = format!("gift:{}", disp.to_lowercase());
         if !self.studies.lock().unwrap().insert(guard.clone()) {
             return format!("Already studying {disp}'s photos for gifts — results land here shortly.");
@@ -7119,7 +7227,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let inference = self.inference.clone();
         let persona = self.persona.clone();
         tokio::spawn(async move {
-            if let Some(t) = gift_task(src_name, pid2, disp2, known, closet_note, mem, inference, persona).await {
+            if let Some(t) = gift_task(src_name, pid2, disp2, known, closet_note, tastes_note, mem, inference, persona).await {
                 nq.lock().unwrap().push(t);
             }
             studies.lock().unwrap().remove(&guard);
@@ -8412,9 +8520,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
             "tastes" | "taste" | "preferences" if !rest.trim().is_empty() => {
-                let mut it = rest.trim().splitn(2, char::is_whitespace);
+                let r = rest.trim();
+                let (r, fresh) = match r.strip_suffix(" fresh").or_else(|| r.strip_suffix(" reset")) {
+                    Some(x) => (x.trim(), true),
+                    None => (r, false),
+                };
+                let mut it = r.splitn(2, char::is_whitespace);
                 let name = it.next().unwrap_or("").to_string();
                 let n: usize = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(40);
+                if fresh {
+                    let _ = self.memory.profile_set(&format!("tastes:{}", name.to_lowercase()), "").await;
+                }
                 self.taste_study(&name, n).await
             }
             "closet" | "wardrobe" | "inventory" | "items" if !rest.trim().is_empty() => {

@@ -488,14 +488,28 @@ fn add_task(
     due_ms: Option<u64>,
 ) -> std::result::Result<Task, String> {
     // Dedup: if an OPEN task is a close paraphrase of this one, reuse it instead of piling up.
+    // Two complementary signals — mirrors the belief store's word-overlap + embedder moat:
+    //   • word-overlap (jaccard ≥ 0.6) catches shared-vocabulary restatements, and is the only
+    //     signal on the no-embedder test path (dim 8);
+    //   • semantic (cosine ≥ 0.85) fires when the bundled embedder (dim 64) is attached, so a
+    //     paraphrase that shares almost NO words ("buy groceries for the week" / "do the weekly
+    //     grocery shopping", jaccard 0 yet cosine 0.89) still merges instead of piling up a third
+    //     near-identical entry in the morning briefing.
     let new_sig = task_word_set(description);
-    if !new_sig.is_empty() {
+    let new_vec = if db.has_embedder() { db.embed(description).ok() } else { None };
+    if !new_sig.is_empty() || new_vec.is_some() {
         for n in all_task_nodes(db) {
             if let NodePayload::Task(ref t) = n.payload {
                 if matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled) {
                     continue;
                 }
-                if jaccard(&new_sig, &task_word_set(&t.description)) >= 0.6 {
+                let word_dup =
+                    !new_sig.is_empty() && jaccard(&new_sig, &task_word_set(&t.description)) >= 0.6;
+                let semantic_dup = new_vec
+                    .as_ref()
+                    .map(|q| db.embed(&t.description).ok().map(|v| cosine(q, &v)).unwrap_or(0.0) >= 0.85)
+                    .unwrap_or(false);
+                if word_dup || semantic_dup {
                     return task_dto(&n).ok_or_else(|| "task build failed".to_string());
                 }
             }
@@ -1595,6 +1609,30 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE EMBEDDER MOAT, applied to task dedup: with the bundled embedder attached (dim 64) a
+    /// paraphrase that shares NO significant words with an open task — so word-overlap jaccard is
+    /// 0 — still collapses into it because their embeddings are ≥ 0.85 cosine. A genuinely
+    /// unrelated task stays separate. This is the case the morning briefing kept showing thrice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn add_task_semantic_dedup_merges_paraphrase_without_shared_words() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.add_task("Buy groceries for the week", "medium", None).await.unwrap();
+        // shares no ≥3-char content token with the above (jaccard 0), but cosine ≈ 0.89 → merges
+        mem.add_task("Do the weekly grocery shopping", "medium", None).await.unwrap();
+        assert_eq!(
+            mem.list_tasks(false).await.unwrap().len(),
+            1,
+            "semantic paraphrase with no shared words must collapse via the embedder path"
+        );
+        // an unrelated task (cosine ≈ 0.01) is NOT swallowed
+        mem.add_task("Fix the leaking kitchen faucet", "medium", None).await.unwrap();
+        assert_eq!(
+            mem.list_tasks(false).await.unwrap().len(),
+            2,
+            "an unrelated task stays a distinct entry"
+        );
+    }
 
     #[test]
     fn decay_confidence_halves_toward_prior() {

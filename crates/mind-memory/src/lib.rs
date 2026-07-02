@@ -40,7 +40,7 @@ enum Cmd {
     Record { text: String, reply: Reply<String> },
     RememberObservation { text: String, source: String, reply: Reply<String> },
     GetText { rid: String, reply: Reply<Option<String>> },
-    AssertBelief { statement: String, signed_weight: f64, source: String, provenance: String, reply: Reply<Belief> },
+    AssertBelief { statement: String, signed_weight: f64, source: String, provenance: String, evidence_version: Option<u64>, reply: Reply<Belief> },
     RecallTyped { text: String, top_k: usize, reply: Reply<Vec<Recalled>> },
     Conflicts { reply: Reply<Vec<Contradiction>> },
     Explain { statement: String, reply: Reply<Option<(Belief, Vec<MEvidence>)>> },
@@ -211,6 +211,7 @@ fn assert_belief(
     signed_weight: f64,
     source: &str,
     provenance: &str,
+    evidence_version: Option<u64>,
 ) -> std::result::Result<Belief, String> {
     gate_write(statement)?;
     let node = match find_belief(db, statement) {
@@ -235,6 +236,19 @@ fn assert_belief(
             n
         }
     };
+    // Monotonic evidence-version guard. Key by the CANONICAL proposition (find_belief may have merged
+    // a paraphrase into an existing node). An explicit version that isn't strictly greater than the
+    // stored one is an out-of-order or replayed update: drop it and return the current (fresher)
+    // belief unchanged so its confidence is never overwritten. The unversioned (None) legacy path
+    // always advances the counter by one and is never rejected.
+    let canonical = node_prop(&node).unwrap_or(statement).to_string();
+    let stored_version = get_belief_evidence_version(db, &canonical);
+    if let (Some(incoming), Some(current)) = (evidence_version, stored_version) {
+        if incoming <= current {
+            return Ok(to_belief_dto(&node));
+        }
+    }
+
     let ev = YEvidence {
         target_belief: node.id,
         weight: signed_weight,
@@ -245,6 +259,11 @@ fn assert_belief(
     };
     db.assert_belief_evidence(&ev, &BeliefRevisionConfig::default())
         .map_err(|e| e.to_string())?;
+    let next_version = match evidence_version {
+        Some(incoming) => incoming,
+        None => stored_version.unwrap_or(0) + 1,
+    };
+    set_belief_evidence_version(db, &canonical, next_version)?;
     let updated = db
         .load_cognitive_node(node.id)
         .map_err(|e| e.to_string())?
@@ -654,6 +673,40 @@ fn belief_scope_map(db: &YantrikDB) -> std::result::Result<std::collections::Has
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Per-belief monotonic evidence version — an optimistic-concurrency guard, keyed by the belief's
+/// canonical proposition. A confidence write must carry a version STRICTLY GREATER than the one last
+/// applied; anything ≤ it is an out-of-order or replayed evidence update and is dropped, so a stale
+/// evidence packet can never silently overwrite a fresher confidence score. A belief with no row has
+/// never taken a versioned write.
+fn ensure_belief_evidence_version_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_belief_evidence_version (proposition TEXT PRIMARY KEY, version INTEGER NOT NULL)",
+        [],
+    );
+}
+
+fn get_belief_evidence_version(db: &YantrikDB, proposition: &str) -> Option<u64> {
+    let conn = db.conn();
+    conn.query_row(
+        "SELECT version FROM mind_belief_evidence_version WHERE proposition = ?1",
+        [proposition],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
+    .map(|v| v as u64)
+}
+
+fn set_belief_evidence_version(db: &YantrikDB, proposition: &str, version: u64) -> std::result::Result<(), String> {
+    db.conn()
+        .execute(
+            "INSERT INTO mind_belief_evidence_version (proposition, version) VALUES (?1, ?2) \
+             ON CONFLICT(proposition) DO UPDATE SET version=excluded.version",
+            rusqlite::params![proposition, version as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<MemoryItem>, String> {
     let kind_enum = if kind == "goal" { MemoryKind::Goal } else { MemoryKind::Preference };
     let conn = db.conn();
@@ -942,6 +995,7 @@ impl MemoryHandle {
                 ensure_goals_prefs_table(&db);
                 ensure_tensions_table(&db);
                 ensure_belief_scope_table(&db);
+                ensure_belief_evidence_version_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -963,8 +1017,8 @@ impl MemoryHandle {
                             let r = db.get(&rid).map(|o| o.map(|m| m.text)).map_err(|e| e.to_string());
                             let _ = reply.send(r);
                         }
-                        Cmd::AssertBelief { statement, signed_weight, source, provenance, reply } => {
-                            let result = assert_belief(&db, &mut alloc, &statement, signed_weight, &source, &provenance);
+                        Cmd::AssertBelief { statement, signed_weight, source, provenance, evidence_version, reply } => {
+                            let result = assert_belief(&db, &mut alloc, &statement, signed_weight, &source, &provenance, evidence_version);
                             if result.is_ok() {
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -1316,7 +1370,13 @@ impl MemoryFacade for MemoryHandle {
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief> {
         let signed_weight = a.polarity * a.weight.abs();
         let (statement, source, provenance) = (a.statement, a.source_event.unwrap_or_default(), a.provenance);
-        self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, reply }).await
+        self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, evidence_version: None, reply }).await
+    }
+
+    async fn remember_as_belief_versioned(&self, a: BeliefAssertion, evidence_version: u64) -> Result<Belief> {
+        let signed_weight = a.polarity * a.weight.abs();
+        let (statement, source, provenance) = (a.statement, a.source_event.unwrap_or_default(), a.provenance);
+        self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, evidence_version: Some(evidence_version), reply }).await
     }
 
     // ── group-chat read-isolation (real impls; default trait methods are unrestricted) ──
@@ -1648,6 +1708,44 @@ mod tests {
         assert!((decay_confidence(0.99, many_hl_ms, 90.0) - 0.5).abs() < 0.001);
         // zero halflife disables decay
         assert!((decay_confidence(0.9, one_hl_ms, 0.0) - 0.9).abs() < 1e-9);
+    }
+
+    /// Monotonic evidence-version guard: once a belief has taken a versioned confidence write, a
+    /// LATER-ARRIVING evidence packet carrying an OLDER (or replayed, equal) version must be dropped
+    /// — it can never overwrite the fresher confidence a higher version already established.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stale_evidence_version_cannot_overwrite_fresher_confidence() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let claim = "the client prefers morning meetings";
+        let assertion = |polarity: f64, weight: f64| BeliefAssertion {
+            statement: claim.into(),
+            polarity,
+            weight,
+            source_event: None,
+            provenance: "told".into(),
+        };
+
+        // v1: strong POSITIVE evidence → confidence rises well above the 0.5 prior.
+        let v1 = mem.remember_as_belief_versioned(assertion(1.0, 2.0), 1).await.unwrap();
+        assert!(v1.confidence > 0.5, "positive evidence should raise confidence: {}", v1.confidence);
+
+        // v3: even stronger POSITIVE evidence → the freshest, highest-confidence state.
+        let fresh = mem.remember_as_belief_versioned(assertion(1.0, 3.0), 3).await.unwrap();
+        assert!(fresh.confidence > v1.confidence, "newer evidence should raise confidence further");
+        let fresh_conf = fresh.confidence;
+
+        // v2 arrives LATE and is strongly NEGATIVE. It is older than the stored v3, so it must be
+        // dropped — the fresher confidence survives untouched, not silently overwritten downward.
+        let stale = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 2).await.unwrap();
+        assert_eq!(stale.confidence, fresh_conf, "stale (older) evidence version must be rejected");
+
+        // A replay of the current version (v3) is likewise a no-op — equal is not strictly greater.
+        let replay = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 3).await.unwrap();
+        assert_eq!(replay.confidence, fresh_conf, "replayed (equal) evidence version must be rejected");
+
+        // A genuinely newer version (v4) is applied — the guard only blocks stale/replayed writes.
+        let advanced = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 4).await.unwrap();
+        assert!(advanced.confidence < fresh_conf, "a strictly-newer version must still apply: {}", advanced.confidence);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

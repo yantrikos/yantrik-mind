@@ -477,7 +477,9 @@ pub struct VisionClient {
 
 impl VisionClient {
     pub fn from_env() -> Option<VisionClient> {
-        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "nanogpt:gpt-4o-mini".into());
+        // Default: qwen3.5 on ollama-cloud — probed to genuinely see (nano-gpt silently STRIPS the
+        // image and the model guesses; a red square came back "Blue" — never default there).
+        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-cloud:qwen3.5:397b".into());
         let (prov, model) = spec.split_once(':').unwrap_or(("nanogpt", spec.as_str()));
         let (base, key_env) = match prov {
             "ollama-cloud" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY"),

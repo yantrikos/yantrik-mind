@@ -342,11 +342,12 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 34] = [
+    const CMDS: [&str; 39] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
         "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
+        "reel", "growup", "timelapse", "memories", "onthisday",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -1313,6 +1314,9 @@ pub struct ConversationEngine {
     /// Images queued for the home channel (photo-retrieval answers). The poll loop drains and sends
     /// them as real Telegram photos — the conversation layer itself never touches the transport.
     photo_queue: Mutex<Vec<(Vec<u8>, String)>>,
+    /// Videos queued for the home channel (growing-up reels). Arc'd so a detached reel-builder task
+    /// can deliver its film after minutes of background work.
+    video_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
     /// How many delegated background jobs are in flight (a soft cap stops runaway fan-out).
     bg_jobs: Arc<AtomicUsize>,
 }
@@ -1358,6 +1362,7 @@ impl ConversationEngine {
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Mutex::new(Vec::new()),
+            video_queue: Arc::new(Mutex::new(Vec::new())),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -6196,6 +6201,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "of", "the", "a", "an", "and", "me", "my", "your", "our", "us", "we", "in", "at", "on",
             "with", "from", "send", "show", "share", "find", "get", "pull", "please", "can",
             "could", "you", "some", "any", "one", "wearing", "her", "his", "their",
+            "more", "another", "again", "different", "else", "new", "boss", "need", "i",
         ];
         let desc = restq.split_whitespace().filter(|w| !stop.contains(w)).collect::<Vec<_>>().join(" ");
         // Candidates, best lane first: SEMANTIC search (CLIP over the whole archive) when the source
@@ -6216,6 +6222,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 if desc.is_empty() { String::new() } else { format!(" (\"{desc}\")") }
             );
         }
+        // "One more" must mean a DIFFERENT photo: prefer candidates not sent before (rolling 200).
+        let sent = self.photos_sent().await;
+        let unseen: Vec<mind_tools::PhotoAsset> = cands.iter().filter(|a| !sent.contains(&a.id)).cloned().collect();
+        let cands = if unseen.is_empty() { cands } else { unseen };
         // Pick + verify. Semantic hits are already meaning-ranked — vision-verify the top few so
         // what we send GENUINELY matches; the no-descriptor path just varies the pick.
         let chosen: Option<&mind_tools::PhotoAsset>;
@@ -6246,6 +6256,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         if !a.place.is_empty() {
                             cap.push_str(&format!(" · {}", a.place));
                         }
+                        self.note_photo_sent(&a.id).await;
                         self.photo_queue.lock().unwrap().push((bytes, cap));
                         return format!(
                             "Sending the library's closest match for \"{desc}\"{} — my eyes weren't 100% sure it's exactly that, so tell me if it's off. 📸",
@@ -6293,6 +6304,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if !desc.is_empty() {
             cap.push_str(&format!(" ({desc})"));
         }
+        self.note_photo_sent(&a.id).await;
         self.photo_queue.lock().unwrap().push((bytes, cap));
         let what = if label.is_empty() { "one from your library".to_string() } else { format!("one of {label}") };
         format!(
@@ -6304,6 +6316,139 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Drain images queued for the home channel (the poll loop sends them as real photos).
     pub fn take_outbound_photos(&self) -> Vec<(Vec<u8>, String)> {
         std::mem::take(&mut *self.photo_queue.lock().unwrap())
+    }
+
+    /// ---------- LIVING MEMORY ----------
+    /// The archive as autobiographical memory: a GROWING-UP REEL (best face per month across the
+    /// whole library, face-centered crops, chronological film) and ON-THIS-DAY resurfacing (a real
+    /// photo from this exact day in past years, captioned from saved face data + EXIF place).
+
+    /// Build a growing-up time-lapse for a named person. Walks the archive month by month in a
+    /// detached task (minutes of work) and delivers the film through the video queue.
+    pub async fn build_growup_reel(&self, who: &str) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((idx, pid, display)) = self.resolve_face(&sources, who).await else {
+            return format!(
+                "No photo source knows a face named \"{}\" yet — answer my who-is-this questions (or name them in the photo app) and I can build their reel.",
+                who.trim()
+            );
+        };
+        let src_name = sources[idx].name().to_string();
+        let vq = self.video_queue.clone();
+        let nq = self.notify_queue.clone();
+        let disp = display.clone();
+        tokio::spawn(async move {
+            use chrono::Datelike;
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else { return };
+            let mut frames: Vec<(Vec<u8>, (f32, f32, f32, f32))> = Vec::new();
+            let (mut first_year, mut last_year) = (0i32, 0i32);
+            let end = chrono::Utc::now().date_naive();
+            let mut cur = chrono::NaiveDate::from_ymd_opt(2014, 1, 1).unwrap_or(end);
+            // Month by month, oldest → newest: the source's best (largest) face of this person.
+            while cur < end && frames.len() < 132 {
+                let nxt = if cur.month() == 12 {
+                    chrono::NaiveDate::from_ymd_opt(cur.year() + 1, 1, 1)
+                } else {
+                    chrono::NaiveDate::from_ymd_opt(cur.year(), cur.month() + 1, 1)
+                }
+                .unwrap_or(end);
+                let cands = src
+                    .taken_between(&format!("{cur}T00:00:00.000Z"), &format!("{nxt}T00:00:00.000Z"), &[pid.clone()], 3)
+                    .await;
+                let mut best: Option<(String, (f32, f32, f32, f32), f32)> = None;
+                for a in &cands {
+                    if let Some((x1, y1, x2, y2, pxw)) = src.face_box(&a.id, &pid).await {
+                        if pxw < 48.0 {
+                            continue; // too small to carry a frame
+                        }
+                        if best.as_ref().map_or(true, |b| pxw > b.2) {
+                            best = Some((a.id.clone(), (x1, y1, x2, y2), pxw));
+                        }
+                    }
+                }
+                if let Some((aid, bbox, _)) = best {
+                    let asset = mind_tools::PhotoAsset { id: aid, date: String::new(), place: String::new() };
+                    if let Some(bytes) = src.image_bytes(&asset).await {
+                        frames.push((bytes, bbox));
+                        if first_year == 0 {
+                            first_year = cur.year();
+                        }
+                        last_year = cur.year();
+                    }
+                }
+                cur = nxt;
+            }
+            let n = frames.len();
+            if n < 6 {
+                nq.lock().unwrap().push(format!(
+                    "🎞️ I couldn't build {disp}'s reel yet — only {n} clear face-months so far. The face backfill is still indexing 18 months of photos; try again once it finishes."
+                ));
+                return;
+            }
+            match mind_tools::face_reel_video(frames).await {
+                Some(mp4) => {
+                    let cap = format!("🎞️ {disp}, {first_year} → {last_year} — {n} months, one frame each. Watch them grow.");
+                    vq.lock().unwrap().push((mp4, cap));
+                }
+                None => {
+                    nq.lock().unwrap().push(format!("🎞️ I gathered {n} frames of {disp} but the video encode failed — that's the honest state."));
+                }
+            }
+        });
+        format!(
+            "🎞️ On it — walking your whole library month by month for {display}'s growing-up reel. It'll land here in a few minutes."
+        )
+    }
+
+    /// ON THIS DAY — a real photo from this exact date in a past year, captioned with who's in it
+    /// (saved face data) and where (EXIF). Queued onto the photo lane; rides the morning briefing.
+    pub async fn queue_on_this_day(&self) -> bool {
+        use chrono::Datelike;
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some(src) = sources.iter().find(|s| s.knows_people()) else { return false };
+        let today = local_now();
+        for back in 1..=10 {
+            let Some(day) = chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day()) else {
+                continue;
+            };
+            let Some(nxt) = day.succ_opt() else { continue };
+            let hits = src.taken_between(&format!("{day}T00:00:00.000Z"), &format!("{nxt}T00:00:00.000Z"), &[], 6).await;
+            if hits.is_empty() {
+                continue;
+            }
+            // Prefer a photo with named people in it — a memory is about WHO.
+            let mut pick: Option<(&mind_tools::PhotoAsset, Vec<String>)> = None;
+            for a in hits.iter().take(6) {
+                let (names, _) = src.people_in(&a.id).await;
+                if !names.is_empty() {
+                    pick = Some((a, names));
+                    break;
+                }
+                if pick.is_none() {
+                    pick = Some((a, Vec::new()));
+                }
+            }
+            let Some((a, names)) = pick else { continue };
+            let Some(bytes) = src.image_bytes(a).await else { continue };
+            let years = if back == 1 { "a year ago today".to_string() } else { format!("{back} years ago today") };
+            let mut cap = format!("📸 {years} — {}", day.format("%b %d, %Y"));
+            if !names.is_empty() {
+                cap.push_str(&format!(" · {}", names.join(", ")));
+            }
+            if !a.place.is_empty() {
+                cap.push_str(&format!(" · {}", a.place));
+            }
+            self.note_photo_sent(&a.id).await;
+            self.photo_queue.lock().unwrap().push((bytes, cap));
+            return true;
+        }
+        false
+    }
+
+    /// Drain reel videos queued for the home channel.
+    pub fn take_outbound_videos(&self) -> Vec<(Vec<u8>, String)> {
+        std::mem::take(&mut *self.video_queue.lock().unwrap())
     }
 
     /// ---------- ASK-WHO-IS-WHO ----------
@@ -6418,6 +6563,28 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
 
     async fn save_whois_asked(&self, v: &[String]) {
         let _ = self.memory.profile_set("whois_asked", &serde_json::to_string(v).unwrap_or_default()).await;
+    }
+
+    /// Rolling memory of photos already sent to the chat — "show me another" excludes these.
+    async fn photos_sent(&self) -> Vec<String> {
+        self.memory
+            .profile_get("photos_sent")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn note_photo_sent(&self, id: &str) {
+        let mut v = self.photos_sent().await;
+        v.retain(|x| x != id);
+        v.push(id.to_string());
+        if v.len() > 200 {
+            let cut = v.len() - 200;
+            v.drain(..cut);
+        }
+        let _ = self.memory.profile_set("photos_sent", &serde_json::to_string(&v).unwrap_or_default()).await;
     }
 
     /// Our own face-id → name map, learned from who-is-this answers (the source stays read-only).
@@ -7445,6 +7612,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
             "photo" | "pic" if !rest.trim().is_empty() => self.photo_find_and_send(rest.trim()).await,
+            "reel" | "growup" | "timelapse" if !rest.trim().is_empty() => self.build_growup_reel(rest.trim()).await,
+            "memories" | "onthisday" | "memory" if rest.trim().is_empty() => {
+                if self.queue_on_this_day().await {
+                    "📸 Found one — sending a memory from this day in a past year.".to_string()
+                } else {
+                    "No photos from this exact day in past years (yet — the library index is still growing).".to_string()
+                }
+            }
             "whois" | "who-is-this" => {
                 let _ = self.memory.profile_set("whois_force", "1").await;
                 "👀 On it — sending the next unknown face to Telegram; reply there with who it is (or \"skip\").".to_string()
@@ -8515,6 +8690,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { self.photo_patterns(None, None, 10).await } else { self.photo_patterns(None, Some(nm.trim()), 10).await }
             }
+            "growup_reel" | "reel" | "timelapse" => {
+                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
+            }
+            "on_this_day" | "memory_photo" => {
+                if self.queue_on_this_day().await {
+                    "Sent a photo memory from this day in a past year.".to_string()
+                } else {
+                    "No photos from this exact day in past years.".to_string()
+                }
+            }
             "ask_whois" => {
                 let _ = self.memory.profile_set("whois_force", "1").await;
                 "Queued — the next unknown face goes to the chat momentarily.".to_string()
@@ -9013,6 +9199,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - photo_send {query}: find a REAL photo in the user's own libraries (face-matched people + semantic search over the whole archive) and SEND it to the chat — use for ANY 'show/send me a photo/pic of X', including events like 'our wedding'\n\
 - photo_patterns {name?}: read someone's photos and learn their style/preferences (no name = recent across libraries)\n\
 - ask_whois {}: send the next unknown-face 'who is this?' question to the chat\n\
+- growup_reel {name}: build a time-lapse FILM of a person growing up (best face per month across the whole photo archive) and send it — pure magic for family\n\
+- on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\

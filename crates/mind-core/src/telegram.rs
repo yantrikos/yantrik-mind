@@ -242,6 +242,37 @@ async fn tg_send_photo(api: &str, chat_id: i64, jpeg: Vec<u8>, caption: &str) ->
     .unwrap_or(false)
 }
 
+/// Send a video (MP4 bytes) with a caption — curl multipart like sendPhoto.
+async fn tg_send_video(api: &str, chat_id: i64, mp4: Vec<u8>, caption: &str) -> bool {
+    let api_owned = api.to_string();
+    let caption: String = caption.chars().take(1000).collect();
+    tokio::task::spawn_blocking(move || -> bool {
+        let tag = format!("{}_{}", std::process::id(), now_ms());
+        let path = std::env::temp_dir().join(format!("ym_vid_{tag}.mp4"));
+        if std::fs::write(&path, &mp4).is_err() {
+            return false;
+        }
+        let out = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "--form-string",
+                &format!("chat_id={chat_id}"),
+                "--form-string",
+                &format!("caption={caption}"),
+                "--form-string",
+                "supports_streaming=true",
+                "-F",
+                &format!("video=@{}", path.to_str().unwrap_or_default()),
+                &format!("{api_owned}/sendVideo"),
+            ])
+            .output();
+        let _ = std::fs::remove_file(&path);
+        out.map(|o| String::from_utf8_lossy(&o.stdout).contains("\"ok\":true")).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Download a Telegram file by file_id (getFile → /file/bot path). Shared by photo analysis.
 async fn tg_download(api: &str, file_id: &str) -> Option<Vec<u8>> {
     let api_owned = api.to_string();
@@ -754,6 +785,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     if tg_send(&api, chat, &msg).await.is_ok() {
                         eprintln!("[briefing] sent the daily morning briefing ({} chars)", msg.len());
                         conv.note_proactive_sent().await;
+                        // A real photo memory from this day in a past year rides the briefing —
+                        // queued here, delivered by the photo drain a tick later.
+                        if conv.queue_on_this_day().await {
+                            eprintln!("[briefing] attached an on-this-day photo memory");
+                        }
                     }
                 }
             }
@@ -858,6 +894,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Compaction tick: absorb aging turns into the persisted rolling summary (continuity beyond
         // the raw-turn window; survives restarts). Cheap early-return until enough turns accrue.
         conv.compact_conversation().await;
+
+        // Outbound video queue: growing-up reels finished by the detached builder task.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 {
+                for (mp4, caption) in conv.take_outbound_videos() {
+                    if tg_send_video(&api, chat, mp4, &caption).await {
+                        eprintln!("[reel] delivered: {caption}");
+                    } else {
+                        eprintln!("[reel] send failed: {caption}");
+                    }
+                }
+            }
+        }
 
         // Outbound photo queue: images the conversation layer decided to send (photo retrieval).
         // Direct answers to the user's own ask, so quiet-hours don't gate them.

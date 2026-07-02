@@ -771,6 +771,7 @@ pub struct PhotoPerson {
     pub name: String,
 }
 
+#[derive(Clone)]
 pub struct PhotoAsset {
     /// Source-native id (Immich asset id; FB uses the image URL itself).
     pub id: String,
@@ -932,6 +933,28 @@ impl PhotoSource {
         }
     }
 
+    /// Assets taken in a date range (face-aware sources; empty elsewhere).
+    pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], n: usize) -> Vec<PhotoAsset> {
+        match self {
+            PhotoSource::Immich(im) => im
+                .taken_between(after, before, person_ids, n)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .collect(),
+            PhotoSource::Facebook(_) => Vec::new(),
+        }
+    }
+
+    /// One person's face box in one asset (normalized 0..1 + pixel width), from saved face data.
+    pub async fn face_box(&self, asset_id: &str, person_id: &str) -> Option<(f32, f32, f32, f32, f32)> {
+        match self {
+            PhotoSource::Immich(im) => im.face_box(asset_id, person_id).await,
+            PhotoSource::Facebook(_) => None,
+        }
+    }
+
     /// Write a name back to the source's face cluster (sources that support it). Human-driven only:
     /// this fires exclusively from the user's own who-is-this answers.
     pub async fn name_person(&self, person_id: &str, name: &str) -> bool {
@@ -1051,6 +1074,58 @@ impl ImmichClient {
         .unwrap_or((Vec::new(), 0))
     }
 
+    /// Assets taken in a date range (ISO strings), optionally filtered to people — powers the
+    /// month-by-month reel walk and "on this day N years ago".
+    pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+        let (b, k, af, bf, pids) = (self.base.clone(), self.key.clone(), after.to_string(), before.to_string(), person_ids.to_vec());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+            let mut body = serde_json::json!({ "takenAfter": af, "takenBefore": bf, "size": size, "type": "IMAGE" });
+            if !pids.is_empty() {
+                body["personIds"] = serde_json::json!(pids);
+            }
+            let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(30))
+                .send_json(body)?
+                .into_json()?;
+            Ok(Self::parse_asset_items(&v))
+        })
+        .await?
+    }
+
+    /// The bounding box of ONE person's face in ONE asset, normalized to 0..1 — plus the face's
+    /// pixel width in the original image (a quality floor for reel frames). Largest match wins.
+    pub async fn face_box(&self, asset_id: &str, person_id: &str) -> Option<(f32, f32, f32, f32, f32)> {
+        let (b, k, aid, pid) = (self.base.clone(), self.key.clone(), asset_id.to_string(), person_id.to_string());
+        tokio::task::spawn_blocking(move || -> Option<(f32, f32, f32, f32, f32)> {
+            let v = Self::get_blocking(&b, &k, &format!("/api/faces?id={aid}")).ok()?;
+            let mut best: Option<(f32, f32, f32, f32, f32)> = None;
+            for face in v.as_array().cloned().unwrap_or_default() {
+                if face["person"]["id"].as_str() != Some(pid.as_str()) {
+                    continue;
+                }
+                let (w, h) = (face["imageWidth"].as_f64()? as f32, face["imageHeight"].as_f64()? as f32);
+                if w < 1.0 || h < 1.0 {
+                    continue;
+                }
+                let (x1, y1, x2, y2) = (
+                    face["boundingBoxX1"].as_f64().unwrap_or(0.0) as f32,
+                    face["boundingBoxY1"].as_f64().unwrap_or(0.0) as f32,
+                    face["boundingBoxX2"].as_f64().unwrap_or(0.0) as f32,
+                    face["boundingBoxY2"].as_f64().unwrap_or(0.0) as f32,
+                );
+                let pxw = x2 - x1;
+                if best.as_ref().map_or(true, |b| pxw > b.4) {
+                    best = Some((x1 / w, y1 / h, x2 / w, y2 / h, pxw));
+                }
+            }
+            best
+        })
+        .await
+        .ok()?
+    }
+
     /// Shared response walk: (asset_id, YYYY-MM-DD, "City, Country") triples.
     fn parse_asset_items(v: &serde_json::Value) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
@@ -1132,5 +1207,51 @@ impl ImmichClient {
         })
         .await?
     }
+}
+
+/// Render a "growing up" reel: for each (image bytes, normalized face box), crop a face-centered
+/// square (box expanded ~1.9x), resize to 512, and encode the chronological frames into an H.264
+/// time-lapse with ffmpeg. Returns MP4 bytes; None if too few frames survive or encoding fails.
+pub async fn face_reel_video(frames: Vec<(Vec<u8>, (f32, f32, f32, f32))>) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        let tag = format!("{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis());
+        let dir = std::env::temp_dir().join(format!("ym_reel_{tag}"));
+        std::fs::create_dir_all(&dir).ok()?;
+        let mut n = 0usize;
+        for (bytes, (nx1, ny1, nx2, ny2)) in &frames {
+            let Ok(img) = image::load_from_memory(bytes) else { continue };
+            let (w, h) = (img.width() as f32, img.height() as f32);
+            let (x1, y1, x2, y2) = (nx1 * w, ny1 * h, nx2 * w, ny2 * h);
+            let (cx, cy) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+            let side = ((x2 - x1).max(y2 - y1) * 1.9).min(w.min(h)).max(32.0);
+            let half = side / 2.0;
+            let left = (cx - half).clamp(0.0, (w - side).max(0.0));
+            let top = (cy - half).clamp(0.0, (h - side).max(0.0));
+            let crop = img.crop_imm(left as u32, top as u32, side as u32, side as u32);
+            let frame = crop.resize_exact(512, 512, image::imageops::FilterType::Triangle);
+            if frame.to_rgb8().save(dir.join(format!("f_{:04}.jpg", n))).is_ok() {
+                n += 1;
+            }
+        }
+        if n < 6 {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        }
+        let out = dir.join("reel.mp4");
+        let st = std::process::Command::new("ffmpeg")
+            .args([
+                "-y", "-loglevel", "error", "-framerate", "3",
+                "-i", dir.join("f_%04d.jpg").to_str()?,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                out.to_str()?,
+            ])
+            .status()
+            .ok()?;
+        let bytes = if st.success() { std::fs::read(&out).ok() } else { None };
+        let _ = std::fs::remove_dir_all(&dir);
+        bytes.filter(|b| b.len() > 10_000)
+    })
+    .await
+    .ok()?
 }
 

@@ -1348,3 +1348,62 @@ pub async fn enhance_photo(bytes: Vec<u8>, mode: &str) -> Option<Vec<u8>> {
     .ok()?
 }
 
+/// Compose a collage: face-centered square cells (when a face box is known) on a warm gutter grid.
+/// 2→2x1, 3→3x1, 4→2x2, 5-6→3x2, 7+→3x3. Returns JPEG bytes.
+pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        let n = cells.len().min(9);
+        if n < 2 {
+            return None;
+        }
+        let (cols, rows) = match n {
+            2 => (2u32, 1u32),
+            3 => (3, 1),
+            4 => (2, 2),
+            5 | 6 => (3, 2),
+            _ => (3, 3),
+        };
+        let n_used = (cols * rows) as usize;
+        let cell = 512u32;
+        let gut = 10u32;
+        let w = cols * cell + (cols + 1) * gut;
+        let h = rows * cell + (rows + 1) * gut;
+        let mut canvas = image::RgbImage::from_pixel(w, h, image::Rgb([246, 242, 236]));
+        let mut placed = 0u32;
+        for (bytes, bbox) in cells.iter().take(n_used) {
+            let Ok(img) = image::load_from_memory(bytes) else { continue };
+            let (iw, ih) = (img.width() as f32, img.height() as f32);
+            let (cx, cy, side) = match bbox {
+                Some((x1, y1, x2, y2)) => {
+                    let fx = (x1 + x2) / 2.0 * iw;
+                    let fy = (y1 + y2) / 2.0 * ih;
+                    // Wider than the reel crop — collages want outfit/body context, not just the face.
+                    let s = ((x2 - x1) * iw).max((y2 - y1) * ih) * 3.4;
+                    (fx, fy, s.min(iw.min(ih)).max(64.0))
+                }
+                None => (iw / 2.0, ih / 2.0, iw.min(ih)),
+            };
+            let half = side / 2.0;
+            let left = (cx - half).clamp(0.0, (iw - side).max(0.0));
+            let top = (cy - half).clamp(0.0, (ih - side).max(0.0));
+            let crop = img
+                .crop_imm(left as u32, top as u32, side as u32, side as u32)
+                .resize_exact(cell, cell, image::imageops::FilterType::Triangle)
+                .to_rgb8();
+            let ox = gut + (placed % cols) * (cell + gut);
+            let oy = gut + (placed / cols) * (cell + gut);
+            image::imageops::overlay(&mut canvas, &crop, ox as i64, oy as i64);
+            placed += 1;
+        }
+        if placed < 2 {
+            return None;
+        }
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
+        image::DynamicImage::ImageRgb8(canvas).write_with_encoder(enc).ok()?;
+        Some(buf.into_inner())
+    })
+    .await
+    .ok()?
+}
+

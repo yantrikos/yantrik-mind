@@ -342,14 +342,14 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 50] = [
+    const CMDS: [&str; 54] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
         "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
-        "tastes", "taste", "preferences",
+        "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -794,6 +794,115 @@ async fn gift_task(
     Some(text)
 }
 
+/// Background body of a creative-studio job: select diverse matching photos (semantic + person
+/// + date-spread), compose (collage grid or single), caption (grounded, non-generic). Returns
+/// (image bytes, caption) for the photo queue plus a status line.
+async fn studio_task(
+    src_name: String,
+    person_ids: Vec<String>,
+    people_desc: String,
+    theme: String,
+    format: String,
+    count: usize,
+    caption_mood: String,
+    inference: InferencePool,
+    persona: String,
+) -> std::result::Result<(Vec<u8>, String), String> {
+    let sources = mind_tools::PhotoSource::all_from_env();
+    let src = sources
+        .into_iter()
+        .find(|s| s.name() == src_name)
+        .ok_or_else(|| "photo source vanished".to_string())?;
+    // Candidates: semantic when there's a theme (the whole archive by MEANING), else the people's
+    // recent photos. Person filters are AND — "us" means photos with both.
+    let cands = if theme.trim().is_empty() {
+        src.assets_of_people(&person_ids, 60).await
+    } else {
+        let mut c = src.search(&theme, &person_ids, 40).await;
+        if c.is_empty() && !person_ids.is_empty() {
+            c = src.assets_of_people(&person_ids, 60).await; // theme found nothing — fall back to the people
+        }
+        c
+    };
+    if cands.is_empty() {
+        return Err(format!("I searched the library for \"{theme}\" but nothing matched — honest miss."));
+    }
+    // Diversity: one per month first (different occasions/outfits live in different months),
+    // then fill by list order. Keeps a party collage from being nine frames of the same night.
+    let want = if format == "single" { 1 } else { count.clamp(2, 9) };
+    let mut chosen: Vec<&mind_tools::PhotoAsset> = Vec::new();
+    let mut months: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for a in &cands {
+        if chosen.len() >= want {
+            break;
+        }
+        let m: String = a.date.chars().take(7).collect();
+        if months.insert(m) {
+            chosen.push(a);
+        }
+    }
+    for a in &cands {
+        if chosen.len() >= want {
+            break;
+        }
+        if !chosen.iter().any(|c| c.id == a.id) {
+            chosen.push(a);
+        }
+    }
+    // Fetch bytes (+ face box of the first person for face-centered cells).
+    let mut cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)> = Vec::new();
+    let mut dates: Vec<String> = Vec::new();
+    let mut places: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for a in &chosen {
+        let Some(bytes) = src.image_bytes(a).await else { continue };
+        let bbox = match person_ids.first() {
+            Some(pid) => src.face_box(&a.id, pid).await.map(|(x1, y1, x2, y2, _)| (x1, y1, x2, y2)),
+            None => None,
+        };
+        if !a.date.is_empty() {
+            dates.push(a.date.clone());
+        }
+        if !a.place.is_empty() {
+            places.insert(a.place.clone());
+        }
+        cells.push((bytes, bbox));
+    }
+    if cells.is_empty() {
+        return Err("I found matches but couldn't fetch any images.".to_string());
+    }
+    dates.sort();
+    let span = match (dates.first(), dates.last()) {
+        (Some(a), Some(b)) if a != b => format!("{a} → {b}"),
+        (Some(a), _) => a.clone(),
+        _ => String::new(),
+    };
+    let place_note = places.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    // Compose.
+    let (img, kind) = if cells.len() >= 2 && format != "single" {
+        let n = cells.len();
+        match mind_tools::make_collage(cells).await {
+            Some(c) => (c, format!("collage of {n}")),
+            None => return Err("the collage composition failed — honest miss.".to_string()),
+        }
+    } else {
+        (cells.remove(0).0, "picture".to_string())
+    };
+    // Caption: unique + grounded — the substrate knows who these people are and when this was.
+    let prompt = format!(
+        "Write ONE unique {caption_mood} caption for a {kind} of {people_desc}. Theme: {theme}. Grounded details you may weave in (never invent others): dates {span}{}. Max 18 words. No hashtags. Not generic — make it feel written for THEM.",
+        if place_note.is_empty() { String::new() } else { format!("; places {place_note}") }
+    );
+    let cfg = GenerationConfig { max_tokens: 80, ..GenerationConfig::default() };
+    let caption = inference
+        .chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg)
+        .await
+        .ok()
+        .map(|r| r.text.trim().trim_matches('"').chars().take(200).collect::<String>())
+        .filter(|t| t.len() > 4)
+        .unwrap_or_else(|| format!("{people_desc} — {theme}"));
+    Ok((img, caption))
+}
+
 /// Render a taste accumulator as human-readable distributions with honest confidence tiers.
 fn render_tastes(acc: &serde_json::Value, disp: &str) -> String {
     let total = acc["total"].as_u64().unwrap_or(0);
@@ -944,6 +1053,22 @@ fn enhancement_mode(text: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Detect a CREATIVE photo ask (collage / vibe picture with caption) — routed to the studio lane
+/// before plain retrieval so "morning vibe picture of us" gets composed + captioned, not just found.
+fn creative_request(text: &str) -> Option<String> {
+    let l = text.trim().to_lowercase();
+    const KW: [&str; 12] = [
+        "collage", "montage", "vibe picture", "vibe photo", "vibe pic", "aesthetic pic",
+        "mood picture", "mood pic", "mood photo", "with a unique caption", "with unique caption",
+        "picture with a caption",
+    ];
+    if KW.iter().any(|k| l.contains(k)) {
+        Some(text.trim().to_string())
+    } else {
+        None
+    }
 }
 
 /// Detect a natural photo-retrieval ask ("send me a photo of Brishti in a red saree", "show me a
@@ -1783,9 +1908,9 @@ pub struct ConversationEngine {
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
-    /// Images queued for the home channel (photo-retrieval answers). The poll loop drains and sends
-    /// them as real Telegram photos — the conversation layer itself never touches the transport.
-    photo_queue: Mutex<Vec<(Vec<u8>, String)>>,
+    /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
+    /// loop drains and sends them as real Telegram photos. Arc'd so detached studio jobs can deliver.
+    photo_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
     /// Videos queued for the home channel (growing-up reels). Arc'd so a detached reel-builder task
     /// can deliver its film after minutes of background work.
     video_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
@@ -1838,7 +1963,7 @@ impl ConversationEngine {
             dmn_phase: Mutex::new(0),
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
-            photo_queue: Mutex::new(Vec::new()),
+            photo_queue: Arc::new(Mutex::new(Vec::new())),
             video_queue: Arc::new(Mutex::new(Vec::new())),
             last_photo: Mutex::new(None),
             studies: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -7062,6 +7187,110 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         std::mem::take(&mut *self.video_queue.lock().unwrap())
     }
 
+    /// ---------- CREATIVE STUDIO ----------
+    /// Free-form photo creation: "collage of Brishti from different parties and traditional
+    /// outfits", "morning vibe picture of us with a unique caption". Intent is parsed, photos are
+    /// selected for DIVERSITY (semantic theme + person filters + one-per-month spread), composed
+    /// (face-centered collage grid or single), and captioned with grounded, non-generic words.
+    pub async fn photo_create(&self, request: &str) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some(src_idx) = sources.iter().position(|s| s.knows_people()) else {
+            return "No face-aware photo source is connected — I can't compose from the library.".to_string();
+        };
+        // Parse the ask into structured intent.
+        let parse_prompt = format!(
+            "User request: \"{}\". Extract photo-creation intent. Output ONLY JSON: {{\"people\":[\"<names mentioned; 'me' for the user themself; 'us' for user+partner>\"],\"theme\":\"<subject/style terms like party traditional outfit / morning cozy light / beach>\",\"format\":\"<collage or single>\",\"count\":<4, 6 or 9 for collages; 1 for single>,\"caption_mood\":\"<warm/funny/poetic/romantic>\"}}",
+            request.trim()
+        );
+        let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
+        let v = self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&parse_prompt)], cfg)
+            .await
+            .map(|r| parse_json_obj(&r.text))
+            .unwrap_or_default();
+        let theme = v.get("theme").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let format_kind = v.get("format").and_then(|x| x.as_str()).unwrap_or("collage").trim().to_lowercase();
+        let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(6) as usize;
+        let caption_mood = v.get("caption_mood").and_then(|x| x.as_str()).unwrap_or("warm").trim().to_string();
+        // Resolve "me"/"us"/names to faces via the people layer + face-aware source.
+        let self_name = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default();
+        let spouse = self
+            .load_people_profiles()
+            .await
+            .iter()
+            .find(|p| p.get("relationship").and_then(|x| x.as_str()).map(|r| r.contains("wife") || r.contains("husband")).unwrap_or(false))
+            .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+            .unwrap_or_default();
+        let mut names: Vec<String> = Vec::new();
+        for p in v.get("people").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let Some(n) = p.as_str() else { continue };
+            match n.trim().to_lowercase().as_str() {
+                "me" | "myself" | "i" => {
+                    if !self_name.is_empty() {
+                        names.push(self_name.clone());
+                    }
+                }
+                "us" | "we" => {
+                    if !self_name.is_empty() {
+                        names.push(self_name.clone());
+                    }
+                    if !spouse.is_empty() {
+                        names.push(spouse.clone());
+                    }
+                }
+                other if other.len() > 1 => names.push(n.trim().to_string()),
+                _ => {}
+            }
+        }
+        names.dedup();
+        let mut person_ids: Vec<String> = Vec::new();
+        let mut resolved: Vec<String> = Vec::new();
+        for n in &names {
+            if let Some((_, pid, disp)) = self.resolve_face(&sources, n).await {
+                person_ids.push(pid);
+                resolved.push(disp);
+            }
+        }
+        if person_ids.is_empty() && !names.is_empty() {
+            return format!(
+                "I couldn't match {} to any face in the library — name them in the photo app (or answer my who-is-this questions) and I can compose with them.",
+                names.join("/")
+            );
+        }
+        let people_desc = if resolved.is_empty() { "the family library".to_string() } else { resolved.join(" and ") };
+        // Compose in the background — selection + composition + caption take a minute.
+        let guard = format!("create:{}", request.trim().to_lowercase().chars().take(48).collect::<String>());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "Already composing that one — it lands here shortly.".to_string();
+        }
+        let src_name = sources[src_idx].name().to_string();
+        let pq = self.photo_queue.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let inference = self.inference.clone();
+        let persona = self.persona.clone();
+        let theme2 = theme.clone();
+        let desc2 = people_desc.clone();
+        let fmt2 = format_kind.clone();
+        tokio::spawn(async move {
+            match studio_task(src_name, person_ids, desc2, theme2, fmt2, count, caption_mood, inference, persona).await {
+                Ok((img, caption)) => {
+                    pq.lock().unwrap().push((img, caption));
+                }
+                Err(msg) => {
+                    nq.lock().unwrap().push(format!("🎨 Couldn't compose it: {msg}"));
+                }
+            }
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!(
+            "🎨 Composing — {} of {people_desc}{} — it lands here in a minute or two.",
+            if format_kind == "single" { "a picture".to_string() } else { format!("a collage") },
+            if theme.is_empty() { String::new() } else { format!(" ({theme})") }
+        )
+    }
+
     /// ---------- TASTE DISTRIBUTIONS ----------
     /// From reads to STATISTICS: incremental batches accumulate categorical counts per person;
     /// frequencies become preference PROBABILITIES with sample-size confidence; milestone beliefs
@@ -8507,6 +8736,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     "No photos from this exact day in past years (yet — the library index is still growing).".to_string()
                 }
             }
+            "collage" | "montage" | "compose" | "studio" if !rest.trim().is_empty() => {
+                self.photo_create(rest.trim()).await
+            }
             "tastes" | "taste" | "preferences" if !rest.trim().is_empty() => {
                 let r = rest.trim();
                 let (r, fresh) = match r.strip_suffix(" fresh").or_else(|| r.strip_suffix(" reset")) {
@@ -9617,6 +9849,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
             }
+            "photo_create" | "collage" | "compose_photo" => {
+                let q = { let a = s("request"); if a.is_empty() { s("query") } else { a } };
+                if q.trim().is_empty() { "What should I compose? Describe the collage or picture.".to_string() } else { self.photo_create(q.trim()).await }
+            }
             "taste_profile" | "tastes" | "preference_profile" => {
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose tastes should I study?".to_string() } else { self.taste_study(nm.trim(), 40).await }
@@ -10153,6 +10389,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
+- photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
@@ -10366,6 +10603,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &brief, ws).await;
             return Ok(brief);
+        }
+        // Creative studio in the flow of chat: collage / vibe-picture asks compose + caption
+        // (checked BEFORE plain retrieval so they aren't swallowed by the find-a-photo path).
+        if let Some(req) = creative_request(user_text) {
+            let reply = self.photo_create(&req).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
         }
         // Photo retrieval in the flow of chat: "send/show me a photo of X" → find it in the photo
         // sources and ship the actual image to the home channel (queued; the poll loop sends it).

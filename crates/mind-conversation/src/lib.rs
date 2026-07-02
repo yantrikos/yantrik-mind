@@ -5841,7 +5841,75 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!("📘 Facebook synced — {learned} facts learned. {}", lines.join("; "))
     }
 
-    /// Daily FB refresh gate for the poll loop (data-only, no user-facing send).
+    /// FB PHOTO PATTERNS — fetch the user's uploaded + tagged photos, vision-describe each, then
+    /// distill recurring themes/activities/aesthetics into interest+preference beliefs. HONEST about
+    /// the Meta limit: the API never says WHO is in a photo, so people are described generically
+    /// (couple/family/solo) and wife-specific reads are inferential, not identified.
+    pub async fn fb_photo_patterns(&self, limit: usize) -> String {
+        let Some(fb) = mind_tools::FbClient::from_env() else {
+            return "Facebook isn't connected — that's the honest state.".to_string();
+        };
+        if mind_tools::VisionClient::from_env().is_none() {
+            return "I can't analyze photos — no vision model is configured (YM_VISION_MODEL).".to_string();
+        }
+        // Gather image URLs from both uploaded and tagged, newest first, deduped.
+        let mut urls: Vec<String> = Vec::new();
+        for kind in ["uploaded", "tagged"] {
+            if let Ok(r) = fb.photos(kind, limit).await {
+                for p in r.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                    if let Some(src) = p.get("images").and_then(|x| x.as_array()).and_then(|a| a.first()).and_then(|im| im.get("source")).and_then(|x| x.as_str()) {
+                        if !urls.contains(&src.to_string()) {
+                            urls.push(src.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        urls.truncate(limit);
+        if urls.is_empty() {
+            return "No Facebook photos came back to analyze (the token may lack photo scope or has none).".to_string();
+        }
+        // Describe each photo (one tight line; never guess names).
+        let mut descriptions: Vec<String> = Vec::new();
+        for u in &urls {
+            let Some(bytes) = mind_tools::fetch_image_bytes(u).await else { continue };
+            let d = self
+                .analyze_image_bytes(bytes, "image/jpeg",
+                    "In ONE line: the setting, the activity, who's in it (solo / couple / family / group — do NOT guess names), and the overall vibe/aesthetic.")
+                .await;
+            descriptions.push(d.lines().next().unwrap_or("").chars().take(160).collect());
+        }
+        if descriptions.is_empty() {
+            return "I could reach the photo list but couldn't fetch/analyze any images.".to_string();
+        }
+        // Distill patterns → concrete interest/preference statements.
+        let joined = descriptions.iter().enumerate().map(|(i, d)| format!("{}. {d}", i + 1)).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "These are one-line descriptions of {}'s Facebook photos (uploaded + tagged). Infer RECURRING patterns: favorite settings, activities, travel/aesthetic tastes, and the kinds of moments they capture. Where a couple or family recurs, note shared preferences (but never invent identities). Output 4-6 concrete statements, each a standalone preference/interest fact, one per line, no preamble.\n\n=== PHOTO DESCRIPTIONS ===\n{joined}",
+            self.memory.profile_get("name").await.ok().flatten().unwrap_or_else(|| "the user".into())
+        );
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+        let insights = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text.trim().to_string(),
+            Err(e) => return format!("Analyzed {} photos but couldn't distill patterns ({e}).", descriptions.len()),
+        };
+        let mut stored = 0;
+        for line in insights.lines() {
+            let stmt = line.trim().trim_start_matches(['-', '*', '•']).trim();
+            let stmt = stmt.get(stmt.find(char::is_alphabetic).unwrap_or(0)..).unwrap_or(stmt).trim();
+            if stmt.len() < 12 {
+                continue;
+            }
+            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                statement: format!("{stmt} (pattern from Facebook photos)"),
+                polarity: 1.0, weight: 0.6, source_event: Some("facebook-photos".into()), provenance: "facebook".into(),
+            }).await;
+            stored += 1;
+        }
+        format!("📸 Analyzed {} of your Facebook photos → {stored} pattern(s) learned:\n\n{insights}", descriptions.len())
+    }
+
+    /// Daily FB refresh gate for the poll loop    /// Daily FB refresh gate for the poll loop (data-only, no user-facing send).
     pub async fn fb_sync_due(&self) -> bool {
         if mind_tools::FbClient::from_env().is_none() {
             return false;
@@ -6839,6 +6907,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
             // --- facebook: read-only sync of the user's own profile (know-me lane) ---
+            "fb" | "facebook" if rest.trim().starts_with("photo") => {
+                let n: usize = rest.split_whitespace().nth(1).and_then(|x| x.parse().ok()).unwrap_or(10);
+                self.fb_photo_patterns(n).await
+            }
             "fb" | "facebook" => self.fb_sync().await,
             // --- bond: the relationship as the engine sees it (bias vector + mode + bursts) ---
             "bond" | "relationship" | "us" => match self.memory.relationship_lens().await {

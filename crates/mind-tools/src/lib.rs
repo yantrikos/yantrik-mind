@@ -522,6 +522,28 @@ impl VisionClient {
 
 /// Screenshot a rendered page (headless Chromium via snap_page.js) — JPEG bytes. SSRF-guarded like
 /// every fetch path; None on any failure (block/timeout) so callers stay honest about having no image.
+/// Fetch raw image bytes from a public URL (FB CDN photos) for the vision lane. SSRF-guarded,
+/// 8 MB cap, None on any failure.
+pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        use std::io::Read;
+        ssrf_check(&url).ok()?;
+        let mut buf = Vec::new();
+        ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .ok()?
+            .into_reader()
+            .take(8_000_000)
+            .read_to_end(&mut buf)
+            .ok()?;
+        if buf.len() < 1000 { None } else { Some(buf) }
+    })
+    .await
+    .ok()?
+}
+
 pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
@@ -592,6 +614,17 @@ impl FbClient {
     }
     pub async fn posts(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
         self.get("me/posts", "message,created_time", limit).await
+    }
+    /// Photos of a given kind ("uploaded" | "tagged") with image URLs.
+    pub async fn photos(&self, kind: &str, limit: usize) -> anyhow::Result<serde_json::Value> {
+        let url = format!(
+            "https://graph.facebook.com/v19.0/me/photos?type={kind}&fields=images&limit={limit}&access_token={}",
+            self.token
+        );
+        tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+            Ok(ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call()?.into_json()?)
+        })
+        .await?
     }
     /// Days until the token dies (Graph debug_token self-introspection). None if unknown.
     pub async fn days_to_expiry(&self) -> Option<i64> {

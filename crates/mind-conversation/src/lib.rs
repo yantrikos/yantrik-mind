@@ -4754,7 +4754,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     pub async fn person_about(&self, name: &str) -> String {
         let store = self.load_people_profiles().await;
         let q = name.trim().to_lowercase();
-        let p = match store.iter().find(|p| person_matches(p, &q)) {
+        // Exact name first — "Brishti" must never resolve to "Brishti's Mom" by substring accident.
+        let exact = store.iter().find(|p| {
+            p.get("name").and_then(|x| x.as_str()).map(|n| n.trim().to_lowercase() == q).unwrap_or(false)
+        });
+        let p = match exact.or_else(|| store.iter().find(|p| person_matches(p, &q))) {
             Some(p) => p,
             None => return format!("I don't know anyone called \"{}\" yet.", name.trim()),
         };

@@ -249,6 +249,14 @@ pub trait MemoryFacade: Send + Sync {
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;
 
+    /// Assert belief evidence stamped with a monotonic `evidence_version`. A write whose version is
+    /// not strictly greater than the last one applied to this belief is an out-of-order or replayed
+    /// update and is dropped, so a stale evidence packet can never silently overwrite a fresher
+    /// confidence score. Default: ignores the version (delegates to the unversioned path).
+    async fn remember_as_belief_versioned(&self, a: BeliefAssertion, _evidence_version: u64) -> Result<Belief> {
+        self.remember_as_belief(a).await
+    }
+
     // ── group-chat read-isolation (scoped variants; the unscoped methods above = unrestricted) ──
     /// Recall, FILTERED to what `viewer` may see (shared facts + their own private). Default: ignores
     /// scope (delegates to recall_typed) so non-isolating impls need no change.

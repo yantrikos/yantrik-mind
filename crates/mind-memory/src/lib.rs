@@ -61,6 +61,7 @@ enum Cmd {
     RecordProactiveOutcome { sent_ms: i64, engaged: bool, reply: Reply<()> },
     ProactiveReceptivity { reply: Reply<Option<f64>> },
     RelationshipLens { reply: Reply<Option<String>> },
+    BeliefCount { reply: Reply<u64> },
     ToolTrackRecord { reply: Reply<Vec<(String, f64, u64)>> },
     ActivityRhythm { local_offset_hours: i32, reply: Reply<Option<String>> },
     ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
@@ -1077,6 +1078,13 @@ impl MemoryHandle {
                             })();
                             let _ = reply.send(Ok(r));
                         }
+                        Cmd::BeliefCount { reply } => {
+                            let n: u64 = db
+                                .conn()
+                                .query_row("SELECT COUNT(*) FROM cognitive_nodes WHERE kind='belief'", [], |r| r.get(0))
+                                .unwrap_or(0);
+                            let _ = reply.send(Ok(n));
+                        }
                         Cmd::RelationshipLens { reply } => {
                             let mut parts: Vec<String> = Vec::new();
                             // Bond + leading trait -> how to speak. The APPLY side of personality:
@@ -1578,6 +1586,9 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn relationship_lens(&self) -> Result<Option<String>> {
         self.call(|reply| Cmd::RelationshipLens { reply }).await
+    }
+    async fn belief_count(&self) -> Result<u64> {
+        self.call(|reply| Cmd::BeliefCount { reply }).await
     }
 }
 

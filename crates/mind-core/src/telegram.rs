@@ -552,7 +552,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 // in the transcript so the conversation stays coherent.
                 if let Some(fid) = photo_fid {
                     let reply = match tg_download(&api2, &fid).await {
-                        Some(bytes) => conv2.analyze_image_bytes(bytes, "image/jpeg", &caption).await,
+                        Some(bytes) => conv2.analyze_photo_turn(bytes, &caption).await,
                         None => "I couldn't download that photo from Telegram — mind sending it again?".to_string(),
                     };
                     let _ = mem2.append_message("user", &format!("[sent a photo] {caption}")).await;
@@ -745,6 +745,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                             c.note_proactive_sent().await;
                         }
                     });
+                }
+            }
+        }
+
+        // Evening look-ahead tick: the THIRD daily beat — tomorrow's shape tonight (once per
+        // evening, persisted-by-date; same restart-safe pattern as the briefing).
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() {
+                if let Some(msg) = conv.evening_due().await {
+                    if tg_send(&api, chat, &msg).await.is_ok() {
+                        eprintln!("[evening] sent the look-ahead ({} chars)", msg.len());
+                        conv.note_proactive_sent().await;
+                    }
                 }
             }
         }

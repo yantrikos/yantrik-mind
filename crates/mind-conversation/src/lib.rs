@@ -458,6 +458,20 @@ fn episode_label(text: &str) -> &'static str {
     }
 }
 
+/// Is this turn about JARVIS ITSELF? Self-referential questions get the instrument panel in
+/// grounding — otherwise introspection routes through top-k recall and sees itself through a
+/// keyhole ("my memory is sparse", said the mind holding 800 beliefs).
+fn is_self_referential(text: &str) -> bool {
+    let l = text.to_lowercase();
+    const KEYS: [&str; 16] = [
+        "yourself", "your limitation", "your memory", "your abilities", "your capabilities",
+        "self-assessment", "self assessment", "who are you", "what are you", "how do you work",
+        "assess yourself", "about you", "are you able", "your tools", "reflect on your",
+        "what have you become",
+    ];
+    KEYS.iter().any(|k| l.contains(k))
+}
+
 fn person_matches(p: &serde_json::Value, q: &str) -> bool {
     person_matches_mode(p, q, MatchMode::Substring)
 }
@@ -5066,6 +5080,45 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         Some((summary, as_of))
     }
 
+    /// The INSTRUMENT PANEL for self-referential turns: real telemetry (belief count, family layer,
+    /// tool track record, open predictions, relationship state, self-build tail) so self-description
+    /// is grounded in measurements, not recall roulette.
+    async fn self_model_block(&self) -> String {
+        let mut s = String::from("\nYOUR OWN TELEMETRY (ground any self-description in THIS — do not undersell or invent):");
+        if let Ok(n) = self.memory.belief_count().await {
+            s.push_str(&format!("\n- durable beliefs held: {n}"));
+        }
+        let people = self.load_people_profiles().await;
+        if !people.is_empty() {
+            let names: Vec<&str> = people.iter().filter_map(|p| p.get("name").and_then(|x| x.as_str())).collect();
+            s.push_str(&format!("\n- people layer: {} profiles ({})", names.len(), names.join(", ")));
+        }
+        let preds = self.load_predictions().await;
+        let open = preds.iter().filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open").count();
+        s.push_str(&format!("\n- self-graded predictions: {open} open (first verdicts land at their deadlines)"));
+        if let Ok(Some(l)) = self.memory.relationship_lens().await {
+            s.push_str(&format!("\n- relationship state: {l}"));
+        }
+        if let Ok(tr) = self.memory.tool_track_record().await {
+            let top: Vec<String> = tr.iter().filter(|(_, _, n)| *n >= 2).take(5).map(|(t, r, n)| format!("{t} {:.0}% (n={n})", r * 100.0)).collect();
+            if !top.is_empty() {
+                s.push_str(&format!("\n- measured tool reliability (worst first): {}", top.join(" · ")));
+            }
+        }
+        let topics = self.load_news_topics().await;
+        if !topics.is_empty() {
+            s.push_str(&format!("\n- tracking for them: {}", topics.join(", ")));
+        }
+        let dir = std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".to_string());
+        if let Ok(log) = std::fs::read_to_string(format!("{dir}/evolution.log")) {
+            if let Some(last) = log.lines().last() {
+                s.push_str(&format!("\n- self-improvement loop, latest: {}", last.chars().take(120).collect::<String>()));
+            }
+        }
+        s.push('\n');
+        s
+    }
+
     /// Proactive gate for the morning briefing: if today's briefing hasn't gone out yet AND we're
     /// inside the morning window (YM_BRIEF_HOUR..YM_BRIEF_UNTIL, local), compose it, mark today done,
     /// and hand it back for the poll loop to send. Persisted by DATE (not an in-memory timer) so a
@@ -5351,7 +5404,35 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         n
     }
 
-    /// Analyze an image (a photo the user sent, or a page screenshot) with the vision model.
+    /// A photo turn from Telegram: vision-analyze, and if it's a RECEIPT, auto-log the expense
+    /// into the month's budget (the vision lane's first money job). The receipt marker line is
+    /// machine-parsed then stripped from what the user sees.
+    pub async fn analyze_photo_turn(&self, image: Vec<u8>, caption: &str) -> String {
+        let q = if caption.trim().is_empty() {
+            "Describe what's in this image and anything the user would want to know from it. Be concrete.".to_string()
+        } else {
+            caption.trim().to_string()
+        };
+        let prompt = format!(
+            "{q}\n\nIf (and only if) this image is a RECEIPT or BILL, also end your reply with exactly one line:\nRECEIPT: <total amount, digits only> | <merchant> | <one-word category like groceries/dining/gas/shopping>"
+        );
+        let mut reply = self.analyze_image_bytes(image, "image/jpeg", &prompt).await;
+        if let Some(pos) = reply.rfind("RECEIPT:") {
+            let line = reply[pos..].lines().next().unwrap_or("").to_string();
+            let parts: Vec<&str> = line.trim_start_matches("RECEIPT:").split('|').map(str::trim).collect();
+            if parts.len() >= 3 {
+                let amt: f64 = parts[0].chars().filter(|c| c.is_ascii_digit() || *c == '.').collect::<String>().parse().unwrap_or(0.0);
+                let category = parts[2].to_lowercase();
+                if amt > 0.0 && !category.is_empty() {
+                    let logged = self.expense_log(&format!("{amt} {category}")).await;
+                    reply = format!("{}\n\n💰 {} ({})", reply[..pos].trim_end(), logged, parts[1]);
+                }
+            }
+        }
+        reply
+    }
+
+    /// Analyze an image (a photo the user sent, or a page screenshot) with the vision model.    /// Analyze an image (a photo the user sent, or a page screenshot) with the vision model.
     /// Honest by construction: no configured model or a failed call says so — never a guessed caption.
     pub async fn analyze_image_bytes(&self, image: Vec<u8>, mime: &str, question: &str) -> String {
         let Some(v) = mind_tools::VisionClient::from_env() else {
@@ -5652,6 +5733,77 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let _ = self.memory.profile_set("task_nudges", &fired.to_string()).await;
         }
         out
+    }
+
+    /// The EVENING LOOK-AHEAD — the third daily beat: tomorrow's shape tonight, so the day starts
+    /// pre-loaded instead of surprising. Deterministic + persisted-by-date like the briefing.
+    pub async fn evening_lookahead(&self) -> String {
+        let now = local_now();
+        let tomorrow = now + chrono::Duration::days(1);
+        let tom_str = tomorrow.format("%Y-%m-%d").to_string();
+        let mut out = format!("🌙 Before tomorrow ({}) —", tomorrow.format("%A"));
+        let mut any = false;
+        let spine = self.upcoming_spine(4).await;
+        let mut tom_lines = Vec::new();
+        let mut soon_lines = Vec::new();
+        for (ms, line) in &spine {
+            let d = chrono::DateTime::from_timestamp_millis(*ms)
+                .map(|t| t.with_timezone(now.offset()).format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            if d == tom_str {
+                tom_lines.push(line.clone());
+            } else if *ms > now.timestamp_millis() {
+                soon_lines.push(line.clone());
+            }
+        }
+        if !tom_lines.is_empty() {
+            any = true;
+            out.push_str("\n\n📅 Tomorrow:");
+            for l in tom_lines.iter().take(5) {
+                out.push_str(&format!("\n  • {l}"));
+            }
+        }
+        if !soon_lines.is_empty() {
+            any = true;
+            out.push_str("\n\n⏳ Closing soon:");
+            for l in soon_lines.iter().take(3) {
+                out.push_str(&format!("\n  • {l}"));
+            }
+        }
+        // The nearest self-graded call, so the accountability is felt daily.
+        let preds = self.load_predictions().await;
+        if let Some(p) = preds
+            .iter()
+            .filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open")
+            .min_by_key(|p| p.get("resolve_by_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX))
+        {
+            let claim: String = p.get("claim").and_then(|x| x.as_str()).unwrap_or("").chars().take(110).collect();
+            let by = p.get("resolve_by").and_then(|x| x.as_str()).unwrap_or("?");
+            out.push_str(&format!("\n\n🔮 My nearest self-graded call: {claim}… (grades {by})"));
+            any = true;
+        }
+        if !any {
+            out.push_str(" clear runway. Nothing due, nothing closing. Sleep easy, bro.");
+        }
+        out
+    }
+
+    /// Once per evening (YM_EVENING_HOUR..YM_EVENING_UNTIL local, default 20..22), persisted by date.
+    pub async fn evening_due(&self) -> Option<String> {
+        let now = local_now();
+        let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);
+        let start: u32 = std::env::var("YM_EVENING_HOUR").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+        let end: u32 = std::env::var("YM_EVENING_UNTIL").ok().and_then(|s| s.parse().ok()).unwrap_or(22);
+        if hour < start || hour >= end {
+            return None;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let last = self.memory.profile_get("evening_last_date").await.ok().flatten().unwrap_or_default();
+        if last == today {
+            return None;
+        }
+        let _ = self.memory.profile_set("evening_last_date", &today).await;
+        Some(self.evening_lookahead().await)
     }
 
     async fn news_track(&self, topic: &str) -> String {
@@ -7960,6 +8112,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     ));
                 }
             }
+        }
+        // Self-referential turn -> the instrument panel (fixes introspection myopia).
+        if is_self_referential(user_text) {
+            grounding.push_str(&self.self_model_block().await);
         }
         // The relationship, applied: bond-earned voice + their current mode + burst-awareness.
         if let Ok(Some(lens)) = self.memory.relationship_lens().await {

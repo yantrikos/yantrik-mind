@@ -385,4 +385,8 @@ pub trait MemoryFacade: Send + Sync {
     async fn relationship_lens(&self) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Total durable beliefs held (for the self-model panel — introspection must not undersell).
+    async fn belief_count(&self) -> Result<u64> {
+        Ok(0)
+    }
 }

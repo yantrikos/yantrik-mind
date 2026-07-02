@@ -509,15 +509,24 @@ impl VisionClient {
         let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             if native {
                 // Ollama native: /api/chat with images array (600s — CPU/GPU local can be slow).
-                let body = serde_json::json!({
-                    "model": model, "stream": false,
-                    "messages": [{ "role": "user", "content": prompt, "images": [b64] }],
-                });
-                let resp: serde_json::Value = ureq::post(&format!("{base}/api/chat"))
-                    .set("content-type", "application/json")
-                    .timeout(std::time::Duration::from_secs(600))
-                    .send_json(body)?
-                    .into_json()?;
+                // Thinking models (qwen3.6) burn most of each call on chain-of-thought we discard —
+                // think:false makes extraction 2-5× faster; retry with default thinking if the
+                // model rejects the parameter.
+                let call = |think_off: bool| -> anyhow::Result<serde_json::Value> {
+                    let mut body = serde_json::json!({
+                        "model": model, "stream": false,
+                        "messages": [{ "role": "user", "content": prompt, "images": [b64] }],
+                    });
+                    if think_off {
+                        body["think"] = serde_json::json!(false);
+                    }
+                    Ok(ureq::post(&format!("{base}/api/chat"))
+                        .set("content-type", "application/json")
+                        .timeout(std::time::Duration::from_secs(600))
+                        .send_json(body)?
+                        .into_json()?)
+                };
+                let resp = call(true).or_else(|_| call(false))?;
                 Ok(resp["message"]["content"].as_str().unwrap_or("").to_string())
             } else {
                 let body = serde_json::json!({

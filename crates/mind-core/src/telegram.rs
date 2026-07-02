@@ -589,6 +589,31 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // routing is pinned to the PRIMARY's chat and set only after the owner resolves below —
             // a family member messaging can never redirect briefings/studies/gift-intel to their DM.
             last_activity = now_ms();
+            // A shared CONTACT CARD from the primary registers that person as a family member.
+            // ("Add her by phone number" — Telegram never exposes phone lookup to bots; the shared
+            // card carries the user id when the contact is on Telegram and their privacy allows.)
+            if let Some(contact) = msg.get("contact") {
+                let first = contact["first_name"].as_str().unwrap_or("").to_string();
+                let last = contact["last_name"].as_str().unwrap_or("").to_string();
+                let cuid = contact["user_id"].as_i64();
+                let from_id2 = msg["from"]["id"].as_i64().unwrap_or(0);
+                let (api2, conv2) = (api.clone(), conv.clone());
+                tokio::spawn(async move {
+                    let owner = conv2.resolve_owner(from_id2, false).await;
+                    let reply = if owner != mind_types::PRIMARY {
+                        "Only the primary can register members by contact card.".to_string()
+                    } else {
+                        match cuid {
+                            Some(id) if id != 0 => conv2.register_contact(&first, &last, id).await,
+                            _ => format!(
+                                "{first}'s contact card doesn't carry a Telegram id (not on Telegram, or their privacy hides it from bots) — simplest fix: have them send me one message, then tell me and I'll register them."
+                            ),
+                        }
+                    };
+                    let _ = tg_send(&api2, chat_id, &reply).await;
+                });
+                continue;
+            }
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
             // A voice note is a first-class turn: transcribed in the spawned task (whisper takes a
             // few seconds - never on the poll loop), answered in text AND voice.

@@ -5387,6 +5387,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!("guest:{tg_id}")
     }
 
+    /// Register a family member from a shared Telegram CONTACT CARD (primary-only path in the
+    /// transport). The card's user_id becomes their recognized identity with a private scope.
+    pub async fn register_contact(&self, first_name: &str, last_name: &str, tg_id: i64) -> String {
+        let name = format!("{first_name} {last_name}").trim().to_string();
+        let slug: String = first_name.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+        if slug.is_empty() || slug == mind_types::PRIMARY || slug == "shared" {
+            return "That contact name can't be used as a member id — add them with `person add <slug> <name> <tg-id>`.".to_string();
+        }
+        let mut people = self.load_people().await;
+        people.retain(|p| p.get("slug").and_then(|x| x.as_str()) != Some(slug.as_str()));
+        people.push(serde_json::json!({ "slug": slug, "name": name, "tg_id": tg_id, "relationship": "" }));
+        self.save_people(&people).await;
+        format!(
+            "✅ Registered {name} from the contact card — they get their own private space with me (their chats stay theirs, yours stay yours). I'll recognize them the moment they message. Add how they're related anytime: `person add {slug} {name} wife`."
+        )
+    }
+
     async fn person_add(&self, arg: &str) -> String {
         let toks: Vec<&str> = arg.split_whitespace().collect();
         if toks.len() < 2 {

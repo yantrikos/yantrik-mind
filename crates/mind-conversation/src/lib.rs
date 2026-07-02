@@ -342,13 +342,14 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 47] = [
+    const CMDS: [&str; 50] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
         "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
+        "tastes", "taste", "preferences",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -473,6 +474,59 @@ fn is_self_referential(text: &str) -> bool {
         "what have you become",
     ];
     KEYS.iter().any(|k| l.contains(k))
+}
+
+/// Render a taste accumulator as human-readable distributions with honest confidence tiers.
+fn render_tastes(acc: &serde_json::Value, disp: &str) -> String {
+    let total = acc["total"].as_u64().unwrap_or(0);
+    let mut out = format!("📊 {disp} — preference distributions from {total} photos:");
+    let counts = acc["counts"].as_object().cloned().unwrap_or_default();
+    let order = ["outfit", "outfit_color", "jewelry_tone", "setting", "vibe", "item"];
+    let label = |c: &str| match c {
+        "outfit" => "Outfit",
+        "outfit_color" => "Outfit color",
+        "jewelry_tone" => "Jewelry tone",
+        "setting" => "Setting",
+        "vibe" => "Vibe",
+        _ => "Recurring items",
+    };
+    for cat in order {
+        let Some(vals) = counts.get(cat).and_then(|x| x.as_object()) else { continue };
+        let cat_total: u64 = vals.values().filter_map(|v| v.as_u64()).sum();
+        if cat_total < 3 {
+            continue;
+        }
+        let mut v: Vec<(String, u64)> = vals.iter().map(|(k, n)| (k.clone(), n.as_u64().unwrap_or(0))).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let conf = if cat_total < 20 { "low conf." } else if cat_total < 80 { "medium conf." } else { "high conf." };
+        let tops = v
+            .iter()
+            .take(3)
+            .map(|(k, n)| format!("{k} {:.0}% ({n}/{cat_total})", *n as f64 * 100.0 / cat_total as f64))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        out.push_str(&format!("\n• {}: {tops} — {conf}", label(cat)));
+    }
+    if total == 0 {
+        out.push_str("\n(no photos studied yet)");
+    } else if total < 30 {
+        out.push_str("\n\n(early sample — probabilities sharpen with more photos; note the honest bias: photos over-represent occasions worth photographing)");
+    }
+    out
+}
+
+/// Count one categorical observation into the taste accumulator.
+fn bump_count(acc: &mut serde_json::Value, cat: &str, val: &str) {
+    let val = val.trim().to_lowercase();
+    if val.len() < 2 || val.len() > 28 || val == "none" || val == "n/a" || val == "unknown" {
+        return;
+    }
+    let c = &mut acc["counts"][cat];
+    if c.is_null() {
+        *c = serde_json::json!({});
+    }
+    let n = c[&val].as_u64().unwrap_or(0);
+    c[&val] = serde_json::json!(n + 1);
 }
 
 /// Fold vision's item names into canonical types so counts aggregate ("purse"/"tote" → handbag,
@@ -6640,6 +6694,133 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         std::mem::take(&mut *self.video_queue.lock().unwrap())
     }
 
+    /// ---------- TASTE DISTRIBUTIONS ----------
+    /// From reads to STATISTICS: study a person's photos in incremental batches, accumulating
+    /// categorical counts (outfit, color, jewelry tone, setting, vibe, items) into a persistent
+    /// per-person accumulator. Frequencies become preference PROBABILITIES whose confidence grows
+    /// with sample size; at every 40-photo milestone the dominant values are written as beliefs
+    /// whose WEIGHT encodes the confidence tier — the substrate's native probability language.
+    pub async fn taste_study(&self, who: &str, batch: usize) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((i, pid, disp)) = self.resolve_face(&sources, who).await else {
+            return format!("No photo source knows \"{}\" by face yet.", who.trim());
+        };
+        if mind_tools::VisionClient::from_env().is_none() {
+            return "No vision model configured — can't study photos.".to_string();
+        }
+        let key = format!("tastes:{}", disp.to_lowercase());
+        let acc: serde_json::Value = self
+            .memory
+            .profile_get(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "total": 0 }));
+        let total0 = acc["total"].as_u64().unwrap_or(0);
+        let already = render_tastes(&acc, &disp);
+        // The study pass runs detached — dozens of local vision reads take many minutes.
+        let src_name = sources[i].name().to_string();
+        let pid2 = pid.clone();
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let disp2 = disp.clone();
+        let batch = batch.clamp(10, 60);
+        tokio::spawn(async move {
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else { return };
+            let Some(vc) = mind_tools::VisionClient::from_env() else { return };
+            let key = format!("tastes:{}", disp2.to_lowercase());
+            let mut acc: serde_json::Value = mem
+                .profile_get(&key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "total": 0 }));
+            let seen: std::collections::HashSet<String> = acc["seen"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            let assets = src.assets_of_person(&pid2, 400).await;
+            let todo: Vec<mind_tools::PhotoAsset> = assets.into_iter().filter(|a| !seen.contains(&a.id)).take(batch).collect();
+            if todo.is_empty() {
+                nq.lock().unwrap().push(format!(
+                    "📊 {disp2}: every reachable photo is already studied ({} total) — the distribution is as sharp as the library allows for now.",
+                    acc["total"]
+                ));
+                return;
+            }
+            let prompt = r#"Analyze the MAIN person's appearance and the scene. Output ONLY JSON: {"outfit":"<type like saree/dress/kurta/casual-western or none>","outfit_color":"<dominant color or none>","jewelry_tone":"<gold/silver/mixed/none>","setting":"<home/outdoor/travel/restaurant/party/temple/studio>","vibe":"<festive/casual/formal/cozy>","items":["<other notable personal items>"]}. No brands, no names."#;
+            let mut n_new = 0u64;
+            for a in &todo {
+                let Some(bytes) = src.image_bytes(a).await else { continue };
+                let Ok(raw) = vc.analyze(prompt, bytes, "image/jpeg").await else { continue };
+                let v = parse_json_obj(&raw);
+                for cat in ["outfit", "outfit_color", "jewelry_tone", "setting", "vibe"] {
+                    if let Some(val) = v.get(cat).and_then(|x| x.as_str()) {
+                        bump_count(&mut acc, cat, val);
+                    }
+                }
+                for it in v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                    if let Some(t) = it.as_str() {
+                        let ty = normalize_item_type(t);
+                        if !ty.is_empty() {
+                            bump_count(&mut acc, "item", &ty);
+                        }
+                    }
+                }
+                if let Some(arr) = acc["seen"].as_array_mut() {
+                    arr.push(serde_json::json!(a.id));
+                }
+                n_new += 1;
+            }
+            let total = acc["total"].as_u64().unwrap_or(0) + n_new;
+            acc["total"] = serde_json::json!(total);
+            let _ = mem.profile_set(&key, &acc.to_string()).await;
+            // Milestone beliefs: dominant values become weight-encoded preference probabilities.
+            if n_new > 0 && total / 40 != (total - n_new) / 40 {
+                if let Some(counts) = acc["counts"].as_object() {
+                    for (cat, vals) in counts {
+                        let Some(vals) = vals.as_object() else { continue };
+                        let cat_total: u64 = vals.values().filter_map(|v| v.as_u64()).sum();
+                        if cat_total < 15 {
+                            continue;
+                        }
+                        if let Some((top, n)) = vals.iter().filter_map(|(k, v)| v.as_u64().map(|n| (k.clone(), n))).max_by_key(|(_, n)| *n) {
+                            let pct = n as f64 / cat_total as f64;
+                            if pct >= 0.4 {
+                                let weight = if cat_total >= 80 { 0.85 } else if cat_total >= 20 { 0.7 } else { 0.55 };
+                                let _ = mem.remember_as_belief(BeliefAssertion {
+                                    statement: format!(
+                                        "{disp2} (taste, {total} photos studied): {cat} is most often {top} — {:.0}% ({n}/{cat_total})",
+                                        pct * 100.0
+                                    ),
+                                    polarity: 1.0,
+                                    weight,
+                                    source_event: Some("taste-study".into()),
+                                    provenance: "photos".into(),
+                                }).await;
+                            }
+                        }
+                    }
+                }
+            }
+            nq.lock().unwrap().push(format!(
+                "{}\n\n(+{n_new} photos this pass — say `tastes {disp2}` anytime to keep sharpening)",
+                render_tastes(&acc, &disp2)
+            ));
+        });
+        if total0 > 0 {
+            format!("{already}\n\n📈 Studying {batch} more in the background — updated numbers will follow.")
+        } else {
+            format!("📊 First taste study of {disp} started ({batch} photos, local vision, background) — the distribution lands here when done.")
+        }
+    }
+
     /// ---------- OBJECT INVENTORY ----------
     /// Structured possession detection: walk a person's photos, extract every visible personal
     /// item as typed JSON (watch, handbag, saree, sunglasses, ...) → a persistent per-person
@@ -8132,6 +8313,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     "No photos from this exact day in past years (yet — the library index is still growing).".to_string()
                 }
             }
+            "tastes" | "taste" | "preferences" if !rest.trim().is_empty() => {
+                let mut it = rest.trim().splitn(2, char::is_whitespace);
+                let name = it.next().unwrap_or("").to_string();
+                let n: usize = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(40);
+                self.taste_study(&name, n).await
+            }
             "closet" | "wardrobe" | "inventory" | "items" if !rest.trim().is_empty() => {
                 let r = rest.trim();
                 let (name, fresh) = match r.strip_suffix(" fresh") {
@@ -9228,6 +9415,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
             }
+            "taste_profile" | "tastes" | "preference_profile" => {
+                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                if nm.trim().is_empty() { "Whose tastes should I study?".to_string() } else { self.taste_study(nm.trim(), 40).await }
+            }
             "person_items" | "inventory" | "closet" => {
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose photos should I inventory?".to_string() } else { self.person_inventory(nm.trim()).await }
@@ -9759,6 +9950,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
 - gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
+- taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\

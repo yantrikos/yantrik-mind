@@ -872,6 +872,39 @@ impl PhotoSource {
         }
     }
 
+    /// Whether the source can search photos by MEANING (CLIP) — "wedding", "beach sunset".
+    pub fn supports_search(&self) -> bool {
+        matches!(self, PhotoSource::Immich(_))
+    }
+
+    /// Semantic search over the whole archive, optionally filtered to people (AND).
+    pub async fn search(&self, query: &str, person_ids: &[String], n: usize) -> Vec<PhotoAsset> {
+        match self {
+            PhotoSource::Immich(im) => im
+                .smart_search(query, person_ids, n)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .collect(),
+            PhotoSource::Facebook(_) => Vec::new(),
+        }
+    }
+
+    /// Photos containing ALL the given people (couple/group shots).
+    pub async fn assets_of_people(&self, person_ids: &[String], n: usize) -> Vec<PhotoAsset> {
+        match self {
+            PhotoSource::Immich(im) => im
+                .assets_of_people(person_ids, n)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .collect(),
+            PhotoSource::Facebook(_) => Vec::new(),
+        }
+    }
+
     /// The image bytes for an asset (downscaled where the source supports it).
     pub async fn image_bytes(&self, asset: &PhotoAsset) -> Option<Vec<u8>> {
         match self {
@@ -928,6 +961,62 @@ impl ImmichClient {
         })
         .await
         .ok()?
+    }
+
+    /// Semantic (CLIP) search over the whole library, optionally person-filtered. This is the
+    /// "our wedding" lane: meaning-based recall across years of photos, not just recency.
+    pub async fn smart_search(&self, query: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+        let (b, k, q, pids) = (self.base.clone(), self.key.clone(), query.to_string(), person_ids.to_vec());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+            let mut body = serde_json::json!({ "query": q, "size": size, "type": "IMAGE" });
+            if !pids.is_empty() {
+                body["personIds"] = serde_json::json!(pids);
+            }
+            let v: serde_json::Value = ureq::post(&format!("{b}/api/search/smart"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(60))
+                .send_json(body)?
+                .into_json()?;
+            Ok(Self::parse_asset_items(&v))
+        })
+        .await?
+    }
+
+    /// Photo assets containing ALL the given people (AND filter) — couples/groups.
+    pub async fn assets_of_people(&self, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+        let (b, k, pids) = (self.base.clone(), self.key.clone(), person_ids.to_vec());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+            let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE" });
+            let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(30))
+                .send_json(body)?
+                .into_json()?;
+            Ok(Self::parse_asset_items(&v))
+        })
+        .await?
+    }
+
+    /// Shared response walk: (asset_id, YYYY-MM-DD, "City, Country") triples.
+    fn parse_asset_items(v: &serde_json::Value) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
+            let id = a["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            let date = a["fileCreatedAt"].as_str().unwrap_or("").chars().take(10).collect();
+            let ex = &a["exifInfo"];
+            let place = match (ex["city"].as_str(), ex["country"].as_str()) {
+                (Some(c), Some(co)) => format!("{c}, {co}"),
+                (Some(c), None) => c.to_string(),
+                _ => String::new(),
+            };
+            out.push((id, date, place));
+        }
+        out
     }
 
     /// Recent IMAGE assets regardless of person — same shape as assets_of_person, no filter.

@@ -491,10 +491,16 @@ fn photo_request(text: &str) -> Option<String> {
     let after = after.strip_prefix('s').unwrap_or(after).trim();
     let q = ["of ", "with ", "from ", "where "].iter().find_map(|p| after.strip_prefix(p)).unwrap_or(after);
     let q = q.trim().trim_end_matches(['?', '!', '.']).trim();
-    if q.len() < 2 || q.contains("http") {
+    if q.len() >= 2 && !q.contains("http") {
+        return Some(q.to_string());
+    }
+    // Descriptor BEFORE the noun ("our wedding photo") — pass the whole ask; the retrieval layer
+    // stop-filters it down to the real terms.
+    let whole = low.trim_end_matches(['?', '!', '.']).trim();
+    if whole.contains("http") || whole.len() < 2 {
         None
     } else {
-        Some(q.to_string())
+        Some(whole.to_string())
     }
 }
 
@@ -6109,10 +6115,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return "No photo source is connected (Immich / Facebook) — I have no library to pull from.".to_string();
         }
         let ql = query.trim().trim_end_matches(['?', '!', '.']).to_lowercase();
-        // Which known person (if any) does the query mention?
         let fm = self.face_names().await;
-        let mut person: Option<(usize, String, String)> = None;
-        'outer: for (i, src) in sources.iter().enumerate() {
+        // Collect EVERY known person the ask mentions ("me and Brishti at the beach") — and ground
+        // our/us/we/my (+ "of me"-style phrases, NOT the "show me" filler) to the user's own face,
+        // so "our wedding" filters to photos he's actually in.
+        let self_name = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default().to_lowercase();
+        let wants_self = ["our", "us", "we", "my"].iter().any(|w| ql.split_whitespace().any(|t| t == *w))
+            || ["me and", "and me", "of me", "with me"].iter().any(|p| ql.contains(p));
+        let mut src_idx: Option<usize> = None;
+        let mut person_ids: Vec<String> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for (i, src) in sources.iter().enumerate() {
             if !src.knows_people() {
                 continue;
             }
@@ -6122,41 +6135,62 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 } else {
                     p.name.clone()
                 };
-                if nm.len() > 1 && ql.contains(&nm.to_lowercase()) {
-                    person = Some((i, p.id.clone(), nm));
-                    break 'outer;
+                if nm.len() < 2 {
+                    continue;
+                }
+                let nml = nm.to_lowercase();
+                if ql.contains(&nml) {
+                    src_idx = Some(i);
+                    person_ids.push(p.id.clone());
+                    names.push(nm);
+                } else if wants_self && !self_name.is_empty() && nml == self_name {
+                    src_idx = Some(i);
+                    person_ids.push(p.id.clone());
                 }
             }
+            if src_idx.is_some() {
+                break; // person filters can't span sources
+            }
         }
-        let (idx, cands, label) = match &person {
-            Some((i, pid, nm)) => (*i, sources[*i].assets_of_person(pid, 24).await, nm.clone()),
-            None => (0, sources[0].recent_assets(24).await, String::new()),
-        };
-        if cands.is_empty() {
-            return if label.is_empty() {
-                "The photo library returned nothing to search.".to_string()
-            } else {
-                format!("The library knows {label} but returned no photos of them.")
-            };
-        }
-        // Descriptor = the query minus the person's name and filler words.
+        let label = names.join(" + ");
+        // Descriptor = the ask minus person names and filler words.
         let mut restq = ql.clone();
-        if !label.is_empty() {
-            restq = restq.replace(&label.to_lowercase(), " ");
+        for nm in &names {
+            restq = restq.replace(&nm.to_lowercase(), " ");
         }
         let stop = [
             "photo", "photos", "picture", "pictures", "pic", "pics", "image", "images", "snap",
-            "of", "the", "a", "an", "and", "me", "my", "your", "our", "us", "in", "at", "on",
+            "of", "the", "a", "an", "and", "me", "my", "your", "our", "us", "we", "in", "at", "on",
             "with", "from", "send", "show", "share", "find", "get", "pull", "please", "can",
             "could", "you", "some", "any", "one", "wearing", "her", "his", "their",
         ];
         let desc = restq.split_whitespace().filter(|w| !stop.contains(w)).collect::<Vec<_>>().join(" ");
+        // Candidates, best lane first: SEMANTIC search (CLIP over the whole archive) when the source
+        // has it and there's a descriptor; person-filtered metadata otherwise; recent sweep as floor.
+        let idx = src_idx.unwrap_or(0);
+        let searched = !desc.is_empty() && sources[idx].supports_search();
+        let cands: Vec<mind_tools::PhotoAsset> = if searched {
+            sources[idx].search(&desc, &person_ids, 12).await
+        } else if !person_ids.is_empty() {
+            sources[idx].assets_of_people(&person_ids, 24).await
+        } else {
+            sources[idx].recent_assets(24).await
+        };
+        if cands.is_empty() {
+            return format!(
+                "I searched the library{}{} and nothing came back — honestly empty-handed.",
+                if label.is_empty() { String::new() } else { format!(" for {label}") },
+                if desc.is_empty() { String::new() } else { format!(" (\"{desc}\")") }
+            );
+        }
+        // Pick + verify. Semantic hits are already meaning-ranked — vision-verify the top few so
+        // what we send GENUINELY matches; the no-descriptor path just varies the pick.
         let chosen: Option<&mind_tools::PhotoAsset>;
         let mut chosen_bytes: Option<Vec<u8>> = None;
-        if desc.len() >= 3 && mind_tools::VisionClient::from_env().is_some() {
-            // Vision-screen candidates until one clearly matches the descriptor (bounded to 8 looks).
+        if !desc.is_empty() && mind_tools::VisionClient::from_env().is_some() {
             let mut hit: Option<&mind_tools::PhotoAsset> = None;
-            for a in cands.iter().take(8) {
+            let look = if searched { 4 } else { 8 };
+            for a in cands.iter().take(look) {
                 let Some(bytes) = sources[idx].image_bytes(a).await else { continue };
                 let verdict = self
                     .analyze_image_bytes(bytes.clone(), "image/jpeg", &format!("Does this photo clearly show: {desc}? Answer only YES or NO."))
@@ -6167,6 +6201,27 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     break;
                 }
             }
+            if hit.is_none() && searched {
+                // CLIP ranked these best across the whole archive — send the top hit rather than
+                // refuse, but say the verifier wasn't sure.
+                if let Some(a) = cands.first() {
+                    if let Some(bytes) = sources[idx].image_bytes(a).await {
+                        let mut cap = format!("📸 closest match for \"{desc}\"");
+                        if !a.date.is_empty() {
+                            cap.push_str(&format!(" · {}", a.date));
+                        }
+                        if !a.place.is_empty() {
+                            cap.push_str(&format!(" · {}", a.place));
+                        }
+                        self.photo_queue.lock().unwrap().push((bytes, cap));
+                        return format!(
+                            "Sending the library's closest match for \"{desc}\"{} — my eyes weren't 100% sure it's exactly that, so tell me if it's off. 📸",
+                            if label.is_empty() { String::new() } else { format!(" with {label}") }
+                        );
+                    }
+                }
+                return format!("I searched for \"{desc}\" but couldn't fetch a matching image — honest miss.");
+            }
             if hit.is_none() {
                 return format!(
                     "I looked through {} recent {} and none clearly shows \"{desc}\" — being straight with you rather than sending a wrong one. Want me to dig further back?",
@@ -6176,7 +6231,6 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             chosen = hit;
         } else {
-            // No descriptor: vary the pick among the newest dozen so repeat asks feel alive.
             let n = cands.len().min(12).max(1);
             let pick = (chrono::Utc::now().timestamp_millis() as usize) % n;
             chosen = cands.get(pick);
@@ -8413,6 +8467,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
             "track_news" | "follow_news" => self.news_track(&s("topic")).await,
             "see_page" | "screenshot_page" | "look_at_page" => self.see_page(&s("url"), &s("question")).await,
+            "photo_send" | "send_photo" | "find_photo" => {
+                let q = { let a = s("query"); if a.is_empty() { s("text") } else { a } };
+                if q.is_empty() { "What photo should I look for?".to_string() } else { self.photo_find_and_send(&q).await }
+            }
+            "photo_patterns" | "photo_pattern" => {
+                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                if nm.trim().is_empty() { self.photo_patterns(None, None, 10).await } else { self.photo_patterns(None, Some(nm.trim()), 10).await }
+            }
+            "ask_whois" => {
+                let _ = self.memory.profile_set("whois_force", "1").await;
+                "Queued — the next unknown face goes to the chat momentarily.".to_string()
+            }
             "calendar_remove" | "remove_event" => {
                 let t = { let a = s("title"); if a.is_empty() { s("query") } else { a } };
                 self.calendar_remove(&t).await
@@ -8904,6 +8970,9 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - calendar_remove {title}: remove a calendar event by (partial) title — USE THIS when the user says an event/date is wrong or should go\n\
 - forget_date {name, label}: remove one dated entry (e.g. open house) from a person's profile — the other place a wrong date can live\n\
 - see_page {url, question?}: render a page in the real browser, screenshot it, and ANALYZE the image — use when text extraction fails or layout/visuals matter\n\
+- photo_send {query}: find a REAL photo in the user's own libraries (face-matched people + semantic search over the whole archive) and SEND it to the chat — use for ANY 'show/send me a photo/pic of X', including events like 'our wedding'\n\
+- photo_patterns {name?}: read someone's photos and learn their style/preferences (no name = recent across libraries)\n\
+- ask_whois {}: send the next unknown-face 'who is this?' question to the chat\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\

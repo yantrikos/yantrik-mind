@@ -1209,16 +1209,16 @@ impl ImmichClient {
     }
 }
 
-/// Render a "growing up" reel: for each (image bytes, normalized face box), crop a face-centered
-/// square (box expanded ~1.9x), resize to 512, and encode the chronological frames into an H.264
-/// time-lapse with ffmpeg. Returns MP4 bytes; None if too few frames survive or encoding fails.
-pub async fn face_reel_video(frames: Vec<(Vec<u8>, (f32, f32, f32, f32))>) -> Option<Vec<u8>> {
+/// Render a "growing up" reel, cinematic cut: each face-centered frame becomes a ~0.87s clip with
+/// a slow Ken Burns zoom and a month/year label, crossfaded into the next — 720p30 H.264. Frames
+/// arrive as (image bytes, normalized face box, label). None if too few frames or encoding fails.
+pub async fn face_reel_video(frames: Vec<(Vec<u8>, (f32, f32, f32, f32), String)>) -> Option<Vec<u8>> {
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         let tag = format!("{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis());
         let dir = std::env::temp_dir().join(format!("ym_reel_{tag}"));
         std::fs::create_dir_all(&dir).ok()?;
-        let mut n = 0usize;
-        for (bytes, (nx1, ny1, nx2, ny2)) in &frames {
+        let mut labels: Vec<String> = Vec::new();
+        for (bytes, (nx1, ny1, nx2, ny2), label) in &frames {
             let Ok(img) = image::load_from_memory(bytes) else { continue };
             let (w, h) = (img.width() as f32, img.height() as f32);
             let (x1, y1, x2, y2) = (nx1 * w, ny1 * h, nx2 * w, ny2 * h);
@@ -1228,28 +1228,112 @@ pub async fn face_reel_video(frames: Vec<(Vec<u8>, (f32, f32, f32, f32))>) -> Op
             let left = (cx - half).clamp(0.0, (w - side).max(0.0));
             let top = (cy - half).clamp(0.0, (h - side).max(0.0));
             let crop = img.crop_imm(left as u32, top as u32, side as u32, side as u32);
-            let frame = crop.resize_exact(512, 512, image::imageops::FilterType::Triangle);
-            if frame.to_rgb8().save(dir.join(format!("f_{:04}.jpg", n))).is_ok() {
-                n += 1;
+            let frame = crop.resize_exact(720, 720, image::imageops::FilterType::Triangle);
+            if frame.to_rgb8().save(dir.join(format!("f_{:04}.jpg", labels.len()))).is_ok() {
+                labels.push(label.clone());
             }
         }
+        let n = labels.len();
         if n < 6 {
             let _ = std::fs::remove_dir_all(&dir);
             return None;
         }
+        // Cinematic filtergraph: per-clip Ken Burns zoom + label, then a crossfade chain.
+        let clip_frames = 26; // @30fps ≈ 0.87s per month
+        let clip = clip_frames as f32 / 30.0;
+        let fade = 0.35f32;
+        let adv = clip - fade;
+        let font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+        let have_font = std::path::Path::new(font).exists();
+        let mut fg = String::new();
+        for (i, label) in labels.iter().enumerate() {
+            let dt = if have_font {
+                format!(
+                    ",drawtext=fontfile={font}:text='{}':x=36:y=h-84:fontsize=40:fontcolor=white@0.9:box=1:boxcolor=black@0.28:boxborderw=10",
+                    label.replace('\'', "")
+                )
+            } else {
+                String::new()
+            };
+            fg.push_str(&format!(
+                "[{i}:v]zoompan=z='min(zoom+0.0016,1.10)':d={clip_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x720:fps=30{dt}[v{i}];\n"
+            ));
+        }
+        let mut prev = "v0".to_string();
+        for k in 1..n {
+            let out_lbl = format!("x{k}");
+            fg.push_str(&format!(
+                "[{prev}][v{k}]xfade=transition=fade:duration={fade}:offset={:.3}[{out_lbl}];\n",
+                adv * k as f32
+            ));
+            prev = out_lbl;
+        }
+        let fg = fg.trim_end().trim_end_matches(';').to_string();
+        let script = dir.join("fg.txt");
+        std::fs::write(&script, &fg).ok()?;
         let out = dir.join("reel.mp4");
-        let st = std::process::Command::new("ffmpeg")
-            .args([
-                "-y", "-loglevel", "error", "-framerate", "3",
-                "-i", dir.join("f_%04d.jpg").to_str()?,
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                out.to_str()?,
-            ])
-            .status()
-            .ok()?;
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.arg("-y").arg("-loglevel").arg("error");
+        for i in 0..n {
+            cmd.arg("-i").arg(dir.join(format!("f_{:04}.jpg", i)));
+        }
+        cmd.arg("-filter_complex_script")
+            .arg(&script)
+            .arg("-map")
+            .arg(format!("[{prev}]"))
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-preset")
+            .arg("veryfast")
+            .arg("-crf")
+            .arg("21")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-movflags")
+            .arg("+faststart")
+            .arg(&out);
+        let st = cmd.status().ok()?;
         let bytes = if st.success() { std::fs::read(&out).ok() } else { None };
         let _ = std::fs::remove_dir_all(&dir);
         bytes.filter(|b| b.len() > 10_000)
+    })
+    .await
+    .ok()?
+}
+
+/// Photo enhancement (local, instant): auto = saturation lift + contrast + gentle sharpen; plus
+/// bw/warm/bright modes. Classical ops that give a real "pop" — honest about not being generative.
+pub async fn enhance_photo(bytes: Vec<u8>, mode: &str) -> Option<Vec<u8>> {
+    let mode = mode.to_string();
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        let img = image::load_from_memory(&bytes).ok()?;
+        let out: image::DynamicImage = match mode.as_str() {
+            "bw" => img.grayscale().adjust_contrast(14.0),
+            "bright" => img.brighten(20).adjust_contrast(6.0),
+            "warm" => {
+                let mut rgb = img.to_rgb8();
+                for p in rgb.pixels_mut() {
+                    p.0[0] = (p.0[0] as f32 * 1.07).min(255.0) as u8;
+                    p.0[2] = (p.0[2] as f32 * 0.93) as u8;
+                }
+                image::DynamicImage::ImageRgb8(rgb).brighten(5)
+            }
+            _ => {
+                let mut rgb = img.to_rgb8();
+                for p in rgb.pixels_mut() {
+                    let l = 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32;
+                    for c in 0..3 {
+                        let v = l + (p.0[c] as f32 - l) * 1.22;
+                        p.0[c] = v.clamp(0.0, 255.0) as u8;
+                    }
+                }
+                image::DynamicImage::ImageRgb8(rgb).adjust_contrast(9.0).brighten(4).unsharpen(1.2, 3)
+            }
+        };
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 92);
+        out.write_with_encoder(enc).ok()?;
+        Some(buf.into_inner())
     })
     .await
     .ok()?

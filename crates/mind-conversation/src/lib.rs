@@ -342,12 +342,12 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 39] = [
+    const CMDS: [&str; 41] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
         "photo", "photos", "pic", "pics", "whois", "immich", "fb", "see",
-        "reel", "growup", "timelapse", "memories", "onthisday",
+        "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -472,6 +472,26 @@ fn is_self_referential(text: &str) -> bool {
         "what have you become",
     ];
     KEYS.iter().any(|k| l.contains(k))
+}
+
+/// Photo-edit intent in a caption/message → enhancement mode. Conservative keyword map.
+fn enhancement_mode(text: &str) -> Option<&'static str> {
+    let l = text.to_lowercase();
+    if l.contains("black and white") || l.contains("b&w") || l.contains("monochrome") {
+        return Some("bw");
+    }
+    if l.contains("warm") {
+        return Some("warm");
+    }
+    if l.contains("brighten") || l.contains("brighter") {
+        return Some("bright");
+    }
+    for w in ["enhance", "beautify", "sharpen", "touch up", "touch-up", "make it pop", "fix this photo", "edit this photo", "improve this photo"] {
+        if l.contains(w) {
+            return Some("auto");
+        }
+    }
+    None
 }
 
 /// Detect a natural photo-retrieval ask ("send me a photo of Brishti in a red saree", "show me a
@@ -1317,6 +1337,8 @@ pub struct ConversationEngine {
     /// Videos queued for the home channel (growing-up reels). Arc'd so a detached reel-builder task
     /// can deliver its film after minutes of background work.
     video_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
+    /// The most recent photo the user sent in chat — "enhance it" follow-ups act on this.
+    last_photo: Mutex<Option<Vec<u8>>>,
     /// How many delegated background jobs are in flight (a soft cap stops runaway fan-out).
     bg_jobs: Arc<AtomicUsize>,
 }
@@ -1363,6 +1385,7 @@ impl ConversationEngine {
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Mutex::new(Vec::new()),
             video_queue: Arc::new(Mutex::new(Vec::new())),
+            last_photo: Mutex::new(None),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -5539,6 +5562,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// into the month's budget (the vision lane's first money job). The receipt marker line is
     /// machine-parsed then stripped from what the user sees.
     pub async fn analyze_photo_turn(&self, image: Vec<u8>, caption: &str) -> String {
+        // Remember the last photo received — "enhance it" style follow-ups act on it.
+        *self.last_photo.lock().unwrap() = Some(image.clone());
+        // ENHANCEMENT LANE: an edit-intent caption returns the edited photo, not a description.
+        if let Some(mode) = enhancement_mode(caption) {
+            return match mind_tools::enhance_photo(image, mode).await {
+                Some(out) => {
+                    self.photo_queue.lock().unwrap().push((out, format!("\u{2728} enhanced ({mode})")));
+                    format!("\u{2728} Done — enhanced it ({mode}), sending it back now.")
+                }
+                None => "I tried to enhance it but the edit failed on this image — honest miss.".to_string(),
+            };
+        }
         let q = if caption.trim().is_empty() {
             "Describe what's in this image and anything the user would want to know from it. Be concrete.".to_string()
         } else {
@@ -6226,6 +6261,24 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let sent = self.photos_sent().await;
         let unseen: Vec<mind_tools::PhotoAsset> = cands.iter().filter(|a| !sent.contains(&a.id)).cloned().collect();
         let cands = if unseen.is_empty() { cands } else { unseen };
+        // DATE-ANCHOR MEMORY (Pranab's insight): successful finds taught us WHEN things happened
+        // ("wedding" → 2016-03). Widen the pool with that date window so "another one" has real
+        // neighbors to draw from, not just the same CLIP top hits.
+        let mut cands = cands;
+        if !desc.is_empty() {
+            let anchors = self.photo_anchors().await;
+            for w in desc.split_whitespace().filter(|w| w.len() >= 4) {
+                if let Some(dt) = anchors.get(w).and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()) {
+                    let from = dt - chrono::Duration::days(6);
+                    let to = dt + chrono::Duration::days(7);
+                    for a in sources[idx].taken_between(&format!("{from}T00:00:00.000Z"), &format!("{to}T00:00:00.000Z"), &person_ids, 12).await {
+                        if !cands.iter().any(|c| c.id == a.id) {
+                            cands.push(a);
+                        }
+                    }
+                }
+            }
+        }
         // Pick + verify. Semantic hits are already meaning-ranked — vision-verify the top few so
         // what we send GENUINELY matches; the no-descriptor path just varies the pick.
         let chosen: Option<&mind_tools::PhotoAsset>;
@@ -6256,6 +6309,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         if !a.place.is_empty() {
                             cap.push_str(&format!(" · {}", a.place));
                         }
+                        self.note_photo_anchor(&desc, &a.date).await;
                         self.note_photo_sent(&a.id).await;
                         self.photo_queue.lock().unwrap().push((bytes, cap));
                         return format!(
@@ -6304,6 +6358,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if !desc.is_empty() {
             cap.push_str(&format!(" ({desc})"));
         }
+        if !desc.is_empty() {
+            self.note_photo_anchor(&desc, &a.date).await;
+        }
         self.note_photo_sent(&a.id).await;
         self.photo_queue.lock().unwrap().push((bytes, cap));
         let what = if label.is_empty() { "one from your library".to_string() } else { format!("one of {label}") };
@@ -6341,7 +6398,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             use chrono::Datelike;
             let sources = mind_tools::PhotoSource::all_from_env();
             let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else { return };
-            let mut frames: Vec<(Vec<u8>, (f32, f32, f32, f32))> = Vec::new();
+            let mut frames: Vec<(Vec<u8>, (f32, f32, f32, f32), String)> = Vec::new();
             let (mut first_year, mut last_year) = (0i32, 0i32);
             let end = chrono::Utc::now().date_naive();
             let mut cur = chrono::NaiveDate::from_ymd_opt(2014, 1, 1).unwrap_or(end);
@@ -6370,7 +6427,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 if let Some((aid, bbox, _)) = best {
                     let asset = mind_tools::PhotoAsset { id: aid, date: String::new(), place: String::new() };
                     if let Some(bytes) = src.image_bytes(&asset).await {
-                        frames.push((bytes, bbox));
+                        frames.push((bytes, bbox, cur.format("%b %Y").to_string()));
                         if first_year == 0 {
                             first_year = cur.year();
                         }
@@ -6408,6 +6465,58 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let sources = mind_tools::PhotoSource::all_from_env();
         let Some(src) = sources.iter().find(|s| s.knows_people()) else { return false };
         let today = local_now();
+        let sent = self.photos_sent().await;
+        // 1. A SIGNIFICANT day first — someone's birthday/anniversary from the people layer means
+        //    throwback photos OF THAT PERSON around this date in past years. A cloud gallery
+        //    resurfaces dates; this resurfaces the PERSON on their day, because the substrate
+        //    knows who they are. Narrated, not just dated.
+        let mmdd = today.format("%m-%d").to_string();
+        let store = self.load_people_profiles().await;
+        for p in &store {
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let dates = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let Some(label) = dates
+                .iter()
+                .find(|d| d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str()))
+                .and_then(|d| d.get("label").and_then(|x| x.as_str()))
+                .map(String::from)
+            else {
+                continue;
+            };
+            let Some((i, pid, disp)) = self.resolve_face(&sources, name).await else { continue };
+            for back in 1..=8 {
+                let Some(day) = chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day()) else {
+                    continue;
+                };
+                let from = day - chrono::Duration::days(3);
+                let to = day + chrono::Duration::days(4);
+                let hits = sources[i]
+                    .taken_between(&format!("{from}T00:00:00.000Z"), &format!("{to}T00:00:00.000Z"), &[pid.clone()], 4)
+                    .await;
+                for a in hits {
+                    if sent.contains(&a.id) {
+                        continue;
+                    }
+                    let Some(bytes) = sources[i].image_bytes(&a).await else { continue };
+                    let (names, _) = sources[i].people_in(&a.id).await;
+                    let when = format!("{} ({} years ago, around {disp}'s {label})", a.date, back);
+                    let story = self.narrate_memory(&bytes, &names, &when, &a.place).await;
+                    let mut cap = format!("🎉 {disp}'s {label} — {}", day.year());
+                    match story {
+                        Some(st) => cap.push_str(&format!("\n{st}")),
+                        None if !names.is_empty() => cap.push_str(&format!(" · {}", names.join(", "))),
+                        None => {}
+                    }
+                    self.note_photo_sent(&a.id).await;
+                    self.photo_queue.lock().unwrap().push((bytes, cap));
+                    return true;
+                }
+            }
+        }
+        // 2. Otherwise this exact day in a past year — still narrated (who they ARE + the scene).
         for back in 1..=10 {
             let Some(day) = chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day()) else {
                 continue;
@@ -6417,9 +6526,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if hits.is_empty() {
                 continue;
             }
-            // Prefer a photo with named people in it — a memory is about WHO.
             let mut pick: Option<(&mind_tools::PhotoAsset, Vec<String>)> = None;
             for a in hits.iter().take(6) {
+                if sent.contains(&a.id) {
+                    continue;
+                }
                 let (names, _) = src.people_in(&a.id).await;
                 if !names.is_empty() {
                     pick = Some((a, names));
@@ -6432,6 +6543,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let Some((a, names)) = pick else { continue };
             let Some(bytes) = src.image_bytes(a).await else { continue };
             let years = if back == 1 { "a year ago today".to_string() } else { format!("{back} years ago today") };
+            let when = format!("{} ({years})", day.format("%b %d, %Y"));
+            let story = self.narrate_memory(&bytes, &names, &when, &a.place).await;
             let mut cap = format!("📸 {years} — {}", day.format("%b %d, %Y"));
             if !names.is_empty() {
                 cap.push_str(&format!(" · {}", names.join(", ")));
@@ -6439,11 +6552,53 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if !a.place.is_empty() {
                 cap.push_str(&format!(" · {}", a.place));
             }
+            if let Some(st) = story {
+                cap.push_str(&format!("\n{st}"));
+            }
             self.note_photo_sent(&a.id).await;
             self.photo_queue.lock().unwrap().push((bytes, cap));
             return true;
         }
         false
+    }
+
+    /// One warm line for a photo memory: local vision reads the scene, the people layer knows who
+    /// they ARE (relationships), a small pass fuses them. The substrate-grounding is the moat — a
+    /// cloud gallery can say "3 years ago"; it can't say who these people are to you.
+    async fn narrate_memory(&self, bytes: &[u8], names: &[String], when: &str, place: &str) -> Option<String> {
+        let scene = self
+            .analyze_image_bytes(
+                bytes.to_vec(),
+                "image/jpeg",
+                "ONE short line: what's happening in this photo — setting, activity, mood. No names.",
+            )
+            .await;
+        let scene: String = scene.lines().next().unwrap_or("").chars().take(140).collect();
+        if scene.len() < 5 {
+            return None;
+        }
+        let store = self.load_people_profiles().await;
+        let mut who: Vec<String> = Vec::new();
+        for n in names.iter().take(4) {
+            let rel = store
+                .iter()
+                .find(|p| p.get("name").and_then(|x| x.as_str()).map(|s| s.eq_ignore_ascii_case(n)).unwrap_or(false))
+                .and_then(|p| p.get("relationship").and_then(|x| x.as_str()))
+                .unwrap_or("");
+            who.push(if rel.is_empty() { n.clone() } else { format!("{n} (his {rel})") });
+        }
+        let prompt = format!(
+            "Write ONE warm, personal sentence (max 22 words) captioning a photo memory for the user. Taken: {when}{}. People in it: {}. Scene: {scene}. Ground it ONLY in these facts — no invented details, no emoji, no preamble.",
+            if place.is_empty() { String::new() } else { format!(" in {place}") },
+            if who.is_empty() { "not identified".to_string() } else { who.join(", ") },
+        );
+        let cfg = GenerationConfig { max_tokens: 90, ..GenerationConfig::default() };
+        self.inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .await
+            .ok()
+            .map(|r| r.text.trim().trim_matches('"').chars().take(180).collect::<String>())
+            .filter(|t| t.len() > 10)
     }
 
     /// Drain reel videos queued for the home channel.
@@ -6563,6 +6718,31 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
 
     async fn save_whois_asked(&self, v: &[String]) {
         let _ = self.memory.profile_set("whois_asked", &serde_json::to_string(v).unwrap_or_default()).await;
+    }
+
+    /// Learned "when things happened" map (desc word → YYYY-MM-DD) from successful finds — the
+    /// metadata a find surfaces becomes searchable knowledge for the next ask.
+    async fn photo_anchors(&self) -> std::collections::HashMap<String, String> {
+        self.memory
+            .profile_get("photo_anchors")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn note_photo_anchor(&self, desc: &str, date: &str) {
+        if date.len() < 8 {
+            return;
+        }
+        let mut m = self.photo_anchors().await;
+        for w in desc.split_whitespace().filter(|w| w.len() >= 4).take(4) {
+            m.insert(w.to_string(), date.to_string());
+        }
+        if m.len() <= 300 {
+            let _ = self.memory.profile_set("photo_anchors", &serde_json::to_string(&m).unwrap_or_default()).await;
+        }
     }
 
     /// Rolling memory of photos already sent to the chat — "show me another" excludes these.
@@ -7612,6 +7792,39 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
             "photo" | "pic" if !rest.trim().is_empty() => self.photo_find_and_send(rest.trim()).await,
+            "enhance" | "beautify" => {
+                let r = rest.trim();
+                if r.is_empty() {
+                    let img = self.last_photo.lock().unwrap().clone();
+                    match img {
+                        Some(b) => match mind_tools::enhance_photo(b, "auto").await {
+                            Some(out) => {
+                                self.photo_queue.lock().unwrap().push((out, "✨ enhanced".to_string()));
+                                "✨ Enhanced your last photo — sending it back.".to_string()
+                            }
+                            None => "The enhancement failed on that image.".to_string(),
+                        },
+                        None => "Send me a photo first (or say `enhance <what to find>`).".to_string(),
+                    }
+                } else {
+                    // Find it in the library, then enhance the found copy before it ships.
+                    let msg = self.photo_find_and_send(r).await;
+                    let item = self.photo_queue.lock().unwrap().pop();
+                    match item {
+                        Some((bytes, cap)) => match mind_tools::enhance_photo(bytes.clone(), "auto").await {
+                            Some(out) => {
+                                self.photo_queue.lock().unwrap().push((out, format!("✨ {cap}")));
+                                format!("{msg} — enhanced ✨")
+                            }
+                            None => {
+                                self.photo_queue.lock().unwrap().push((bytes, cap));
+                                format!("{msg} (the enhancement failed, sending the original)")
+                            }
+                        },
+                        None => msg,
+                    }
+                }
+            }
             "reel" | "growup" | "timelapse" if !rest.trim().is_empty() => self.build_growup_reel(rest.trim()).await,
             "memories" | "onthisday" | "memory" if rest.trim().is_empty() => {
                 if self.queue_on_this_day().await {
@@ -8694,6 +8907,19 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
             }
+            "enhance_photo" => {
+                let img = self.last_photo.lock().unwrap().clone();
+                match img {
+                    Some(b) => match mind_tools::enhance_photo(b, "auto").await {
+                        Some(out) => {
+                            self.photo_queue.lock().unwrap().push((out, "✨ enhanced".to_string()));
+                            "Enhanced the photo and queued it to send back.".to_string()
+                        }
+                        None => "Enhancement failed on that image.".to_string(),
+                    },
+                    None => "No photo received yet to enhance.".to_string(),
+                }
+            }
             "on_this_day" | "memory_photo" => {
                 if self.queue_on_this_day().await {
                     "Sent a photo memory from this day in a past year.".to_string()
@@ -9201,6 +9427,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - ask_whois {}: send the next unknown-face 'who is this?' question to the chat\n\
 - growup_reel {name}: build a time-lapse FILM of a person growing up (best face per month across the whole photo archive) and send it — pure magic for family\n\
 - on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
+- enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
 - NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
         const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
 - discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\

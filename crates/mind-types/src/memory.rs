@@ -379,4 +379,10 @@ pub trait MemoryFacade: Send + Sync {
     async fn proactive_receptivity(&self) -> Result<Option<f64>> {
         Ok(None)
     }
+    /// One compact line fusing the engine's relationship state — bond level + leading personality
+    /// trait (how to SPEAK), the user's inferred current mode (what to MATCH), and any activity
+    /// burst today (when to be extra concise). None when the engine has nothing yet.
+    async fn relationship_lens(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }

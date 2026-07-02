@@ -6563,6 +6563,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     self.calendar_view().await
                 }
             }
+            // --- bond: the relationship as the engine sees it (bias vector + mode + bursts) ---
+            "bond" | "relationship" | "us" => match self.memory.relationship_lens().await {
+                Ok(Some(l)) => format!("🤝 Where we are: {l}."),
+                _ => "🤝 Still early — the bond grows from real engagement (replies to my pings, accepted suggestions). Give it a few days of living together.".to_string(),
+            },
             // --- rhythm: the engine's temporal read of your life (episodes → histograms) ---
             "rhythm" | "routine" => {
                 let off = local_now().offset().local_minus_utc() / 3600;
@@ -7955,6 +7960,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     ));
                 }
             }
+        }
+        // The relationship, applied: bond-earned voice + their current mode + burst-awareness.
+        if let Ok(Some(lens)) = self.memory.relationship_lens().await {
+            grounding.push_str(&format!("RELATIONSHIP LENS (adapt your voice to this): {lens}.\n\n"));
         }
         if let Ok(Some(note)) = self.memory.metacog_note().await {
             grounding.push_str(&format!(

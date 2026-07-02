@@ -28,7 +28,9 @@ use yantrikdb_core::state::{
     sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EpisodePayload,
     NodeId, NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
 };
+use yantrikdb_core::intent::IntentConfig;
 use yantrikdb_core::personality_bias::BondLevel;
+use yantrikdb_core::temporal::BurstConfig;
 use yantrikdb_core::world_model::{ActionKind as WmAction, ActionOutcome as WmOutcome, StateFeatures};
 use yantrikdb_core::{InteractionOutcome, YantrikDB};
 
@@ -58,6 +60,7 @@ enum Cmd {
     RecordToolOutcome { tool: String, ok: bool, reply: Reply<()> },
     RecordProactiveOutcome { sent_ms: i64, engaged: bool, reply: Reply<()> },
     ProactiveReceptivity { reply: Reply<Option<f64>> },
+    RelationshipLens { reply: Reply<Option<String>> },
     ToolTrackRecord { reply: Reply<Vec<(String, f64, u64)>> },
     ActivityRhythm { local_offset_hours: i32, reply: Reply<Option<String>> },
     ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
@@ -1074,6 +1077,51 @@ impl MemoryHandle {
                             })();
                             let _ = reply.send(Ok(r));
                         }
+                        Cmd::RelationshipLens { reply } => {
+                            let mut parts: Vec<String> = Vec::new();
+                            // Bond + leading trait -> how to speak. The APPLY side of personality:
+                            // the earned relationship visibly shapes the voice.
+                            if let Ok(store) = db.load_personality_bias_store() {
+                                let v = &store.current;
+                                let mut dims: Vec<(&str, f64)> = vec![
+                                    ("curiosity", v.curiosity),
+                                    ("proactivity", v.proactivity),
+                                    ("caution", v.caution),
+                                    ("warmth", v.warmth),
+                                    ("efficiency", v.efficiency),
+                                ];
+                                dims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                                let style = match store.bond_level {
+                                    BondLevel::Stranger => "warm but not presumptuous",
+                                    BondLevel::Acquaintance => "friendly, still earning trust",
+                                    BondLevel::Familiar => "relaxed and personal",
+                                    BondLevel::Bonded => "close-friend candor",
+                                    BondLevel::Trusted => "full candor — finish their thoughts",
+                                };
+                                if let Some((lead, x)) = dims.first() {
+                                    parts.push(format!(
+                                        "bond {:?} ({style}); leading trait {lead} {:.2}",
+                                        store.bond_level, x
+                                    ));
+                                }
+                            }
+                            // Inferred current mode -> what to match (execute vs explore vs rest).
+                            if let Ok(Some(t)) = db.top_intent(&IntentConfig::default()) {
+                                let d: String = t.description.chars().take(90).collect();
+                                parts.push(format!("their current mode: {d}"));
+                            }
+                            // A same-day activity burst -> be extra concise; maybe check in.
+                            if let Ok(b) = db.detect_episode_bursts(&BurstConfig::default()) {
+                                let now = now_secs();
+                                if let Some(x) = b.bursts.iter().rev().find(|x| now - x.window_end < 86_400.0 && x.z_score > 2.0) {
+                                    parts.push(format!(
+                                        "activity burst today ({} events, z={:.1}) — they may be slammed; be extra concise",
+                                        x.event_count, x.z_score
+                                    ));
+                                }
+                            }
+                            let _ = reply.send(Ok(if parts.is_empty() { None } else { Some(parts.join("; ")) }));
+                        }
                         Cmd::RecordToolOutcome { tool, ok, reply } => {
                             let outcome = if ok { InteractionOutcome::Accepted } else { InteractionOutcome::Rejected };
                             let r = db
@@ -1527,6 +1575,9 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn proactive_receptivity(&self) -> Result<Option<f64>> {
         self.call(|reply| Cmd::ProactiveReceptivity { reply }).await
+    }
+    async fn relationship_lens(&self) -> Result<Option<String>> {
+        self.call(|reply| Cmd::RelationshipLens { reply }).await
     }
 }
 

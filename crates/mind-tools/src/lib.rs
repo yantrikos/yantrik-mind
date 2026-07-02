@@ -465,3 +465,94 @@ mod tests {
         assert!(err.to_string().contains("SSRF"), "expected SSRF refusal, got: {err}");
     }
 }
+
+/// Vision — analyze an image with a multimodal model (openai-compatible providers). Powers
+/// see_page (rendered-page screenshots) and Telegram photo understanding. Fully env-configured:
+/// YM_VISION_MODEL = "provider:model" (default nanogpt:gpt-4o-mini) + that provider's key env.
+pub struct VisionClient {
+    base: String,
+    key: String,
+    model: String,
+}
+
+impl VisionClient {
+    pub fn from_env() -> Option<VisionClient> {
+        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "nanogpt:gpt-4o-mini".into());
+        let (prov, model) = spec.split_once(':').unwrap_or(("nanogpt", spec.as_str()));
+        let (base, key_env) = match prov {
+            "ollama-cloud" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY"),
+            "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY"),
+            "grok" => ("https://api.x.ai/v1", "GROK_API_KEY"),
+            _ => ("https://nano-gpt.com/api/v1", "NANOGPT_KEY"),
+        };
+        let key = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty())?;
+        Some(VisionClient { base: base.into(), key, model: model.to_string() })
+    }
+
+    pub async fn analyze(&self, prompt: &str, image: Vec<u8>, mime: &str) -> anyhow::Result<String> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&image);
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 900,
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{b64}") } }
+            ]}]
+        });
+        let (base, key) = (self.base.clone(), self.key.clone());
+        let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let resp: serde_json::Value = ureq::post(&format!("{base}/chat/completions"))
+                .set("authorization", &format!("Bearer {key}"))
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(120))
+                .send_json(body)?
+                .into_json()?;
+            Ok(resp["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
+        })
+        .await??;
+        if text.trim().is_empty() {
+            anyhow::bail!("vision model returned nothing");
+        }
+        Ok(text.trim().to_string())
+    }
+}
+
+/// Screenshot a rendered page (headless Chromium via snap_page.js) — JPEG bytes. SSRF-guarded like
+/// every fetch path; None on any failure (block/timeout) so callers stay honest about having no image.
+pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        ssrf_check(&url).ok()?;
+        let script = std::env::var("YM_SNAP_SCRIPT").unwrap_or_else(|_| "/opt/yantrik-mind/snap_page.js".into());
+        let dir = std::path::Path::new(&script).parent()?.to_path_buf();
+        let out = std::env::temp_dir().join(format!(
+            "ym_snap_{}_{}.jpg",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()
+        ));
+        let st = std::process::Command::new("timeout")
+            .arg("60")
+            .arg("node")
+            .arg(&script)
+            .arg(&url)
+            .arg(out.to_str()?)
+            .current_dir(&dir)
+            .status()
+            .ok()?;
+        if !st.success() {
+            let _ = std::fs::remove_file(&out);
+            return None;
+        }
+        let bytes = std::fs::read(&out).ok()?;
+        let _ = std::fs::remove_file(&out);
+        if bytes.len() < 2000 {
+            return None; // a blank/failed render, not a real page
+        }
+        Some(bytes)
+    })
+    .await
+    .ok()?
+}
+
+

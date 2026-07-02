@@ -212,6 +212,35 @@ async fn tg_send_voice(api: &str, chat_id: i64, text: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Download a Telegram file by file_id (getFile → /file/bot path). Shared by photo analysis.
+async fn tg_download(api: &str, file_id: &str) -> Option<Vec<u8>> {
+    let api_owned = api.to_string();
+    let fid = file_id.to_string();
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        use std::io::Read;
+        let meta: serde_json::Value = ureq::get(&format!("{api_owned}/getFile?file_id={fid}"))
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .ok()?
+            .into_json()
+            .ok()?;
+        let path = meta["result"]["file_path"].as_str()?;
+        let file_url = format!("{}/{}", api_owned.replacen("/bot", "/file/bot", 1), path);
+        let mut bytes = Vec::new();
+        ureq::get(&file_url)
+            .timeout(std::time::Duration::from_secs(60))
+            .call()
+            .ok()?
+            .into_reader()
+            .take(20_000_000)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(bytes)
+    })
+    .await
+    .ok()?
+}
+
 fn offset_path() -> String {
     std::env::var("YM_TG_OFFSET").unwrap_or_else(|_| "telegram_offset".to_string())
 }
@@ -497,7 +526,14 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .as_str()
                 .or_else(|| msg["audio"]["file_id"].as_str())
                 .map(String::from);
-            if text.is_empty() && voice_fid.is_none() {
+            // A photo is a first-class turn too: largest size, caption = the question.
+            let photo_fid = msg["photo"]
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(|p| p["file_id"].as_str())
+                .map(String::from);
+            let caption = msg["caption"].as_str().unwrap_or("").trim().to_string();
+            if text.is_empty() && voice_fid.is_none() && photo_fid.is_none() {
                 continue;
             }
             // Group-chat read-isolation: WHO is speaking (from.id) + on WHAT channel (private DM vs a
@@ -512,6 +548,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let (api2, mem2, conv2) = (api.clone(), mem.clone(), conv.clone());
             tokio::spawn(async move {
                 tg_typing(&api2, chat_id).await;
+                // Photo turn: download → vision-analyze (caption as the question) → reply. Recorded
+                // in the transcript so the conversation stays coherent.
+                if let Some(fid) = photo_fid {
+                    let reply = match tg_download(&api2, &fid).await {
+                        Some(bytes) => conv2.analyze_image_bytes(bytes, "image/jpeg", &caption).await,
+                        None => "I couldn't download that photo from Telegram — mind sending it again?".to_string(),
+                    };
+                    let _ = mem2.append_message("user", &format!("[sent a photo] {caption}")).await;
+                    let _ = mem2.append_message("assistant", &reply).await;
+                    if let Err(e) = tg_send(&api2, chat_id, &reply).await {
+                        eprintln!("[telegram] send error: {e}");
+                    }
+                    return;
+                }
                 let (text, via_voice) = if text.is_empty() {
                     match tg_voice_to_text(&api2, voice_fid.as_deref().unwrap_or_default()).await {
                         Some(t) => {

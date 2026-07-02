@@ -1133,6 +1133,32 @@ fn enhancement_mode(text: &str) -> Option<&'static str> {
     None
 }
 
+/// Member-path photo intent, looser than photo_request: family members ask in event language
+/// ("get one from Aadrisha's last birthday") with no photo-noun at all. Verb + event/photo word →
+/// hand the WHOLE ask to retrieval (it stop-filters and resolves people itself).
+fn member_photo_intent(text: &str) -> Option<String> {
+    let l = text.trim().to_lowercase();
+    let verb = ["get", "show", "send", "share", "find", "can you", "could you", "please"].iter().any(|v| l.contains(v));
+    if !verb {
+        return None;
+    }
+    let eventish = [
+        "birthday", "wedding", "anniversary", "trip", "vacation", "party", "puja", "festival",
+        "holiday", "photo", "picture", "pic", "image", "snap", "memories",
+    ]
+    .iter()
+    .any(|w| l.contains(w));
+    if !eventish {
+        return None;
+    }
+    let q = text.trim().trim_end_matches(['?', '!', '.']).to_string();
+    if q.len() < 4 || q.contains("http") {
+        None
+    } else {
+        Some(q)
+    }
+}
+
 /// Detect a CREATIVE photo ask (collage / vibe picture with caption) — routed to the studio lane
 /// before plain retrieval so "morning vibe picture of us" gets composed + captioned, not just found.
 fn creative_request(text: &str) -> Option<String> {
@@ -6882,6 +6908,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return "No photo source is connected (Immich / Facebook) — I have no library to pull from.".to_string();
         }
         let ql = query.trim().trim_end_matches(['?', '!', '.']).to_lowercase();
+        // "old/early/childhood/years ago" asks want the ARCHIVE, not the camera roll: widen the
+        // pool and walk it oldest-first.
+        let wants_old = ["old", "older", "early", "earliest", "childhood", "years ago", "long ago", "back then"]
+            .iter()
+            .any(|w| ql.contains(w));
         let fm = self.face_names().await;
         // Collect EVERY known person the ask mentions ("me and Brishti at the beach") — and ground
         // our/us/we/my (+ "of me"-style phrases, NOT the "show me" filler) to the user's own face,
@@ -6916,6 +6947,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 } else if wants_self && !self_name.is_empty() && nml == self_name {
                     src_idx = Some(i);
                     person_ids.push(p.id.clone());
+                    names.push(nm);
                 }
             }
             if src_idx.is_some() {
@@ -6934,6 +6966,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "with", "from", "send", "show", "share", "find", "get", "pull", "please", "can",
             "could", "you", "some", "any", "one", "wearing", "her", "his", "their",
             "more", "another", "again", "different", "else", "new", "boss", "need", "i",
+            "old", "older", "early", "earliest", "childhood", "ago", "long", "back", "then",
         ];
         let desc = restq.split_whitespace().filter(|w| !stop.contains(w)).collect::<Vec<_>>().join(" ");
         // Candidates, best lane first: SEMANTIC search (CLIP over the whole archive) when the source
@@ -6941,11 +6974,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let idx = src_idx.unwrap_or(0);
         let searched = !desc.is_empty() && sources[idx].supports_search();
         let cands: Vec<mind_tools::PhotoAsset> = if searched {
-            sources[idx].search(&desc, &person_ids, 12).await
+            sources[idx].search(&desc, &person_ids, if wants_old { 30 } else { 12 }).await
         } else if !person_ids.is_empty() {
-            sources[idx].assets_of_people(&person_ids, 24).await
+            sources[idx].assets_of_people(&person_ids, if wants_old { 80 } else { 24 }).await
         } else {
-            sources[idx].recent_assets(24).await
+            sources[idx].recent_assets(if wants_old { 80 } else { 24 }).await
         };
         if cands.is_empty() {
             return format!(
@@ -6957,7 +6990,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         // "One more" must mean a DIFFERENT photo: prefer candidates not sent before (rolling 200).
         let sent = self.photos_sent().await;
         let unseen: Vec<mind_tools::PhotoAsset> = cands.iter().filter(|a| !sent.contains(&a.id)).cloned().collect();
-        let cands = if unseen.is_empty() { cands } else { unseen };
+        let mut cands = if unseen.is_empty() { cands } else { unseen };
+        if wants_old {
+            // Oldest first — dated assets ascending, undated last. The no-descriptor pick and the
+            // verify walk both start from the archive's far end.
+            cands.sort_by(|a, b| match (a.date.is_empty(), b.date.is_empty()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a.date.cmp(&b.date),
+            });
+        }
         // DATE-ANCHOR MEMORY (Pranab's insight): successful finds taught us WHEN things happened
         // ("wedding" → 2016-03). Widen the pool with that date window so "another one" has real
         // neighbors to draw from, not just the same CLIP top hits.
@@ -10929,6 +10972,11 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         if let Some(reply) = self.member_task_turn(&id.owner, &name, user_text).await {
             return reply;
         }
+        // Looser photo intent for members: event phrasings without a photo-noun ("get one from
+        // Aadrisha's last birthday") still reach retrieval instead of the chat model.
+        if let Some(q) = member_photo_intent(user_text) {
+            return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
+        }
         let recent = self.memory.recent_messages_as(12, id.viewer()).await.unwrap_or_default();
         let convo = if recent.is_empty() {
             "(first conversation — greet them warmly by name, and in ONE short line mention what you can do for them: find family photos ('show me photos of…'), make collages, set reminders ('remind me to…'), and a daily morning brief ('brief me daily'))".to_string()
@@ -10936,7 +10984,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             recent.iter().map(|(role, text)| format!("{role}: {text}")).collect::<Vec<_>>().join("\n")
         };
         let sys = format!(
-            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- You can chat, answer questions, analyze photos they send, find/send family photos and collages, set reminders, and send a daily brief (all handled automatically — never claim you lack these).",
+            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- Capabilities like photo finding, collages, reminders and the daily brief are handled AUTOMATICALLY before your reply. If such a request still reached you, the handler missed it — ask them to rephrase (e.g. 'show me photos of Aadrisha'). You CANNOT attach or send files yourself: NEVER say you are sending/attaching a photo and NEVER claim one was sent.",
             self.persona,
             if rel.is_empty() { String::new() } else { format!(" ({primary_name}'s {rel})") },
         );

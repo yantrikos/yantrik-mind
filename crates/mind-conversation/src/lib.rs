@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 57] = [
+    const CMDS: [&str; 59] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -350,7 +350,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
-        "inboxes", "mailscan", "emailscan",
+        "inboxes", "mailscan", "emailscan", "mailrule", "mailrules",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -8488,10 +8488,32 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
         }
-        // Stage 3: the digest, grounded in verified content where it exists.
+        // Stage 3: the digest — strict taxonomy (exclusion rules beat vibes), user rules override.
+        let known_people: String = {
+            let mut names: Vec<String> = self
+                .load_people_profiles()
+                .await
+                .iter()
+                .filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+                .collect();
+            names.sort();
+            names.dedup();
+            names.join(", ")
+        };
+        let user_rules = self.mail_rules().await;
+        let rules_block = if user_rules.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nUSER RULES (these OVERRIDE every category rule):\n{}",
+                user_rules.iter().enumerate().map(|(i, r)| format!("{}. {r}", i + 1)).collect::<Vec<_>>().join("\n")
+            )
+        };
         let prompt = format!(
-            "Recent email HEADERS from the user's {} account(s), plus OPENED bodies for the few that matter. Produce a terse cross-account digest with EXACTLY these sections:\nNEEDS ACTION: things a human must handle — one line each with [account]. Check OPENED content first: a canceled/refunded reservation or order is NOT needs-action.\nRESOLVED: canceled/refunded/completed threads worth knowing about (from OPENED content)\nMONEY: bills/receipts/renewals — amounts and due dates ONLY if they appear in a subject or OPENED body, never invented\nWORTH A LOOK: genuinely important or interesting\nNOISE: one line — rough count + top 3 promo senders\nOmit any section with nothing in it.\n\nHEADERS:\n{headers}\n{opened}",
-            inboxes.len()
+            "Recent email HEADERS from the user's {} account(s), plus OPENED bodies for the few that matter. Produce a terse cross-account digest.\n\nCATEGORY RULES (strict — exclusions beat instincts):\nNEEDS ACTION: ONLY when inaction has a real consequence — payment due, deadline, reply owed to a real person, pending refund/dispute, delivery needing presence. Marketing calls-to-action (confirm/verify/rate/review/update-your-profile) are NEVER needs-action.\nFROM PEOPLE: written by an actual human personally addressing the user — never automated mail. Known people: {known}.\nMONEY IN MOTION: money still moving — bills due, upcoming renewals, pending refunds, price/plan changes. Completed order receipts are NOT money in motion.\nPURCHASES: order/shipping confirmations of already-completed purchases — compact, amounts only if shown.\nRESOLVED: threads verified closed in OPENED content (canceled, refunded, delivered, settled).\nWORTH A LOOK: important information with no action needed (statements ready, results, policy changes).\nNOISE: one line — promos, newsletters, engagement bait ('confirm your accounts', surveys, rate-your-purchase), and routine security notifications for activity the user likely caused themselves (e.g. an app password or 2FA change made today); rough count + top 3 senders.\n{rules}\nOmit any empty section. Keep [account] tags. Never invent amounts, dates, senders, or states.\n\nHEADERS:\n{headers}\n{opened}",
+            inboxes.len(),
+            known = known_people,
+            rules = rules_block,
         );
         let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
         match self
@@ -8507,6 +8529,24 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             ),
             Err(e) => format!("Read the inboxes ({}) but couldn't analyze: {e}", counts.join(" · ")),
         }
+    }
+
+    /// User-taught mail categorization rules — corrections become permanent behavior.
+    async fn mail_rules(&self) -> Vec<String> {
+        self.memory
+            .profile_get("mail_rules")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_mail_rules(&self, v: &[String]) {
+        let _ = self
+            .memory
+            .profile_set("mail_rules", &serde_json::to_string(v).unwrap_or_default())
+            .await;
     }
 
     /// Daily mail-sweep gate (YM_MAILSWEEP_SECS, default daily) — data check runs quietly; the
@@ -8535,7 +8575,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 .map(|rest| rest.lines().take(4).any(|l| l.trim_start().starts_with("- ")))
                 .unwrap_or(false)
         };
-        if has("NEEDS ACTION") || has("MONEY") {
+        if has("NEEDS ACTION") || has("MONEY IN MOTION") || has("FROM PEOPLE") {
             Some(format!("📬 Mail sweep — something needs you:\n\n{digest}"))
         } else {
             eprintln!("[mail] sweep clean — staying quiet");
@@ -9062,6 +9102,40 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let _ = self.memory.profile_set(&format!("closet:{}", name.to_lowercase()), "").await;
                 }
                 self.person_inventory(name).await
+            }
+            "mailrule" | "mailrules" if rest.trim().is_empty() => {
+                let rules = self.mail_rules().await;
+                if rules.is_empty() {
+                    "No mail rules yet. Teach me with `mailrule <rule>` — e.g. `mailrule amazon receipts are noise`.".to_string()
+                } else {
+                    format!(
+                        "📮 Your mail rules (they override my categories):\n{}\n\n(`mailrule remove <n>` to drop one)",
+                        rules.iter().enumerate().map(|(i, r)| format!("{}. {r}", i + 1)).collect::<Vec<_>>().join("\n")
+                    )
+                }
+            }
+            "mailrule" | "mailrules" => {
+                let r = rest.trim();
+                if let Some(nstr) = r.strip_prefix("remove ") {
+                    let mut rules = self.mail_rules().await;
+                    match nstr.trim().parse::<usize>() {
+                        Ok(n) if n >= 1 && n <= rules.len() => {
+                            let gone = rules.remove(n - 1);
+                            self.save_mail_rules(&rules).await;
+                            format!("Dropped rule: {gone}")
+                        }
+                        _ => "Which number? `mailrules` shows the list.".to_string(),
+                    }
+                } else {
+                    let mut rules = self.mail_rules().await;
+                    if rules.len() >= 30 {
+                        "That's 30 rules — drop one first (`mailrule remove <n>`).".to_string()
+                    } else {
+                        rules.push(r.to_string());
+                        self.save_mail_rules(&rules).await;
+                        format!("📮 Rule learned (#{}) — every future digest obeys it: {r}", rules.len())
+                    }
+                }
             }
             "inboxes" | "mailscan" | "emailscan" => {
                 let n: usize = rest.trim().parse().unwrap_or(30);
@@ -10165,6 +10239,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 if nm.trim().is_empty() { "Whose photos should I inventory?".to_string() } else { self.person_inventory(nm.trim()).await }
             }
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
+            "mail_rule" | "mailrule" => {
+                let r = { let a = s("rule"); if a.is_empty() { s("text") } else { a } };
+                if r.trim().is_empty() {
+                    "What's the rule?".to_string()
+                } else {
+                    let mut rules = self.mail_rules().await;
+                    rules.push(r.trim().to_string());
+                    self.save_mail_rules(&rules).await;
+                    format!("Mail rule learned: {}", r.trim())
+                }
+            }
             "gift_intel" | "gift_ideas" => {
                 let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
                 if nm.trim().is_empty() { "Whose photos should I study for gift ideas?".to_string() } else { self.gift_intel(nm.trim()).await }
@@ -10691,7 +10776,8 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
 - enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
 - gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
-- inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action, money, worth-a-look, noise (read-only, headers only)\n\
+- inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action / from-people / money-in-motion / purchases / noise, with body-peek state verification (read-only)\n\
+- mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\

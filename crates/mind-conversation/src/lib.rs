@@ -794,9 +794,9 @@ async fn gift_task(
     Some(text)
 }
 
-/// Background body of a creative-studio job: select diverse matching photos (semantic + person
-/// + date-spread), compose (collage grid or single), caption (grounded, non-generic). Returns
-/// (image bytes, caption) for the photo queue plus a status line.
+/// Background body of a creative-studio job: over-fetch diverse candidates, CURATE (technical
+/// quality triage → fast vision scoring for subject clarity + photogenic quality), polish, compose,
+/// caption. The curation is the point — an album a human would keep, not fetch-and-send.
 async fn studio_task(
     src_name: String,
     person_ids: Vec<String>,
@@ -813,62 +813,139 @@ async fn studio_task(
         .into_iter()
         .find(|s| s.name() == src_name)
         .ok_or_else(|| "photo source vanished".to_string())?;
-    // Candidates: semantic when there's a theme (the whole archive by MEANING), else the people's
-    // recent photos. Person filters are AND — "us" means photos with both.
     let cands = if theme.trim().is_empty() {
-        src.assets_of_people(&person_ids, 60).await
+        src.assets_of_people(&person_ids, 80).await
     } else {
-        let mut c = src.search(&theme, &person_ids, 40).await;
+        let mut c = src.search(&theme, &person_ids, 50).await;
         if c.is_empty() && !person_ids.is_empty() {
-            c = src.assets_of_people(&person_ids, 60).await; // theme found nothing — fall back to the people
+            c = src.assets_of_people(&person_ids, 80).await;
         }
         c
     };
     if cands.is_empty() {
         return Err(format!("I searched the library for \"{theme}\" but nothing matched — honest miss."));
     }
-    // Diversity: one per month first (different occasions/outfits live in different months),
-    // then fill by list order. Keeps a party collage from being nine frames of the same night.
+    // Diverse POOL, over-fetched ~3x: one per month first, then fill. Curation picks the winners.
     let want = if format == "single" { 1 } else { count.clamp(2, 9) };
-    let mut chosen: Vec<&mind_tools::PhotoAsset> = Vec::new();
+    let pool_n = (want * 3).clamp(6, 18);
+    let mut pool: Vec<&mind_tools::PhotoAsset> = Vec::new();
     let mut months: std::collections::HashSet<String> = std::collections::HashSet::new();
     for a in &cands {
-        if chosen.len() >= want {
+        if pool.len() >= pool_n {
             break;
         }
-        let m: String = a.date.chars().take(7).collect();
-        if months.insert(m) {
-            chosen.push(a);
+        if months.insert(a.date.chars().take(7).collect()) {
+            pool.push(a);
         }
     }
     for a in &cands {
-        if chosen.len() >= want {
+        if pool.len() >= pool_n {
             break;
         }
-        if !chosen.iter().any(|c| c.id == a.id) {
-            chosen.push(a);
+        if !pool.iter().any(|c| c.id == a.id) {
+            pool.push(a);
         }
     }
-    // Fetch bytes (+ face box of the first person for face-centered cells).
-    let mut cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)> = Vec::new();
-    let mut dates: Vec<String> = Vec::new();
-    let mut places: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for a in &chosen {
+    // CURATION 1 — technical triage (free): sharpness + exposure kill blurry/dark/blown frames.
+    struct Cand {
+        bytes: Vec<u8>,
+        bbox: Option<(f32, f32, f32, f32)>,
+        date: String,
+        place: String,
+        tech: f32,
+        score: f32,
+    }
+    let mut kept: Vec<Cand> = Vec::new();
+    for a in &pool {
         let Some(bytes) = src.image_bytes(a).await else { continue };
+        let Some((sharp, luma, contrast)) = mind_tools::photo_quality(&bytes) else { continue };
+        if sharp < 30.0 || luma < 35.0 || luma > 220.0 {
+            continue; // technically bad — a human curator wouldn't even consider it
+        }
         let bbox = match person_ids.first() {
             Some(pid) => src.face_box(&a.id, pid).await.map(|(x1, y1, x2, y2, _)| (x1, y1, x2, y2)),
             None => None,
         };
-        if !a.date.is_empty() {
-            dates.push(a.date.clone());
+        let tech = (sharp.min(400.0) / 400.0)
+            + (1.0 - (luma - 128.0).abs() / 128.0) * 0.5
+            + (contrast.min(60.0) / 60.0) * 0.3
+            + if bbox.is_some() { 0.4 } else { 0.0 };
+        kept.push(Cand { bytes, bbox, date: a.date.clone(), place: a.place.clone(), tech, score: 0.0 });
+    }
+    if kept.is_empty() {
+        // Every candidate failed triage — fall back to best-effort rather than refusing outright.
+        for a in pool.iter().take(want.max(2)) {
+            if let Some(bytes) = src.image_bytes(a).await {
+                kept.push(Cand { bytes, bbox: None, date: a.date.clone(), place: a.place.clone(), tech: 0.0, score: 0.0 });
+            }
         }
-        if !a.place.is_empty() {
-            places.insert(a.place.clone());
+        if kept.is_empty() {
+            return Err("I found matches but couldn't fetch any images.".to_string());
         }
-        cells.push((bytes, bbox));
+    }
+    // CURATION 2 — vision scoring (fast, think-off): subject clarity + photogenic 1-10. The model
+    // sees only technically-sound frames, so its budget goes to judging moments, not noise.
+    kept.sort_by(|a, b| b.tech.partial_cmp(&a.tech).unwrap_or(std::cmp::Ordering::Equal));
+    kept.truncate(12);
+    if let Some(vc) = mind_tools::VisionClient::from_env() {
+        for c in kept.iter_mut() {
+            let Ok(raw) = vc
+                .analyze(
+                    r#"Judge this photo for a family album, focusing on the FACE. Output ONLY JSON: {"subject_clear":<true if a person is clearly the subject, face visible, not obstructed or turned away>,"face_presentable":<true only if the face looks GOOD: eyes open, natural flattering expression, decent angle — false for mid-blink, mid-bite, grimace, motion-blurred or awkward faces>,"score":<1-10: 10 = sharp, well-lit, flattering, a moment worth framing>}"#,
+                    c.bytes.clone(),
+                    "image/jpeg",
+                )
+                .await
+            else {
+                c.score = c.tech;
+                continue;
+            };
+            let v = parse_json_obj(&raw);
+            let clear = v.get("subject_clear").and_then(|x| x.as_bool()).unwrap_or(true);
+            let face_ok = v.get("face_presentable").and_then(|x| x.as_bool()).unwrap_or(true);
+            let sc = v.get("score").and_then(|x| x.as_f64()).unwrap_or(5.0) as f32;
+            c.score = sc + c.tech * 2.0 + if clear { 0.0 } else { -6.0 } + if face_ok { 0.0 } else { -5.0 };
+        }
+    } else {
+        for c in kept.iter_mut() {
+            c.score = c.tech;
+        }
+    }
+    // Winners: best score, month-diverse on ties (two passes: distinct months, then fill).
+    kept.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut chosen_idx: Vec<usize> = Vec::new();
+    let mut used_months: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (i, c) in kept.iter().enumerate() {
+        if chosen_idx.len() >= want {
+            break;
+        }
+        if used_months.insert(c.date.chars().take(7).collect()) {
+            chosen_idx.push(i);
+        }
+    }
+    for i in 0..kept.len() {
+        if chosen_idx.len() >= want {
+            break;
+        }
+        if !chosen_idx.contains(&i) {
+            chosen_idx.push(i);
+        }
+    }
+    let mut cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)> = Vec::new();
+    let mut dates: Vec<String> = Vec::new();
+    let mut places: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for &i in &chosen_idx {
+        let c = &kept[i];
+        if !c.date.is_empty() {
+            dates.push(c.date.clone());
+        }
+        if !c.place.is_empty() {
+            places.insert(c.place.clone());
+        }
+        cells.push((c.bytes.clone(), c.bbox));
     }
     if cells.is_empty() {
-        return Err("I found matches but couldn't fetch any images.".to_string());
+        return Err("curation rejected everything — the matches were too poor to send.".to_string());
     }
     dates.sort();
     let span = match (dates.first(), dates.last()) {
@@ -877,7 +954,7 @@ async fn studio_task(
         _ => String::new(),
     };
     let place_note = places.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    // Compose.
+    // Compose (single picks also get the polish via a 1-cell path below).
     let (img, kind) = if cells.len() >= 2 && format != "single" {
         let n = cells.len();
         match mind_tools::make_collage(cells).await {
@@ -885,9 +962,10 @@ async fn studio_task(
             None => return Err("the collage composition failed — honest miss.".to_string()),
         }
     } else {
-        (cells.remove(0).0, "picture".to_string())
+        let best = cells.remove(0).0;
+        let polished = mind_tools::enhance_photo(best.clone(), "auto").await.unwrap_or(best);
+        (polished, "picture".to_string())
     };
-    // Caption: unique + grounded — the substrate knows who these people are and when this was.
     let prompt = format!(
         "Write ONE unique {caption_mood} caption for a {kind} of {people_desc}. Theme: {theme}. Grounded details you may weave in (never invent others): dates {span}{}. Max 18 words. No hashtags. Not generic — make it feel written for THEM.",
         if place_note.is_empty() { String::new() } else { format!("; places {place_note}") }

@@ -1348,6 +1348,66 @@ pub async fn enhance_photo(bytes: Vec<u8>, mode: &str) -> Option<Vec<u8>> {
     .ok()?
 }
 
+/// Technical quality read: (sharpness = Laplacian variance, mean luma, contrast = luma stddev)
+/// on a 256px grayscale downscale. Free and instant — kills blurry/dark/blown frames before any
+/// model spends time on them. Rough thresholds: sharpness <30 blurry; luma <35 dark, >220 blown.
+pub fn photo_quality(bytes: &[u8]) -> Option<(f32, f32, f32)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let g = img.resize(256, 256, image::imageops::FilterType::Triangle).to_luma8();
+    let (w, h) = g.dimensions();
+    if w < 8 || h < 8 {
+        return None;
+    }
+    let (mut sum, mut sum2, mut n) = (0f64, 0f64, 0f64);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let c = g.get_pixel(x, y).0[0] as f64;
+            let lap = 4.0 * c
+                - g.get_pixel(x - 1, y).0[0] as f64
+                - g.get_pixel(x + 1, y).0[0] as f64
+                - g.get_pixel(x, y - 1).0[0] as f64
+                - g.get_pixel(x, y + 1).0[0] as f64;
+            sum += lap;
+            sum2 += lap * lap;
+            n += 1.0;
+        }
+    }
+    let mean = sum / n;
+    let sharpness = ((sum2 / n) - mean * mean).max(0.0) as f32;
+    let (mut ls, mut ls2) = (0f64, 0f64);
+    let ln = (w * h) as f64;
+    for p in g.pixels() {
+        let v = p.0[0] as f64;
+        ls += v;
+        ls2 += v * v;
+    }
+    let lmean = ls / ln;
+    let contrast = ((ls2 / ln) - lmean * lmean).max(0.0).sqrt() as f32;
+    Some((sharpness, lmean as f32, contrast))
+}
+
+/// Gentle per-cell polish: nudge brightness toward the grid's target luma (cohesion), light
+/// contrast + saturation lift, mild unsharp. Deliberately subtler than `enhance_photo` — a clean
+/// album look, not an Instagram filter.
+fn polish_cell(img: &image::RgbImage, target_luma: f32) -> image::RgbImage {
+    let n = (img.width() * img.height()).max(1) as f32;
+    let mean: f32 = img
+        .pixels()
+        .map(|p| 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32)
+        .sum::<f32>()
+        / n;
+    let delta = ((target_luma - mean) * 0.5).clamp(-22.0, 22.0) as i32;
+    let mut out = image::imageops::colorops::brighten(img, delta);
+    image::imageops::colorops::contrast_in_place(&mut out, 7.0);
+    for p in out.pixels_mut() {
+        let l = 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32;
+        for c in 0..3 {
+            p.0[c] = (l + (p.0[c] as f32 - l) * 1.10).clamp(0.0, 255.0) as u8;
+        }
+    }
+    image::imageops::unsharpen(&out, 0.8, 2)
+}
+
 /// Compose a collage: face-centered square cells (when a face box is known) on a warm gutter grid.
 /// 2→2x1, 3→3x1, 4→2x2, 5-6→3x2, 7+→3x3. Returns JPEG bytes.
 pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -> Option<Vec<u8>> {
@@ -1369,7 +1429,8 @@ pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -
         let w = cols * cell + (cols + 1) * gut;
         let h = rows * cell + (rows + 1) * gut;
         let mut canvas = image::RgbImage::from_pixel(w, h, image::Rgb([246, 242, 236]));
-        let mut placed = 0u32;
+        // Phase 1: face-centered crops.
+        let mut crops: Vec<image::RgbImage> = Vec::new();
         for (bytes, bbox) in cells.iter().take(n_used) {
             let Ok(img) = image::load_from_memory(bytes) else { continue };
             let (iw, ih) = (img.width() as f32, img.height() as f32);
@@ -1390,9 +1451,25 @@ pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -
                 .crop_imm(left as u32, top as u32, side as u32, side as u32)
                 .resize_exact(cell, cell, image::imageops::FilterType::Triangle)
                 .to_rgb8();
+            crops.push(crop);
+        }
+        // Phase 2: polish every cell toward the grid's median luma — one cohesive album page,
+        // not nine mismatched exposures.
+        let mut lumas: Vec<f32> = crops
+            .iter()
+            .map(|c| {
+                let n = (c.width() * c.height()).max(1) as f32;
+                c.pixels().map(|p| 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32).sum::<f32>() / n
+            })
+            .collect();
+        lumas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let target = lumas.get(lumas.len() / 2).copied().unwrap_or(128.0).clamp(95.0, 165.0);
+        let mut placed = 0u32;
+        for crop in &crops {
+            let polished = polish_cell(crop, target);
             let ox = gut + (placed % cols) * (cell + gut);
             let oy = gut + (placed / cols) * (cell + gut);
-            image::imageops::overlay(&mut canvas, &crop, ox as i64, oy as i64);
+            image::imageops::overlay(&mut canvas, &polished, ox as i64, oy as i64);
             placed += 1;
         }
         if placed < 2 {

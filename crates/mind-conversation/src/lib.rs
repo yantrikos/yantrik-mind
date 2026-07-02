@@ -10683,6 +10683,203 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         Ok(ans)
     }
 
+    /// ---------- MEMBER PRODUCT SURFACE ----------
+    /// Per-member reminders/tasks and an opt-in daily brief — owner-keyed KVs (`m:<owner>:…`),
+    /// delivered to the member's own chat. Structurally isolated from the primary's task spine;
+    /// connected to the household only through deliberately-shared surfaces (family dates).
+
+    async fn member_tasks(&self, owner: &str) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get(&format!("m:{owner}:tasks"))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_member_tasks(&self, owner: &str, v: &[serde_json::Value]) {
+        let _ = self
+            .memory
+            .profile_set(&format!("m:{owner}:tasks"), &serde_json::to_string(v).unwrap_or_default())
+            .await;
+    }
+
+    /// Deterministic member intents: reminders, task list, done, daily-brief opt-in/out.
+    /// Returns None when the message is plain conversation.
+    async fn member_task_turn(&self, owner: &str, name: &str, text: &str) -> Option<String> {
+        let low = text.trim().to_lowercase();
+        // "remind me to pick up the cake tomorrow" / "add task ..." / "reminder: ..."
+        for pat in ["remind me to ", "remind me ", "add task ", "add a task ", "reminder: ", "task: "] {
+            if let Some(rest) = low.strip_prefix(pat) {
+                let body = text.trim()[text.trim().len() - rest.len()..].trim().to_string();
+                if body.len() < 2 {
+                    return Some("What should I remind you about?".to_string());
+                }
+                let due = parse_due(&low);
+                let mut tasks = self.member_tasks(owner).await;
+                tasks.push(serde_json::json!({
+                    "id": chrono::Utc::now().timestamp_millis(),
+                    "text": body,
+                    "due": due,
+                    "done": false,
+                    "notified": false,
+                }));
+                self.save_member_tasks(owner, &tasks).await;
+                let when = match due {
+                    Some(ms) => chrono::DateTime::from_timestamp_millis(ms as i64)
+                        .map(|t| format!(" — I'll nudge you around {}", t.with_timezone(local_now().offset()).format("%a %b %d, %H:%M")))
+                        .unwrap_or_default(),
+                    None => " — no time attached; it'll sit on your list (say `my tasks`)".to_string(),
+                };
+                return Some(format!("Got it, {name}: “{body}”{when}. ✅"));
+            }
+        }
+        if ["my tasks", "my reminders", "show tasks", "show reminders", "list tasks", "list reminders"].iter().any(|p| low.contains(p)) {
+            let tasks = self.member_tasks(owner).await;
+            let open: Vec<(usize, &serde_json::Value)> = tasks.iter().enumerate().filter(|(_, t)| !t["done"].as_bool().unwrap_or(false)).collect();
+            if open.is_empty() {
+                return Some("Your list is clear — nothing pending. 🎉".to_string());
+            }
+            let mut out = format!("📝 Your reminders, {name}:");
+            for (n, (_, t)) in open.iter().enumerate() {
+                let due = t["due"].as_u64().and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
+                    .map(|d| format!(" ({})", d.with_timezone(local_now().offset()).format("%b %d %H:%M")))
+                    .unwrap_or_default();
+                out.push_str(&format!("\n{}. {}{}", n + 1, t["text"].as_str().unwrap_or("?"), due));
+            }
+            out.push_str("\n\n(say `done <number>` to clear one)");
+            return Some(out);
+        }
+        if let Some(nstr) = low.strip_prefix("done ") {
+            if let Ok(n) = nstr.trim().parse::<usize>() {
+                let mut tasks = self.member_tasks(owner).await;
+                let open_ids: Vec<usize> = tasks.iter().enumerate().filter(|(_, t)| !t["done"].as_bool().unwrap_or(false)).map(|(i, _)| i).collect();
+                if let Some(&idx) = open_ids.get(n.saturating_sub(1)) {
+                    tasks[idx]["done"] = serde_json::json!(true);
+                    let txt = tasks[idx]["text"].as_str().unwrap_or("?").to_string();
+                    self.save_member_tasks(owner, &tasks).await;
+                    return Some(format!("Done — “{txt}” cleared. ✔️"));
+                }
+                return Some("I couldn't find that number on your list — say `my tasks` to see it.".to_string());
+            }
+        }
+        if low.contains("brief me daily") || low.contains("daily brief") || low.contains("morning brief") {
+            if low.contains("stop") || low.contains("off") || low.contains("no more") {
+                let _ = self.memory.profile_set(&format!("m:{owner}:brief"), "").await;
+                return Some("Okay — daily briefs off. Say `brief me daily` anytime to restart.".to_string());
+            }
+            let _ = self.memory.profile_set(&format!("m:{owner}:brief"), "on").await;
+            let sample = self.compose_member_brief(owner, name).await;
+            return Some(format!("☀️ Daily brief is ON — every morning, just for you. Here's today's:\n\n{sample}"));
+        }
+        None
+    }
+
+    /// A member's short morning brief: THEIR reminders + the household's upcoming dates (the
+    /// deliberately-shared layer). No primary-private data by construction.
+    async fn compose_member_brief(&self, owner: &str, name: &str) -> String {
+        use chrono::Datelike;
+        let now = local_now();
+        let mut out = format!("☀️ Morning, {name} — {}", now.format("%A, %b %d"));
+        let tasks = self.member_tasks(owner).await;
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let soon: Vec<String> = tasks
+            .iter()
+            .filter(|t| !t["done"].as_bool().unwrap_or(false))
+            .filter(|t| t["due"].as_u64().map(|d| d <= now_ms + 48 * 3_600_000).unwrap_or(false))
+            .map(|t| {
+                let due = t["due"].as_u64().and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
+                    .map(|d| format!(" ({})", d.with_timezone(now.offset()).format("%a %H:%M")))
+                    .unwrap_or_default();
+                format!("• {}{due}", t["text"].as_str().unwrap_or("?"))
+            })
+            .collect();
+        if !soon.is_empty() {
+            out.push_str("\n\n⏰ Coming up on your list:\n");
+            out.push_str(&soon.join("\n"));
+        }
+        // Household dates (shared by design): birthdays/anniversaries within 14 days.
+        let mut fam: Vec<String> = Vec::new();
+        for p in &self.load_people_profiles().await {
+            let pname = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            if pname.is_empty() || pname.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let (Some(mmdd), Some(label)) = (d.get("mmdd").and_then(|x| x.as_str()), d.get("label").and_then(|x| x.as_str())) else { continue };
+                if let Some(days) = days_until_mmdd(mmdd, &now) {
+                    if (0..=14).contains(&days) {
+                        fam.push(format!("• {pname}'s {label} in {days} day(s)"));
+                    }
+                }
+            }
+        }
+        if !fam.is_empty() {
+            out.push_str("\n\n🏠 Family:\n");
+            out.push_str(&fam.join("\n"));
+        }
+        if soon.is_empty() && fam.is_empty() {
+            out.push_str("\n\nNothing pressing on your list — enjoy the day. 🌼");
+        }
+        out
+    }
+
+    /// Poll-loop beat for ALL registered members: due-reminder nudges + opt-in morning briefs,
+    /// each delivered to that member's own chat. Returns (chat_id, message) pairs.
+    pub async fn member_beats(&self) -> Vec<(i64, String)> {
+        use chrono::Timelike;
+        let mut out: Vec<(i64, String)> = Vec::new();
+        let people = self.load_people().await;
+        let now = local_now();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let today = now.format("%Y-%m-%d").to_string();
+        for p in &people {
+            let (Some(slug), Some(tg)) = (p.get("slug").and_then(|x| x.as_str()), p.get("tg_id").and_then(|x| x.as_i64())) else {
+                continue;
+            };
+            if tg == 0 {
+                continue;
+            }
+            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or(slug).to_string();
+            // Due reminders (mark notified so each fires once).
+            let mut tasks = self.member_tasks(slug).await;
+            let mut dirty = false;
+            for t in tasks.iter_mut() {
+                let due = t["due"].as_u64().unwrap_or(0);
+                if due > 0
+                    && due <= now_ms
+                    && !t["done"].as_bool().unwrap_or(false)
+                    && !t["notified"].as_bool().unwrap_or(false)
+                {
+                    out.push((tg, format!("⏰ {name} — reminder: {}", t["text"].as_str().unwrap_or("?"))));
+                    t["notified"] = serde_json::json!(true);
+                    dirty = true;
+                }
+            }
+            if dirty {
+                self.save_member_tasks(slug, &tasks).await;
+            }
+            // Opt-in morning brief, once per date, morning window 7-11 local.
+            let brief_on = self
+                .memory
+                .profile_get(&format!("m:{slug}:brief"))
+                .await
+                .ok()
+                .flatten()
+                .map(|v| v == "on")
+                .unwrap_or(false);
+            if brief_on && (7..=11).contains(&now.hour()) {
+                let sent = self.memory.profile_get(&format!("m:{slug}:brief_date")).await.ok().flatten().unwrap_or_default();
+                if sent != today {
+                    let _ = self.memory.profile_set(&format!("m:{slug}:brief_date"), &today).await;
+                    out.push((tg, self.compose_member_brief(slug, &name).await));
+                }
+            }
+        }
+        out
+    }
+
     /// The DM chat id for a member slug (registry tg_id; Telegram private chat id == user id).
     async fn chat_of_member(&self, owner: &str) -> Option<i64> {
         if let Some(rest) = owner.strip_prefix("guest:") {
@@ -10728,14 +10925,18 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         if let Some(q) = photo_request(user_text) {
             return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
         }
+        // Their reminders, tasks, and daily-brief switch — owner-keyed, delivered to their chat.
+        if let Some(reply) = self.member_task_turn(&id.owner, &name, user_text).await {
+            return reply;
+        }
         let recent = self.memory.recent_messages_as(12, id.viewer()).await.unwrap_or_default();
         let convo = if recent.is_empty() {
-            "(this is your first conversation with them — greet them warmly by name)".to_string()
+            "(first conversation — greet them warmly by name, and in ONE short line mention what you can do for them: find family photos ('show me photos of…'), make collages, set reminders ('remind me to…'), and a daily morning brief ('brief me daily'))".to_string()
         } else {
             recent.iter().map(|(role, text)| format!("{role}: {text}")).collect::<Vec<_>>().join("\n")
         };
         let sys = format!(
-            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- You can chat, answer questions, analyze photos they send, and find/send family photos and collages (photo requests are handled automatically — never claim you lack photo access).",
+            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- You can chat, answer questions, analyze photos they send, find/send family photos and collages, set reminders, and send a daily brief (all handled automatically — never claim you lack these).",
             self.persona,
             if rel.is_empty() { String::new() } else { format!(" ({primary_name}'s {rel})") },
         );

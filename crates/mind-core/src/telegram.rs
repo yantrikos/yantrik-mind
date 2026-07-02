@@ -560,6 +560,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
     let mut last_ics = 0u64; // external-calendar (ICS) refresh cadence
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
+    let mut last_member_beat = 0u64; // member reminders + briefs cadence
     loop {
         let updates = match tg_get(&api, &format!("getUpdates?timeout=25&offset={offset}")).await {
             Ok(u) => u,
@@ -1031,6 +1032,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         }
                     }
                 }
+            }
+        }
+
+        // Member beats: every registered family member's due reminders + opt-in morning brief,
+        // delivered to THEIR own chat (owner-keyed end to end). Quiet-hours respected.
+        {
+            let now = now_ms();
+            if now.saturating_sub(last_member_beat) >= 120_000 && !in_quiet_hours_now() {
+                for (chat, text) in conv.member_beats().await {
+                    if tg_send(&api, chat, &text).await.is_ok() {
+                        eprintln!("[member] beat delivered to {chat}");
+                    }
+                }
+                last_member_beat = now;
             }
         }
 

@@ -470,6 +470,43 @@ fn person_matches_mode(p: &serde_json::Value, q: &str, mode: MatchMode) -> bool 
     p.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).any(hit)).unwrap_or(false)
 }
 
+/// Parse a rename request — "<old> to <new>" (or "->", "=>", "|"). Empty pair if no separator, so the
+/// caller can show usage rather than guess which token is the correction.
+fn parse_rename(args: &str) -> (String, String) {
+    let a = args.trim();
+    for sep in [" to ", " -> ", " => ", " | ", "->", "=>", "|"] {
+        if let Some(i) = a.find(sep) {
+            return (a[..i].trim().to_string(), a[i + sep.len()..].trim().to_string());
+        }
+    }
+    (String::new(), String::new())
+}
+
+/// Correct a person's canonical name in place: the new name becomes canonical and the old name is
+/// folded into the aliases so `ym about <old>` still resolves. Word-boundary matching so a short old
+/// name can't rename an unrelated person via a substring. Returns the prior canonical names changed.
+fn rename_in_people(store: &mut [serde_json::Value], old_q: &str, new_name: &str) -> Vec<String> {
+    let low = |s: &str| s.trim().to_lowercase();
+    let mut renamed = Vec::new();
+    for p in store.iter_mut() {
+        if !person_matches_mode(p, old_q, MatchMode::WordBoundary) {
+            continue;
+        }
+        let prior = p.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if prior.is_empty() || low(&prior) == low(new_name) {
+            continue;
+        }
+        // Keep the old canonical name as a nickname; drop the new name if it lingered as one.
+        let mut aliases: Vec<serde_json::Value> = p.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        aliases.retain(|x| x.as_str().map(|s| low(s) != low(new_name) && low(s) != low(&prior)).unwrap_or(true));
+        aliases.push(serde_json::json!(prior));
+        p["aliases"] = serde_json::json!(aliases);
+        p["name"] = serde_json::json!(new_name);
+        renamed.push(prior);
+    }
+    renamed
+}
+
 /// The soonest upcoming key date for a person, as a short "label in Nd" line. None if they have none.
 fn next_date_line(p: &serde_json::Value, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<String> {
     let mut best: Option<(i64, String)> = None;
@@ -4756,6 +4793,55 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!("Forgotten: {}. (Removed from the people I track.)", removed.join(", "))
     }
 
+    /// `ym rename <old> to <new>` — correct a person's canonical name. The new name becomes canonical
+    /// and the old one is kept as a nickname. Crucially, a rename also recalls every belief that still
+    /// names the OLD person and flags them, so the correction doesn't leave stale duplicates lurking in
+    /// the belief store — the user confirms they're still right or purges them with `ym forget-belief`.
+    pub async fn rename_person(&self, args: &str) -> String {
+        let (old, new) = parse_rename(args);
+        if old.len() < 2 || new.len() < 2 {
+            return "Usage: `ym rename <old name> to <new name>` (e.g. `ym rename Priya to Priyanka`).".to_string();
+        }
+        let old_q = old.to_lowercase();
+        let mut store = self.load_people_profiles().await;
+        let renamed = rename_in_people(&mut store, &old_q, &new);
+        if renamed.is_empty() {
+            return format!("I don't have anyone matching \"{old}\" to rename. (`ym family` lists everyone I track.)");
+        }
+        self.save_people_profiles(&store).await;
+        let stale = self.beliefs_referencing(&old_q).await;
+        let mut out = format!("Renamed {} → {new}. (\"{old}\" is kept as a nickname so lookups still resolve.)", renamed.join(", "));
+        if stale.is_empty() {
+            out.push_str("\nNo beliefs still reference the old name — nothing to clean up.");
+        } else {
+            out.push_str(&format!("\n\n⚠️ {} belief(s) still reference \"{old}\" — confirm they're still right, or purge them:", stale.len()));
+            for s in &stale {
+                out.push_str(&format!("\n  • {s}"));
+            }
+            out.push_str(&format!("\n\nRun `ym forget-belief {old}` to purge them, or leave them if they still hold."));
+        }
+        out
+    }
+
+    /// Recall beliefs whose text still names `needle` (word-boundary, deduped by id) — for flagging the
+    /// stale references a canonical-name correction leaves behind. Mirrors `forget_beliefs_matching`'s
+    /// recall, but surfaces rather than deletes: purging is the user's call.
+    async fn beliefs_referencing(&self, needle: &str) -> Vec<String> {
+        let rs = self
+            .memory
+            .recall_typed(mind_types::RecallQuery { text: needle.to_string(), top_k: 50, kind: None })
+            .await
+            .unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for r in rs {
+            if word_boundary_contains(&r.item.text.to_lowercase(), needle) && seen.insert(r.item.id.clone()) {
+                out.push(r.item.text.clone());
+            }
+        }
+        out
+    }
+
     /// Upcoming key dates across everyone, within `within_days`. Returns (name, label, days, mmdd) for
     /// the proactive tick to surface. Rolls each date to its next occurrence from today.
     pub async fn upcoming_people_dates(&self, within_days: i64) -> Vec<(String, String, i64, String)> {
@@ -6388,6 +6474,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,
+            // --- correct a canonical name, then flag beliefs still naming the old one (confirm or purge) ---
+            "rename" | "rename-person" if !rest.is_empty() => self.rename_person(&rest).await,
             // --- memory hygiene: purge stale/wrong beliefs by text match (+ compact state for retrospect) ---
             "forget-belief" | "unbelieve" if !rest.is_empty() => self.forget_beliefs_matching(&rest).await,
             // --- self-evolution scorecard: what the self-build loop has done, what's queued, kill state ---
@@ -8622,6 +8710,33 @@ mod tests {
         // A real match on the whole name still forgets under word-boundary mode.
         let ana = serde_json::json!({ "name": "Ana", "aliases": ["Ana (from work)"] });
         assert!(person_matches_mode(&ana, "ana", MatchMode::WordBoundary));
+    }
+
+    #[test]
+    fn rename_corrects_canonical_name_and_keeps_old_as_alias() {
+        assert_eq!(parse_rename("Priya to Priyanka"), ("Priya".into(), "Priyanka".into()));
+        assert_eq!(parse_rename("Priya -> Priyanka"), ("Priya".into(), "Priyanka".into()));
+        assert_eq!(parse_rename("Priya"), (String::new(), String::new()));
+
+        let mut store = vec![
+            serde_json::json!({ "name": "Priya", "aliases": ["Pri"], "relationship": "wife" }),
+            serde_json::json!({ "name": "Susana", "aliases": ["Su"] }),
+        ];
+        let renamed = rename_in_people(&mut store, "priya", "Priyanka");
+        assert_eq!(renamed, vec!["Priya".to_string()]);
+
+        // Canonical name is corrected in place; the old name is folded into aliases so `ym about
+        // Priya` still resolves, and the prior nickname survives.
+        assert_eq!(store[0]["name"], serde_json::json!("Priyanka"));
+        let aliases: Vec<&str> = store[0]["aliases"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        assert!(aliases.contains(&"Priya"), "old canonical name kept as alias: {aliases:?}");
+        assert!(aliases.contains(&"Pri"), "existing nickname preserved: {aliases:?}");
+        assert!(person_matches(&store[0], "priya"), "old name still resolves");
+
+        // Word-boundary safety: "Ana" must not rename "Susana" via a substring.
+        let mut only_susana = vec![serde_json::json!({ "name": "Susana", "aliases": [] })];
+        assert!(rename_in_people(&mut only_susana, "ana", "Anastasia").is_empty());
+        assert_eq!(only_susana[0]["name"], serde_json::json!("Susana"));
     }
 
     #[test]

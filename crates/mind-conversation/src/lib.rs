@@ -814,11 +814,11 @@ async fn studio_task(
         .find(|s| s.name() == src_name)
         .ok_or_else(|| "photo source vanished".to_string())?;
     let cands = if theme.trim().is_empty() {
-        src.assets_of_people(&person_ids, 80).await
+        src.assets_of_people(&person_ids, 80, false).await
     } else {
         let mut c = src.search(&theme, &person_ids, 50).await;
         if c.is_empty() && !person_ids.is_empty() {
-            c = src.assets_of_people(&person_ids, 80).await;
+            c = src.assets_of_people(&person_ids, 80, false).await;
         }
         c
     };
@@ -6968,7 +6968,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let cands: Vec<mind_tools::PhotoAsset> = if searched {
             sources[idx].search(&desc, &person_ids, if wants_old { 30 } else { 12 }).await
         } else if !person_ids.is_empty() {
-            sources[idx].assets_of_people(&person_ids, if wants_old { 80 } else { 24 }).await
+            sources[idx].assets_of_people(&person_ids, if wants_old { 80 } else { 24 }, wants_old).await
         } else {
             sources[idx].recent_assets(if wants_old { 80 } else { 24 }).await
         };

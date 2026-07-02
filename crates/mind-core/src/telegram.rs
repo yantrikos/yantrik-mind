@@ -95,6 +95,123 @@ async fn tg_typing(api: &str, chat_id: i64) {
     .await;
 }
 
+/// Speech-to-text for an inbound Telegram voice note: getFile -> download the .oga -> ffmpeg to
+/// 16 kHz mono wav -> whisper.cpp. None on any failure - the caller apologizes instead of guessing.
+async fn tg_voice_to_text(api: &str, file_id: &str) -> Option<String> {
+    let api_owned = api.to_string();
+    let fid = file_id.to_string();
+    tokio::task::spawn_blocking(move || -> Option<String> {
+        use std::io::Read;
+        let meta: serde_json::Value = ureq::get(&format!("{api_owned}/getFile?file_id={fid}"))
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .ok()?
+            .into_json()
+            .ok()?;
+        let path = meta["result"]["file_path"].as_str()?;
+        // Files download from a sibling host path: /bot<token>/ -> /file/bot<token>/.
+        let file_url = format!("{}/{}", api_owned.replacen("/bot", "/file/bot", 1), path);
+        let mut bytes = Vec::new();
+        ureq::get(&file_url)
+            .timeout(std::time::Duration::from_secs(60))
+            .call()
+            .ok()?
+            .into_reader()
+            .take(20_000_000)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let tag = format!("{}_{}", std::process::id(), now_ms());
+        let dir = std::env::temp_dir();
+        let oga = dir.join(format!("ym_v_{tag}.oga"));
+        let wav = dir.join(format!("ym_v_{tag}.wav"));
+        std::fs::write(&oga, &bytes).ok()?;
+        let ff = std::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-i", oga.to_str()?, "-ar", "16000", "-ac", "1", wav.to_str()?])
+            .status()
+            .ok()?;
+        let _ = std::fs::remove_file(&oga);
+        if !ff.success() {
+            return None;
+        }
+        let whisper = std::env::var("YM_WHISPER_BIN").unwrap_or_else(|_| "/opt/voice/whisper.cpp/build/bin/whisper-cli".into());
+        let model = std::env::var("YM_WHISPER_MODEL").unwrap_or_else(|_| "/opt/voice/models/ggml-base.en.bin".into());
+        let out = std::process::Command::new(whisper)
+            .args(["-m", &model, "-f", wav.to_str()?, "-nt", "-np"])
+            .output()
+            .ok()?;
+        let _ = std::fs::remove_file(&wav);
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.len() < 2 {
+            None
+        } else {
+            Some(text)
+        }
+    })
+    .await
+    .ok()?
+}
+
+/// Voice reply: Piper TTS -> wav -> ffmpeg to OGG/Opus -> Telegram sendVoice (curl multipart - ureq
+/// has no multipart). Spoken replies are capped to the gist; the full text always goes as a message.
+async fn tg_send_voice(api: &str, chat_id: i64, text: &str) -> bool {
+    let speak: String = text
+        .chars()
+        .filter(|c| !matches!(c, '*' | '#' | '`' | '_'))
+        .take(600)
+        .collect();
+    if speak.trim().len() < 2 {
+        return false;
+    }
+    let api_owned = api.to_string();
+    tokio::task::spawn_blocking(move || -> bool {
+        use std::io::Write as _;
+        let piper = std::env::var("YM_PIPER_BIN").unwrap_or_else(|_| "/opt/voice/piper/piper".into());
+        let voice = std::env::var("YM_PIPER_VOICE").unwrap_or_else(|_| "/opt/voice/piper/en_US-lessac-medium.onnx".into());
+        let tag = format!("{}_{}", std::process::id(), now_ms());
+        let dir = std::env::temp_dir();
+        let wav = dir.join(format!("ym_tts_{tag}.wav"));
+        let ogg = dir.join(format!("ym_tts_{tag}.ogg"));
+        let Ok(mut child) = std::process::Command::new(&piper)
+            .args(["-m", &voice, "-f", wav.to_str().unwrap_or_default()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(speak.as_bytes());
+        }
+        if !child.wait().map(|st| st.success()).unwrap_or(false) {
+            return false;
+        }
+        let ff = std::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-i", wav.to_str().unwrap_or_default(), "-c:a", "libopus", "-b:a", "32k", ogg.to_str().unwrap_or_default()])
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&wav);
+        if !ff {
+            return false;
+        }
+        let out = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-F",
+                &format!("chat_id={chat_id}"),
+                "-F",
+                &format!("voice=@{}", ogg.to_str().unwrap_or_default()),
+                &format!("{api_owned}/sendVoice"),
+            ])
+            .output();
+        let _ = std::fs::remove_file(&ogg);
+        out.map(|o| String::from_utf8_lossy(&o.stdout).contains("\"ok\":true")).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 fn offset_path() -> String {
     std::env::var("YM_TG_OFFSET").unwrap_or_else(|_| "telegram_offset".to_string())
 }
@@ -374,7 +491,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             save_active_chat(chat_id); // persist so proactive/reminders/backchannel survive restarts
             last_activity = now_ms();
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
-            if text.is_empty() {
+            // A voice note is a first-class turn: transcribed in the spawned task (whisper takes a
+            // few seconds - never on the poll loop), answered in text AND voice.
+            let voice_fid = msg["voice"]["file_id"]
+                .as_str()
+                .or_else(|| msg["audio"]["file_id"].as_str())
+                .map(String::from);
+            if text.is_empty() && voice_fid.is_none() {
                 continue;
             }
             // Group-chat read-isolation: WHO is speaking (from.id) + on WHAT channel (private DM vs a
@@ -389,6 +512,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let (api2, mem2, conv2) = (api.clone(), mem.clone(), conv.clone());
             tokio::spawn(async move {
                 tg_typing(&api2, chat_id).await;
+                let (text, via_voice) = if text.is_empty() {
+                    match tg_voice_to_text(&api2, voice_fid.as_deref().unwrap_or_default()).await {
+                        Some(t) => {
+                            eprintln!("[voice] heard {} chars", t.len());
+                            (t, true)
+                        }
+                        None => {
+                            let _ = tg_send(&api2, chat_id, "I couldn't make out that voice note - mind trying once more?").await;
+                            return;
+                        }
+                    }
+                } else {
+                    (text, false)
+                };
                 let owner = conv2.resolve_owner(from_id, shared_channel).await;
                 let identity = mind_conversation::TurnIdentity::new(owner, shared_channel);
                 let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity);
@@ -406,6 +543,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 };
                 if let Err(e) = tg_send(&api2, chat_id, &reply).await {
                     eprintln!("[telegram] send error: {e}");
+                }
+                // Voice in -> voice out: they spoke to us, so we speak back (gist as audio; the
+                // full text is already delivered above).
+                if via_voice && tg_send_voice(&api2, chat_id, &reply).await {
+                    eprintln!("[voice] replied with voice");
                 }
             });
         }

@@ -473,19 +473,22 @@ pub struct VisionClient {
     base: String,
     key: String,
     model: String,
+    /// Local ollama uses its NATIVE /api/chat with an `images:[b64]` array. Some models (qwen3.6)
+    /// genuinely see there but return EMPTY on the OpenAI /v1 image_url shape — so local goes native.
+    native: bool,
 }
 
 impl VisionClient {
     pub fn from_env() -> Option<VisionClient> {
-        // Default: LOCAL vision on the LAN GPU box (gemma4:31b, probed to genuinely see) — zero cloud
-        // cost. Note: qwen3.5/3.6 are TEXT-only and silently return empty on images (same trap as
-        // nano-gpt), so a VL/gemma model is required. "provider:model", model may contain ':'.
-        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-local:gemma4:31b".into());
+        // Default: LOCAL vision on the LAN GPU box — zero cloud cost, via ollama's native format so
+        // vision-capable text-flagships (qwen3.6) work. "provider:model" (model may contain ':').
+        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-local:qwen3.6:27b".into());
         let (prov, model) = spec.split_once(':').unwrap_or(("ollama-local", spec.as_str()));
-        // Local ollama needs no API key — short-circuit before the key requirement below.
         if prov == "ollama-local" || prov == "local" {
-            let base = std::env::var("YM_OLLAMA_LOCAL_URL").unwrap_or_else(|_| "http://192.168.4.35:11434/v1".into());
-            return Some(VisionClient { base, key: "ollama".into(), model: model.to_string() });
+            // base = ollama root (strip a trailing /v1 if present) — native calls hit /api/chat.
+            let raw = std::env::var("YM_OLLAMA_LOCAL_URL").unwrap_or_else(|_| "http://192.168.4.35:11434".into());
+            let base = raw.trim_end_matches("/v1").trim_end_matches('/').to_string();
+            return Some(VisionClient { base, key: "ollama".into(), model: model.to_string(), native: true });
         }
         let (base, key_env) = match prov {
             "ollama-cloud" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY"),
@@ -494,29 +497,44 @@ impl VisionClient {
             _ => ("https://nano-gpt.com/api/v1", "NANOGPT_KEY"),
         };
         let key = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty())?;
-        Some(VisionClient { base: base.into(), key, model: model.to_string() })
+        Some(VisionClient { base: base.into(), key, model: model.to_string(), native: false })
     }
 
-    pub async fn analyze(&self, prompt: &str, image: Vec<u8>, mime: &str) -> anyhow::Result<String> {
+    pub async fn analyze(&self, prompt: &str, image: Vec<u8>, _mime: &str) -> anyhow::Result<String> {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&image);
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": 900,
-            "messages": [{ "role": "user", "content": [
-                { "type": "text", "text": prompt },
-                { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{b64}") } }
-            ]}]
-        });
-        let (base, key) = (self.base.clone(), self.key.clone());
+        let (base, key, model, native) = (self.base.clone(), self.key.clone(), self.model.clone(), self.native);
+        let prompt = prompt.to_string();
+        let mime = _mime.to_string();
         let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let resp: serde_json::Value = ureq::post(&format!("{base}/chat/completions"))
-                .set("authorization", &format!("Bearer {key}"))
-                .set("content-type", "application/json")
-                .timeout(std::time::Duration::from_secs(120))
-                .send_json(body)?
-                .into_json()?;
-            Ok(resp["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
+            if native {
+                // Ollama native: /api/chat with images array (600s — CPU/GPU local can be slow).
+                let body = serde_json::json!({
+                    "model": model, "stream": false,
+                    "messages": [{ "role": "user", "content": prompt, "images": [b64] }],
+                });
+                let resp: serde_json::Value = ureq::post(&format!("{base}/api/chat"))
+                    .set("content-type", "application/json")
+                    .timeout(std::time::Duration::from_secs(600))
+                    .send_json(body)?
+                    .into_json()?;
+                Ok(resp["message"]["content"].as_str().unwrap_or("").to_string())
+            } else {
+                let body = serde_json::json!({
+                    "model": model, "max_tokens": 900,
+                    "messages": [{ "role": "user", "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{b64}") } }
+                    ]}]
+                });
+                let resp: serde_json::Value = ureq::post(&format!("{base}/chat/completions"))
+                    .set("authorization", &format!("Bearer {key}"))
+                    .set("content-type", "application/json")
+                    .timeout(std::time::Duration::from_secs(120))
+                    .send_json(body)?
+                    .into_json()?;
+                Ok(resp["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
+            }
         })
         .await??;
         if text.trim().is_empty() {

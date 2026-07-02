@@ -476,6 +476,284 @@ fn is_self_referential(text: &str) -> bool {
     KEYS.iter().any(|k| l.contains(k))
 }
 
+/// Background body of a taste-study pass (detached; returns the message to deliver).
+async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, mem: Arc<dyn MemoryFacade>) -> Option<String> {
+    let sources = mind_tools::PhotoSource::all_from_env();
+    let src = sources.into_iter().find(|s| s.name() == src_name)?;
+    let vc = mind_tools::VisionClient::from_env()?;
+    let key = format!("tastes:{}", disp.to_lowercase());
+    let mut acc: serde_json::Value = mem
+        .profile_get(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "total": 0 }));
+    let seen: std::collections::HashSet<String> = acc["seen"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|x| x.as_str().map(String::from))
+        .collect();
+    let assets = src.assets_of_person(&pid, 400).await;
+    let todo: Vec<mind_tools::PhotoAsset> = assets.into_iter().filter(|a| !seen.contains(&a.id)).take(batch).collect();
+    if todo.is_empty() {
+        return Some(format!(
+            "📊 {disp}: every reachable photo is already studied ({} total) — the distribution is as sharp as the library allows for now.",
+            acc["total"]
+        ));
+    }
+    let prompt = r#"Analyze the MAIN person's appearance and the scene. Output ONLY JSON: {"outfit":"<type like saree/dress/kurta/casual-western or none>","outfit_color":"<dominant color or none>","jewelry_tone":"<gold/silver/mixed/none>","setting":"<home/outdoor/travel/restaurant/party/temple/studio>","vibe":"<festive/casual/formal/cozy>","items":["<other notable personal items>"]}. No brands, no names."#;
+    let mut n_new = 0u64;
+    for a in &todo {
+        let Some(bytes) = src.image_bytes(a).await else { continue };
+        let Ok(raw) = vc.analyze(prompt, bytes, "image/jpeg").await else { continue };
+        let v = parse_json_obj(&raw);
+        for cat in ["outfit", "outfit_color", "jewelry_tone", "setting", "vibe"] {
+            if let Some(val) = v.get(cat).and_then(|x| x.as_str()) {
+                bump_count(&mut acc, cat, val);
+            }
+        }
+        for it in v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            if let Some(t) = it.as_str() {
+                let ty = normalize_item_type(t);
+                if !ty.is_empty() {
+                    bump_count(&mut acc, "item", &ty);
+                }
+            }
+        }
+        if let Some(arr) = acc["seen"].as_array_mut() {
+            arr.push(serde_json::json!(a.id));
+        }
+        n_new += 1;
+    }
+    let total = acc["total"].as_u64().unwrap_or(0) + n_new;
+    acc["total"] = serde_json::json!(total);
+    let _ = mem.profile_set(&key, &acc.to_string()).await;
+    // Milestone beliefs: dominant values become weight-encoded preference probabilities.
+    if n_new > 0 && total / 40 != (total - n_new) / 40 {
+        if let Some(counts) = acc["counts"].as_object() {
+            for (cat, vals) in counts {
+                let Some(vals) = vals.as_object() else { continue };
+                let cat_total: u64 = vals.values().filter_map(|v| v.as_u64()).sum();
+                if cat_total < 15 {
+                    continue;
+                }
+                if let Some((top, n)) = vals.iter().filter_map(|(k, v)| v.as_u64().map(|n| (k.clone(), n))).max_by_key(|(_, n)| *n) {
+                    let pct = n as f64 / cat_total as f64;
+                    if pct >= 0.4 {
+                        let weight = if cat_total >= 80 { 0.85 } else if cat_total >= 20 { 0.7 } else { 0.55 };
+                        let _ = mem
+                            .remember_as_belief(BeliefAssertion {
+                                statement: format!(
+                                    "{disp} (taste, {total} photos studied): {cat} is most often {top} — {:.0}% ({n}/{cat_total})",
+                                    pct * 100.0
+                                ),
+                                polarity: 1.0,
+                                weight,
+                                source_event: Some("taste-study".into()),
+                                provenance: "photos".into(),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+    Some(format!(
+        "{}\n\n(+{n_new} photos this pass — say `tastes {disp}` anytime to keep sharpening)",
+        render_tastes(&acc, &disp)
+    ))
+}
+
+/// Background body of an object-inventory study (detached; returns the catalog message).
+async fn inventory_task(src_name: String, pid: String, disp: String, mem: Arc<dyn MemoryFacade>) -> Option<String> {
+    let sources = mind_tools::PhotoSource::all_from_env();
+    let src = sources.into_iter().find(|s| s.name() == src_name)?;
+    let vc = mind_tools::VisionClient::from_env()?;
+    let assets = src.assets_of_person(&pid, 20).await;
+    if assets.is_empty() {
+        return Some(format!("The library knows {disp} but returned no photos to inventory."));
+    }
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut variants: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut read = 0usize;
+    for a in assets.iter().take(16) {
+        let Some(bytes) = src.image_bytes(a).await else { continue };
+        let Ok(raw) = vc
+            .analyze(
+                r#"List every distinct personal item visible on or near the main person (clothing, jewelry, accessories, gadgets). Output ONLY JSON: {"items":[{"type":"<one word like saree/dress/watch/handbag/sunglasses/earrings/necklace/shoes>","desc":"<3-6 words: color, material, style>"}]}. Empty list if none. Do NOT guess brands."#,
+                bytes,
+                "image/jpeg",
+            )
+            .await
+        else {
+            continue;
+        };
+        let v = parse_json_obj(&raw);
+        if raw.len() > 4 {
+            read += 1;
+        }
+        for it in v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let Some(ty) = it.get("type").and_then(|x| x.as_str()) else { continue };
+            let ty = normalize_item_type(ty);
+            if ty.is_empty() {
+                continue;
+            }
+            *counts.entry(ty.clone()).or_insert(0) += 1;
+            let d = it.get("desc").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+            let e = variants.entry(ty).or_default();
+            if !d.is_empty() && e.len() < 6 && !e.iter().any(|x| x == &d) {
+                e.push(d);
+            }
+        }
+    }
+    if counts.is_empty() {
+        return Some(format!("I read {read} of {disp}'s photos but couldn't extract structured items from them."));
+    }
+    let mut owned: Vec<(String, usize)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    owned.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut text = format!("👗 {disp} — object inventory from {read} photos:\n\nSEEN:");
+    for (ty, n) in owned.iter().take(14) {
+        let vars = variants.get(ty).map(|v| v.join("; ")).unwrap_or_default();
+        if vars.is_empty() {
+            text.push_str(&format!("\n• {ty} ×{n}"));
+        } else {
+            text.push_str(&format!("\n• {ty} ×{n} — {vars}"));
+        }
+    }
+    const CHECKLIST: [&str; 11] = [
+        "watch", "handbag", "sunglasses", "earrings", "necklace", "bracelet", "ring", "shoes",
+        "scarf", "smartwatch", "headphones",
+    ];
+    let missing: Vec<&str> = CHECKLIST.iter().filter(|c| !counts.contains_key(**c)).copied().collect();
+    if !missing.is_empty() {
+        text.push_str(&format!(
+            "\n\nNEVER SEEN in this sample: {} — absence is a hint, not proof, but it's where gift gaps live.",
+            missing.join(", ")
+        ));
+    }
+    for (ty, n) in owned.iter().take(3) {
+        let vars = variants.get(ty).map(|v| v.join("; ")).unwrap_or_default();
+        let _ = mem
+            .remember_as_belief(BeliefAssertion {
+                statement: format!(
+                    "{disp} (inventory): {n}× {ty} observed in photos{}",
+                    if vars.is_empty() { String::new() } else { format!(" — {vars}") }
+                ),
+                polarity: 1.0,
+                weight: 0.65,
+                source_event: Some("inventory".into()),
+                provenance: "photos".into(),
+            })
+            .await;
+    }
+    if !missing.is_empty() {
+        let _ = mem
+            .remember_as_belief(BeliefAssertion {
+                statement: format!(
+                    "{disp} (inventory): never seen with {} across {read} recent photos — gift-gap candidates",
+                    missing.join(", ")
+                ),
+                polarity: 1.0,
+                weight: 0.6,
+                source_event: Some("inventory".into()),
+                provenance: "photos".into(),
+            })
+            .await;
+    }
+    let summary = format!(
+        "{}{}",
+        owned.iter().take(6).map(|(t, n)| format!("{t}×{n}")).collect::<Vec<_>>().join(", "),
+        if missing.is_empty() { String::new() } else { format!("; never seen: {}", missing.join(", ")) }
+    );
+    let _ = mem
+        .profile_set(
+            &format!("closet:{}", disp.to_lowercase()),
+            &serde_json::json!({ "ts": chrono::Utc::now().timestamp_millis(), "text": text, "summary": summary }).to_string(),
+        )
+        .await;
+    Some(text)
+}
+
+/// Background body of a gift-intelligence study (detached; returns the full intel message).
+async fn gift_task(
+    src_name: String,
+    pid: String,
+    disp: String,
+    known: String,
+    closet_note: String,
+    mem: Arc<dyn MemoryFacade>,
+    inference: InferencePool,
+    persona: String,
+) -> Option<String> {
+    let sources = mind_tools::PhotoSource::all_from_env();
+    let src = sources.into_iter().find(|s| s.name() == src_name)?;
+    let vc = mind_tools::VisionClient::from_env()?;
+    let assets = src.assets_of_person(&pid, 14).await;
+    if assets.is_empty() {
+        return Some(format!("The library knows {disp} but returned no photos to study."));
+    }
+    let mut obs: Vec<String> = Vec::new();
+    for a in assets.iter().take(12) {
+        let Some(bytes) = src.image_bytes(a).await else { continue };
+        let Ok(d) = vc
+            .analyze(
+                "List ONLY visible personal effects in ONE line: clothing style + colors, jewelry (type/metal), accessories (watch, bag, sunglasses), gadgets, hobby items, notable decor. No people descriptions, no names.",
+                bytes,
+                "image/jpeg",
+            )
+            .await
+        else {
+            continue;
+        };
+        let d1: String = d.lines().next().unwrap_or("").chars().take(170).collect();
+        if d1.len() > 8 {
+            obs.push(format!("[{}] {d1}", a.date));
+        }
+    }
+    if obs.is_empty() {
+        return Some(format!("I reached {disp}'s photos but couldn't read any of them."));
+    }
+    let joined: String = obs.join("\n").chars().take(2400).collect();
+    let prompt = format!(
+        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
+    );
+    let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+    let out = match inference.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+        Ok(r) => r.text.trim().to_string(),
+        Err(e) => return Some(format!("Studied {} photos of {disp} but couldn't distill ({e}).", obs.len())),
+    };
+    for line in out.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("STYLE:").or_else(|| l.strip_prefix("MISSING:")) {
+            if rest.trim().len() > 8 {
+                let _ = mem
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!("{disp} (gift intel): {}", rest.trim()),
+                        polarity: 1.0,
+                        weight: 0.65,
+                        source_event: Some("gift-intel".into()),
+                        provenance: "photos".into(),
+                    })
+                    .await;
+            }
+        }
+    }
+    let text = format!(
+        "🎁 {disp} — gift intelligence from {} of their photos:\n\n{out}\n\nSay `deals <idea>` and I'll find real listings in budget.",
+        obs.len()
+    );
+    let _ = mem
+        .profile_set(
+            &format!("gift_intel:{}", disp.to_lowercase()),
+            &serde_json::json!({ "ts": chrono::Utc::now().timestamp_millis(), "text": text }).to_string(),
+        )
+        .await;
+    Some(text)
+}
+
 /// Render a taste accumulator as human-readable distributions with honest confidence tiers.
 fn render_tastes(acc: &serde_json::Value, disp: &str) -> String {
     let total = acc["total"].as_u64().unwrap_or(0);
@@ -1427,6 +1705,9 @@ pub struct ConversationEngine {
     video_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
     /// The most recent photo the user sent in chat — "enhance it" follow-ups act on this.
     last_photo: Mutex<Option<Vec<u8>>>,
+    /// Photo studies currently running (gift:/closet:/tastes:<name>) — dedupe guard so a repeat
+    /// ask acknowledges instead of double-spawning a 10-minute vision pass.
+    studies: Arc<Mutex<std::collections::HashSet<String>>>,
     /// How many delegated background jobs are in flight (a soft cap stops runaway fan-out).
     bg_jobs: Arc<AtomicUsize>,
 }
@@ -1474,6 +1755,7 @@ impl ConversationEngine {
             photo_queue: Mutex::new(Vec::new()),
             video_queue: Arc::new(Mutex::new(Vec::new())),
             last_photo: Mutex::new(None),
+            studies: Arc::new(Mutex::new(std::collections::HashSet::new())),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -6695,11 +6977,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     }
 
     /// ---------- TASTE DISTRIBUTIONS ----------
-    /// From reads to STATISTICS: study a person's photos in incremental batches, accumulating
-    /// categorical counts (outfit, color, jewelry tone, setting, vibe, items) into a persistent
-    /// per-person accumulator. Frequencies become preference PROBABILITIES whose confidence grows
-    /// with sample size; at every 40-photo milestone the dominant values are written as beliefs
-    /// whose WEIGHT encodes the confidence tier — the substrate's native probability language.
+    /// From reads to STATISTICS: incremental batches accumulate categorical counts per person;
+    /// frequencies become preference PROBABILITIES with sample-size confidence; milestone beliefs
+    /// carry the probability in their weight. Heavy pass runs detached — instant ack here.
     pub async fn taste_study(&self, who: &str, batch: usize) -> String {
         let sources = mind_tools::PhotoSource::all_from_env();
         let Some((i, pid, disp)) = self.resolve_face(&sources, who).await else {
@@ -6708,125 +6988,43 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if mind_tools::VisionClient::from_env().is_none() {
             return "No vision model configured — can't study photos.".to_string();
         }
-        let key = format!("tastes:{}", disp.to_lowercase());
         let acc: serde_json::Value = self
             .memory
-            .profile_get(&key)
+            .profile_get(&format!("tastes:{}", disp.to_lowercase()))
             .await
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "total": 0 }));
         let total0 = acc["total"].as_u64().unwrap_or(0);
-        let already = render_tastes(&acc, &disp);
-        // The study pass runs detached — dozens of local vision reads take many minutes.
-        let src_name = sources[i].name().to_string();
-        let pid2 = pid.clone();
+        let guard = format!("tastes:{}", disp.to_lowercase());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return format!("A taste study of {disp} is already running — the update lands here shortly.");
+        }
+        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid.clone(), disp.clone());
         let mem = self.memory.clone();
         let nq = self.notify_queue.clone();
-        let disp2 = disp.clone();
+        let studies = self.studies.clone();
         let batch = batch.clamp(10, 60);
         tokio::spawn(async move {
-            let sources = mind_tools::PhotoSource::all_from_env();
-            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else { return };
-            let Some(vc) = mind_tools::VisionClient::from_env() else { return };
-            let key = format!("tastes:{}", disp2.to_lowercase());
-            let mut acc: serde_json::Value = mem
-                .profile_get(&key)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| serde_json::json!({ "seen": [], "counts": {}, "total": 0 }));
-            let seen: std::collections::HashSet<String> = acc["seen"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect();
-            let assets = src.assets_of_person(&pid2, 400).await;
-            let todo: Vec<mind_tools::PhotoAsset> = assets.into_iter().filter(|a| !seen.contains(&a.id)).take(batch).collect();
-            if todo.is_empty() {
-                nq.lock().unwrap().push(format!(
-                    "📊 {disp2}: every reachable photo is already studied ({} total) — the distribution is as sharp as the library allows for now.",
-                    acc["total"]
-                ));
-                return;
+            if let Some(t) = taste_task(src_name, pid2, disp2, batch, mem).await {
+                nq.lock().unwrap().push(t);
             }
-            let prompt = r#"Analyze the MAIN person's appearance and the scene. Output ONLY JSON: {"outfit":"<type like saree/dress/kurta/casual-western or none>","outfit_color":"<dominant color or none>","jewelry_tone":"<gold/silver/mixed/none>","setting":"<home/outdoor/travel/restaurant/party/temple/studio>","vibe":"<festive/casual/formal/cozy>","items":["<other notable personal items>"]}. No brands, no names."#;
-            let mut n_new = 0u64;
-            for a in &todo {
-                let Some(bytes) = src.image_bytes(a).await else { continue };
-                let Ok(raw) = vc.analyze(prompt, bytes, "image/jpeg").await else { continue };
-                let v = parse_json_obj(&raw);
-                for cat in ["outfit", "outfit_color", "jewelry_tone", "setting", "vibe"] {
-                    if let Some(val) = v.get(cat).and_then(|x| x.as_str()) {
-                        bump_count(&mut acc, cat, val);
-                    }
-                }
-                for it in v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                    if let Some(t) = it.as_str() {
-                        let ty = normalize_item_type(t);
-                        if !ty.is_empty() {
-                            bump_count(&mut acc, "item", &ty);
-                        }
-                    }
-                }
-                if let Some(arr) = acc["seen"].as_array_mut() {
-                    arr.push(serde_json::json!(a.id));
-                }
-                n_new += 1;
-            }
-            let total = acc["total"].as_u64().unwrap_or(0) + n_new;
-            acc["total"] = serde_json::json!(total);
-            let _ = mem.profile_set(&key, &acc.to_string()).await;
-            // Milestone beliefs: dominant values become weight-encoded preference probabilities.
-            if n_new > 0 && total / 40 != (total - n_new) / 40 {
-                if let Some(counts) = acc["counts"].as_object() {
-                    for (cat, vals) in counts {
-                        let Some(vals) = vals.as_object() else { continue };
-                        let cat_total: u64 = vals.values().filter_map(|v| v.as_u64()).sum();
-                        if cat_total < 15 {
-                            continue;
-                        }
-                        if let Some((top, n)) = vals.iter().filter_map(|(k, v)| v.as_u64().map(|n| (k.clone(), n))).max_by_key(|(_, n)| *n) {
-                            let pct = n as f64 / cat_total as f64;
-                            if pct >= 0.4 {
-                                let weight = if cat_total >= 80 { 0.85 } else if cat_total >= 20 { 0.7 } else { 0.55 };
-                                let _ = mem.remember_as_belief(BeliefAssertion {
-                                    statement: format!(
-                                        "{disp2} (taste, {total} photos studied): {cat} is most often {top} — {:.0}% ({n}/{cat_total})",
-                                        pct * 100.0
-                                    ),
-                                    polarity: 1.0,
-                                    weight,
-                                    source_event: Some("taste-study".into()),
-                                    provenance: "photos".into(),
-                                }).await;
-                            }
-                        }
-                    }
-                }
-            }
-            nq.lock().unwrap().push(format!(
-                "{}\n\n(+{n_new} photos this pass — say `tastes {disp2}` anytime to keep sharpening)",
-                render_tastes(&acc, &disp2)
-            ));
+            studies.lock().unwrap().remove(&guard);
         });
         if total0 > 0 {
-            format!("{already}\n\n📈 Studying {batch} more in the background — updated numbers will follow.")
+            format!(
+                "{}\n\n📈 Studying {batch} more in the background — updated numbers will follow.",
+                render_tastes(&acc, &disp)
+            )
         } else {
             format!("📊 First taste study of {disp} started ({batch} photos, local vision, background) — the distribution lands here when done.")
         }
     }
 
     /// ---------- OBJECT INVENTORY ----------
-    /// Structured possession detection: walk a person's photos, extract every visible personal
-    /// item as typed JSON (watch, handbag, saree, sunglasses, ...) → a persistent per-person
-    /// inventory with counts + variants, and an explicit NEVER-SEEN list — the hard gift-gap
-    /// signal. Honest limits: types/colors/materials are reliable; brands are never guessed;
-    /// absence in a photo sample is a hint, not proof. Cached 30 days per person.
+    /// Structured possession detection (watch/handbag/saree/... with counts + variants + a
+    /// NEVER-SEEN gap list). Heavy pass runs detached — instant ack, catalog arrives when done.
     pub async fn person_inventory(&self, who: &str) -> String {
         let key = format!("closet:{}", who.trim().to_lowercase());
         if let Ok(Some(prev)) = self.memory.profile_get(&key).await {
@@ -6845,90 +7043,21 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if mind_tools::VisionClient::from_env().is_none() {
             return "No vision model configured — can't read the photos.".to_string();
         }
-        let assets = sources[i].assets_of_person(&pid, 20).await;
-        if assets.is_empty() {
-            return format!("The library knows {disp} but returned no photos.");
+        let guard = format!("closet:{}", disp.to_lowercase());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return format!("Already inventorying {disp}'s photos — the catalog lands here shortly.");
         }
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut variants: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        let mut read = 0usize;
-        for a in assets.iter().take(16) {
-            let Some(bytes) = sources[i].image_bytes(a).await else { continue };
-            let raw = self
-                .analyze_image_bytes(
-                    bytes,
-                    "image/jpeg",
-                    r#"List every distinct personal item visible on or near the main person (clothing, jewelry, accessories, gadgets). Output ONLY JSON: {"items":[{"type":"<one word like saree/dress/watch/handbag/sunglasses/earrings/necklace/shoes>","desc":"<3-6 words: color, material, style>"}]}. Empty list if none. Do NOT guess brands."#,
-                )
-                .await;
-            let v = parse_json_obj(&raw);
-            let items = v.get("items").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-            if raw.len() > 4 {
-                read += 1;
+        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid.clone(), disp.clone());
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        tokio::spawn(async move {
+            if let Some(t) = inventory_task(src_name, pid2, disp2, mem).await {
+                nq.lock().unwrap().push(t);
             }
-            for it in items {
-                let Some(ty) = it.get("type").and_then(|x| x.as_str()) else { continue };
-                let ty = normalize_item_type(ty);
-                if ty.is_empty() {
-                    continue;
-                }
-                *counts.entry(ty.clone()).or_insert(0) += 1;
-                let d = it.get("desc").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
-                let e = variants.entry(ty).or_default();
-                if !d.is_empty() && e.len() < 6 && !e.iter().any(|x| x == &d) {
-                    e.push(d);
-                }
-            }
-        }
-        if counts.is_empty() {
-            return format!("I read {read} of {disp}'s photos but couldn't extract structured items from them.");
-        }
-        let mut owned: Vec<(String, usize)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        owned.sort_by(|a, b| b.1.cmp(&a.1));
-        let mut text = format!("👗 {disp} — object inventory from {read} photos:\n\nSEEN:");
-        for (ty, n) in owned.iter().take(14) {
-            let vars = variants.get(ty).map(|v| v.join("; ")).unwrap_or_default();
-            if vars.is_empty() {
-                text.push_str(&format!("\n• {ty} ×{n}"));
-            } else {
-                text.push_str(&format!("\n• {ty} ×{n} — {vars}"));
-            }
-        }
-        const CHECKLIST: [&str; 11] = [
-            "watch", "handbag", "sunglasses", "earrings", "necklace", "bracelet", "ring", "shoes",
-            "scarf", "smartwatch", "headphones",
-        ];
-        let missing: Vec<&str> = CHECKLIST.iter().filter(|c| !counts.contains_key(**c)).copied().collect();
-        if !missing.is_empty() {
-            text.push_str(&format!(
-                "\n\nNEVER SEEN in this sample: {} — absence is a hint, not proof, but it's where gift gaps live.",
-                missing.join(", ")
-            ));
-        }
-        // Persist: the top possessions and the gap list become durable beliefs.
-        for (ty, n) in owned.iter().take(3) {
-            let vars = variants.get(ty).map(|v| v.join("; ")).unwrap_or_default();
-            let _ = self.memory.remember_as_belief(BeliefAssertion {
-                statement: format!("{disp} (inventory): {n}× {ty} observed in photos{}", if vars.is_empty() { String::new() } else { format!(" — {vars}") }),
-                polarity: 1.0, weight: 0.65, source_event: Some("inventory".into()), provenance: "photos".into(),
-            }).await;
-        }
-        if !missing.is_empty() {
-            let _ = self.memory.remember_as_belief(BeliefAssertion {
-                statement: format!("{disp} (inventory): never seen with {} across {read} recent photos — gift-gap candidates", missing.join(", ")),
-                polarity: 1.0, weight: 0.6, source_event: Some("inventory".into()), provenance: "photos".into(),
-            }).await;
-        }
-        let summary = format!(
-            "{}{}",
-            owned.iter().take(6).map(|(t, n)| format!("{t}×{n}")).collect::<Vec<_>>().join(", "),
-            if missing.is_empty() { String::new() } else { format!("; never seen: {}", missing.join(", ")) }
-        );
-        let _ = self
-            .memory
-            .profile_set(&key, &serde_json::json!({ "ts": chrono::Utc::now().timestamp_millis(), "text": text, "summary": summary }).to_string())
-            .await;
-        text
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!("👗 Studying {disp}'s photos for a structured object inventory (background, local vision) — the catalog lands here when done.")
     }
 
     /// ---------- GIFT INTELLIGENCE ----------
@@ -6938,7 +7067,6 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// straight into the deal-finder. Cached ~30 days per person (12 vision reads aren't free).
     pub async fn gift_intel(&self, who: &str) -> String {
         let name_key = format!("gift_intel:{}", who.trim().to_lowercase());
-        // Fresh study already on file? Reuse it (say so) unless it's stale.
         if let Ok(Some(prev)) = self.memory.profile_get(&name_key).await {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&prev) {
                 let ts = v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -6956,30 +7084,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if mind_tools::VisionClient::from_env().is_none() {
             return "No vision model configured — I can't read the photos.".to_string();
         }
-        let assets = sources[i].assets_of_person(&pid, 14).await;
-        if assets.is_empty() {
-            return format!("The library knows {disp} but returned no photos to study.");
-        }
-        // Observation pass: personal effects only — this is a WHAT-THEY-OWN read, not a scene read.
-        let mut obs: Vec<String> = Vec::new();
-        for a in assets.iter().take(12) {
-            let Some(bytes) = sources[i].image_bytes(a).await else { continue };
-            let d = self
-                .analyze_image_bytes(
-                    bytes,
-                    "image/jpeg",
-                    "List ONLY visible personal effects in ONE line: clothing style + colors, jewelry (type/metal), accessories (watch, bag, sunglasses), gadgets, hobby items, notable decor. No people descriptions, no names.",
-                )
-                .await;
-            let d1: String = d.lines().next().unwrap_or("").chars().take(170).collect();
-            if d1.len() > 8 {
-                obs.push(format!("[{}] {d1}", a.date));
-            }
-        }
-        if obs.is_empty() {
-            return format!("I reached {disp}'s photos but couldn't read any of them.");
-        }
-        // Fuse with what the substrate already knows about them.
+        // Substrate context gathered up front (the detached task can't call &self methods).
         let store = self.load_people_profiles().await;
         let known = store
             .iter()
@@ -7003,33 +7108,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.get("summary").and_then(|x| x.as_str()).map(String::from))
             .unwrap_or_default();
-        let joined: String = obs.join("\n").chars().take(2400).collect();
-        let prompt = format!(
-            "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
-        );
-        let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
-        let out = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
-            Ok(r) => r.text.trim().to_string(),
-            Err(e) => return format!("Studied {} photos of {disp} but couldn't distill ({e}).", obs.len()),
-        };
-        // Persist: STYLE + MISSING become beliefs (the deal-finder and future asks build on them).
-        for line in out.lines() {
-            let l = line.trim();
-            if let Some(rest) = l.strip_prefix("STYLE:").or_else(|| l.strip_prefix("MISSING:")) {
-                if rest.trim().len() > 8 {
-                    let _ = self.memory.remember_as_belief(BeliefAssertion {
-                        statement: format!("{disp} (gift intel): {}", rest.trim()),
-                        polarity: 1.0, weight: 0.65, source_event: Some("gift-intel".into()), provenance: "photos".into(),
-                    }).await;
-                }
-            }
+        let guard = format!("gift:{}", disp.to_lowercase());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return format!("Already studying {disp}'s photos for gifts — results land here shortly.");
         }
-        let text = format!("🎁 {disp} — gift intelligence from {} of their photos:\n\n{out}\n\nSay `deals <idea>` and I'll find real listings in budget.", obs.len());
-        let _ = self
-            .memory
-            .profile_set(&name_key, &serde_json::json!({ "ts": chrono::Utc::now().timestamp_millis(), "text": text }).to_string())
-            .await;
-        text
+        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid.clone(), disp.clone());
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let inference = self.inference.clone();
+        let persona = self.persona.clone();
+        tokio::spawn(async move {
+            if let Some(t) = gift_task(src_name, pid2, disp2, known, closet_note, mem, inference, persona).await {
+                nq.lock().unwrap().push(t);
+            }
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!("📸 Studying {disp}'s photos for gift intelligence in the background — results land here shortly.")
     }
 
     /// Proactive gift scout gate: at most one study per period, only when photo sources exist.
@@ -7076,11 +7171,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         }
                     }
                 }
-                let intel = self.gift_intel(name).await;
-                if intel.len() < 120 || intel.starts_with("No photo source") {
+                let kick = self.gift_intel(name).await;
+                if kick.starts_with("No photo source") || kick.starts_with("No vision") {
                     continue;
                 }
-                return Some(format!("{name}'s {label} is in {days} day(s) — so I studied their photos.\n\n{intel}"));
+                if kick.starts_with("🎁") {
+                    return Some(format!("{name}'s {label} is in {days} day(s) — here's what their photos say:\n\n{kick}"));
+                }
+                return Some(format!("{name}'s {label} is in {days} day(s) — I'm studying their photos now; gift ideas will follow shortly."));
             }
         }
         None

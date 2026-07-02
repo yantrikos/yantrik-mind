@@ -557,4 +557,60 @@ pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
     .ok()?
 }
 
+/// Facebook Graph API (READ-ONLY, the user's own profile via their own app token). The "know me"
+/// lane: profile facts, likes (interest mining), events (calendar spine), post cadence. The token
+/// lives only in env (FB_USER_TOKEN); requests go out, nothing is ever posted.
+pub struct FbClient {
+    token: String,
+}
+
+impl FbClient {
+    pub fn from_env() -> Option<FbClient> {
+        std::env::var("FB_USER_TOKEN").ok().filter(|t| t.len() > 20).map(|token| FbClient { token })
+    }
+
+    async fn get(&self, path: &str, fields: &str, limit: usize) -> anyhow::Result<serde_json::Value> {
+        let url = format!(
+            "https://graph.facebook.com/v19.0/{path}?fields={}&limit={limit}&access_token={}",
+            urlencoding::encode(fields),
+            self.token
+        );
+        tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+            Ok(ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call()?.into_json()?)
+        })
+        .await?
+    }
+
+    pub async fn profile(&self) -> anyhow::Result<serde_json::Value> {
+        self.get("me", "name,birthday,hometown,location{name},email", 1).await
+    }
+    pub async fn likes(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
+        self.get("me/likes", "name,category", limit).await
+    }
+    pub async fn events(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
+        self.get("me/events", "name,start_time,place{name},rsvp_status", limit).await
+    }
+    pub async fn posts(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
+        self.get("me/posts", "message,created_time", limit).await
+    }
+    /// Days until the token dies (Graph debug_token self-introspection). None if unknown.
+    pub async fn days_to_expiry(&self) -> Option<i64> {
+        let url = format!(
+            "https://graph.facebook.com/v19.0/debug_token?input_token={t}&access_token={t}",
+            t = self.token
+        );
+        let v: serde_json::Value = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+            Ok(ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call()?.into_json()?)
+        })
+        .await
+        .ok()?
+        .ok()?;
+        let exp = v["data"]["expires_at"].as_i64()?;
+        if exp == 0 {
+            return Some(9999); // never-expiring
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        Some((exp - now) / 86_400)
+    }
+}
 

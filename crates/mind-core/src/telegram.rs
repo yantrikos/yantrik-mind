@@ -829,6 +829,15 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // the raw-turn window; survives restarts). Cheap early-return until enough turns accrue.
         conv.compact_conversation().await;
 
+        // Facebook refresh: keep the know-me lane current (daily; data-only, sends nothing).
+        if conv.fb_sync_due().await {
+            let c = conv.clone();
+            tokio::spawn(async move {
+                let r = c.fb_sync().await;
+                eprintln!("[fb] {}", r.chars().take(140).collect::<String>());
+            });
+        }
+
         // Resolve a STALE proactive send (past the 90-min window, no reply) as IGNORED — the world
         // model learns dead zones from silence just as it learns receptive windows from replies.
         conv.resolve_proactive(false).await;

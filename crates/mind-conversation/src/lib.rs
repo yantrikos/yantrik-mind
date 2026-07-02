@@ -5735,6 +5735,125 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         out
     }
 
+    /// FACEBOOK SYNC — the "know me" lane, read-only over the user's OWN profile. Profile facts +
+    /// likes (interest mining) + events (straight onto the calendar spine) become typed beliefs and
+    /// profile entries, provenance "facebook". Deterministic extraction; refreshed daily by the
+    /// poll loop; warns when the token nears expiry.
+    pub async fn fb_sync(&self) -> String {
+        let Some(fb) = mind_tools::FbClient::from_env() else {
+            return "Facebook isn't connected (FB_USER_TOKEN not set) — that's the honest state.".to_string();
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut learned = 0usize;
+        // 1. Profile facts → beliefs.
+        if let Ok(p) = fb.profile().await {
+            if let Some(b) = p.get("birthday").and_then(|x| x.as_str()) {
+                let _ = self.memory.remember_as_belief(BeliefAssertion {
+                    statement: format!("Pranab's own birthday is {b} (from his Facebook profile)"),
+                    polarity: 1.0, weight: 1.0, source_event: Some("facebook".into()), provenance: "facebook".into(),
+                }).await;
+                learned += 1;
+            }
+            if let Some(h) = p.get("hometown").and_then(|x| x.get("name")).and_then(|x| x.as_str()) {
+                let _ = self.memory.remember_as_belief(BeliefAssertion {
+                    statement: format!("Pranab's hometown is {h}"),
+                    polarity: 1.0, weight: 0.9, source_event: Some("facebook".into()), provenance: "facebook".into(),
+                }).await;
+                learned += 1;
+            }
+        }
+        // 2. Likes → interest beliefs (and the Brishti creator-page enrichment).
+        if let Ok(l) = fb.likes(25).await {
+            let mut names: Vec<String> = Vec::new();
+            for like in l.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let (Some(name), cat) = (
+                    like.get("name").and_then(|x| x.as_str()),
+                    like.get("category").and_then(|x| x.as_str()).unwrap_or(""),
+                ) else { continue };
+                names.push(name.trim().to_string());
+                let _ = self.memory.remember_as_belief(BeliefAssertion {
+                    statement: format!("Pranab follows \"{}\" on Facebook ({cat})", name.trim()),
+                    polarity: 1.0, weight: 0.7, source_event: Some("facebook".into()), provenance: "facebook".into(),
+                }).await;
+                learned += 1;
+            }
+            // The wife's creator page, pinned to her profile as a fact.
+            if names.iter().any(|n| n.to_lowercase().contains("brishti")) {
+                let mut store = self.load_people_profiles().await;
+                if let Some(idx) = store.iter().position(|p| {
+                    p.get("relationship").and_then(|x| x.as_str()).map(|r| r.contains("wife")).unwrap_or(false)
+                }) {
+                    let mut facts = store[idx].get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    let fact = "Runs the \"World Of Brishti\" digital-creator page on Facebook";
+                    if !facts.iter().any(|f| f.as_str().map(|s| s.contains("World Of Brishti")).unwrap_or(false)) {
+                        facts.push(serde_json::json!(fact));
+                        store[idx]["facts"] = serde_json::json!(facts);
+                        self.save_people_profiles(&store).await;
+                        lines.push("pinned Brishti's creator page to her profile".to_string());
+                    }
+                }
+            }
+            lines.push(format!("{} liked pages mined for interests", names.len()));
+        }
+        // 3. Events → the calendar spine (source "fb"; replaced wholesale each sync).
+        if let Ok(ev) = fb.events(10).await {
+            let mut evs: Vec<serde_json::Value> = self
+                .load_calendar()
+                .await
+                .into_iter()
+                .filter(|e| e.get("source").and_then(|x| x.as_str()) != Some("fb"))
+                .collect();
+            let mut n = 0;
+            for e in ev.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let (Some(name), Some(start)) = (
+                    e.get("name").and_then(|x| x.as_str()),
+                    e.get("start_time").and_then(|x| x.as_str()),
+                ) else { continue };
+                if let Ok(t) = chrono::DateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S%z") {
+                    evs.push(serde_json::json!({
+                        "id": t.timestamp_millis(), "title": format!("{name} (FB)"),
+                        "when_ms": t.timestamp_millis(), "source": "fb",
+                    }));
+                    n += 1;
+                }
+            }
+            self.save_calendar(&evs).await;
+            if n > 0 {
+                lines.push(format!("{n} Facebook event(s) on the calendar"));
+            }
+        }
+        // 4. Post cadence — noted, not over-read (sparse posters are sparse).
+        if let Ok(p) = fb.posts(10).await {
+            let n = p.get("data").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            lines.push(format!("{n} recent posts seen"));
+        }
+        // 5. Token health — warn while there's still time to re-mint.
+        if let Some(days) = fb.days_to_expiry().await {
+            if days < 7 {
+                lines.push(format!("⚠️ Facebook token expires in {days} day(s) — re-mint it soon"));
+            }
+        }
+        let _ = self.memory.profile_set("fb_last_sync", &chrono::Utc::now().timestamp_millis().to_string()).await;
+        format!("📘 Facebook synced — {learned} facts learned. {}", lines.join("; "))
+    }
+
+    /// Daily FB refresh gate for the poll loop (data-only, no user-facing send).
+    pub async fn fb_sync_due(&self) -> bool {
+        if mind_tools::FbClient::from_env().is_none() {
+            return false;
+        }
+        let period_ms: i64 = std::env::var("YM_FB_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let last: i64 = self
+            .memory
+            .profile_get("fb_last_sync")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
     /// The EVENING LOOK-AHEAD — the third daily beat: tomorrow's shape tonight, so the day starts
     /// pre-loaded instead of surprising. Deterministic + persisted-by-date like the briefing.
     pub async fn evening_lookahead(&self) -> String {
@@ -6715,6 +6834,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     self.calendar_view().await
                 }
             }
+            // --- facebook: read-only sync of the user's own profile (know-me lane) ---
+            "fb" | "facebook" => self.fb_sync().await,
             // --- bond: the relationship as the engine sees it (bias vector + mode + bursts) ---
             "bond" | "relationship" | "us" => match self.memory.relationship_lens().await {
                 Ok(Some(l)) => format!("🤝 Where we are: {l}."),

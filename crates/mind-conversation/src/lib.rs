@@ -10665,6 +10665,50 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         Ok(ans)
     }
 
+    /// A REGISTERED MEMBER's conversational turn (wife/kids — anyone but the primary). Their own
+    /// voice, their own scoped transcript, and a hard wall by construction: none of the primary's
+    /// memory, beliefs, plans, or surprises is fetched on this path, and the speaker context makes
+    /// the identity explicit so the companion never confuses who it's talking to.
+    async fn member_turn(&self, user_text: &str, id: &TurnIdentity) -> String {
+        let people = self.load_people().await;
+        let (name, rel) = people
+            .iter()
+            .find(|p| p.get("slug").and_then(|x| x.as_str()) == Some(id.owner.as_str()))
+            .map(|p| {
+                (
+                    p.get("name").and_then(|x| x.as_str()).unwrap_or(id.owner.as_str()).to_string(),
+                    p.get("relationship").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                )
+            })
+            .unwrap_or_else(|| (id.owner.clone(), String::new()));
+        let primary_name = self
+            .memory
+            .profile_get("name")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "the primary".to_string());
+        let recent = self.memory.recent_messages_as(12, id.viewer()).await.unwrap_or_default();
+        let convo = if recent.is_empty() {
+            "(this is your first conversation with them — greet them warmly by name)".to_string()
+        } else {
+            recent.iter().map(|(role, text)| format!("{role}: {text}")).collect::<Vec<_>>().join("\n")
+        };
+        let sys = format!(
+            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- You can chat, answer questions, and analyze photos they send.",
+            self.persona,
+            if rel.is_empty() { String::new() } else { format!(" ({primary_name}'s {rel})") },
+        );
+        let prompt = format!(
+            "Recent conversation with {name}:\n{convo}\n\n{name}: {user_text}\n\nReply as the companion — warm, natural, concise. No preamble."
+        );
+        let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+        match self.inference.chat(vec![ChatMessage::system(&sys), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text.trim().to_string(),
+            Err(e) => format!("(I hit a snag thinking just now: {e})"),
+        }
+    }
+
     /// Single-user entry — acts as the primary member (the `ym` CLI + legacy callers).
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {
         self.handle_turn_as(user_text, TurnIdentity::primary()).await
@@ -10697,6 +10741,15 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
                 return Ok(reply);
             }
+        }
+        // MEMBER TURNS: everyone but the primary gets the member companion voice — grounded ONLY
+        // in their own scope. The primary's memory, outward actions, and agent tools stay on the
+        // primary's path; nothing here can leak a plan or a surprise.
+        if !matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            let reply = self.member_turn(user_text, &id).await;
+            let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, id.write_scope()).await;
+            return Ok(reply);
         }
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.

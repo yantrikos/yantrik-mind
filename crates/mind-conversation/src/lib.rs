@@ -1988,10 +1988,10 @@ pub struct ConversationEngine {
     notify_queue: Arc<Mutex<Vec<String>>>,
     /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
     /// loop drains and sends them as real Telegram photos. Arc'd so detached studio jobs can deliver.
-    photo_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
+    photo_queue: Arc<Mutex<Vec<(Vec<u8>, String, Option<i64>)>>>,
     /// Videos queued for the home channel (growing-up reels). Arc'd so a detached reel-builder task
     /// can deliver its film after minutes of background work.
-    video_queue: Arc<Mutex<Vec<(Vec<u8>, String)>>>,
+    video_queue: Arc<Mutex<Vec<(Vec<u8>, String, Option<i64>)>>>,
     /// The most recent photo the user sent in chat — "enhance it" follow-ups act on this.
     last_photo: Mutex<Option<Vec<u8>>>,
     /// Photo studies currently running (gift:/closet:/tastes:<name>) — dedupe guard so a repeat
@@ -6255,7 +6255,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if let Some(mode) = enhancement_mode(caption) {
             return match mind_tools::enhance_photo(image, mode).await {
                 Some(out) => {
-                    self.photo_queue.lock().unwrap().push((out, format!("\u{2728} enhanced ({mode})")));
+                    self.photo_queue.lock().unwrap().push((out, format!("\u{2728} enhanced ({mode})"), None));
                     format!("\u{2728} Done — enhanced it ({mode}), sending it back now.")
                 }
                 None => "I tried to enhance it but the edit failed on this image — honest miss.".to_string(),
@@ -6870,6 +6870,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// are vision-screened (LOCAL) against candidates so the photo genuinely matches. Honest when
     /// nothing matches — never sends a wrong photo claiming it fits.
     pub async fn photo_find_and_send(&self, query: &str) -> String {
+        self.photo_find_and_send_for(query, None, None).await
+    }
+
+    /// Retrieval with explicit DELIVERY TARGET and SPEAKER ("me" = the speaker, not the primary) —
+    /// the member-facing variant. The photo library is a shared family resource; targeting keeps
+    /// each person's results in their own chat.
+    pub async fn photo_find_and_send_for(&self, query: &str, target: Option<i64>, speaker: Option<&str>) -> String {
         let sources = mind_tools::PhotoSource::all_from_env();
         if sources.is_empty() {
             return "No photo source is connected (Immich / Facebook) — I have no library to pull from.".to_string();
@@ -6879,7 +6886,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         // Collect EVERY known person the ask mentions ("me and Brishti at the beach") — and ground
         // our/us/we/my (+ "of me"-style phrases, NOT the "show me" filler) to the user's own face,
         // so "our wedding" filters to photos he's actually in.
-        let self_name = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default().to_lowercase();
+        let self_name = match speaker {
+            Some(sp) => sp.to_lowercase(),
+            None => self.memory.profile_get("name").await.ok().flatten().unwrap_or_default().to_lowercase(),
+        };
         let wants_self = ["our", "us", "we", "my"].iter().any(|w| ql.split_whitespace().any(|t| t == *w))
             || ["me and", "and me", "of me", "with me"].iter().any(|p| ql.contains(p));
         let mut src_idx: Option<usize> = None;
@@ -6998,7 +7008,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         }
                         self.note_photo_anchor(&desc, &a.date).await;
                         self.note_photo_sent(&a.id).await;
-                        self.photo_queue.lock().unwrap().push((bytes, cap));
+                        self.photo_queue.lock().unwrap().push((bytes, cap, target));
                         return format!(
                             "Sending the library's closest match for \"{desc}\"{} — my eyes weren't 100% sure it's exactly that, so tell me if it's off. 📸",
                             if label.is_empty() { String::new() } else { format!(" with {label}") }
@@ -7049,7 +7059,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             self.note_photo_anchor(&desc, &a.date).await;
         }
         self.note_photo_sent(&a.id).await;
-        self.photo_queue.lock().unwrap().push((bytes, cap));
+        self.photo_queue.lock().unwrap().push((bytes, cap, target));
         let what = if label.is_empty() { "one from your library".to_string() } else { format!("one of {label}") };
         format!(
             "Found it — sending {what}{} 📸",
@@ -7057,8 +7067,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         )
     }
 
-    /// Drain images queued for the home channel (the poll loop sends them as real photos).
-    pub fn take_outbound_photos(&self) -> Vec<(Vec<u8>, String)> {
+    /// Drain images queued for delivery: (bytes, caption, target chat — None = the primary).
+    pub fn take_outbound_photos(&self) -> Vec<(Vec<u8>, String, Option<i64>)> {
         std::mem::take(&mut *self.photo_queue.lock().unwrap())
     }
 
@@ -7133,7 +7143,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             match mind_tools::face_reel_video(frames).await {
                 Some(mp4) => {
                     let cap = format!("🎞️ {disp}, {first_year} → {last_year} — {n} months, one frame each. Watch them grow.");
-                    vq.lock().unwrap().push((mp4, cap));
+                    vq.lock().unwrap().push((mp4, cap, None));
                 }
                 None => {
                     nq.lock().unwrap().push(format!("🎞️ I gathered {n} frames of {disp} but the video encode failed — that's the honest state."));
@@ -7198,7 +7208,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         None => {}
                     }
                     self.note_photo_sent(&a.id).await;
-                    self.photo_queue.lock().unwrap().push((bytes, cap));
+                    self.photo_queue.lock().unwrap().push((bytes, cap, None));
                     return true;
                 }
             }
@@ -7243,7 +7253,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 cap.push_str(&format!("\n{st}"));
             }
             self.note_photo_sent(&a.id).await;
-            self.photo_queue.lock().unwrap().push((bytes, cap));
+            self.photo_queue.lock().unwrap().push((bytes, cap, None));
             return true;
         }
         false
@@ -7288,8 +7298,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .filter(|t| t.len() > 10)
     }
 
-    /// Drain reel videos queued for the home channel.
-    pub fn take_outbound_videos(&self) -> Vec<(Vec<u8>, String)> {
+    /// Drain reel videos queued for delivery: (bytes, caption, target chat — None = the primary).
+    pub fn take_outbound_videos(&self) -> Vec<(Vec<u8>, String, Option<i64>)> {
         std::mem::take(&mut *self.video_queue.lock().unwrap())
     }
 
@@ -7299,6 +7309,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// selected for DIVERSITY (semantic theme + person filters + one-per-month spread), composed
     /// (face-centered collage grid or single), and captioned with grounded, non-generic words.
     pub async fn photo_create(&self, request: &str) -> String {
+        self.photo_create_for(request, None, None).await
+    }
+
+    /// Studio with explicit DELIVERY TARGET and SPEAKER ("me"/"us" resolve around the speaker).
+    pub async fn photo_create_for(&self, request: &str, target: Option<i64>, speaker: Option<&str>) -> String {
         let sources = mind_tools::PhotoSource::all_from_env();
         let Some(src_idx) = sources.iter().position(|s| s.knows_people()) else {
             return "No face-aware photo source is connected — I can't compose from the library.".to_string();
@@ -7320,7 +7335,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(6) as usize;
         let caption_mood = v.get("caption_mood").and_then(|x| x.as_str()).unwrap_or("warm").trim().to_string();
         // Resolve "me"/"us"/names to faces via the people layer + face-aware source.
-        let self_name = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default();
+        let self_name = match speaker {
+            Some(sp) => sp.to_string(),
+            None => self.memory.profile_get("name").await.ok().flatten().unwrap_or_default(),
+        };
         let spouse = self
             .load_people_profiles()
             .await
@@ -7382,7 +7400,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         tokio::spawn(async move {
             match studio_task(src_name, person_ids, desc2, theme2, fmt2, count, caption_mood, inference, persona).await {
                 Ok((img, caption)) => {
-                    pq.lock().unwrap().push((img, caption));
+                    pq.lock().unwrap().push((img, caption, target));
                 }
                 Err(msg) => {
                     nq.lock().unwrap().push(format!("🎨 Couldn't compose it: {msg}"));
@@ -8808,7 +8826,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     match img {
                         Some(b) => match mind_tools::enhance_photo(b, "auto").await {
                             Some(out) => {
-                                self.photo_queue.lock().unwrap().push((out, "✨ enhanced".to_string()));
+                                self.photo_queue.lock().unwrap().push((out, "✨ enhanced".to_string(), None));
                                 "✨ Enhanced your last photo — sending it back.".to_string()
                             }
                             None => "The enhancement failed on that image.".to_string(),
@@ -8820,13 +8838,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let msg = self.photo_find_and_send(r).await;
                     let item = self.photo_queue.lock().unwrap().pop();
                     match item {
-                        Some((bytes, cap)) => match mind_tools::enhance_photo(bytes.clone(), "auto").await {
+                        Some((bytes, cap, tgt)) => match mind_tools::enhance_photo(bytes.clone(), "auto").await {
                             Some(out) => {
-                                self.photo_queue.lock().unwrap().push((out, format!("✨ {cap}")));
+                                self.photo_queue.lock().unwrap().push((out, format!("✨ {cap}"), tgt));
                                 format!("{msg} — enhanced ✨")
                             }
                             None => {
-                                self.photo_queue.lock().unwrap().push((bytes, cap));
+                                self.photo_queue.lock().unwrap().push((bytes, cap, tgt));
                                 format!("{msg} (the enhancement failed, sending the original)")
                             }
                         },
@@ -9976,7 +9994,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 match img {
                     Some(b) => match mind_tools::enhance_photo(b, "auto").await {
                         Some(out) => {
-                            self.photo_queue.lock().unwrap().push((out, "✨ enhanced".to_string()));
+                            self.photo_queue.lock().unwrap().push((out, "✨ enhanced".to_string(), None));
                             "Enhanced the photo and queued it to send back.".to_string()
                         }
                         None => "Enhancement failed on that image.".to_string(),
@@ -10665,6 +10683,18 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         Ok(ans)
     }
 
+    /// The DM chat id for a member slug (registry tg_id; Telegram private chat id == user id).
+    async fn chat_of_member(&self, owner: &str) -> Option<i64> {
+        if let Some(rest) = owner.strip_prefix("guest:") {
+            return rest.parse().ok();
+        }
+        self.load_people()
+            .await
+            .iter()
+            .find(|p| p.get("slug").and_then(|x| x.as_str()) == Some(owner))
+            .and_then(|p| p.get("tg_id").and_then(|x| x.as_i64()))
+    }
+
     /// A REGISTERED MEMBER's conversational turn (wife/kids — anyone but the primary). Their own
     /// voice, their own scoped transcript, and a hard wall by construction: none of the primary's
     /// memory, beliefs, plans, or surprises is fetched on this path, and the speaker context makes
@@ -10688,6 +10718,16 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             .ok()
             .flatten()
             .unwrap_or_else(|| "the primary".to_string());
+        // FAMILY PHOTO ACCESS: the library is a shared family resource — retrieval and the studio
+        // work for members, DELIVERED TO THEIR OWN CHAT, with "me"/"us" resolving around them.
+        // (Analysis about people — gift/tastes/closet studies — stays on the primary's path.)
+        let member_chat = self.chat_of_member(&id.owner).await;
+        if let Some(req) = creative_request(user_text) {
+            return self.photo_create_for(&req, member_chat, Some(&name)).await;
+        }
+        if let Some(q) = photo_request(user_text) {
+            return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
+        }
         let recent = self.memory.recent_messages_as(12, id.viewer()).await.unwrap_or_default();
         let convo = if recent.is_empty() {
             "(this is your first conversation with them — greet them warmly by name)".to_string()
@@ -10695,7 +10735,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             recent.iter().map(|(role, text)| format!("{role}: {text}")).collect::<Vec<_>>().join("\n")
         };
         let sys = format!(
-            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- You can chat, answer questions, and analyze photos they send.",
+            "{}\n\nSPEAKER CONTEXT (hard rules):\n- You are talking with {name}{} — a registered family member, on THEIR own private channel.\n- Address {name} by name. NEVER address or confuse them with {primary_name} (the primary user).\n- {primary_name}'s private information, notes, plans, purchases and surprises are OFF-LIMITS here. If asked about them, say warmly that it's private.\n- What {name} shares with you is THEIR private space — treasure it for them.\n- You can chat, answer questions, analyze photos they send, and find/send family photos and collages (photo requests are handled automatically — never claim you lack photo access).",
             self.persona,
             if rel.is_empty() { String::new() } else { format!(" ({primary_name}'s {rel})") },
         );

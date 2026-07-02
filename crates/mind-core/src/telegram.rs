@@ -964,14 +964,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
 
         // Outbound video queue: growing-up reels finished by the detached builder task.
         {
-            let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 {
-                for (mp4, caption) in conv.take_outbound_videos() {
-                    if tg_send_video(&api, chat, mp4, &caption).await {
-                        eprintln!("[reel] delivered: {caption}");
-                    } else {
-                        eprintln!("[reel] send failed: {caption}");
-                    }
+            let primary = active_chat.load(Ordering::Relaxed);
+            for (mp4, caption, target) in conv.take_outbound_videos() {
+                let chat = target.unwrap_or(primary);
+                if chat == 0 {
+                    continue;
+                }
+                if tg_send_video(&api, chat, mp4, &caption).await {
+                    eprintln!("[reel] delivered: {caption}");
+                } else {
+                    eprintln!("[reel] send failed: {caption}");
                 }
             }
         }
@@ -979,12 +981,14 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Outbound photo queue: images the conversation layer decided to send (photo retrieval).
         // Direct answers to the user's own ask, so quiet-hours don't gate them.
         {
-            let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 {
-                for (jpeg, caption) in conv.take_outbound_photos() {
-                    if !tg_send_photo(&api, chat, jpeg, &caption).await {
-                        eprintln!("[photo] send failed: {caption}");
-                    }
+            let primary = active_chat.load(Ordering::Relaxed);
+            for (jpeg, caption, target) in conv.take_outbound_photos() {
+                let chat = target.unwrap_or(primary);
+                if chat == 0 {
+                    continue;
+                }
+                if !tg_send_photo(&api, chat, jpeg, &caption).await {
+                    eprintln!("[photo] send failed: {caption}");
                 }
             }
         }

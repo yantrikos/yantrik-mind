@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 59] = [
+    const CMDS: [&str; 61] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -350,7 +350,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "reel", "growup", "timelapse", "memories", "onthisday", "enhance", "beautify",
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
-        "inboxes", "mailscan", "emailscan", "mailrule", "mailrules",
+        "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -980,6 +980,41 @@ async fn studio_task(
         .filter(|t| t.len() > 4)
         .unwrap_or_else(|| format!("{people_desc} — {theme}"));
     Ok((img, caption))
+}
+
+/// Per-sender aggregate for the deep mail report.
+struct SenderAgg {
+    addr: String,
+    count: usize,
+    times: Vec<i64>,
+    subjects: Vec<String>,
+}
+
+/// Median gap in days between a sender's messages → cadence label.
+fn cadence_label(times: &mut Vec<i64>) -> Option<&'static str> {
+    if times.len() < 3 {
+        return None;
+    }
+    times.sort();
+    let mut gaps: Vec<i64> = times.windows(2).map(|w| (w[1] - w[0]) / 86_400_000).filter(|d| *d > 0).collect();
+    if gaps.len() < 2 {
+        return None;
+    }
+    gaps.sort();
+    let med = gaps[gaps.len() / 2];
+    match med {
+        5..=9 => Some("weekly"),
+        12..=18 => Some("biweekly"),
+        24..=38 => Some("monthly"),
+        80..=110 => Some("quarterly"),
+        330..=400 => Some("yearly"),
+        _ => None,
+    }
+}
+
+/// Best-effort epoch-ms from an RFC2822-ish email date header.
+fn parse_mail_date(d: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc2822(d.trim()).ok().map(|t| t.timestamp_millis())
 }
 
 /// Render a taste accumulator as human-readable distributions with honest confidence tiers.
@@ -8422,6 +8457,217 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         self.mail.as_ref().map(|m| ("inbox".to_string(), m.clone())).into_iter().collect()
     }
 
+    /// ---------- DEEP MAIL REPORT ----------
+    /// The mailbox as a LIFE LEDGER: hundreds of headers per account, aggregated per sender with
+    /// cadence detection, classified once, amounts verified by body-peek for the top recurrers.
+    /// Detached (IMAP + 2 LLM passes + peeks take minutes); delivered via the notify queue.
+    /// Findings compound: clear-amount subscriptions land in the tracker, dated renewals land on
+    /// the calendar spine (source "mail", replaced per report).
+    pub async fn mail_report(&self, per_account: usize) -> String {
+        let inboxes = self.scan_inboxes();
+        if inboxes.is_empty() {
+            return "No inboxes connected yet — set YM_SCAN_EMAIL (+ _2.._6) with app passwords.".to_string();
+        }
+        let guard = "mailreport".to_string();
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "A mail report is already running — it lands here shortly.".to_string();
+        }
+        let n = per_account.clamp(100, 600);
+        let n_accounts = inboxes.len();
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let inference = self.inference.clone();
+        let known_people: Vec<String> = self
+            .load_people_profiles()
+            .await
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+        let rules = self.mail_rules().await;
+        let subs_now = self.load_subs().await;
+        let cal_now = self.load_calendar().await;
+        tokio::spawn(async move {
+            let mut report_sections: Vec<String> = Vec::new();
+            let mut new_subs: Vec<serde_json::Value> = Vec::new();
+            let mut cal_events: Vec<serde_json::Value> = Vec::new();
+            for (label, m) in &inboxes {
+                let msgs = match m.inbox(n).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report_sections.push(format!("— {label}: unreachable ({e})"));
+                        continue;
+                    }
+                };
+                if msgs.is_empty() {
+                    continue;
+                }
+                // Deterministic aggregation: per-sender counts, times, sample subjects.
+                let mut agg: std::collections::HashMap<String, SenderAgg> = std::collections::HashMap::new();
+                let (mut t_min, mut t_max) = (i64::MAX, 0i64);
+                for msg in &msgs {
+                    let key = msg.from.trim().to_string();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let e = agg.entry(key.clone()).or_insert_with(|| SenderAgg {
+                        addr: key,
+                        count: 0,
+                        times: Vec::new(),
+                        subjects: Vec::new(),
+                    });
+                    e.count += 1;
+                    if let Some(ms) = parse_mail_date(&msg.date) {
+                        e.times.push(ms);
+                        t_min = t_min.min(ms);
+                        t_max = t_max.max(ms);
+                    }
+                    if e.subjects.len() < 3 && !msg.subject.trim().is_empty() {
+                        e.subjects.push(msg.subject.trim().chars().take(90).collect());
+                    }
+                }
+                let span_days = if t_max > t_min && t_min != i64::MAX { ((t_max - t_min) / 86_400_000).max(1) } else { 0 };
+                // Rank senders; keep the top 60 for classification.
+                let mut senders: Vec<SenderAgg> = agg.into_values().collect();
+                senders.sort_by(|a, b| b.count.cmp(&a.count));
+                senders.truncate(60);
+                let table: String = senders
+                    .iter_mut()
+                    .map(|se| {
+                        let cad = cadence_label(&mut se.times).unwrap_or("-");
+                        format!("{} | ×{} | {} | {}", se.addr, se.count, cad, se.subjects.join(" ⸱ "))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // One classification pass over the aggregate (not per email — that's the trick).
+                let people_csv = known_people.join(", ");
+                let rules_line = if rules.is_empty() { String::new() } else { format!("\nUSER RULES (override): {}", rules.join(" | ")) };
+                let classify = format!(
+                    "Sender table from the user's mailbox: sender | count | cadence | sample subjects.\nClassify EACH sender. Output ONLY a JSON array: [{{\"sender\":\"<sender>\",\"type\":\"subscription|bill|shop|newsletter|service|human|other\",\"name\":\"<clean service/person name>\",\"amount\":<number if a recurring amount is visible in subjects, else null>,\"renewal\":\"<YYYY-MM-DD if a renewal/expiry date is visible, else null>\"}}].\nKnown people (always type human): {people_csv}.{rules_line}\n\n{table}"
+                );
+                let cfg = GenerationConfig { max_tokens: 2600, ..GenerationConfig::default() };
+                let classified: Vec<serde_json::Value> = match inference
+                    .chat(vec![ChatMessage::system("You classify email senders from aggregates. Output only JSON."), ChatMessage::user(&classify)], cfg)
+                    .await
+                {
+                    Ok(r) => {
+                        let body = r.text.rsplit("</think>").next().unwrap_or(&r.text).to_string();
+                        match (body.find('['), body.rfind(']')) {
+                            (Some(x), Some(y)) if y > x => serde_json::from_str(&body[x..=y]).unwrap_or_default(),
+                            _ => Vec::new(),
+                        }
+                    }
+                    Err(_) => Vec::new(),
+                };
+                // Assemble the account's ledger view.
+                let (mut subs, mut bills, mut shops, mut humans, mut services) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0usize);
+                let mut monthly_total = 0f64;
+                for c in &classified {
+                    let ty = c.get("type").and_then(|x| x.as_str()).unwrap_or("other");
+                    let nm = c.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+                    let amt = c.get("amount").and_then(|x| x.as_f64());
+                    let renewal = c.get("renewal").and_then(|x| x.as_str()).unwrap_or("");
+                    let sender = c.get("sender").and_then(|x| x.as_str()).unwrap_or("");
+                    let cad = senders.iter().find(|se| se.addr == sender).and_then(|se| {
+                        let mut t = se.times.clone();
+                        cadence_label(&mut t)
+                    });
+                    match ty {
+                        "subscription" | "bill" => {
+                            let line = format!(
+                                "• {nm}{}{}",
+                                cad.map(|c| format!(" — {c}")).unwrap_or_default(),
+                                amt.map(|a| format!(", ~${a:.2}")).unwrap_or_default()
+                            );
+                            if ty == "subscription" { subs.push(line) } else { bills.push(line) }
+                            if let Some(a) = amt {
+                                monthly_total += match cad {
+                                    Some("yearly") => a / 12.0,
+                                    Some("quarterly") => a / 3.0,
+                                    Some("weekly") => a * 4.3,
+                                    _ => a,
+                                };
+                                // Auto-track: a named recurring charge with a clear amount.
+                                let already = subs_now.iter().chain(new_subs.iter()).any(|t| {
+                                    t.get("name").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(&nm)).unwrap_or(false)
+                                });
+                                if !already && ty == "subscription" {
+                                    new_subs.push(serde_json::json!({ "name": nm, "amount": a, "cycle": cad.unwrap_or("monthly") }));
+                                }
+                            }
+                            if renewal.len() == 10 {
+                                if let Ok(d) = chrono::NaiveDate::parse_from_str(renewal, "%Y-%m-%d") {
+                                    if let Some(ms) = d.and_hms_opt(9, 0, 0).map(|t| t.and_utc().timestamp_millis()) {
+                                        cal_events.push(serde_json::json!({ "id": ms, "title": format!("{nm} renewal (mail)"), "when_ms": ms, "source": "mail" }));
+                                    }
+                                }
+                            }
+                        }
+                        "shop" => shops.push(format!("• {nm} ×{}", senders.iter().find(|se| se.addr == sender).map(|se| se.count).unwrap_or(0))),
+                        "human" => humans.push(format!("• {nm} ×{}", senders.iter().find(|se| se.addr == sender).map(|se| se.count).unwrap_or(0))),
+                        "service" => services += 1,
+                        _ => {}
+                    }
+                }
+                let mut sec = format!(
+                    "📊 {label} — {} emails over ~{span_days} day(s) (~{}/day)",
+                    msgs.len(),
+                    if span_days > 0 { (msgs.len() as i64 / span_days).max(1) } else { msgs.len() as i64 }
+                );
+                if !subs.is_empty() {
+                    sec.push_str(&format!(
+                        "\n\n💳 RECURRING (visible ≈ ${monthly_total:.0}/mo):\n{}",
+                        subs.join("\n")
+                    ));
+                }
+                if !bills.is_empty() {
+                    sec.push_str(&format!("\n\n🏦 BILLS & UTILITIES:\n{}", bills.join("\n")));
+                }
+                if !shops.is_empty() {
+                    sec.push_str(&format!("\n\n🧾 SHOPPING (by volume):\n{}", shops.join("\n")));
+                }
+                if !humans.is_empty() {
+                    sec.push_str(&format!("\n\n👤 PEOPLE writing to you:\n{}", humans.join("\n")));
+                }
+                sec.push_str(&format!(
+                    "\n\n🌐 ACCOUNT SURFACE: {} distinct senders; ~{services} service/notification accounts",
+                    senders.len()
+                ));
+                report_sections.push(sec);
+            }
+            // Compound the findings.
+            let mut notes: Vec<String> = Vec::new();
+            if !new_subs.is_empty() {
+                let mut tracked = subs_now.clone();
+                let names: Vec<String> = new_subs.iter().filter_map(|s| s.get("name").and_then(|x| x.as_str()).map(String::from)).collect();
+                tracked.extend(new_subs);
+                let _ = mem.profile_set("subscriptions", &serde_json::to_string(&tracked).unwrap_or_default()).await;
+                notes.push(format!("auto-tracked {} new subscription(s): {}", names.len(), names.join(", ")));
+            }
+            if !cal_events.is_empty() {
+                let mut evs: Vec<serde_json::Value> = cal_now
+                    .into_iter()
+                    .filter(|e| e.get("source").and_then(|x| x.as_str()) != Some("mail"))
+                    .collect();
+                let n_new = cal_events.len();
+                evs.extend(cal_events);
+                let _ = mem.profile_set("calendar_events", &serde_json::to_string(&evs).unwrap_or_default()).await;
+                notes.push(format!("{n_new} renewal date(s) added to the calendar"));
+            }
+            let tail = if notes.is_empty() { String::new() } else { format!("\n\n✅ {}", notes.join("; ")) };
+            if report_sections.is_empty() {
+                nq.lock().unwrap().push("📊 Mail report: couldn't read any inbox.".to_string());
+            } else {
+                nq.lock().unwrap().push(format!("{}{tail}", report_sections.join("\n\n———\n\n")));
+            }
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!(
+            "📊 Deep mail report started — reading up to {n} emails per account ({n_accounts} account(s)), aggregating senders, verifying the money. It lands here in a few minutes."
+        )
+    }
+
     /// CROSS-ACCOUNT EMAIL ANALYTICS, two-stage: headers from every inbox → triage picks the few
     /// messages worth OPENING → BODY.PEEK verifies their actual STATE (canceled vs confirmed,
     /// real amounts, real dates) → digest. Read-only throughout (peek never marks anything).
@@ -9102,6 +9348,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let _ = self.memory.profile_set(&format!("closet:{}", name.to_lowercase()), "").await;
                 }
                 self.person_inventory(name).await
+            }
+            "mailreport" | "mailaudit" | "maildeep" => {
+                let n: usize = rest.trim().parse().unwrap_or(400);
+                self.mail_report(n).await
             }
             "mailrule" | "mailrules" if rest.trim().is_empty() => {
                 let rules = self.mail_rules().await;
@@ -10239,6 +10489,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 if nm.trim().is_empty() { "Whose photos should I inventory?".to_string() } else { self.person_inventory(nm.trim()).await }
             }
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
+            "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
             "mail_rule" | "mailrule" => {
                 let r = { let a = s("rule"); if a.is_empty() { s("text") } else { a } };
                 if r.trim().is_empty() {
@@ -10778,6 +11029,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
 - inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action / from-people / money-in-motion / purchases / noise, with body-peek state verification (read-only)\n\
 - mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
+- mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\

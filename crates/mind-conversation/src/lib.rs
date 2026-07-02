@@ -2843,8 +2843,30 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     ),
                     polarity: 1.0, weight: 0.9, source_event: Some("whois".into()), provenance: "told".into(),
                 }).await;
+                // WRITE-BACK (opted in): if the source already has a person with this name, MERGE
+                // the unnamed cluster into them (recognition anchor gets stronger); otherwise name
+                // the cluster itself. Honest suffix only when the write actually landed.
+                let mut wrote = String::new();
+                if let Some(src_obj) = mind_tools::PhotoSource::all_from_env().into_iter().find(|s| s.name() == source) {
+                    let existing = src_obj
+                        .list_people()
+                        .await
+                        .into_iter()
+                        .find(|p| !p.name.is_empty() && p.name.to_lowercase() == name.to_lowercase() && p.id != pid);
+                    let ok = match &existing {
+                        Some(t) => src_obj.merge_people(&t.id, &[pid.to_string()]).await,
+                        None => src_obj.name_person(pid, &name).await,
+                    };
+                    if ok {
+                        wrote = if existing.is_some() {
+                            format!(" I also merged this face into {name}'s existing cluster in your photo app — recognition just got stronger.")
+                        } else {
+                            " I also named them in your photo app itself.".to_string()
+                        };
+                    }
+                }
                 format!(
-                    "Got it — that's {name}{}. I can recognize them across the library now; try `ym photos {name}` sometime. 📸",
+                    "Got it — that's {name}{}.{wrote} I can recognize them across the library now; try `ym photos {name}` sometime. 📸",
                     if rel.is_empty() { String::new() } else { format!(", your {rel}") }
                 )
             }
@@ -6014,7 +6036,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let d = self.analyze_image_bytes(bytes, "image/jpeg", q).await;
             let d1: String = d.lines().next().unwrap_or("").chars().take(160).collect();
             if d1.len() > 5 {
-                descs.push(if a.date.is_empty() { d1 } else { format!("[{}] {d1}", a.date) });
+                // Ground each line in WHO is in the photo (saved face data) — "Brishti + Aadrisha,
+                // porch, autumn" teaches far more than "two people outside".
+                let (who, _) = sources[*i].people_in(&a.id).await;
+                let mut line = String::new();
+                if !a.date.is_empty() {
+                    line.push_str(&format!("[{}] ", a.date));
+                }
+                if !who.is_empty() {
+                    line.push_str(&format!("({}) ", who.join(" + ")));
+                }
+                line.push_str(&d1);
+                descs.push(line);
             }
         }
         if descs.is_empty() {
@@ -6241,8 +6274,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let (Some(a), Some(bytes)) = (chosen, chosen_bytes) else {
             return "I found a match but couldn't fetch the image bytes.".to_string();
         };
+        let (who, unknown) = sources[idx].people_in(&a.id).await;
         let mut cap = String::from("📸");
-        if !label.is_empty() {
+        if !who.is_empty() {
+            cap.push_str(&format!(" {}", who.join(", ")));
+            if unknown > 0 {
+                cap.push_str(&format!(" +{unknown}"));
+            }
+        } else if !label.is_empty() {
             cap.push_str(&format!(" {label}"));
         }
         if !a.date.is_empty() {
@@ -6270,8 +6309,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// ---------- ASK-WHO-IS-WHO ----------
     /// Face-aware sources cluster faces they can't name (Immich: hundreds unnamed). Instead of
     /// guessing, the mind ASKS: the most-photographed unknown face goes to the home channel as a
-    /// photo question; the answer lands in the people layer + a local face_names map. The source
-    /// itself stays READ-ONLY — we never write names back without an explicit opt-in.
+    /// photo question; the answer lands in the people layer + a local face_names map, AND is
+    /// written back to the source (name the cluster, or MERGE it into an existing named person) —
+    /// Pranab opted in 2026-07-02; person.update + person.merge only, never deletes.
 
     /// Cadence gate for the poll loop: a people-knowing source exists, no interview question is
     /// already pending, and YM_WHOIS_SECS (default daily) has elapsed.

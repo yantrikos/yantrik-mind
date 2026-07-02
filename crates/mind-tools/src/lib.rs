@@ -671,9 +671,11 @@ impl FbClient {
     }
 }
 
-/// Immich (self-hosted photo server, READ-ONLY). The real "know my life in pictures" lane: its
+/// Immich (self-hosted photo server). The real "know my life in pictures" lane: its
 /// LOCAL ML already named faces (Brishti, Aadrisha, ...) and indexed every asset — we just query it.
-/// Env: IMMICH_SERVER (host or URL), IMMICH_USER_API_KEY (x-api-key). Nothing is ever written.
+/// Env: IMMICH_SERVER (host or URL), IMMICH_USER_API_KEY (x-api-key). The ONLY writes ever
+/// performed are person naming + merging — both driven by the user's own who-is-this answers
+/// (opt-in granted 2026-07-02); nothing is ever deleted or uploaded.
 pub struct ImmichClient {
     base: String,
     key: String,
@@ -921,6 +923,32 @@ impl PhotoSource {
         }
     }
 
+    /// WHO is in one image (named people + count of unrecognized faces) from the source's saved
+    /// face data — the "from an image, derive who is who" primitive.
+    pub async fn people_in(&self, asset_id: &str) -> (Vec<String>, usize) {
+        match self {
+            PhotoSource::Immich(im) => im.people_in_asset(asset_id).await,
+            PhotoSource::Facebook(_) => (Vec::new(), 0),
+        }
+    }
+
+    /// Write a name back to the source's face cluster (sources that support it). Human-driven only:
+    /// this fires exclusively from the user's own who-is-this answers.
+    pub async fn name_person(&self, person_id: &str, name: &str) -> bool {
+        match self {
+            PhotoSource::Immich(im) => im.rename_person(person_id, name).await,
+            PhotoSource::Facebook(_) => false,
+        }
+    }
+
+    /// Merge clusters into a target person (the user said they're the same human).
+    pub async fn merge_people(&self, target_id: &str, source_ids: &[String]) -> bool {
+        match self {
+            PhotoSource::Immich(im) => im.merge_person(target_id, source_ids).await,
+            PhotoSource::Facebook(_) => false,
+        }
+    }
+
     /// How many photos a person cluster appears in (ranks which unknown face is worth asking about).
     pub async fn person_photo_count(&self, person_id: &str) -> Option<u64> {
         match self {
@@ -999,6 +1027,30 @@ impl ImmichClient {
         .await?
     }
 
+    /// WHO is in one image, from the saved face data (GET /api/faces?id=<asset>): named people
+    /// first, plus a count of faces the library hasn't identified yet.
+    pub async fn people_in_asset(&self, asset_id: &str) -> (Vec<String>, usize) {
+        let (b, k, id) = (self.base.clone(), self.key.clone(), asset_id.to_string());
+        tokio::task::spawn_blocking(move || -> (Vec<String>, usize) {
+            let Ok(v) = Self::get_blocking(&b, &k, &format!("/api/faces?id={id}")) else {
+                return (Vec::new(), 0);
+            };
+            let mut names: Vec<String> = Vec::new();
+            let mut unknown = 0usize;
+            for face in v.as_array().cloned().unwrap_or_default() {
+                let name = face["person"]["name"].as_str().unwrap_or("").trim().to_string();
+                if name.is_empty() {
+                    unknown += 1;
+                } else if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            (names, unknown)
+        })
+        .await
+        .unwrap_or((Vec::new(), 0))
+    }
+
     /// Shared response walk: (asset_id, YYYY-MM-DD, "City, Country") triples.
     fn parse_asset_items(v: &serde_json::Value) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
@@ -1017,6 +1069,37 @@ impl ImmichClient {
             out.push((id, date, place));
         }
         out
+    }
+
+    /// Name a face cluster (PUT /api/people/{id}) — the who-is-who write-back.
+    pub async fn rename_person(&self, person_id: &str, name: &str) -> bool {
+        let (b, k, id, nm) = (self.base.clone(), self.key.clone(), person_id.to_string(), name.to_string());
+        tokio::task::spawn_blocking(move || -> bool {
+            ureq::put(&format!("{b}/api/people/{id}"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(25))
+                .send_json(serde_json::json!({ "name": nm }))
+                .is_ok()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Merge face clusters INTO a target person (POST /api/people/{id}/merge) — an unnamed cluster
+    /// the user identified as an already-named person folds into them (stronger recognition anchor).
+    pub async fn merge_person(&self, target_id: &str, source_ids: &[String]) -> bool {
+        let (b, k, id, ids) = (self.base.clone(), self.key.clone(), target_id.to_string(), source_ids.to_vec());
+        tokio::task::spawn_blocking(move || -> bool {
+            ureq::post(&format!("{b}/api/people/{id}/merge"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(25))
+                .send_json(serde_json::json!({ "ids": ids }))
+                .is_ok()
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Recent IMAGE assets regardless of person — same shape as assets_of_person, no filter.

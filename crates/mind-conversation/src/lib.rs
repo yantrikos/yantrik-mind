@@ -681,7 +681,7 @@ async fn inventory_task(src_name: String, pid: String, disp: String, mem: Arc<dy
     let missing: Vec<&str> = CHECKLIST.iter().filter(|c| !counts.contains_key(**c)).copied().collect();
     if !missing.is_empty() {
         text.push_str(&format!(
-            "\n\nNEVER SEEN in this sample: {} — absence is a hint, not proof, but it's where gift gaps live.",
+            "\n\nNot observed in this sample: {} — a weak signal only (absence isn't evidence; the sample is small and biased toward photographed moments).",
             missing.join(", ")
         ));
     }
@@ -700,20 +700,8 @@ async fn inventory_task(src_name: String, pid: String, disp: String, mem: Arc<dy
             })
             .await;
     }
-    if !missing.is_empty() {
-        let _ = mem
-            .remember_as_belief(BeliefAssertion {
-                statement: format!(
-                    "{disp} (inventory): never seen with {} across {read} recent photos — gift-gap candidates",
-                    missing.join(", ")
-                ),
-                polarity: 1.0,
-                weight: 0.6,
-                source_event: Some("inventory".into()),
-                provenance: "photos".into(),
-            })
-            .await;
-    }
+    // Deliberately NO belief for absences — presence is evidence, absence is a sampling artifact
+    // (Pranab's correction 2026-07-02: she owned plenty the sample never showed).
     let summary = format!(
         "{}{}",
         owned.iter().take(6).map(|(t, n)| format!("{t}×{n}")).collect::<Vec<_>>().join(", "),
@@ -770,7 +758,7 @@ async fn gift_task(
     }
     let joined: String = obs.join("\n").chars().take(2400).collect();
     let prompt = format!(
-        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\nTASTE DISTRIBUTIONS (statistical, by occasion): {tastes_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what they clearly already have (never gift these)\nSTYLE: their recurring style/colors/materials in one line\nMISSING: 2-4 specific things NOT seen in any photo that would complement what they own and wear\nGIFT IDEAS: 3 concrete, buyable ideas, one line of reasoning each, matched to STYLE, excluding OWNS"
+        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\nTASTE DISTRIBUTIONS (statistical, by occasion): {tastes_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what the photos clearly show they have (never gift duplicates of these)\nSTYLE: their recurring style/colors/materials in one line, each element backed by repeated observations\nCOMPLEMENTS: 2-4 things that would EXTEND their observed style and habits — justify each from OWNS/STYLE evidence (what they demonstrably love and use), NEVER from absence ("not seen" is a sampling artifact, not a gap)\nGIFT IDEAS: 3 concrete, buyable ideas, one line of evidence-backed reasoning each, matched to STYLE, excluding OWNS"
     );
     let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
     let out = match inference.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
@@ -779,7 +767,7 @@ async fn gift_task(
     };
     for line in out.lines() {
         let l = line.trim();
-        if let Some(rest) = l.strip_prefix("STYLE:").or_else(|| l.strip_prefix("MISSING:")) {
+        if let Some(rest) = l.strip_prefix("STYLE:").or_else(|| l.strip_prefix("COMPLEMENTS:")) {
             if rest.trim().len() > 8 {
                 let _ = mem
                     .remember_as_belief(BeliefAssertion {

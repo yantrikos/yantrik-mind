@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 72] = [
+    const CMDS: [&str; 74] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -352,7 +352,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
-        "horizon", "anticipations", "lookahead",
+        "horizon", "anticipations", "lookahead", "festivals", "festival",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -3630,6 +3630,33 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     }
                     None => "Got it — that gives me a real feel for you, and I'll put it to use.".to_string(),
                 }
+            }
+            s if s.starts_with("plans:") => {
+                // plans:<festival>:<year> — the user is answering "what are the plans?"
+                let mut it = s.trim_start_matches("plans:").splitn(2, ':');
+                let fest = it.next().unwrap_or("").to_string();
+                let year = it.next().unwrap_or("").to_string();
+                let t = text.trim();
+                let low = t.to_lowercase();
+                if ["skip", "pass", "idk", "no idea", "not sure", "no plans", "nothing yet", "later", "dont know", "don't know"]
+                    .iter()
+                    .any(|w| low == *w || low.starts_with(w))
+                {
+                    self.ledger_resolve(true).await;
+                    return format!("No plans yet — noted. I'll check back as {fest} gets closer.");
+                }
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!("Plan for {fest} {year}: {}", t.chars().take(300).collect::<String>()),
+                        polarity: 1.0,
+                        weight: 0.85,
+                        source_event: Some("festival-plans".into()),
+                        provenance: "told".into(),
+                    })
+                    .await;
+                self.ledger_correction("anticipate", &format!("plans for {fest} {year}"), &format!("captured: {}", t.chars().take(120).collect::<String>())).await;
+                format!("🪔 Noted for {fest} — \"{}\". I'll keep it in mind as it approaches.", t.chars().take(140).collect::<String>())
             }
             s if s.starts_with("event:") => {
                 // event:<date> — the user is telling us what a heavily-photographed day WAS.
@@ -7876,6 +7903,254 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
     }
 
+    /// ---------- THE FESTIVAL CALENDAR ----------
+    /// Pranab is Hindu and Bengali (West Bengal) — the family's year is shaped by festivals whose
+    /// dates FOLLOW THE LUNAR CALENDAR and move every year. So: a registry of what each festival
+    /// IS (religion + activity), per-year date resolution from the web (never projecting last
+    /// year's Gregorian date), and local-celebration scouting when one approaches.
+
+    /// (name, match_word, what-it-is, duration_days). match_word ties observed event-ledger
+    /// labels to the festival.
+    const FESTIVALS: [(&'static str, &'static str, &'static str, u32); 12] = [
+        ("Durga Puja", "durga", "the heart of the Bengali year — Shashthi to Bijoya Dashami: pandals, new clothes, dhunuchi, family", 5),
+        ("Kali Puja", "kali", "Kali worship on the Diwali new-moon night — lamps in every Bengali home", 1),
+        ("Diwali", "diwali", "the festival of lights", 1),
+        ("Bhai Phonta", "phonta", "the Bengali brother-sister day, two days after Kali Puja", 1),
+        ("Lakshmi Puja", "lakshmi", "Kojagori Lakshmi Puja on the full moon right after Durga Puja", 1),
+        ("Saraswati Puja", "saraswati", "Basant Panchami — students put their books at Saraswati's feet; yellow everywhere", 1),
+        ("Holi", "holi", "Dol Jatra in Bengal — colors on Dol Purnima", 1),
+        ("Poila Boishakh", "boishakh", "the Bengali New Year — mishti, new clothes, halkhata", 1),
+        ("Rath Yatra", "rath", "Jagannath's chariot festival", 1),
+        ("Janmashtami", "janmashtami", "Krishna's birth at midnight", 1),
+        ("Jamai Shashthi", "jamai", "the son-in-law day — a feast at the in-laws'", 1),
+        ("Poush Sankranti", "sankranti", "Makar Sankranti — pithe-puli in every Bengali kitchen", 1),
+    ];
+
+    async fn load_festival_dates(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("festival_dates")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    async fn save_festival_dates(&self, v: &[serde_json::Value]) {
+        let _ = self
+            .memory
+            .profile_set("festival_dates", &serde_json::Value::Array(v.to_vec()).to_string())
+            .await;
+    }
+
+    /// Which registry festivals have no resolved date covering [today, today+120d]?
+    async fn festivals_unresolved(&self) -> Vec<(&'static str, i32)> {
+        use chrono::Datelike;
+        let today = local_now().date_naive();
+        let have: std::collections::HashSet<(String, i32)> = self
+            .load_festival_dates()
+            .await
+            .iter()
+            .filter_map(|e| {
+                let n = e["name"].as_str()?.to_string();
+                let y = e["year"].as_i64()? as i32;
+                Some((n, y))
+            })
+            .collect();
+        let mut want: Vec<(&'static str, i32)> = Vec::new();
+        for (name, _, _, _) in Self::FESTIVALS.iter() {
+            for year in [today.year(), today.year() + 1] {
+                // Only chase next year once we're in Q4 — keeps the search budget tiny.
+                if year > today.year() && today.month() < 10 {
+                    continue;
+                }
+                if !have.contains(&(name.to_string(), year)) {
+                    want.push((name, year));
+                }
+            }
+        }
+        want
+    }
+
+    /// Detached task: resolve missing festival dates for the horizon via web search + extraction.
+    pub async fn festivals_refresh(&self) -> String {
+        let Some(searcher) = self.searcher.clone() else {
+            return "Web search isn't configured — can't resolve festival dates.".to_string();
+        };
+        let want = self.festivals_unresolved().await;
+        if want.is_empty() {
+            return "All festival dates for the horizon are already resolved — `festivals` to see them.".to_string();
+        }
+        let guard = "festivals".to_string();
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "Already resolving festival dates — results land here shortly.".to_string();
+        }
+        // One-time identity grounding: WHY this calendar exists.
+        if self.memory.profile_get("festival_identity_noted").await.ok().flatten().is_none() {
+            let _ = self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: "Pranab is Hindu and Bengali, from West Bengal — the family's year follows the Bengali Hindu festival calendar (Durga Puja above all, Kali Puja, Saraswati Puja, Poila Boishakh, Bhai Phonta...)".to_string(),
+                    polarity: 1.0,
+                    weight: 0.95,
+                    source_event: Some("festival-calendar".into()),
+                    provenance: "told".into(),
+                })
+                .await;
+            let _ = self.memory.profile_set("festival_identity_noted", "1").await;
+        }
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let inf = self.inference.clone();
+        let n_want = want.len();
+        tokio::spawn(async move {
+            let mut resolved = 0usize;
+            let mut entries: Vec<serde_json::Value> = mem
+                .profile_get("festival_dates")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default();
+            for (name, year) in want {
+                let hits = match searcher.search(&format!("{name} {year} date hindu bengali calendar"), 5).await {
+                    Ok(h) if !h.is_empty() => h,
+                    _ => continue,
+                };
+                let listing = mind_tools::render_search(&hits);
+                let prompt = format!(
+                    "From these search results, find the {year} Gregorian START date of {name} (the Hindu/Bengali festival).\n\n{listing}\n\nOutput ONLY JSON: {{\"date\":\"YYYY-MM-DD\",\"confidence\":0.0-1.0}}. If the results don't clearly show the {year} date, use confidence 0."
+                );
+                let cfg = GenerationConfig { max_tokens: 80, ..GenerationConfig::default() };
+                let Ok(resp) = inf.chat(vec![ChatMessage::user(&prompt)], cfg).await else { continue };
+                let txt = resp.text;
+                let json = txt
+                    .find('{')
+                    .and_then(|a| txt.rfind('}').map(|b| &txt[a..=b]))
+                    .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
+                let Some(j) = json else { continue };
+                let conf = j["confidence"].as_f64().unwrap_or(0.0);
+                let date = j["date"].as_str().unwrap_or("");
+                let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok();
+                if conf >= 0.5 && parsed.map(|d| d.format("%Y").to_string() == year.to_string()).unwrap_or(false) {
+                    entries.retain(|e| !(e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year as i64)));
+                    entries.push(serde_json::json!({ "name": name, "year": year, "date": date, "src": "web" }));
+                    resolved += 1;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            let _ = mem.profile_set("festival_dates", &serde_json::Value::Array(entries).to_string()).await;
+            studies.lock().unwrap().remove(&guard);
+            nq.lock()
+                .unwrap()
+                .push(format!("📅 Festival calendar updated — resolved {resolved} of {n_want} pending dates. `festivals` to see the year."));
+        });
+        format!("📅 Resolving {n_want} festival date(s) from the calendar sources — I'll post here when done.")
+    }
+
+    /// The family's festival year — resolved dates + what each festival is.
+    pub async fn festivals_list(&self) -> String {
+        let today = local_now().date_naive();
+        let entries = self.load_festival_dates().await;
+        let mut lines: Vec<(i64, String)> = Vec::new();
+        for e in &entries {
+            let (Some(name), Some(date)) = (e["name"].as_str(), e["date"].as_str()) else { continue };
+            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else { continue };
+            let days = (d - today).num_days();
+            if !(-30..=420).contains(&days) {
+                continue;
+            }
+            let reg = Self::FESTIVALS.iter().find(|(n, _, _, _)| *n == name);
+            let hint = reg.map(|(_, _, h, _)| *h).unwrap_or("");
+            let dur = reg.map(|(_, _, _, d)| *d).unwrap_or(1);
+            let span = if dur > 1 {
+                format!("{} – {}", d.format("%b %d"), (d + chrono::Duration::days(dur as i64 - 1)).format("%b %d"))
+            } else {
+                d.format("%b %d, %Y").to_string()
+            };
+            let when = if days < 0 { format!("{} days ago", -days) } else { format!("in {days}d") };
+            lines.push((days, format!("🪔 {name} — {span} ({when}) — {hint}")));
+        }
+        lines.sort_by_key(|(d, _)| *d);
+        let unresolved = self.festivals_unresolved().await;
+        let mut out = if lines.is_empty() {
+            "🪔 No festival dates resolved yet.".to_string()
+        } else {
+            format!(
+                "🪔 The festival year (Bengali Hindu calendar):\n{}",
+                lines.into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("\n")
+            )
+        };
+        if !unresolved.is_empty() {
+            out.push_str(&format!(
+                "\n({} date(s) not yet resolved — `festivals refresh` to look them up)",
+                unresolved.len()
+            ));
+        }
+        out
+    }
+
+    /// Modal city of the last ~4 months of camera photos — where home is right now. Cached 30d.
+    async fn home_city_now(&self) -> Option<String> {
+        if let Some(cached) = self.memory.profile_get("home_city").await.ok().flatten() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
+                let age = chrono::Utc::now().timestamp_millis() - v["ts"].as_i64().unwrap_or(0);
+                if age < 30 * 86_400_000 {
+                    if let Some(c) = v["city"].as_str() {
+                        return Some(c.to_string());
+                    }
+                }
+            }
+        }
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let src = sources.iter().find(|s| s.knows_people())?;
+        let today = local_now().date_naive();
+        let after = format!("{}T00:00:00.000Z", today - chrono::Duration::days(120));
+        let before = format!("{}T23:59:59.000Z", today);
+        let assets = src.taken_between(&after, &before, &[], 300).await;
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)) {
+            let city = a.place.split(',').next().unwrap_or("").trim().to_string();
+            if city.len() > 2 {
+                *counts.entry(city).or_insert(0) += 1;
+            }
+        }
+        let city = counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c)?;
+        let _ = self
+            .memory
+            .profile_set(
+                "home_city",
+                &serde_json::json!({ "city": city, "ts": chrono::Utc::now().timestamp_millis() }).to_string(),
+            )
+            .await;
+        Some(city)
+    }
+
+    /// Local-celebration scout: is this festival being celebrated near home this year?
+    async fn festival_local_scout(&self, name: &str, year: i32) -> Option<String> {
+        let searcher = self.searcher.clone()?;
+        let city = self.home_city_now().await?;
+        let hits = searcher
+            .search(&format!("{name} {year} {city} bengali association celebration event"), 4)
+            .await
+            .ok()
+            .filter(|h| !h.is_empty())?;
+        let listing = mind_tools::render_search(&hits);
+        let prompt = format!(
+            "From these search results, write ONE short sentence about where/when {name} {year} is being celebrated near {city} — ONLY if a result actually shows a local celebration (association, temple, community event). If nothing local and concrete, output exactly NONE.\n\n{listing}"
+        );
+        let cfg = GenerationConfig { max_tokens: 90, ..GenerationConfig::default() };
+        let resp = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
+        let line = resp.text.trim().to_string();
+        if line.len() < 12 || line.to_uppercase().contains("NONE") {
+            return None;
+        }
+        Some(line)
+    }
+
     /// ---------- THE ANTICIPATION ENGINE ----------
     /// Calendar reminders know DATES; anticipation knows RHYTHMS. Annual patterns are mined from
     /// the event + trip ledgers (a labeled celebration recurring across years, a destination
@@ -7941,7 +8216,36 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 .push((y, d.ordinal(), t["photos"].as_u64().unwrap_or(0), note));
         }
         let mut out = Vec::new();
+        // Calendar festivals are AUTHORITATIVE for their own dates (lunar — they move every
+        // year); the observed ledger enriches them with the family's own history. Buckets that
+        // match a calendared festival are consumed here so they don't double-project.
+        let mut fest_words: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for e in self.load_festival_dates().await {
+            let (Some(name), Some(date)) = (e["name"].as_str(), e["date"].as_str()) else { continue };
+            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else { continue };
+            let days_until = (d - today).num_days();
+            if !(0..=400).contains(&days_until) {
+                continue;
+            }
+            let Some((_, word, _, _)) = Self::FESTIVALS.iter().find(|(n, _, _, _)| *n == name) else { continue };
+            fest_words.insert(*word);
+            let observed: Vec<&(i32, u32, u64, String)> = buckets
+                .iter()
+                .filter(|(k, _)| k.contains(word))
+                .flat_map(|(_, v)| v.iter())
+                .collect();
+            let years: std::collections::HashSet<i32> = observed.iter().map(|(y, _, _, _)| *y).collect();
+            let last_note = observed
+                .iter()
+                .max_by_key(|(y, _, _, _)| *y)
+                .map(|(y, _, _, n)| format!("{y}: {n}"))
+                .unwrap_or_else(|| "your tradition — first one I'm tracking".to_string());
+            out.push((format!("fest:{word}"), name.to_string(), d, days_until, years.len(), last_note));
+        }
         for (key, mut hits) in buckets {
+            if fest_words.iter().any(|w| key.contains(*w)) || key == "puja" {
+                continue; // covered by an authoritative calendar entry above
+            }
             let years: std::collections::HashSet<i32> = hits.iter().map(|(y, _, _, _)| *y).collect();
             if years.len() < 2 {
                 continue; // a pattern needs at least two years of evidence
@@ -7984,14 +8288,22 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return "🔮 No annual patterns confident enough to project yet — they emerge as the event and trip ledgers grow (answer the day-questions!).".to_string();
         }
         let mut lines = Vec::new();
-        for (_, label, next, days, years, last) in patterns.iter().take(14) {
+        for (key, label, next, days, years, last) in patterns.iter().take(14) {
             if *days > 180 {
                 continue;
             }
-            lines.push(format!(
-                "• ~{} ({days}d away) — {label} [{years} years of evidence; last: {last}]",
-                next.format("%b %d")
-            ));
+            if key.starts_with("fest:") {
+                lines.push(format!(
+                    "🪔 {} ({days}d away) — {label} [calendar-resolved{}]",
+                    next.format("%b %d"),
+                    if *years > 0 { format!("; {years} year(s) in your photos, last: {last}") } else { String::new() }
+                ));
+            } else {
+                lines.push(format!(
+                    "• ~{} ({days}d away) — {label} [{years} years of evidence; last: {last}]",
+                    next.format("%b %d")
+                ));
+            }
         }
         if lines.is_empty() {
             return "🔮 Nothing projected inside the next 6 months.".to_string();
@@ -8034,6 +8346,19 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     .unwrap_or_default()
             })
             .collect();
+        // Resolve missing festival dates first (bounded: one attempt per 24h) — anticipation on a
+        // stale lunar date is worse than none.
+        let last_try: i64 = self.memory.profile_get("festival_refresh_try").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if !self.festivals_unresolved().await.is_empty()
+            && chrono::Utc::now().timestamp_millis() - last_try > 86_400_000
+            && !self.studies.lock().unwrap().contains("festivals")
+        {
+            let _ = self
+                .memory
+                .profile_set("festival_refresh_try", &chrono::Utc::now().timestamp_millis().to_string())
+                .await;
+            let _ = self.festivals_refresh().await;
+        }
         for (key, label, next, days, years, last) in self.life_patterns().await {
             if !(10..=75).contains(&days) {
                 continue;
@@ -8045,12 +8370,6 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if person_mmdds.contains(&next.format("%m-%d").to_string()) && (key.contains("birthday") || key.contains("anniversary")) {
                 continue;
             }
-            let travel = last.contains("traveled") || key.starts_with("visit ");
-            let suggestion = if travel {
-                "Last time this meant travel — worth planning or booking while it's cheap."
-            } else {
-                "Planning time, while there's still runway."
-            };
             let mut done2 = done.clone();
             done2.push(occ_key);
             if done2.len() > 100 {
@@ -8058,6 +8377,39 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 done2.drain(..cut);
             }
             let _ = self.memory.profile_set("anticipated", &serde_json::to_string(&done2).unwrap_or_default()).await;
+            // Festival: cultural framing + the family's own history + a LOCAL scout + an open
+            // question whose answer becomes a stored plan (the ask-to-learn shape).
+            if let Some(word) = key.strip_prefix("fest:") {
+                let reg = Self::FESTIVALS.iter().find(|(_, w, _, _)| *w == word);
+                let hint = reg.map(|(_, _, h, _)| *h).unwrap_or("");
+                let dur = reg.map(|(_, _, _, d)| *d).unwrap_or(1);
+                let year: i32 = next.format("%Y").to_string().parse().unwrap_or(0);
+                let span = if dur > 1 {
+                    format!("{} – {}", next.format("%B %d"), (next + chrono::Duration::days(dur as i64 - 1)).format("%B %d"))
+                } else {
+                    next.format("%B %d").to_string()
+                };
+                let history = if years > 0 {
+                    format!(" I've seen {years} year(s) of it in your photos (last: {last}).")
+                } else {
+                    String::new()
+                };
+                let local = match self.festival_local_scout(&label, year).await {
+                    Some(l) => format!(" 📍 {l}"),
+                    None => String::new(),
+                };
+                self.set_pending_slot(Some(&format!("plans:{label}:{year}"))).await;
+                self.ledger_sent("anticipate", &format!("festival {label} ~{span}, asked plans")).await;
+                return Some(format!(
+                    "🪔 {label} is coming — {span} this year ({days} days out). {hint}.{history}{local} What are the plans this year?"
+                ));
+            }
+            let travel = last.contains("traveled") || key.starts_with("visit ");
+            let suggestion = if travel {
+                "Last time this meant travel — worth planning or booking while it's cheap."
+            } else {
+                "Planning time, while there's still runway."
+            };
             self.ledger_sent("anticipate", &format!("projected {key} ~{}", next.format("%b %d"))).await;
             return Some(format!(
                 "🔮 Looking ahead — {label} is coming up around {} ({days} days out), based on {years} year(s) of your own rhythm ({last}). {suggestion}",
@@ -11232,6 +11584,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "trips" if rest.trim() == "build" => self.trips_build().await,
             "events" if rest.trim() == "build" => self.events_build().await,
             "horizon" | "anticipations" | "lookahead" => self.life_horizon().await,
+            "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
+            "festivals" | "festival" => self.festivals_list().await,
             "events" => self.events_list(rest.trim()).await,
             "event" if !rest.trim().is_empty() => self.events_list(rest.trim()).await,
             "trips" => self.trips_list(rest.trim()).await,
@@ -12544,6 +12898,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "self_report" | "week_review" => self.self_report(false).await,
             "photo_cleanup" | "cleanup_photos" => self.photo_cleanup("organize").await,
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
+            "festival_calendar" | "festivals" => self.festivals_list().await,
             "event_ledger" | "events" | "event" => {
                 let q = { let a = s("query"); if a.is_empty() { s("date") } else { a } };
                 self.events_list(q.trim()).await
@@ -13102,6 +13457,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
 - event_ledger {query?}: heavily-photographed DAYS related to family dates and occasions (birthday parties, pujas, ceremonies) — list or look one up; unknown days get asked about\n\
 - life_horizon {}: the PROJECTED life — annual patterns from the family's own rhythms (festivals, recurring visits) with next dates and evidence\n\
+- festival_calendar {}: the Bengali Hindu festival year — per-year resolved dates (lunar calendar) + what each festival is\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

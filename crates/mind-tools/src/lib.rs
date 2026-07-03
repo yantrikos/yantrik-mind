@@ -1666,7 +1666,34 @@ impl FaceEngine {
     }
 }
 
-/// Cosine similarity between two vectors.
+/// Crop an image to ONE PERSON's region given their normalized face box: the face plus torso —
+/// where clothes, jewelry, and accessories live. Face box widened ~3.2x, extended ~5 face-heights
+/// down, clamped to the frame. Returns JPEG bytes.
+pub async fn crop_person_region(bytes: Vec<u8>, face: (f32, f32, f32, f32)) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        let img = image::load_from_memory(&bytes).ok()?;
+        let (w, h) = (img.width() as f32, img.height() as f32);
+        let (fx1, fy1, fx2, fy2) = (face.0 * w, face.1 * h, face.2 * w, face.3 * h);
+        let (fw, fh) = ((fx2 - fx1).max(8.0), (fy2 - fy1).max(8.0));
+        let cx = (fx1 + fx2) / 2.0;
+        let left = (cx - fw * 1.6).clamp(0.0, w - 1.0);
+        let right = (cx + fw * 1.6).clamp(1.0, w);
+        let top = (fy1 - fh * 0.6).clamp(0.0, h - 1.0);
+        let bottom = (fy2 + fh * 5.0).clamp(1.0, h);
+        if right - left < 32.0 || bottom - top < 32.0 {
+            return None;
+        }
+        let crop = img.crop_imm(left as u32, top as u32, (right - left) as u32, (bottom - top) as u32);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
+        crop.write_with_encoder(enc).ok()?;
+        Some(buf.into_inner())
+    })
+    .await
+    .ok()?
+}
+
+/// Cosine similarity between two vectors./// Cosine similarity between two vectors.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() || a.len() != b.len() {
         return 0.0;

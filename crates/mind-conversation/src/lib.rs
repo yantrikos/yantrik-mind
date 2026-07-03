@@ -478,6 +478,38 @@ fn is_self_referential(text: &str) -> bool {
     KEYS.iter().any(|k| l.contains(k))
 }
 
+/// Isolate the TARGET person's region in an image (couple-shot attribution): detect faces, match
+/// against the person's gallery centroid, crop face+torso. None → caller uses the full frame.
+async fn person_region(mem: &Arc<dyn MemoryFacade>, name: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    let engine = mind_tools::FaceEngine::from_env()?;
+    let gallery: serde_json::Value = mem
+        .profile_get("facegallery")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())?;
+    let centroid: Vec<f32> = gallery["people"]
+        .as_object()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))?
+        .1["c"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|x| x as f32))
+        .collect();
+    if centroid.is_empty() {
+        return None;
+    }
+    let threshold: f32 = std::env::var("YM_FACE_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.45);
+    let faces = engine.faces(bytes.to_vec()).await.ok()?;
+    let target = faces
+        .iter()
+        .map(|f| (f, mind_tools::cosine(&f.embedding, &centroid)))
+        .filter(|(_, sim)| *sim >= threshold)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    mind_tools::crop_person_region(bytes.to_vec(), target.0.bbox).await
+}
+
 /// Background body of a taste-study pass (detached; returns the message to deliver). Each photo
 /// yields occasion + outfit + jewelry pieces + watch style; counts accumulate flat AND per
 /// occasion, so distributions answer "what does she wear AT parties" — not just "what does she wear".
@@ -516,6 +548,7 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
     let mut n_new = 0u64;
     for a in &todo {
         let Some(bytes) = src.image_bytes(a).await else { continue };
+        let bytes = person_region(&mem, &disp, &bytes).await.unwrap_or(bytes);
         let Ok(raw) = vc.analyze(prompt, bytes, "image/jpeg").await else { continue };
         let v = parse_json_obj(&raw);
         for cat in ["occasion", "outfit", "outfit_color", "watch", "setting", "vibe"] {
@@ -638,6 +671,9 @@ async fn inventory_task(src_name: String, pid: String, disp: String, mem: Arc<dy
     let mut read = 0usize;
     for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)).take(16) {
         let Some(bytes) = src.image_bytes(a).await else { continue };
+        // COUPLE-SHOT ATTRIBUTION: isolate THIS person's region so someone else's belt or
+        // glasses in a shared frame never lands in their inventory.
+        let bytes = person_region(&mem, &disp, &bytes).await.unwrap_or(bytes);
         let Ok(raw) = vc
             .analyze(
                 r#"List every distinct personal item visible on or near the main person (clothing, jewelry, accessories, gadgets). Output ONLY JSON: {"items":[{"type":"<one word like saree/dress/watch/handbag/sunglasses/earrings/necklace/shoes>","desc":"<3-6 words: color, material, style>"}]}. Empty list if none. Do NOT guess brands."#,
@@ -744,6 +780,7 @@ async fn gift_task(
     let mut obs: Vec<String> = Vec::new();
     for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)).take(12) {
         let Some(bytes) = src.image_bytes(a).await else { continue };
+        let bytes = person_region(&mem, &disp, &bytes).await.unwrap_or(bytes);
         let Ok(d) = vc
             .analyze(
                 "List ONLY visible personal effects in ONE line: clothing style + colors, jewelry (type/metal), accessories (watch, bag, sunglasses), gadgets, hobby items, notable decor. No people descriptions, no names.",

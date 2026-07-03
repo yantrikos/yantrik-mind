@@ -7604,21 +7604,104 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         gray.len().saturating_sub(rescued),
                     ));
                 }
+                // MEMES: classify non-keeper forwards with the local graphic detector — the
+                // "no known face + text/graphics" bucket Pranab asked for. Photo-like faceless
+                // saves are deliberately NOT flagged (scenery/food someone sent may be a keeper).
+                "memes" => {
+                    let mut memes: Vec<String> = Vec::new();
+                    let mut photo_like = 0usize;
+                    let mut unreadable = 0usize;
+                    let total = fwds.len();
+                    for (i, id) in fwds.iter().enumerate() {
+                        if keep_set.contains(id) {
+                            continue;
+                        }
+                        if i % 1500 == 0 && i > 0 {
+                            eprintln!("[cleanup] memes {i}/{total} — {} flagged", memes.len());
+                        }
+                        let asset = mind_tools::PhotoAsset { id: id.clone(), ..Default::default() };
+                        let Some(bytes) = found.image_bytes(&asset).await else {
+                            unreadable += 1;
+                            continue;
+                        };
+                        match mind_tools::looks_graphic(&bytes) {
+                            Some(true) => memes.push(id.clone()),
+                            Some(false) => photo_like += 1,
+                            None => unreadable += 1,
+                        }
+                    }
+                    // Honesty audit: vision-check a small sample of flagged memes (think-off, fast).
+                    let mut audit = String::new();
+                    if !memes.is_empty() {
+                        if let Some(vc) = mind_tools::VisionClient::from_env() {
+                            let (mut agree, mut checked) = (0usize, 0usize);
+                            let step = (memes.len() / 12).max(1);
+                            for id in memes.iter().step_by(step).take(12) {
+                                let asset = mind_tools::PhotoAsset { id: id.clone(), ..Default::default() };
+                                let Some(bytes) = found.image_bytes(&asset).await else { continue };
+                                if let Ok(v) = vc
+                                    .analyze("Is this a meme, advertisement, poster, or text/graphic image (not a camera photo of real life)? Answer only YES or NO.", bytes, "image/jpeg")
+                                    .await
+                                {
+                                    checked += 1;
+                                    if v.trim().to_uppercase().starts_with("YES") {
+                                        agree += 1;
+                                    }
+                                }
+                            }
+                            if checked > 0 {
+                                audit = format!(" Vision audit: {agree}/{checked} sampled flags confirmed.");
+                            }
+                        }
+                    }
+                    let _ = mem.profile_set("cleanup_memes", &serde_json::to_string(&memes).unwrap_or_default()).await;
+                    let albums = im.list_albums().await.unwrap_or_default();
+                    let meme_album = albums
+                        .iter()
+                        .find(|(_, n)| n == "🗑 Memes & Ads (auto)")
+                        .map(|(i, _)| i.clone());
+                    let meme_album = match meme_album {
+                        Some(a) => Some(a),
+                        None => im.create_album("🗑 Memes & Ads (auto)").await,
+                    };
+                    if let Some(aid) = &meme_album {
+                        for chunk in memes.chunks(400) {
+                            let _ = im.add_to_album(aid, chunk).await;
+                        }
+                    }
+                    nq.lock().unwrap().push(format!(
+                        "🗑 Meme/ad detection done — of the non-keeper forwards: {} flagged as memes/ads/graphics (filed into 🗑 Memes & Ads), {photo_like} look like real photos (left alone), {unreadable} unreadable.{audit}
+
+`photos cleanup archive` now sweeps screenshots + flagged memes only — photo-like saves and every family keeper stay in your timeline.",
+                        memes.len()
+                    ));
+                }
                 // ARCHIVE: sweep junk out of the timeline — keepers are protected.
                 "archive" => {
+                    // SAFER SCOPE: screenshots + vision-classified memes/ads only. Faceless but
+                    // photo-like saves are NOT swept — run `photos cleanup memes` first to grow
+                    // the meme list; keepers are always protected.
+                    let memes: Vec<String> = mem
+                        .profile_get("cleanup_memes")
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
                     let mut archived = 0usize;
                     let protected = |id: &String| keep_set.contains(id);
                     let shots_go: Vec<String> = shots.into_iter().filter(|i| !protected(i)).collect();
-                    let fwds_go: Vec<String> = fwds.into_iter().filter(|i| !protected(i)).collect();
-                    for chunk in shots_go.chunks(400).chain(fwds_go.chunks(400)) {
+                    let memes_go: Vec<String> = memes.into_iter().filter(|i| !protected(i)).collect();
+                    for chunk in shots_go.chunks(400).chain(memes_go.chunks(400)) {
                         if im.set_archived(chunk, true).await {
                             archived += chunk.len();
                         }
                     }
+                    let _ = fwds; // full forwards deliberately untouched — photo-like saves stay
                     nq.lock().unwrap().push(format!(
-                        "🧹 Archived {archived} junk pictures out of your main timeline ({} screenshots + {} forwards) — {} family keepers were protected and remain. Fully reversible.",
+                        "🧹 Archived {archived} out of your main timeline ({} screenshots + {} flagged memes/ads) — {} family keepers protected; photo-like faceless saves untouched. Fully reversible.",
                         shots_go.len(),
-                        fwds_go.len(),
+                        memes_go.len(),
                         keep_set.len()
                     ));
                 }
@@ -7660,7 +7743,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         });
         match mode {
             m if m == "triage" => "🔎 Checking every forward for known family faces (the library's assignments + my own gallery) — keepers get protected and filed into a ❤️ Family album. This takes a while; counts land here.".to_string(),
-            m if m == "archive" => "🧹 Sweeping the true junk out of your main timeline (family keepers protected, fully reversible) — counts land here shortly.".to_string(),
+            m if m == "memes" => "🗑 Running the meme/ad detector over the non-keeper forwards (local + a vision audit sample) — counts land here when done.".to_string(),
+            m if m == "archive" => "🧹 Sweeping screenshots + flagged memes out of your main timeline (family keepers protected, photo-like saves untouched, fully reversible) — counts land here shortly.".to_string(),
             _ => "🧹 Sweeping the whole archive to classify screenshots and forwards — filing into auto-albums.".to_string(),
         }
     }
@@ -10483,6 +10567,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     self.photo_cleanup("organize").await
                 } else if r == "cleanup triage" {
                     self.photo_cleanup("triage").await
+                } else if r == "cleanup memes" {
+                    self.photo_cleanup("memes").await
                 } else if r == "cleanup archive" {
                     self.photo_cleanup("archive").await
                 } else if r.is_empty() || r == "recent" {

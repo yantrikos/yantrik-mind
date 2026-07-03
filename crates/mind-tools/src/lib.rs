@@ -786,7 +786,44 @@ pub fn is_screenish(a: &PhotoAsset) -> bool {
     f.contains("screenshot") || f.contains("screen_shot") || !a.camera
 }
 
-/// Finer junk classification for library cleanup: screenshots vs forwards/saves (WhatsApp
+/// Local meme/ad/poster detector — no model, no cost. Graphic content differs from camera
+/// photos in three measurable ways on a 128px thumbnail: (1) FEW distinct colors (flat fills vs
+/// sensor noise + gradients), (2) a large share of pixels in "flat runs" (identical neighbors),
+/// (3) high-contrast horizontal transitions (text edges). Returns true for graphic/texty images.
+pub fn looks_graphic(bytes: &[u8]) -> Option<bool> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let small = img.resize_exact(128, 128, image::imageops::FilterType::Triangle).to_rgb8();
+    // 1. distinct quantized colors (4 bits/channel).
+    let mut colors: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for p in small.pixels() {
+        let q = ((p.0[0] as u16 >> 4) << 8) | ((p.0[1] as u16 >> 4) << 4) | (p.0[2] as u16 >> 4);
+        colors.insert(q);
+    }
+    // 2. flat-run share + 3. strong horizontal transitions (text edges) on luma.
+    let luma = image::imageops::grayscale(&small);
+    let (mut flat, mut strong, mut n) = (0u32, 0u32, 0u32);
+    for y in 0..128u32 {
+        for x in 1..128u32 {
+            let a = luma.get_pixel(x - 1, y).0[0] as i32;
+            let b = luma.get_pixel(x, y).0[0] as i32;
+            let d = (a - b).abs();
+            if d <= 2 {
+                flat += 1;
+            }
+            if d >= 90 {
+                strong += 1;
+            }
+            n += 1;
+        }
+    }
+    let color_ratio = colors.len() as f32 / 4096.0; // photos: high; graphics: low
+    let flat_share = flat as f32 / n as f32; // graphics: high (flat fills)
+    let text_share = strong as f32 / n as f32; // text/graphics: high-contrast edges
+    // Graphic when: few colors AND (very flat OR text-heavy). Tuned conservative.
+    Some(color_ratio < 0.10 && (flat_share > 0.55 || text_share > 0.02))
+}
+
+/// Finer junk classification for library cleanup:/// Finer junk classification for library cleanup: screenshots vs forwards/saves (WhatsApp
 /// "-WAxxxx" names, or any no-camera save that isn't a screenshot).
 pub fn junk_class(a: &PhotoAsset) -> Option<&'static str> {
     let f = a.file.to_lowercase();

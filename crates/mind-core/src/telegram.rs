@@ -1021,6 +1021,25 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Event ask-to-learn: ONE "what was this day?" question per period — a sample photo from
+        // the biggest unexplained photo-burst; the reply becomes a labeled life event.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && conv.event_ask_due().await
+                && conv.proactive_receptivity_ok().await
+            {
+                if let Some((caption, jpeg, slot)) = conv.event_ask_next().await {
+                    if tg_send_photo(&api, chat, jpeg, &caption).await {
+                        conv.event_ask_arm(&slot).await;
+                        conv.mirror_proactive(&caption).await;
+                        eprintln!("[events] asked about {slot}");
+                    }
+                }
+            }
+        }
+
         // Gift scout: someone's day within 25 days → study their photos unprompted and deliver
         // gift intelligence while there's still shipping time. Daily-capped, quiet-gated, detached
         // (12 vision reads take minutes and must never stall the poll loop).

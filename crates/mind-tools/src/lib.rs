@@ -1484,3 +1484,88 @@ pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -
     .ok()?
 }
 
+/// ---------- FACE ENGINE (our own recognition) ----------
+/// The embedder is a self-hosted stateless function (YM_FACE_ML_URL — currently the repaired
+/// Immich ML container; swappable for any InsightFace-compatible service). The GALLERY — who these
+/// embeddings belong to — lives in OUR substrate, so identity survives any third-party system.
+pub struct FaceEngine {
+    url: String,
+}
+
+/// One detected face: normalized box (0..1), detection score, 512-d embedding.
+pub struct DetectedFace {
+    pub bbox: (f32, f32, f32, f32),
+    pub score: f32,
+    pub embedding: Vec<f32>,
+}
+
+impl FaceEngine {
+    pub fn from_env() -> Option<FaceEngine> {
+        let url = std::env::var("YM_FACE_ML_URL").ok().filter(|u| !u.trim().is_empty())?;
+        Some(FaceEngine { url: url.trim().trim_end_matches('/').to_string() })
+    }
+
+    /// Detect + embed every face in an image (hand-built multipart — ureq has none).
+    pub async fn faces(&self, image: Vec<u8>) -> anyhow::Result<Vec<DetectedFace>> {
+        let url = format!("{}/predict", self.url);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DetectedFace>> {
+            let boundary = "ym-face-boundary-7c1";
+            let entries = r#"{"facial-recognition":{"detection":{"modelName":"buffalo_l","options":{"minScore":0.5}},"recognition":{"modelName":"buffalo_l"}}}"#;
+            let mut body: Vec<u8> = Vec::new();
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"entries\"\r\n\r\n{entries}\r\n").as_bytes());
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"img.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n").as_bytes());
+            body.extend_from_slice(&image);
+            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            let resp: serde_json::Value = ureq::post(&url)
+                .set("content-type", &format!("multipart/form-data; boundary={boundary}"))
+                .timeout(std::time::Duration::from_secs(90))
+                .send_bytes(&body)?
+                .into_json()?;
+            let (w, h) = (
+                resp["imageWidth"].as_f64().unwrap_or(1.0) as f32,
+                resp["imageHeight"].as_f64().unwrap_or(1.0) as f32,
+            );
+            let mut out = Vec::new();
+            for face in resp["facial-recognition"].as_array().cloned().unwrap_or_default() {
+                let b = &face["boundingBox"];
+                let bbox = (
+                    b["x1"].as_f64().unwrap_or(0.0) as f32 / w.max(1.0),
+                    b["y1"].as_f64().unwrap_or(0.0) as f32 / h.max(1.0),
+                    b["x2"].as_f64().unwrap_or(0.0) as f32 / w.max(1.0),
+                    b["y2"].as_f64().unwrap_or(0.0) as f32 / h.max(1.0),
+                );
+                let score = face["score"].as_f64().unwrap_or(0.0) as f32;
+                // The embedding arrives either as a JSON array or as a stringified array.
+                let embedding: Vec<f32> = match &face["embedding"] {
+                    serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect(),
+                    serde_json::Value::String(st) => serde_json::from_str::<Vec<f32>>(st).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                if embedding.len() >= 128 {
+                    out.push(DetectedFace { bbox, score, embedding });
+                }
+            }
+            Ok(out)
+        })
+        .await?
+    }
+}
+
+/// Cosine similarity between two vectors.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+

@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 63] = [
+    const CMDS: [&str; 64] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -351,7 +351,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
-        "report", "selfreport",
+        "report", "selfreport", "faces",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -6327,6 +6327,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     pub async fn analyze_photo_turn(&self, image: Vec<u8>, caption: &str) -> String {
         // Remember the last photo received — "enhance it" style follow-ups act on it.
         *self.last_photo.lock().unwrap() = Some(image.clone());
+        // OUR face recognition first: names from our own gallery ground everything downstream.
+        let (who, unknown_faces) = self.identify_faces_in(&image).await;
+        let who_line = if who.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = who.iter().map(|(n, _)| n.clone()).collect();
+            format!(
+                "
+
+(People in this photo, from MY OWN face memory — treat as ground truth: {}{})",
+                names.join(", "),
+                if unknown_faces > 0 { format!(" + {unknown_faces} I don't recognize") } else { String::new() }
+            )
+        };
         // ENHANCEMENT LANE: an edit-intent caption returns the edited photo, not a description.
         if let Some(mode) = enhancement_mode(caption) {
             return match mind_tools::enhance_photo(image, mode).await {
@@ -6338,14 +6352,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             };
         }
         let q = if caption.trim().is_empty() {
-            "Describe what's in this image and anything the user would want to know from it. Be concrete.".to_string()
+            format!("Describe what's in this image and anything the user would want to know from it. Be concrete.{who_line}")
         } else {
-            caption.trim().to_string()
+            format!("{}{who_line}", caption.trim())
         };
         let prompt = format!(
             "{q}\n\nIf (and only if) this image is a RECEIPT or BILL, also end your reply with exactly one line:\nRECEIPT: <total amount, digits only> | <merchant> | <one-word category like groceries/dining/gas/shopping>"
         );
         let mut reply = self.analyze_image_bytes(image, "image/jpeg", &prompt).await;
+        if !who.is_empty() {
+            let names: Vec<String> = who.iter().map(|(n, s)| format!("{n} ({:.0}%)", s * 100.0)).collect();
+            reply = format!("👥 I recognize: {}
+
+{reply}", names.join(", "));
+        }
         if let Some(pos) = reply.rfind("RECEIPT:") {
             let line = reply[pos..].lines().next().unwrap_or("").to_string();
             let parts: Vec<&str> = line.trim_start_matches("RECEIPT:").split('|').map(str::trim).collect();
@@ -7165,6 +7185,145 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Drain images queued for delivery: (bytes, caption, target chat — None = the primary).
     pub fn take_outbound_photos(&self) -> Vec<(Vec<u8>, String, Option<i64>)> {
         std::mem::take(&mut *self.photo_queue.lock().unwrap())
+    }
+
+    /// ---------- OUR FACE GALLERY ----------
+    /// Identity lives in OUR substrate: per-person embedding centroids learned from the family's
+    /// named photos. The third-party system's per-person boxes only LABEL our training crops once;
+    /// after that, any image — including a brand-new chat photo — is recognized by us.
+
+    async fn face_gallery(&self) -> serde_json::Value {
+        self.memory
+            .profile_get("facegallery")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({ "people": {} }))
+    }
+
+    /// Build/refresh the gallery (detached — dozens of embeds take minutes). For every named
+    /// identity (source-named + our face_names), embed up to 6 photos, match OUR detected face to
+    /// the source's box for that person (center-in-box), average into a normalized centroid.
+    pub async fn faces_learn(&self) -> String {
+        if mind_tools::FaceEngine::from_env().is_none() {
+            return "No face embedder configured (YM_FACE_ML_URL) — honest state.".to_string();
+        }
+        let guard = "faces".to_string();
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "Already learning faces — results land here shortly.".to_string();
+        }
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let fm = self.face_names().await;
+        tokio::spawn(async move {
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.iter().find(|s| s.knows_people()) else {
+                nq.lock().unwrap().push("🧠 Face learning needs a face-aware photo source connected.".to_string());
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            let Some(engine) = mind_tools::FaceEngine::from_env() else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            // Named identities: source names + our own taught names.
+            let mut identities: Vec<(String, String)> = Vec::new(); // (person_id, name)
+            for p in src.list_people().await {
+                let nm = if p.name.is_empty() {
+                    fm.get(&format!("{}:{}", src.name(), p.id)).cloned().unwrap_or_default()
+                } else {
+                    p.name.clone()
+                };
+                if nm.len() > 1 {
+                    identities.push((p.id, nm));
+                }
+            }
+            let mut gallery = serde_json::json!({ "people": {} });
+            let mut lines: Vec<String> = Vec::new();
+            for (pid, name) in &identities {
+                let assets = src.assets_of_person(pid, 8).await;
+                let mut sum: Vec<f32> = Vec::new();
+                let mut n = 0usize;
+                for a in assets.iter().take(6) {
+                    let Some((bx1, by1, bx2, by2, _)) = src.face_box(&a.id, pid).await else { continue };
+                    let Some(bytes) = src.image_bytes(a).await else { continue };
+                    let Ok(faces) = engine.faces(bytes).await else { continue };
+                    // Our detected face whose center sits inside the source's labeled box = them.
+                    let (cx_lo, cy_lo, cx_hi, cy_hi) = (bx1, by1, bx2, by2);
+                    for f in faces {
+                        let (fx, fy) = ((f.bbox.0 + f.bbox.2) / 2.0, (f.bbox.1 + f.bbox.3) / 2.0);
+                        if fx >= cx_lo && fx <= cx_hi && fy >= cy_lo && fy <= cy_hi {
+                            let norm: f32 = f.embedding.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+                            if sum.is_empty() {
+                                sum = f.embedding.iter().map(|x| x / norm).collect();
+                            } else {
+                                for (i, x) in f.embedding.iter().enumerate() {
+                                    sum[i] += x / norm;
+                                }
+                            }
+                            n += 1;
+                            break;
+                        }
+                    }
+                }
+                if n >= 2 {
+                    let cn: f32 = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+                    let centroid: Vec<f32> = sum.iter().map(|x| x / cn).collect();
+                    gallery["people"][name] = serde_json::json!({ "c": centroid, "n": n });
+                    lines.push(format!("{name} ({n} faces)"));
+                }
+            }
+            let _ = mem.profile_set("facegallery", &gallery.to_string()).await;
+            nq.lock().unwrap().push(format!(
+                "🧠 Face gallery learned — I can now recognize {} people in ANY photo, with my own eyes: {}",
+                lines.len(),
+                lines.join(", ")
+            ));
+            studies.lock().unwrap().remove(&guard);
+        });
+        "🧠 Learning the family's faces into my own memory (a few minutes) — I'll confirm when I can recognize everyone myself.".to_string()
+    }
+
+    /// Recognize people in ANY image using OUR gallery. Returns (name, similarity) per face
+    /// above threshold, plus a count of unknown faces.
+    pub async fn identify_faces_in(&self, image: &[u8]) -> (Vec<(String, f32)>, usize) {
+        let Some(engine) = mind_tools::FaceEngine::from_env() else {
+            return (Vec::new(), 0);
+        };
+        let gallery = self.face_gallery().await;
+        let Some(people) = gallery["people"].as_object() else {
+            return (Vec::new(), 0);
+        };
+        if people.is_empty() {
+            return (Vec::new(), 0);
+        }
+        let threshold: f32 = std::env::var("YM_FACE_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.45);
+        let Ok(faces) = engine.faces(image.to_vec()).await else {
+            return (Vec::new(), 0);
+        };
+        let mut named: Vec<(String, f32)> = Vec::new();
+        let mut unknown = 0usize;
+        for f in faces {
+            let mut best: Option<(String, f32)> = None;
+            for (name, entry) in people {
+                let c: Vec<f32> = entry["c"].as_array().map(|a| a.iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect()).unwrap_or_default();
+                let sim = mind_tools::cosine(&f.embedding, &c);
+                if sim > best.as_ref().map_or(0.0, |b| b.1) {
+                    best = Some((name.clone(), sim));
+                }
+            }
+            match best {
+                Some((name, sim)) if sim >= threshold => {
+                    if !named.iter().any(|(n, _)| n == &name) {
+                        named.push((name, sim));
+                    }
+                }
+                _ => unknown += 1,
+            }
+        }
+        (named, unknown)
     }
 
     /// ---------- PHOTO SESSION (working set) ----------
@@ -9593,6 +9752,49 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
+            "faces" if rest.trim() == "learn" => self.faces_learn().await,
+            "faces" if rest.trim().starts_with("test") => {
+                // Live proof without a chat photo: pull one photo of <name>, identify with OUR eyes.
+                let name = rest.trim().trim_start_matches("test").trim();
+                if name.is_empty() {
+                    "Usage: faces test <name>".to_string()
+                } else {
+                    let sources = mind_tools::PhotoSource::all_from_env();
+                    match self.resolve_face(&sources, name).await {
+                        Some((i, pid, disp)) => {
+                            let assets = sources[i].assets_of_person(&pid, 3).await;
+                            match assets.first() {
+                                Some(a) => match sources[i].image_bytes(a).await {
+                                    Some(bytes) => {
+                                        let (who, unk) = self.identify_faces_in(&bytes).await;
+                                        if who.is_empty() {
+                                            format!("Pulled a photo of {disp} but MY gallery recognized no one ({unk} unknown faces) — run `faces learn` first or lower YM_FACE_THRESHOLD.")
+                                        } else {
+                                            format!(
+                                                "🧠 My own recognition on a photo of {disp}: {}{}",
+                                                who.iter().map(|(n, s)| format!("{n} ({:.0}%)", s * 100.0)).collect::<Vec<_>>().join(", "),
+                                                if unk > 0 { format!(" + {unk} unknown") } else { String::new() }
+                                            )
+                                        }
+                                    }
+                                    None => "Couldn't fetch a test photo.".to_string(),
+                                },
+                                None => format!("No photos of {disp} to test on."),
+                            }
+                        }
+                        None => format!("No face named {name} known."),
+                    }
+                }
+            }
+            "faces" => {
+                let g = self.face_gallery().await;
+                let names: Vec<String> = g["people"].as_object().map(|m| m.iter().map(|(k, v)| format!("{k} ({} faces)", v["n"].as_u64().unwrap_or(0))).collect()).unwrap_or_default();
+                if names.is_empty() {
+                    "🧠 My own face gallery is empty — say `faces learn` and I'll learn the family from the photo library.".to_string()
+                } else {
+                    format!("🧠 Faces I recognize with my own memory: {}", names.join(", "))
+                }
+            }
             // --- get-to-know-you: surface the next proactive question on demand (same drive that fires idle) ---
             "ask" | "getting-to-know" if rest.is_empty() => self.proactive_ask().await.unwrap_or_else(|| "I've got a good feel for you right now — nothing I need to ask.".to_string()),
             // --- calendar: the unified time-spine + read-only external (ICS) bridge ---

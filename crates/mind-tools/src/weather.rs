@@ -73,12 +73,20 @@ impl WeatherClient for OpenMeteo {
         }
         tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             // 1) geocode the place name → lat/lon (+ canonical name/country)
-            let geo: serde_json::Value = ureq::get("https://geocoding-api.open-meteo.com/v1/search")
-                .timeout(std::time::Duration::from_secs(15))
-                .query("name", &place)
-                .query("count", "1")
-                .call()?
-                .into_json()?;
+            let geocode = |name: &str| -> anyhow::Result<serde_json::Value> {
+                Ok(ureq::get("https://geocoding-api.open-meteo.com/v1/search")
+                    .timeout(std::time::Duration::from_secs(15))
+                    .query("name", name)
+                    .query("count", "1")
+                    .call()?
+                    .into_json()?)
+            };
+            let mut geo = geocode(&place)?;
+            if geo["results"].get(0).is_none() {
+                if let Some(prefix) = place.split(',').next() {
+                    geo = geocode(prefix.trim())?;
+                }
+            }
             let r = geo["results"].get(0).cloned().ok_or_else(|| anyhow::anyhow!("couldn't find a place called \"{place}\""))?;
             let (lat, lon) = (r["latitude"].as_f64().unwrap_or(0.0), r["longitude"].as_f64().unwrap_or(0.0));
             let name = r["name"].as_str().unwrap_or(&place).to_string();

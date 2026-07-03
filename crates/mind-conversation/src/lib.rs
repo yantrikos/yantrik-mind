@@ -7981,8 +7981,66 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         want
     }
 
+    /// Lunar-structure consistency guard: the Bengali festival cluster has FIXED internal
+    /// arithmetic — Kojagori Lakshmi Puja = Vijayadashami + 5, Kali Puja = Dashami + ~19,
+    /// Bhai Phonta = Kali Puja + 2. A web-extracted Durga Puja date that disagrees with the
+    /// other anchors is wrong; re-derive it from them instead of trusting a bad snippet.
+    async fn festival_consistency_fix(&self) -> usize {
+        let mut entries = self.load_festival_dates().await;
+        let get = |entries: &[serde_json::Value], name: &str, year: i64| -> Option<chrono::NaiveDate> {
+            entries
+                .iter()
+                .find(|e| e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year))
+                .and_then(|e| e["date"].as_str())
+                .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        };
+        let years: std::collections::HashSet<i64> = entries.iter().filter_map(|e| e["year"].as_i64()).collect();
+        let mut fixed = 0usize;
+        for y in years {
+            let Some(durga) = get(&entries, "Durga Puja", y) else { continue };
+            let dashami = durga + chrono::Duration::days(4);
+            let mut anchors = 0u32;
+            let mut bad = 0u32;
+            if let Some(l) = get(&entries, "Lakshmi Puja", y) {
+                anchors += 1;
+                if !(3..=7).contains(&(l - dashami).num_days()) {
+                    bad += 1;
+                }
+            }
+            if let Some(k) = get(&entries, "Kali Puja", y) {
+                anchors += 1;
+                if !(16..=22).contains(&(k - dashami).num_days()) {
+                    bad += 1;
+                }
+            }
+            if anchors > 0 && bad == anchors {
+                let derived = get(&entries, "Lakshmi Puja", y)
+                    .map(|l| l - chrono::Duration::days(9))
+                    .or_else(|| get(&entries, "Kali Puja", y).map(|k| k - chrono::Duration::days(23)));
+                if let Some(nd) = derived {
+                    entries.retain(|e| !(e["name"].as_str() == Some("Durga Puja") && e["year"].as_i64() == Some(y)));
+                    entries.push(serde_json::json!({
+                        "name": "Durga Puja", "year": y, "date": nd.format("%Y-%m-%d").to_string(), "src": "derived-lunar",
+                    }));
+                    fixed += 1;
+                }
+            }
+        }
+        if fixed > 0 {
+            self.save_festival_dates(&entries).await;
+        }
+        fixed
+    }
+
     /// Detached task: resolve missing festival dates for the horizon via web search + extraction.
     pub async fn festivals_refresh(&self) -> String {
+        let fixed = self.festival_consistency_fix().await;
+        if fixed > 0 {
+            self.notify_queue
+                .lock()
+                .unwrap()
+                .push(format!("📅 Corrected {fixed} festival date(s) that disagreed with the lunar arithmetic (Dashami→Kojagori→Kali Puja spacing)."));
+        }
         let Some(searcher) = self.searcher.clone() else {
             return "Web search isn't configured — can't resolve festival dates.".to_string();
         };

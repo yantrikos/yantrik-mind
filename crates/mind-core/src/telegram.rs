@@ -853,6 +853,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     if tg_send(&api, chat, &msg).await.is_ok() {
                         eprintln!("[briefing] sent the daily morning briefing ({} chars)", msg.len());
                         conv.note_proactive_sent().await;
+                        conv.ledger_sent("briefing", "morning briefing").await;
                         // A real photo memory from this day in a past year rides the briefing —
                         // queued here, delivered by the photo drain a tick later.
                         if conv.queue_on_this_day().await {
@@ -1067,6 +1068,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // WEEKLY SELF-REPORT: the mind reviews its own week — scoreboard, absorbed corrections,
+        // and the pacing policies it changes as a result (the learning-ledger loop, closed).
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() && conv.report_due().await {
+                let c = conv.clone();
+                let api2 = api.clone();
+                tokio::spawn(async move {
+                    let msg = c.self_report(true).await;
+                    if tg_send(&api2, chat, &msg).await.is_ok() {
+                        eprintln!("[report] weekly self-report delivered");
+                        c.note_proactive_sent().await;
+                    }
+                });
+            }
+        }
+
         // Facebook refresh: keep the know-me lane current (daily; data-only, sends nothing).
         if conv.fb_sync_due().await {
             let c = conv.clone();
@@ -1079,6 +1097,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Resolve a STALE proactive send (past the 90-min window, no reply) as IGNORED — the world
         // model learns dead zones from silence just as it learns receptive windows from replies.
         conv.resolve_proactive(false).await;
+        conv.ledger_resolve(false).await;
 
         // External-calendar refresh: re-pull the read-only ICS feed if one is connected. Paced
         // (YM_ICS_SECS, default 6h); no chat gating — it only updates stored events, sends nothing.

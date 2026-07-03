@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 61] = [
+    const CMDS: [&str; 63] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -351,6 +351,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
+        "report", "selfreport",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -7659,6 +7660,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return false;
         }
         let period_ms: i64 = std::env::var("YM_GIFTSCOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms = (period_ms as f64 * self.domain_pace("gift").await) as i64;
         let last: i64 = self.memory.profile_get("gift_scout_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
@@ -7702,12 +7704,210 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     continue;
                 }
                 if kick.starts_with("🎁") {
-                    return Some(format!("{name}'s {label} is in {days} day(s) — here's what their photos say:\n\n{kick}"));
+                    self.ledger_sent("gift", &format!("proactive gift intel for {name}")).await;
+                return Some(format!("{name}'s {label} is in {days} day(s) — here's what their photos say:\n\n{kick}"));
                 }
                 return Some(format!("{name}'s {label} is in {days} day(s) — I'm studying their photos now; gift ideas will follow shortly."));
             }
         }
         None
+    }
+
+    /// ---------- THE LEARNING LEDGER ----------
+    /// The loop that makes week 2 BETTER than week 1 — measurably. Every proactive act is logged
+    /// as a PREDICTION in a domain; the user's reaction (reply, silence, correction) becomes its
+    /// OUTCOME; corrections carry LESSONS; per-domain acceptance rates are computed, pacing
+    /// self-adjusts when a domain gets ignored, and a weekly first-person SELF-REPORT tells the
+    /// user what was learned, where the mind was wrong, and what it changed. Behavioral
+    /// prediction error as the loss function — the research program's endpoint, lived.
+
+    async fn ledger(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_ledger(&self, v: &[serde_json::Value]) {
+        let start = v.len().saturating_sub(600);
+        let _ = self
+            .memory
+            .profile_set("ledger", &serde_json::to_string(&v[start..]).unwrap_or_default())
+            .await;
+    }
+
+    /// Log a proactive act as a pending prediction ("I judged this worth your attention").
+    pub async fn ledger_sent(&self, domain: &str, what: &str) {
+        let mut l = self.ledger().await;
+        l.push(serde_json::json!({
+            "ts": chrono::Utc::now().timestamp_millis(),
+            "domain": domain,
+            "what": what.chars().take(140).collect::<String>(),
+            "outcome": "pending",
+            "lesson": null,
+        }));
+        self.save_ledger(&l).await;
+    }
+
+    /// Log a user correction — the most valuable signal there is. The lesson is permanent.
+    pub async fn ledger_correction(&self, domain: &str, what: &str, lesson: &str) {
+        let mut l = self.ledger().await;
+        l.push(serde_json::json!({
+            "ts": chrono::Utc::now().timestamp_millis(),
+            "domain": domain,
+            "what": what.chars().take(140).collect::<String>(),
+            "outcome": "corrected",
+            "lesson": lesson.chars().take(200).collect::<String>(),
+        }));
+        self.save_ledger(&l).await;
+    }
+
+    /// Resolve recent pending predictions: the user replying within the window = engaged; the
+    /// stale-resolver calling with false = ignored. Mirrors the world-model resolution.
+    pub async fn ledger_resolve(&self, engaged: bool) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut l = self.ledger().await;
+        let mut changed = false;
+        for e in l.iter_mut().rev().take(12) {
+            if e["outcome"].as_str() == Some("pending") {
+                let age = now - e["ts"].as_i64().unwrap_or(0);
+                if age < 90 * 60_000 {
+                    e["outcome"] = serde_json::json!(if engaged { "engaged" } else { "ignored" });
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_ledger(&l).await;
+        }
+    }
+
+    /// Pacing multiplier for a domain (1.0 = normal; >1 = slowed because it was being ignored).
+    /// Consulted by the due-gates; adjusted only by the weekly review — policy changes are
+    /// deliberate, logged, and reversible, never twitchy.
+    pub async fn domain_pace(&self, domain: &str) -> f64 {
+        self.memory
+            .profile_get(&format!("pace:{domain}"))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0)
+    }
+
+    /// Per-domain scoreboard over a trailing window: (sends, engaged, ignored, corrected).
+    fn ledger_stats(l: &[serde_json::Value], since_ms: i64) -> std::collections::BTreeMap<String, (u32, u32, u32, u32)> {
+        let mut m: std::collections::BTreeMap<String, (u32, u32, u32, u32)> = std::collections::BTreeMap::new();
+        for e in l {
+            if e["ts"].as_i64().unwrap_or(0) < since_ms {
+                continue;
+            }
+            let d = e["domain"].as_str().unwrap_or("general").to_string();
+            let s = m.entry(d).or_insert((0, 0, 0, 0));
+            s.0 += 1;
+            match e["outcome"].as_str().unwrap_or("pending") {
+                "engaged" => s.1 += 1,
+                "ignored" => s.2 += 1,
+                "corrected" => s.3 += 1,
+                _ => {}
+            }
+        }
+        m
+    }
+
+    /// THE WEEKLY SELF-REPORT — the mind reviews its own week: scoreboard per domain, the
+    /// corrections it absorbed (with lessons), what it learned (beliefs formed, studies deepened,
+    /// rules taught), and the PACING POLICIES it is changing as a result. Deterministic core;
+    /// one small LLM pass turns it into honest first-person prose. `ym report` anytime.
+    pub async fn self_report(&self, apply_policy: bool) -> String {
+        use chrono::Datelike;
+        let now = chrono::Utc::now().timestamp_millis();
+        let week_ago = now - 7 * 86_400_000;
+        let l = self.ledger().await;
+        let stats = Self::ledger_stats(&l, week_ago);
+        // Corrections + lessons this week (verbatim — these are the gold).
+        let lessons: Vec<String> = l
+            .iter()
+            .filter(|e| e["ts"].as_i64().unwrap_or(0) >= week_ago && e["outcome"].as_str() == Some("corrected"))
+            .filter_map(|e| {
+                let what = e["what"].as_str().unwrap_or("?");
+                e["lesson"].as_str().map(|le| format!("{what} → {le}"))
+            })
+            .collect();
+        // Growth counters: beliefs, taught mail rules, face names learned.
+        let beliefs_now = self.memory.belief_count().await.unwrap_or(0) as i64;
+        let beliefs_prev: i64 = self.memory.profile_get("report_beliefs").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(beliefs_now);
+        let rules_n = self.mail_rules().await.len();
+        let faces_n = self.face_names().await.len();
+        // Policy pass: domains ignored hard get slower; domains loved speed back up. Logged.
+        let mut policy_notes: Vec<String> = Vec::new();
+        if apply_policy {
+            for (d, (sends, eng, ign, _)) in &stats {
+                if *sends >= 4 {
+                    let cur = self.domain_pace(d).await;
+                    if *ign as f64 >= *sends as f64 * 0.75 && cur < 4.0 {
+                        let new = (cur * 1.5).min(4.0);
+                        let _ = self.memory.profile_set(&format!("pace:{d}"), &format!("{new:.2}")).await;
+                        policy_notes.push(format!("{d}: mostly ignored ({ign}/{sends}) — slowing myself down ({cur:.1}x → {new:.1}x)"));
+                    } else if *eng as f64 >= *sends as f64 * 0.6 && cur > 1.0 {
+                        let new = (cur / 1.5).max(1.0);
+                        let _ = self.memory.profile_set(&format!("pace:{d}"), &format!("{new:.2}")).await;
+                        policy_notes.push(format!("{d}: engaging again ({eng}/{sends}) — speeding back up ({cur:.1}x → {new:.1}x)"));
+                    }
+                }
+            }
+            let _ = self.memory.profile_set("report_beliefs", &beliefs_now.to_string()).await;
+            let _ = self.memory.profile_set("report_last", &now.to_string()).await;
+        }
+        let scoreboard: String = if stats.is_empty() {
+            "(no proactive acts logged yet — the ledger just opened)".to_string()
+        } else {
+            stats
+                .iter()
+                .map(|(d, (s, e, ig, c))| {
+                    let pct = if *s > 0 { *e as f64 * 100.0 / *s as f64 } else { 0.0 };
+                    format!("- {d}: {s} sent, {e} engaged ({pct:.0}%), {ig} ignored, {c} corrected")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let facts = format!(
+            "WEEK SCOREBOARD (my proactive predictions vs your reactions):\n{scoreboard}\n\nCORRECTIONS I ABSORBED ({}):\n{}\n\nGROWTH: {} durable beliefs ({}); {} taught mail rules; {} faces I can name.\n\nPOLICY CHANGES THIS REVIEW:\n{}",
+            lessons.len(),
+            if lessons.is_empty() { "(none — either I was right or you were patient)".to_string() } else { lessons.join("\n") },
+            beliefs_now,
+            if beliefs_now >= beliefs_prev { format!("+{}", beliefs_now - beliefs_prev) } else { format!("{}", beliefs_now - beliefs_prev) },
+            rules_n,
+            faces_n,
+            if policy_notes.is_empty() { "(none needed)".to_string() } else { policy_notes.join("\n") },
+        );
+        let week = format!("{}", chrono::Utc::now().iso_week().week());
+        let prompt = format!(
+            "You are writing your OWN weekly self-review to the person you serve — first person, honest, warm, terse (max 220 words), plain text no markdown. Use ONLY these facts (never invent): \n\n{facts}\n\nStructure: what I learned about you this week; where I was wrong (own the misses concretely); what I'm changing. If the ledger is thin, say plainly this is week one and the numbers start now."
+        );
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+        match self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .await
+        {
+            Ok(r) => format!("🪞 Week {week} self-report\n\n{}", r.text.trim()),
+            Err(_) => format!("🪞 Week {week} self-report (raw)\n\n{facts}"),
+        }
+    }
+
+    /// Weekly gate for the poll loop: 7 days since the last applied review, morning window.
+    pub async fn report_due(&self) -> bool {
+        use chrono::Timelike;
+        let now = local_now();
+        if !(8..=11).contains(&now.hour()) {
+            return false;
+        }
+        let last: i64 = self.memory.profile_get("report_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= 7 * 86_400_000
     }
 
     /// ---------- ASK-WHO-IS-WHO ----------
@@ -7727,6 +7927,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return false; // never stack interview questions
         }
         let period_ms: i64 = std::env::var("YM_WHOIS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms = (period_ms as f64 * self.domain_pace("whois").await) as i64;
         let last: i64 = self.memory.profile_get("whois_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
@@ -7808,6 +8009,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         self.set_pending_slot(Some(slot)).await;
         let _ = self.memory.profile_set("whois_last", &chrono::Utc::now().timestamp_millis().to_string()).await;
         self.note_proactive_sent().await;
+        self.ledger_sent("whois", "asked who an unnamed face is").await;
     }
 
     async fn whois_asked(&self) -> Vec<String> {
@@ -8802,6 +9004,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return false;
         }
         let period_ms: i64 = std::env::var("YM_MAILSWEEP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms = (period_ms as f64 * self.domain_pace("mail").await) as i64;
         let last: i64 = self.memory.profile_get("mail_sweep_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
@@ -8822,6 +9025,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 .unwrap_or(false)
         };
         if has("NEEDS ACTION") || has("MONEY IN MOTION") || has("FROM PEOPLE") {
+            self.ledger_sent("mail", "daily sweep flagged something needing action").await;
             Some(format!("📬 Mail sweep — something needs you:\n\n{digest}"))
         } else {
             eprintln!("[mail] sweep clean — staying quiet");
@@ -9249,6 +9453,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "family" | "relationships" => self.family_view().await,
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
+            "report" | "selfreport" | "weekreview" => self.self_report(false).await,
             // --- get-to-know-you: surface the next proactive question on demand (same drive that fires idle) ---
             "ask" | "getting-to-know" if rest.is_empty() => self.proactive_ask().await.unwrap_or_else(|| "I've got a good feel for you right now — nothing I need to ask.".to_string()),
             // --- calendar: the unified time-spine + read-only external (ICS) bridge ---
@@ -9383,6 +9588,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     } else {
                         rules.push(r.to_string());
                         self.save_mail_rules(&rules).await;
+                        self.ledger_correction("mail", "digest categorization", r).await;
                         format!("📮 Rule learned (#{}) — every future digest obeys it: {r}", rules.len())
                     }
                 }
@@ -10490,6 +10696,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
             "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
+            "self_report" | "week_review" => self.self_report(false).await,
             "mail_rule" | "mailrule" => {
                 let r = { let a = s("rule"); if a.is_empty() { s("text") } else { a } };
                 if r.trim().is_empty() {
@@ -10498,6 +10705,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let mut rules = self.mail_rules().await;
                     rules.push(r.trim().to_string());
                     self.save_mail_rules(&rules).await;
+                    self.ledger_correction("mail", "digest categorization", r.trim()).await;
                     format!("Mail rule learned: {}", r.trim())
                 }
             }
@@ -11030,6 +11238,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action / from-people / money-in-motion / purchases / noise, with body-peek state verification (read-only)\n\
 - mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
 - mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
+- self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\
@@ -11490,6 +11699,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // Resolve any outstanding proactive send: replying now (within the window) counts as
         // ENGAGED — the world model learns when pings actually land.
         self.resolve_proactive(true).await;
+        self.ledger_resolve(true).await;
         let onboard = if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
             self.pending_slot().await
         } else {

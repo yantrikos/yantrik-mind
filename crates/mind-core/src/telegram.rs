@@ -1021,6 +1021,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Anticipation: project the family's OWN rhythms forward (festivals, recurring visits)
+        // and nudge ONCE inside the actionable window — rhythm-based foresight, not calendar math.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && conv.anticipate_due().await
+                && conv.proactive_receptivity_ok().await
+            {
+                if let Some(msg) = conv.anticipate_run().await {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                        conv.note_proactive_sent().await;
+                        eprintln!("[anticipate] rhythm nudge sent");
+                    }
+                }
+            }
+        }
+
         // Event ask-to-learn: ONE "what was this day?" question per period — a sample photo from
         // the biggest unexplained photo-burst; the reply becomes a labeled life event.
         {

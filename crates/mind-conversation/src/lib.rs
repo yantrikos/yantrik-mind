@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 69] = [
+    const CMDS: [&str; 72] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -352,6 +352,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
+        "horizon", "anticipations", "lookahead",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -7875,6 +7876,197 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
     }
 
+    /// ---------- THE ANTICIPATION ENGINE ----------
+    /// Calendar reminders know DATES; anticipation knows RHYTHMS. Annual patterns are mined from
+    /// the event + trip ledgers (a labeled celebration recurring across years, a destination
+    /// visited every winter), projected to their next occurrence, and nudged ONCE inside the
+    /// actionable window — with the evidence ("based on 3 years of your life") attached.
+
+    /// Detect recurring annual patterns. Returns (key, label, next_date, days_until, years_seen,
+    /// last_note) sorted by days_until.
+    async fn life_patterns(&self) -> Vec<(String, String, chrono::NaiveDate, i64, usize, String)> {
+        use chrono::Datelike;
+        let today = local_now().date_naive();
+        let mut buckets: std::collections::HashMap<String, Vec<(i32, u32, u64, String)>> = std::collections::HashMap::new();
+        const LEXICON: [&str; 18] = [
+            "puja", "durga", "holi", "holika", "diwali", "christmas", "thanksgiving", "halloween",
+            "eid", "rakhi", "navratri", "saraswati", "lights", "birthday", "anniversary", "wedding",
+            "housewarming", "graduation",
+        ];
+        // Events: normalized label keyword (or first two significant words) is the pattern key.
+        for e in self.load_events().await {
+            let label = e["label"].as_str().unwrap_or("");
+            let date = e["date"].as_str().unwrap_or("");
+            if label.is_empty() || date.len() != 10 {
+                continue;
+            }
+            let low = label.to_lowercase();
+            let key = LEXICON
+                .iter()
+                .find(|w| low.contains(*w))
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| {
+                    low.split_whitespace()
+                        .filter(|w| w.len() > 3)
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+            if key.len() < 4 {
+                continue;
+            }
+            let (Ok(y), Ok(d)) = (date[..4].parse::<i32>(), chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")) else {
+                continue;
+            };
+            let note = format!(
+                "{label}{}",
+                e["trip"].as_str().map(|t| format!(" (traveled: {t})")).unwrap_or_default()
+            );
+            buckets.entry(key).or_default().push((y, d.ordinal(), e["photos"].as_u64().unwrap_or(0), note));
+        }
+        // Trips: a destination visited in multiple years around the same season.
+        for t in self.load_trips().await {
+            let (Some(dest), Some(start)) = (t["dest"].as_str(), t["start"].as_str()) else { continue };
+            if start.len() != 10 {
+                continue;
+            }
+            let city = dest.split(',').next().unwrap_or(dest).trim().to_string();
+            let (Ok(y), Ok(d)) = (start[..4].parse::<i32>(), chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")) else {
+                continue;
+            };
+            let note = format!("trip to {city} ({} days, {} photos)", t["days"], t["photos"]);
+            buckets
+                .entry(format!("visit {city}"))
+                .or_default()
+                .push((y, d.ordinal(), t["photos"].as_u64().unwrap_or(0), note));
+        }
+        let mut out = Vec::new();
+        for (key, mut hits) in buckets {
+            let years: std::collections::HashSet<i32> = hits.iter().map(|(y, _, _, _)| *y).collect();
+            if years.len() < 2 {
+                continue; // a pattern needs at least two years of evidence
+            }
+            // Day-of-year center with Dec/Jan wraparound handling.
+            let mut doys: Vec<i64> = hits.iter().map(|(_, d, _, _)| *d as i64).collect();
+            doys.sort();
+            if doys.last().unwrap_or(&0) - doys.first().unwrap_or(&0) > 300 {
+                for d in doys.iter_mut() {
+                    if *d < 60 {
+                        *d += 365;
+                    }
+                }
+                doys.sort();
+            }
+            let spread = doys.last().unwrap_or(&0) - doys.first().unwrap_or(&0);
+            if spread > 42 {
+                continue; // not seasonal enough to project
+            }
+            let center = doys[doys.len() / 2] % 365;
+            let mut next = chrono::NaiveDate::from_yo_opt(today.year(), center.max(1) as u32)
+                .unwrap_or(today);
+            if next < today {
+                next = chrono::NaiveDate::from_yo_opt(today.year() + 1, center.max(1) as u32).unwrap_or(today);
+            }
+            let days_until = (next - today).num_days();
+            hits.sort_by_key(|(y, _, _, _)| std::cmp::Reverse(*y));
+            let last_note = hits.first().map(|(y, _, _, n)| format!("{y}: {n}")).unwrap_or_default();
+            let label = hits.first().map(|(_, _, _, n)| n.split(" (").next().unwrap_or(n).to_string()).unwrap_or(key.clone());
+            out.push((key, label, next, days_until, years.len(), last_note));
+        }
+        out.sort_by_key(|(_, _, _, d, _, _)| *d);
+        out
+    }
+
+    /// The projected life — what's coming, with the evidence behind each projection.
+    pub async fn life_horizon(&self) -> String {
+        let patterns = self.life_patterns().await;
+        if patterns.is_empty() {
+            return "🔮 No annual patterns confident enough to project yet — they emerge as the event and trip ledgers grow (answer the day-questions!).".to_string();
+        }
+        let mut lines = Vec::new();
+        for (_, label, next, days, years, last) in patterns.iter().take(14) {
+            if *days > 180 {
+                continue;
+            }
+            lines.push(format!(
+                "• ~{} ({days}d away) — {label} [{years} years of evidence; last: {last}]",
+                next.format("%b %d")
+            ));
+        }
+        if lines.is_empty() {
+            return "🔮 Nothing projected inside the next 6 months.".to_string();
+        }
+        format!("🔮 Your projected horizon (from your own life's rhythms):\n{}", lines.join("\n"))
+    }
+
+    /// Anticipation nudge gate: one pattern entering its actionable window (10-75 days), not yet
+    /// nudged for this occurrence.
+    pub async fn anticipate_due(&self) -> bool {
+        let period_ms: i64 = std::env::var("YM_ANTICIPATE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(259_200) * 1000;
+        let period_ms = (period_ms as f64 * self.domain_pace("anticipate").await) as i64;
+        let last: i64 = self.memory.profile_get("anticipate_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// Pick the soonest un-nudged pattern in the window and compose the anticipation.
+    pub async fn anticipate_run(&self) -> Option<String> {
+        let _ = self
+            .memory
+            .profile_set("anticipate_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .await;
+        let done: Vec<String> = self
+            .memory
+            .profile_get("anticipated")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        // Skip pure birthday/anniversary keys — the family-date nudges own those dates; the
+        // anticipation engine owns the RHYTHM-based rest (festivals, visits, recurring parties).
+        let profiles = self.load_people_profiles().await;
+        let person_mmdds: std::collections::HashSet<String> = profiles
+            .iter()
+            .flat_map(|p| {
+                p.get("dates")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|d| d.get("mmdd").and_then(|x| x.as_str()).map(String::from)).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for (key, label, next, days, years, last) in self.life_patterns().await {
+            if !(10..=75).contains(&days) {
+                continue;
+            }
+            let occ_key = format!("{key}:{}", next.format("%Y"));
+            if done.contains(&occ_key) {
+                continue;
+            }
+            if person_mmdds.contains(&next.format("%m-%d").to_string()) && (key.contains("birthday") || key.contains("anniversary")) {
+                continue;
+            }
+            let travel = last.contains("traveled") || key.starts_with("visit ");
+            let suggestion = if travel {
+                "Last time this meant travel — worth planning or booking while it's cheap."
+            } else {
+                "Planning time, while there's still runway."
+            };
+            let mut done2 = done.clone();
+            done2.push(occ_key);
+            if done2.len() > 100 {
+                let cut = done2.len() - 100;
+                done2.drain(..cut);
+            }
+            let _ = self.memory.profile_set("anticipated", &serde_json::to_string(&done2).unwrap_or_default()).await;
+            self.ledger_sent("anticipate", &format!("projected {key} ~{}", next.format("%b %d"))).await;
+            return Some(format!(
+                "🔮 Looking ahead — {label} is coming up around {} ({days} days out), based on {years} year(s) of your own rhythm ({last}). {suggestion}",
+                next.format("%B %d")
+            ));
+        }
+        None
+    }
+
     /// ---------- THE EVENT LEDGER ----------
     /// Bursts of photography ARE events: days documented far above the personal baseline become
     /// candidates, related automatically — people-layer dates ("burst on her mmdd = birthday
@@ -11039,6 +11231,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "running" | "status" if rest.trim().is_empty() => self.running_studies(),
             "trips" if rest.trim() == "build" => self.trips_build().await,
             "events" if rest.trim() == "build" => self.events_build().await,
+            "horizon" | "anticipations" | "lookahead" => self.life_horizon().await,
             "events" => self.events_list(rest.trim()).await,
             "event" if !rest.trim().is_empty() => self.events_list(rest.trim()).await,
             "trips" => self.trips_list(rest.trim()).await,
@@ -12350,6 +12543,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
             "self_report" | "week_review" => self.self_report(false).await,
             "photo_cleanup" | "cleanup_photos" => self.photo_cleanup("organize").await,
+            "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "event_ledger" | "events" | "event" => {
                 let q = { let a = s("query"); if a.is_empty() { s("date") } else { a } };
                 self.events_list(q.trim()).await
@@ -12907,6 +13101,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop\n\
 - trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
 - event_ledger {query?}: heavily-photographed DAYS related to family dates and occasions (birthday parties, pujas, ceremonies) — list or look one up; unknown days get asked about\n\
+- life_horizon {}: the PROJECTED life — annual patterns from the family's own rhythms (festivals, recurring visits) with next dates and evidence\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

@@ -1170,6 +1170,17 @@ fn enhancement_mode(text: &str) -> Option<&'static str> {
     None
 }
 
+/// Follow-up about photos just shown ("that one", "the third one", "which one has the cake").
+fn photo_followup(text: &str) -> bool {
+    let l = text.to_lowercase();
+    const REFS: [&str; 16] = [
+        "that photo", "that pic", "this photo", "this pic", "that one", "this one", "the one",
+        "which one", "first one", "second one", "third one", "fourth one", "last one",
+        "these photos", "those photos", "the cake one",
+    ];
+    REFS.iter().any(|r| l.contains(r))
+}
+
 /// Member-path photo intent, looser than photo_request: family members ask in event language
 /// ("get one from Aadrisha's last birthday") with no photo-noun at all. Verb + event/photo word →
 /// hand the WHOLE ask to retrieval (it stop-filters and resolves people itself).
@@ -2049,6 +2060,9 @@ pub struct ConversationEngine {
     video_queue: Arc<Mutex<Vec<(Vec<u8>, String, Option<i64>)>>>,
     /// The most recent photo the user sent in chat — "enhance it" follow-ups act on this.
     last_photo: Mutex<Option<Vec<u8>>>,
+    /// Working set of photos the mind just SURFACED (sent to chat) — the session buffer that makes
+    /// "the third one" / "the cake one" / "is she smiling?" resolvable instead of stateless.
+    photo_session: Arc<Mutex<Vec<serde_json::Value>>>,
     /// Photo studies currently running (gift:/closet:/tastes:<name>) — dedupe guard so a repeat
     /// ask acknowledges instead of double-spawning a 10-minute vision pass.
     studies: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -2099,6 +2113,7 @@ impl ConversationEngine {
             photo_queue: Arc::new(Mutex::new(Vec::new())),
             video_queue: Arc::new(Mutex::new(Vec::new())),
             last_photo: Mutex::new(None),
+            photo_session: Arc::new(Mutex::new(Vec::new())),
             studies: Arc::new(Mutex::new(std::collections::HashSet::new())),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
         }
@@ -7086,6 +7101,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         }
                         self.note_photo_anchor(&desc, &a.date).await;
                         self.note_photo_sent(&a.id).await;
+                        self.session_note_photo(sources[idx].name(), &a.id, &cap, &a.date);
                         self.photo_queue.lock().unwrap().push((bytes, cap, target));
                         return format!(
                             "Sending the library's closest match for \"{desc}\"{} — my eyes weren't 100% sure it's exactly that, so tell me if it's off. 📸",
@@ -7137,6 +7153,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             self.note_photo_anchor(&desc, &a.date).await;
         }
         self.note_photo_sent(&a.id).await;
+        self.session_note_photo(sources[idx].name(), &a.id, &cap, &a.date);
         self.photo_queue.lock().unwrap().push((bytes, cap, target));
         let what = if label.is_empty() { "one from your library".to_string() } else { format!("one of {label}") };
         format!(
@@ -7148,6 +7165,120 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Drain images queued for delivery: (bytes, caption, target chat — None = the primary).
     pub fn take_outbound_photos(&self) -> Vec<(Vec<u8>, String, Option<i64>)> {
         std::mem::take(&mut *self.photo_queue.lock().unwrap())
+    }
+
+    /// ---------- PHOTO SESSION (working set) ----------
+    /// Pin a just-surfaced photo into the session buffer (last 12 kept).
+    fn session_note_photo(&self, source: &str, id: &str, cap: &str, date: &str) {
+        let mut sess = self.photo_session.lock().unwrap();
+        sess.push(serde_json::json!({
+            "src": source,
+            "id": id,
+            "cap": cap.chars().take(120).collect::<String>(),
+            "date": date,
+            "ts": chrono::Utc::now().timestamp_millis(),
+        }));
+        if sess.len() > 12 {
+            let cut = sess.len() - 12;
+            sess.drain(..cut);
+        }
+    }
+
+    /// Resolve a follow-up against the photos currently "in view" (surfaced within 2h):
+    /// ordinals pick by position, descriptors are vision-matched, and visual QUESTIONS are
+    /// answered by looking at the actual photo. Honest when nothing is in view or nothing matches.
+    pub async fn photo_followup_turn(&self, text: &str, target: Option<i64>) -> String {
+        let now = chrono::Utc::now().timestamp_millis();
+        let fresh: Vec<serde_json::Value> = {
+            self.photo_session
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| now - e["ts"].as_i64().unwrap_or(0) < 2 * 3_600_000)
+                .cloned()
+                .collect()
+        };
+        if fresh.is_empty() {
+            return "I don't have any photos in view right now — the ones from earlier have left my working set. Ask me to find them again and I'll keep the thread this time.".to_string();
+        }
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let fetch = |e: &serde_json::Value| {
+            let src_name = e["src"].as_str().unwrap_or("").to_string();
+            let id = e["id"].as_str().unwrap_or("").to_string();
+            let sources = &sources;
+            async move {
+                let src = sources.iter().find(|s| s.name() == src_name)?;
+                src.image_bytes(&mind_tools::PhotoAsset { id, date: String::new(), place: String::new() }).await
+            }
+        };
+        let l = text.to_lowercase();
+        let is_question = text.trim().ends_with('?')
+            || ["is ", "are ", "does ", "do ", "who ", "what ", "which ", "how "].iter().any(|q| l.starts_with(q));
+        // Ordinal reference → a specific buffered photo.
+        let ord: Option<usize> = [
+            ("first", 0usize), ("1st", 0), ("second", 1), ("2nd", 1), ("third", 2), ("3rd", 2),
+            ("fourth", 3), ("4th", 3), ("fifth", 4), ("5th", 4),
+        ]
+        .iter()
+        .find(|(w, _)| l.contains(w))
+        .map(|(_, i)| *i)
+        .or_else(|| if l.contains("last one") || l.contains("latest one") { Some(fresh.len() - 1) } else { None });
+        if let Some(i) = ord {
+            let Some(e) = fresh.get(i) else {
+                return format!("Only {} photo(s) are in view — no #{}.", fresh.len(), i + 1);
+            };
+            let Some(bytes) = fetch(e).await else {
+                return "I know which one you mean but couldn't re-fetch it.".to_string();
+            };
+            if is_question {
+                let ans = self.analyze_image_bytes(bytes, "image/jpeg", text).await;
+                return format!("Looking at that photo ({}): {}", e["cap"].as_str().unwrap_or("?"), ans);
+            }
+            self.photo_queue.lock().unwrap().push((bytes, e["cap"].as_str().unwrap_or("📸").to_string(), target));
+            return "Sending that one. 📸".to_string();
+        }
+        // Descriptor reference ("the cake one", "which one has the blue dress"): vision-match the set.
+        let stopish = [
+            "that", "this", "the", "one", "photo", "pic", "picture", "which", "is", "in", "with",
+            "has", "have", "she", "he", "her", "his", "there", "of", "a", "an", "you", "sent",
+            "showed", "me", "was", "were", "it",
+        ];
+        let desc: String = l
+            .trim_end_matches(['?', '!', '.'])
+            .split_whitespace()
+            .filter(|w| !stopish.contains(w))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if desc.len() >= 3 {
+            for (i, e) in fresh.iter().enumerate().take(6) {
+                let Some(bytes) = fetch(e).await else { continue };
+                let verdict = self
+                    .analyze_image_bytes(bytes.clone(), "image/jpeg", &format!("Does this photo clearly show: {desc}? Answer only YES or NO."))
+                    .await;
+                if verdict.trim().to_uppercase().starts_with("YES") {
+                    if is_question && !l.starts_with("which") {
+                        let ans = self.analyze_image_bytes(bytes, "image/jpeg", text).await;
+                        return format!("That's #{} ({}): {}", i + 1, e["cap"].as_str().unwrap_or("?"), ans);
+                    }
+                    self.photo_queue.lock().unwrap().push((bytes, e["cap"].as_str().unwrap_or("📸").to_string(), target));
+                    return format!("That's #{} — sending it. 📸", i + 1);
+                }
+            }
+            return format!(
+                "I looked at the {} photo(s) in view and none clearly shows \"{desc}\" — honest miss. Want me to search the whole library for it instead?",
+                fresh.len().min(6)
+            );
+        }
+        // Bare visual question with exactly one photo in view → just look at it.
+        if is_question {
+            if let Some(e) = fresh.last() {
+                if let Some(bytes) = fetch(e).await {
+                    let ans = self.analyze_image_bytes(bytes, "image/jpeg", text).await;
+                    return format!("Looking at the latest one ({}): {}", e["cap"].as_str().unwrap_or("?"), ans);
+                }
+            }
+        }
+        "Tell me which of the photos in view you mean — 'the first one', 'the last one', or describe it ('the cake one').".to_string()
     }
 
     /// ---------- LIVING MEMORY ----------
@@ -7286,6 +7417,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         None => {}
                     }
                     self.note_photo_sent(&a.id).await;
+                    self.session_note_photo(sources[i].name(), &a.id, &cap, &a.date);
                     self.photo_queue.lock().unwrap().push((bytes, cap, None));
                     return true;
                 }
@@ -7331,6 +7463,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 cap.push_str(&format!("\n{st}"));
             }
             self.note_photo_sent(&a.id).await;
+            self.session_note_photo(src.name(), &a.id, &cap, &a.date);
             self.photo_queue.lock().unwrap().push((bytes, cap, None));
             return true;
         }
@@ -11650,6 +11783,9 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         if let Some(req) = creative_request(user_text) {
             return self.photo_create_for(&req, member_chat, Some(&name)).await;
         }
+        if photo_followup(user_text) {
+            return self.photo_followup_turn(user_text, member_chat).await;
+        }
         if let Some(q) = photo_request(user_text) {
             return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
         }
@@ -11746,6 +11882,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // (checked BEFORE plain retrieval so they aren't swallowed by the find-a-photo path).
         if let Some(req) = creative_request(user_text) {
             let reply = self.photo_create(&req).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
+        // Follow-ups about photos just shown ("the third one", "is she smiling?") resolve against
+        // the session working set — checked BEFORE fresh retrieval so the thread isn't lost.
+        if photo_followup(user_text) {
+            let reply = self.photo_followup_turn(user_text, None).await;
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);

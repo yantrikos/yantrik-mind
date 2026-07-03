@@ -720,7 +720,7 @@ impl ImmichClient {
     pub async fn assets_of_person(&self, person_id: &str, size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
         let (b, k, pid) = (self.base.clone(), self.key.clone(), person_id.to_string());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
-            let body = serde_json::json!({ "personIds": [pid], "size": size, "type": "IMAGE" });
+            let body = serde_json::json!({ "personIds": [pid], "size": size, "type": "IMAGE", "withExif": true });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
                 .set("content-type", "application/json")
@@ -1028,7 +1028,7 @@ impl ImmichClient {
     pub async fn smart_search(&self, query: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
         let (b, k, q, pids) = (self.base.clone(), self.key.clone(), query.to_string(), person_ids.to_vec());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
-            let mut body = serde_json::json!({ "query": q, "size": size, "type": "IMAGE" });
+            let mut body = serde_json::json!({ "query": q, "size": size, "type": "IMAGE", "withExif": true });
             if !pids.is_empty() {
                 body["personIds"] = serde_json::json!(pids);
             }
@@ -1047,7 +1047,7 @@ impl ImmichClient {
     pub async fn assets_of_people(&self, person_ids: &[String], size: usize, oldest_first: bool) -> anyhow::Result<Vec<(String, String, String)>> {
         let (b, k, pids) = (self.base.clone(), self.key.clone(), person_ids.to_vec());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
-            let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE", "order": if oldest_first { "asc" } else { "desc" } });
+            let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE", "withExif": true, "order": if oldest_first { "asc" } else { "desc" } });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
                 .set("content-type", "application/json")
@@ -1088,7 +1088,7 @@ impl ImmichClient {
     pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
         let (b, k, af, bf, pids) = (self.base.clone(), self.key.clone(), after.to_string(), before.to_string(), person_ids.to_vec());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
-            let mut body = serde_json::json!({ "takenAfter": af, "takenBefore": bf, "size": size, "type": "IMAGE" });
+            let mut body = serde_json::json!({ "takenAfter": af, "takenBefore": bf, "size": size, "type": "IMAGE", "withExif": true });
             if !pids.is_empty() {
                 body["personIds"] = serde_json::json!(pids);
             }
@@ -1190,7 +1190,7 @@ impl ImmichClient {
     pub async fn recent_assets(&self, n: usize) -> anyhow::Result<Vec<(String, String, String)>> {
         let (b, k) = (self.base.clone(), self.key.clone());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
-            let body = serde_json::json!({ "size": n, "type": "IMAGE", "order": "desc" });
+            let body = serde_json::json!({ "size": n, "type": "IMAGE", "order": "desc", "withExif": true });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
                 .set("content-type", "application/json")

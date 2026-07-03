@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 75] = [
+    const CMDS: [&str; 77] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -353,6 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
+        "traditions", "tradition",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -7911,7 +7912,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
 
     /// (name, match_word, what-it-is, duration_days). match_word ties observed event-ledger
     /// labels to the festival.
-    const FESTIVALS: [(&'static str, &'static str, &'static str, u32); 12] = [
+    const FESTIVALS: [(&'static str, &'static str, &'static str, u32); 13] = [
+        ("Mahalaya", "mahalaya", "the dawn of Devi Paksha — Mahishasura Mardini at first light; the Pujo countdown begins", 1),
         ("Durga Puja", "durga", "the heart of the Bengali year — Shashthi to Bijoya Dashami: pandals, new clothes, dhunuchi, family", 5),
         ("Kali Puja", "kali", "Kali worship on the Diwali new-moon night — lamps in every Bengali home", 1),
         ("Diwali", "diwali", "the festival of lights", 1),
@@ -8024,6 +8026,21 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     }));
                     fixed += 1;
                 }
+            }
+        }
+        // Mahalaya is EXACTLY the Amavasya six days before Shashthi — derive it from Durga Puja
+        // rather than trusting (or waiting for) a web extraction.
+        let years2: std::collections::HashSet<i64> = entries.iter().filter_map(|e| e["year"].as_i64()).collect();
+        for y in years2 {
+            let Some(durga) = get(&entries, "Durga Puja", y) else { continue };
+            let want = durga - chrono::Duration::days(6);
+            let ok = get(&entries, "Mahalaya", y).map(|m| (durga - m).num_days().abs() <= 8 && m < durga).unwrap_or(false);
+            if !ok {
+                entries.retain(|e| !(e["name"].as_str() == Some("Mahalaya") && e["year"].as_i64() == Some(y)));
+                entries.push(serde_json::json!({
+                    "name": "Mahalaya", "year": y, "date": want.format("%Y-%m-%d").to_string(), "src": "derived-lunar",
+                }));
+                fixed += 1;
             }
         }
         if fixed > 0 {
@@ -8216,6 +8233,225 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return None;
         }
         Some(line)
+    }
+
+    /// ---------- FESTIVAL TRADITIONS + WEATHER-PLANNED DAYS ----------
+    /// What the FAMILY does around each festival ("Brishti's Mahalaya photoshoot of Aadrisha") is
+    /// knowledge worth holding — and weather-dependent traditions deserve planning help: when the
+    /// festival comes within forecast range, score the nearby days and suggest the best ones.
+
+    async fn load_traditions(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("festival_traditions")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    /// Add a tradition: `tradition <festival>: <what the family does>`.
+    pub async fn tradition_add(&self, arg: &str) -> String {
+        let Some((fest_raw, text)) = arg.split_once(':') else {
+            return "Usage: tradition <festival>: <what the family does>  (e.g. tradition Mahalaya: dress-up photoshoot)".to_string();
+        };
+        let fest_raw = fest_raw.trim().to_lowercase();
+        let text = text.trim().to_string();
+        if text.len() < 4 {
+            return "Tell me what the tradition actually is.".to_string();
+        }
+        let Some((name, _, _, _)) = Self::FESTIVALS.iter().find(|(n, w, _, _)| {
+            n.to_lowercase().contains(&fest_raw) || fest_raw.contains(*w)
+        }) else {
+            let known = Self::FESTIVALS.iter().map(|(n, _, _, _)| *n).collect::<Vec<_>>().join(", ");
+            return format!("I don't know that festival. Ones I track: {known}");
+        };
+        const OUTDOOR: [&str; 9] = ["photo", "shoot", "picture", "pic", "outdoor", "picnic", "park", "garden", "walk"];
+        let low = text.to_lowercase();
+        let weather = OUTDOOR.iter().any(|w| low.contains(w));
+        let mut all = self.load_traditions().await;
+        all.retain(|t| !(t["festival"].as_str() == Some(name) && t["tradition"].as_str().map(|x| x.to_lowercase()) == Some(low.clone())));
+        all.push(serde_json::json!({
+            "festival": name, "tradition": text, "weather": weather, "src": "told",
+            "added": local_now().format("%Y-%m-%d").to_string(),
+        }));
+        let _ = self.memory.profile_set("festival_traditions", &serde_json::Value::Array(all).to_string()).await;
+        let _ = self
+            .memory
+            .remember_as_belief(BeliefAssertion {
+                statement: format!("Family tradition around {name}: {text}"),
+                polarity: 1.0,
+                weight: 0.9,
+                source_event: Some("festival-tradition".into()),
+                provenance: "told".into(),
+            })
+            .await;
+        format!(
+            "🪔 Remembered — around {name}: {text}.{}",
+            if weather { " I'll watch the forecast and suggest the best days when it's close." } else { "" }
+        )
+    }
+
+    pub async fn traditions_list(&self) -> String {
+        let all = self.load_traditions().await;
+        if all.is_empty() {
+            return "No family traditions taught yet — `tradition <festival>: <what you do>` and I'll plan around them.".to_string();
+        }
+        let lines: Vec<String> = all
+            .iter()
+            .filter_map(|t| {
+                let f = t["festival"].as_str()?;
+                let tr = t["tradition"].as_str()?;
+                let w = if t["weather"].as_bool().unwrap_or(false) { " 🌤" } else { "" };
+                Some(format!("🪔 {f}{w} — {tr}"))
+            })
+            .collect();
+        format!("Family traditions I plan around:\n{}", lines.join("\n"))
+    }
+
+    /// Score a forecast day for an outdoor dress-up-and-photos plan. 0-100.
+    fn photo_day_score(d: &mind_tools::DayForecast, delta_from_fest: i64) -> i64 {
+        let mut score: i64 = 100;
+        if d.precip_prob >= 60.0 {
+            score -= 60;
+        } else if d.precip_prob >= 30.0 {
+            score -= 25;
+        }
+        if matches!(d.desc, "rain" | "rain showers" | "thunderstorm" | "thunderstorm with hail" | "snow" | "snow showers" | "freezing rain" | "freezing drizzle") {
+            score -= 40;
+        } else if d.desc == "drizzle" || d.desc == "overcast" || d.desc == "fog" {
+            score -= 12;
+        }
+        if d.hi_f < 45.0 {
+            score -= 25;
+        } else if d.hi_f < 55.0 {
+            score -= 10;
+        } else if d.hi_f > 95.0 {
+            score -= 20;
+        }
+        if d.wind_mph > 25.0 {
+            score -= 15;
+        }
+        if d.weekday == "Sat" || d.weekday == "Sun" {
+            score += 8;
+        }
+        score - 2 * delta_from_fest.abs()
+    }
+
+    /// Compose the best-days suggestion for one weather-dependent tradition, if the festival's
+    /// window [-4, +3] overlaps the forecast. Returns None when out of range or weather missing.
+    async fn tradition_days_suggestion(&self, fest: &str, tradition: &str) -> Option<String> {
+        let weather = self.weather.clone()?;
+        let today = local_now().date_naive();
+        let fdate = self
+            .load_festival_dates()
+            .await
+            .iter()
+            .filter_map(|e| {
+                if e["name"].as_str() != Some(fest) {
+                    return None;
+                }
+                let d = chrono::NaiveDate::parse_from_str(e["date"].as_str()?, "%Y-%m-%d").ok()?;
+                if d >= today { Some(d) } else { None }
+            })
+            .min()?;
+        let days_until = (fdate - today).num_days();
+        if days_until > 14 {
+            return None; // beyond a trustworthy forecast
+        }
+        let city = self.home_city_now().await.unwrap_or_else(|| "home".to_string());
+        let outlook = weather.daily_outlook(&city, 16).await.ok()?;
+        let w_start = fdate - chrono::Duration::days(4);
+        let w_end = fdate + chrono::Duration::days(3);
+        let mut scored: Vec<(i64, &mind_tools::DayForecast)> = outlook
+            .iter()
+            .filter_map(|d| {
+                let nd = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok()?;
+                if nd < w_start || nd > w_end || nd < today {
+                    return None;
+                }
+                Some((Self::photo_day_score(d, (nd - fdate).num_days()), d))
+            })
+            .collect();
+        if scored.is_empty() {
+            return None;
+        }
+        scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+        let best: Vec<String> = scored
+            .iter()
+            .take(3)
+            .filter(|(s, _)| *s >= 40)
+            .map(|(_, d)| {
+                let sunset = if d.sunset.is_empty() { String::new() } else { format!(", sunset {}", d.sunset) };
+                format!("**{} {}** — {}, {:.0}°F, rain {:.0}%{sunset}", d.weekday, &d.date[5..], d.desc, d.hi_f, d.precip_prob)
+            })
+            .collect();
+        let worst = scored
+            .iter()
+            .rev()
+            .find(|(s, _)| *s < 20)
+            .map(|(_, d)| format!(" Skip {} {} ({}, rain {:.0}%).", d.weekday, &d.date[5..], d.desc, d.precip_prob))
+            .unwrap_or_default();
+        let day_word = if days_until == 0 { "TODAY".to_string() } else { format!("{} ({days_until}d out)", fdate.format("%A %b %d")) };
+        if best.is_empty() {
+            return Some(format!(
+                "🪔📸 {fest} is {day_word} — {tradition}. The forecast around it looks rough in {city}; best of it: {}, {:.0}°F, rain {:.0}%. I'd keep plans flexible.{worst}",
+                scored[0].1.desc, scored[0].1.hi_f, scored[0].1.precip_prob
+            ));
+        }
+        Some(format!(
+            "🪔📸 {fest} is {day_word} — and that's {tradition}. Best days by the {city} forecast:\n{}\n{}Golden hour is the last hour before sunset.",
+            best.join("\n"),
+            worst.trim_start().to_string() + if worst.is_empty() { "" } else { "\n" }
+        ))
+    }
+
+    /// Daily gate for tradition prep.
+    pub async fn tradition_prep_due(&self) -> bool {
+        let period_ms: i64 = std::env::var("YM_TRADPREP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let last: i64 = self.memory.profile_get("tradprep_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// One prep suggestion per firing: the soonest weather-dependent tradition whose festival is
+    /// within forecast range and not yet prepped this occurrence.
+    pub async fn tradition_prep_run(&self) -> Option<String> {
+        let _ = self
+            .memory
+            .profile_set("tradprep_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .await;
+        let done: Vec<String> = self
+            .memory
+            .profile_get("trad_prepped")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let today = local_now().date_naive();
+        for t in self.load_traditions().await {
+            if !t["weather"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let (Some(fest), Some(tr)) = (t["festival"].as_str(), t["tradition"].as_str()) else { continue };
+            let occ = format!("{fest}:{}", today.format("%Y"));
+            if done.contains(&occ) {
+                continue;
+            }
+            if let Some(msg) = self.tradition_days_suggestion(fest, tr).await {
+                let mut done2 = done.clone();
+                done2.push(occ);
+                if done2.len() > 60 {
+                    let cut = done2.len() - 60;
+                    done2.drain(..cut);
+                }
+                let _ = self.memory.profile_set("trad_prepped", &serde_json::to_string(&done2).unwrap_or_default()).await;
+                self.ledger_sent("anticipate", &format!("weather-planned days for {fest} tradition")).await;
+                return Some(msg);
+            }
+        }
+        None
     }
 
     /// ---------- THE ANTICIPATION ENGINE ----------
@@ -11660,6 +11896,41 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 None => "Nothing is inside the anticipation window right now (10-75 days out, not yet nudged).".to_string(),
             },
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
+            "traditions" => self.traditions_list().await,
+            "tradition" if rest.trim().starts_with("prep") => {
+                let fest = rest.trim().trim_start_matches("prep").trim().to_string();
+                if fest.is_empty() {
+                    match self.tradition_prep_run().await {
+                        Some(m) => {
+                            self.notify_queue.lock().unwrap().push(m.clone());
+                            format!("(sent to chat)\n{m}")
+                        }
+                        None => "No weather-dependent tradition is inside forecast range right now — I'll fire automatically when one is.".to_string(),
+                    }
+                } else {
+                    let name = Self::FESTIVALS
+                        .iter()
+                        .find(|(n, w, _, _)| n.to_lowercase().contains(&fest.to_lowercase()) || fest.to_lowercase().contains(*w))
+                        .map(|(n, _, _, _)| *n);
+                    match name {
+                        None => "I don't track that festival.".to_string(),
+                        Some(n) => {
+                            let tr = self
+                                .load_traditions()
+                                .await
+                                .iter()
+                                .find(|t| t["festival"].as_str() == Some(n))
+                                .and_then(|t| t["tradition"].as_str().map(String::from))
+                                .unwrap_or_else(|| "your plans".to_string());
+                            match self.tradition_days_suggestion(n, &tr).await {
+                                Some(m) => m,
+                                None => format!("{n} isn't within the ~2-week forecast window yet — I'll watch and suggest days when it is."),
+                            }
+                        }
+                    }
+                }
+            }
+            "tradition" if !rest.trim().is_empty() => self.tradition_add(rest.trim()).await,
             "festivals" | "festival" => self.festivals_list().await,
             "events" => self.events_list(rest.trim()).await,
             "event" if !rest.trim().is_empty() => self.events_list(rest.trim()).await,
@@ -12974,6 +13245,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "photo_cleanup" | "cleanup_photos" => self.photo_cleanup("organize").await,
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
+            "traditions" | "tradition" => self.traditions_list().await,
             "event_ledger" | "events" | "event" => {
                 let q = { let a = s("query"); if a.is_empty() { s("date") } else { a } };
                 self.events_list(q.trim()).await
@@ -13533,6 +13805,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - event_ledger {query?}: heavily-photographed DAYS related to family dates and occasions (birthday parties, pujas, ceremonies) — list or look one up; unknown days get asked about\n\
 - life_horizon {}: the PROJECTED life — annual patterns from the family's own rhythms (festivals, recurring visits) with next dates and evidence\n\
 - festival_calendar {}: the Bengali Hindu festival year — per-year resolved dates (lunar calendar) + what each festival is\n\
+- traditions {}: the family's per-festival traditions (photoshoots, feasts) — weather-dependent ones get forecast-planned day suggestions\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

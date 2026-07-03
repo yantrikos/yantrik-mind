@@ -1039,6 +1039,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Tradition prep: weather-planned best days for the family's festival traditions
+        // (the Mahalaya photoshoot) once the festival is inside forecast range.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && conv.tradition_prep_due().await
+                && conv.proactive_receptivity_ok().await
+            {
+                if let Some(msg) = conv.tradition_prep_run().await {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                        conv.note_proactive_sent().await;
+                        eprintln!("[tradition] weather-planned days sent");
+                    }
+                }
+            }
+        }
+
         // Event ask-to-learn: ONE "what was this day?" question per period — a sample photo from
         // the biggest unexplained photo-burst; the reply becomes a labeled life event.
         {

@@ -8164,7 +8164,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if let Some(cached) = self.memory.profile_get("home_city").await.ok().flatten() {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cached) {
                 let age = chrono::Utc::now().timestamp_millis() - v["ts"].as_i64().unwrap_or(0);
-                if age < 30 * 86_400_000 {
+                if age < 30 * 86_400_000 && v["v"].as_i64() == Some(2) {
                     if let Some(c) = v["city"].as_str() {
                         return Some(c.to_string());
                     }
@@ -8179,7 +8179,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let assets = src.taken_between(&after, &before, &[], 300).await;
         let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)) {
-            let city = a.place.split(',').next().unwrap_or("").trim().to_string();
+            // Keep "City, State" — a bare small-town name under-scopes the local search.
+            let city = a.place.split(',').take(2).map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(", ");
             if city.len() > 2 {
                 *counts.entry(city).or_insert(0) += 1;
             }
@@ -8189,7 +8190,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .memory
             .profile_set(
                 "home_city",
-                &serde_json::json!({ "city": city, "ts": chrono::Utc::now().timestamp_millis() }).to_string(),
+                &serde_json::json!({ "city": city, "ts": chrono::Utc::now().timestamp_millis(), "v": 2 }).to_string(),
             )
             .await;
         Some(city)

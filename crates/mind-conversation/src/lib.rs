@@ -8318,9 +8318,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         } else if d.precip_prob >= 30.0 {
             score -= 25;
         }
-        if matches!(d.desc, "rain" | "rain showers" | "thunderstorm" | "thunderstorm with hail" | "snow" | "snow showers" | "freezing rain" | "freezing drizzle") {
+        let dl = d.desc.to_lowercase();
+        if ["rain", "thunder", "storm", "snow", "sleet", "freezing"].iter().any(|w| dl.contains(w)) {
             score -= 40;
-        } else if d.desc == "drizzle" || d.desc == "overcast" || d.desc == "fog" {
+        } else if ["drizzle", "overcast", "fog"].iter().any(|w| dl.contains(w)) {
             score -= 12;
         }
         if d.hi_f < 45.0 {

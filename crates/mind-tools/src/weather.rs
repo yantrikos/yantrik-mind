@@ -8,7 +8,7 @@ use async_trait::async_trait;
 pub struct DayForecast {
     pub date: String,    // YYYY-MM-DD, local to the place
     pub weekday: String, // "Sat"
-    pub desc: &'static str,
+    pub desc: String,
     pub hi_f: f64,
     pub lo_f: f64,
     pub precip_prob: f64, // %
@@ -136,7 +136,7 @@ impl WeatherClient for OpenMeteo {
             }
             let r = geo["results"].get(0).cloned().ok_or_else(|| anyhow::anyhow!("couldn't find a place called \"{place}\""))?;
             let (lat, lon) = (r["latitude"].as_f64().unwrap_or(0.0), r["longitude"].as_f64().unwrap_or(0.0));
-            let w: serde_json::Value = ureq::get("https://api.open-meteo.com/v1/forecast")
+            let w: serde_json::Value = match ureq::get("https://api.open-meteo.com/v1/forecast")
                 .timeout(std::time::Duration::from_secs(15))
                 .query("latitude", &lat.to_string())
                 .query("longitude", &lon.to_string())
@@ -145,8 +145,14 @@ impl WeatherClient for OpenMeteo {
                 .query("temperature_unit", "fahrenheit")
                 .query("wind_speed_unit", "mph")
                 .query("forecast_days", &days.to_string())
-                .call()?
-                .into_json()?;
+                .call()
+                .and_then(|r| r.into_json().map_err(ureq::Error::from))
+            {
+                Ok(v) => v,
+                // open-meteo's main API has outages; for US locations the National Weather
+                // Service is a rock-solid keyless fallback (7-day horizon, no sunset).
+                Err(_) => return nws_daily(lat, lon),
+            };
             let d = &w["daily"];
             let dates = d["time"].as_array().cloned().unwrap_or_default();
             let mut out = Vec::new();
@@ -158,7 +164,7 @@ impl WeatherClient for OpenMeteo {
                 out.push(DayForecast {
                     date: date.to_string(),
                     weekday,
-                    desc: wmo(d["weather_code"][i].as_i64().unwrap_or(-1)),
+                    desc: wmo(d["weather_code"][i].as_i64().unwrap_or(-1)).to_string(),
                     hi_f: d["temperature_2m_max"][i].as_f64().unwrap_or(0.0),
                     lo_f: d["temperature_2m_min"][i].as_f64().unwrap_or(0.0),
                     precip_prob: d["precipitation_probability_max"][i].as_f64().unwrap_or(0.0),
@@ -174,6 +180,63 @@ impl WeatherClient for OpenMeteo {
         })
         .await?
     }
+}
+
+/// US National Weather Service fallback: points → gridpoint forecast → daytime periods.
+/// Keyless; requires a User-Agent with contact info per NWS policy.
+fn nws_daily(lat: f64, lon: f64) -> anyhow::Result<Vec<DayForecast>> {
+    const UA: &str = "yantrik-mind (contact: developer@pranab.co.in)";
+    let pts: serde_json::Value = ureq::get(&format!("https://api.weather.gov/points/{lat:.4},{lon:.4}"))
+        .set("User-Agent", UA)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()?
+        .into_json()?;
+    let url = pts["properties"]["forecast"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("NWS: no forecast URL (non-US location?)"))?
+        .to_string();
+    let fc: serde_json::Value = ureq::get(&url)
+        .set("User-Agent", UA)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()?
+        .into_json()?;
+    let periods = fc["properties"]["periods"].as_array().cloned().unwrap_or_default();
+    // Night temps become the day's low.
+    let mut lows: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for p in &periods {
+        if !p["isDaytime"].as_bool().unwrap_or(true) {
+            if let (Some(d), Some(t)) = (p["startTime"].as_str(), p["temperature"].as_f64()) {
+                lows.insert(d[..10].to_string(), t);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for p in &periods {
+        if !p["isDaytime"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let Some(date) = p["startTime"].as_str().map(|t| t[..10].to_string()) else { continue };
+        let weekday = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .map(|nd| nd.format("%a").to_string())
+            .unwrap_or_default();
+        let wind_mph = p["windSpeed"]
+            .as_str()
+            .unwrap_or("")
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f64>().ok())
+            .fold(0.0f64, f64::max);
+        out.push(DayForecast {
+            weekday,
+            desc: p["shortForecast"].as_str().unwrap_or("—").to_string(),
+            hi_f: p["temperature"].as_f64().unwrap_or(0.0),
+            lo_f: lows.get(&date).copied().unwrap_or(0.0),
+            precip_prob: p["probabilityOfPrecipitation"]["value"].as_f64().unwrap_or(0.0),
+            wind_mph,
+            sunset: String::new(),
+            date,
+        });
+    }
+    Ok(out)
 }
 
 /// Deterministic weather for tests.

@@ -8913,6 +8913,36 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let beliefs_prev: i64 = self.memory.profile_get("report_beliefs").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(beliefs_now);
         let rules_n = self.mail_rules().await.len();
         let faces_n = self.face_names().await.len();
+        // MOVE 5 — visible self-extension: what the mind built/changed in ITSELF this week
+        // (the self-build loop's evolution log + deploy count). The awe-tier line, made routine.
+        let evo_path = std::env::var("YM_EVOLUTION_LOG").unwrap_or_else(|_| "/var/lib/yantrik-mind/evolution.log".to_string());
+        let mut built: Vec<String> = Vec::new();
+        let mut deploys = 0u32;
+        if let Ok(txt) = std::fs::read_to_string(&evo_path) {
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+            for line in txt.lines().rev().take(500) {
+                let parts: Vec<&str> = line.splitn(4, " | ").collect();
+                if parts.len() < 4 {
+                    continue;
+                }
+                let Ok(ts) = chrono::DateTime::parse_from_rfc3339(parts[0].trim()) else { continue };
+                if ts.with_timezone(&chrono::Utc) < cutoff {
+                    break;
+                }
+                if parts[1].trim() == "deploy" {
+                    deploys += 1;
+                } else {
+                    built.push(format!(
+                        "{} {} — {}",
+                        parts[1].trim(),
+                        parts[2].trim(),
+                        parts[3].trim().chars().take(90).collect::<String>()
+                    ));
+                }
+            }
+        }
+        built.reverse();
+        built.truncate(8);
         // Policy pass: domains ignored hard get slower; domains loved speed back up. Logged.
         let mut policy_notes: Vec<String> = Vec::new();
         if apply_policy {
@@ -8945,8 +8975,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        let self_built = if built.is_empty() {
+            format!("{deploys} self-deployments; no separate self-build entries logged")
+        } else {
+            format!("{deploys} self-deployments; self-built: {}", built.join(" · "))
+        };
         let facts = format!(
-            "WEEK SCOREBOARD (my proactive predictions vs your reactions):\n{scoreboard}\n\nCORRECTIONS I ABSORBED ({}):\n{}\n\nGROWTH: {} durable beliefs ({}); {} taught mail rules; {} faces I can name.\n\nPOLICY CHANGES THIS REVIEW:\n{}",
+            "WEEK SCOREBOARD (my proactive predictions vs your reactions):\n{scoreboard}\n\nCORRECTIONS I ABSORBED ({}):\n{}\n\nGROWTH: {} durable beliefs ({}); {} taught mail rules; {} faces I can name.\n\nWHAT I BUILT/CHANGED IN MYSELF THIS WEEK:\n{self_built}\n\nPOLICY CHANGES THIS REVIEW:\n{}",
             lessons.len(),
             if lessons.is_empty() { "(none — either I was right or you were patient)".to_string() } else { lessons.join("\n") },
             beliefs_now,
@@ -8957,7 +8992,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         );
         let week = format!("{}", chrono::Utc::now().iso_week().week());
         let prompt = format!(
-            "You are writing your OWN weekly self-review to the person you serve — first person, honest, warm, terse (max 220 words), plain text no markdown. Use ONLY these facts (never invent): \n\n{facts}\n\nStructure: what I learned about you this week; where I was wrong (own the misses concretely); what I'm changing. If the ledger is thin, say plainly this is week one and the numbers start now."
+            "You are writing your OWN weekly self-review to the person you serve — first person, honest, warm, terse (max 220 words), plain text no markdown. Use ONLY these facts (never invent): \n\n{facts}\n\nStructure: what I learned about you this week; where I was wrong (own the misses concretely); what I built in myself (from the BUILT section — mention it with quiet pride); what I'm changing. If the ledger is thin, say plainly this is week one and the numbers start now."
         );
         let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
         match self
@@ -10275,7 +10310,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         let mut bills = self.load_bills().await;
         bills.retain(|b| !b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false));
-        bills.push(serde_json::json!({ "name": name, "amount": amount, "due_day": due_day, "cycle": cycle, "currency": currency }));
+        bills.push(serde_json::json!({
+            "name": name, "amount": amount, "due_day": due_day, "cycle": cycle, "currency": currency,
+            "src": "told", "added": local_now().format("%b %d, %Y").to_string(),
+        }));
         self.save_bills(&bills).await;
         format!("Got it — {name} {currency}{amount}, due the {due_day}{} ({cycle}). I'll remind you before it's due.", ordinal(due_day))
     }
@@ -10312,6 +10350,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let d = bill_days_until(due_day);
             let due = if d == 0 { " — due TODAY".to_string() } else if d > 0 && d <= 5 { format!(" — due in {d}d") } else { String::new() };
             let ap = if b.get("autopay").and_then(|x| x.as_bool()).unwrap_or(false) { " · autopay" } else { "" };
+            let ap = format!("{ap}{}", b.get("added").and_then(|x| x.as_str()).map(|d| format!(" · added {d}")).unwrap_or_default());
+            let ap = ap.as_str();
             lines.push(format!("• {name} — {c}{amount}, the {due_day}{} ({cycle}){due}{ap}", ordinal(due_day)));
         }
         format!("{}\n— {} bills, ~{cur}{total:.2}/mo", lines.join("\n"), bills.len())
@@ -10356,7 +10396,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let amount = b.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let cur = b.get("currency").and_then(|x| x.as_str()).unwrap_or("$");
             let when = if d == 0 { "today".to_string() } else { format!("in {d} day(s)") };
-            out.push(format!("🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).", ordinal(due_day)));
+            let prov = match (b.get("src").and_then(|x| x.as_str()), b.get("added").and_then(|x| x.as_str())) {
+                (Some("told"), Some(d)) => format!(" (you added this {d})"),
+                (Some(sr), Some(d)) => format!(" (from {sr}, {d})"),
+                _ => String::new(),
+            };
+            out.push(format!("🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).{prov}", ordinal(due_day)));
         }
         if dirty {
             if reminded.len() > 60 {

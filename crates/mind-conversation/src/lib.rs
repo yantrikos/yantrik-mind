@@ -7530,6 +7530,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     .and_then(|m| m.iter().max_by_key(|(_, n)| **n).map(|(p, _)| p.clone()))
                     .unwrap_or_default()
             };
+            // FAMILIAR SET: a place photographed in >=4 distinct months of a year is home-region
+            // (the neighboring suburb, the office town) — not a trip destination. Kills the
+            // Bentonville-as-a-trip artifact around a Centerton home.
+            let mut year_city_months: std::collections::HashMap<(i32, String), std::collections::HashSet<String>> = std::collections::HashMap::new();
+            for (day, places) in &day_place {
+                let y: i32 = day[..4].parse().unwrap_or(0);
+                let month: String = day[..7].to_string();
+                for p in places.keys() {
+                    year_city_months.entry((y, p.clone())).or_default().insert(month.clone());
+                }
+            }
+            let familiar = |y: i32, city: &str| -> bool {
+                year_city_months.get(&(y, city.to_string())).map(|m| m.len() >= 4).unwrap_or(false)
+            };
             // 3. Away-day runs (gap tolerance 2 days) → trip candidates.
             #[derive(Clone)]
             struct Run {
@@ -7547,7 +7561,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let y: i32 = day[..4].parse().unwrap_or(0);
                 let home = home_of(y);
                 let (modal, n) = places.iter().max_by_key(|(_, n)| **n).map(|(p, n)| (p.clone(), *n)).unwrap();
-                let away = !home.is_empty() && modal != home;
+                let away = !home.is_empty() && modal != home && !familiar(y, &modal);
                 if away {
                     let gap_ok = last_away.map(|la| (d - la).num_days() <= 3).unwrap_or(false);
                     if let (Some(r), true) = (cur.as_mut(), gap_ok) {

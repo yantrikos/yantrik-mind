@@ -9504,7 +9504,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             total += sub_monthly(amount, cycle);
             let d = bill_days_until(due_day);
             let due = if d == 0 { " — due TODAY".to_string() } else if d > 0 && d <= 5 { format!(" — due in {d}d") } else { String::new() };
-            lines.push(format!("• {name} — {c}{amount}, the {due_day}{} ({cycle}){due}", ordinal(due_day)));
+            let ap = if b.get("autopay").and_then(|x| x.as_bool()).unwrap_or(false) { " · autopay" } else { "" };
+            lines.push(format!("• {name} — {c}{amount}, the {due_day}{} ({cycle}){due}{ap}", ordinal(due_day)));
         }
         format!("{}\n— {} bills, ~{cur}{total:.2}/mo", lines.join("\n"), bills.len())
     }
@@ -9517,9 +9518,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return Vec::new();
         }
         let ym = current_ym();
+        // PERSISTED dedup ("name:YYYY-MM") — the in-memory set reset on every restart and re-fired
+        // reminders after each deploy (live bug: three pings for the same bill in one day).
+        let mut reminded: Vec<String> = self
+            .memory
+            .profile_get("bills_reminded")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         let mut out = Vec::new();
-        {
-        let mut reminded = self.bills_reminded.lock().unwrap();
+        let mut dirty = false;
         for b in &bills {
             if b.get("autopay").and_then(|x| x.as_bool()).unwrap_or(false) {
                 continue; // autopay — the money moves itself; no ping needed
@@ -9534,12 +9544,22 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if reminded.contains(&key) {
                 continue;
             }
-            reminded.insert(key);
+            reminded.push(key);
+            dirty = true;
             let amount = b.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let cur = b.get("currency").and_then(|x| x.as_str()).unwrap_or("$");
             let when = if d == 0 { "today".to_string() } else { format!("in {d} day(s)") };
             out.push(format!("🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).", ordinal(due_day)));
         }
+        if dirty {
+            if reminded.len() > 60 {
+                let cut = reminded.len() - 60;
+                reminded.drain(..cut);
+            }
+            let _ = self
+                .memory
+                .profile_set("bills_reminded", &serde_json::to_string(&reminded).unwrap_or_default())
+                .await;
         }
         if !out.is_empty() {
             self.ledger_sent("bills", &format!("{} bill reminder(s)", out.len())).await;

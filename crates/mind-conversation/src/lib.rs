@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 74] = [
+    const CMDS: [&str; 75] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -352,7 +352,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
-        "horizon", "anticipations", "lookahead", "festivals", "festival",
+        "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -11650,6 +11650,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "trips" if rest.trim() == "build" => self.trips_build().await,
             "events" if rest.trim() == "build" => self.events_build().await,
             "horizon" | "anticipations" | "lookahead" => self.life_horizon().await,
+            "anticipate" if rest.trim() == "now" => match self.anticipate_run().await {
+                Some(m) => {
+                    self.notify_queue.lock().unwrap().push(m.clone());
+                    format!("(sent to chat)
+{m}")
+                }
+                None => "Nothing is inside the anticipation window right now (10-75 days out, not yet nudged).".to_string(),
+            },
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "festivals" | "festival" => self.festivals_list().await,
             "events" => self.events_list(rest.trim()).await,

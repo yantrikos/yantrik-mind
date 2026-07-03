@@ -7223,6 +7223,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         .find(|(w, _)| l.contains(w))
         .map(|(_, i)| *i)
         .or_else(|| if l.contains("last one") || l.contains("latest one") { Some(fresh.len() - 1) } else { None });
+        // Singular demonstrative ('that one', 'this photo') → the most recent photo in view.
+        let demonstrative = ["that one", "this one", "that photo", "this photo", "that pic", "this pic", "it again"]
+            .iter()
+            .any(|r| l.contains(r));
+        let ord = ord.or(if demonstrative { Some(fresh.len() - 1) } else { None });
         if let Some(i) = ord {
             let Some(e) = fresh.get(i) else {
                 return format!("Only {} photo(s) are in view — no #{}.", fresh.len(), i + 1);
@@ -7241,7 +7246,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let stopish = [
             "that", "this", "the", "one", "photo", "pic", "picture", "which", "is", "in", "with",
             "has", "have", "she", "he", "her", "his", "there", "of", "a", "an", "you", "sent",
-            "showed", "me", "was", "were", "it",
+            "showed", "me", "was", "were", "it", "send", "show", "again", "resend", "please",
+            "can", "could", "ones",
         ];
         let desc: String = l
             .trim_end_matches(['?', '!', '.'])

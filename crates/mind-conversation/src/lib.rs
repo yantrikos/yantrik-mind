@@ -7465,7 +7465,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Organize the photo library ITSELF: sweep the archive, classify screenshots and forwards/
     /// no-camera saves, file them into auto-albums — and, as an explicit second step, archive
     /// them out of the main timeline (reversible; nothing is ever deleted).
-    pub async fn photo_cleanup(&self, archive: bool) -> String {
+    pub async fn photo_cleanup(&self, mode: &str) -> String {
         let sources = mind_tools::PhotoSource::all_from_env();
         let Some(idx) = sources.iter().position(|s| s.knows_people()) else {
             return "No photo source connected.".to_string();
@@ -7475,12 +7475,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return "A library cleanup is already running — results land here shortly.".to_string();
         }
         let src_name = sources[idx].name().to_string();
+        let mem = self.memory.clone();
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
+        let mode = mode.to_string();
+        let mode2 = mode.clone();
         tokio::spawn(async move {
+            let mode = mode2;
             use chrono::Datelike;
             let sources = mind_tools::PhotoSource::all_from_env();
-            let Some(mind_tools::PhotoSource::Immich(im)) = sources.into_iter().find(|s| s.name() == src_name) else {
+            let Some(found) = sources.into_iter().find(|s| s.name() == src_name) else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            let mind_tools::PhotoSource::Immich(im) = &found else {
                 studies.lock().unwrap().remove(&guard);
                 return;
             };
@@ -7497,68 +7505,163 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         format!("{year}-{:02}-01T00:00:00.000Z", m0 + 3)
                     };
                     for (id, _d, _p, file, camera) in im.taken_between(&from, &to, &[], 1000).await.unwrap_or_default() {
-                        let a = mind_tools::PhotoAsset { id, file, camera, ..Default::default() };
-                        match mind_tools::junk_class(&a) {
-                            Some("screenshot") => shots.push(a.id),
-                            Some("forward") => fwds.push(a.id),
+                        let asset = mind_tools::PhotoAsset { id, file, camera, ..Default::default() };
+                        match mind_tools::junk_class(&asset) {
+                            Some("screenshot") => shots.push(asset.id),
+                            Some("forward") => fwds.push(asset.id),
                             _ => {}
                         }
                     }
                 }
             }
-            if archive {
-                // Second step: sweep them out of the timeline (reversible).
-                let mut archived = 0usize;
-                for chunk in shots.chunks(400).chain(fwds.chunks(400)) {
-                    if im.set_archived(chunk, true).await {
-                        archived += chunk.len();
+            let keep_set: std::collections::HashSet<String> = mem
+                .profile_get("cleanup_keep")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            match mode.as_str() {
+                // TRIAGE: which forwards contain KNOWN FAMILY FACES? Those are keepers.
+                "triage" => {
+                    let engine = mind_tools::FaceEngine::from_env();
+                    let mut keeps: Vec<String> = Vec::new();
+                    let mut gray: Vec<String> = Vec::new();
+                    let mut junk = 0usize;
+                    let total = fwds.len();
+                    for (i, id) in fwds.iter().enumerate() {
+                        if i % 2000 == 0 && i > 0 {
+                            eprintln!("[cleanup] triage {i}/{total} — {} keepers so far", keeps.len());
+                        }
+                        // Tier 1 (free): Immich's own face assignments.
+                        let (named, unknown) = found.people_in(id).await;
+                        if !named.is_empty() {
+                            keeps.push(id.clone());
+                        } else if unknown > 0 {
+                            gray.push(id.clone());
+                        } else {
+                            junk += 1;
+                        }
                     }
-                }
-                nq.lock().unwrap().push(format!(
-                    "🧹 Archived {archived} junk pictures out of your main timeline ({} screenshots + {} forwards/saves). They're still in the auto-albums and fully restorable.",
-                    shots.len(),
-                    fwds.len()
-                ));
-                studies.lock().unwrap().remove(&guard);
-                return;
-            }
-            // Organize step: file into auto-albums.
-            let albums = im.list_albums().await.unwrap_or_default();
-            let mut get_album = |name: &str| albums.iter().find(|(_, n)| n == name).map(|(i, _)| i.clone());
-            let shots_album = match get_album("📱 Screenshots (auto)") {
-                Some(a) => Some(a),
-                None => im.create_album("📱 Screenshots (auto)").await,
-            };
-            let fwd_album = match get_album("📨 Forwards & Saves (auto)") {
-                Some(a) => Some(a),
-                None => im.create_album("📨 Forwards & Saves (auto)").await,
-            };
-            let mut filed = 0usize;
-            if let Some(aid) = &shots_album {
-                for chunk in shots.chunks(400) {
-                    if im.add_to_album(aid, chunk).await {
-                        filed += chunk.len();
+                    // Tier 2: face-bearing but unnamed — check against OUR gallery (bounded).
+                    let mut rescued = 0usize;
+                    if let Some(engine) = engine {
+                        let gallery = mem
+                            .profile_get("facegallery")
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            .unwrap_or_else(|| serde_json::json!({ "people": {} }));
+                        let people: Vec<(String, Vec<f32>)> = gallery["people"]
+                            .as_object()
+                            .map(|m| {
+                                m.iter()
+                                    .filter_map(|(n, e)| {
+                                        let c: Vec<f32> = e["c"].as_array()?.iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
+                                        Some((n.clone(), c))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let threshold: f32 = std::env::var("YM_FACE_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.45);
+                        if !people.is_empty() {
+                            for id in gray.iter().take(1500) {
+                                let asset = mind_tools::PhotoAsset { id: id.clone(), ..Default::default() };
+                                let Some(bytes) = found.image_bytes(&asset).await else { continue };
+                                let Ok(faces) = engine.faces(bytes).await else { continue };
+                                let hit = faces.iter().any(|f| {
+                                    people.iter().any(|(_, c)| mind_tools::cosine(&f.embedding, c) >= threshold)
+                                });
+                                if hit {
+                                    keeps.push(id.clone());
+                                    rescued += 1;
+                                }
+                            }
+                        }
                     }
-                }
-            }
-            if let Some(aid) = &fwd_album {
-                for chunk in fwds.chunks(400) {
-                    if im.add_to_album(aid, chunk).await {
-                        filed += chunk.len();
+                    // Protect the keepers + file them into a Family album.
+                    let _ = mem.profile_set("cleanup_keep", &serde_json::to_string(&keeps).unwrap_or_default()).await;
+                    let albums = im.list_albums().await.unwrap_or_default();
+                    let fam_album = albums
+                        .iter()
+                        .find(|(_, n)| n == "❤️ Family (rescued from forwards)")
+                        .map(|(i, _)| i.clone());
+                    let fam_album = match fam_album {
+                        Some(a) => Some(a),
+                        None => im.create_album("❤️ Family (rescued from forwards)").await,
+                    };
+                    if let Some(aid) = &fam_album {
+                        for chunk in keeps.chunks(400) {
+                            let _ = im.add_to_album(aid, chunk).await;
+                        }
                     }
+                    nq.lock().unwrap().push(format!(
+                        "🔎 Forwards triage done — of {total} forwards/saves: {} contain KNOWN family faces (kept + filed into ❤️ Family album; {rescued} of those recognized by MY own gallery where the library had no name), {} have unfamiliar faces only, {junk} have no faces at all.\n\n`photos cleanup archive` now archives ONLY the junk — every family keeper stays in your timeline.",
+                        keeps.len(),
+                        gray.len().saturating_sub(rescued),
+                    ));
+                }
+                // ARCHIVE: sweep junk out of the timeline — keepers are protected.
+                "archive" => {
+                    let mut archived = 0usize;
+                    let protected = |id: &String| keep_set.contains(id);
+                    let shots_go: Vec<String> = shots.into_iter().filter(|i| !protected(i)).collect();
+                    let fwds_go: Vec<String> = fwds.into_iter().filter(|i| !protected(i)).collect();
+                    for chunk in shots_go.chunks(400).chain(fwds_go.chunks(400)) {
+                        if im.set_archived(chunk, true).await {
+                            archived += chunk.len();
+                        }
+                    }
+                    nq.lock().unwrap().push(format!(
+                        "🧹 Archived {archived} junk pictures out of your main timeline ({} screenshots + {} forwards) — {} family keepers were protected and remain. Fully reversible.",
+                        shots_go.len(),
+                        fwds_go.len(),
+                        keep_set.len()
+                    ));
+                }
+                // ORGANIZE (default): file into auto-albums.
+                _ => {
+                    let albums = im.list_albums().await.unwrap_or_default();
+                    let mut get_album = |name: &str| albums.iter().find(|(_, n)| n == name).map(|(i, _)| i.clone());
+                    let shots_album = match get_album("📱 Screenshots (auto)") {
+                        Some(a) => Some(a),
+                        None => im.create_album("📱 Screenshots (auto)").await,
+                    };
+                    let fwd_album = match get_album("📨 Forwards & Saves (auto)") {
+                        Some(a) => Some(a),
+                        None => im.create_album("📨 Forwards & Saves (auto)").await,
+                    };
+                    let mut filed = 0usize;
+                    if let Some(aid) = &shots_album {
+                        for chunk in shots.chunks(400) {
+                            if im.add_to_album(aid, chunk).await {
+                                filed += chunk.len();
+                            }
+                        }
+                    }
+                    if let Some(aid) = &fwd_album {
+                        for chunk in fwds.chunks(400) {
+                            if im.add_to_album(aid, chunk).await {
+                                filed += chunk.len();
+                            }
+                        }
+                    }
+                    nq.lock().unwrap().push(format!(
+                        "🧹 Library organized — {} screenshots and {} forwards/no-camera saves classified; {filed} filed into the auto-albums.\n\nNext: `photos cleanup triage` checks every forward for KNOWN FAMILY FACES (those get kept), then `photos cleanup archive` sweeps only the true junk.",
+                        shots.len(),
+                        fwds.len()
+                    ));
                 }
             }
-            nq.lock().unwrap().push(format!(
-                "🧹 Library organized — {} screenshots and {} forwards/no-camera saves classified across the archive; {filed} filed into the two auto-albums (📱 Screenshots · 📨 Forwards & Saves).\n\nWant them OUT of your main photo timeline too? Say `photos cleanup archive` — reversible, nothing is deleted.",
-                shots.len(),
-                fwds.len()
-            ));
             studies.lock().unwrap().remove(&guard);
         });
-        if archive {
-            "🧹 Sweeping the classified junk out of your main timeline (reversible) — I'll confirm counts shortly.".to_string()
-        } else {
-            "🧹 Sweeping the whole archive to classify screenshots and forwards — they'll be filed into auto-albums in a few minutes.".to_string()
+        match mode {
+            m if m == "triage" => "🔎 Checking every forward for known family faces (the library's assignments + my own gallery) — keepers get protected and filed into a ❤️ Family album. This takes a while; counts land here.".to_string(),
+            m if m == "archive" => "🧹 Sweeping the true junk out of your main timeline (family keepers protected, fully reversible) — counts land here shortly.".to_string(),
+            _ => "🧹 Sweeping the whole archive to classify screenshots and forwards — filing into auto-albums.".to_string(),
         }
     }
 
@@ -10377,9 +10480,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "photos" | "pics" | "immich" => {
                 let r = rest.trim();
                 if r == "cleanup" {
-                    self.photo_cleanup(false).await
+                    self.photo_cleanup("organize").await
+                } else if r == "cleanup triage" {
+                    self.photo_cleanup("triage").await
                 } else if r == "cleanup archive" {
-                    self.photo_cleanup(true).await
+                    self.photo_cleanup("archive").await
                 } else if r.is_empty() || r == "recent" {
                     self.photo_patterns(None, None, 10).await
                 } else {
@@ -11602,7 +11707,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
             "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
             "self_report" | "week_review" => self.self_report(false).await,
-            "photo_cleanup" | "cleanup_photos" => self.photo_cleanup(false).await,
+            "photo_cleanup" | "cleanup_photos" => self.photo_cleanup("organize").await,
             "trip_ledger" | "trips" | "trip" => {
                 let q = { let a = s("query"); if a.is_empty() { s("place") } else { a } };
                 if q.trim().is_empty() { self.trips_list("").await } else { self.trip_brief(q.trim()).await }

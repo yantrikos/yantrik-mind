@@ -83,8 +83,8 @@ impl WeatherClient for OpenMeteo {
             let (lat, lon) = (r["latitude"].as_f64().unwrap_or(0.0), r["longitude"].as_f64().unwrap_or(0.0));
             let name = r["name"].as_str().unwrap_or(&place).to_string();
             let country = r["country"].as_str().unwrap_or("").to_string();
-            // 2) current conditions + today's hi/lo
-            let w: serde_json::Value = ureq::get("https://api.open-meteo.com/v1/forecast")
+            // 2) current conditions + today's hi/lo (NWS day-1 when open-meteo is down)
+            let w: serde_json::Value = match ureq::get("https://api.open-meteo.com/v1/forecast")
                 .timeout(std::time::Duration::from_secs(15))
                 .query("latitude", &lat.to_string())
                 .query("longitude", &lon.to_string())
@@ -92,8 +92,20 @@ impl WeatherClient for OpenMeteo {
                 .query("daily", "temperature_2m_max,temperature_2m_min,weather_code")
                 .query("timezone", "auto")
                 .query("forecast_days", "1")
-                .call()?
-                .into_json()?;
+                .call()
+                .and_then(|r| r.into_json().map_err(ureq::Error::from))
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    let d = nws_daily(lat, lon)?;
+                    let today = d.first().ok_or_else(|| anyhow::anyhow!("no forecast available"))?;
+                    let place_lbl = if country.is_empty() { name } else { format!("{name}, {country}") };
+                    return Ok(format!(
+                        "🌦 {place_lbl}: {} — hi {:.0}°F / lo {:.0}°F, rain {:.0}%, wind {:.0} mph (NWS).",
+                        today.desc, today.hi_f, today.lo_f, today.precip_prob, today.wind_mph
+                    ));
+                }
+            };
             let cur = &w["current"];
             let temp = cur["temperature_2m"].as_f64().unwrap_or(0.0);
             let feels = cur["apparent_temperature"].as_f64().unwrap_or(temp);

@@ -11925,7 +11925,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                                 .unwrap_or_else(|| "your plans".to_string());
                             match self.tradition_days_suggestion(n, &tr).await {
                                 Some(m) => m,
-                                None => format!("{n} isn't within the ~2-week forecast window yet — I'll watch and suggest days when it is."),
+                                None => format!("{n} isn't within forecast reach yet — I check daily and will suggest days the moment the forecast covers it."),
                             }
                         }
                     }

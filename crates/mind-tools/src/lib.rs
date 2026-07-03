@@ -717,9 +717,9 @@ impl ImmichClient {
 
     /// Photo assets (IMAGE only) for a recognized person, newest first. Returns Vec<(asset_id,
     /// date, place)> for the caller to thumbnail + vision-analyze.
-    pub async fn assets_of_person(&self, person_id: &str, size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub async fn assets_of_person(&self, person_id: &str, size: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
         let (b, k, pid) = (self.base.clone(), self.key.clone(), person_id.to_string());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
             let body = serde_json::json!({ "personIds": [pid], "size": size, "type": "IMAGE", "withExif": true });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
@@ -727,22 +727,7 @@ impl ImmichClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .send_json(body)?
                 .into_json()?;
-            let mut out = Vec::new();
-            for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
-                let id = a["id"].as_str().unwrap_or("").to_string();
-                if id.is_empty() {
-                    continue;
-                }
-                let date = a["fileCreatedAt"].as_str().unwrap_or("").chars().take(10).collect();
-                let ex = &a["exifInfo"];
-                let place = match (ex["city"].as_str(), ex["country"].as_str()) {
-                    (Some(c), Some(co)) => format!("{c}, {co}"),
-                    (Some(c), None) => c.to_string(),
-                    _ => String::new(),
-                };
-                out.push((id, date, place));
-            }
-            Ok(out)
+            Ok(Self::parse_asset_items(&v))
         })
         .await?
     }
@@ -780,7 +765,7 @@ pub struct PhotoPerson {
     pub name: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PhotoAsset {
     /// Source-native id (Immich asset id; FB uses the image URL itself).
     pub id: String,
@@ -788,6 +773,17 @@ pub struct PhotoAsset {
     pub date: String,
     /// EXIF city/country when known.
     pub place: String,
+    /// Original filename (screenshot detection).
+    pub file: String,
+    /// True when EXIF carries a camera make — a REAL photo, not a screenshot/forward.
+    pub camera: bool,
+}
+
+/// Is this asset a screenshot/app-capture rather than a camera photo? Deterministic and free:
+/// screenshot filenames, or no camera make in EXIF (screenshots and forwarded saves have none).
+pub fn is_screenish(a: &PhotoAsset) -> bool {
+    let f = a.file.to_lowercase();
+    f.contains("screenshot") || f.contains("screen_shot") || !a.camera
 }
 
 pub enum PhotoSource {
@@ -849,7 +845,7 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
@@ -863,7 +859,7 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
                 .collect(),
             PhotoSource::Facebook(fb) => {
                 let mut out: Vec<PhotoAsset> = Vec::new();
@@ -872,7 +868,7 @@ impl PhotoSource {
                         for p in r.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
                             if let Some(src) = p["images"].as_array().and_then(|a| a.first()).and_then(|im| im["source"].as_str()) {
                                 if !out.iter().any(|a| a.id == src) {
-                                    out.push(PhotoAsset { id: src.to_string(), date: String::new(), place: String::new() });
+                                    out.push(PhotoAsset { id: src.to_string(), date: String::new(), place: String::new(), file: String::new(), camera: true });
                                 }
                             }
                         }
@@ -897,7 +893,7 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
@@ -911,7 +907,7 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
@@ -950,7 +946,7 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place)| PhotoAsset { id, date, place })
+                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
@@ -1025,9 +1021,9 @@ impl ImmichClient {
 
     /// Semantic (CLIP) search over the whole library, optionally person-filtered. This is the
     /// "our wedding" lane: meaning-based recall across years of photos, not just recency.
-    pub async fn smart_search(&self, query: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub async fn smart_search(&self, query: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
         let (b, k, q, pids) = (self.base.clone(), self.key.clone(), query.to_string(), person_ids.to_vec());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
             let mut body = serde_json::json!({ "query": q, "size": size, "type": "IMAGE", "withExif": true });
             if !pids.is_empty() {
                 body["personIds"] = serde_json::json!(pids);
@@ -1044,9 +1040,9 @@ impl ImmichClient {
     }
 
     /// Photo assets containing ALL the given people (AND filter) — couples/groups.
-    pub async fn assets_of_people(&self, person_ids: &[String], size: usize, oldest_first: bool) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub async fn assets_of_people(&self, person_ids: &[String], size: usize, oldest_first: bool) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
         let (b, k, pids) = (self.base.clone(), self.key.clone(), person_ids.to_vec());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
             let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE", "withExif": true, "order": if oldest_first { "asc" } else { "desc" } });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
@@ -1085,9 +1081,9 @@ impl ImmichClient {
 
     /// Assets taken in a date range (ISO strings), optionally filtered to people — powers the
     /// month-by-month reel walk and "on this day N years ago".
-    pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
         let (b, k, af, bf, pids) = (self.base.clone(), self.key.clone(), after.to_string(), before.to_string(), person_ids.to_vec());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
             let mut body = serde_json::json!({ "takenAfter": af, "takenBefore": bf, "size": size, "type": "IMAGE", "withExif": true });
             if !pids.is_empty() {
                 body["personIds"] = serde_json::json!(pids);
@@ -1135,8 +1131,8 @@ impl ImmichClient {
         .ok()?
     }
 
-    /// Shared response walk: (asset_id, YYYY-MM-DD, "City, Country") triples.
-    fn parse_asset_items(v: &serde_json::Value) -> Vec<(String, String, String)> {
+    /// Shared response walk: (asset_id, YYYY-MM-DD, "City, Country", filename, has-camera-make).
+    fn parse_asset_items(v: &serde_json::Value) -> Vec<(String, String, String, String, bool)> {
         let mut out = Vec::new();
         for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
             let id = a["id"].as_str().unwrap_or("").to_string();
@@ -1150,7 +1146,9 @@ impl ImmichClient {
                 (Some(c), None) => c.to_string(),
                 _ => String::new(),
             };
-            out.push((id, date, place));
+            let file = a["originalFileName"].as_str().unwrap_or("").to_string();
+            let camera = ex["make"].as_str().map(|m| !m.trim().is_empty()).unwrap_or(false);
+            out.push((id, date, place, file, camera));
         }
         out
     }
@@ -1187,9 +1185,9 @@ impl ImmichClient {
     }
 
     /// Recent IMAGE assets regardless of person — same shape as assets_of_person, no filter.
-    pub async fn recent_assets(&self, n: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+    pub async fn recent_assets(&self, n: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
         let (b, k) = (self.base.clone(), self.key.clone());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
             let body = serde_json::json!({ "size": n, "type": "IMAGE", "order": "desc", "withExif": true });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
@@ -1197,22 +1195,7 @@ impl ImmichClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .send_json(body)?
                 .into_json()?;
-            let mut out = Vec::new();
-            for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
-                let id = a["id"].as_str().unwrap_or("").to_string();
-                if id.is_empty() {
-                    continue;
-                }
-                let date = a["fileCreatedAt"].as_str().unwrap_or("").chars().take(10).collect();
-                let ex = &a["exifInfo"];
-                let place = match (ex["city"].as_str(), ex["country"].as_str()) {
-                    (Some(c), Some(co)) => format!("{c}, {co}"),
-                    (Some(c), None) => c.to_string(),
-                    _ => String::new(),
-                };
-                out.push((id, date, place));
-            }
-            Ok(out)
+            Ok(Self::parse_asset_items(&v))
         })
         .await?
     }

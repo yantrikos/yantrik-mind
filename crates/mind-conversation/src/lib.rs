@@ -501,7 +501,11 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
         .filter_map(|x| x.as_str().map(String::from))
         .collect();
     let assets = src.assets_of_person(&pid, 400).await;
-    let todo: Vec<mind_tools::PhotoAsset> = assets.into_iter().filter(|a| !seen.contains(&a.id)).take(batch).collect();
+    let todo: Vec<mind_tools::PhotoAsset> = assets
+        .into_iter()
+        .filter(|a| !seen.contains(&a.id) && !mind_tools::is_screenish(a))
+        .take(batch)
+        .collect();
     if todo.is_empty() {
         return Some(format!(
             "📊 {disp}: every reachable photo is already studied ({} total) — the distribution is as sharp as the library allows for now.",
@@ -632,7 +636,7 @@ async fn inventory_task(src_name: String, pid: String, disp: String, mem: Arc<dy
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut variants: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut read = 0usize;
-    for a in assets.iter().take(16) {
+    for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)).take(16) {
         let Some(bytes) = src.image_bytes(a).await else { continue };
         let Ok(raw) = vc
             .analyze(
@@ -738,7 +742,7 @@ async fn gift_task(
         return Some(format!("The library knows {disp} but returned no photos to study."));
     }
     let mut obs: Vec<String> = Vec::new();
-    for a in assets.iter().take(12) {
+    for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)).take(12) {
         let Some(bytes) = src.image_bytes(a).await else { continue };
         let Ok(d) = vc
             .analyze(
@@ -859,6 +863,9 @@ async fn studio_task(
     }
     let mut kept: Vec<Cand> = Vec::new();
     for a in &pool {
+        if mind_tools::is_screenish(a) {
+            continue; // screenshots are tack-sharp — they beat real photos on triage; kill first
+        }
         let Some(bytes) = src.image_bytes(a).await else { continue };
         let Some((sharp, luma, contrast)) = mind_tools::photo_quality(&bytes) else { continue };
         if sharp < 30.0 || luma < 35.0 || luma > 220.0 {
@@ -893,7 +900,7 @@ async fn studio_task(
         for c in kept.iter_mut() {
             let Ok(raw) = vc
                 .analyze(
-                    r#"Judge this photo for a family album, focusing on the FACE. Output ONLY JSON: {"subject_clear":<true if a person is clearly the subject, face visible, not obstructed or turned away>,"face_presentable":<true only if the face looks GOOD: eyes open, natural flattering expression, decent angle — false for mid-blink, mid-bite, grimace, motion-blurred or awkward faces>,"score":<1-10: 10 = sharp, well-lit, flattering, a moment worth framing>}"#,
+                    r#"Judge this image for a family album. Output ONLY JSON: {"camera_photo":<true ONLY for a real camera photograph of life — false for screenshots, app screens, ads, documents, memes>,"subject_clear":<true if a person is clearly the subject, face visible, not obstructed>,"face_presentable":<true only if the face looks GOOD: eyes open, natural flattering expression, decent angle>,"score":<1-10: 10 = sharp, well-lit, flattering, a moment worth framing>}"#,
                     c.bytes.clone(),
                     "image/jpeg",
                 )
@@ -905,8 +912,12 @@ async fn studio_task(
             let v = parse_json_obj(&raw);
             let clear = v.get("subject_clear").and_then(|x| x.as_bool()).unwrap_or(true);
             let face_ok = v.get("face_presentable").and_then(|x| x.as_bool()).unwrap_or(true);
+            let is_photo = v.get("camera_photo").and_then(|x| x.as_bool()).unwrap_or(true);
             let sc = v.get("score").and_then(|x| x.as_f64()).unwrap_or(5.0) as f32;
-            c.score = sc + c.tech * 2.0 + if clear { 0.0 } else { -6.0 } + if face_ok { 0.0 } else { -5.0 };
+            c.score = sc + c.tech * 2.0
+                + if clear { 0.0 } else { -6.0 }
+                + if face_ok { 0.0 } else { -5.0 }
+                + if is_photo { 0.0 } else { -20.0 };
         }
     } else {
         for c in kept.iter_mut() {
@@ -6851,7 +6862,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         };
         let mut descs: Vec<String> = Vec::new();
         let mut places: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (i, a) in picked.iter().take(limit.max(4)) {
+        for (i, a) in picked.iter().filter(|(_, a)| !mind_tools::is_screenish(a)).take(limit.max(4)) {
             if !a.place.is_empty() {
                 places.insert(a.place.clone());
             }
@@ -7059,6 +7070,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         // "One more" must mean a DIFFERENT photo: prefer candidates not sent before (rolling 200).
         let sent = self.photos_sent().await;
+        // Screenshots/app-captures never belong in a memory answer — real camera photos only
+        // (unless literally nothing else matched, in which case honesty wins below).
+        let real: Vec<mind_tools::PhotoAsset> = cands.iter().filter(|a| !mind_tools::is_screenish(a)).cloned().collect();
+        let cands = if real.is_empty() { cands } else { real };
         let unseen: Vec<mind_tools::PhotoAsset> = cands.iter().filter(|a| !sent.contains(&a.id)).cloned().collect();
         let mut cands = if unseen.is_empty() { cands } else { unseen };
         if wants_old {
@@ -7367,7 +7382,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let sources = &sources;
             async move {
                 let src = sources.iter().find(|s| s.name() == src_name)?;
-                src.image_bytes(&mind_tools::PhotoAsset { id, date: String::new(), place: String::new() }).await
+                src.image_bytes(&mind_tools::PhotoAsset { id, date: String::new(), place: String::new(), ..Default::default() }).await
             }
         };
         let l = text.to_lowercase();
@@ -7764,6 +7779,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 if cells.len() >= 9 {
                     break;
                 }
+                if mind_tools::is_screenish(a) {
+                    continue; // ads/app-screens are not memories
+                }
                 if !used_days.insert(a.date.clone()) && assets.len() > 12 {
                     continue;
                 }
@@ -7842,7 +7860,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     }
                 }
                 if let Some((aid, bbox, _)) = best {
-                    let asset = mind_tools::PhotoAsset { id: aid, date: String::new(), place: String::new() };
+                    let asset = mind_tools::PhotoAsset { id: aid, date: String::new(), place: String::new(), ..Default::default() };
                     if let Some(bytes) = src.image_bytes(&asset).await {
                         frames.push((bytes, bbox, cur.format("%b %Y").to_string()));
                         if first_year == 0 {
@@ -7914,7 +7932,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     .taken_between(&format!("{from}T00:00:00.000Z"), &format!("{to}T00:00:00.000Z"), &[pid.clone()], 4)
                     .await;
                 for a in hits {
-                    if sent.contains(&a.id) {
+                    if sent.contains(&a.id) || mind_tools::is_screenish(&a) {
                         continue;
                     }
                     let Some(bytes) = sources[i].image_bytes(&a).await else { continue };
@@ -7950,7 +7968,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         .taken_between(&format!("{start}T00:00:00.000Z"), &format!("{}T23:59:59.000Z", t["end"].as_str().unwrap_or(start)), &[], 6)
                         .await;
                     for a in hits {
-                        if sent.contains(&a.id) {
+                        if sent.contains(&a.id) || mind_tools::is_screenish(&a) {
                             continue;
                         }
                         let Some(bytes) = src.image_bytes(&a).await else { continue };
@@ -7978,7 +7996,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             let mut pick: Option<(&mind_tools::PhotoAsset, Vec<String>)> = None;
             for a in hits.iter().take(6) {
-                if sent.contains(&a.id) {
+                if sent.contains(&a.id) || mind_tools::is_screenish(a) {
                     continue;
                 }
                 let (names, _) = src.people_in(&a.id).await;

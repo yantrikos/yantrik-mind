@@ -786,6 +786,19 @@ pub fn is_screenish(a: &PhotoAsset) -> bool {
     f.contains("screenshot") || f.contains("screen_shot") || !a.camera
 }
 
+/// Finer junk classification for library cleanup: screenshots vs forwards/saves (WhatsApp
+/// "-WAxxxx" names, or any no-camera save that isn't a screenshot).
+pub fn junk_class(a: &PhotoAsset) -> Option<&'static str> {
+    let f = a.file.to_lowercase();
+    if f.contains("screenshot") || f.contains("screen_shot") {
+        return Some("screenshot");
+    }
+    if f.contains("-wa0") || f.contains("-wa1") || !a.camera {
+        return Some("forward");
+    }
+    None
+}
+
 pub enum PhotoSource {
     Immich(ImmichClient),
     Facebook(FbClient),
@@ -1151,6 +1164,88 @@ impl ImmichClient {
             out.push((id, date, place, file, camera));
         }
         out
+    }
+
+    /// Existing albums as (id, name).
+    pub async fn list_albums(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let (b, k) = (self.base.clone(), self.key.clone());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String)>> {
+            let v = Self::get_blocking(&b, &k, "/api/albums")?;
+            Ok(v.as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|a| {
+                    Some((a["id"].as_str()?.to_string(), a["albumName"].as_str().unwrap_or("").to_string()))
+                })
+                .collect())
+        })
+        .await?
+    }
+
+    /// Create an album, returning its id.
+    pub async fn create_album(&self, name: &str) -> Option<String> {
+        let (b, k, nm) = (self.base.clone(), self.key.clone(), name.to_string());
+        tokio::task::spawn_blocking(move || -> Option<String> {
+            let v: serde_json::Value = ureq::post(&format!("{b}/api/albums"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(25))
+                .send_json(serde_json::json!({ "albumName": nm }))
+                .ok()?
+                .into_json()
+                .ok()?;
+            v["id"].as_str().map(String::from)
+        })
+        .await
+        .ok()?
+    }
+
+    /// Add assets to an album (idempotent; duplicates are skipped server-side).
+    pub async fn add_to_album(&self, album_id: &str, ids: &[String]) -> bool {
+        if ids.is_empty() {
+            return true;
+        }
+        let (b, k, aid, ids) = (self.base.clone(), self.key.clone(), album_id.to_string(), ids.to_vec());
+        tokio::task::spawn_blocking(move || -> bool {
+            ureq::put(&format!("{b}/api/albums/{aid}/assets"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(60))
+                .send_json(serde_json::json!({ "ids": ids }))
+                .is_ok()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Archive (or restore) assets — removes them from the main timeline, fully reversible.
+    /// Tries the v2 `visibility` field, falls back to the legacy `isArchived` boolean.
+    pub async fn set_archived(&self, ids: &[String], archived: bool) -> bool {
+        if ids.is_empty() {
+            return true;
+        }
+        let (b, k, ids) = (self.base.clone(), self.key.clone(), ids.to_vec());
+        tokio::task::spawn_blocking(move || -> bool {
+            let body_v2 = serde_json::json!({ "ids": ids, "visibility": if archived { "archive" } else { "timeline" } });
+            let ok = ureq::put(&format!("{b}/api/assets"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(60))
+                .send_json(body_v2)
+                .is_ok();
+            if ok {
+                return true;
+            }
+            ureq::put(&format!("{b}/api/assets"))
+                .set("x-api-key", &k)
+                .set("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(60))
+                .send_json(serde_json::json!({ "ids": ids, "isArchived": archived }))
+                .is_ok()
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Name a face cluster (PUT /api/people/{id}) — the who-is-who write-back.

@@ -7461,6 +7461,107 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         "Tell me which of the photos in view you mean — 'the first one', 'the last one', or describe it ('the cake one').".to_string()
     }
 
+    /// ---------- LIBRARY CLEANUP ----------
+    /// Organize the photo library ITSELF: sweep the archive, classify screenshots and forwards/
+    /// no-camera saves, file them into auto-albums — and, as an explicit second step, archive
+    /// them out of the main timeline (reversible; nothing is ever deleted).
+    pub async fn photo_cleanup(&self, archive: bool) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some(idx) = sources.iter().position(|s| s.knows_people()) else {
+            return "No photo source connected.".to_string();
+        };
+        let guard = "cleanup".to_string();
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "A library cleanup is already running — results land here shortly.".to_string();
+        }
+        let src_name = sources[idx].name().to_string();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        tokio::spawn(async move {
+            use chrono::Datelike;
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(mind_tools::PhotoSource::Immich(im)) = sources.into_iter().find(|s| s.name() == src_name) else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            // Sweep + classify the whole archive (metadata only).
+            let (mut shots, mut fwds) = (Vec::new(), Vec::new());
+            let this_year = chrono::Utc::now().year();
+            for year in 2014..=this_year {
+                for q in 0..4 {
+                    let m0 = q * 3 + 1;
+                    let from = format!("{year}-{m0:02}-01T00:00:00.000Z");
+                    let to = if m0 + 3 > 12 {
+                        format!("{}-01-01T00:00:00.000Z", year + 1)
+                    } else {
+                        format!("{year}-{:02}-01T00:00:00.000Z", m0 + 3)
+                    };
+                    for (id, _d, _p, file, camera) in im.taken_between(&from, &to, &[], 1000).await.unwrap_or_default() {
+                        let a = mind_tools::PhotoAsset { id, file, camera, ..Default::default() };
+                        match mind_tools::junk_class(&a) {
+                            Some("screenshot") => shots.push(a.id),
+                            Some("forward") => fwds.push(a.id),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if archive {
+                // Second step: sweep them out of the timeline (reversible).
+                let mut archived = 0usize;
+                for chunk in shots.chunks(400).chain(fwds.chunks(400)) {
+                    if im.set_archived(chunk, true).await {
+                        archived += chunk.len();
+                    }
+                }
+                nq.lock().unwrap().push(format!(
+                    "🧹 Archived {archived} junk pictures out of your main timeline ({} screenshots + {} forwards/saves). They're still in the auto-albums and fully restorable.",
+                    shots.len(),
+                    fwds.len()
+                ));
+                studies.lock().unwrap().remove(&guard);
+                return;
+            }
+            // Organize step: file into auto-albums.
+            let albums = im.list_albums().await.unwrap_or_default();
+            let mut get_album = |name: &str| albums.iter().find(|(_, n)| n == name).map(|(i, _)| i.clone());
+            let shots_album = match get_album("📱 Screenshots (auto)") {
+                Some(a) => Some(a),
+                None => im.create_album("📱 Screenshots (auto)").await,
+            };
+            let fwd_album = match get_album("📨 Forwards & Saves (auto)") {
+                Some(a) => Some(a),
+                None => im.create_album("📨 Forwards & Saves (auto)").await,
+            };
+            let mut filed = 0usize;
+            if let Some(aid) = &shots_album {
+                for chunk in shots.chunks(400) {
+                    if im.add_to_album(aid, chunk).await {
+                        filed += chunk.len();
+                    }
+                }
+            }
+            if let Some(aid) = &fwd_album {
+                for chunk in fwds.chunks(400) {
+                    if im.add_to_album(aid, chunk).await {
+                        filed += chunk.len();
+                    }
+                }
+            }
+            nq.lock().unwrap().push(format!(
+                "🧹 Library organized — {} screenshots and {} forwards/no-camera saves classified across the archive; {filed} filed into the two auto-albums (📱 Screenshots · 📨 Forwards & Saves).\n\nWant them OUT of your main photo timeline too? Say `photos cleanup archive` — reversible, nothing is deleted.",
+                shots.len(),
+                fwds.len()
+            ));
+            studies.lock().unwrap().remove(&guard);
+        });
+        if archive {
+            "🧹 Sweeping the classified junk out of your main timeline (reversible) — I'll confirm counts shortly.".to_string()
+        } else {
+            "🧹 Sweeping the whole archive to classify screenshots and forwards — they'll be filed into auto-albums in a few minutes.".to_string()
+        }
+    }
+
     /// ---------- THE TRIP LEDGER (life chapters) ----------
     /// Cross-domain fusion nobody else can do: the photo archive's EXIF timeline (when + where)
     /// joined with OUR face data (who) becomes typed LIFE CHAPTERS — "Kolkata, Dec 2019: 11 days,
@@ -10275,7 +10376,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- photo UNDERSTANDING layer: patterns / retrieval / who-is-who over ALL sources ---
             "photos" | "pics" | "immich" => {
                 let r = rest.trim();
-                if r.is_empty() || r == "recent" {
+                if r == "cleanup" {
+                    self.photo_cleanup(false).await
+                } else if r == "cleanup archive" {
+                    self.photo_cleanup(true).await
+                } else if r.is_empty() || r == "recent" {
                     self.photo_patterns(None, None, 10).await
                 } else {
                     let mut it = r.splitn(2, char::is_whitespace);
@@ -11497,6 +11602,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
             "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
             "self_report" | "week_review" => self.self_report(false).await,
+            "photo_cleanup" | "cleanup_photos" => self.photo_cleanup(false).await,
             "trip_ledger" | "trips" | "trip" => {
                 let q = { let a = s("query"); if a.is_empty() { s("place") } else { a } };
                 if q.trim().is_empty() { self.trips_list("").await } else { self.trip_brief(q.trim()).await }
@@ -12049,6 +12155,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
 - bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop\n\
 - trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
+- photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\

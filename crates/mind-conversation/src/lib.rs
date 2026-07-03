@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 64] = [
+    const CMDS: [&str; 66] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -351,7 +351,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
-        "report", "selfreport", "faces",
+        "report", "selfreport", "faces", "trips", "trip",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -7446,6 +7446,338 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         "Tell me which of the photos in view you mean — 'the first one', 'the last one', or describe it ('the cake one').".to_string()
     }
 
+    /// ---------- THE TRIP LEDGER (life chapters) ----------
+    /// Cross-domain fusion nobody else can do: the photo archive's EXIF timeline (when + where)
+    /// joined with OUR face data (who) becomes typed LIFE CHAPTERS — "Kolkata, Dec 2019: 11 days,
+    /// 340 photos, with Brishti, Maa, Baba". Deterministic mining (no vision cost): daily modal
+    /// city vs the year's home city → away-bursts → trips. Every chapter carries provenance.
+
+    async fn load_trips(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("trips")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Build/refresh the ledger (detached — ~50 metadata sweeps + face sampling take minutes).
+    pub async fn trips_build(&self) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some(idx) = sources.iter().position(|s| s.knows_people()) else {
+            return "No face-aware photo source connected — the trip ledger mines the photo archive.".to_string();
+        };
+        let guard = "trips".to_string();
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "Already building the trip ledger — it lands here shortly.".to_string();
+        }
+        let src_name = sources[idx].name().to_string();
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        tokio::spawn(async move {
+            use chrono::Datelike;
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            // 1. Sweep the archive quarterly for (date, place) — metadata only, no vision.
+            let mut day_place: std::collections::BTreeMap<String, std::collections::HashMap<String, u32>> = std::collections::BTreeMap::new();
+            let mut day_assets: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            let this_year = chrono::Utc::now().year();
+            for year in 2014..=this_year {
+                for q in 0..4 {
+                    let m0 = q * 3 + 1;
+                    let from = format!("{year}-{m0:02}-01T00:00:00.000Z");
+                    let to = if m0 + 3 > 12 {
+                        format!("{}-01-01T00:00:00.000Z", year + 1)
+                    } else {
+                        format!("{year}-{:02}-01T00:00:00.000Z", m0 + 3)
+                    };
+                    for a in src.taken_between(&from, &to, &[], 900).await {
+                        if a.date.len() < 10 {
+                            continue;
+                        }
+                        let day = a.date.clone();
+                        if !a.place.is_empty() {
+                            *day_place.entry(day.clone()).or_default().entry(a.place.clone()).or_insert(0) += 1;
+                        }
+                        let e = day_assets.entry(day).or_default();
+                        if e.len() < 4 {
+                            e.push(a.id.clone());
+                        }
+                    }
+                }
+            }
+            if day_place.len() < 10 {
+                nq.lock().unwrap().push("🧳 Trip ledger: too little GPS-tagged history to mine trips from.".to_string());
+                studies.lock().unwrap().remove(&guard);
+                return;
+            }
+            // 2. Home per year = that year's modal city.
+            let mut year_city: std::collections::HashMap<i32, std::collections::HashMap<String, u32>> = std::collections::HashMap::new();
+            for (day, places) in &day_place {
+                let y: i32 = day[..4].parse().unwrap_or(0);
+                for (p, n) in places {
+                    *year_city.entry(y).or_default().entry(p.clone()).or_insert(0) += n;
+                }
+            }
+            let home_of = |y: i32| -> String {
+                year_city
+                    .get(&y)
+                    .and_then(|m| m.iter().max_by_key(|(_, n)| **n).map(|(p, _)| p.clone()))
+                    .unwrap_or_default()
+            };
+            // 3. Away-day runs (gap tolerance 2 days) → trip candidates.
+            #[derive(Clone)]
+            struct Run {
+                start: String,
+                end: String,
+                places: std::collections::HashMap<String, u32>,
+                photos: u32,
+                sample: Vec<String>,
+            }
+            let mut runs: Vec<Run> = Vec::new();
+            let mut cur: Option<Run> = None;
+            let mut last_away: Option<chrono::NaiveDate> = None;
+            for (day, places) in &day_place {
+                let Ok(d) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") else { continue };
+                let y: i32 = day[..4].parse().unwrap_or(0);
+                let home = home_of(y);
+                let (modal, n) = places.iter().max_by_key(|(_, n)| **n).map(|(p, n)| (p.clone(), *n)).unwrap();
+                let away = !home.is_empty() && modal != home;
+                if away {
+                    let gap_ok = last_away.map(|la| (d - la).num_days() <= 3).unwrap_or(false);
+                    if let (Some(r), true) = (cur.as_mut(), gap_ok) {
+                        r.end = day.clone();
+                        *r.places.entry(modal.clone()).or_insert(0) += n;
+                        r.photos += places.values().sum::<u32>();
+                        if r.sample.len() < 8 {
+                            r.sample.extend(day_assets.get(day).cloned().unwrap_or_default().into_iter().take(2));
+                        }
+                    } else {
+                        if let Some(r) = cur.take() {
+                            runs.push(r);
+                        }
+                        cur = Some(Run {
+                            start: day.clone(),
+                            end: day.clone(),
+                            places: places.clone(),
+                            photos: places.values().sum::<u32>(),
+                            sample: day_assets.get(day).cloned().unwrap_or_default(),
+                        });
+                    }
+                    last_away = Some(d);
+                }
+            }
+            if let Some(r) = cur.take() {
+                runs.push(r);
+            }
+            // 4. Keep real trips (≥2 days or a heavy single-day burst), name them, find WHO.
+            let mut trips: Vec<serde_json::Value> = Vec::new();
+            for r in runs {
+                let days = chrono::NaiveDate::parse_from_str(&r.end, "%Y-%m-%d")
+                    .and_then(|e| chrono::NaiveDate::parse_from_str(&r.start, "%Y-%m-%d").map(|s| (e - s).num_days() + 1))
+                    .unwrap_or(1);
+                if days < 2 && r.photos < 12 {
+                    continue;
+                }
+                let dest = r.places.iter().max_by_key(|(_, n)| **n).map(|(p, _)| p.clone()).unwrap_or_default();
+                // WHO: named faces across sample assets.
+                let mut who_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                for aid in r.sample.iter().take(6) {
+                    let (names, _) = src.people_in(aid).await;
+                    for n in names {
+                        *who_counts.entry(n).or_insert(0) += 1;
+                    }
+                }
+                let mut who: Vec<(String, u32)> = who_counts.into_iter().collect();
+                who.sort_by(|a, b| b.1.cmp(&a.1));
+                let people: Vec<String> = who.into_iter().take(6).map(|(n, _)| n).collect();
+                trips.push(serde_json::json!({
+                    "dest": dest,
+                    "start": r.start,
+                    "end": r.end,
+                    "days": days,
+                    "photos": r.photos,
+                    "people": people,
+                    "provenance": "photos:exif+faces",
+                }));
+            }
+            trips.sort_by(|a, b| b["start"].as_str().cmp(&a["start"].as_str()));
+            trips.truncate(80);
+            let n_trips = trips.len();
+            // Top chapters become typed beliefs (provenance-tagged).
+            for t in trips.iter().take(12) {
+                let people = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                let _ = mem.remember_as_belief(BeliefAssertion {
+                    statement: format!(
+                        "Life chapter (from photos): trip to {} — {} to {} ({} days, {} photos){}",
+                        t["dest"].as_str().unwrap_or("?"),
+                        t["start"].as_str().unwrap_or("?"),
+                        t["end"].as_str().unwrap_or("?"),
+                        t["days"],
+                        t["photos"],
+                        if people.is_empty() { String::new() } else { format!(", with {people}") }
+                    ),
+                    polarity: 1.0,
+                    weight: 0.75,
+                    source_event: Some("trip-ledger".into()),
+                    provenance: "photos".into(),
+                }).await;
+            }
+            let _ = mem.profile_set("trips", &serde_json::to_string(&trips).unwrap_or_default()).await;
+            let preview: Vec<String> = trips
+                .iter()
+                .take(6)
+                .map(|t| {
+                    format!(
+                        "• {} — {} ({}d, {} photos)",
+                        t["dest"].as_str().unwrap_or("?"),
+                        t["start"].as_str().unwrap_or("?"),
+                        t["days"],
+                        t["photos"]
+                    )
+                })
+                .collect();
+            nq.lock().unwrap().push(format!(
+                "🧳 Trip ledger built — {n_trips} life chapters mined from the photo archive (where + when + who). Most recent:\n{}\n\nAsk `trips`, `trip <place>`, or `trip collage <place>`.",
+                preview.join("\n")
+            ));
+            studies.lock().unwrap().remove(&guard);
+        });
+        "🧳 Mining your photo archive for life chapters (where + when + who, a few minutes) — the ledger lands here when done.".to_string()
+    }
+
+    /// The ledger listing, optionally filtered by year or destination substring.
+    pub async fn trips_list(&self, filter: &str) -> String {
+        let trips = self.load_trips().await;
+        if trips.is_empty() {
+            return "🧳 No trip ledger yet — say `trips build` and I'll mine the photo archive.".to_string();
+        }
+        let f = filter.trim().to_lowercase();
+        let mut lines = Vec::new();
+        for t in &trips {
+            let dest = t["dest"].as_str().unwrap_or("?");
+            let start = t["start"].as_str().unwrap_or("");
+            if !f.is_empty() && !dest.to_lowercase().contains(&f) && !start.starts_with(&f) {
+                continue;
+            }
+            let people = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            lines.push(format!(
+                "• {dest} — {start} → {} ({}d, {} photos){}",
+                t["end"].as_str().unwrap_or(""),
+                t["days"],
+                t["photos"],
+                if people.is_empty() { String::new() } else { format!(" — with {people}") }
+            ));
+            if lines.len() >= 20 {
+                break;
+            }
+        }
+        if lines.is_empty() {
+            format!("No trips matching \"{}\" in the ledger.", filter.trim())
+        } else {
+            format!("🧳 Life chapters ({} total):\n{}", trips.len(), lines.join("\n"))
+        }
+    }
+
+    /// A warm one-chapter brief: facts from the ledger + the offer of a collage.
+    pub async fn trip_brief(&self, query: &str) -> String {
+        let trips = self.load_trips().await;
+        let q = query.trim().to_lowercase();
+        let Some(t) = trips.iter().find(|t| {
+            t["dest"].as_str().map(|d| d.to_lowercase().contains(&q)).unwrap_or(false)
+                || t["start"].as_str().map(|s| s.starts_with(&q)).unwrap_or(false)
+        }) else {
+            return format!("No chapter matching \"{}\" — `trips` lists what I know; `trips build` re-mines.", query.trim());
+        };
+        let people = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        format!(
+            "🧳 {} — {} to {} ({} days, {} photos{}).\n\nSay `trip collage {}` and I'll compose the album page.",
+            t["dest"].as_str().unwrap_or("?"),
+            t["start"].as_str().unwrap_or("?"),
+            t["end"].as_str().unwrap_or("?"),
+            t["days"],
+            t["photos"],
+            if people.is_empty() { String::new() } else { format!(", with {people}") },
+            t["dest"].as_str().unwrap_or("?").split(',').next().unwrap_or("?")
+        )
+    }
+
+    /// Compose a curated collage for one chapter (the studio, window-scoped to the trip).
+    pub async fn trip_collage(&self, query: &str, target: Option<i64>) -> String {
+        let trips = self.load_trips().await;
+        let q = query.trim().to_lowercase();
+        let Some(t) = trips.iter().find(|t| t["dest"].as_str().map(|d| d.to_lowercase().contains(&q)).unwrap_or(false)) else {
+            return format!("No chapter matching \"{}\" — `trips` lists them.", query.trim());
+        };
+        let (dest, start, end) = (
+            t["dest"].as_str().unwrap_or("?").to_string(),
+            t["start"].as_str().unwrap_or("").to_string(),
+            t["end"].as_str().unwrap_or("").to_string(),
+        );
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some(idx) = sources.iter().position(|s| s.knows_people()) else {
+            return "No photo source connected.".to_string();
+        };
+        let guard = format!("tripcollage:{q}");
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "Already composing that one.".to_string();
+        }
+        let src_name = sources[idx].name().to_string();
+        let pq = self.photo_queue.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let people_line = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        let (dest2, start2, end2) = (dest.clone(), start.clone(), end.clone());
+        tokio::spawn(async move {
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            let (dest, start, end) = (dest2, start2, end2);
+            let assets = src
+                .taken_between(&format!("{start}T00:00:00.000Z"), &format!("{end}T23:59:59.000Z"), &[], 60)
+                .await;
+            // Day-spread + technical triage, then compose.
+            let mut cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)> = Vec::new();
+            let mut used_days: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for a in &assets {
+                if cells.len() >= 9 {
+                    break;
+                }
+                if !used_days.insert(a.date.clone()) && assets.len() > 12 {
+                    continue;
+                }
+                let Some(bytes) = src.image_bytes(a).await else { continue };
+                if let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) {
+                    if sharp < 30.0 || luma < 35.0 || luma > 220.0 {
+                        continue;
+                    }
+                }
+                cells.push((bytes, None));
+            }
+            let n = cells.len();
+            if n < 2 {
+                nq.lock().unwrap().push(format!("🧳 Couldn't gather enough good frames for the {dest} collage."));
+            } else if let Some(img) = mind_tools::make_collage(cells).await {
+                let cap = format!(
+                    "🧳 {dest} — {start} → {end}{}",
+                    if people_line.is_empty() { String::new() } else { format!(" · {people_line}") }
+                );
+                pq.lock().unwrap().push((img, cap, target));
+            } else {
+                nq.lock().unwrap().push(format!("🧳 The {dest} collage composition failed — honest miss."));
+            }
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!("🧳 Composing the {dest} chapter ({start} → {end}) — it lands here in a minute or two.")
+    }
+
     /// ---------- LIVING MEMORY ----------
     /// The archive as autobiographical memory: a GROWING-UP REEL (best face per month across the
     /// whole library, face-centered crops, chronological film) and ON-THIS-DAY resurfacing (a real
@@ -7588,7 +7920,39 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
         }
-        // 2. Otherwise this exact day in a past year — still narrated (who they ARE + the scene).
+        // 2. Experience anniversaries: a trip that STARTED on this date in a past year beats a
+        //    generic same-day photo ("3 years since Kolkata" is a chapter, not a coincidence).
+        {
+            let mmdd = today.format("%m-%d").to_string();
+            for t in self.load_trips().await.iter().take(60) {
+                let Some(start) = t["start"].as_str() else { continue };
+                if start.len() == 10 && &start[5..] == mmdd.as_str() {
+                    let years = today.year() - start[..4].parse::<i32>().unwrap_or(today.year());
+                    if years < 1 {
+                        continue;
+                    }
+                    let dest = t["dest"].as_str().unwrap_or("?");
+                    let hits = src
+                        .taken_between(&format!("{start}T00:00:00.000Z"), &format!("{}T23:59:59.000Z", t["end"].as_str().unwrap_or(start)), &[], 6)
+                        .await;
+                    for a in hits {
+                        if sent.contains(&a.id) {
+                            continue;
+                        }
+                        let Some(bytes) = src.image_bytes(&a).await else { continue };
+                        let people = t["people"].as_array().map(|x| x.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                        let cap = format!(
+                            "🧳 {years} year(s) ago today, this trip began — {dest}{}",
+                            if people.is_empty() { String::new() } else { format!(", with {people}") }
+                        );
+                        self.note_photo_sent(&a.id).await;
+                        self.photo_queue.lock().unwrap().push((bytes, cap, None));
+                        return true;
+                    }
+                }
+            }
+        }
+        // 3. Otherwise this exact day in a past year — still narrated (who they ARE + the scene).
         for back in 1..=10 {
             let Some(day) = chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day()) else {
                 continue;
@@ -9809,6 +10173,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
+            "trips" if rest.trim() == "build" => self.trips_build().await,
+            "trips" => self.trips_list(rest.trim()).await,
+            "trip" if rest.trim().starts_with("collage") => {
+                self.trip_collage(rest.trim().trim_start_matches("collage").trim(), None).await
+            }
+            "trip" if !rest.trim().is_empty() => self.trip_brief(rest.trim()).await,
             "faces" if rest.trim() == "learn" => self.faces_learn().await,
             "faces" if rest.trim().starts_with("test") => {
                 // Live proof without a chat photo: pull one photo of <name>, identify with OUR eyes.
@@ -11095,6 +11465,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
             "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
             "self_report" | "week_review" => self.self_report(false).await,
+            "trip_ledger" | "trips" | "trip" => {
+                let q = { let a = s("query"); if a.is_empty() { s("place") } else { a } };
+                if q.trim().is_empty() { self.trips_list("").await } else { self.trip_brief(q.trim()).await }
+            }
             "bill_autopay" | "autopay" => {
                 let n = { let a = s("name"); if a.is_empty() { s("bill") } else { a } };
                 self.bill_autopay(&n).await
@@ -11642,6 +12016,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
 - self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
 - bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop\n\
+- trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\

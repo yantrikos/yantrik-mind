@@ -386,6 +386,21 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Proactive send + transcript mirror: the mind must remember its own pings, or replies to them
+/// land with no referent. Every tick-driven send goes through here.
+async fn tg_send_mirrored(
+    conv: &Arc<mind_conversation::ConversationEngine>,
+    api: &str,
+    chat: i64,
+    msg: &str,
+) -> anyhow::Result<()> {
+    let r = tg_send(api, chat, msg).await;
+    if r.is_ok() {
+        conv.mirror_proactive(msg).await;
+    }
+    r
+}
+
 /// Proactive reminders: a background tick that messages the operator when a commitment they asked
 /// to be reminded of comes due. Conservative by design — it only surfaces *due* tasks (never
 /// free-form outreach), honors quiet hours, and dedupes so a reminder fires once.
@@ -410,6 +425,7 @@ async fn reminder_loop(api: String, mem: MemoryHandle, active_chat: Arc<AtomicI6
             }
             let msg = format!("⏰ Reminder: {}", t.description);
             if tg_send(&api, chat, &msg).await.is_ok() {
+                let _ = mem.append_message("assistant", &msg).await;
                 reminded.insert(t.id.clone());
                 save_reminded(&reminded);
             }
@@ -744,6 +760,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let target = active_chat.load(Ordering::Relaxed);
             if target != 0 {
                 let ok = tg_send(&api, target, &note).await.is_ok();
+                if ok {
+                    conv.mirror_proactive(&note).await;
+                }
                 eprintln!("[notify] delivered={ok}: {}", note.chars().take(80).collect::<String>());
             }
         }
@@ -760,11 +779,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for alert in conv.home_watch().await {
-                        let _ = tg_send(&api, chat, &alert).await;
+                        let _ = tg_send_mirrored(&conv, &api, chat, &alert).await;
                     }
                     // Bills due soon (deduped once per month) ride the same cadence.
                     for note in conv.bill_watch().await {
-                        let _ = tg_send(&api, chat, &note).await;
+                        let _ = tg_send_mirrored(&conv, &api, chat, &note).await;
                     }
                     // Tracked news: when a topic is DUE for a digest (fresh developments + paced, state
                     // PERSISTED so restarts don't swallow updates), research it into a full CROSS-DOMAIN
@@ -796,7 +815,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let chat = active_chat.load(Ordering::Relaxed);
                 for verdict in conv.resolve_predictions(false).await {
                     if chat != 0 && !in_quiet_hours_now() {
-                        let _ = tg_send(&api, chat, &verdict).await;
+                        let _ = tg_send_mirrored(&conv, &api, chat, &verdict).await;
                     }
                 }
                 last_resolve = now;
@@ -814,7 +833,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 if let Some(update) = conv.refresh_profile().await {
                     let chat = active_chat.load(Ordering::Relaxed);
                     if chat != 0 && !in_quiet_hours_now() {
-                        let _ = tg_send(&api, chat, &format!("🧭 Refreshed what I know about you:\n\n{update}")).await;
+                        let _ = tg_send_mirrored(&conv, &api, chat, &format!("🧭 Refreshed what I know about you:\n\n{update}")).await;
                     }
                 }
                 last_profile = now;
@@ -834,7 +853,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     // (it read as "not doing anything" until the last minute). Default 28 days, tunable.
                     let window: i64 = std::env::var("YM_FAMILY_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
                     for nudge in conv.family_date_nudges(window).await {
-                        if tg_send(&api, chat, &nudge).await.is_ok() {
+                        if tg_send_mirrored(&conv, &api, chat, &nudge).await.is_ok() {
                             conv.note_proactive_sent().await;
                         }
                     }
@@ -850,7 +869,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let chat = active_chat.load(Ordering::Relaxed);
             if chat != 0 && !in_quiet_hours_now() {
                 if let Some(msg) = conv.briefing_due().await {
-                    if tg_send(&api, chat, &msg).await.is_ok() {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                         eprintln!("[briefing] sent the daily morning briefing ({} chars)", msg.len());
                         conv.note_proactive_sent().await;
                         conv.ledger_sent("briefing", "morning briefing").await;
@@ -890,7 +909,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let chat = active_chat.load(Ordering::Relaxed);
             if chat != 0 && !in_quiet_hours_now() {
                 if let Some(msg) = conv.evening_due().await {
-                    if tg_send(&api, chat, &msg).await.is_ok() {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                         eprintln!("[evening] sent the look-ahead ({} chars)", msg.len());
                         conv.note_proactive_sent().await;
                     }
@@ -907,7 +926,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for nudge in conv.deadline_followups().await {
-                        if tg_send(&api, chat, &nudge).await.is_ok() {
+                        if tg_send_mirrored(&conv, &api, chat, &nudge).await.is_ok() {
                             conv.note_proactive_sent().await;
                         }
                     }
@@ -946,7 +965,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for alert in conv.check_price_watches().await {
-                        let _ = tg_send(&api, chat, &alert).await;
+                        let _ = tg_send_mirrored(&conv, &api, chat, &alert).await;
                     }
                 }
                 last_pricewatch = now;
@@ -973,6 +992,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     continue;
                 }
                 if tg_send_video(&api, chat, mp4, &caption).await {
+                    if target.is_none() {
+                        conv.mirror_proactive(&format!("[sent a video] {caption}")).await;
+                    }
                     eprintln!("[reel] delivered: {caption}");
                 } else {
                     eprintln!("[reel] send failed: {caption}");
@@ -989,7 +1011,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 if chat == 0 {
                     continue;
                 }
-                if !tg_send_photo(&api, chat, jpeg, &caption).await {
+                if tg_send_photo(&api, chat, jpeg, &caption).await {
+                    if target.is_none() {
+                        conv.mirror_proactive(&format!("[sent a photo] {caption}")).await;
+                    }
+                } else {
                     eprintln!("[photo] send failed: {caption}");
                 }
             }
@@ -1042,7 +1068,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let now = now_ms();
             if now.saturating_sub(last_member_beat) >= 120_000 && !in_quiet_hours_now() {
                 for (chat, text) in conv.member_beats().await {
-                    if tg_send(&api, chat, &text).await.is_ok() {
+                    if tg_send_mirrored(&conv, &api, chat, &text).await.is_ok() {
                         eprintln!("[member] beat delivered to {chat}");
                     }
                 }
@@ -1150,7 +1176,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let mut spoke = false;
             if idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 && conv.proactive_receptivity_ok().await {
                 if let Some(msg) = conv.proactive_digest().await {
-                    if tg_send(&api, chat, &msg).await.is_ok() {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                         eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());
                         conv.note_proactive_sent().await;
                         spoke = true;
@@ -1172,7 +1198,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 && conv.proactive_receptivity_ok().await
             {
                 if let Some(q) = conv.proactive_ask().await {
-                    if tg_send(&api, chat, &q).await.is_ok() {
+                    if tg_send_mirrored(&conv, &api, chat, &q).await.is_ok() {
                         eprintln!("[ask] posed a get-to-know-you question");
                         conv.note_proactive_sent().await;
                     }
@@ -1191,7 +1217,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 && now.saturating_sub(last_patterns) >= pat_secs * 1000
             {
                 let msg = conv.find_patterns().await;
-                if msg.starts_with('\u{1f4a1}') && tg_send(&api, chat, &msg).await.is_ok() {
+                if msg.starts_with('\u{1f4a1}') && tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                     eprintln!("[patterns] surfaced a learned pattern ({} chars)", msg.len());
                     conv.note_proactive_sent().await;
                 }

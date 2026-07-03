@@ -8037,6 +8037,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .await;
     }
 
+    /// Mirror a proactively-sent message into the transcript — the mind must REMEMBER its own
+    /// pings, or replies to them land with no referent ("Which bill are we talking about?").
+    pub async fn mirror_proactive(&self, text: &str) {
+        let _ = self.memory.append_message("assistant", text).await;
+    }
+
     /// Log a proactive act as a pending prediction ("I judged this worth your attention").
     pub async fn ledger_sent(&self, domain: &str, what: &str) {
         let mut l = self.ledger().await;
@@ -9431,6 +9437,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         match action {
             "add" | "+" => self.bill_add(arg).await,
             "rm" | "remove" | "del" | "-" => self.bill_remove(arg).await,
+            "autopay" | "auto" => self.bill_autopay(arg).await,
             "" | "list" | "ls" => self.bills_list().await,
             _ => "Usage: ym bill add <name> <amount> <due-day> [monthly|yearly] · ym bills · ym bill rm <name>".to_string(),
         }
@@ -9510,9 +9517,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return Vec::new();
         }
         let ym = current_ym();
-        let mut reminded = self.bills_reminded.lock().unwrap();
         let mut out = Vec::new();
+        {
+        let mut reminded = self.bills_reminded.lock().unwrap();
         for b in &bills {
+            if b.get("autopay").and_then(|x| x.as_bool()).unwrap_or(false) {
+                continue; // autopay — the money moves itself; no ping needed
+            }
             let due_day = b.get("due_day").and_then(|x| x.as_u64()).unwrap_or(1) as u32;
             let d = bill_days_until(due_day);
             if !(0..=2).contains(&d) {
@@ -9529,7 +9540,33 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let when = if d == 0 { "today".to_string() } else { format!("in {d} day(s)") };
             out.push(format!("🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).", ordinal(due_day)));
         }
+        }
+        if !out.is_empty() {
+            self.ledger_sent("bills", &format!("{} bill reminder(s)", out.len())).await;
+        }
         out
+    }
+
+    /// Mark a bill as autopay — reminders stop; the ledger learns the lesson.
+    pub async fn bill_autopay(&self, name: &str) -> String {
+        let name = name.trim();
+        if name.is_empty() {
+            return "Which bill? `bill autopay <name>`".to_string();
+        }
+        let mut bills = self.load_bills().await;
+        let mut hit = false;
+        for b in bills.iter_mut() {
+            if b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false) {
+                b["autopay"] = serde_json::json!(true);
+                hit = true;
+            }
+        }
+        if !hit {
+            return format!("No bill named '{name}'. `ym bills` to see them.");
+        }
+        self.save_bills(&bills).await;
+        self.ledger_correction("bills", name, "on autopay — stop reminding").await;
+        format!("✅ {name} marked autopay — I'll stop reminding you (it'll still show in `ym bills`).")
     }
 
     // ── Budget + expenses (this month) — `ym budget <cat> <amt>` to set, `ym spent <amt> <cat>` to log ──
@@ -11038,6 +11075,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
             "mail_report" | "mailreport" | "mail_audit" => self.mail_report(400).await,
             "self_report" | "week_review" => self.self_report(false).await,
+            "bill_autopay" | "autopay" => {
+                let n = { let a = s("name"); if a.is_empty() { s("bill") } else { a } };
+                self.bill_autopay(&n).await
+            }
             "mail_rule" | "mailrule" => {
                 let r = { let a = s("rule"); if a.is_empty() { s("text") } else { a } };
                 if r.trim().is_empty() {
@@ -11580,6 +11621,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
 - mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
 - self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
+- bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\

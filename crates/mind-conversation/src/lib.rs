@@ -7958,15 +7958,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 Some((n, y))
             })
             .collect();
+        let dates = self.load_festival_dates().await;
+        let date_of = |name: &str, year: i32| -> Option<chrono::NaiveDate> {
+            dates
+                .iter()
+                .find(|e| e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year as i64))
+                .and_then(|e| e["date"].as_str())
+                .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        };
         let mut want: Vec<(&'static str, i32)> = Vec::new();
-        for (name, _, _, _) in Self::FESTIVALS.iter() {
-            for year in [today.year(), today.year() + 1] {
-                // Only chase next year once we're in Q4 — keeps the search budget tiny.
-                if year > today.year() && today.month() < 10 {
-                    continue;
-                }
-                if !have.contains(&(name.to_string(), year)) {
-                    want.push((name, year));
+        for (name, _, _, dur) in Self::FESTIVALS.iter() {
+            let y = today.year();
+            if !have.contains(&(name.to_string(), y)) {
+                want.push((name, y));
+            } else if let Some(d) = date_of(name, y) {
+                // This year's celebration is over → the horizon needs NEXT year's date.
+                if d + chrono::Duration::days(*dur as i64 + 7) < today && !have.contains(&(name.to_string(), y + 1)) {
+                    want.push((name, y + 1));
                 }
             }
         }

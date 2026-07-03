@@ -1111,6 +1111,18 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Study-all continuation: chain the next taste batch for anyone with an unmet target.
+        // Deploy-proof long-running work: accumulator + target persist; the tick re-fires.
+        {
+            let now = now_ms();
+            if now.saturating_sub(last_member_beat) >= 120_000 {
+                for name in conv.taste_continues().await {
+                    eprintln!("[tastes] auto-continuing study-all for {name}");
+                    let _ = conv.taste_study(&name, 60).await;
+                }
+            }
+        }
+
         // Facebook refresh: keep the know-me lane current (daily; data-only, sends nothing).
         if conv.fb_sync_due().await {
             let c = conv.clone();

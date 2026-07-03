@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 66] = [
+    const CMDS: [&str; 67] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -351,7 +351,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "gift", "giftideas", "closet", "wardrobe", "inventory", "items",
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
-        "report", "selfreport", "faces", "trips", "trip",
+        "report", "selfreport", "faces", "trips", "trip", "running",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -478,6 +478,8 @@ fn is_self_referential(text: &str) -> bool {
     KEYS.iter().any(|k| l.contains(k))
 }
 
+fn gray_totals_note(_rescued: usize) {}
+
 /// Isolate the TARGET person's region in an image (couple-shot attribution): detect faces, match
 /// against the person's gallery centroid, crop face+torso. None → caller uses the full frame.
 async fn person_region(mem: &Arc<dyn MemoryFacade>, name: &str, bytes: &[u8]) -> Option<Vec<u8>> {
@@ -532,15 +534,36 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
         .iter()
         .filter_map(|x| x.as_str().map(String::from))
         .collect();
-    let assets = src.assets_of_person(&pid, 400).await;
-    let todo: Vec<mind_tools::PhotoAsset> = assets
-        .into_iter()
-        .filter(|a| !seen.contains(&a.id) && !mind_tools::is_screenish(a))
-        .take(batch)
-        .collect();
+    // Page the WHOLE archive newest→oldest via date windows (a flat fetch capped at the newest
+    // 400 could never finish "study ALL her photos" — 6k+ libraries need paging).
+    let mut todo: Vec<mind_tools::PhotoAsset> = Vec::new();
+    {
+        use chrono::Datelike;
+        let this_year = chrono::Utc::now().year();
+        'outer: for year in (2014..=this_year).rev() {
+            for q in (0..4).rev() {
+                let m0 = q * 3 + 1;
+                let from = format!("{year}-{m0:02}-01T00:00:00.000Z");
+                let to = if m0 + 3 > 12 {
+                    format!("{}-01-01T00:00:00.000Z", year + 1)
+                } else {
+                    format!("{year}-{:02}-01T00:00:00.000Z", m0 + 3)
+                };
+                for a in src.taken_between(&from, &to, &[pid.clone()], 900).await {
+                    if !seen.contains(&a.id) && !mind_tools::is_screenish(&a) {
+                        todo.push(a);
+                        if todo.len() >= batch {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
     if todo.is_empty() {
+        let _ = mem.profile_set(&format!("taste_target:{}", disp.to_lowercase()), "").await;
         return Some(format!(
-            "📊 {disp}: every reachable photo is already studied ({} total) — the distribution is as sharp as the library allows for now.",
+            "📊 {disp}: STUDY COMPLETE — every photo in the archive is analyzed ({} total). The distributions are as sharp as the library allows.",
             acc["total"]
         ));
     }
@@ -650,6 +673,24 @@ async fn taste_task(src_name: String, pid: String, disp: String, batch: usize, m
                 }
             }
         }
+    }
+    // Auto-continue: while a study-all target is set, only report at milestones (every ~200) to
+    // avoid spamming; the tick chains the next batch automatically.
+    let target: i64 = mem
+        .profile_get(&format!("taste_target:{}", disp.to_lowercase()))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if target > 0 && (total as i64) < target {
+        if total / 200 != (total - n_new) / 200 {
+            return Some(format!(
+                "{}\n\n(auto-study continuing: {total} analyzed, target {target})",
+                render_tastes(&acc, &disp)
+            ));
+        }
+        return None; // quiet continuation — the tick fires the next batch
     }
     Some(format!(
         "{}\n\n(+{n_new} photos this pass — say `tastes {disp}` anytime to keep sharpening)",
@@ -7605,7 +7646,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                             .unwrap_or_default();
                         let threshold: f32 = std::env::var("YM_FACE_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.45);
                         if !people.is_empty() {
-                            for id in gray.iter().take(1500) {
+                            let gray_total = gray.len().min(1500);
+                            for (gi, id) in gray.iter().take(1500).enumerate() {
+                                if gi % 250 == 0 && gi > 0 {
+                                    eprintln!("[cleanup] tier-2 gallery check {gi}/{gray_total} — {rescued} rescued");
+                                }
                                 let asset = mind_tools::PhotoAsset { id: id.clone(), ..Default::default() };
                                 let Some(bytes) = found.image_bytes(&asset).await else { continue };
                                 let Ok(faces) = engine.faces(bytes).await else { continue };
@@ -7618,6 +7663,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                                 }
                             }
                         }
+                        let _ = gray_totals_note(rescued);
                     }
                     // Protect the keepers + file them into a Family album.
                     let _ = mem.profile_set("cleanup_keep", &serde_json::to_string(&keeps).unwrap_or_default()).await;
@@ -8941,6 +8987,46 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// photo question; the answer lands in the people layer + a local face_names map, AND is
     /// written back to the source (name the cluster, or MERGE it into an existing named person) —
     /// Pranab opted in 2026-07-02; person.update + person.merge only, never deletes.
+
+    /// Study-all continuation: names with an unmet taste target and a free guard — the poll loop
+    /// chains the next batch (deploy-proof: accumulator + target persist).
+    pub async fn taste_continues(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.load_people_profiles().await {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            let key = format!("taste_target:{}", name.to_lowercase());
+            let target: i64 = self.memory.profile_get(&key).await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if target <= 0 {
+                continue;
+            }
+            let total: i64 = self
+                .memory
+                .profile_get(&format!("tastes:{}", name.to_lowercase()))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v["total"].as_i64())
+                .unwrap_or(0);
+            if total < target && !self.studies.lock().unwrap().contains(&format!("tastes:{}", name.to_lowercase())) {
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
+    /// What's running in the background right now — the "is it happening or broke" answer.
+    pub fn running_studies(&self) -> String {
+        let s = self.studies.lock().unwrap();
+        if s.is_empty() {
+            "Nothing running in the background right now — all studies idle.".to_string()
+        } else {
+            format!(
+                "⚙️ Running now: {}. (Progress lines go to the journal; results land here when done.)",
+                s.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        }
+    }
 
     /// Cadence gate for the poll loop: a people-knowing source exists, no interview question is
     /// already pending, and YM_WHOIS_SECS (default daily) has elapsed.
@@ -10530,6 +10616,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
+            "running" | "status" if rest.trim().is_empty() => self.running_studies(),
             "trips" if rest.trim() == "build" => self.trips_build().await,
             "trips" => self.trips_list(rest.trim()).await,
             "trip" if rest.trim().starts_with("collage") => {
@@ -10670,11 +10757,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 };
                 let mut it = r.splitn(2, char::is_whitespace);
                 let name = it.next().unwrap_or("").to_string();
-                let n: usize = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(40);
+                let arg = it.next().unwrap_or("").trim().to_string();
                 if fresh {
                     let _ = self.memory.profile_set(&format!("tastes:{}", name.to_lowercase()), "").await;
                 }
-                self.taste_study(&name, n).await
+                if arg == "all" {
+                    let _ = self.memory.profile_set(&format!("taste_target:{}", name.to_lowercase()), "100000").await;
+                    let kick = self.taste_study(&name, 60).await;
+                    format!("🎯 Study-ALL armed for {name} — batches will chain automatically until every photo is analyzed (progress reports every ~200; survives restarts).
+
+{kick}")
+                } else {
+                    let n: usize = arg.parse().unwrap_or(40);
+                    self.taste_study(&name, n).await
+                }
             }
             "closet" | "wardrobe" | "inventory" | "items" if !rest.trim().is_empty() => {
                 let r = rest.trim();

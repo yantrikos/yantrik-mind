@@ -11984,7 +11984,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         vec![
             m("immich-photos", "photo_source", "live", "self-hosted family photo archive: people/faces, CLIP search, EXIF dates+places, albums, archive curation", "YM_IMMICH_URL, YM_IMMICH_KEY"),
             m("facebook-photos", "photo_source", "parked", "FB tagged-photo read (album crawl)", "FB_USER_TOKEN (long-lived)"),
-            m("onedrive-photos", "photo_source", "planned", "OneDrive camera-roll + memories archive read (Graph API, device-code auth) — the pre-Immich years live here", "one-time Microsoft sign-in"),
+            m("onedrive-photos", "photo_source", "gated", "OneDrive photo-year read (Graph, device-code, read-only) — pre-Immich years; find by date + on-this-day. Needs one Azure app id + phone sign-in", "YM_OD_CLIENT_ID + phone approval"),
             m("google-photos", "photo_source", "planned", "Google Photos read (API access is restricted post-2025 — feasibility check first)", "Google OAuth"),
             m("dropbox-files", "file_source", "planned", "Dropbox file/photo read", "Dropbox OAuth"),
             m("gdrive-files", "file_source", "planned", "Google Drive docs/files read for household paperwork", "Google OAuth"),
@@ -12015,7 +12015,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .await;
         let seeded = self.memory.profile_get("plugin_seed_ver").await.ok().flatten().unwrap_or_default();
         let mut wrote = 0usize;
-        if seeded != "v1" {
+        if seeded != "v2" {
             for p in &manifests {
                 let line = format!(
                     "[plugin] {} ({}, {}) — {}; needs: {}",
@@ -12029,7 +12029,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     wrote += 1;
                 }
             }
-            let _ = self.memory.profile_set("plugin_seed_ver", "v1").await;
+            let _ = self.memory.profile_set("plugin_seed_ver", "v2").await;
         }
         format!(
             "🧩 Plugin registry written: {} manifests in the substrate ({wrote} memory lines seeded). `plugin all` to browse, `plugin search <what>` to discover.",

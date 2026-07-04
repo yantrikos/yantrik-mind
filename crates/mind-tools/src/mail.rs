@@ -73,10 +73,17 @@ fn strip_block(s: &str, tag: &str) -> String {
     let mut cursor = 0usize;
     while let Some(rel) = low[cursor..].find(&open) {
         let start = cursor + rel;
-        out.push_str(&s[cursor..start]);
         match low[start..].find(&close) {
-            Some(er) => cursor = start + er + close.len(),
-            None => return out, // unclosed → drop the rest
+            Some(er) => {
+                // drop the block; keep everything before it
+                out.push_str(&s[cursor..start]);
+                cursor = start + er + close.len();
+            }
+            None => {
+                // unclosed (e.g. <head> with no </head> before <body>) → KEEP the remainder
+                // rather than deleting the rest of the document (which nuked whole receipts).
+                break;
+            }
         }
     }
     out.push_str(&s[cursor..]);

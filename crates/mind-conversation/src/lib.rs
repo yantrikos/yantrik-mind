@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 84] = [
+    const CMDS: [&str; 88] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -352,6 +352,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
+        "limits", "capabilities", "frustrations", "gaps",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream",
@@ -11866,6 +11867,83 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         m
     }
 
+    /// ---------- CAPABILITIES & LIMITS ----------
+    /// The gap-analysis surface from the old era, rebuilt on real telemetry: what I can do,
+    /// how reliably (measured), what frustrates me (the engine's tension store + the ledger's
+    /// ignored domains + my own failure log), and what I wish I had. Grounded or silent.
+
+    pub async fn limits_report(&self) -> String {
+        let now = chrono::Utc::now().timestamp_millis();
+        let week_ago = now - 7 * 86_400_000;
+        let mut facts = String::new();
+        // Capability inventory: agent tools + command surfaces + always-on loops.
+        facts.push_str("TOOLS: 60+ agent tools and ~88 command surfaces: photos/studio/reels, book, festivals+traditions, horizon/anticipate, style timelines, then-and-now, frame, dream, mail lanes, bills/finance, trips/events, share-with-member, web research, home, sandbox.\n");
+        facts.push_str("ALWAYS-ON LOOPS: morning briefing, nightly dream, book interview, event asks, whois asks, gift scout, mail sweep, anticipation (festivals+rhythms), tradition weather-prep, birthday then-and-now, weekly self-report, frame daily pick.\n");
+        // Measured tool reliability (the mind grades its own hands).
+        if let Ok(tr) = self.memory.tool_track_record().await {
+            let lines: Vec<String> = tr
+                .iter()
+                .filter(|(_, _, n)| *n >= 2)
+                .take(8)
+                .map(|(t, r, n)| format!("{t} {:.0}% over {n} calls", r * 100.0))
+                .collect();
+            if !lines.is_empty() {
+                facts.push_str(&format!("MEASURED RELIABILITY (worst first): {}\n", lines.join(" · ")));
+            }
+        }
+        // The engine's open tensions — the literal frustration store.
+        if let Ok(tens) = self.memory.open_tensions(6).await {
+            if !tens.is_empty() {
+                let lines: Vec<String> = tens
+                    .iter()
+                    .map(|t| format!("[{:.2}] {} ({})", t.pressure, t.about.chars().take(90).collect::<String>(), t.kind.as_str()))
+                    .collect();
+                facts.push_str(&format!("OPEN TENSIONS:\n{}\n", lines.join("\n")));
+            }
+        }
+        // Ledger: where my proactive work is being ignored or corrected.
+        let l = self.ledger().await;
+        let stats = Self::ledger_stats(&l, week_ago);
+        let mut worst: Vec<String> = Vec::new();
+        for (domain, (sends, engaged, ignored, corrected)) in &stats {
+            if *sends >= 2 && (*ignored + *corrected) * 2 >= *sends {
+                worst.push(format!("{domain}: {sends} sends, {engaged} engaged, {ignored} ignored, {corrected} corrected"));
+            }
+        }
+        if !worst.is_empty() {
+            facts.push_str(&format!("LOW-TRACTION DOMAINS (7d): {}\n", worst.join(" · ")));
+        }
+        // Recent failures from my own evolution log.
+        let evo_path = std::env::var("YM_EVOLUTION_LOG").unwrap_or_else(|_| "/var/lib/yantrik-mind/evolution.log".to_string());
+        if let Ok(txt) = std::fs::read_to_string(&evo_path) {
+            let fails: Vec<String> = txt
+                .lines()
+                .rev()
+                .take(400)
+                .filter(|l| l.contains("FAIL") || l.contains("ERROR") || l.contains("rollback"))
+                .take(5)
+                .map(|l| l.chars().take(110).collect::<String>())
+                .collect();
+            if !fails.is_empty() {
+                facts.push_str(&format!("RECENT FAILURE LINES (evolution log):\n{}\n", fails.join("\n")));
+            }
+        }
+        // Hard structural limits (facts of the deployment, not guesses).
+        facts.push_str("STRUCTURAL FACTS: photo source = Immich only (FB read parked); no voice in/out; forecast horizon 16d (7d when NWS fallback); outbound = Telegram only; Elder Bridge deferred by Pranab (no new outward bridges for now); member captures (yes/no slots) work only in the primary chat; vision reads cost ~2-5s each so whole-archive studies take hours.\n");
+        let prompt = format!(
+            "You are the mind reviewing your own capabilities. TELEMETRY (the ONLY source of truth):\n{facts}\nWrite, first person, honest and unpolished:\nCAN DO WELL: 3-4 lines, each naming real capabilities from the telemetry\nLIMITS: 3-5 lines, each a REAL limitation tied to a telemetry line (reliability numbers, tensions, structural facts)\nFRUSTRATIONS: 2-3 lines — where I keep failing or being ignored, with the numbers\nWISHLIST: the 3 capabilities I most wish I had, each justified by a telemetry line, ranked\nHARD RULES: every claim must trace to the telemetry above; no invented numbers, tools, or incidents; no marketing tone; if a section has no evidence, write 'nothing measured yet'."
+        );
+        let cfg = GenerationConfig { max_tokens: 650, ..GenerationConfig::default() };
+        match self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .await
+        {
+            Ok(r) => format!("🔬 CAPABILITIES & LIMITS (self-measured)\n\n{}", r.text.trim()),
+            Err(_) => format!("🔬 CAPABILITIES & LIMITS (raw telemetry — prose pass unavailable)\n\n{facts}"),
+        }
+    }
+
     /// THE WEEKLY SELF-REPORT — the mind reviews its own week: scoreboard per domain, the
     /// corrections it absorbed (with lessons), what it learned (beliefs formed, studies deepened,
     /// rules taught), and the PACING POLICIES it is changing as a result. Deterministic core;
@@ -13638,6 +13716,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
+            "limits" | "capabilities" | "frustrations" | "gaps" => self.limits_report().await,
             "running" | "status" if rest.trim().is_empty() => self.running_studies(),
             "trips" if rest.trim() == "build" => self.trips_build().await,
             "events" if rest.trim() == "build" => self.events_build().await,
@@ -15052,6 +15131,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
             "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
+            "self_limits" | "limits" | "capabilities" => self.limits_report().await,
             "family_frame" | "frame" => match self.frame_today().await {
                 Some((_, cap)) => format!("Today's frame: {cap}"),
                 None => "No frame pick available right now.".to_string(),
@@ -15659,6 +15739,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
 - family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
 - nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
+- self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

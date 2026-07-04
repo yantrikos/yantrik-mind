@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 78] = [
+    const CMDS: [&str; 80] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
-        "traditions", "tradition", "book",
+        "traditions", "tradition", "book", "thennow", "thenandnow",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -8496,6 +8496,151 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         None
     }
 
+    /// ---------- THEN AND NOW ----------
+    /// The face gallery makes time travel nearly free: the same person's earliest good frame and
+    /// their latest, side by side, with the years between them. Fires on demand and by itself on
+    /// birthday mornings.
+
+    /// Compose and queue the pair. Detached; honest notify when the archive is too shallow.
+    pub async fn then_now_run(&self, who: &str, occasion: Option<String>, target: Option<i64>) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((idx, pid, display)) = self.resolve_face(&sources, who).await else {
+            return format!("I don't have a face for \"{who}\" yet — `whois` teaches me people.");
+        };
+        let guard = format!("thennow:{}", display.to_lowercase());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return format!("Already composing {display}'s then-and-now — it lands in chat shortly.");
+        }
+        let src_name = sources[idx].name().to_string();
+        let display2 = display.clone();
+        let nq = self.notify_queue.clone();
+        let pq = self.photo_queue.clone();
+        let studies = self.studies.clone();
+        let inf = self.inference.clone();
+        tokio::spawn(async move {
+            let display = display2;
+            let done = |studies: &Arc<Mutex<std::collections::HashSet<String>>>, g: &str| {
+                studies.lock().unwrap().remove(g);
+            };
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else {
+                done(&studies, &guard);
+                return;
+            };
+            // Best frame from a candidate list: real photo, sharp, decently lit.
+            async fn best_frame(src: &mind_tools::PhotoSource, cands: &[mind_tools::PhotoAsset]) -> Option<(Vec<u8>, String, String)> {
+                let mut best: Option<(f32, Vec<u8>, String, String)> = None;
+                for a in cands.iter().filter(|a| !mind_tools::is_screenish(a)).take(14) {
+                    let Some(bytes) = src.image_bytes(a).await else { continue };
+                    let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
+                    if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
+                        continue;
+                    }
+                    if best.as_ref().map(|(s, _, _, _)| sharp > *s).unwrap_or(true) {
+                        best = Some((sharp, bytes, a.date.clone(), a.place.clone()));
+                    }
+                }
+                best.map(|(_, b, d, p)| (b, d, p))
+            }
+            let old = src.assets_of_people(&[pid.clone()], 60, true).await;
+            let new = src.assets_of_people(&[pid.clone()], 40, false).await;
+            let Some((then_b, then_d, then_p)) = best_frame(&src, &old).await else {
+                nq.lock().unwrap().push(format!("↔ Couldn't find a clean early frame of {display} — the old archive is mostly screenshots there."));
+                done(&studies, &guard);
+                return;
+            };
+            let Some((now_b, now_d, now_p)) = best_frame(&src, &new).await else {
+                nq.lock().unwrap().push(format!("↔ No clean recent frame of {display} to pair with the old one."));
+                done(&studies, &guard);
+                return;
+            };
+            let (y_then, y_now) = (then_d.chars().take(4).collect::<String>(), now_d.chars().take(4).collect::<String>());
+            let gap: i64 = y_now.parse::<i64>().unwrap_or(0) - y_then.parse::<i64>().unwrap_or(0);
+            if gap < 2 {
+                nq.lock().unwrap().push(format!("↔ {display}'s archive spans only {gap} year(s) so far — then-and-now needs more distance. It'll get better every year."));
+                done(&studies, &guard);
+                return;
+            }
+            let Some(img) = mind_tools::make_collage(vec![(then_b, None), (now_b, None)]).await else {
+                nq.lock().unwrap().push("↔ The pair composition failed — honest miss.".to_string());
+                done(&studies, &guard);
+                return;
+            };
+            // One warm grounded line; deterministic fallback.
+            let mut caption = format!("↔ {display} — {y_then} → {y_now}");
+            let places = match (then_p.is_empty(), now_p.is_empty()) {
+                (false, false) if then_p != now_p => format!(" · {} → {}", then_p.split(',').next().unwrap_or(""), now_p.split(',').next().unwrap_or("")),
+                _ => String::new(),
+            };
+            caption.push_str(&places);
+            let prompt = format!(
+                "One warm line (max 14 words) for a side-by-side photo pair of {display}: left from {y_then}, right from {y_now} ({gap} years apart). Use only these facts. No hashtags, no quotes."
+            );
+            let cfg = GenerationConfig { max_tokens: 50, ..GenerationConfig::default() };
+            if let Ok(r) = inf.chat(vec![ChatMessage::user(&prompt)], cfg).await {
+                let line = r.text.trim().trim_matches('"').to_string();
+                if line.len() > 8 && line.len() < 120 {
+                    caption.push_str(&format!("\n{line}"));
+                }
+            }
+            if let Some(occ) = occasion {
+                caption = format!("{occ}\n{caption}");
+            }
+            pq.lock().unwrap().push((img, caption, target));
+            done(&studies, &guard);
+        });
+        format!("↔ Composing {display}'s then-and-now — the years side by side. Landing in chat.")
+    }
+
+    /// Birthday mornings: the pair fires itself, once per person per year.
+    pub async fn birthday_thennow_due(&self) -> Option<(String, String)> {
+        let today = local_now().date_naive();
+        let mmdd = today.format("%m-%d").to_string();
+        let year = today.format("%Y").to_string();
+        let sent: Vec<String> = self
+            .memory
+            .profile_get("thennow_sent")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        for p in self.load_people_profiles().await {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            let dates = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let is_bday = dates.iter().any(|d| {
+                d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str())
+                    && d.get("label").and_then(|x| x.as_str()).map(|l| l.to_lowercase().contains("birthday")).unwrap_or(false)
+            });
+            if !is_bday {
+                continue;
+            }
+            let key = format!("{}:{}", name.to_lowercase(), year);
+            if sent.contains(&key) {
+                continue;
+            }
+            return Some((name.to_string(), key));
+        }
+        None
+    }
+
+    pub async fn birthday_thennow_mark(&self, key: &str) {
+        let mut sent: Vec<String> = self
+            .memory
+            .profile_get("thennow_sent")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        sent.push(key.to_string());
+        if sent.len() > 60 {
+            let cut = sent.len() - 60;
+            sent.drain(..cut);
+        }
+        let _ = self.memory.profile_set("thennow_sent", &serde_json::to_string(&sent).unwrap_or_default()).await;
+    }
+
     /// ---------- THE FAMILY BOOK ----------
     /// Twelve years of photos, trips, events, traditions, and told lore are a CHRONICLE, not a
     /// pile. Chapters are drafted strictly from evidence; what the archive can't explain becomes
@@ -12341,6 +12486,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             },
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "traditions" => self.traditions_list().await,
+            "thennow" | "thenandnow" if !rest.trim().is_empty() => self.then_now_run(rest.trim(), None, None).await,
             "book" if rest.trim() == "build" => self.book_build().await,
             "book" if rest.trim() == "gaps" => self.book_gaps().await,
             "book" if rest.trim() == "export" => self.book_export().await,
@@ -13709,6 +13855,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
+            "then_and_now" | "thennow" => {
+                let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
+                if who.is_empty() {
+                    "then_and_now needs a 'person'".to_string()
+                } else {
+                    self.then_now_run(&who, None, None).await
+                }
+            }
             "family_book" | "book" => match args.get("year").and_then(|v| v.as_i64()) {
                 Some(y) => self.book_read(y).await,
                 None => self.book_toc().await,
@@ -14274,6 +14428,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - festival_calendar {}: the Bengali Hindu festival year — per-year resolved dates (lunar calendar) + what each festival is\n\
 - traditions {}: the family's per-festival traditions (photoshoots, feasts) — weather-dependent ones get forecast-planned day suggestions\n\
 - family_book {year?}: the family's living biography compiled from the archive — chapters per year, open questions, exportable volume\n\
+- then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

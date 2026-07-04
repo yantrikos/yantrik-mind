@@ -1039,6 +1039,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Birthday mornings: the then-and-now pair fires itself, once per person per year.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() {
+                if let Some((name, key)) = conv.birthday_thennow_due().await {
+                    let _ = conv
+                        .then_now_run(&name, Some(format!("🎂 Happy birthday, {name} — look how far.")), None)
+                        .await;
+                    conv.birthday_thennow_mark(&key).await;
+                    conv.note_proactive_sent().await;
+                    eprintln!("[thennow] birthday pair queued for {name}");
+                }
+            }
+        }
+
         // Book interview: ONE question per period about a chapter the archive can't explain;
         // the answer becomes lore and rewrites its chapter.
         {

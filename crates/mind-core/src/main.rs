@@ -48,11 +48,26 @@ fn web_handle(mut stream: std::net::TcpStream, dir: &str) {
     let req = String::from_utf8_lossy(&buf[..n]);
     let raw = req.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/");
     let path = raw.split('?').next().unwrap_or("/").trim_start_matches('/');
-    let safe = path.replace("..", "").replace('\\', ""); // basic traversal guard
-    let file = if safe.is_empty() { format!("{dir}/index.html") } else { format!("{dir}/{safe}") };
-    let (status, body, ctype) = match std::fs::read(&file) {
-        Ok(b) => ("200 OK", b, if file.ends_with(".html") { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" }),
-        Err(_) => ("404 Not Found", b"not found".to_vec(), "text/plain; charset=utf-8"),
+    let safe = path.replace("..", "").replace('\\', "");
+    let rel = if safe.is_empty() { "index.html".to_string() } else { safe };
+    // Defense in depth: allowlist extensions, reject dotfiles, and CANONICALIZE — the resolved
+    // path must stay inside dir, so no traversal or symlink can escape the public folder.
+    let allowed = [".html", ".txt", ".css", ".js", ".json", ".png", ".jpg", ".svg"];
+    let ext_ok = allowed.iter().any(|e| rel.ends_with(e));
+    let dotfile = rel.split('/').any(|seg| seg.starts_with('.'));
+    let file = format!("{dir}/{rel}");
+    let confined = std::fs::canonicalize(&file)
+        .ok()
+        .zip(std::fs::canonicalize(dir).ok())
+        .map(|(f, d)| f.starts_with(&d))
+        .unwrap_or(false);
+    let (status, body, ctype) = if ext_ok && !dotfile && confined {
+        match std::fs::read(&file) {
+            Ok(b) => ("200 OK", b, if file.ends_with(".html") { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" }),
+            Err(_) => ("404 Not Found", b"not found".to_vec(), "text/plain; charset=utf-8"),
+        }
+    } else {
+        ("404 Not Found", b"not found".to_vec(), "text/plain; charset=utf-8")
     };
     let header = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     let _ = stream.write_all(header.as_bytes());

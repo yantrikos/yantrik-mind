@@ -11867,6 +11867,149 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         m
     }
 
+    /// ---------- THE PLUGIN REGISTRY (substrate-as-store) ----------
+    /// Connector manifests live in the substrate: a KV for deterministic listing, and one
+    /// semantic memory line each so `plugin search` is recall, not grep. Planned plugins are
+    /// first-class entries — the roadmap is searchable before it's built.
+
+    fn plugin_manifests() -> Vec<serde_json::Value> {
+        let m = |name: &str, kind: &str, status: &str, does: &str, needs: &str| {
+            serde_json::json!({ "name": name, "kind": kind, "status": status, "does": does, "needs": needs })
+        };
+        vec![
+            m("immich-photos", "photo_source", "live", "self-hosted family photo archive: people/faces, CLIP search, EXIF dates+places, albums, archive curation", "YM_IMMICH_URL, YM_IMMICH_KEY"),
+            m("facebook-photos", "photo_source", "parked", "FB tagged-photo read (album crawl)", "FB_USER_TOKEN (long-lived)"),
+            m("onedrive-photos", "photo_source", "planned", "OneDrive camera-roll + memories archive read (Graph API, device-code auth) — the pre-Immich years live here", "one-time Microsoft sign-in"),
+            m("google-photos", "photo_source", "planned", "Google Photos read (API access is restricted post-2025 — feasibility check first)", "Google OAuth"),
+            m("dropbox-files", "file_source", "planned", "Dropbox file/photo read", "Dropbox OAuth"),
+            m("gdrive-files", "file_source", "planned", "Google Drive docs/files read for household paperwork", "Google OAuth"),
+            m("own-faces", "vision", "live", "own face gallery: 40 learned people, temporal identity chain, verification of source tags", "YM_FACE_ML_URL"),
+            m("vision-analyze", "vision", "live", "photo understanding: occasions, outfits, quality, memes, style timelines", "ollama vision model"),
+            m("weather", "info", "live", "current + 16-day outlook (open-meteo) with NWS fallback; photo-day scoring", "none (keyless)"),
+            m("mail-inboxes", "comm_read", "live", "multi-account IMAP: digests, taxonomy, teachable rules, subscriptions, renewals", "YM_SCAN_EMAIL[_n] + app passwords"),
+            m("email-send", "comm_write", "gated", "outbound email drafts (harm-gate + confirm)", "SMTP creds"),
+            m("github", "dev", "live", "repo/notification read; gated commenting; self-build PRs", "GITHUB token"),
+            m("home-assistant", "home", "live", "device states + presence for briefings and alerts", "HOME_ASSISTANT_TOKEN"),
+            m("telegram", "channel", "live", "primary channel: family multi-user, photos, proactive delivery", "bot token"),
+            m("whatsapp-channel", "channel", "planned", "WhatsApp Business/bridge channel — where the wider family actually is", "provider decision + number"),
+            m("slack-channel", "channel", "planned", "Slack workspace channel (work-life surface)", "Slack app token"),
+            m("discord-channel", "channel", "planned", "Discord channel", "bot token"),
+            m("family-frame", "surface", "live", "daily-photo wall tablet page, token-guarded LAN listener", "YM_FRAME_TOKEN"),
+            m("web-research", "info", "live", "keyless search + SSRF-guarded fetch; deals; link learning", "none"),
+            m("markets", "info", "live", "stocks/crypto quotes + portfolio view", "none"),
+            m("sandbox-coder", "dev", "live", "code sandbox + skill authoring loop (self-extension)", "none"),
+        ]
+    }
+
+    /// Write the registry: KV for listing + one semantic memory line per plugin for discovery.
+    pub async fn plugins_seed(&self) -> String {
+        let manifests = Self::plugin_manifests();
+        let _ = self
+            .memory
+            .profile_set("plugin_registry", &serde_json::Value::Array(manifests.clone()).to_string())
+            .await;
+        let seeded = self.memory.profile_get("plugin_seed_ver").await.ok().flatten().unwrap_or_default();
+        let mut wrote = 0usize;
+        if seeded != "v1" {
+            for p in &manifests {
+                let line = format!(
+                    "[plugin] {} ({}, {}) — {}; needs: {}",
+                    p["name"].as_str().unwrap_or(""),
+                    p["kind"].as_str().unwrap_or(""),
+                    p["status"].as_str().unwrap_or(""),
+                    p["does"].as_str().unwrap_or(""),
+                    p["needs"].as_str().unwrap_or("")
+                );
+                if self.memory.remember_observation(&line, mind_types::safety::ProvenanceCategory::Human).await.is_ok() {
+                    wrote += 1;
+                }
+            }
+            let _ = self.memory.profile_set("plugin_seed_ver", "v1").await;
+        }
+        format!(
+            "🧩 Plugin registry written: {} manifests in the substrate ({wrote} memory lines seeded). `plugin all` to browse, `plugin search <what>` to discover.",
+            Self::plugin_manifests().len()
+        )
+    }
+
+    pub async fn plugins_all(&self) -> String {
+        let reg: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("plugin_registry")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_else(|| Self::plugin_manifests());
+        let mut by_kind: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for p in &reg {
+            let icon = match p["status"].as_str().unwrap_or("") {
+                "live" => "🟢",
+                "gated" => "🔐",
+                "parked" => "⏸",
+                _ => "🔵",
+            };
+            by_kind
+                .entry(p["kind"].as_str().unwrap_or("other").to_string())
+                .or_default()
+                .push(format!("{icon} {} — {}", p["name"].as_str().unwrap_or(""), p["does"].as_str().unwrap_or("")));
+        }
+        let mut out = String::from("🧩 PLUGIN STORE (substrate registry)\n");
+        for (kind, items) in by_kind {
+            out.push_str(&format!("\n{}:\n{}\n", kind.to_uppercase(), items.join("\n")));
+        }
+        out.push_str("\n🟢 live · 🔐 gated · ⏸ parked · 🔵 planned — `plugin search <what>` to discover");
+        out
+    }
+
+    pub async fn plugins_search(&self, q: &str) -> String {
+        // Semantic first (the memory lane), substring safety net second (the KV).
+        let mut hits: Vec<String> = Vec::new();
+        if let Ok(rs) = self
+            .memory
+            .recall_typed(mind_types::RecallQuery { text: format!("plugin connector {q}"), top_k: 12, kind: None })
+            .await
+        {
+            for r in rs {
+                if r.item.text.starts_with("[plugin]") && !hits.iter().any(|h| h == &r.item.text) {
+                    hits.push(r.item.text.clone());
+                }
+            }
+        }
+        if hits.len() < 3 {
+            let ql = q.to_lowercase();
+            let reg: Vec<serde_json::Value> = self
+                .memory
+                .profile_get("plugin_registry")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default();
+            for p in &reg {
+                let line = format!(
+                    "[plugin] {} ({}, {}) — {}",
+                    p["name"].as_str().unwrap_or(""),
+                    p["kind"].as_str().unwrap_or(""),
+                    p["status"].as_str().unwrap_or(""),
+                    p["does"].as_str().unwrap_or("")
+                );
+                let key: String = line.chars().take(30).collect();
+                if line.to_lowercase().contains(&ql) && !hits.iter().any(|h| h.starts_with(&key)) {
+                    hits.push(line);
+                }
+            }
+        }
+        hits.truncate(6);
+        if hits.is_empty() {
+            format!("🧩 Nothing in the registry matches \"{q}\" — `plugin all` to browse, and planned plugins count too.")
+        } else {
+            format!("🧩 Registry matches for \"{q}\":\n{}", hits.join("\n"))
+        }
+    }
+
     /// ---------- CAPABILITIES & LIMITS ----------
     /// The gap-analysis surface from the old era, rebuilt on real telemetry: what I can do,
     /// how reliably (measured), what frustrates me (the engine's tension store + the ledger's
@@ -14210,6 +14353,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let action = p.next().unwrap_or("").to_lowercase();
                 let name = p.next().unwrap_or("").trim().to_string();
                 match action.as_str() {
+                    "search" | "find" => return self.plugins_search(&name).await,
+                    "all" | "store" | "registry" => return self.plugins_all().await,
+                    "seed" | "reseed" => return self.plugins_seed().await,
+                    _ => {}
+                }
+                match action.as_str() {
                     "" | "list" | "ls" => self.plugins.lock().unwrap().render_list(),
                     "enable" | "on" | "disable" | "off" => {
                         let on = matches!(action.as_str(), "enable" | "on");
@@ -15157,6 +15306,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "traditions" | "tradition" => self.traditions_list().await,
             "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
             "self_limits" | "limits" | "capabilities" => self.limits_report().await,
+            "plugin_registry" | "plugin_search" | "plugins" => {
+                let q = s("query");
+                if q.is_empty() {
+                    self.plugins_all().await
+                } else {
+                    self.plugins_search(&q).await
+                }
+            }
             "family_frame" | "frame" => match self.frame_today().await {
                 Some((_, cap)) => format!("Today's frame: {cap}"),
                 None => "No frame pick available right now.".to_string(),
@@ -15765,6 +15922,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
 - nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
 - self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
+- plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

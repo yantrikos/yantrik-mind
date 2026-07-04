@@ -38,45 +38,120 @@ pub trait MailClient: Send + Sync {
     }
 }
 
-/// Strip an email body to readable text: drop MIME scaffolding, base64 payloads, HTML tags,
-/// quoted-printable soft breaks — bounded to `max_chars`.
-fn clean_body(raw: &[u8], max_chars: usize) -> String {
-    let s = String::from_utf8_lossy(raw);
-    let mut out = String::new();
-    let mut in_tag = false;
-    for line in s.lines() {
-        let t = line.trim_end_matches('\r').trim();
-        if t.len() > 100 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
-            continue; // base64 payload line
-        }
-        if t.starts_with("Content-") || t.starts_with("--") || t.starts_with("MIME-") || t.starts_with("charset") {
-            continue;
-        }
-        let mut cleaned = String::new();
-        for c in t.chars() {
-            match c {
-                '<' => in_tag = true,
-                '>' => in_tag = false,
-                c if !in_tag => cleaned.push(c),
-                _ => {}
+/// Decode quoted-printable: soft line breaks (`=` at EOL) and `=XX` hex escapes → bytes → UTF-8.
+fn qp_decode(s: &str) -> String {
+    let raw = s.as_bytes();
+    let mut bytes: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'=' && i + 1 < raw.len() {
+            if raw[i + 1] == b'\r' || raw[i + 1] == b'\n' {
+                i += if raw[i + 1] == b'\r' && i + 2 < raw.len() && raw[i + 2] == b'\n' { 3 } else { 2 };
+                continue;
+            }
+            if i + 2 < raw.len() {
+                if let Ok(h) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    bytes.push(h);
+                    i += 3;
+                    continue;
+                }
             }
         }
-        let cleaned = cleaned
-            .replace("=20", " ")
-            .replace("=E2=80=99", "'")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&#39;", "'");
-        let cleaned = cleaned.trim();
-        if cleaned.len() > 1 {
-            out.push_str(cleaned);
-            out.push('\n');
-        }
-        if out.len() >= max_chars {
-            break;
+        bytes.push(raw[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Remove `<tag ...>...</tag>` blocks (style/script/head) whose CONTENT would otherwise leak as
+/// garbage text — the "CSS in the receipt" bug. Case-insensitive, cross-line.
+fn strip_block(s: &str, tag: &str) -> String {
+    let low = s.to_lowercase();
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = low[cursor..].find(&open) {
+        let start = cursor + rel;
+        out.push_str(&s[cursor..start]);
+        match low[start..].find(&close) {
+            Some(er) => cursor = start + er + close.len(),
+            None => return out, // unclosed → drop the rest
         }
     }
-    out.chars().take(max_chars).collect()
+    out.push_str(&s[cursor..]);
+    out
+}
+
+/// Strip an email body to readable text: quoted-printable decode, drop MIME/base64 scaffolding,
+/// remove style/script CONTENT (not just tags), convert block tags to breaks, strip remaining
+/// tags, decode HTML entities, collapse whitespace — bounded to `max_chars`.
+fn clean_body(raw: &[u8], max_chars: usize) -> String {
+    let lossy = String::from_utf8_lossy(raw);
+    let mut kept: Vec<&str> = Vec::new();
+    for line in lossy.lines() {
+        let t = line.trim_end_matches('\r');
+        let tt = t.trim();
+        if tt.len() > 100 && tt.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+            continue; // base64 payload
+        }
+        if tt.starts_with("Content-") || tt.starts_with("--=") || tt.starts_with("MIME-") || tt.starts_with("charset=") {
+            continue;
+        }
+        kept.push(t);
+    }
+    let decoded = qp_decode(&kept.join("\n"));
+    let mut body = decoded;
+    for tag in ["style", "script", "head"] {
+        body = strip_block(&body, tag);
+    }
+    // Block tags → breaks so words don't run together; other tags → dropped.
+    let low = body.to_lowercase();
+    let breakers = ["</p>", "<br", "</tr>", "</div>", "</td>", "</li>", "</h1>", "</h2>", "</h3>"];
+    let mut spaced = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body.as_bytes()[i] == b'<' {
+            let hit = breakers.iter().any(|br| low[i..].starts_with(br));
+            spaced.push(if hit { '\n' } else { ' ' });
+            match body[i..].find('>') {
+                Some(rel) => i += rel + 1,
+                None => break,
+            }
+        } else {
+            let c = body[i..].chars().next().unwrap_or(' ');
+            spaced.push(c);
+            i += c.len_utf8();
+        }
+    }
+    let mut text = spaced
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–");
+    while let Some(p) = text.find("&#") {
+        match text[p..].find(';').map(|e| p + e + 1) {
+            Some(e) if e - p <= 9 => {
+                let num = &text[p + 2..e - 1];
+                let ch = num
+                    .strip_prefix(['x', 'X'])
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .or_else(|| num.parse::<u32>().ok())
+                    .and_then(char::from_u32);
+                match ch {
+                    Some(c) => text.replace_range(p..e, &c.to_string()),
+                    None => text.replace_range(p..p + 2, "  "),
+                }
+            }
+            _ => text.replace_range(p..p + 2, "  "),
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max_chars).collect()
 }
 
 /// Render an inbox as a compact, untrusted digest block for grounding a reply.

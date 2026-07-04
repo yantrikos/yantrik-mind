@@ -13130,13 +13130,25 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let lines: Vec<String> = hits
                         .iter()
                         .map(|(m, body)| {
-                            // HTML-heavy receipts leak CSS into the text part — keep human words only.
                             let cleanish: String = body
                                 .split_whitespace()
                                 .filter(|w| !w.contains('{') && !w.contains('}') && !w.starts_with('@') && !w.starts_with('.') && !w.contains("=09"))
                                 .collect::<Vec<_>>()
                                 .join(" ");
-                            let snip: String = cleanish.chars().take(280).collect();
+                            // Match-centered window: receipts are long and the relevant line (hotel,
+                            // dates, amount) is wherever the query hits — show ±260 chars around it,
+                            // not just the head.
+                            let low = cleanish.to_lowercase();
+                            let anchor = q.to_lowercase();
+                            let first_word = anchor.split_whitespace().next().unwrap_or(&anchor);
+                            let hit = low.find(&anchor).or_else(|| low.find(first_word));
+                            let snip: String = match hit {
+                                Some(pos) => {
+                                    let start = cleanish.char_indices().rev().find(|(i, _)| *i <= pos.saturating_sub(120)).map(|(i, _)| i).unwrap_or(0);
+                                    cleanish[start..].chars().take(520).collect()
+                                }
+                                None => cleanish.chars().take(360).collect(),
+                            };
                             format!("• [{}] {} — {}\n  {}", m.date, m.from, m.subject, snip)
                         })
                         .collect();

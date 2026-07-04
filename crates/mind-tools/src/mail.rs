@@ -122,7 +122,9 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
             continue;
         }
         flush(&mut b64buf, &mut kept);
-        if tt.starts_with("Content-") || tt.starts_with("--=") || tt.starts_with("MIME-") || tt.starts_with("charset=") {
+        // MIME boundary lines ("--=_Part_…", "------=_…") + part headers → drop.
+        let is_boundary = tt.starts_with("--") && tt.len() > 6 && !tt.contains(' ') && (tt.contains("=_") || tt.contains("_Part") || tt.chars().all(|c| c == '-' || c.is_ascii_alphanumeric() || c == '=' || c == '_' || c == '.'));
+        if is_boundary || tt.starts_with("Content-") || tt.starts_with("MIME-") || tt.starts_with("charset=") {
             continue;
         }
         kept.push(t.to_string());
@@ -333,7 +335,7 @@ impl MailClient for ImapClient {
                         })
                         .unwrap_or_else(|| "(unknown)".into());
                     let date = env.date.as_ref().map(|b| decode(b)).unwrap_or_default();
-                    let body = fmsg.text().map(|t| clean_body(t, 700)).unwrap_or_default();
+                    let body = fmsg.text().map(|t| clean_body(t, 4000)).unwrap_or_default();
                     out.push((EmailMsg { id: fmsg.message.to_string(), from, subject, date }, body));
                 }
                 if !out.is_empty() {

@@ -25,6 +25,13 @@ pub trait MailClient: Send + Sync {
 
     /// Body text of specific messages by sequence id — BODY.PEEK, so nothing is ever marked read.
     /// Returns (id, cleaned text). Default: unsupported → empty.
+    /// Full-mailbox search (subject/body TEXT), newest first, with cleaned body snippets.
+    /// Default: unsupported (scripted clients return empty).
+    async fn search(&self, needle: &str, limit: usize) -> anyhow::Result<Vec<(EmailMsg, String)>> {
+        let _ = (needle, limit);
+        Ok(vec![])
+    }
+
     async fn peek_bodies(&self, ids: &[String], max_chars: usize) -> anyhow::Result<Vec<(String, String)>> {
         let _ = (ids, max_chars);
         Ok(Vec::new())
@@ -174,6 +181,64 @@ impl MailClient for ImapClient {
             }
             let _ = session.logout();
             out.reverse(); // newest first
+            Ok(out)
+        })
+        .await?
+    }
+
+    async fn search(&self, needle: &str, limit: usize) -> anyhow::Result<Vec<(EmailMsg, String)>> {
+        let (host, port, user, password) =
+            (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+        let needle: String = needle.chars().filter(|c| *c != '"' && *c != '\\').collect();
+        let limit = limit.clamp(1, 10);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(EmailMsg, String)>> {
+            let tls = native_tls::TlsConnector::builder().build()?;
+            let client = imap::connect((host.as_str(), port), host.as_str(), &tls)?;
+            let mut session = client.login(&user, &password).map_err(|(e, _)| e)?;
+            // Gmail's All Mail covers INBOX + archive in one place; plain hosts get INBOX + Archive.
+            let mailboxes: Vec<&str> = if host.contains("gmail") {
+                vec!["[Gmail]/All Mail", "INBOX"]
+            } else {
+                vec!["INBOX", "Archive"]
+            };
+            let mut out: Vec<(EmailMsg, String)> = Vec::new();
+            for mb in mailboxes {
+                if session.select(mb).is_err() {
+                    continue;
+                }
+                let Ok(ids) = session.search(format!("TEXT \"{needle}\"")) else { continue };
+                let mut idv: Vec<u32> = ids.into_iter().collect();
+                idv.sort_unstable();
+                let take: Vec<u32> = idv.into_iter().rev().take(limit).collect();
+                if take.is_empty() {
+                    continue;
+                }
+                let set = take.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                let fetches = session.fetch(&set, "(ENVELOPE INTERNALDATE BODY.PEEK[TEXT])")?;
+                for fmsg in fetches.iter() {
+                    let Some(env) = fmsg.envelope() else { continue };
+                    let decode = |b: &[u8]| String::from_utf8_lossy(b).to_string();
+                    let subject = env.subject.as_ref().map(|s| decode(s)).unwrap_or_default();
+                    let from = env
+                        .from
+                        .as_ref()
+                        .and_then(|a| a.first())
+                        .map(|a| {
+                            let mbox = a.mailbox.as_ref().map(|b| decode(b)).unwrap_or_default();
+                            let h = a.host.as_ref().map(|b| decode(b)).unwrap_or_default();
+                            if a.name.is_some() { decode(a.name.as_ref().unwrap()) } else { format!("{mbox}@{h}") }
+                        })
+                        .unwrap_or_else(|| "(unknown)".into());
+                    let date = env.date.as_ref().map(|b| decode(b)).unwrap_or_default();
+                    let body = fmsg.text().map(|t| clean_body(t, 700)).unwrap_or_default();
+                    out.push((EmailMsg { id: fmsg.message.to_string(), from, subject, date }, body));
+                }
+                if !out.is_empty() {
+                    break; // first mailbox with hits wins (All Mail already spans the account)
+                }
+            }
+            let _ = session.logout();
+            out.reverse();
             Ok(out)
         })
         .await?

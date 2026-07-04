@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 88] = [
+    const CMDS: [&str; 90] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -352,7 +352,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "tastes", "taste", "preferences", "collage", "montage", "compose", "studio",
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
-        "limits", "capabilities", "frustrations", "gaps",
+        "limits", "capabilities", "frustrations", "gaps", "mailsearch", "findmail",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream",
@@ -13005,6 +13005,46 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     }
 
     /// Every connected read-only scan inbox (falls back to the bot's own mailbox when none).
+    /// Search the FULL mailboxes of every configured account (INBOX + archive/All Mail) —
+    /// bookings, receipts, confirmation numbers. The digests read recent windows; this reads
+    /// everything the accounts hold.
+    pub async fn mail_search_all(&self, query: &str) -> String {
+        let q = query.trim();
+        if q.len() < 3 {
+            return "Search for what? (subject words, sender, a confirmation number…)".to_string();
+        }
+        let inboxes = self.scan_inboxes();
+        if inboxes.is_empty() {
+            return "No mail accounts configured.".to_string();
+        }
+        let mut sections: Vec<String> = Vec::new();
+        let mut errors = 0usize;
+        for (addr, client) in &inboxes {
+            match client.search(q, 4).await {
+                Ok(hits) if !hits.is_empty() => {
+                    let lines: Vec<String> = hits
+                        .iter()
+                        .map(|(m, body)| {
+                            let snip: String = body.chars().take(280).collect();
+                            format!("• [{}] {} — {}\n  {}", m.date, m.from, m.subject, snip.replace('\n', " "))
+                        })
+                        .collect();
+                    sections.push(format!("{addr}:\n{}", lines.join("\n")));
+                }
+                Ok(_) => {}
+                Err(_) => errors += 1,
+            }
+        }
+        if sections.is_empty() {
+            let err_note = if errors > 0 { format!(" ({errors} account(s) unreachable)") } else { String::new() };
+            return format!(
+                "📬 Searched the full mailboxes of {} account(s) for \"{q}\" — no matching message{err_note}. If it exists, it's in an account I don't scan yet.",
+                inboxes.len()
+            );
+        }
+        format!("📬 Mail search \"{q}\":\n\n{}", sections.join("\n\n"))
+    }
+
     fn scan_inboxes(&self) -> Vec<(String, Arc<dyn MailClient>)> {
         if !self.scan_mail.is_empty() {
             return self.scan_mail.clone();
@@ -13868,6 +13908,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
+            "mailsearch" | "findmail" if !rest.trim().is_empty() => self.mail_search_all(rest.trim()).await,
             "limits" | "capabilities" | "frustrations" | "gaps" if rest.trim().starts_with("clear") => {
                 let needle = rest.trim().trim_start_matches("clear").trim().to_lowercase();
                 if needle.len() < 3 {
@@ -15309,6 +15350,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "traditions" | "tradition" => self.traditions_list().await,
             "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
             "self_limits" | "limits" | "capabilities" => self.limits_report().await,
+            "mail_search" | "mailsearch" | "search_mail" => {
+                let q = { let a = s("query"); if a.is_empty() { s("q") } else { a } };
+                if q.is_empty() {
+                    "mail_search needs a 'query'".to_string()
+                } else {
+                    self.mail_search_all(&q).await
+                }
+            }
             "plugin_registry" | "plugin_search" | "plugins" => {
                 let q = s("query");
                 if q.is_empty() {
@@ -15926,6 +15975,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
 - self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
 - plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all\n\
+- mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

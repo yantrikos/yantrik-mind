@@ -6190,6 +6190,33 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Merge freshly-extracted people into the living profiles: upsert by name, dedupe facts, refresh the
     /// relationship, and upsert key dates by label. Returns how many people were touched (for the
     /// consolidation counter). Revise-in-place — one evolving profile per person, not an ever-growing pile.
+    /// Remove a LIVING PROFILE by name (test residue, perspective artifacts). The household
+    /// registry (`person remove <slug>`) is separate; this cleans the consolidation-built layer.
+    pub async fn person_forget(&self, name: &str) -> String {
+        let want = name.trim().to_lowercase();
+        if want.len() < 2 {
+            return "person forget <name>".to_string();
+        }
+        let mut store = self.load_people_profiles().await;
+        let before = store.len();
+        let mut dropped: Vec<String> = Vec::new();
+        store.retain(|p| {
+            let n = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            if n.to_lowercase() == want {
+                let facts = p.get("facts").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                dropped.push(format!("{n} ({facts} facts)"));
+                false
+            } else {
+                true
+            }
+        });
+        if store.len() == before {
+            return format!("No living profile named \"{name}\".");
+        }
+        self.save_people_profiles(&store).await;
+        format!("🧹 Forgot profile: {} — {} people remain.", dropped.join(", "), store.len())
+    }
+
     async fn merge_people(&self, people: Vec<serde_json::Value>) -> usize {
         if people.is_empty() {
             return 0;
@@ -6202,6 +6229,27 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let name = pv.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
             if name.len() < 2 {
                 continue;
+            }
+            // Perspective words are not people. Bare relationship nouns ("wife", "mother"), the
+            // primary's own name, and "<primary>'s wife/husband" when the spouse is registered
+            // all create phantom profiles — facts belong on the real person instead.
+            {
+                const GENERIC: [&str; 18] = [
+                    "wife", "husband", "mother", "father", "mom", "dad", "son", "daughter",
+                    "brother", "sister", "mother-in-law", "father-in-law", "cousin", "nephew",
+                    "niece", "uncle", "aunt", "friend",
+                ];
+                let low = name.to_lowercase();
+                let primary = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default().to_lowercase();
+                let spouse_registered = self
+                    .load_people()
+                    .await
+                    .iter()
+                    .any(|p| matches!(p.get("relationship").and_then(|x| x.as_str()), Some("wife") | Some("husband")));
+                let possessive_spouse = (low.ends_with("'s wife") || low.ends_with("'s husband")) && spouse_registered;
+                if GENERIC.contains(&low.as_str()) || (!primary.is_empty() && low == primary) || possessive_spouse {
+                    continue;
+                }
             }
             // Resolve to an existing person by NAME **or** any nickname (either side) — otherwise the same
             // person under a nickname (e.g. "Arya" vs "Aadrisha") would fork into a duplicate record.
@@ -14036,6 +14084,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 match action.as_str() {
                     "add" => self.person_add(&arg).await,
                     "rm" | "remove" => self.person_remove(&arg).await,
+                    "forget" => self.person_forget(&arg).await,
                     "" | "list" => self.people_list().await,
                     _ => "Usage: ym person add <slug> <name> [telegram-id] [relationship] · ym people".to_string(),
                 }

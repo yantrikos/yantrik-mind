@@ -8513,6 +8513,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         let src_name = sources[idx].name().to_string();
         let display2 = display.clone();
+        // OUR eyes, not the source's tags: the person's face-gallery centroid gates every frame.
+        let centroid: Option<Vec<f32>> = {
+            let g = self.face_gallery().await;
+            g["people"][&display]["c"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect::<Vec<f32>>())
+                .filter(|c| !c.is_empty())
+        };
+        let threshold: f32 = std::env::var("YM_FACE_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.45);
         let nq = self.notify_queue.clone();
         let pq = self.photo_queue.clone();
         let studies = self.studies.clone();
@@ -8528,28 +8537,59 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 return;
             };
             // Best frame from a candidate list: real photo, sharp, decently lit.
-            async fn best_frame(src: &mind_tools::PhotoSource, cands: &[mind_tools::PhotoAsset]) -> Option<(Vec<u8>, String, String)> {
+            async fn best_frame(
+                src: &mind_tools::PhotoSource,
+                cands: &[mind_tools::PhotoAsset],
+                centroid: &Option<Vec<f32>>,
+                threshold: f32,
+            ) -> (Option<(Vec<u8>, String, String)>, u32) {
                 let mut best: Option<(f32, Vec<u8>, String, String)> = None;
-                for a in cands.iter().filter(|a| !mind_tools::is_screenish(a)).take(14) {
+                let mut rejected = 0u32;
+                for a in cands.iter().filter(|a| !mind_tools::is_screenish(a)).take(20) {
                     let Some(bytes) = src.image_bytes(a).await else { continue };
                     let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
                     if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
                         continue;
                     }
+                    // The source says this photo shows the person; verify with OUR gallery before
+                    // trusting it. ML unreachable -> fall back to tag trust rather than stalling.
+                    if let Some(c) = centroid {
+                        if let Some(eng) = mind_tools::FaceEngine::from_env() {
+                            match eng.faces(bytes.clone()).await {
+                                Ok(faces) => {
+                                    if !faces.iter().any(|f| mind_tools::cosine(&f.embedding, c) >= threshold) {
+                                        rejected += 1;
+                                        continue;
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
                     if best.as_ref().map(|(s, _, _, _)| sharp > *s).unwrap_or(true) {
                         best = Some((sharp, bytes, a.date.clone(), a.place.clone()));
                     }
                 }
-                best.map(|(_, b, d, p)| (b, d, p))
+                (best.map(|(_, b, d, p)| (b, d, p)), rejected)
             }
             let old = src.assets_of_people(&[pid.clone()], 60, true).await;
             let new = src.assets_of_people(&[pid.clone()], 40, false).await;
-            let Some((then_b, then_d, then_p)) = best_frame(&src, &old).await else {
-                nq.lock().unwrap().push(format!("↔ Couldn't find a clean early frame of {display} — the old archive is mostly screenshots there."));
+            let (then_res, then_rej) = best_frame(&src, &old, &centroid, threshold).await;
+            let Some((then_b, then_d, then_p)) = then_res else {
+                let why = if then_rej > 0 {
+                    format!("the {then_rej} oldest frames tagged as {display} don't actually show her to my own eyes (mis-tagged in the library — a `whois` cleanup would fix them)")
+                } else {
+                    format!("the old archive around {display} is mostly screenshots")
+                };
+                nq.lock().unwrap().push(format!("↔ Couldn't build a truthful then-and-now — {why}."));
                 done(&studies, &guard);
                 return;
             };
-            let Some((now_b, now_d, now_p)) = best_frame(&src, &new).await else {
+            if then_rej > 0 {
+                nq.lock().unwrap().push(format!("↔ Note: I skipped {then_rej} old frame(s) tagged as {display} that my own face check says aren't her."));
+            }
+            let (now_res, _) = best_frame(&src, &new, &centroid, threshold).await;
+            let Some((now_b, now_d, now_p)) = now_res else {
                 nq.lock().unwrap().push(format!("↔ No clean recent frame of {display} to pair with the old one."));
                 done(&studies, &guard);
                 return;

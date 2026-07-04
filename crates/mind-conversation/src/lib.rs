@@ -1440,6 +1440,47 @@ fn photo_followup(text: &str) -> bool {
     REFS.iter().any(|r| l.contains(r))
 }
 
+/// THE HONESTY WALL — proper nouns in the user's message that appear NOWHERE in the assembled
+/// grounding (beliefs, working set, recent transcript) are entities the mind knows NOTHING about.
+/// Confabulation about them (invented geography, membership, relationships) is the #1 trust
+/// killer; the wall names them so the model can say "I don't know" and ask instead.
+fn novel_entities(text: &str, known_context: &str) -> Vec<String> {
+    const COMMON: [&str; 58] = [
+        "the", "this", "that", "what", "where", "when", "who", "why", "how", "can", "could",
+        "would", "should", "do", "does", "did", "are", "was", "were", "will", "and", "but", "for",
+        "not", "you", "your", "our", "his", "her", "its", "they", "them", "there", "here", "yes",
+        "okay", "hey", "hello", "please", "thanks", "thank", "today", "tomorrow", "yesterday",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "just",
+        "also", "maybe", "quick", "check", "think", "sorry",
+    ];
+    let ctx = known_context.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut sentence_start = true;
+    for raw in text.split_whitespace() {
+        let w: String = raw.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect();
+        let ends_sentence = raw.ends_with(['.', '!', '?']);
+        let was_start = sentence_start;
+        sentence_start = ends_sentence;
+        let w = w.trim_matches('\'');
+        if w.len() < 3 {
+            continue;
+        }
+        let capitalized = w.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        if !capitalized || was_start {
+            continue; // sentence-initial capitalization proves nothing
+        }
+        let lw = w.to_lowercase();
+        if COMMON.contains(&lw.as_str()) || ctx.contains(&lw) {
+            continue;
+        }
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(w)) {
+            out.push(w.to_string());
+        }
+    }
+    out.truncate(4);
+    out
+}
+
 /// Explicit photo-noun follow-up — safe to intercept even with nothing in view.
 fn photo_followup_strong(text: &str) -> bool {
     let l = text.to_lowercase();
@@ -16450,6 +16491,19 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 grounding = format!(
                     "EARLIER CONVERSATION (rolling summary of older turns — the verbatim recent turns follow):\n{sum}\n\n{grounding}"
                 );
+            }
+        }
+        // The honesty wall: entities this turn that the grounding knows NOTHING about get an
+        // explicit do-not-invent instruction — turning would-be confabulation into a question.
+        {
+            let recent_text: String = recent.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
+            let known = format!("{grounding}\n{recent_text}\n{}", notes.join("\n"));
+            let unknown = novel_entities(user_text, &known);
+            if !unknown.is_empty() {
+                grounding.push_str(&format!(
+                    "\n\nUNKNOWN TO ME THIS TURN: {}. I hold NO stored knowledge about these — I must NOT state facts about them (location, membership, dates, relationships). Honest move: say what I don't know and ask ONE short question; the answer will be remembered.",
+                    unknown.join(", ")
+                ));
             }
         }
         let messages = self.build_prompt(

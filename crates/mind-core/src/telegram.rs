@@ -1011,8 +1011,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 if chat == 0 {
                     continue;
                 }
+                let keep = if target.is_none() { Some(jpeg.clone()) } else { None };
                 if tg_send_photo(&api, chat, jpeg, &caption).await {
-                    if target.is_none() {
+                    if let Some(k) = keep {
+                        conv.note_last_photo(k, &caption).await;
                         conv.mirror_proactive(&format!("[sent a photo] {caption}")).await;
                     }
                 } else {

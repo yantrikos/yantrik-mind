@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 80] = [
+    const CMDS: [&str; 81] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
-        "traditions", "tradition", "book", "thennow", "thenandnow",
+        "traditions", "tradition", "book", "thennow", "thenandnow", "share",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -2146,6 +2146,8 @@ pub struct ConversationEngine {
     /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
     /// loop drains and sends them as real Telegram photos. Arc'd so detached studio jobs can deliver.
     photo_queue: Arc<Mutex<Vec<(Vec<u8>, String, Option<i64>)>>>,
+    /// The most recent photo delivered to the primary — shareable to household members on ask.
+    last_sent_photo: Arc<Mutex<Option<(Vec<u8>, String)>>>,
     /// Videos queued for the home channel (growing-up reels). Arc'd so a detached reel-builder task
     /// can deliver its film after minutes of background work.
     video_queue: Arc<Mutex<Vec<(Vec<u8>, String, Option<i64>)>>>,
@@ -2202,6 +2204,7 @@ impl ConversationEngine {
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
+            last_sent_photo: Arc::new(Mutex::new(None)),
             video_queue: Arc::new(Mutex::new(Vec::new())),
             last_photo: Mutex::new(None),
             photo_session: Arc::new(Mutex::new(Vec::new())),
@@ -4961,6 +4964,87 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// against the stated threshold. The verdict is written as signed evidence into a per-domain
     /// calibration belief (the Bayesian engine turns the stream of hits/misses into a posterior), and the
     /// ledger entry is closed. Auto-resolvable for tracked subjects (news/markets) — no user burden.
+    /// Stake a LIFE prediction (family rhythm) with a machine grade-hint. Reuses the standard
+    /// gate/dedupe/calibration path, then attaches the hint the ledger-grader understands.
+    async fn life_predict(
+        &self,
+        subject: &str,
+        claim: String,
+        threshold: String,
+        resolve_by: chrono::NaiveDate,
+        confidence: f64,
+        grade: serde_json::Value,
+    ) {
+        let made = local_now();
+        let v = serde_json::json!({ "prediction": {
+            "claim": claim, "threshold": threshold,
+            "resolve_by": resolve_by.format("%Y-%m-%d").to_string(), "confidence": confidence,
+        }});
+        if self
+            .maybe_store_prediction(subject, &v, made.timestamp_millis(), &made.format("%Y-%m-%d").to_string())
+            .await
+            .is_some()
+        {
+            let mut preds = self.load_predictions().await;
+            for p in preds.iter_mut() {
+                if p.get("subject").and_then(|x| x.as_str()) == Some(subject)
+                    && p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open"
+                {
+                    p["grade"] = grade.clone();
+                    p["domain"] = serde_json::json!("family-rhythm");
+                }
+            }
+            self.save_predictions(&preds).await;
+        }
+    }
+
+    /// Judge a grade-hint against the family's OWN ledgers. Some(hit,...) when evidence exists;
+    /// None when the ledgers are silent (caller decides open-vs-miss).
+    async fn grade_from_ledgers(&self, g: &serde_json::Value) -> Option<(String, String)> {
+        let from = chrono::NaiveDate::parse_from_str(g["from"].as_str().unwrap_or(""), "%Y-%m-%d").ok()?;
+        let to = chrono::NaiveDate::parse_from_str(g["to"].as_str().unwrap_or(""), "%Y-%m-%d").ok()?;
+        match g["kind"].as_str().unwrap_or("") {
+            "event" => {
+                let word = g["word"].as_str().unwrap_or("").to_lowercase();
+                for e in self.load_events().await {
+                    let Some(d) = e["date"].as_str().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()) else {
+                        continue;
+                    };
+                    if d < from || d > to {
+                        continue;
+                    }
+                    let label = e["label"].as_str().unwrap_or("").to_string();
+                    let photos = e["photos"].as_u64().unwrap_or(0);
+                    if !word.is_empty() && label.to_lowercase().contains(&word) {
+                        return Some(("hit".into(), format!("your own archive confirms it — \"{label}\" on {d} ({photos} photos)")));
+                    }
+                    if photos >= 25 {
+                        return Some(("hit".into(), format!("a {photos}-photo day on {d} sits inside the window")));
+                    }
+                }
+                None
+            }
+            "trip" => {
+                let dest = g["dest"].as_str().unwrap_or("").to_lowercase();
+                for t in self.load_trips().await {
+                    let Some(st) = t["start"].as_str().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()) else {
+                        continue;
+                    };
+                    let en = t["end"].as_str().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).unwrap_or(st);
+                    if en < from || st > to {
+                        continue;
+                    }
+                    let td = t["dest"].as_str().unwrap_or("").to_string();
+                    if dest.is_empty() || td.to_lowercase().contains(&dest) {
+                        return Some(("hit".into(), format!("the trip ledger shows {td} {st} – {en} ({} photos)", t["photos"])));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     pub async fn resolve_predictions(&self, force: bool) -> Vec<String> {
         let now = chrono::Utc::now().timestamp_millis();
         let mut preds = self.load_predictions().await;
@@ -4980,6 +5064,36 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let made_as_of = preds[i].get("made_as_of").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let resolve_by = preds[i].get("resolve_by").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let domain = preds[i].get("domain").and_then(|x| x.as_str()).unwrap_or("general").to_string();
+            // LIFE predictions carry a machine grade-hint: judged against the family's OWN
+            // trip/event ledgers — the archive is the referee, not an LLM opinion.
+            let mut machine: Option<(String, String)> = None;
+            if let Some(g) = preds[i].get("grade").cloned() {
+                match self.grade_from_ledgers(&g).await {
+                    Some(v) => machine = Some(v),
+                    None => {
+                        let rb = preds[i].get("resolve_by_ms").and_then(|x| x.as_i64()).unwrap_or(now);
+                        if now > rb + 14 * 86_400_000 {
+                            machine = Some((
+                                "miss".into(),
+                                "no matching evidence appeared in the trip/event ledgers (window + 2 weeks grace)".into(),
+                            ));
+                        } else {
+                            // Ledgers may lag the archive — refresh them once, grade next pass.
+                            if preds[i].get("build_fired").is_none() {
+                                preds[i]["build_fired"] = serde_json::json!(true);
+                                changed = true;
+                                let _ = self.trips_build().await;
+                                let _ = self.events_build().await;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            let is_receipt = machine.is_some();
+            let (verd, why) = if let Some(mv) = machine {
+                mv
+            } else {
             // Read the current understanding to judge against (the tracked loop keeps it fresh).
             let key = format!("understanding:{}", subject.to_lowercase());
             let cur = self
@@ -5025,7 +5139,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
                 Err(_) => continue, // leave it open; try again next pass
             };
-            let (verd, why) = verdict;
+            verdict
+            };
             preds[i]["status"] = serde_json::json!(verd);
             preds[i]["resolved_ms"] = serde_json::json!(now);
             preds[i]["why"] = serde_json::json!(why);
@@ -5081,7 +5196,26 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 "miss" => "❌ MISSED",
                 _ => "🤷 unclear",
             };
-            out.push(format!("🎯 Predicted ({made_as_of}): {claim}\n   → {mark}. {why}"));
+            if is_receipt {
+                let (mut fr_hit, mut fr_all) = (0u32, 0u32);
+                for p in preds.iter() {
+                    if p.get("domain").and_then(|x| x.as_str()) == Some("family-rhythm") {
+                        match p.get("status").and_then(|x| x.as_str()).unwrap_or("open") {
+                            "hit" => {
+                                fr_hit += 1;
+                                fr_all += 1;
+                            }
+                            "miss" => fr_all += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                out.push(format!(
+                    "🧾🔮 RECEIPT — called it on {made_as_of}: {claim}\n   {mark} — {why}. Family-rhythm track record: {fr_hit}/{fr_all}."
+                ));
+            } else {
+                out.push(format!("🎯 Predicted ({made_as_of}): {claim}\n   → {mark}. {why}"));
+            }
         }
         if changed {
             self.save_predictions(&preds).await;
@@ -9619,11 +9753,42 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     Some(l) => format!(" 📍 {l}"),
                     None => String::new(),
                 };
+                // Stake the formal prediction the archive will grade (the receipt loop).
+                let conf = (0.55 + 0.08 * years.min(4) as f64).min(0.85);
+                self.life_predict(
+                    &format!("life:{label} {year}"),
+                    format!("The family will celebrate {label} around {} and the archive will show it", next.format("%B %d")),
+                    format!("event-ledger day matching '{word}' or a 25+ photo day inside the window"),
+                    next + chrono::Duration::days(10),
+                    conf,
+                    serde_json::json!({
+                        "kind": "event", "word": word,
+                        "from": (next - chrono::Duration::days(5)).format("%Y-%m-%d").to_string(),
+                        "to": (next + chrono::Duration::days(7)).format("%Y-%m-%d").to_string(),
+                    }),
+                )
+                .await;
                 self.set_pending_slot(Some(&format!("plans:{label}:{year}"))).await;
                 self.ledger_sent("anticipate", &format!("festival {label} ~{span}, asked plans")).await;
                 return Some(format!(
                     "🪔 {label} is coming — {span} this year ({days} days out). {hint}.{history}{local} What are the plans this year?"
                 ));
+            }
+            if let Some(city) = key.strip_prefix("visit ") {
+                let conf = (0.5 + 0.08 * years.min(4) as f64).min(0.8);
+                self.life_predict(
+                    &format!("life:visit {city} {}", next.format("%Y")),
+                    format!("The family will travel to {city} around {}", next.format("%B %d")),
+                    format!("a trip to {city} in the trip ledger overlapping the window"),
+                    next + chrono::Duration::days(28),
+                    conf,
+                    serde_json::json!({
+                        "kind": "trip", "dest": city,
+                        "from": (next - chrono::Duration::days(21)).format("%Y-%m-%d").to_string(),
+                        "to": (next + chrono::Duration::days(21)).format("%Y-%m-%d").to_string(),
+                    }),
+                )
+                .await;
             }
             let travel = last.contains("traveled") || key.starts_with("visit ");
             let suggestion = if travel {
@@ -12816,6 +12981,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "traditions" => self.traditions_list().await,
             "thennow" | "thenandnow" if !rest.trim().is_empty() => self.then_now_run(rest.trim(), None, None).await,
+            "share" if !rest.trim().is_empty() => {
+                let mut it = rest.trim().splitn(2, char::is_whitespace);
+                let member = it.next().unwrap_or("").to_string();
+                let note = it.next().unwrap_or("").trim().to_string();
+                self.share_with_member(&member, &note).await
+            }
             "whois" if rest.trim().to_lowercase().starts_with("baby ") || rest.trim().to_lowercase().starts_with("younger ") => {
                 let who = rest.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim().to_string();
                 if who.is_empty() { "whois baby <name>".to_string() } else { self.find_younger_self(&who).await }
@@ -14188,6 +14359,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
+            "share_with_member" | "share" => {
+                let member = { let a = s("member"); if a.is_empty() { s("person") } else { a } };
+                if member.is_empty() {
+                    "share_with_member needs a 'member'".to_string()
+                } else {
+                    self.share_with_member(&member, &s("note")).await
+                }
+            }
             "find_younger_self" | "younger_self" => {
                 let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
                 if who.is_empty() {
@@ -14771,6 +14950,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - family_book {year?}: the family's living biography compiled from the archive — chapters per year, open questions, exportable volume\n\
 - then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
 - find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
+- share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
@@ -15142,6 +15322,52 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
     }
 
     /// The DM chat id for a member slug (registry tg_id; Telegram private chat id == user id).
+    pub async fn note_last_photo(&self, jpeg: Vec<u8>, caption: &str) {
+        *self.last_sent_photo.lock().unwrap() = Some((jpeg, caption.to_string()));
+    }
+
+    /// Share the most recent photo with a household member and relay their take back.
+    pub async fn share_with_member(&self, member: &str, note: &str) -> String {
+        let want = member.trim().trim_start_matches('@').to_lowercase();
+        if want.is_empty() {
+            return "Share with whom? (a household member's name, slug, or relationship)".to_string();
+        }
+        let people = self.load_people().await;
+        let Some(p) = people.iter().find(|p| {
+            ["slug", "name", "relationship"].iter().any(|f| {
+                p.get(*f).and_then(|x| x.as_str()).map(|v| v.to_lowercase() == want).unwrap_or(false)
+            })
+        }) else {
+            return format!("I don't have \"{member}\" in the household registry yet — `person add <slug> <name> <tg_id> <relationship>` first.");
+        };
+        let slug = p.get("slug").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or(&slug).to_string();
+        let Some(chat) = self.chat_of_member(&slug).await else {
+            return format!("{name} is registered but I don't have their Telegram chat yet.");
+        };
+        let Some((jpeg, caption)) = self.last_sent_photo.lock().unwrap().clone() else {
+            return "I haven't sent you a photo recently — nothing to share yet.".to_string();
+        };
+        let primary = self
+            .memory
+            .profile_get("name")
+            .await
+            .ok()
+            .flatten()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "The family".to_string());
+        let extra = if note.trim().is_empty() { String::new() } else { format!("\n{}", note.trim()) };
+        let cap = format!("📨 {primary} shared this with you.{extra}\n{caption}\n\nReply here and I'll pass your take along.");
+        self.photo_queue.lock().unwrap().push((jpeg, cap, Some(chat)));
+        let take = serde_json::json!({
+            "slug": slug, "name": name,
+            "until": chrono::Utc::now().timestamp_millis() + 3 * 3_600_000,
+            "about": caption.chars().take(120).collect::<String>(),
+        });
+        let _ = self.memory.profile_set("member_take", &take.to_string()).await;
+        format!("📨 Sent to {name} with the note — I'll relay whatever they say back to you.")
+    }
+
     async fn chat_of_member(&self, owner: &str) -> Option<i64> {
         if let Some(rest) = owner.strip_prefix("guest:") {
             return rest.parse().ok();
@@ -15158,6 +15384,27 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
     /// memory, beliefs, plans, or surprises is fetched on this path, and the speaker context makes
     /// the identity explicit so the companion never confuses who it's talking to.
     async fn member_turn(&self, user_text: &str, id: &TurnIdentity) -> String {
+        // A shared-photo take we're waiting on? Relay the reply to the primary, then continue.
+        if let Some(t) = self
+            .memory
+            .profile_get("member_take")
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        {
+            if t["slug"].as_str() == Some(id.owner.as_str())
+                && chrono::Utc::now().timestamp_millis() < t["until"].as_i64().unwrap_or(0)
+            {
+                let _ = self.memory.profile_set("member_take", "").await;
+                let who = t["name"].as_str().unwrap_or("They").to_string();
+                self.notify_queue.lock().unwrap().push(format!(
+                    "💬 {who}'s take on what you shared: \"{}\"",
+                    user_text.trim().chars().take(300).collect::<String>()
+                ));
+            }
+        }
         let people = self.load_people().await;
         let (name, rel) = people
             .iter()

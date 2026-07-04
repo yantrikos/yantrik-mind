@@ -1496,6 +1496,45 @@ fn photo_followup_strong(text: &str) -> bool {
 /// Member-path photo intent, looser than photo_request: family members ask in event language
 /// ("get one from Aadrisha's last birthday") with no photo-noun at all. Verb + event/photo word →
 /// hand the WHOLE ask to retrieval (it stop-filters and resolves people itself).
+/// "Find/search my mail for X", "what's my booking/reservation/confirmation" → the keyword to
+/// full-mailbox-search. Returns the most distinctive term (proper noun preferred) so the IMAP
+/// TEXT search matches. None when it's not a mail-lookup ask.
+fn mail_lookup_intent(text: &str) -> Option<String> {
+    let l = text.trim().to_lowercase();
+    let mail_word = ["mail", "email", "inbox", "booking", "reservation", "confirmation", "receipt", "itinerary", "order"]
+        .iter()
+        .any(|w| l.contains(w));
+    let lookup_word = ["search", "find", "look up", "look for", "check", "read", "what", "when", "where", "which", "dates", "hotel", "details"]
+        .iter()
+        .any(|w| l.contains(w));
+    if !(mail_word && lookup_word) {
+        return None;
+    }
+    const STOP: [&str; 47] = [
+        "search", "find", "look", "check", "read", "what", "when", "where", "which", "tell", "show",
+        "give", "please", "can", "you", "could", "the", "my", "me", "for", "and", "about", "from",
+        "mail", "email", "inbox", "details", "detail", "info", "exact", "dates", "date", "hotel",
+        "trip", "our", "your", "with", "that", "this", "have", "get", "into", "any", "all", "was",
+        "are", "its",
+    ];
+    // Prefer capitalized (proper-noun) tokens from the original text; else longest non-stopword.
+    let mut proper: Vec<String> = text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| w.len() > 2 && w.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+        .filter(|w| !STOP.contains(&w.to_lowercase().as_str()))
+        .collect();
+    if let Some(p) = proper.drain(..).next() {
+        return Some(p);
+    }
+    let mut words: Vec<&str> = l
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 3 && !STOP.contains(w))
+        .collect();
+    words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+    words.first().map(|w| w.to_string())
+}
+
 fn member_photo_intent(text: &str) -> Option<String> {
     let l = text.trim().to_lowercase();
     let verb = ["get", "show", "send", "share", "find", "can you", "could you", "please"].iter().any(|v| l.contains(v));
@@ -16717,6 +16756,24 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // sources and ship the actual image to the home channel (queued; the poll loop sends it).
         if let Some(q) = photo_request(user_text) {
             let reply = self.photo_find_and_send(&q).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
+        // Deterministic mail-lookup: "find/search my mail for X", "what's my booking/reservation/
+        // confirmation" — the small model sometimes confabulates a search instead of running one, so
+        // route the intent straight to full-mailbox search and let the LLM summarize the real hits.
+        if let Some(mq) = mail_lookup_intent(user_text) {
+            let raw = self.mail_search_all(&mq).await;
+            let prompt = format!(
+                "The user asked: \"{user_text}\"\nI searched their full mailboxes and found:\n\"\"\"\n{}\n\"\"\"\nAnswer their question directly from these results (dates, hotel, amounts, sender). If the results don't contain the answer, say so plainly — do NOT invent details.",
+                raw.chars().take(3000).collect::<String>()
+            );
+            let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
+            let reply = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                Ok(r) => r.text.trim().to_string(),
+                Err(_) => raw,
+            };
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);

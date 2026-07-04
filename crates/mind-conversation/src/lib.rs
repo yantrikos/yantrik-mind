@@ -8572,7 +8572,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
                 (best.map(|(_, b, d, p)| (b, d, p)), rejected)
             }
-            let old = src.assets_of_people(&[pid.clone()], 1000, true).await;
+            let mut old = src.assets_of_people(&[pid.clone()], 1000, true).await;
+            let recent = src.assets_of_people(&[pid.clone()], 1000, false).await;
+            let have: std::collections::HashSet<String> = old.iter().map(|a| a.id.clone()).collect();
+            old.extend(recent.into_iter().filter(|a| !have.contains(&a.id)));
             let new = src.assets_of_people(&[pid.clone()], 40, false).await;
             // TEMPORAL IDENTITY CHAIN: a child's earliest face can't match their current centroid,
             // so recognition propagates backward — each verified year's faces update a rolling
@@ -8588,12 +8591,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let mut rolling: Option<Vec<f32>> = centroid.clone();
             if let (Some(_), Some(eng)) = (&rolling, mind_tools::FaceEngine::from_env()) {
                 for (_year, assets) in by_year.iter().rev() {
-                    // Spread up to 6 tries across the year, oldest-in-year preferred.
-                    let step = (assets.len() / 6).max(1);
+                    // Face-check up to 6 frames that PASS the cheap gates (quality first, so the
+                    // ML tries aren't wasted on blurry forwards), oldest-in-year preferred.
                     let mut year_hits: Vec<Vec<f32>> = Vec::new();
                     let mut year_best: Option<(Vec<u8>, String, String)> = None;
-                    for a in assets.iter().step_by(step).take(6) {
-                        if ml_budget == 0 {
+                    let mut tried = 0u32;
+                    for a in assets.iter() {
+                        if ml_budget == 0 || tried >= 6 {
                             break;
                         }
                         let Some(bytes) = src.image_bytes(a).await else { continue };
@@ -8601,6 +8605,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
                             continue;
                         }
+                        tried += 1;
                         ml_budget -= 1;
                         let Ok(faces) = eng.faces(bytes.clone()).await else { continue };
                         let cur = rolling.as_ref().unwrap();
@@ -8644,7 +8649,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             let Some((then_b, then_d, then_p)) = then_res else {
                 let why = if then_rej > 0 {
-                    format!("even walking my identity chain back through the years, I couldn't verify a single old frame as {display} ({then_rej} rejected) — the old tags need a `whois` session")
+                    format!("even walking my identity chain back through the years, I couldn't verify a single old frame as {display} ({then_rej} rejected). Most likely the library keeps their younger self as a SEPARATE unnamed person — a `whois` session on the baby photos would let me link the two")
                 } else {
                     format!("the old archive around {display} is mostly screenshots")
                 };

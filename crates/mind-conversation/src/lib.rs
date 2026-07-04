@@ -3645,10 +3645,12 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 {
                     return "No problem — the book keeps that page open.".to_string();
                 }
+                let teller = self.memory.profile_get("name").await.ok().flatten().filter(|n| !n.is_empty()).unwrap_or_else(|| "the family".to_string());
                 let mut lore = self.load_book_lore().await;
                 lore.push(serde_json::json!({
                     "year": year, "q": format!("about {}", if year == 0 { "the beginning".to_string() } else { year.to_string() }),
                     "a": t.chars().take(600).collect::<String>(),
+                    "by": teller,
                     "ts": chrono::Utc::now().timestamp_millis(),
                 }));
                 let _ = self.memory.profile_set("book_lore", &serde_json::Value::Array(lore.clone()).to_string()).await;
@@ -3667,30 +3669,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     })
                     .await;
                 self.ledger_correction("book", &format!("chapter gap {year}"), &format!("told: {}", t.chars().take(120).collect::<String>())).await;
-                // Rewrite the chapter with the new lore in hand.
-                let mut chapters = self.load_book_chapters().await;
-                let ev = chapters
-                    .iter()
-                    .find(|c| c["year"].as_i64() == Some(year))
-                    .map(|c| c["evidence"].clone())
-                    .unwrap_or_else(|| serde_json::json!({"photos": 0, "places": [], "trips": [], "events": [], "people": [], "unknown_events": 0}));
-                let lore_y: Vec<serde_json::Value> = lore.iter().filter(|l| l["year"].as_i64() == Some(year)).cloned().collect();
-                let prompt = Self::book_chapter_prompt(year, &ev, &lore_y);
-                let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-                if let Ok(resp) = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await {
-                    let txt = resp.text.trim().to_string();
-                    let (title, body) = match txt.split_once('\n') {
-                        Some((t2, b)) => (t2.trim().trim_start_matches("TITLE:").trim().to_string(), b.trim().to_string()),
-                        None => (key.clone(), txt),
-                    };
-                    chapters.retain(|c| c["year"].as_i64() != Some(year));
-                    chapters.push(serde_json::json!({
-                        "year": year, "title": title, "text": body, "stale": false,
-                        "drafted": chrono::Utc::now().timestamp_millis(), "evidence": ev,
-                    }));
-                    chapters.sort_by_key(|c| c["year"].as_i64().unwrap_or(0));
-                    let _ = self.memory.profile_set("book_chapters", &serde_json::Value::Array(chapters).to_string()).await;
-                }
+                let _ = self.book_redraft(year).await;
                 let ylabel = if year == 0 { "the prologue".to_string() } else { format!("chapter {year}") };
                 format!("📖 That's in the book — I've rewritten {ylabel} with it. `book {}` to read it.", if year == 0 { "origin".to_string() } else { year.to_string() })
             }
@@ -8550,14 +8529,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "(none yet)".to_string()
         } else {
             lore.iter()
-                .filter_map(|l| l["a"].as_str())
-                .map(|a| format!("- \"{a}\""))
+                .filter_map(|l| {
+                    let a = l["a"].as_str()?;
+                    let by = l["by"].as_str().unwrap_or("the family");
+                    Some(format!("- {by} said: \"{a}\""))
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
         let label = if year == 0 { "the years before the photographs".to_string() } else { year.to_string() };
         format!(
-            "You are writing one chapter of a family's private book. Chapter: {label}.\n\nEVIDENCE — the ONLY facts you may use (do not invent events, places, feelings, or people):\nPhotos taken: {}\nPlaces in the photos: {}\nTrips: {}\nNamed occasions: {}\nMost often in frame: {}\nIn the family's own words:\n{lore_block}\n\nWrite 130-210 words, warm and concrete, literary but honest. Refer to people by name. If the evidence is thin, write a short, honest chapter — say what little the archive holds rather than inventing. NEVER use bullet points.\nFirst line must be: TITLE: <3-6 word chapter title>\nThen a blank line, then the chapter text.",
+            "You are writing one chapter of a family's private book. Chapter: {label}.\n\nEVIDENCE — the ONLY facts you may use (do not invent events, places, feelings, or people):\nPhotos taken: {}\nPlaces in the photos: {}\nTrips: {}\nNamed occasions: {}\nMost often in frame: {}\nIn the family's own words:\n{lore_block}\n\nWrite 130-210 words, warm and concrete, literary but honest. HARD RULES: use ONLY names that appear in the evidence above — if no names appear, use no names at all; never invent people, relatives, speakers, or scenes; a quote belongs to exactly the person marked as its teller; do not reference outside world events (news, pandemics) unless they are in the evidence; do not write imagined or hypothetical scenes — write what is present, and write honestly about what is absent. If the evidence is thin, the chapter is short. NEVER use bullet points.\nFirst line must be: TITLE: <3-6 word chapter title>\nThen a blank line, then the chapter text.",
             ev["photos"].as_u64().unwrap_or(0),
             ev["places"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "(unknown)".into()),
             ev["trips"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("; ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "(none recorded)".into()),
@@ -8705,6 +8687,41 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             ));
         });
         "📖 Compiling the Family Book — reading the whole archive year by year. The table of contents lands here when it's done.".to_string()
+    }
+
+    /// Redraft one chapter from its stored evidence + all lore for that year.
+    pub async fn book_redraft(&self, year: i64) -> String {
+        let mut chapters = self.load_book_chapters().await;
+        let ev = chapters
+            .iter()
+            .find(|c| c["year"].as_i64() == Some(year))
+            .map(|c| c["evidence"].clone())
+            .unwrap_or_else(|| serde_json::json!({"photos": 0, "places": [], "trips": [], "events": [], "people": [], "unknown_events": 0}));
+        let lore_y: Vec<serde_json::Value> = self
+            .load_book_lore()
+            .await
+            .into_iter()
+            .filter(|l| l["year"].as_i64() == Some(year))
+            .collect();
+        let prompt = Self::book_chapter_prompt(year, &ev, &lore_y);
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+        let Ok(resp) = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await else {
+            return "Couldn't redraft the chapter right now.".to_string();
+        };
+        let txt = resp.text.trim().to_string();
+        let (title, body) = match txt.split_once('\n') {
+            Some((t, b)) => (t.trim().trim_start_matches("TITLE:").trim().to_string(), b.trim().to_string()),
+            None => (year.to_string(), txt),
+        };
+        chapters.retain(|c| c["year"].as_i64() != Some(year));
+        chapters.push(serde_json::json!({
+            "year": year, "title": title, "text": body, "stale": false,
+            "drafted": chrono::Utc::now().timestamp_millis(), "evidence": ev,
+        }));
+        chapters.sort_by_key(|c| c["year"].as_i64().unwrap_or(0));
+        let _ = self.memory.profile_set("book_chapters", &serde_json::Value::Array(chapters).to_string()).await;
+        let ylabel = if year == 0 { "the prologue".to_string() } else { format!("chapter {year}") };
+        format!("📖 Rewritten — {ylabel} now reflects everything told. `book {}` to read it.", if year == 0 { "origin".to_string() } else { year.to_string() })
     }
 
     pub async fn book_toc(&self) -> String {
@@ -12327,6 +12344,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "book" if rest.trim() == "build" => self.book_build().await,
             "book" if rest.trim() == "gaps" => self.book_gaps().await,
             "book" if rest.trim() == "export" => self.book_export().await,
+            "book" if rest.trim().starts_with("redraft") => {
+                let y = rest.trim().trim_start_matches("redraft").trim();
+                let y: i64 = if y.eq_ignore_ascii_case("origin") || y.eq_ignore_ascii_case("prologue") { 0 } else { y.parse().unwrap_or(-1) };
+                if y < 0 { "Usage: book redraft <year|origin>".to_string() } else { self.book_redraft(y).await }
+            }
             "book" if rest.trim() == "ask" => match self.book_ask_next().await {
                 Some((slot, q)) => {
                     self.book_ask_arm(&slot).await;

@@ -3632,6 +3632,42 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     None => "Got it — that gives me a real feel for you, and I'll put it to use.".to_string(),
                 }
             }
+            s if s.starts_with("mergeface:") => {
+                // mergeface:<display>:<target_pid>:<cand_pid> — confirm to unify a person's timeline.
+                let parts: Vec<String> = s.trim_start_matches("mergeface:").splitn(3, ':').map(String::from).collect();
+                let t = text.trim().to_lowercase();
+                if parts.len() != 3 {
+                    return "That merge slot looks malformed — ignoring it.".to_string();
+                }
+                let (display, target_pid, cand_pid) = (parts[0].clone(), parts[1].clone(), parts[2].clone());
+                if ["yes", "y", "yeah", "yep", "correct", "merge", "confirm", "do it"].iter().any(|w| t == *w || t.starts_with(w)) {
+                    let sources = mind_tools::PhotoSource::all_from_env();
+                    let Some(src) = sources.iter().find(|s| s.knows_people()) else {
+                        return "Photo library unreachable right now — merge not done.".to_string();
+                    };
+                    if src.merge_people(&target_pid, &[cand_pid]).await {
+                        let _ = self
+                            .memory
+                            .remember_as_belief(BeliefAssertion {
+                                statement: format!("{display}'s younger-self cluster was confirmed and merged into their person in the photo library — their timeline now spans the full archive"),
+                                polarity: 1.0,
+                                weight: 0.9,
+                                source_event: Some("younger-self-merge".into()),
+                                provenance: "told".into(),
+                            })
+                            .await;
+                        self.ledger_correction("photos", &format!("younger-self of {display}"), "confirmed + merged").await;
+                        format!("🕵️ Merged — {display}'s timeline now includes those years. Give the library a minute, then `thennow {display}` for the real then-and-now.")
+                    } else {
+                        "The merge call failed on the library side — nothing changed. I'll leave the evidence as is.".to_string()
+                    }
+                } else if ["no", "n", "nope", "not", "wrong", "skip"].iter().any(|w| t == *w || t.starts_with(w)) {
+                    self.ledger_resolve(true).await;
+                    "Understood — left unmerged. I'll keep the candidate in mind but won't act on it.".to_string()
+                } else {
+                    "Just yes or no on this one — is that photo the same person, younger?".to_string()
+                }
+            }
             s if s.starts_with("book:") => {
                 // book:<year>|book:origin — an answer for the family book. Store as lore, then
                 // REWRITE that chapter immediately so the answer visibly lands in the book.
@@ -8496,6 +8532,117 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         None
     }
 
+    /// ---------- THE YOUNGER-SELF FINDER ----------
+    /// Face clustering splits a baby from the child they become; the person's early years sit in
+    /// an unnamed cluster. Find it by evidence: family co-occurrence + timeline adjacency + size,
+    /// then show a sample and ask ONE question; a yes merges the person's timeline for good.
+
+    pub async fn find_younger_self(&self, who: &str) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((idx, pid, display)) = self.resolve_face(&sources, who).await else {
+            return format!("I don't know \"{who}\" yet — `whois` teaches me people.");
+        };
+        let guard = format!("youngerself:{}", display.to_lowercase());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return "Already searching for that younger self — results land here.".to_string();
+        }
+        let src_name = sources[idx].name().to_string();
+        let display2 = display.clone();
+        let family: Vec<String> = self
+            .load_people_profiles()
+            .await
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+            .filter(|n| n.to_lowercase() != display.to_lowercase())
+            .collect();
+        let nq = self.notify_queue.clone();
+        let pq = self.photo_queue.clone();
+        let studies = self.studies.clone();
+        let mem = self.memory.clone();
+        tokio::spawn(async move {
+            let display = display2;
+            let sources = mind_tools::PhotoSource::all_from_env();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            // Target's tagged timeline: first year seen (their cluster's own start).
+            let target_assets = src.assets_of_people(&[pid.clone()], 60, true).await;
+            let target_first: i32 = target_assets
+                .iter()
+                .filter_map(|a| a.date.chars().take(4).collect::<String>().parse::<i32>().ok())
+                .min()
+                .unwrap_or(2019);
+            // Candidates: big unnamed clusters.
+            let mut scored: Vec<(f64, String, u64, i32, i32, f64)> = Vec::new();
+            for p in src.list_people().await {
+                if !p.name.trim().is_empty() {
+                    continue;
+                }
+                let count = src.person_photo_count(&p.id).await.unwrap_or(0);
+                if count < 60 {
+                    continue;
+                }
+                let assets = src.assets_of_people(&[p.id.clone()], 300, true).await;
+                if assets.is_empty() {
+                    continue;
+                }
+                let years: Vec<i32> = assets
+                    .iter()
+                    .filter_map(|a| a.date.chars().take(4).collect::<String>().parse::<i32>().ok())
+                    .collect();
+                let (y0, y1) = (
+                    years.iter().min().copied().unwrap_or(0),
+                    years.iter().max().copied().unwrap_or(0),
+                );
+                // Must live mostly BEFORE the target's verified era (with 1y overlap tolerance).
+                if y0 == 0 || y0 > target_first {
+                    continue;
+                }
+                // Family co-occurrence over a small sample.
+                let step = (assets.len() / 6).max(1);
+                let mut with_family = 0u32;
+                let mut sampled = 0u32;
+                for a in assets.iter().step_by(step).take(6) {
+                    let (names, _) = src.people_in(&a.id).await;
+                    sampled += 1;
+                    if names.iter().any(|n| family.iter().any(|f| f.eq_ignore_ascii_case(n))) {
+                        with_family += 1;
+                    }
+                }
+                if sampled == 0 {
+                    continue;
+                }
+                let co = with_family as f64 / sampled as f64;
+                let adjacency = 1.0 / (1.0 + (target_first - y1).abs() as f64); // ends near target's start
+                let size_score = (count as f64).ln() / 10.0;
+                let score = co * 0.5 + adjacency * 0.3 + size_score * 0.2;
+                scored.push((score, p.id.clone(), count, y0, y1, co));
+            }
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let Some((score, cand_id, count, y0, y1, co)) = scored.into_iter().next().filter(|(sc, _, _, _, _, co)| *sc > 0.25 && *co >= 0.3) else {
+                nq.lock().unwrap().push(format!(
+                    "🕵️ I searched the unnamed clusters for {display}'s younger self and none scored high enough (need family co-occurrence + the right years). Their early photos may simply not be in the library."
+                ));
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            let Some(thumb) = src.face_thumbnail(&cand_id).await else {
+                studies.lock().unwrap().remove(&guard);
+                return;
+            };
+            let caption = format!(
+                "🕵️ I think I found {display}'s younger self: an unnamed person in the library with {count} photos spanning {y0}–{y1}, appearing with the family in {:.0}% of my samples (confidence {:.2}). Is this {display} as a baby? (yes to merge her timeline / no)",
+                co * 100.0,
+                score
+            );
+            let _ = mem.profile_set("pending_onboard", &format!("mergeface:{display}:{pid}:{cand_id}")).await;
+            pq.lock().unwrap().push((thumb, caption, None));
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!("🕵️ Hunting for {display}'s younger self among the unnamed clusters — evidence + one sample photo lands here.")
+    }
+
     /// ---------- THEN AND NOW ----------
     /// The face gallery makes time travel nearly free: the same person's earliest good frame and
     /// their latest, side by side, with the years between them. Fires on demand and by itself on
@@ -12599,6 +12746,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "traditions" => self.traditions_list().await,
             "thennow" | "thenandnow" if !rest.trim().is_empty() => self.then_now_run(rest.trim(), None, None).await,
+            "whois" if rest.trim().to_lowercase().starts_with("baby ") || rest.trim().to_lowercase().starts_with("younger ") => {
+                let who = rest.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim().to_string();
+                if who.is_empty() { "whois baby <name>".to_string() } else { self.find_younger_self(&who).await }
+            }
             "book" if rest.trim() == "build" => self.book_build().await,
             "book" if rest.trim() == "gaps" => self.book_gaps().await,
             "book" if rest.trim() == "export" => self.book_export().await,
@@ -13967,6 +14118,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
+            "find_younger_self" | "younger_self" => {
+                let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
+                if who.is_empty() {
+                    "find_younger_self needs a 'person'".to_string()
+                } else {
+                    self.find_younger_self(&who).await
+                }
+            }
             "then_and_now" | "thennow" => {
                 let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
                 if who.is_empty() {
@@ -14541,6 +14700,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - traditions {}: the family's per-festival traditions (photoshoots, feasts) — weather-dependent ones get forecast-planned day suggestions\n\
 - family_book {year?}: the family's living biography compiled from the archive — chapters per year, open questions, exportable volume\n\
 - then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
+- find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

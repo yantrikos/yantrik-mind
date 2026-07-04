@@ -8572,42 +8572,79 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
                 (best.map(|(_, b, d, p)| (b, d, p)), rejected)
             }
-            let old = src.assets_of_people(&[pid.clone()], 500, true).await;
+            let old = src.assets_of_people(&[pid.clone()], 1000, true).await;
             let new = src.assets_of_people(&[pid.clone()], 40, false).await;
-            // Walk oldest -> newest: the FIRST face-verified decent frame is the earliest
-            // truthful moment. Cheap gates first; ML budget bounded.
+            // TEMPORAL IDENTITY CHAIN: a child's earliest face can't match their current centroid,
+            // so recognition propagates backward — each verified year's faces update a rolling
+            // centroid that then verifies the next-older year. Mis-tags still fail; babyhood passes.
+            let mut by_year: std::collections::BTreeMap<String, Vec<&mind_tools::PhotoAsset>> = std::collections::BTreeMap::new();
+            for a in old.iter().filter(|a| !mind_tools::is_screenish(a) && a.date.len() >= 4) {
+                by_year.entry(a.date.chars().take(4).collect()).or_default().push(a);
+            }
             let mut then_res: Option<(Vec<u8>, String, String)> = None;
             let mut then_rej = 0u32;
-            let mut ml_budget = 60u32;
-            for a in old.iter().filter(|a| !mind_tools::is_screenish(a)) {
-                if ml_budget == 0 {
-                    break;
-                }
-                let Some(bytes) = src.image_bytes(a).await else { continue };
-                let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
-                if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
-                    continue;
-                }
-                if let Some(c) = &centroid {
-                    if let Some(eng) = mind_tools::FaceEngine::from_env() {
+            let mut ml_budget = 80u32;
+            let chain_threshold = (threshold - 0.07).max(0.36);
+            let mut rolling: Option<Vec<f32>> = centroid.clone();
+            if let (Some(_), Some(eng)) = (&rolling, mind_tools::FaceEngine::from_env()) {
+                for (_year, assets) in by_year.iter().rev() {
+                    // Spread up to 6 tries across the year, oldest-in-year preferred.
+                    let step = (assets.len() / 6).max(1);
+                    let mut year_hits: Vec<Vec<f32>> = Vec::new();
+                    let mut year_best: Option<(Vec<u8>, String, String)> = None;
+                    for a in assets.iter().step_by(step).take(6) {
+                        if ml_budget == 0 {
+                            break;
+                        }
+                        let Some(bytes) = src.image_bytes(a).await else { continue };
+                        let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
+                        if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
+                            continue;
+                        }
                         ml_budget -= 1;
-                        match eng.faces(bytes.clone()).await {
-                            Ok(faces) => {
-                                if !faces.iter().any(|f| mind_tools::cosine(&f.embedding, c) >= threshold) {
-                                    then_rej += 1;
-                                    continue;
+                        let Ok(faces) = eng.faces(bytes.clone()).await else { continue };
+                        let cur = rolling.as_ref().unwrap();
+                        let hit = faces
+                            .iter()
+                            .map(|f| (mind_tools::cosine(&f.embedding, cur), &f.embedding))
+                            .filter(|(sim, _)| *sim >= chain_threshold)
+                            .max_by(|(a2, _), (b2, _)| a2.partial_cmp(b2).unwrap_or(std::cmp::Ordering::Equal));
+                        match hit {
+                            Some((_, emb)) => {
+                                year_hits.push(emb.clone());
+                                // oldest verified frame in the year wins (we iterate oldest-first)
+                                if year_best.is_none() {
+                                    year_best = Some((bytes, a.date.clone(), a.place.clone()));
                                 }
                             }
-                            Err(_) => {}
+                            None => then_rej += 1,
                         }
                     }
+                    if let Some(best) = year_best {
+                        then_res = Some(best); // keeps being replaced by ever-older years
+                        // EMA-update the rolling centroid with this year's verified faces so the
+                        // next-older year is judged by a face closer to its own era.
+                        if let Some(cur) = rolling.as_mut() {
+                            for emb in &year_hits {
+                                for (c1, e1) in cur.iter_mut().zip(emb.iter()) {
+                                    *c1 = 0.7 * *c1 + 0.3 * e1;
+                                }
+                            }
+                        }
+                    }
+                    if ml_budget == 0 {
+                        break;
+                    }
                 }
-                then_res = Some((bytes, a.date.clone(), a.place.clone()));
-                break;
+            } else if let Some(a) = by_year.values().next().and_then(|v| v.first()) {
+                // No gallery/engine: fall back to the oldest decent frame on tag trust.
+                if let Some(bytes) = src.image_bytes(a).await {
+                    then_res = Some((bytes, a.date.clone(), a.place.clone()));
+                }
             }
             let Some((then_b, then_d, then_p)) = then_res else {
                 let why = if then_rej > 0 {
-                    format!("I checked {then_rej} of the oldest frames tagged as {display} with my own face gallery and none actually show them — that part of the library is mis-tagged (a `whois` cleanup would fix it)")
+                    format!("even walking my identity chain back through the years, I couldn't verify a single old frame as {display} ({then_rej} rejected) — the old tags need a `whois` session")
                 } else {
                     format!("the old archive around {display} is mostly screenshots")
                 };

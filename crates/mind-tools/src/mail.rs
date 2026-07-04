@@ -87,19 +87,40 @@ fn strip_block(s: &str, tag: &str) -> String {
 /// remove style/script CONTENT (not just tags), convert block tags to breaks, strip remaining
 /// tags, decode HTML entities, collapse whitespace — bounded to `max_chars`.
 fn clean_body(raw: &[u8], max_chars: usize) -> String {
+    use base64::Engine;
     let lossy = String::from_utf8_lossy(raw);
-    let mut kept: Vec<&str> = Vec::new();
+    // A base64-encoded MIME part arrives as a run of base64 lines; DECODE it (many receipts
+    // encode their HTML this way) rather than dropping it as noise.
+    let is_b64 = |s: &str| s.len() >= 40 && !s.contains(' ') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+    let mut kept: Vec<String> = Vec::new();
+    let mut b64buf = String::new();
+    let flush = |buf: &mut String, out: &mut Vec<String>| {
+        if buf.len() >= 40 {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(buf.as_bytes()) {
+                let txt = String::from_utf8_lossy(&bytes).into_owned();
+                // keep only if it decoded to mostly-printable text (an HTML/text part)
+                let printable = txt.chars().take(400).filter(|c| c.is_ascii_graphic() || c.is_whitespace()).count();
+                if printable * 100 >= txt.chars().take(400).count() * 80 {
+                    out.push(txt);
+                }
+            }
+        }
+        buf.clear();
+    };
     for line in lossy.lines() {
         let t = line.trim_end_matches('\r');
         let tt = t.trim();
-        if tt.len() > 100 && tt.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
-            continue; // base64 payload
+        if is_b64(tt) {
+            b64buf.push_str(tt);
+            continue;
         }
+        flush(&mut b64buf, &mut kept);
         if tt.starts_with("Content-") || tt.starts_with("--=") || tt.starts_with("MIME-") || tt.starts_with("charset=") {
             continue;
         }
-        kept.push(t);
+        kept.push(t.to_string());
     }
+    flush(&mut b64buf, &mut kept);
     let decoded = qp_decode(&kept.join("\n"));
     let mut body = decoded;
     for tag in ["style", "script", "head"] {

@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 
+pub mod onedrive;
+pub use onedrive::{DeviceCode, OdItem, OneDriveClient};
 pub mod mail;
 pub use mail::{
     render_inbox_digest, EmailMsg, ImapClient, MailClient, MailSender, ScriptedMailClient,

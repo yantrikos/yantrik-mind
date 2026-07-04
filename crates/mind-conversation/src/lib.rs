@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 90] = [
+    const CMDS: [&str; 92] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -353,6 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "limits", "capabilities", "frustrations", "gaps", "mailsearch", "findmail",
+        "onedrive", "od",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream",
@@ -11867,6 +11868,110 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         m
     }
 
+    /// ---------- ONEDRIVE (pre-Immich years) ----------
+    /// Read-only Microsoft Graph connector for the photo years that predate Immich (or never
+    /// synced). Device-code auth: one phone sign-in, the box refreshes forever. Files.Read only.
+
+    pub async fn onedrive_status(&self) -> String {
+        let Some(od) = mind_tools::OneDriveClient::from_env() else {
+            return "🗂 OneDrive isn't set up yet. One-time setup:\n1. Register a free Azure app at portal.azure.com → App registrations → New → Accounts in any org + personal Microsoft accounts → set it as a PUBLIC client (Authentication → Allow public client flows: Yes).\n2. Copy the Application (client) ID.\n3. Add YM_OD_CLIENT_ID=<that id> to the box env.\nThen `onedrive auth` and approve on your phone. Read-only (Files.Read) — I can never write or delete.".to_string();
+        };
+        if od.is_authed() {
+            "🗂 OneDrive: connected (read-only). `onedrive recent`, `onedrive find <YYYY-MM-DD..YYYY-MM-DD>`, `onedrive onthisday`.".to_string()
+        } else {
+            "🗂 OneDrive: app configured but not signed in yet — `onedrive auth` and approve on your phone.".to_string()
+        }
+    }
+
+    pub async fn onedrive_auth(&self) -> String {
+        let Some(od) = mind_tools::OneDriveClient::from_env() else {
+            return self.onedrive_status().await;
+        };
+        if od.is_authed() {
+            return "🗂 Already connected. `onedrive recent` to test it.".to_string();
+        }
+        let dc = match od.begin_auth().await {
+            Ok(d) if !d.user_code.is_empty() => d,
+            Ok(_) => return "Couldn't start OneDrive sign-in (empty device code) — check YM_OD_CLIENT_ID.".to_string(),
+            Err(e) => return format!("OneDrive sign-in failed to start: {e}"),
+        };
+        // Detached poll — approving on the phone takes a minute; never block the turn.
+        let nq = self.notify_queue.clone();
+        let now = local_now().timestamp();
+        let (code, interval, expires) = (dc.device_code.clone(), dc.interval, dc.expires_in);
+        tokio::spawn(async move {
+            let Some(od) = mind_tools::OneDriveClient::from_env() else { return };
+            match od.poll_auth(&code, interval, expires, now).await {
+                Ok(true) => nq.lock().unwrap().push("🗂 OneDrive connected ✅ — I can now reach your older photo years. Try `onedrive onthisday`.".to_string()),
+                _ => nq.lock().unwrap().push("🗂 OneDrive sign-in didn't complete (timed out or declined). `onedrive auth` to try again.".to_string()),
+            }
+        });
+        format!(
+            "🗂 To connect OneDrive (read-only):\n1. Open {}\n2. Enter code: {}\n3. Sign in and approve.\nI'll confirm here the moment it's done.",
+            dc.verification_uri, dc.user_code
+        )
+    }
+
+    /// Find OneDrive images in a date window: `find 2019-06-01..2019-06-30` or a single date.
+    pub async fn onedrive_find(&self, arg: &str) -> String {
+        let Some(od) = mind_tools::OneDriveClient::from_env() else {
+            return self.onedrive_status().await;
+        };
+        if !od.is_authed() {
+            return "🗂 Not connected yet — `onedrive auth` first.".to_string();
+        }
+        let (after, before) = match arg.split_once("..") {
+            Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
+            None => {
+                let d = arg.trim();
+                (d.to_string(), d.to_string())
+            }
+        };
+        if after.len() != 10 || before.len() != 10 {
+            return "Usage: onedrive find YYYY-MM-DD..YYYY-MM-DD (or a single YYYY-MM-DD)".to_string();
+        }
+        let now = local_now().timestamp();
+        match od.taken_between(&after, &before, 40, now).await {
+            Ok(items) if !items.is_empty() => {
+                let by_day: std::collections::BTreeMap<String, usize> = items.iter().fold(Default::default(), |mut m, it| {
+                    *m.entry(it.taken.clone()).or_insert(0) += 1;
+                    m
+                });
+                let days: Vec<String> = by_day.iter().rev().take(12).map(|(d, n)| format!("  {d}: {n} photo(s)")).collect();
+                format!("🗂 OneDrive — {} image(s) between {after} and {before}:\n{}", items.len(), days.join("\n"))
+            }
+            Ok(_) => format!("🗂 OneDrive holds no images between {after} and {before}."),
+            Err(e) => format!("🗂 OneDrive search failed: {e}"),
+        }
+    }
+
+    pub async fn onedrive_on_this_day(&self) -> String {
+        let Some(od) = mind_tools::OneDriveClient::from_env() else {
+            return self.onedrive_status().await;
+        };
+        if !od.is_authed() {
+            return "🗂 Not connected yet — `onedrive auth` first.".to_string();
+        }
+        let today = local_now().date_naive();
+        let mmdd = today.format("%m-%d").to_string();
+        let now = local_now().timestamp();
+        use chrono::Datelike;
+        let mut lines: Vec<String> = Vec::new();
+        for y in (2012..today.year()).rev().take(12) {
+            let day = format!("{y}-{mmdd}");
+            if let Ok(items) = od.taken_between(&day, &day, 5, now).await {
+                if !items.is_empty() {
+                    lines.push(format!("  {y}: {} photo(s)", items.len()));
+                }
+            }
+        }
+        if lines.is_empty() {
+            format!("🗂 OneDrive has nothing from {} in past years.", today.format("%B %d"))
+        } else {
+            format!("🗂 On {} in OneDrive's older years:\n{}", today.format("%B %d"), lines.join("\n"))
+        }
+    }
+
     /// ---------- THE PLUGIN REGISTRY (substrate-as-store) ----------
     /// Connector manifests live in the substrate: a KV for deterministic listing, and one
     /// semantic memory line each so `plugin search` is recall, not grep. Planned plugins are
@@ -13915,6 +14020,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
             "mailsearch" | "findmail" if !rest.trim().is_empty() => self.mail_search_all(rest.trim()).await,
+            "onedrive" | "od" => {
+                let a = rest.trim();
+                if a == "auth" || a == "connect" || a == "login" {
+                    self.onedrive_auth().await
+                } else if a == "onthisday" || a == "on-this-day" {
+                    self.onedrive_on_this_day().await
+                } else if let Some(q) = a.strip_prefix("find") {
+                    self.onedrive_find(q.trim()).await
+                } else if a == "recent" {
+                    self.onedrive_find(&format!("{}..{}", (local_now().date_naive() - chrono::Duration::days(60)).format("%Y-%m-%d"), local_now().date_naive().format("%Y-%m-%d"))).await
+                } else {
+                    self.onedrive_status().await
+                }
+            }
             "limits" | "capabilities" | "frustrations" | "gaps" if rest.trim().starts_with("clear") => {
                 let needle = rest.trim().trim_start_matches("clear").trim().to_lowercase();
                 if needle.len() < 3 {
@@ -15356,6 +15475,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "traditions" | "tradition" => self.traditions_list().await,
             "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
             "self_limits" | "limits" | "capabilities" => self.limits_report().await,
+            "onedrive" => {
+                let a = s("action");
+                match a.as_str() {
+                    "auth" | "connect" => self.onedrive_auth().await,
+                    "onthisday" => self.onedrive_on_this_day().await,
+                    "find" => self.onedrive_find(&s("range")).await,
+                    _ => self.onedrive_status().await,
+                }
+            }
             "mail_search" | "mailsearch" | "search_mail" => {
                 let q = { let a = s("query"); if a.is_empty() { s("q") } else { a } };
                 if q.is_empty() {
@@ -15982,6 +16110,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
 - plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all\n\
 - mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders. Results ARE the answer — never fetch links or sign-in pages from email bodies\n\
+- onedrive {action}: read the family's OLDER photo years from OneDrive (pre-Immich) — status/auth/find <date-range>/onthisday. Read-only\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

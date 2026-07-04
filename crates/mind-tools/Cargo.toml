@@ -13,6 +13,7 @@ anyhow = { workspace = true }
 # `process` for the agentic coder + worker pool (spawns ssh/claude); `io-util` to pipe code into
 # a worker's stdin (remote sandbox); `rt` for JoinSet (parallel worker map).
 tokio = { workspace = true, features = ["process", "io-util", "rt"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 ureq = { version = "2", features = ["json"] }
 html2text = "0.12"

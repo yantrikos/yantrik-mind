@@ -50,8 +50,12 @@ fn qp_decode(s: &str) -> String {
                 continue;
             }
             if i + 2 < raw.len() {
-                if let Ok(h) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    bytes.push(h);
+                // Decode from BYTES, never string-slice — `=` before a multibyte UTF-8 char would
+                // land `&s[i+1..i+3]` off a char boundary and panic (crashing the whole turn).
+                let hi = (raw[i + 1] as char).to_digit(16);
+                let lo = (raw[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    bytes.push((h * 16 + l) as u8);
                     i += 3;
                     continue;
                 }

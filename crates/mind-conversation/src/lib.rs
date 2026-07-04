@@ -1428,12 +1428,24 @@ fn enhancement_mode(text: &str) -> Option<&'static str> {
 }
 
 /// Follow-up about photos just shown ("that one", "the third one", "which one has the cake").
+/// Bare demonstratives ("that's the one") are everyday speech — they only count as photo talk
+/// while a photo session is actually in view; explicit photo nouns count anytime.
 fn photo_followup(text: &str) -> bool {
     let l = text.to_lowercase();
     const REFS: [&str; 16] = [
         "that photo", "that pic", "this photo", "this pic", "that one", "this one", "the one",
         "which one", "first one", "second one", "third one", "fourth one", "last one",
         "these photos", "those photos", "the cake one",
+    ];
+    REFS.iter().any(|r| l.contains(r))
+}
+
+/// Explicit photo-noun follow-up — safe to intercept even with nothing in view.
+fn photo_followup_strong(text: &str) -> bool {
+    let l = text.to_lowercase();
+    const REFS: [&str; 8] = [
+        "that photo", "that pic", "this photo", "this pic", "these photos", "those photos",
+        "the photo", "the pic",
     ];
     REFS.iter().any(|r| l.contains(r))
 }
@@ -7932,6 +7944,16 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// Resolve a follow-up against the photos currently "in view" (surfaced within 2h):
     /// ordinals pick by position, descriptors are vision-matched, and visual QUESTIONS are
     /// answered by looking at the actual photo. Honest when nothing is in view or nothing matches.
+    /// Is a photo working set currently in view (non-empty, < 2h old)?
+    pub fn photo_session_active(&self) -> bool {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.photo_session
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| now - e["ts"].as_i64().unwrap_or(0) < 2 * 3_600_000)
+    }
+
     pub async fn photo_followup_turn(&self, text: &str, target: Option<i64>) -> String {
         let now = chrono::Utc::now().timestamp_millis();
         let fresh: Vec<serde_json::Value> = {
@@ -16026,7 +16048,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         if let Some(req) = creative_request(user_text) {
             return self.photo_create_for(&req, member_chat, Some(&name)).await;
         }
-        if photo_followup(user_text) {
+        if photo_followup(user_text) && (self.photo_session_active() || photo_followup_strong(user_text)) {
             return self.photo_followup_turn(user_text, member_chat).await;
         }
         if let Some(q) = photo_request(user_text) {
@@ -16131,7 +16153,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         }
         // Follow-ups about photos just shown ("the third one", "is she smiling?") resolve against
         // the session working set — checked BEFORE fresh retrieval so the thread isn't lost.
-        if photo_followup(user_text) {
+        if photo_followup(user_text) && (self.photo_session_active() || photo_followup_strong(user_text)) {
             let reply = self.photo_followup_turn(user_text, None).await;
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;

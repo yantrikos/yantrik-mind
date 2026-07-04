@@ -139,23 +139,28 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
     for tag in ["style", "script", "head"] {
         body = strip_block(&body, tag);
     }
-    // Block tags → breaks so words don't run together; other tags → dropped.
-    let low = body.to_lowercase();
+    // Block tags → breaks so words don't run together; other tags → dropped. Iterate by CHARS
+    // (char_indices) and slice only at recorded char boundaries — the body may hold multibyte /
+    // replacement chars, so byte-indexing a lowercased copy would panic.
     let breakers = ["</p>", "<br", "</tr>", "</div>", "</td>", "</li>", "</h1>", "</h2>", "</h3>"];
+    let chars: Vec<(usize, char)> = body.char_indices().collect();
     let mut spaced = String::with_capacity(body.len());
-    let mut i = 0;
-    while i < body.len() {
-        if body.as_bytes()[i] == b'<' {
-            let hit = breakers.iter().any(|br| low[i..].starts_with(br));
-            spaced.push(if hit { '\n' } else { ' ' });
-            match body[i..].find('>') {
-                Some(rel) => i += rel + 1,
-                None => break,
+    let mut k = 0;
+    while k < chars.len() {
+        let (bi, c) = chars[k];
+        if c == '<' {
+            let mut end = k;
+            while end < chars.len() && chars[end].1 != '>' {
+                end += 1;
             }
+            let tag_end = if end < chars.len() { chars[end].0 + 1 } else { body.len() };
+            let tag_low = body[bi..tag_end].to_lowercase();
+            let is_break = breakers.iter().any(|br| tag_low.starts_with(br));
+            spaced.push(if is_break { '\n' } else { ' ' });
+            k = end + 1;
         } else {
-            let c = body[i..].chars().next().unwrap_or(' ');
             spaced.push(c);
-            i += c.len_utf8();
+            k += 1;
         }
     }
     let mut text = spaced

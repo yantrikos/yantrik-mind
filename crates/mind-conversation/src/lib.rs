@@ -11891,13 +11891,19 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 facts.push_str(&format!("MEASURED RELIABILITY (worst first): {}\n", lines.join(" · ")));
             }
         }
-        // The engine's open tensions — the literal frustration store.
-        if let Ok(tens) = self.memory.open_tensions(6).await {
-            if !tens.is_empty() {
-                let lines: Vec<String> = tens
-                    .iter()
-                    .map(|t| format!("[{:.2}] {} ({})", t.pressure, t.about.chars().take(90).collect::<String>(), t.kind.as_str()))
-                    .collect();
+        // The engine's open tensions — the literal frustration store. Stale ones (>14d) get
+        // DISCHARGED here rather than displayed: a frustration that outlived its cause is noise.
+        if let Ok(tens) = self.memory.open_tensions(10).await {
+            let cutoff = now - 14 * 86_400_000;
+            let mut lines: Vec<String> = Vec::new();
+            for t in &tens {
+                if (t.created_ms as i64) < cutoff {
+                    let _ = self.memory.discharge_tension(&t.id).await;
+                    continue;
+                }
+                lines.push(format!("[{:.2}] {} ({})", t.pressure, t.about.chars().take(90).collect::<String>(), t.kind.as_str()));
+            }
+            if !lines.is_empty() {
                 facts.push_str(&format!("OPEN TENSIONS:\n{}\n", lines.join("\n")));
             }
         }
@@ -13716,6 +13722,25 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
+            "limits" | "capabilities" | "frustrations" | "gaps" if rest.trim().starts_with("clear") => {
+                let needle = rest.trim().trim_start_matches("clear").trim().to_lowercase();
+                if needle.len() < 3 {
+                    "limits clear <words from the tension>".to_string()
+                } else {
+                    match self.memory.open_tensions(20).await {
+                        Ok(tens) => {
+                            let mut n = 0;
+                            for t in tens {
+                                if t.about.to_lowercase().contains(&needle) && self.memory.discharge_tension(&t.id).await.unwrap_or(false) {
+                                    n += 1;
+                                }
+                            }
+                            format!("Discharged {n} tension(s) matching \"{needle}\".")
+                        }
+                        Err(e) => format!("(tensions unavailable: {e})"),
+                    }
+                }
+            }
             "limits" | "capabilities" | "frustrations" | "gaps" => self.limits_report().await,
             "running" | "status" if rest.trim().is_empty() => self.running_studies(),
             "trips" if rest.trim() == "build" => self.trips_build().await,

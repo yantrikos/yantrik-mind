@@ -1127,6 +1127,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // The nightly dream: one verified cross-domain connection with breakfast — or silence.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && conv.dream_due().await
+                && conv.proactive_receptivity_ok().await
+            {
+                if let Some(msg) = conv.dream_run().await {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                        conv.note_proactive_sent().await;
+                        eprintln!("[dream] morning connection sent");
+                    }
+                }
+            }
+        }
+
         // Book interview: ONE question per period about a chapter the archive can't explain;
         // the answer becomes lore and rewrites its chapter.
         {

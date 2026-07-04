@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 83] = [
+    const CMDS: [&str; 84] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -354,6 +354,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
+        "dream",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -8875,6 +8876,204 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         None
     }
 
+    /// ---------- THE NIGHTLY DREAM ----------
+    /// One grounded cross-domain connection per morning — or silence. The digest carries stable
+    /// evidence ids; an undelivered citation is a lie, so citations are verified string-level
+    /// before anything reaches the family.
+
+    /// Deterministic evidence digest: (id, line) pairs across domains.
+    async fn dream_digest(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let today = local_now().date_naive();
+        // H: the projected horizon (next 90d)
+        for (n, (_, label, next, days, years, last)) in self.life_patterns().await.into_iter().enumerate().take(6) {
+            if days > 90 {
+                continue;
+            }
+            out.push((format!("H{}", n + 1), format!("{label} expected ~{} ({days}d away; {years} yrs evidence; last: {last})", next.format("%b %d"))));
+        }
+        // F: traditions
+        for (n, t) in self.load_traditions().await.into_iter().enumerate().take(4) {
+            if let (Some(f0), Some(tr)) = (t["festival"].as_str(), t["tradition"].as_str()) {
+                out.push((format!("F{}", n + 1), format!("tradition around {f0}: {tr}")));
+            }
+        }
+        // S: style directions
+        let mut sn = 0usize;
+        for p in self.load_people_profiles().await.iter().take(6) {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            if let Some(kv) = self
+                .memory
+                .profile_get(&format!("style_timeline:{}", name.to_lowercase()))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            {
+                if let Some(dir) = kv["trend"].as_str().and_then(|t| t.lines().find(|l| l.trim_start().starts_with("DIRECTION:"))) {
+                    sn += 1;
+                    out.push((format!("S{sn}"), format!("{name}'s style {}", dir.trim())));
+                }
+            }
+        }
+        // T: recent trips
+        let mut trips = self.load_trips().await;
+        trips.sort_by(|a, b| b["start"].as_str().unwrap_or("").cmp(a["start"].as_str().unwrap_or("")));
+        for (n, t) in trips.iter().enumerate().take(5) {
+            if let (Some(d), Some(st)) = (t["dest"].as_str(), t["start"].as_str()) {
+                out.push((format!("T{}", n + 1), format!("trip: {d}, {st} ({} days, {} photos, with {})", t["days"], t["photos"], t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("/")).unwrap_or_default())));
+            }
+        }
+        // E: latest labeled events
+        let mut events: Vec<serde_json::Value> = self
+            .load_events()
+            .await
+            .into_iter()
+            .filter(|e| !e["label"].as_str().unwrap_or("").is_empty())
+            .collect();
+        events.sort_by(|a, b| b["date"].as_str().unwrap_or("").cmp(a["date"].as_str().unwrap_or("")));
+        for (n, e) in events.iter().enumerate().take(8) {
+            out.push((format!("E{}", n + 1), format!("{}: {} ({} photos)", e["date"].as_str().unwrap_or(""), e["label"].as_str().unwrap_or(""), e["photos"])));
+        }
+        // L: the family's own words
+        for (n, l) in self.load_book_lore().await.iter().enumerate().take(5) {
+            if let Some(a) = l["a"].as_str() {
+                let by = l["by"].as_str().unwrap_or("family");
+                out.push((format!("L{}", n + 1), format!("{by} said: \"{}\"", a.chars().take(140).collect::<String>())));
+            }
+        }
+        // P: people dates within 45 days
+        let mut pn = 0usize;
+        for p in self.load_people_profiles().await {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let (Some(mmdd), Some(label)) = (d.get("mmdd").and_then(|x| x.as_str()), d.get("label").and_then(|x| x.as_str())) else {
+                    continue;
+                };
+                use chrono::Datelike;
+                let Ok(md) = chrono::NaiveDate::parse_from_str(&format!("{}-{mmdd}", today.year()), "%Y-%m-%d") else { continue };
+                let md = if md < today { md.with_year(today.year() + 1).unwrap_or(md) } else { md };
+                let days = (md - today).num_days();
+                if (0..=45).contains(&days) {
+                    pn += 1;
+                    out.push((format!("P{pn}"), format!("{name}'s {label} in {days}d ({})", md.format("%b %d"))));
+                }
+            }
+        }
+        // G: taste signatures (top outfit/occasion per studied person)
+        let mut gn = 0usize;
+        for p in self.load_people_profiles().await.iter().take(6) {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            if let Some(acc) = self
+                .memory
+                .profile_get(&format!("tastes:{}", name.to_lowercase()))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            {
+                let top_of = |k: &str| -> Option<(String, u64)> {
+                    acc["counts"][k]
+                        .as_object()
+                        .and_then(|m| m.iter().max_by_key(|(_, v)| v.as_u64().unwrap_or(0)).map(|(s, v)| (s.clone(), v.as_u64().unwrap_or(0))))
+                };
+                if let (Some((o, oc)), total) = (top_of("outfit"), acc["total"].as_u64().unwrap_or(0)) {
+                    if total >= 100 {
+                        gn += 1;
+                        out.push((format!("G{gn}"), format!("{name}'s most-worn: {o} ({oc} of {total} studied looks)")));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// One morning dream: mine the digest for a single cross-domain connection, verify its
+    /// citations, dedup vs prior dreams, deliver — or stay silent.
+    pub async fn dream_run(&self) -> Option<String> {
+        let _ = self
+            .memory
+            .profile_set("dream_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .await;
+        let digest = self.dream_digest().await;
+        if digest.len() < 6 {
+            return None; // not enough substrate to dream on
+        }
+        let listing = digest.iter().map(|(id, l)| format!("[{id}] {l}")).collect::<Vec<_>>().join("\n");
+        let seen: Vec<String> = self
+            .memory
+            .profile_get("dreams_seen")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let avoid = if seen.is_empty() { String::new() } else { format!("\nALREADY TOLD (never repeat these themes): {}", seen.join("; ")) };
+        let prompt = format!(
+            "You know this family through evidence. Find ONE genuinely non-obvious CONNECTION between items from DIFFERENT domains below (H=upcoming, F=traditions, S=style direction, T=trips, E=events, L=their own words, P=dates ahead, G=taste). Surprise them with something true.\n\n{listing}\n{avoid}\n\nOutput ONLY JSON: {{\"connection\":\"<2-3 warm concrete sentences>\",\"cites\":[\"<id>\",\"<id>\"],\"suggestion\":\"<one short optional next step, or empty>\",\"theme\":\"<3-5 word slug>\"}}\nHARD RULES: every claim must be derivable from the cited items alone; cite 2-4 ids from at least 2 different letter-domains; no invented people, dates, or reasons; if nothing is genuinely interesting, output {{\"connection\":\"\"}}."
+        );
+        let cfg = GenerationConfig { max_tokens: 320, ..GenerationConfig::default() };
+        let resp = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
+        let txt = resp.text;
+        let j: serde_json::Value = txt
+            .find('{')
+            .and_then(|a| txt.rfind('}').map(|b| txt[a..=b].to_string()))
+            .and_then(|t| serde_json::from_str(&t).ok())?;
+        let connection = j["connection"].as_str().unwrap_or("").trim().to_string();
+        if connection.len() < 40 {
+            return None;
+        }
+        // Citation verification: ids must exist; >=2 distinct letter-domains.
+        let ids: std::collections::HashSet<&str> = digest.iter().map(|(id, _)| id.as_str()).collect();
+        let cites: Vec<String> = j["cites"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        if cites.len() < 2 || !cites.iter().all(|c| ids.contains(c.as_str())) {
+            return None;
+        }
+        let domains: std::collections::HashSet<char> = cites.iter().filter_map(|c| c.chars().next()).collect();
+        if domains.len() < 2 {
+            return None;
+        }
+        // Novelty: reject heavy word-overlap with any prior theme.
+        let theme = j["theme"].as_str().unwrap_or("").trim().to_lowercase();
+        if theme.is_empty() {
+            return None;
+        }
+        let tw: std::collections::HashSet<String> = theme.split_whitespace().map(String::from).collect();
+        for old in &seen {
+            let ow: std::collections::HashSet<String> = old.to_lowercase().split_whitespace().map(String::from).collect();
+            let inter = tw.intersection(&ow).count();
+            if !ow.is_empty() && inter * 10 >= ow.len().min(tw.len()) * 6 {
+                return None; // dreamt this before
+            }
+        }
+        let mut seen2 = seen;
+        seen2.push(theme);
+        if seen2.len() > 60 {
+            let cut = seen2.len() - 60;
+            seen2.drain(..cut);
+        }
+        let _ = self.memory.profile_set("dreams_seen", &serde_json::to_string(&seen2).unwrap_or_default()).await;
+        self.ledger_sent("dream", "morning connection delivered").await;
+        let suggestion = j["suggestion"].as_str().unwrap_or("").trim().to_string();
+        Some(if suggestion.is_empty() {
+            format!("💭 {connection}")
+        } else {
+            format!("💭 {connection}\n→ {suggestion}")
+        })
+    }
+
+    /// Morning window, once a day, ledger-paced.
+    pub async fn dream_due(&self) -> bool {
+        use chrono::Timelike;
+        let h = local_now().hour();
+        if !(7..=11).contains(&h) {
+            return false;
+        }
+        let period_ms = (20.0 * 3_600_000.0 * self.domain_pace("dream").await) as i64;
+        let last: i64 = self.memory.profile_get("dream_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
     /// ---------- THE FAMILY FRAME ----------
     /// Ambient presence: one photo a day on a wall tablet, chosen with intent — anniversaries
     /// first, then this-day-in-history, then a slow walk through the archive. Silent by design.
@@ -13343,6 +13542,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "traditions" => self.traditions_list().await,
             "thennow" | "thenandnow" if !rest.trim().is_empty() => self.then_now_run(rest.trim(), None, None).await,
+            "dream" => match self.dream_run().await {
+                Some(m) => {
+                    self.notify_queue.lock().unwrap().push(m.clone());
+                    format!("(sent to chat)\n{m}")
+                }
+                None => "💭 Nothing earned a dream right now — the bar is two verified citations across domains.".to_string(),
+            },
             "frame" => match self.frame_today().await {
                 Some((_, cap)) => format!(
                     "🖼 Today's frame: {cap}\nWall tablet URL: http://<box-ip>:{}/frame/<YM_FRAME_TOKEN> (set YM_FRAME_TOKEN in the env to enable the LAN listener).",
@@ -14733,6 +14939,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
+            "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
             "family_frame" | "frame" => match self.frame_today().await {
                 Some((_, cap)) => format!("Today's frame: {cap}"),
                 None => "No frame pick available right now.".to_string(),
@@ -15339,6 +15546,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back\n\
 - style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
 - family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
+- nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

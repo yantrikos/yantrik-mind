@@ -3663,7 +3663,51 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     }
                 } else if ["no", "n", "nope", "not", "wrong", "skip"].iter().any(|w| t == *w || t.starts_with(w)) {
                     self.ledger_resolve(true).await;
-                    "Understood — left unmerged. I'll keep the candidate in mind but won't act on it.".to_string()
+                    // Remember the rejection forever; offer the next-best candidate if one waits.
+                    let mut rej: Vec<String> = self
+                        .memory
+                        .profile_get("youngerself_no")
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    if !rej.contains(&cand_pid) {
+                        rej.push(cand_pid.clone());
+                    }
+                    let _ = self.memory.profile_set("youngerself_no", &serde_json::to_string(&rej).unwrap_or_default()).await;
+                    let key = format!("youngerself_cands_{}", display.to_lowercase());
+                    let mut cands: Vec<serde_json::Value> = self
+                        .memory
+                        .profile_get(&key)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    if let Some(next) = if cands.is_empty() { None } else { Some(cands.remove(0)) } {
+                        let _ = self.memory.profile_set(&key, &serde_json::Value::Array(cands).to_string()).await;
+                        let sources = mind_tools::PhotoSource::all_from_env();
+                        if let Some(src) = sources.iter().find(|s| s.knows_people()) {
+                            if let (Some(nid), Some(thumb)) = (
+                                next["id"].as_str().map(String::from),
+                                match next["id"].as_str() {
+                                    Some(nid) => src.face_thumbnail(nid).await,
+                                    None => None,
+                                },
+                            ) {
+                                let cap = format!(
+                                    "🕵️ Understood, not them. Next candidate for {display}'s younger self: {} photos, {}–{}, family co-occurrence {:.0}%. Same question — is this {display}? (yes/no)",
+                                    next["count"], next["y0"], next["y1"],
+                                    next["co"].as_f64().unwrap_or(0.0) * 100.0
+                                );
+                                self.photo_queue.lock().unwrap().push((thumb, cap, None));
+                                self.set_pending_slot(Some(&format!("mergeface:{display}:{target_pid}:{nid}"))).await;
+                                return "🕵️ Noted as not them — sending the next candidate now.".to_string();
+                            }
+                        }
+                    }
+                    "Understood — left unmerged, and I'll remember that cluster isn't them.".to_string()
                 } else {
                     "Just yes or no on this one — is that photo the same person, younger?".to_string()
                 }
@@ -8566,17 +8610,32 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 studies.lock().unwrap().remove(&guard);
                 return;
             };
-            // Target's tagged timeline: first year seen (their cluster's own start).
-            let target_assets = src.assets_of_people(&[pid.clone()], 60, true).await;
-            let target_first: i32 = target_assets
+            // Target's era anchor: the first year their cluster is DENSE (a handful of mis-tags
+            // must not drag the anchor back years).
+            let target_assets = src.assets_of_people(&[pid.clone()], 300, true).await;
+            let mut year_counts: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
+            for a in &target_assets {
+                if let Ok(y) = a.date.chars().take(4).collect::<String>().parse::<i32>() {
+                    *year_counts.entry(y).or_insert(0) += 1;
+                }
+            }
+            let target_first: i32 = year_counts
                 .iter()
-                .filter_map(|a| a.date.chars().take(4).collect::<String>().parse::<i32>().ok())
-                .min()
+                .find(|(_, n)| **n >= 15)
+                .map(|(y, _)| *y)
+                .or_else(|| year_counts.keys().next().copied())
                 .unwrap_or(2019);
+            let rejected: Vec<String> = mem
+                .profile_get("youngerself_no")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
             // Candidates: big unnamed clusters.
             let mut scored: Vec<(f64, String, u64, i32, i32, f64)> = Vec::new();
             for p in src.list_people().await {
-                if !p.name.trim().is_empty() {
+                if !p.name.trim().is_empty() || rejected.contains(&p.id) {
                     continue;
                 }
                 let count = src.person_photo_count(&p.id).await.unwrap_or(0);
@@ -8620,7 +8679,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 scored.push((score, p.id.clone(), count, y0, y1, co));
             }
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let Some((score, cand_id, count, y0, y1, co)) = scored.into_iter().next().filter(|(sc, _, _, _, _, co)| *sc > 0.25 && *co >= 0.3) else {
+            scored.retain(|(sc, _, _, _, _, co)| *sc > 0.25 && *co >= 0.3);
+            // Runner-ups wait in a queue so a "no" can offer the next one immediately.
+            let runner_ups: Vec<serde_json::Value> = scored
+                .iter()
+                .skip(1)
+                .take(3)
+                .map(|(sc, id, n, y0, y1, co)| serde_json::json!({"id": id, "score": sc, "count": n, "y0": y0, "y1": y1, "co": co}))
+                .collect();
+            let _ = mem
+                .profile_set(&format!("youngerself_cands_{}", display.to_lowercase()), &serde_json::Value::Array(runner_ups).to_string())
+                .await;
+            let Some((score, cand_id, count, y0, y1, co)) = scored.into_iter().next() else {
                 nq.lock().unwrap().push(format!(
                     "🕵️ I searched the unnamed clusters for {display}'s younger self and none scored high enough (need family co-occurrence + the right years). Their early photos may simply not be in the library."
                 ));

@@ -1039,6 +1039,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Book interview: ONE question per period about a chapter the archive can't explain;
+        // the answer becomes lore and rewrites its chapter.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && conv.book_ask_due().await
+                && conv.proactive_receptivity_ok().await
+            {
+                if let Some((slot, q)) = conv.book_ask_next().await {
+                    if tg_send_mirrored(&conv, &api, chat, &q).await.is_ok() {
+                        conv.book_ask_arm(&slot).await;
+                        eprintln!("[book] chapter-gap question sent");
+                    }
+                }
+            }
+        }
+
         // Tradition prep: weather-planned best days for the family's festival traditions
         // (the Mahalaya photoshoot) once the festival is inside forecast range.
         {

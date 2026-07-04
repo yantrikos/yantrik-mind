@@ -8572,12 +8572,42 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
                 (best.map(|(_, b, d, p)| (b, d, p)), rejected)
             }
-            let old = src.assets_of_people(&[pid.clone()], 60, true).await;
+            let old = src.assets_of_people(&[pid.clone()], 500, true).await;
             let new = src.assets_of_people(&[pid.clone()], 40, false).await;
-            let (then_res, then_rej) = best_frame(&src, &old, &centroid, threshold).await;
+            // Walk oldest -> newest: the FIRST face-verified decent frame is the earliest
+            // truthful moment. Cheap gates first; ML budget bounded.
+            let mut then_res: Option<(Vec<u8>, String, String)> = None;
+            let mut then_rej = 0u32;
+            let mut ml_budget = 60u32;
+            for a in old.iter().filter(|a| !mind_tools::is_screenish(a)) {
+                if ml_budget == 0 {
+                    break;
+                }
+                let Some(bytes) = src.image_bytes(a).await else { continue };
+                let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
+                if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
+                    continue;
+                }
+                if let Some(c) = &centroid {
+                    if let Some(eng) = mind_tools::FaceEngine::from_env() {
+                        ml_budget -= 1;
+                        match eng.faces(bytes.clone()).await {
+                            Ok(faces) => {
+                                if !faces.iter().any(|f| mind_tools::cosine(&f.embedding, c) >= threshold) {
+                                    then_rej += 1;
+                                    continue;
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                then_res = Some((bytes, a.date.clone(), a.place.clone()));
+                break;
+            }
             let Some((then_b, then_d, then_p)) = then_res else {
                 let why = if then_rej > 0 {
-                    format!("the {then_rej} oldest frames tagged as {display} don't actually show her to my own eyes (mis-tagged in the library — a `whois` cleanup would fix them)")
+                    format!("I checked {then_rej} of the oldest frames tagged as {display} with my own face gallery and none actually show them — that part of the library is mis-tagged (a `whois` cleanup would fix it)")
                 } else {
                     format!("the old archive around {display} is mostly screenshots")
                 };
@@ -8586,7 +8616,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 return;
             };
             if then_rej > 0 {
-                nq.lock().unwrap().push(format!("↔ Note: I skipped {then_rej} old frame(s) tagged as {display} that my own face check says aren't her."));
+                nq.lock().unwrap().push(format!("↔ Note: I walked past {then_rej} old frame(s) tagged as {display} that my own face check says aren't them — the pair uses the earliest one that really is."));
             }
             let (now_res, _) = best_frame(&src, &new, &centroid, threshold).await;
             let Some((now_b, now_d, now_p)) = now_res else {

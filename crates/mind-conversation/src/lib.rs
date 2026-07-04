@@ -13025,8 +13025,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     let lines: Vec<String> = hits
                         .iter()
                         .map(|(m, body)| {
-                            let snip: String = body.chars().take(280).collect();
-                            format!("• [{}] {} — {}\n  {}", m.date, m.from, m.subject, snip.replace('\n', " "))
+                            // HTML-heavy receipts leak CSS into the text part — keep human words only.
+                            let cleanish: String = body
+                                .split_whitespace()
+                                .filter(|w| !w.contains('{') && !w.contains('}') && !w.starts_with('@') && !w.starts_with('.') && !w.contains("=09"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let snip: String = cleanish.chars().take(280).collect();
+                            format!("• [{}] {} — {}\n  {}", m.date, m.from, m.subject, snip)
                         })
                         .collect();
                     sections.push(format!("{addr}:\n{}", lines.join("\n")));
@@ -15975,7 +15981,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
 - self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
 - plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all\n\
-- mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders\n\
+- mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders. Results ARE the answer — never fetch links or sign-in pages from email bodies\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

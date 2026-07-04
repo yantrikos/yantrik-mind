@@ -11979,6 +11979,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         if hits.len() < 3 {
             let ql = q.to_lowercase();
+            let words: Vec<String> = ql.split_whitespace().filter(|w| w.len() >= 3).map(String::from).collect();
             let reg: Vec<serde_json::Value> = self
                 .memory
                 .profile_get("plugin_registry")
@@ -11997,7 +11998,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     p["does"].as_str().unwrap_or("")
                 );
                 let key: String = line.chars().take(30).collect();
-                if line.to_lowercase().contains(&ql) && !hits.iter().any(|h| h.starts_with(&key)) {
+                let ll = line.to_lowercase();
+                let word_hit = words.iter().any(|w| ll.contains(w.as_str()));
+                if (ll.contains(&ql) || word_hit) && !hits.iter().any(|h| h.starts_with(&key)) {
                     hits.push(line);
                 }
             }

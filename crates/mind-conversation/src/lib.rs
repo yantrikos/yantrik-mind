@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 82] = [
+    const CMDS: [&str; 83] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
-        "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style",
+        "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -8875,6 +8875,144 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         None
     }
 
+    /// ---------- THE FAMILY FRAME ----------
+    /// Ambient presence: one photo a day on a wall tablet, chosen with intent — anniversaries
+    /// first, then this-day-in-history, then a slow walk through the archive. Silent by design.
+
+    /// Today's pick: (jpeg, caption). Choice cached per day; bytes re-fetched per request.
+    pub async fn frame_today(&self) -> Option<(Vec<u8>, String)> {
+        let today = local_now().date_naive();
+        let dkey = today.format("%Y-%m-%d").to_string();
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let src = sources.iter().find(|s| s.knows_people())?;
+        // Cached pick for today?
+        if let Some(p) = self
+            .memory
+            .profile_get("frame_pick")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        {
+            if p["date"].as_str() == Some(dkey.as_str()) {
+                if let (Some(id), Some(cap)) = (p["id"].as_str(), p["caption"].as_str()) {
+                    let a = mind_tools::PhotoAsset {
+                        id: id.to_string(),
+                        date: String::new(),
+                        place: String::new(),
+                        file: String::new(),
+                        camera: true,
+                    };
+                    if let Some(bytes) = src.image_bytes(&a).await {
+                        return Some((bytes, cap.to_string()));
+                    }
+                }
+            }
+        }
+        // Pick fresh. Helper: best-quality real photo from a candidate day/window.
+        async fn best_of(src: &mind_tools::PhotoSource, from: &str, to: &str, person: &[String]) -> Option<(String, String, String)> {
+            let assets = src.taken_between(from, to, person, 60).await;
+            let mut best: Option<(f32, String, String, String)> = None;
+            let mut tried = 0;
+            for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)) {
+                if tried >= 5 {
+                    break;
+                }
+                let Some(bytes) = src.image_bytes(a).await else { continue };
+                let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
+                tried += 1;
+                if sharp < 15.0 || luma < 28.0 || luma > 228.0 {
+                    continue;
+                }
+                if best.as_ref().map(|(s, _, _, _)| sharp > *s).unwrap_or(true) {
+                    best = Some((sharp, a.id.clone(), a.date.clone(), a.place.clone()));
+                }
+            }
+            best.map(|(_, id, d, p)| (id, d, p))
+        }
+        let mmdd = today.format("%m-%d").to_string();
+        let mut pick: Option<(String, String)> = None; // (asset id, caption)
+        // 1. A person's day (birthday/anniversary) — their best recent frame.
+        for p in self.load_people_profiles().await {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            let dates = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let Some(label) = dates.iter().find_map(|d| {
+                (d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str()))
+                    .then(|| d.get("label").and_then(|x| x.as_str()).unwrap_or("day").to_string())
+            }) else {
+                continue;
+            };
+            if let Some((_, pid, disp)) = self.resolve_face(&sources, name).await {
+                let from = format!("{}T00:00:00.000Z", today - chrono::Duration::days(365));
+                let to = format!("{}T23:59:59.000Z", today);
+                if let Some((id, _, _)) = best_of(src, &from, &to, &[pid]).await {
+                    pick = Some((id, format!("Today is {disp}'s {label} ❤")));
+                    break;
+                }
+            }
+        }
+        // 2. A labeled event's anniversary — a photo from that very day.
+        if pick.is_none() {
+            for e in self.load_events().await {
+                let (Some(date), Some(label)) = (e["date"].as_str(), e["label"].as_str()) else { continue };
+                if label.is_empty() || !date.ends_with(&mmdd) || date.starts_with(&dkey[..4]) {
+                    continue;
+                }
+                let from = format!("{date}T00:00:00.000Z");
+                let to = format!("{date}T23:59:59.000Z");
+                if let Some((id, _, place)) = best_of(src, &from, &to, &[]).await {
+                    let year = &date[..4];
+                    let where_ = if place.is_empty() { String::new() } else { format!(" · {}", place.split(',').next().unwrap_or("")) };
+                    pick = Some((id, format!("{label} — {year}{where_}")));
+                    break;
+                }
+            }
+        }
+        // 3. This day in history — the year with the most photos on this date.
+        if pick.is_none() {
+            use chrono::Datelike;
+            for year in (2014..today.year()).rev() {
+                let day = format!("{year}-{mmdd}");
+                let from = format!("{day}T00:00:00.000Z");
+                let to = format!("{day}T23:59:59.000Z");
+                if let Some((id, _, place)) = best_of(src, &from, &to, &[]).await {
+                    let where_ = if place.is_empty() { String::new() } else { format!(" · {}", place.split(',').next().unwrap_or("")) };
+                    pick = Some((id, format!("This day, {year}{where_}")));
+                    break;
+                }
+            }
+        }
+        // 4. Slow walk: a month window somewhere in the archive, rotated by day-of-year.
+        if pick.is_none() {
+            use chrono::Datelike;
+            let span = (today.year() - 2014).max(1) as u32;
+            let year = 2014 + (today.ordinal() % span) as i32;
+            let month = 1 + (today.ordinal() * 7 % 12);
+            let from = format!("{year}-{month:02}-01T00:00:00.000Z");
+            let to = if month == 12 {
+                format!("{}-01-01T00:00:00.000Z", year + 1)
+            } else {
+                format!("{year}-{:02}-01T00:00:00.000Z", month + 1)
+            };
+            if let Some((id, d, place)) = best_of(src, &from, &to, &[]).await {
+                let where_ = if place.is_empty() { String::new() } else { format!(" · {}", place.split(',').next().unwrap_or("")) };
+                let ym = if d.len() >= 7 { d[..7].to_string() } else { format!("{year}") };
+                pick = Some((id, format!("From the archive · {ym}{where_}")));
+            }
+        }
+        let (id, caption) = pick?;
+        let _ = self
+            .memory
+            .profile_set(
+                "frame_pick",
+                &serde_json::json!({ "date": dkey, "id": id, "caption": caption }).to_string(),
+            )
+            .await;
+        let a = mind_tools::PhotoAsset { id, date: String::new(), place: String::new(), file: String::new(), camera: true };
+        let bytes = src.image_bytes(&a).await?;
+        Some((bytes, caption))
+    }
+
     /// ---------- STYLE EVOLUTION ----------
     /// A person is a moving target: the timeline shows how their look is EVOLVING and where it's
     /// heading — and the direction feeds gift intelligence and proactive suggestions.
@@ -13205,6 +13343,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "traditions" => self.traditions_list().await,
             "thennow" | "thenandnow" if !rest.trim().is_empty() => self.then_now_run(rest.trim(), None, None).await,
+            "frame" => match self.frame_today().await {
+                Some((_, cap)) => format!(
+                    "🖼 Today's frame: {cap}\nWall tablet URL: http://<box-ip>:{}/frame/<YM_FRAME_TOKEN> (set YM_FRAME_TOKEN in the env to enable the LAN listener).",
+                    std::env::var("YM_FRAME_PORT").unwrap_or_else(|_| "8078".into())
+                ),
+                None => "🖼 Couldn't compose a frame pick right now (photo source unreachable?).".to_string(),
+            },
             "style" if rest.trim().to_lowercase().starts_with("build") => {
                 let who = rest.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim().to_string();
                 if who.is_empty() { "style build <name>".to_string() } else { self.style_timeline_build(&who).await }
@@ -14588,6 +14733,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
+            "family_frame" | "frame" => match self.frame_today().await {
+                Some((_, cap)) => format!("Today's frame: {cap}"),
+                None => "No frame pick available right now.".to_string(),
+            },
             "style_timeline" | "style" => {
                 let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
                 if who.is_empty() {
@@ -15189,6 +15338,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
 - share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back\n\
 - style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
+- family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

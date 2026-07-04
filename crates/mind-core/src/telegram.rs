@@ -518,6 +518,76 @@ fn spawn_control_server(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handl
     });
 }
 
+/// The family-frame listener: LAN-exposed, token-guarded, read-only. Serves ONE thing — today's
+/// photo pick — so a wall tablet can live on it. Enabled only when YM_FRAME_TOKEN is set.
+fn spawn_frame_server(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
+    let Ok(token) = std::env::var("YM_FRAME_TOKEN") else { return };
+    let token = token.trim().to_string();
+    if token.len() < 8 {
+        eprintln!("[frame] YM_FRAME_TOKEN too short (need 8+ chars) — frame server not started");
+        return;
+    }
+    let port: u16 = std::env::var("YM_FRAME_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8078);
+    std::thread::spawn(move || match std::net::TcpListener::bind(("0.0.0.0", port)) {
+        Ok(listener) => {
+            eprintln!("[frame] family frame live on LAN port {port} at /frame/<token>");
+            for stream in listener.incoming().flatten() {
+                let (conv, rt, token) = (conv.clone(), rt.clone(), token.clone());
+                std::thread::spawn(move || frame_handle(stream, conv, rt, token));
+            }
+        }
+        Err(e) => eprintln!("[frame] could not bind 0.0.0.0:{port}: {e}"),
+    });
+}
+
+fn frame_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle, token: String) {
+    use std::io::{Read, Write};
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 2048];
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 8192 {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(_) => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let path = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/").to_string();
+    let path = path.split('?').next().unwrap_or(&path).to_string();
+    let html_path = format!("/frame/{token}");
+    let jpg_path = format!("/frame/{token}.jpg");
+    if path == jpg_path {
+        match rt.block_on(conv.frame_today()) {
+            Some((jpeg, _)) => {
+                let mut resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nCache-Control: max-age=600\r\nConnection: close\r\n\r\n",
+                    jpeg.len()
+                )
+                .into_bytes();
+                resp.extend_from_slice(&jpeg);
+                let _ = stream.write_all(&resp);
+            }
+            None => {
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        }
+    } else if path == html_path {
+        let caption = rt.block_on(conv.frame_today()).map(|(_, c)| c).unwrap_or_else(|| "—".to_string());
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let body = format!(
+            "<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"1800\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Family Frame</title><style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}img{{width:100vw;height:100vh;object-fit:contain}}.c{{position:fixed;bottom:0;left:0;right:0;padding:16px 22px;color:#fff;font:500 17px system-ui;background:linear-gradient(transparent,rgba(0,0,0,.78));text-align:center;letter-spacing:.2px}}</style></head><body><img src=\"/frame/{token}.jpg?t={ts}\"><div class=\"c\">{caption}</div></body></html>"
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    } else {
+        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
+}
+
 /// Run the telegram channel until killed. `chat_lock` (YM_TELEGRAM_CHAT) optionally restricts to a
 /// single chat id; if unset, the first chatter is accepted (single-user companion).
 pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
@@ -540,6 +610,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // with the telegram channel (one mind, two surfaces). Bound to 127.0.0.1 only (no new LAN port;
     // SSH stays the trust boundary). Disable with YM_CTL=off.
     spawn_control_server(conv.clone(), tokio::runtime::Handle::current());
+    spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
 
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT").ok().and_then(|s| s.trim().parse().ok());
 

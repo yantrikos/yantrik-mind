@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 81] = [
+    const CMDS: [&str; 82] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "inboxes", "mailscan", "emailscan", "mailrule", "mailrules", "mailreport", "mailaudit",
         "report", "selfreport", "faces", "trips", "trip", "running", "events", "event",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
-        "traditions", "tradition", "book", "thennow", "thenandnow", "share",
+        "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -802,6 +802,159 @@ async fn inventory_task(src_name: String, pid: String, disp: String, mem: Arc<dy
 }
 
 /// Background body of a gift-intelligence study (detached; returns the full intel message).
+/// Background body of a style-timeline pass: sample each year of a person's photos, read the
+/// look with vision (on THEIR crop — attribution-safe), and reduce to per-year style rows.
+async fn style_task(
+    src_name: String,
+    pid: String,
+    disp: String,
+    mem: Arc<dyn MemoryFacade>,
+    inference: InferencePool,
+) -> Option<String> {
+    let sources = mind_tools::PhotoSource::all_from_env();
+    let src = sources.into_iter().find(|s| s.name() == src_name)?;
+    let vc = mind_tools::VisionClient::from_env()?;
+    use chrono::Datelike;
+    let this_year = chrono::Utc::now().year();
+    let style_prompt = r#"Describe the MAIN person's look. Output ONLY JSON: {"outfit":"<saree/salwar/kurta/lehenga/ethnic-fusion/dress/top-jeans/casual-western/formal-western/none>","color":"<dominant outfit color>","jewelry_count":<number of visible pieces>,"vibe":"<one word like festive/casual/elegant/sporty>"}"#;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut analyzed_total = 0u32;
+    for year in 2014..=this_year {
+        let from = format!("{year}-01-01T00:00:00.000Z");
+        let to = format!("{}-01-01T00:00:00.000Z", year + 1);
+        let assets = src.taken_between(&from, &to, &[pid.clone()], 300).await;
+        let real: Vec<&mind_tools::PhotoAsset> = assets.iter().filter(|a| !mind_tools::is_screenish(a)).collect();
+        if real.len() < 8 {
+            continue;
+        }
+        // Month-spread sample: different months hold different occasions and outfits.
+        let mut picks: Vec<&mind_tools::PhotoAsset> = Vec::new();
+        let mut seen_m: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for a in &real {
+            if seen_m.insert(a.date.chars().take(7).collect::<String>()) {
+                picks.push(a);
+            }
+        }
+        for a in &real {
+            if picks.len() >= 12 {
+                break;
+            }
+            if !picks.iter().any(|p| p.id == a.id) {
+                picks.push(a);
+            }
+        }
+        picks.truncate(12);
+        let (mut n, mut trad, mut jwl_sum) = (0u32, 0u32, 0u32);
+        let mut colors: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut vibes: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut outfits: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for a in picks {
+            let Some(bytes) = src.image_bytes(a).await else { continue };
+            let bytes = person_region(&mem, &disp, &bytes).await.unwrap_or(bytes);
+            let Ok(raw) = vc.analyze(style_prompt, bytes, "image/jpeg").await else { continue };
+            let Some(j) = raw
+                .find('{')
+                .and_then(|x| raw.rfind('}').map(|y| raw[x..=y].to_string()))
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            else {
+                continue;
+            };
+            let outfit = j["outfit"].as_str().unwrap_or("").to_lowercase();
+            if outfit.is_empty() || outfit == "none" {
+                continue;
+            }
+            n += 1;
+            analyzed_total += 1;
+            if ["saree", "sari", "salwar", "kurta", "lehenga", "ethnic"].iter().any(|w| outfit.contains(w)) {
+                trad += 1;
+            }
+            *outfits.entry(outfit).or_insert(0) += 1;
+            let c = j["color"].as_str().unwrap_or("").to_lowercase();
+            if c.len() > 2 {
+                *colors.entry(c).or_insert(0) += 1;
+            }
+            let v = j["vibe"].as_str().unwrap_or("").to_lowercase();
+            if v.len() > 2 {
+                *vibes.entry(v).or_insert(0) += 1;
+            }
+            jwl_sum += j["jewelry_count"].as_u64().unwrap_or(0).min(9) as u32;
+        }
+        if n < 5 {
+            continue;
+        }
+        let top = |m: std::collections::HashMap<String, u32>, k: usize| -> Vec<String> {
+            let mut v: Vec<(String, u32)> = m.into_iter().collect();
+            v.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            v.into_iter().take(k).map(|(s, _)| s).collect()
+        };
+        rows.push(serde_json::json!({
+            "year": year, "n": n, "trad_pct": 100 * trad / n,
+            "outfits": top(outfits, 3), "colors": top(colors, 3), "vibe": top(vibes, 1),
+            "jwl": (jwl_sum as f64 / n as f64 * 10.0).round() / 10.0,
+        }));
+    }
+    if rows.len() < 2 {
+        return Some(format!("📈 {disp}: fewer than two readable years — a style timeline needs more history."));
+    }
+    let table = rows
+        .iter()
+        .map(|r| {
+            let j = |k: &str| {
+                r[k].as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("/"))
+                    .unwrap_or_default()
+            };
+            format!(
+                "{} · {} looks · traditional {}% · outfits {} · colors {} · vibe {} · jewelry {}",
+                r["year"], r["n"], r["trad_pct"], j("outfits"), j("colors"), j("vibe"), r["jwl"]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "Here is {disp}'s style measured from their own photos, year by year:\n{table}\n\nWrite:\nTREND: 2-3 short bullets on how the style has MOVED (compare years, cite the numbers)\nDIRECTION: one sentence on where it's heading next, ending with (confidence: low|medium|high)\nWATCH: one concrete signal that would confirm or refute the direction\nHARD RULES: use ONLY the table above; no invented items, colors, brands, occasions, or reasons."
+    );
+    let cfg = GenerationConfig { max_tokens: 380, ..GenerationConfig::default() };
+    let trend = inference
+        .chat(vec![ChatMessage::user(&prompt)], cfg)
+        .await
+        .map(|r| r.text.trim().to_string())
+        .unwrap_or_default();
+    let kv = serde_json::json!({ "rows": rows, "trend": trend, "updated": chrono::Utc::now().timestamp_millis() });
+    let _ = mem.profile_set(&format!("style_timeline:{}", disp.to_lowercase()), &kv.to_string()).await;
+    let direction = trend
+        .lines()
+        .find(|l| l.trim_start().starts_with("DIRECTION:"))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_default();
+    if direction.len() > 14 {
+        let _ = mem
+            .remember_as_belief(BeliefAssertion {
+                statement: format!("Style direction ({disp}, as of {}): {}", local_now().format("%b %Y"), direction.trim_start_matches("DIRECTION:").trim()),
+                polarity: 1.0,
+                weight: 0.7,
+                source_event: Some("style-timeline".into()),
+                provenance: "inference".into(),
+            })
+            .await;
+    }
+    let headline = match (rows.first(), rows.last()) {
+        (Some(f0), Some(l0)) => {
+            let d = l0["trad_pct"].as_i64().unwrap_or(0) - f0["trad_pct"].as_i64().unwrap_or(0);
+            if d.abs() >= 25 {
+                format!("clear shift: traditional {}% ({}) → {}% ({})", f0["trad_pct"], f0["year"], l0["trad_pct"], l0["year"])
+            } else {
+                "style holding steady".to_string()
+            }
+        }
+        _ => String::new(),
+    };
+    Some(format!(
+        "📈 {disp}'s style timeline is built — {} years, {analyzed_total} looks analyzed; {headline}. `style {disp}` for the evolution; gift intelligence now leads the direction.",
+        rows.len()
+    ))
+}
+
 async fn gift_task(
     src_name: String,
     pid: String,
@@ -816,6 +969,18 @@ async fn gift_task(
     let sources = mind_tools::PhotoSource::all_from_env();
     let src = sources.into_iter().find(|s| s.name() == src_name)?;
     let vc = mind_tools::VisionClient::from_env()?;
+    let style_dir: String = mem
+        .profile_get(&format!("style_timeline:{}", disp.to_lowercase()))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v["trend"].as_str().and_then(|t| {
+                t.lines().find(|l| l.trim_start().starts_with("DIRECTION:")).map(|l| l.trim().to_string())
+            })
+        })
+        .unwrap_or_else(|| "(no evolution timeline yet)".to_string());
     let assets = src.assets_of_person(&pid, 14).await;
     if assets.is_empty() {
         return Some(format!("The library knows {disp} but returned no photos to study."));
@@ -844,7 +1009,7 @@ async fn gift_task(
     }
     let joined: String = obs.join("\n").chars().take(2400).collect();
     let prompt = format!(
-        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\nTASTE DISTRIBUTIONS (statistical, by occasion): {tastes_note}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what the photos clearly show they have (never gift duplicates of these)\nSTYLE: their recurring style/colors/materials in one line, each element backed by repeated observations\nCOMPLEMENTS: 2-4 things that would EXTEND their observed style and habits — justify each from OWNS/STYLE evidence (what they demonstrably love and use), NEVER from absence ('not seen' is a sampling artifact, not a gap)\nGIFT IDEAS: 3 concrete, buyable ideas, one line of evidence-backed reasoning each, matched to STYLE, excluding OWNS"
+        "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\nTASTE DISTRIBUTIONS (statistical, by occasion): {tastes_note}\nSTYLE DIRECTION (how their look is EVOLVING): {style_dir}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what the photos clearly show they have (never gift duplicates of these)\nSTYLE: their recurring style/colors/materials in one line, each element backed by repeated observations\nCOMPLEMENTS: 2-4 things that would EXTEND their observed style and habits — justify each from OWNS/STYLE evidence (what they demonstrably love and use), NEVER from absence ('not seen' is a sampling artifact, not a gap)\nGIFT IDEAS: 3 concrete, buyable ideas, one line of evidence-backed reasoning each, matched to STYLE and LEANING INTO the STYLE DIRECTION (gift where they're going, not only where they've been), excluding OWNS"
     );
     let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
     let out = match inference.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
@@ -8710,6 +8875,65 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         None
     }
 
+    /// ---------- STYLE EVOLUTION ----------
+    /// A person is a moving target: the timeline shows how their look is EVOLVING and where it's
+    /// heading — and the direction feeds gift intelligence and proactive suggestions.
+
+    pub async fn style_timeline_build(&self, who: &str) -> String {
+        let sources = mind_tools::PhotoSource::all_from_env();
+        let Some((_, pid, display)) = self.resolve_face(&sources, who).await else {
+            return format!("I don't know \"{who}\" yet — `whois` teaches me people.");
+        };
+        let guard = format!("style:{}", display.to_lowercase());
+        if !self.studies.lock().unwrap().insert(guard.clone()) {
+            return format!("Already reading {display}'s visual history — the timeline lands here.");
+        }
+        let src_name = sources.iter().find(|s| s.knows_people()).map(|s| s.name().to_string()).unwrap_or_default();
+        let mem = self.memory.clone();
+        let nq = self.notify_queue.clone();
+        let studies = self.studies.clone();
+        let inf = self.inference.clone();
+        let disp2 = display.clone();
+        tokio::spawn(async move {
+            if let Some(msg) = style_task(src_name, pid, disp2, mem, inf).await {
+                nq.lock().unwrap().push(msg);
+            }
+            studies.lock().unwrap().remove(&guard);
+        });
+        format!("📈 Reading {display}'s whole visual history year by year — the evolution lands here when done.")
+    }
+
+    pub async fn style_view(&self, who: &str) -> String {
+        let key = format!("style_timeline:{}", who.trim().to_lowercase());
+        let Some(kv) = self
+            .memory
+            .profile_get(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        else {
+            return format!("No style timeline for {who} yet — `style build {who}` reads their whole visual history.");
+        };
+        let rows = kv["rows"].as_array().cloned().unwrap_or_default();
+        let table = rows
+            .iter()
+            .map(|r| {
+                let j = |k: &str| {
+                    r[k].as_array()
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("/"))
+                        .unwrap_or_default()
+                };
+                format!(
+                    "{} · traditional {}% · {} · {} · vibe {} · jewelry {}",
+                    r["year"], r["trad_pct"], j("outfits"), j("colors"), j("vibe"), r["jwl"]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("📈 {who} — style evolution:\n{table}\n\n{}", kv["trend"].as_str().unwrap_or(""))
+    }
+
     /// ---------- THE YOUNGER-SELF FINDER ----------
     /// Face clustering splits a baby from the child they become; the person's early years sit in
     /// an unnamed cluster. Find it by evidence: family co-occurrence + timeline adjacency + size,
@@ -12981,6 +13205,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festivals" | "festival" if rest.trim() == "refresh" => self.festivals_refresh().await,
             "traditions" => self.traditions_list().await,
             "thennow" | "thenandnow" if !rest.trim().is_empty() => self.then_now_run(rest.trim(), None, None).await,
+            "style" if rest.trim().to_lowercase().starts_with("build") => {
+                let who = rest.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim().to_string();
+                if who.is_empty() { "style build <name>".to_string() } else { self.style_timeline_build(&who).await }
+            }
+            "style" if !rest.trim().is_empty() => self.style_view(rest.trim()).await,
             "share" if !rest.trim().is_empty() => {
                 let mut it = rest.trim().splitn(2, char::is_whitespace);
                 let member = it.next().unwrap_or("").to_string();
@@ -14359,6 +14588,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "life_horizon" | "horizon" | "anticipate" => self.life_horizon().await,
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
+            "style_timeline" | "style" => {
+                let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
+                if who.is_empty() {
+                    "style_timeline needs a 'person'".to_string()
+                } else {
+                    self.style_view(&who).await
+                }
+            }
             "share_with_member" | "share" => {
                 let member = { let a = s("member"); if a.is_empty() { s("person") } else { a } };
                 if member.is_empty() {
@@ -14951,6 +15188,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 - then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
 - find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
 - share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back\n\
+- style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\

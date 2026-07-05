@@ -42,6 +42,7 @@ enum Cmd {
     GetText { rid: String, reply: Reply<Option<String>> },
     AssertBelief { statement: String, signed_weight: f64, source: String, provenance: String, evidence_version: Option<u64>, reply: Reply<Belief> },
     RecallTyped { text: String, top_k: usize, reply: Reply<Vec<Recalled>> },
+    BeliefsMatching { needle: String, reply: Reply<Vec<Belief>> },
     Conflicts { reply: Reply<Vec<Contradiction>> },
     Explain { statement: String, reply: Reply<Option<(Belief, Vec<MEvidence>)>> },
     Relate { src: String, dst: String, rel: String, weight: f64, reply: Reply<()> },
@@ -1039,6 +1040,28 @@ impl MemoryHandle {
                         Cmd::RecallTyped { text, top_k, reply } => {
                             let _ = reply.send(Ok(recall_beliefs(&db, &text, top_k)));
                         }
+                        Cmd::BeliefsMatching { needle, reply } => {
+                            let words: Vec<String> = needle
+                                .to_lowercase()
+                                .split(|c: char| !c.is_alphanumeric())
+                                .filter(|w| w.len() >= 4)
+                                .map(String::from)
+                                .collect();
+                            let hits: Vec<Belief> = if words.is_empty() {
+                                Vec::new()
+                            } else {
+                                all_beliefs(&db)
+                                    .iter()
+                                    .filter(|n| {
+                                        let t = n.label.to_lowercase();
+                                        words.iter().any(|w| t.contains(w.as_str()))
+                                    })
+                                    .take(20)
+                                    .map(to_belief_dto)
+                                    .collect()
+                            };
+                            let _ = reply.send(Ok(hits));
+                        }
                         Cmd::Conflicts { reply } => {
                             let _ = reply.send(Ok(detect_conflicts(&db)));
                         }
@@ -1359,6 +1382,11 @@ impl MemoryFacade for MemoryHandle {
     async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>> {
         let (text, top_k) = (q.text, q.top_k);
         self.call(|reply| Cmd::RecallTyped { text, top_k, reply }).await
+    }
+
+    async fn beliefs_matching(&self, needle: &str) -> Result<Vec<Belief>> {
+        let needle = needle.to_string();
+        self.call(|reply| Cmd::BeliefsMatching { needle, reply }).await
     }
 
     async fn remember_observation(&self, text: &str, source: mind_types::ProvenanceCategory) -> Result<String> {

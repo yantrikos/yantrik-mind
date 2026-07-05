@@ -246,6 +246,13 @@ impl Skill {
 pub trait MemoryFacade: Send + Sync {
     /// Typed + semantic + temporal recall (multi-signal).
     async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>>;
+
+    /// Deterministic belief lookup: every belief whose statement contains any word (len>=4) of
+    /// `needle`, case-insensitive. No semantic ranking — complete and exact. Default: empty.
+    async fn beliefs_matching(&self, needle: &str) -> Result<Vec<Belief>> {
+        let _ = needle;
+        Ok(vec![])
+    }
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;
 

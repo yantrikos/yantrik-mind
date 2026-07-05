@@ -15567,20 +15567,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         }
                     }
                 }
-                // BELIEF-LANE pass: taught facts live in the cognitive graph (the memories table
-                // holds only raw observations, ~40 rows). reflect(q) is the engine's own belief
-                // search — word-matched hits lead the output.
-                if let Ok(refl) = self.memory.reflect(&q).await {
-                    for b in refl.beliefs.iter().take(20) {
-                        let sl = b.statement.to_lowercase();
-                        let word_hit = qwords.iter().any(|w| sl.contains(w.as_str()));
+                // EXACT-MATCH belief pass: deterministic enumeration (no embedding lottery) —
+                // any belief that literally says a query word leads the output.
+                if let Ok(bs) = self.memory.beliefs_matching(&q).await {
+                    for b in bs.iter().take(8) {
                         let l = format!("- {} (belief {:.2})", b.statement, b.confidence);
                         if !lines.contains(&l) {
-                            if word_hit {
-                                lines.insert(0, l);
-                            } else if lines.len() < 8 {
-                                lines.push(l);
-                            }
+                            lines.insert(0, l);
                         }
                     }
                 }

@@ -15541,17 +15541,29 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         lines.push(format!("- {} ({:.2})", r.item.text, r.item.confidence));
                     }
                 }
-                if let Ok(ws) = self.memory.hydrate_working_set_as(&q, id.viewer()).await {
-                    for f in ws.stable_facts.iter().take(5) {
-                        let l = format!("- {} (fact)", f.text);
-                        if !lines.iter().any(|x| x.split(" (").next() == l.split(" (").next()) {
-                            lines.push(l);
-                        }
-                    }
-                    for b in ws.uncertain_beliefs.iter().take(5) {
-                        let l = format!("- {} (belief {:.2})", b.statement, b.confidence);
-                        if !lines.iter().any(|x| x.split(" (").next() == l.split(" (").next()) {
-                            lines.push(l);
+                // Deep lexical pass: semantic top-k can rank fresh news above the exact fact the
+                // user is asking for (tiny embeddings + recency boosts). Word-match at depth
+                // guarantees "Sangam" surfaces anything that SAYS Sangam.
+                let qwords: Vec<String> = q
+                    .to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() >= 4)
+                    .map(String::from)
+                    .collect();
+                if !qwords.is_empty() {
+                    if let Ok(deep) = self
+                        .memory
+                        .recall_typed_as(mind_types::RecallQuery { text: q.clone(), top_k: 40, kind: None }, id.viewer())
+                        .await
+                    {
+                        for r in deep {
+                            let tl = r.item.text.to_lowercase();
+                            if qwords.iter().any(|w| tl.contains(w.as_str())) {
+                                let l = format!("- {} ({:.2})", r.item.text, r.item.confidence);
+                                if !lines.contains(&l) {
+                                    lines.insert(0, l); // exact-word hits lead
+                                }
+                            }
                         }
                     }
                 }

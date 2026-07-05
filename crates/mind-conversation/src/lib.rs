@@ -6340,6 +6340,21 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if name.len() < 2 {
                 continue;
             }
+            // BLOCKLIST: names the user declared non-existent stay dead — consolidation keeps
+            // re-extracting them from old transcript text (Aarav rose three times).
+            {
+                let blocked: Vec<String> = self
+                    .memory
+                    .profile_get("people_blocklist")
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                if blocked.iter().any(|b| b.eq_ignore_ascii_case(&name)) {
+                    continue;
+                }
+            }
             // Perspective words are not people. Bare relationship nouns ("wife", "mother"), the
             // primary's own name, and "<primary>'s wife/husband" when the spouse is registered
             // all create phantom profiles — facts belong on the real person instead.
@@ -14621,6 +14636,22 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     "add" => self.person_add(&arg).await,
                     "rm" | "remove" => self.person_remove(&arg).await,
                     "forget" => self.person_forget(&arg).await,
+                    "ban" => {
+                        let msg = self.person_forget(&arg).await;
+                        let mut bl: Vec<String> = self
+                            .memory
+                            .profile_get("people_blocklist")
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+                        if !bl.iter().any(|b| b.eq_ignore_ascii_case(&arg)) {
+                            bl.push(arg.trim().to_string());
+                        }
+                        let _ = self.memory.profile_set("people_blocklist", &serde_json::to_string(&bl).unwrap_or_default()).await;
+                        format!("{msg}\n🚫 \"{arg}\" is permanently blocked from the people layer.")
+                    }
                     "" | "list" => self.people_list().await,
                     _ => "Usage: ym person add <slug> <name> [telegram-id] [relationship] · ym people".to_string(),
                 }

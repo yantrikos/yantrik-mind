@@ -15534,7 +15534,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let mut lines: Vec<String> = Vec::new();
                 if let Ok(rs) = self
                     .memory
-                    .recall_typed_as(mind_types::RecallQuery { text: q.clone(), top_k: 6, kind: None }, id.viewer())
+                    .recall_typed(mind_types::RecallQuery { text: q.clone(), top_k: 6, kind: None })
                     .await
                 {
                     for r in rs {
@@ -15553,7 +15553,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 if !qwords.is_empty() {
                     if let Ok(deep) = self
                         .memory
-                        .recall_typed_as(mind_types::RecallQuery { text: q.clone(), top_k: 40, kind: None }, id.viewer())
+                        .recall_typed(mind_types::RecallQuery { text: q.clone(), top_k: 40, kind: None })
                         .await
                     {
                         for r in deep {

@@ -158,8 +158,15 @@ fn edge_kind(s: &str) -> CognitiveEdgeKind {
 }
 
 fn all_beliefs(db: &YantrikDB) -> Vec<CognitiveNode> {
-    db.query_beliefs(&BeliefPattern { limit: 100_000, ..Default::default() })
-        .unwrap_or_default()
+    // NOT query_beliefs: its loader (load_cognitive_nodes_by_kind) silently caps at 1,000 nodes —
+    // with 2,400+ beliefs, everything taught recently fell past the cap and became unrecallable.
+    // Query the graph directly with a real limit.
+    db.query_cognitive_nodes(&yantrikdb_core::CognitiveNodeFilter {
+        kinds: vec![yantrikdb_core::NodeKind::Belief],
+        limit: 100_000,
+        ..Default::default()
+    })
+    .unwrap_or_default()
 }
 
 fn node_prop(n: &CognitiveNode) -> Option<&str> {

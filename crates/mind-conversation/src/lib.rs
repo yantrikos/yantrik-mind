@@ -4116,6 +4116,66 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     .filter(|s| s.len() > 1)
                     .unwrap_or_else(|| Self::clean_name(t));
                 let rel = v.get("relationship").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                // JUNK GATE + RELATIONAL RESOLUTION: "my wife" / "that's my wife's mom" carry a
+                // RELATION, not a name — resolve through the family, or re-ask. A phrase must
+                // never become a person's name (it polluted Immich once: "That's my wife's").
+                let name = {
+                    let nl = name.to_lowercase();
+                    let junk = name.split_whitespace().count() > 3
+                        || nl.contains("that")
+                        || nl.contains("this")
+                        || nl.contains("whose")
+                        || nl.starts_with("my ")
+                        || nl.contains(" my ")
+                        || nl.ends_with("'s")
+                        || nl.ends_with("\u{2019}s");
+                    if !junk && name.len() > 1 {
+                        name
+                    } else {
+                        // resolve pure relations via the household registry + profiles
+                        let phrase = low.clone();
+                        let members = self.load_people().await;
+                        let member_name = |want: &str| -> Option<String> {
+                            members
+                                .iter()
+                                .find(|p| p.get("relationship").and_then(|x| x.as_str()) == Some(want))
+                                .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+                        };
+                        let profiles = self.load_people_profiles().await;
+                        let profile_named = |n: &str| -> Option<String> {
+                            profiles
+                                .iter()
+                                .find(|p| p.get("name").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(n)).unwrap_or(false))
+                                .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+                        };
+                        let spouse = member_name("wife").or_else(|| member_name("husband"));
+                        let resolved = if phrase.contains("wife") && (phrase.contains("mom") || phrase.contains("mother")) {
+                            spouse.as_deref().and_then(|w| profile_named(&format!("{w}'s Mom")))
+                        } else if phrase.contains("wife") && (phrase.contains("dad") || phrase.contains("father")) {
+                            spouse.as_deref().and_then(|w| profile_named(&format!("{w}'s Dad")))
+                        } else if phrase.contains("wife") {
+                            member_name("wife")
+                        } else if phrase.contains("husband") {
+                            member_name("husband")
+                        } else if phrase.contains("daughter") {
+                            member_name("daughter").or_else(|| profile_named("Aadrisha"))
+                        } else if phrase.contains("mom") || phrase.contains("mother") {
+                            profile_named("Pranab's Mom")
+                        } else if phrase.contains("dad") || phrase.contains("father") {
+                            profile_named("Pranab's Dad")
+                        } else {
+                            None
+                        };
+                        match resolved {
+                            Some(n) => n,
+                            None => {
+                                // can't resolve — re-arm the slot and ask for JUST the name
+                                self.set_pending_slot(Some(s)).await;
+                                return "Got the relation — but to name them right, what's their actual name?".to_string();
+                            }
+                        }
+                    }
+                };
                 // Local face-name map — the source stays read-only; WE remember which cluster is who,
                 // so `ym photos <name>` and photo retrieval work for this person from now on.
                 let mut fm = self.face_names().await;
@@ -6255,7 +6315,16 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return format!("No living profile named \"{name}\".");
         }
         self.save_people_profiles(&store).await;
-        format!("🧹 Forgot profile: {} — {} people remain.", dropped.join(", "), store.len())
+        // Cascade: face-name map entries pointing at the forgotten name go too, so the whois
+        // loop can re-ask about that cluster cleanly.
+        let mut fm = self.face_names().await;
+        let before_fm = fm.len();
+        fm.retain(|_, v| !v.eq_ignore_ascii_case(&want));
+        let fm_dropped = before_fm - fm.len();
+        if fm_dropped > 0 {
+            self.save_face_names(&fm).await;
+        }
+        format!("🧹 Forgot profile: {} — {} people remain{}.", dropped.join(", "), store.len(), if fm_dropped > 0 { format!(" (+{fm_dropped} face-map entry)") } else { String::new() })
     }
 
     async fn merge_people(&self, people: Vec<serde_json::Value>) -> usize {

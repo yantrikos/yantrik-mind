@@ -3250,7 +3250,14 @@ impl ConversationEngine {
         // current from every conversation for free (rides this same extraction call). This is how
         // "personal + family always kept updated" is honored without a per-turn cost.
         let people = v.get("people").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-        count += self.merge_people(people).await;
+        let user_said: String = msgs
+            .iter()
+            .filter(|(_, r, _)| r == "user")
+            .map(|(_, _, t)| t.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("
+");
+        count += self.merge_people(people, &user_said).await;
         *self.last_consolidated.lock().unwrap() = max_id;
         let _ = self.memory.profile_set("last_consolidated", &max_id.to_string()).await; // survive restarts
         count
@@ -6327,7 +6334,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!("🧹 Forgot profile: {} — {} people remain{}.", dropped.join(", "), store.len(), if fm_dropped > 0 { format!(" (+{fm_dropped} face-map entry)") } else { String::new() })
     }
 
-    async fn merge_people(&self, people: Vec<serde_json::Value>) -> usize {
+    async fn merge_people(&self, people: Vec<serde_json::Value>, user_said: &str) -> usize {
         if people.is_empty() {
             return 0;
         }
@@ -6395,7 +6402,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             });
             let mut rec = match idx {
                 Some(i) => store.remove(i),
-                None => serde_json::json!({ "name": name.clone(), "relationship": "", "facts": [], "dates": [] }),
+                None => {
+                    // PROVENANCE GATE: a NEW person can only be born from the user's OWN words.
+                    // The extraction window mixes assistant text (mail digests, cleanup chatter,
+                    // transcript ghosts) — that text may ENRICH existing people, never create.
+                    if !user_said.contains(&name.to_lowercase()) {
+                        continue;
+                    }
+                    serde_json::json!({ "name": name.clone(), "relationship": "", "facts": [], "dates": [] })
+                }
             };
             // The canonical stored name wins; anything else this person is called becomes a nickname.
             let key = rec.get("name").and_then(|x| x.as_str()).map(norm).unwrap_or_else(|| norm(&name));

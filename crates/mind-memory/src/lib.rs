@@ -1052,12 +1052,12 @@ impl MemoryHandle {
                             } else {
                                 all_beliefs(&db)
                                     .iter()
-                                    .filter(|n| {
-                                        let t = n.label.to_lowercase();
+                                    .map(to_belief_dto)
+                                    .filter(|b| {
+                                        let t = b.statement.to_lowercase();
                                         words.iter().any(|w| t.contains(w.as_str()))
                                     })
                                     .take(20)
-                                    .map(to_belief_dto)
                                     .collect()
                             };
                             let _ = reply.send(Ok(hits));

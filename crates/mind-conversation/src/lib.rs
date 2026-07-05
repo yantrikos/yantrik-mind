@@ -15527,14 +15527,41 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
             // READ-ISOLATED: the recall tool sees only what THIS speaker may (so the agent can't read
             // around the grounding isolation to reach another member's private facts).
-            "recall" => match self
-                .memory
-                .recall_typed_as(mind_types::RecallQuery { text: s("query"), top_k: 6, kind: None }, id.viewer())
-                .await
-            {
-                Ok(rs) if !rs.is_empty() => rs.iter().map(|r| format!("- {} ({:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n"),
-                _ => "(nothing relevant in memory)".to_string(),
-            },
+            "recall" => {
+                // TWO lanes, ONE answer: the semantic memories lane + the belief working-set the
+                // chat itself grounds on. What was taught as a belief is recallable, period.
+                let q = s("query");
+                let mut lines: Vec<String> = Vec::new();
+                if let Ok(rs) = self
+                    .memory
+                    .recall_typed_as(mind_types::RecallQuery { text: q.clone(), top_k: 6, kind: None }, id.viewer())
+                    .await
+                {
+                    for r in rs {
+                        lines.push(format!("- {} ({:.2})", r.item.text, r.item.confidence));
+                    }
+                }
+                if let Ok(ws) = self.memory.hydrate_working_set_as(&q, id.viewer()).await {
+                    for f in ws.stable_facts.iter().take(5) {
+                        let l = format!("- {} (fact)", f.text);
+                        if !lines.iter().any(|x| x.split(" (").next() == l.split(" (").next()) {
+                            lines.push(l);
+                        }
+                    }
+                    for b in ws.uncertain_beliefs.iter().take(5) {
+                        let l = format!("- {} (belief {:.2})", b.statement, b.confidence);
+                        if !lines.iter().any(|x| x.split(" (").next() == l.split(" (").next()) {
+                            lines.push(l);
+                        }
+                    }
+                }
+                if lines.is_empty() {
+                    "(nothing relevant in memory)".to_string()
+                } else {
+                    lines.truncate(12);
+                    lines.join("\n")
+                }
+            }
             "remember" => {
                 let t = s("text");
                 if t.len() < 4 {

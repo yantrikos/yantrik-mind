@@ -17232,6 +17232,36 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         {
             let recent_text: String = recent.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
             let known = format!("{grounding}\n{recent_text}\n{}", notes.join("\n"));
+            // The wall's MIRROR: entities the mind KNOWS get their exact-match beliefs pinned
+            // into grounding — entity questions must not depend on the ranking lottery.
+            {
+                let mut pinned: Vec<String> = Vec::new();
+                for w in user_text.split_whitespace() {
+                    let t: String = w.chars().filter(|c| c.is_alphanumeric()).collect();
+                    if t.len() < 4 || pinned.len() >= 3 {
+                        continue;
+                    }
+                    let cap = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        || t.chars().all(|c| c.is_uppercase());
+                    if !cap {
+                        continue;
+                    }
+                    if let Ok(bs) = self.memory.beliefs_matching(&t).await {
+                        for b in bs.iter().take(3) {
+                            let line = format!("- {} (certainty {:.2})", b.statement, b.confidence);
+                            if !pinned.contains(&line) {
+                                pinned.push(line);
+                            }
+                        }
+                    }
+                }
+                if !pinned.is_empty() {
+                    grounding.push_str(&format!(
+                        "\n\nPINNED FACTS (exact matches for names in this turn — authoritative):\n{}",
+                        pinned.join("\n")
+                    ));
+                }
+            }
             let unknown = novel_entities(user_text, &known);
             if !unknown.is_empty() {
                 grounding.push_str(&format!(

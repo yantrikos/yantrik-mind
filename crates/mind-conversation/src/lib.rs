@@ -4102,6 +4102,19 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 {
                     return "No problem — the book keeps that page open.".to_string();
                 }
+                // A clearly-typed COMMAND (not a memory) accidentally landed on an open book question —
+                // don't store it as lore (that pollutes the book). Set the page aside; let them resend.
+                if Self::wants_draft(t).is_some()
+                    || Self::wants_deep_research(t).is_some()
+                    || low.starts_with("draft ")
+                    || low.starts_with("research ")
+                    || low.starts_with("code:")
+                    || low.starts_with("write a script")
+                    || low.contains("://")
+                {
+                    self.set_pending_slot(None).await;
+                    return "That looked like a command, not a book memory — I've set that book question aside. Send it again and I'll run it.".to_string();
+                }
                 let teller = self.memory.profile_get("name").await.ok().flatten().filter(|n| !n.is_empty()).unwrap_or_else(|| "the family".to_string());
                 let mut lore = self.load_book_lore().await;
                 lore.push(serde_json::json!({
@@ -14362,6 +14375,43 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let y = rest.trim().trim_start_matches("redraft").trim();
                 let y: i64 = if y.eq_ignore_ascii_case("origin") || y.eq_ignore_ascii_case("prologue") { 0 } else { y.parse().unwrap_or(-1) };
                 if y < 0 { "Usage: book redraft <year|origin>".to_string() } else { self.book_redraft(y).await }
+            }
+            "book" if rest.trim().starts_with("unlore ") => {
+                // Remove stray lore entries whose text matches, then redraft the affected chapters.
+                let needle = rest.trim().trim_start_matches("unlore").trim().to_lowercase();
+                if needle.len() < 3 {
+                    "Usage: book unlore <substring> (min 3 chars)".to_string()
+                } else {
+                    let mut lore = self.load_book_lore().await;
+                    let before = lore.len();
+                    let mut years: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+                    lore.retain(|e| {
+                        let hit = e
+                            .get("a")
+                            .and_then(|x| x.as_str())
+                            .map(|a| a.to_lowercase().contains(&needle))
+                            .unwrap_or(false);
+                        if hit {
+                            if let Some(y) = e.get("year").and_then(|x| x.as_i64()) {
+                                years.insert(y);
+                            }
+                        }
+                        !hit
+                    });
+                    let removed = before - lore.len();
+                    if removed == 0 {
+                        "No book lore matched that.".to_string()
+                    } else {
+                        let _ = self
+                            .memory
+                            .profile_set("book_lore", &serde_json::Value::Array(lore).to_string())
+                            .await;
+                        for y in &years {
+                            let _ = self.book_redraft(*y).await;
+                        }
+                        format!("\u{1f9f9} Removed {removed} stray lore entr(y/ies); redrafted {} chapter(s).", years.len())
+                    }
+                }
             }
             "book" if rest.trim() == "ask" => match self.book_ask_next().await {
                 Some((slot, q)) => {

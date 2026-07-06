@@ -70,7 +70,9 @@ fn qp_decode(s: &str) -> String {
 /// Remove `<tag ...>...</tag>` blocks (style/script/head) whose CONTENT would otherwise leak as
 /// garbage text — the "CSS in the receipt" bug. Case-insensitive, cross-line.
 fn strip_block(s: &str, tag: &str) -> String {
-    let low = s.to_lowercase();
+    // to_ascii_lowercase — NOT to_lowercase: Unicode case-folding can change byte lengths,
+    // making byte indices from the lowercased copy invalid for slicing the original. Tag names are ASCII.
+    let low = s.to_ascii_lowercase();
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
     let mut out = String::new();
@@ -480,6 +482,14 @@ mod tests {
         assert!(d.contains("alice@x") && d.contains("Invoice"));
         assert!(d.contains("bob@y") && d.contains("Lunch?"));
         assert!(render_inbox_digest(&[]).contains("empty"));
+    }
+
+    #[test]
+    fn mail_strip_block_unicode_byte_len_change() {
+        // Ω (U+2126) is 3 bytes; to_lowercase() maps it to ω (2 bytes), shifting indices.
+        // Slicing the original at the shifted index would land mid-char and panic.
+        let s = "Ω<STYLE>body{}</STYLE>text";
+        assert_eq!(strip_block(s, "style"), "Ωtext");
     }
 
     #[test]

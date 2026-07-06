@@ -121,7 +121,10 @@ fn ssrf_check(url: &str) -> anyhow::Result<()> {
 /// Used to strip boilerplate/noise (scripts, nav, footers…) BEFORE html→text, so the reader sees the
 /// article instead of menus — the difference between a usable web fetch and a wall of chrome.
 fn strip_block(html: &str, tag: &str) -> String {
-    let lower = html.to_lowercase();
+    // to_ascii_lowercase — NOT to_lowercase: Unicode case-folding can change byte lengths
+    // (e.g. Ω→ω shrinks from 3 bytes to 2), making byte indices from the lowercased copy
+    // invalid for slicing the original string. HTML tag names are ASCII, so ascii is enough.
+    let lower = html.to_ascii_lowercase();
     let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
     let mut out = String::with_capacity(html.len());
     let mut i = 0;
@@ -414,6 +417,15 @@ mod tests {
         assert_eq!(first_url("see https://example.com/x, thanks").as_deref(), Some("https://example.com/x"));
         assert_eq!(first_url("no link here"), None);
         assert_eq!(first_url("(http://a.b/c)").as_deref(), Some("http://a.b/c"));
+    }
+
+    #[test]
+    fn strip_block_unicode_byte_len_change() {
+        // Ω (U+2126) is 3 bytes; to_lowercase() maps it to ω (U+03C9, 2 bytes).
+        // Using indices from the lowercased copy to slice the original would land mid-char → panic.
+        // to_ascii_lowercase() leaves non-ASCII unchanged, so indices stay valid.
+        let html = "Ω<SCRIPT>evil()</SCRIPT>safe";
+        assert_eq!(strip_block(html, "script"), "Ωsafe");
     }
 
     #[test]

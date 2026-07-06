@@ -2918,6 +2918,55 @@ impl ConversationEngine {
         None
     }
 
+    /// Parse a document-drafting ask -> (kind, subject). Only fires with an explicit COMPOSE verb AND
+    /// a document-kind noun (plan/memo/brief/...), so "write a script" (coder) and "write an email"
+    /// (action) are not stolen. Subject is taken before the kind ("an SDF adoption plan" -> "SDF") or
+    /// after a connector ("a plan about SDF" -> "SDF").
+    fn wants_draft(text: &str) -> Option<(String, String)> {
+        let l = text.trim().to_lowercase();
+        let verbs = [
+            "draft me ", "draft an ", "draft a ", "draft ", "write me ", "write up ", "write an ",
+            "write a ", "compose ", "put together ", "prepare ",
+        ];
+        let verb = verbs.iter().find(|v| l.starts_with(**v))?;
+        // Not a doc draft — these have their own dedicated paths.
+        if ["script", "email", "code", "function", "collage", "poem", "song"].iter().any(|x| l.contains(x)) {
+            return None;
+        }
+        // Longest kind phrases first so "adoption plan" wins over "plan".
+        let kinds = [
+            "adoption plan", "one-pager", "one pager", "action plan", "rollout plan", "proposal",
+            "strategy", "overview", "write-up", "writeup", "summary", "outline", "memo", "brief",
+            "pitch", "plan", "document", "doc",
+        ];
+        let kind = kinds.iter().find(|k| l.contains(**k))?.to_string();
+        let rest = &text[verb.len()..];
+        let rl = rest.to_lowercase();
+        let kpos = rl.find(&kind)?;
+        // Subject BEFORE the kind: "an SDF adoption plan" -> "SDF".
+        let before = rest[..kpos]
+            .trim()
+            .trim_start_matches("the ")
+            .trim_start_matches("an ")
+            .trim_start_matches("a ")
+            .trim();
+        if before.len() >= 2 {
+            return Some((kind, before.to_string()));
+        }
+        // Subject AFTER the kind via a connector: "a plan about SDF" -> "SDF".
+        let after = &rest[kpos + kind.len()..];
+        let al = after.to_lowercase();
+        for c in [" about ", " on ", " for ", " regarding ", " covering ", " of "] {
+            if let Some(i) = al.find(c) {
+                let subj = after[i + c.len()..].trim().trim_end_matches(['.', '?', '!']).trim();
+                if subj.len() >= 2 {
+                    return Some((kind, subj.to_string()));
+                }
+            }
+        }
+        None
+    }
+
     /// Deep research: split the topic into sub-questions, run a sub-agent on each IN PARALLEL
     /// (fan-out), then synthesize. The visible payoff of the sub-agent + concurrency work.
     /// RESEARCH → BELIEF REVISION (the moat's signature move). Recall what we already believe near the
@@ -3094,6 +3143,64 @@ impl ConversationEngine {
         out.push_str(&format!("\n**Verification:** {verdict}"));
         out.push_str(&format!("\n\n_(deep-dived {} angles in parallel, fact-checked)_", results.len()));
         Ok(out)
+    }
+
+    /// HARD-GROUNDED DRAFTING (the Family Book's discipline, applied to work). Gather the COMPLETE
+    /// set of stored facts about the subject (deterministic enumerate + word-match — no embedding
+    /// ranking lottery, no 3-fact cap), compose STRICTLY from them, then adversarially fact-check the
+    /// draft against the same facts. Thin corpus -> an honest short draft with gap markers, never a
+    /// confident fabrication (the SDF-adoption-plan value-prop blend was drafting freely, not from facts).
+    async fn draft_grounded(&self, kind: &str, subject: &str) -> Result<String> {
+        let facts = self.memory.beliefs_matching(subject).await.unwrap_or_default();
+        if facts.is_empty() {
+            return Ok(format!(
+                "I don't hold any stored grounding on \"{subject}\" yet, so I won't invent a {kind}. \
+                 Point me at a source — `ym learn <url>` — or tell me the key facts, and I'll draft it strictly from those."
+            ));
+        }
+        let fact_block = facts
+            .iter()
+            .map(|b| format!("- {} (certainty {:.2})", b.statement, b.confidence))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = format!(
+            "You are drafting a {kind} about \"{subject}\" for Pranab.\n\n\
+             FACTS — the ONLY things you know about {subject}; every claim in the {kind} must trace to one of these:\n{fact_block}\n\n\
+             Write the {kind}. HARD RULES: use ONLY the facts above; never blend in adjacent or general \
+             knowledge, and never invent capabilities, numbers, names, dates, or value-propositions not \
+             stated in the facts. Where the {kind} needs something the facts don't cover, write \
+             \"[no grounding: <what's missing>]\" on its own line — do NOT guess to fill the gap. A short, \
+             honest {kind} grounded in real facts beats a long confident one that fabricates. Structure it \
+             well; content comes only from the facts."
+        );
+        let draft = self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], GenerationConfig::default())
+            .await
+            .map_err(|e| MindError::Inference(e.to_string()))?
+            .text;
+        // Adversarial grounding check — every claim must trace to a fact; gap markers are honest, not violations.
+        let verify = format!(
+            "You are a skeptical fact-checker. Below is a DRAFT {kind} and the FACTS it must rest on. \
+             List any claim in the draft NOT supported by the facts, one per line as '\u{26a0} <claim>'. \
+             Ignore any \"[no grounding: ...]\" markers — those are honest gaps, not violations. \
+             If every claim is supported, reply exactly 'All claims grounded.'\n\nDRAFT:\n{draft}\n\nFACTS:\n{fact_block}"
+        );
+        let verdict = self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&verify)], GenerationConfig::default())
+            .await
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_else(|_| "(grounding check unavailable)".into());
+        let note = if facts.len() < 4 {
+            format!(
+                "\n\n_(Grounded in only {} stored fact(s) about {subject} — thin. `ym learn <url>` on a source and I'll deepen it.)_",
+                facts.len()
+            )
+        } else {
+            format!("\n\n_(Grounded strictly in {} stored facts about {subject}.)_", facts.len())
+        };
+        Ok(format!("{draft}\n\n**Grounding check:** {verdict}{note}"))
     }
 
     /// Give the mind hands: outward actions run through this harm-gated runtime with confirmation.
@@ -16942,6 +17049,15 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
         }
+        // HARD-GROUNDED DRAFTING: "draft me an X plan about Y" composes STRICTLY from the complete
+        // stored fact set about Y (no blending, no ranking lottery). Deterministic intercept ahead of
+        // the agent loop's free composition — the small model confabulates a draft otherwise (SDF bug).
+        if let Some((kind, subject)) = Self::wants_draft(user_text) {
+            let reply = self.draft_grounded(&kind, &subject).await?;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
         // PRIMARY: the agentic loop (reason → pick ONE tool → observe → iterate → answer, with the
         // build_capability self-extension hook). It subsumes the capability paths below — research,
         // code, monitors, grounded chat — as tools. The stateful interceptors (onboarding capture +
@@ -17238,12 +17354,17 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 let mut pinned: Vec<String> = Vec::new();
                 for w in user_text.split_whitespace() {
                     let t: String = w.chars().filter(|c| c.is_alphanumeric()).collect();
-                    if t.len() < 4 || pinned.len() >= 3 {
+                    if pinned.len() >= 3 {
                         continue;
                     }
+                    // Short ALL-CAPS acronyms (SDF, ML, API) are work subjects — pin them; otherwise
+                    // require a capitalized word of len>=4. Lowercase noise never pins.
+                    let acronym = (2..=3).contains(&t.len())
+                        && t.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                        && t.chars().any(|c| c.is_ascii_uppercase());
                     let cap = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                         || t.chars().all(|c| c.is_uppercase());
-                    if !cap {
+                    if !(acronym || (t.len() >= 4 && cap)) {
                         continue;
                     }
                     if let Ok(bs) = self.memory.beliefs_matching(&t).await {
@@ -18459,6 +18580,29 @@ mod tests {
         assert_eq!(ConversationEngine::wants_research_revise("research and update the latest rust version").as_deref(), Some("the latest rust version"));
         assert_eq!(ConversationEngine::wants_research_revise("update your knowledge on rust releases").as_deref(), Some("rust releases"));
         assert!(ConversationEngine::wants_research_revise("research the latest rust").is_none(), "plain research is not a revise");
+    }
+
+    #[test]
+    fn wants_draft_parsing() {
+        // subject BEFORE the kind (the SDF-adoption-plan failing case)
+        assert_eq!(
+            ConversationEngine::wants_draft("draft an SDF adoption plan").as_ref().map(|(k, s)| (k.as_str(), s.as_str())),
+            Some(("adoption plan", "SDF"))
+        );
+        // subject AFTER a connector
+        assert_eq!(
+            ConversationEngine::wants_draft("write me a memo about the Q3 rollout").as_ref().map(|(k, s)| (k.as_str(), s.as_str())),
+            Some(("memo", "the Q3 rollout"))
+        );
+        // bare "plan" kind still resolves the subject
+        assert_eq!(ConversationEngine::wants_draft("draft a plan for SDF").as_ref().map(|(k, _)| k.as_str()), Some("plan"));
+        // dedicated paths are NOT stolen
+        assert!(ConversationEngine::wants_draft("write a script to rename files").is_none(), "script -> coder");
+        assert!(ConversationEngine::wants_draft("draft an email to Brishti").is_none(), "email -> action");
+        // no doc-kind noun -> not a draft
+        assert!(ConversationEngine::wants_draft("draft something nice").is_none());
+        // no compose verb -> not a draft
+        assert!(ConversationEngine::wants_draft("what's the plan for SDF").is_none());
     }
 
     #[test]

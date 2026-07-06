@@ -1048,11 +1048,24 @@ impl MemoryHandle {
                             let _ = reply.send(Ok(recall_beliefs(&db, &text, top_k)));
                         }
                         Cmd::BeliefsMatching { needle, reply } => {
-                            let words: Vec<String> = needle
-                                .to_lowercase()
+                            // Classify each needle token: SHORT ALL-CAPS ACRONYMS (SDF, ML, API — the
+                            // exact shape of work subjects) match WHOLE-WORD to avoid noise ("AI" inside
+                            // "domain"); ordinary words (len>=4) keep substring match ("adopt"->"adoption").
+                            // The old flat len>=4 gate silently dropped 3-char acronyms = the SDF bug.
+                            let words: Vec<(String, bool)> = needle
                                 .split(|c: char| !c.is_alphanumeric())
-                                .filter(|w| w.len() >= 4)
-                                .map(String::from)
+                                .filter_map(|w| {
+                                    let acronym = (2..=3).contains(&w.len())
+                                        && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                                        && w.chars().any(|c| c.is_ascii_uppercase());
+                                    if acronym {
+                                        Some((w.to_lowercase(), true))
+                                    } else if w.len() >= 4 {
+                                        Some((w.to_lowercase(), false))
+                                    } else {
+                                        None
+                                    }
+                                })
                                 .collect();
                             let hits: Vec<Belief> = if words.is_empty() {
                                 Vec::new()
@@ -1062,7 +1075,15 @@ impl MemoryHandle {
                                     .map(to_belief_dto)
                                     .filter(|b| {
                                         let t = b.statement.to_lowercase();
-                                        words.iter().any(|w| t.contains(w.as_str()))
+                                        let toks: Vec<&str> =
+                                            t.split(|c: char| !c.is_alphanumeric()).collect();
+                                        words.iter().any(|(w, whole)| {
+                                            if *whole {
+                                                toks.iter().any(|x| *x == w.as_str())
+                                            } else {
+                                                t.contains(w.as_str())
+                                            }
+                                        })
                                     })
                                     .take(20)
                                     .collect()

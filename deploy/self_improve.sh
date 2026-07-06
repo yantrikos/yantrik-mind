@@ -27,7 +27,7 @@ set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"
 # Force real Claude (drop any MiniMax override that may be in the env).
-unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_API_KEY
 
 # Clone as a SIBLING of the path-dep repos (../yantrikdb, ../yantrik-companion live under /root/codes)
 # so the relative path deps resolve and the compile-gate can actually build. Claude's config goes in a

@@ -20,7 +20,7 @@ flock -n 9 || { echo "$(date -u +%FT%TZ) another tick is still running — skip"
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"
-unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_API_KEY
 export CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
 # cron runs with a minimal PATH; claude lives in /usr/local/bin, cargo in /root/.cargo/bin.
 export PATH="/usr/local/bin:/root/.cargo/bin:$PATH"

@@ -17,7 +17,7 @@ KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"
-unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_API_KEY
 
 WORK="$(mktemp -d /opt/yantrik-mind/release.XXXXXX)"; trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"; export HOME="$WORK"

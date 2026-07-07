@@ -6450,15 +6450,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         let mut store = self.load_people_profiles().await;
         let mut touched = false;
-        for p in store.iter_mut() {
-            let matches = p
-                .get("name")
+        // EXACT name match only — a prefix match would let "Brishti" hit "Brishti's Mom" first
+        // (store order), silently editing a relative. Deterministic editors don't guess.
+        let idx = store.iter().position(|p| {
+            p.get("name")
                 .and_then(|x| x.as_str())
-                .map(|n| n.eq_ignore_ascii_case(name) || n.to_lowercase().starts_with(&name.to_lowercase()))
-                .unwrap_or(false);
-            if !matches {
-                continue;
-            }
+                .map(|n| n.trim().eq_ignore_ascii_case(name.trim()))
+                .unwrap_or(false)
+        });
+        let Some(idx) = idx else {
+            return format!("No profile named exactly \"{name}\" — `ym family` lists them.");
+        };
+        for p in store.iter_mut().skip(idx).take(1) {
             match field.as_str() {
                 "relationship" => {
                     p["relationship"] = serde_json::json!(value.trim());

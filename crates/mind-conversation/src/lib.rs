@@ -9930,6 +9930,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 .await;
             built.push(title.to_string());
         }
+        // NIGHT RESEARCH: the autonomous-scientist stage — discover, study, relate, adapt,
+        // (bounded) adopt. Its line joins the morning board like any other shift work.
+        let research_line = self.night_research_run().await;
+
         let standing = self.live_packets().await.len();
         let mut out = format!(
             "🌙 Night shift compiled {} packet(s){}.",
@@ -9943,6 +9947,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             out.push_str("\n  didn't do: ");
             out.push_str(&skipped.join("; "));
         }
+        out.push_str(&format!("\n{research_line}"));
         out.push_str("\n`packets` to review.");
         // THE COMPOUNDING WIRE: regret clusters become self-build goals. >=2 misses on the same
         // subject = a capability gap, not bad luck — enqueue ONE typed goal into the (proven)
@@ -11314,6 +11319,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             return self.paper_adopt(&key, n).await;
         }
+        if let Some(rest) = a.strip_prefix("topics").map(str::trim) {
+            if let Some(vals) = rest.strip_prefix("set ").map(str::trim).filter(|x| !x.is_empty()) {
+                let topics: Vec<String> = vals.split(';').map(|t| t.trim().to_string()).filter(|t| t.len() > 3).collect();
+                let _ = self.memory.profile_set("research_topics", &serde_json::to_string(&topics).unwrap_or_default()).await;
+                return format!("🔭 Research agenda set ({} topics). The night shift hunts these on arXiv.", topics.len());
+            }
+            let topics = self.research_topics().await;
+            return format!("🔭 Research agenda:
+{}
+
+`paper topics set t1; t2; …` to change.",
+                topics.iter().map(|t| format!("• {t}")).collect::<Vec<_>>().join("
+"));
+        }
+        if a == "night" {
+            return self.night_research_run().await;
+        }
         if a.is_empty() || a == "list" {
             let idx = self.memory.profile_get("paper_index").await.ok().flatten().unwrap_or_default();
             let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
@@ -11586,6 +11608,97 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             Err(e) => format!("Couldn't write the goal queue ({e})."),
         }
+    }
+
+    async fn research_topics(&self) -> Vec<String> {
+        let raw = self.memory.profile_get("research_topics").await.ok().flatten().unwrap_or_default();
+        let t: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        if !t.is_empty() {
+            return t;
+        }
+        vec![
+            "LLM agent persistent memory".into(),
+            "belief revision language agents".into(),
+            "self-improving code agents".into(),
+            "retrieval augmented reasoning".into(),
+        ]
+    }
+
+    /// THE AUTONOMOUS SCIENTIST — one bounded overnight research cycle, no human trigger:
+    /// discover (arXiv, agenda round-robin) → study (distill + relate) → adapt against the studied
+    /// yantrik-mind codebase → auto-adopt the top proposal into the self-build queue (only if the
+    /// queue is short). Reports for the morning board. ~4 LLM calls, one paper per night.
+    pub async fn night_research_run(&self) -> String {
+        if std::env::var("YM_NIGHT_RESEARCH").map(|v| v == "off").unwrap_or(false) {
+            return "🔭 night research is off (YM_NIGHT_RESEARCH=off)".into();
+        }
+        let topics = self.research_topics().await;
+        let day = (chrono::Utc::now().timestamp() / 86_400) as usize;
+        let topic = topics[day % topics.len()].clone();
+        let seen_raw = self.memory.profile_get("research_seen").await.ok().flatten().unwrap_or_default();
+        let mut seen: Vec<String> = serde_json::from_str(&seen_raw).unwrap_or_default();
+        let idx = self.memory.profile_get("paper_index").await.ok().flatten().unwrap_or_default();
+        let studied: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
+        let topic2 = topic.clone();
+        let found = tokio::task::spawn_blocking(move || mind_tools::paper::arxiv_search(&topic2, 10))
+            .await
+            .unwrap_or_else(|_| Ok(vec![]))
+            .unwrap_or_default();
+        let fresh = found.into_iter().find(|(url, _)| {
+            let k = mind_tools::paper::paper_key(url);
+            !studied.contains_key(&k) && !seen.contains(&k)
+        });
+        let Some((url, title)) = fresh else {
+            return format!("🔭 night research: nothing new on \"{topic}\" tonight.");
+        };
+        let key = mind_tools::paper::paper_key(&url);
+        seen.push(key.clone());
+        if seen.len() > 300 { let cut = seen.len() - 300; seen.drain(..cut); }
+        let _ = self.memory.profile_set("research_seen", &serde_json::to_string(&seen).unwrap_or_default()).await;
+        // STUDY (detached distill+relate), then wait for the facts to land before adapting.
+        let _ = self.paper_study(&url).await;
+        for _ in 0..12 {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let token = format!("paperkb{key}");
+            if !self.memory.beliefs_matching_n(&token, 3).await.unwrap_or_default().is_empty() {
+                break;
+            }
+        }
+        let token = format!("paperkb{key}");
+        let n_facts = self.memory.beliefs_matching_n(&token, 300).await.unwrap_or_default().len();
+        if n_facts == 0 {
+            return format!("🔭 night research: read \"{title}\" but distillation produced nothing usable — skipped.");
+        }
+        // ADAPT against the studied self-codebase; auto-adopt top proposal only when the human
+        // queue is short (human goals keep priority) and the proposal is grounded (names a module).
+        let _ = self.paper_adapt(&key, "yantrik-mind").await;
+        let raw = self.memory.profile_get(&format!("paper_adapt_{key}")).await.ok().flatten().unwrap_or_default();
+        let props: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut queued = String::new();
+        if let Some(top) = props.first() {
+            let grounded = top.contains("mind-") || top.contains("ConversationEngine") || top.contains("Memory");
+            let goals_path = std::path::PathBuf::from(
+                std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()),
+            ).join("selfbuild-goals.txt");
+            let qlen = std::fs::read_to_string(&goals_path)
+                .map(|c| c.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).count())
+                .unwrap_or(99);
+            if grounded && qlen < 8 {
+                use std::io::Write as _;
+                if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(&goals_path) {
+                    let _ = writeln!(fh, "{top}");
+                    queued = format!("\n  → queued for self-build: {}", top.chars().take(160).collect::<String>());
+                }
+            } else if !grounded {
+                queued = "\n  → top proposal too vague to auto-queue (kept for `paper adapt` review)".into();
+            } else {
+                queued = format!("\n  → self-build queue has {qlen} goals — not auto-adding (say `paper adopt {key} 1`)");
+            }
+        }
+        format!(
+            "🔭 night research on \"{topic}\": read **{}** ({n_facts} facts learned, `{key}`), derived {} adaptation(s){queued}",
+            title.chars().take(110).collect::<String>(), props.len()
+        )
     }
 
     pub async fn code_cmd(&self, arg: &str) -> String {

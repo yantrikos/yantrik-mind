@@ -6426,6 +6426,83 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let _ = self.memory.profile_set("people_profiles", &serde_json::Value::Array(p.to_vec()).to_string()).await;
     }
 
+    /// Deterministic profile editor — the human-authoritative path for key dates and relationship.
+    /// LLM chat may PROPOSE profile changes; this verb is how they actually land (no freelancing).
+    pub async fn family_set(&self, name: &str, field: &str, value: &str) -> String {
+        let field = field.to_lowercase();
+        // Accept MM-DD or "July 23"-style month-name dates for the date fields.
+        let mmdd: Option<String> = if field == "birthday" || field == "anniversary" {
+            let v = value.trim();
+            let direct = v.len() == 5 && v.as_bytes()[2] == b'-';
+            if direct {
+                Some(v.to_string())
+            } else {
+                let today = local_now();
+                parse_text_date_ms(v, &today)
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|t| t.with_timezone(today.offset()).format("%m-%d").to_string())
+            }
+        } else {
+            None
+        };
+        if (field == "birthday" || field == "anniversary") && mmdd.is_none() {
+            return format!("Couldn't parse \"{value}\" as a date — use MM-DD or \"July 23\".");
+        }
+        let mut store = self.load_people_profiles().await;
+        let mut touched = false;
+        for p in store.iter_mut() {
+            let matches = p
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(|n| n.eq_ignore_ascii_case(name) || n.to_lowercase().starts_with(&name.to_lowercase()))
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            match field.as_str() {
+                "relationship" => {
+                    p["relationship"] = serde_json::json!(value.trim());
+                    touched = true;
+                }
+                "birthday" | "anniversary" => {
+                    let label = if field == "birthday" { "birthday" } else { "wedding anniversary" };
+                    let dates = p
+                        .as_object_mut()
+                        .and_then(|m| {
+                            m.entry("dates").or_insert_with(|| serde_json::json!([]));
+                            m.get_mut("dates")
+                        })
+                        .and_then(|d| d.as_array_mut());
+                    if let Some(arr) = dates {
+                        arr.retain(|d| {
+                            d.get("label").and_then(|x| x.as_str()).map(|l| !l.eq_ignore_ascii_case(label)).unwrap_or(true)
+                        });
+                        arr.push(serde_json::json!({"label": label, "mmdd": mmdd.clone().unwrap()}));
+                        touched = true;
+                    }
+                }
+                _ => return format!("Unknown field \"{field}\" — birthday | anniversary | relationship."),
+            }
+            break;
+        }
+        if !touched {
+            return format!("No profile named \"{name}\".");
+        }
+        self.save_people_profiles(&store).await;
+        // The correction is also a belief — recall stays consistent with the profile.
+        let _ = self
+            .memory
+            .remember_as_belief(BeliefAssertion {
+                statement: format!("{name}'s {field} is {}", mmdd.as_deref().unwrap_or(value)),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: Some("family-set".into()),
+                provenance: "told".into(),
+            })
+            .await;
+        format!("✅ {name}: {field} set to {} (profile + belief).", mmdd.as_deref().unwrap_or(value))
+    }
+
     /// Merge freshly-extracted people into the living profiles: upsert by name, dedupe facts, refresh the
     /// relationship, and upsert key dates by label. Returns how many people were touched (for the
     /// consolidation counter). Revise-in-place — one evolving profile per person, not an ever-growing pile.
@@ -14747,6 +14824,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // --- household: people registry + speak-as (group-chat read-isolation) ---
             "people" | "household" => self.people_list().await,
             // --- family/people layer: living per-person profiles kept current from conversation ---
+            "family" if rest.trim().starts_with("set ") => {
+                // family set <name> birthday|anniversary <MM-DD|July 23> | relationship <rel>
+                let args: Vec<&str> = rest.trim().trim_start_matches("set").trim().splitn(3, ' ').collect();
+                if args.len() < 3 {
+                    "Usage: family set <name> birthday|anniversary|relationship <value>".to_string()
+                } else {
+                    self.family_set(args[0], args[1], args[2]).await
+                }
+            }
             "family" | "relationships" => self.family_view().await,
             // --- the daily morning briefing (also fires proactively once/day past quiet hours) ---
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,

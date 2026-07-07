@@ -11608,6 +11608,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         // each claim; strip only the retrieval token and the [code:] tag.
         let strip = |f: &str| {
             let mut t = f.replacen(&token, "", 1).replacen(&tag, "", 1);
+            // Provenance tags → human words the model can cite naturally, not raw brackets.
+            t = t.replace("[det]", "(parsed)").replace("[syn]", "(inferred)");
             t = t.trim().to_string();
             t
         };

@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 96] = [
+    const CMDS: [&str; 98] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -367,7 +367,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "onedrive", "od",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
-        "dream", "radar", "privacy", "regrets", "regret",
+        "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9456,6 +9456,182 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
+    /// ---------- FUTURE NODES (the world twin's seed) ----------
+    /// One queryable forward store. Nodes carry a stable id, a kind, and READINESS CRITERIA —
+    /// the checklist the Night Shift compiles ActionPackets against. Grown from what already
+    /// exists (calendar + fest: entries + people dates + deadlined reminders); rescans preserve
+    /// per-node state (readiness ticks, packet links). The twin emerges here, not from ontology.
+
+    /// Rebuild the forward store for the next `days`, preserving existing node state by id.
+    /// Returns the nodes sorted by time. Persisted at KV `future_nodes`.
+    pub async fn future_scan(&self, days: i64) -> Vec<serde_json::Value> {
+        let today = local_now();
+        let now = today.timestamp_millis();
+        let horizon = now + days * 86_400_000;
+        // Existing state to preserve (readiness ticks, packets, dismissals survive rescans).
+        let old: std::collections::HashMap<String, serde_json::Value> = self
+            .memory
+            .profile_get("future_nodes")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|x| serde_json::from_str::<Vec<serde_json::Value>>(&x).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|n| {
+                let id = n.get("id").and_then(|x| x.as_str()).map(String::from)?;
+                Some((id, n))
+            })
+            .collect();
+        let slug = |t: &str| -> String {
+            t.to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|x| !x.is_empty())
+                .take(5)
+                .collect::<Vec<_>>()
+                .join("-")
+        };
+        // Per-kind readiness criteria: the packet checklist each node kind demands. These defaults
+        // seed the compiler; packets tick them off as they ship.
+        let criteria = |kind: &str| -> Vec<&'static str> {
+            match kind {
+                "festival" => vec!["supplies", "logistics+weather", "story+message"],
+                "trip" => vec!["packing", "documents", "weather+fallback", "route+timing"],
+                "birthday" => vec!["gift", "card", "plan", "collision-check"],
+                "deadline" => vec!["prepared-action"],
+                _ => vec!["prepared-note"],
+            }
+        };
+        let mut nodes: Vec<serde_json::Value> = Vec::new();
+        let mut push = |title: String, kind: &str, when_ms: i64, end_ms: i64, participants: Vec<String>| {
+            let id = format!("{kind}:{}", slug(&title));
+            let mut node = old.get(&id).cloned().unwrap_or_else(|| {
+                serde_json::json!({
+                    "id": id, "readiness": {}, "packets": [], "status": "open",
+                })
+            });
+            node["title"] = serde_json::json!(title);
+            node["kind"] = serde_json::json!(kind);
+            node["when_ms"] = serde_json::json!(when_ms);
+            node["end_ms"] = serde_json::json!(end_ms.max(when_ms));
+            node["participants"] = serde_json::json!(participants);
+            node["criteria"] = serde_json::json!(criteria(kind));
+            nodes.push(node);
+        };
+        // 1. Calendar entries (festivals carry the fest: prefix; multi-day events keep their window).
+        for e in self.load_calendar().await {
+            let ms = e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+            if ms < now - 86_400_000 || ms > horizon {
+                continue;
+            }
+            let title = e.get("title").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+            let end = e.get("end_ms").and_then(|x| x.as_i64()).unwrap_or(ms);
+            let tl = title.to_lowercase();
+            let kind = if title.starts_with("fest:") || tl.contains("puja") || tl.contains("yatra") || tl.contains("ashtami") {
+                "festival"
+            } else if tl.contains("trip") || tl.contains("travel") || tl.contains("resort") || tl.contains("hotel") || tl.contains("flight") {
+                "trip"
+            } else {
+                "event"
+            };
+            push(title.trim_start_matches("fest:").trim().to_string(), kind, ms, end, vec![]);
+        }
+        // 2. People dates (birthdays/anniversaries) inside the horizon.
+        for (name, label, d, _mmdd) in self.upcoming_people_dates(days).await {
+            let kind = if label.to_lowercase().contains("birthday") { "birthday" } else { "event" };
+            push(format!("{name}'s {label}"), kind, now + d * 86_400_000, now + d * 86_400_000, vec![name]);
+        }
+        // 3. Deadlined reminders.
+        let (reminders, _) = self.split_tasks().await;
+        for t in &reminders {
+            if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
+                if ms >= now && ms <= horizon {
+                    push(t.description.chars().take(80).collect(), "deadline", ms, ms, vec![]);
+                }
+            }
+        }
+        nodes.sort_by_key(|n| n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0));
+        let _ = self
+            .memory
+            .profile_set("future_nodes", &serde_json::Value::Array(nodes.clone()).to_string())
+            .await;
+        nodes
+    }
+
+    /// Fragility ranking: deadline proximity × unmet readiness. This is the Night Shift's
+    /// dispatch order — the most-imminent, least-ready node gets worked first.
+    pub async fn future_fragile(&self, days: i64) -> Vec<(f64, serde_json::Value)> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut out: Vec<(f64, serde_json::Value)> = self
+            .future_scan(days)
+            .await
+            .into_iter()
+            .filter(|n| n.get("status").and_then(|x| x.as_str()) != Some("dismissed"))
+            .map(|n| {
+                let when = n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(now);
+                let days_left = ((when - now).max(0) as f64 / 86_400_000.0).max(0.25);
+                let total = n.get("criteria").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(1).max(1);
+                let done = n
+                    .get("readiness")
+                    .and_then(|x| x.as_object())
+                    .map(|m| m.values().filter(|v| v.as_bool() == Some(true)).count())
+                    .unwrap_or(0);
+                let unready = 1.0 - (done as f64 / total as f64);
+                // proximity dominates as the date closes in; fully-ready nodes fall to ~0.
+                (unready * (10.0 / days_left), n)
+            })
+            .collect();
+        out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
+    /// `ym future` — the forward store, fragility-ranked. The twin's first visible face.
+    pub async fn future_view(&self) -> String {
+        let ranked = self.future_fragile(21).await;
+        if ranked.is_empty() {
+            return "🔭 Nothing on the 21-day horizon. (`ym calendar add …` seeds it.)".to_string();
+        }
+        let today = local_now();
+        let mut out = String::from("🔭 FUTURE NODES (21d, fragility-ranked — most imminent × least ready first)\n");
+        for (score, n) in ranked.iter().take(12) {
+            let title = n.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+            let kind = n.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
+            let when = n
+                .get("when_ms")
+                .and_then(|x| x.as_i64())
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|t| t.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                .unwrap_or_default();
+            let total = n.get("criteria").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            let done = n
+                .get("readiness")
+                .and_then(|x| x.as_object())
+                .map(|m| m.values().filter(|v| v.as_bool() == Some(true)).count())
+                .unwrap_or(0);
+            let unmet: Vec<String> = n
+                .get("criteria")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.as_str())
+                        .filter(|c| {
+                            n.get("readiness").and_then(|r| r.get(*c)).and_then(|v| v.as_bool()) != Some(true)
+                        })
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "• [{kind}] {title} — {when} · readiness {done}/{total} · fragility {score:.1}{}\n",
+                if unmet.is_empty() { String::new() } else { format!(" · needs: {}", unmet.join(", ")) }
+            ));
+        }
+        out
+    }
+
     /// ---------- REGRET LOG (Night Shift baseline) ----------
     /// The charter's eval: every owner ask is classified against the forward spine. An ask about
     /// something that was FORESEEABLE (on the 21-day spine) with nothing prepared is a REGRET —
@@ -14634,6 +14810,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             },
             "privacy" => mind_inference::privacy_report(self.inference.provider()),
             "regrets" | "regret" => self.regrets_report().await,
+            "future" | "nodes" => self.future_view().await,
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());

@@ -13,6 +13,37 @@ set -euo pipefail
 KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
 [ -f "$KILL" ] && { echo "$(date -u +%FT%TZ) kill-switch present — tick skipped"; exit 0; }
 
+# ALERT: a dead self-build loop must SPEAK, not rot silently (it once sat broken for 4 days).
+# Sends a Telegram message to the active chat, at most once per failure-kind per 24h.
+tg_alert() { # $1 = failure kind (slug), $2 = message
+  local kind="$1" msg="$2" stamp="/var/lib/yantrik-mind/.selfbuild_alert_$1"
+  if [ -f "$stamp" ] && [ "$(( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) ))" -lt 86400 ]; then
+    return 0
+  fi
+  touch "$stamp"
+  local tok chat
+  tok="$(. /etc/yantrik-mind.env 2>/dev/null; printf '%s' "${YM_TELEGRAM_TOKEN:-}")"
+  chat="$(cat /var/lib/yantrik-mind/tg_offset.active_chat 2>/dev/null || true)"
+  [ -n "$tok" ] && [ -n "$chat" ] && curl -s -m 10 "https://api.telegram.org/bot${tok}/sendMessage" \
+    --data-urlencode "chat_id=${chat}" --data-urlencode "text=🛠️ self-build: ${msg}" >/dev/null 2>&1 || true
+}
+# Any unexpected error path (set -e) also speaks before dying.
+trap 'rc=$?; [ $rc -ne 0 ] && tg_alert crash "tick crashed (exit $rc) — check selfbuild-cron.log"; exit $rc' ERR
+
+# AUTH PREFLIGHT — before drawing a treasury pass or popping a goal. The OAuth token expires
+# every ~6-12h; a dead token must not burn passes, drain the queue, or fail silently.
+set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
+: "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
+AUTH_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 12 \
+  -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN" \
+  -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage 2>/dev/null || echo 000)
+if [ "$AUTH_HTTP" = "401" ] || [ "$AUTH_HTTP" = "403" ]; then
+  echo "$(date -u +%FT%TZ) auth preflight: OAuth token rejected (HTTP $AUTH_HTTP) — tick skipped, nothing consumed"
+  tg_alert token "builder OAuth token expired — self-build paused until it's refreshed (copy a fresh session token)"
+  exit 0
+fi
+# transient network failure (000/5xx): proceed — the hot-window guard below degrades gracefully
+
 # TREASURY: draw one selfbuild pass from the shared daily envelope (budget.json — same file the
 # Rust engine meters). Dry = skip-with-log; the goal queue is untouched, the pass runs tomorrow.
 BUDGET=/var/lib/yantrik-mind/budget.json
@@ -123,5 +154,6 @@ if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded
     printf '%s\n' "$GOAL" >> "$GOALS"
     echo "==> builder unavailable — goal re-queued (not consumed)"
   fi
+  tg_alert builder "builder unavailable mid-run (credit/quota/auth) — goal re-queued; check token + Max window"
 fi
 echo "$(date -u +%FT%TZ) self-build tick done"

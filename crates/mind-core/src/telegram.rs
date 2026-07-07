@@ -1156,6 +1156,27 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // WORKOPS: paced field-scan of the owner's actual projects (registry-driven, not
+        // conversation-derived). Speaks only when the field moved. Detached; treasury-gated.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() && conv.work_watch_due().await {
+                let conv2 = conv.clone();
+                let api2 = api.clone();
+                tokio::spawn(async move {
+                    match conv2.work_watch_run().await {
+                        Some(msg) => {
+                            if tg_send_mirrored(&conv2, &api2, chat, &msg).await.is_ok() {
+                                conv2.note_proactive_sent().await;
+                                eprintln!("[workops] field-scan delivered");
+                            }
+                        }
+                        None => eprintln!("[workops] pass complete — silent (no field movement)"),
+                    }
+                });
+            }
+        }
+
         // WORK RADAR: autonomous research on whatever the user is actively working on (derived
         // from their own recent turns). Speaks only when the research changed stored beliefs.
         {

@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 115] = [
+    const CMDS: [&str; 118] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -370,6 +370,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
+        "work", "workops", "projects",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -11082,6 +11083,108 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         Some(format!("\u{1f6f0} Work radar — I looked into **{fresh}** on my own (it's what you've been working on):\n\n{report}"))
     }
 
+    /// ---------- WORKOPS (the research co-pilot) ----------
+    /// Autonomous help on the OWNER'S WORK. A registry of his real projects (seeded from what the
+    /// mind already knows he builds); a paced pass that research-revises the next project for field
+    /// movement, cited, and speaks ONLY when beliefs changed. Distinct from the work-radar: that
+    /// infers subjects from conversation (family-heavy), this targets the work explicitly.
+
+    async fn work_subjects(&self) -> Vec<String> {
+        let stored: Vec<String> = self
+            .memory
+            .profile_get("work_subjects")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if !stored.is_empty() {
+            return stored;
+        }
+        // Seed from his known projects (the mind already holds these as beliefs).
+        let seed: Vec<String> = ["SDF Protocol", "ContextCache", "YantrikDB", "ToolFormerMicro", "agentweb", "anandotsav"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        let _ = self.memory.profile_set("work_subjects", &serde_json::to_string(&seed).unwrap_or_default()).await;
+        seed
+    }
+
+    /// `work` / `work list` / `work add <s>` / `work remove <s>` / `work run`.
+    pub async fn work_cmd(&self, arg: &str) -> String {
+        let a = arg.trim();
+        if let Some(sub) = a.strip_prefix("add ").map(str::trim).filter(|x| !x.is_empty()) {
+            let mut subs = self.work_subjects().await;
+            if !subs.iter().any(|x| x.eq_ignore_ascii_case(sub)) {
+                subs.push(sub.to_string());
+                let _ = self.memory.profile_set("work_subjects", &serde_json::to_string(&subs).unwrap_or_default()).await;
+            }
+            return format!("🛠 Watching \"{sub}\" now. `work` lists the set.");
+        }
+        if let Some(sub) = a.strip_prefix("remove ").or_else(|| a.strip_prefix("rm ")).map(str::trim).filter(|x| !x.is_empty()) {
+            let mut subs = self.work_subjects().await;
+            let before = subs.len();
+            subs.retain(|x| !x.eq_ignore_ascii_case(sub));
+            let _ = self.memory.profile_set("work_subjects", &serde_json::to_string(&subs).unwrap_or_default()).await;
+            return if subs.len() < before { format!("🛠 Stopped watching \"{sub}\".") } else { format!("Not in the watch set: \"{sub}\".") };
+        }
+        if a == "run" || a == "now" {
+            return self.work_watch_run().await.unwrap_or_else(|| "🛠 WorkOps ran — no field movement worth surfacing (the research still landed in memory), or the research envelope is dry.".to_string());
+        }
+        let subs = self.work_subjects().await;
+        format!(
+            "🛠 WORKOPS — watching your projects (nightly field-scan, belief-revising, speaks only on change):\n{}\n\n`work add <project>` · `work remove <project>` · `work run` (force a pass now).",
+            subs.iter().map(|x| format!("  • {x}")).collect::<Vec<_>>().join("\n")
+        )
+    }
+
+    pub async fn work_watch_due(&self) -> bool {
+        use chrono::Timelike;
+        let h = local_now().hour();
+        if !(8..=22).contains(&h) {
+            return false;
+        }
+        let period_ms = (std::env::var("YM_WORKOPS_HOURS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(8.0) * 3_600_000.0) as i64;
+        let last: i64 = self.memory.profile_get("workops_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// One WorkOps pass: research-revise the next project in the rotation; surface only on change.
+    /// A GitHub-activity glance rides along when there's unread work.
+    pub async fn work_watch_run(&self) -> Option<String> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let _ = self.memory.profile_set("workops_last", &now_ms.to_string()).await;
+        self.researcher.as_ref()?;
+        let subjects = self.work_subjects().await;
+        if subjects.is_empty() {
+            return None;
+        }
+        // round-robin cursor so it walks the whole portfolio, not one project.
+        let cursor: usize = self.memory.profile_get("workops_cursor").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let subject = subjects[cursor % subjects.len()].clone();
+        let _ = self.memory.profile_set("workops_cursor", &((cursor + 1) % subjects.len()).to_string()).await;
+        // Belief-revising field scan on the project (treasury-gated inside research_revise).
+        let report = self.research_revise(&format!("{subject} — latest developments, competitors, and relevant research")).await.ok()?;
+        // GitHub activity glance (proven-strong signal; only when there's genuinely unread work).
+        let mut gh = String::new();
+        if let Some(g) = &self.github {
+            if let Ok(notes) = g.notifications(8).await {
+                if !notes.is_empty() {
+                    gh = format!(
+                        "\n\n📬 GitHub — {} unread: {}",
+                        notes.len(),
+                        notes.iter().take(4).map(|n| n.title.clone()).collect::<Vec<_>>().join(" · ")
+                    );
+                }
+            }
+        }
+        if report.contains("nothing changed in what I believe") && gh.is_empty() {
+            return None; // silent — the scan still updated memory
+        }
+        self.ledger_sent("workops", &format!("field-scanned {subject}")).await;
+        Some(format!("🛠 WorkOps — I scanned **{subject}** for you:\n\n{report}{gh}"))
+    }
+
     /// ---------- THE FAMILY FRAME ----------
     /// Ambient presence: one photo a day on a wall tablet, chosen with intent — anniversaries
     /// first, then this-day-in-history, then a slow walk through the archive. Silent by design.
@@ -16214,6 +16317,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let why = it.next().unwrap_or("");
                 self.packet_decide(n, false, why).await
             }
+            "work" | "workops" | "projects" => self.work_cmd(&rest).await,
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());

@@ -9559,15 +9559,38 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     pub async fn providers_report(&self) -> String {
         let mut out = String::from("🔌 PROVIDERS — real quota where queryable, observed truth elsewhere\n");
         // Live balance (blocking probe off the async thread).
+        let q = tokio::task::spawn_blocking(mind_tools::nanogpt_quota).await.ok().flatten();
         let bal = tokio::task::spawn_blocking(mind_tools::nanogpt_balance).await.ok().flatten();
-        match bal {
-            Some((usd, _)) => {
-                out.push_str(&format!(
-                    "• nanogpt: ${usd:.2} remaining (live balance API){}\n",
-                    if usd < 0.50 { " ⚠️ DRY — every call fails over to the next provider (latency + hidden dependence)" } else { "" }
-                ));
+        let sub_active = q.as_ref().and_then(|v| v.get("active")).and_then(|x| x.as_bool()).unwrap_or(false);
+        if sub_active {
+            let w = q.as_ref().and_then(|v| v.get("weeklyInputTokens")).cloned().unwrap_or_default();
+            let used = w.get("used").and_then(|x| x.as_i64()).unwrap_or(0);
+            let rem = w.get("remaining").and_then(|x| x.as_i64()).unwrap_or(0);
+            let pct = w.get("percentUsed").and_then(|x| x.as_f64()).unwrap_or(0.0) * 100.0;
+            let reset = w
+                .get("resetAt")
+                .and_then(|x| x.as_i64())
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|t| t.with_timezone(local_now().offset()).format("%a %b %-d").to_string())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "• nanogpt: SUBSCRIPTION active — weekly input tokens {:.1}M/{:.0}M used ({pct:.1}%), {:.1}M remaining, resets {reset}",
+                used as f64 / 1e6,
+                (used + rem) as f64 / 1e6,
+                rem as f64 / 1e6
+            ));
+            if let Some((usd, _)) = bal {
+                out.push_str(&format!(" · PAYG wallet ${usd:.2}"));
             }
-            None => out.push_str("• nanogpt: balance probe failed (key missing or endpoint down)\n"),
+            out.push('\n');
+        } else {
+            match bal {
+                Some((usd, _)) => out.push_str(&format!(
+                    "• nanogpt: ${usd:.2} PAYG remaining{}\n",
+                    if usd < 0.50 { " ⚠️ DRY — calls fail over to the next provider" } else { "" }
+                )),
+                None => out.push_str("• nanogpt: quota probe failed (key missing or endpoint down)\n"),
+            }
         }
         out.push_str("• ollama-cloud: no usage API (dashboard: ollama.com/settings) — observed counts below\n");
         out.push_str("• minimax: no usage API (dashboard: platform.minimax.io) — observed counts below\n");

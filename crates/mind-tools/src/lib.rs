@@ -1726,6 +1726,19 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 
+/// NanoGPT subscription usage — the REAL quota (weekly input tokens used/remaining/reset).
+/// GET /api/subscription/v1/usage with x-api-key. Blocking (ureq); call via spawn_blocking.
+pub fn nanogpt_quota() -> Option<serde_json::Value> {
+    let key = std::env::var("NANOGPT_KEY").ok().filter(|k| !k.trim().is_empty())?;
+    ureq::get("https://nano-gpt.com/api/subscription/v1/usage")
+        .set("x-api-key", &key)
+        .timeout(std::time::Duration::from_secs(12))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()
+}
+
 /// NanoGPT is the one chain provider with a REAL balance API. Returns (usd, nano) — the ground
 /// truth `ym providers` renders. Blocking (ureq); call via spawn_blocking.
 pub fn nanogpt_balance() -> Option<(f64, f64)> {

@@ -12,11 +12,106 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use yantrik_ml::{ChatMessage, GenerationConfig, LLMBackend, LLMResponse};
 
+/// NIGHT SHIFT privacy lanes. Every inference request declares what class of data rides in the
+/// prompt; the facade routes or REFUSES based on where the backing provider runs. This is the wall
+/// the charter builds first: family data must not silently transit cloud providers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivacyScope {
+    /// Family memories, names, photos-derived facts, sensitive household context. Only providers
+    /// in `YM_PRIVATE_PROVIDERS` (owned hardware) may serve it; otherwise the call is REFUSED and
+    /// the caller must fall back to deterministic rendering (scaffold/fill).
+    Private,
+    /// Semi-private operational data the owner has EXPLICITLY allowed for named cloud providers
+    /// via `YM_HOUSEHOLD_PROVIDERS` (default: current providers — making today's implicit routing
+    /// explicit and revocable). The unscoped `chat()` defaults here.
+    Household,
+    /// Public-web research, generic scaffolding, code — any configured provider.
+    Public,
+}
+
+impl PrivacyScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PrivacyScope::Private => "private",
+            PrivacyScope::Household => "household",
+            PrivacyScope::Public => "public",
+        }
+    }
+}
+
+/// Pure policy: may a pool labeled `provider` serve a request of `scope`, given the two CSV
+/// allowlists? Pure so it's testable without env races.
+pub fn scope_allows(scope: PrivacyScope, provider: &str, household_csv: &str, private_csv: &str) -> bool {
+    let pl = provider.to_lowercase();
+    let in_list = |csv: &str| {
+        csv.split(',')
+            .map(|x| x.trim().to_lowercase())
+            .filter(|x| !x.is_empty())
+            .any(|x| pl.contains(&x))
+    };
+    match scope {
+        PrivacyScope::Public => true,
+        PrivacyScope::Household => in_list(household_csv),
+        // The private lane never falls back to the household list — owned hardware or refusal.
+        PrivacyScope::Private => in_list(private_csv),
+    }
+}
+
+/// Per-scope served/refused counters — the audit trail `ym privacy` renders. Process-lifetime.
+static PRIVACY_SERVED: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+static PRIVACY_REFUSED: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn scope_idx(s: PrivacyScope) -> usize {
+    match s {
+        PrivacyScope::Private => 0,
+        PrivacyScope::Household => 1,
+        PrivacyScope::Public => 2,
+    }
+}
+
+/// The audit report: lanes config + per-scope served/refused counts since start.
+pub fn privacy_report(provider: &str) -> String {
+    use std::sync::atomic::Ordering;
+    let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
+    let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+    format!(
+        "PRIVACY LANES (charter wall — every LLM call declares a scope)\n\
+         provider: {provider}\n\
+         household allowlist (YM_HOUSEHOLD_PROVIDERS): {household}\n\
+         private allowlist (YM_PRIVATE_PROVIDERS): {}\n\
+         served  — private {} · household {} · public {}\n\
+         refused — private {} · household {} · public {}\n\
+         Private-scope refusals are correct behavior until an owned-hardware provider is configured:\n\
+         callers fall back to deterministic rendering (scaffold/fill), family data stays home.",
+        if private.is_empty() { "(none — private lane HARD-REFUSES; deterministic fallback only)" } else { private.as_str() },
+        PRIVACY_SERVED[0].load(Ordering::Relaxed),
+        PRIVACY_SERVED[1].load(Ordering::Relaxed),
+        PRIVACY_SERVED[2].load(Ordering::Relaxed),
+        PRIVACY_REFUSED[0].load(Ordering::Relaxed),
+        PRIVACY_REFUSED[1].load(Ordering::Relaxed),
+        PRIVACY_REFUSED[2].load(Ordering::Relaxed),
+    )
+}
+
+/// Default household allowlist = the providers the engine ships with today, so the wall's arrival
+/// changes nothing until the owner edits the env. "scripted" keeps the test seam green.
+pub const DEFAULT_HOUSEHOLD: &str = "minimax,nanogpt,ollama-cloud,claude-cli,scripted,chain";
+
 /// Bounded async wrapper over a synchronous `LLMBackend`.
 #[derive(Clone)]
 pub struct InferencePool {
     backend: Arc<dyn LLMBackend>,
     sem: Arc<Semaphore>,
+    /// Which provider(s) back this pool — e.g. "nanogpt -> minimax", "scripted". Drives the lanes.
+    provider: Arc<str>,
 }
 
 impl InferencePool {
@@ -26,16 +121,56 @@ impl InferencePool {
         Self {
             backend,
             sem: Arc::new(Semaphore::new(max_concurrency.max(1))),
+            provider: Arc::from("scripted"),
         }
     }
 
-    /// Run a chat completion on the blocking pool. Holds a permit for the whole call and never
-    /// blocks a tokio worker thread.
+    /// Name the provider(s) backing this pool — the privacy lanes route on it.
+    pub fn with_provider(mut self, label: &str) -> Self {
+        self.provider = Arc::from(label);
+        self
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Unscoped chat = HOUSEHOLD lane (today's behavior, now explicit, audited, and revocable via
+    /// YM_HOUSEHOLD_PROVIDERS). New code should call `chat_scoped` and say what it's carrying.
     pub async fn chat(
         &self,
         messages: Vec<ChatMessage>,
         config: GenerationConfig,
     ) -> anyhow::Result<LLMResponse> {
+        self.chat_scoped(messages, config, PrivacyScope::Household).await
+    }
+
+    /// Scope-aware chat: routes or REFUSES per the privacy lanes. A refusal is an error the caller
+    /// must handle by deterministic fallback — never by silently downgrading the scope.
+    pub async fn chat_scoped(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        scope: PrivacyScope,
+    ) -> anyhow::Result<LLMResponse> {
+        use std::sync::atomic::Ordering;
+        let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
+        let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+        if !scope_allows(scope, &self.provider, &household, &private) {
+            PRIVACY_REFUSED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[privacy] REFUSED {} -> provider '{}' not in the {} allowlist",
+                scope.as_str(),
+                self.provider,
+                scope.as_str()
+            );
+            anyhow::bail!(
+                "privacy: {}-scope request refused — provider '{}' is not allowlisted for this lane; use deterministic rendering (scaffold/fill) instead",
+                scope.as_str(),
+                self.provider
+            );
+        }
+        PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
         let permit = self
             .sem
             .clone()
@@ -321,6 +456,42 @@ impl Router {
         let mut v: Vec<String> = self.roles.keys().cloned().collect();
         v.sort();
         v
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[test]
+    fn lanes_route_correctly() {
+        let hh = "minimax,nanogpt,scripted";
+        let pv = "";
+        assert!(scope_allows(PrivacyScope::Public, "minimax", hh, pv));
+        assert!(scope_allows(PrivacyScope::Public, "anything", hh, pv));
+        assert!(scope_allows(PrivacyScope::Household, "nanogpt -> minimax", hh, pv));
+        assert!(!scope_allows(PrivacyScope::Household, "random-cloud", hh, pv));
+        assert!(!scope_allows(PrivacyScope::Private, "minimax", hh, pv));
+        assert!(!scope_allows(PrivacyScope::Private, "scripted", hh, pv));
+        assert!(scope_allows(PrivacyScope::Private, "ollama-local:qwen3", hh, "ollama-local"));
+        assert!(!scope_allows(PrivacyScope::Private, "minimax", hh, "ollama-local"));
+    }
+
+    #[tokio::test]
+    async fn private_scope_refuses_on_cloud_pool() {
+        let pool = InferencePool::new(
+            std::sync::Arc::new(ScriptedLLM::new("leak")) as std::sync::Arc<dyn LLMBackend>,
+            1,
+        )
+        .with_provider("minimax");
+        let out = pool
+            .chat_scoped(vec![ChatMessage::user("family secret")], GenerationConfig::default(), PrivacyScope::Private)
+            .await;
+        assert!(out.is_err(), "private scope must refuse a cloud-labeled pool");
+        let ok = pool
+            .chat_scoped(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household)
+            .await;
+        assert!(ok.is_ok());
     }
 }
 

@@ -99,7 +99,7 @@ fn spawn_web_server() {
 async fn main() -> anyhow::Result<()> {
     let (backend, name) = build_backend();
     let permits = if name.starts_with("nanogpt") { 4 } else { 1 };
-    let pool = InferencePool::new(backend, permits);
+    let pool = InferencePool::new(backend, permits).with_provider(&name);
 
     let db = std::env::var("YM_DB").unwrap_or_else(|_| ":memory:".to_string());
     // dim 64 = yantrikdb 0.9.0's bundled embedder dimension; YantrikDB::new auto-attaches the

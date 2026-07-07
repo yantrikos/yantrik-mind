@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 93] = [
+    const CMDS: [&str; 94] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -356,7 +356,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "onedrive", "od",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
-        "dream", "radar",
+        "dream", "radar", "privacy",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -14452,6 +14452,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
                 None => "💭 Nothing earned a dream right now — the bar is two verified citations across domains.".to_string(),
             },
+            "privacy" => mind_inference::privacy_report(self.inference.provider()),
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());

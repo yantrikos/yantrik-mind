@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 121] = [
+    const CMDS: [&str; 125] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -371,6 +371,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
+        "reviewer", "review", "researchops", "ro",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -2928,6 +2929,35 @@ impl ConversationEngine {
                     return Some(topic.to_string());
                 }
             }
+        }
+        None
+    }
+
+    /// Parse a ResearchOps ask -> (mode, subject). mode ∈ review|related|next. Explicit verbs only,
+    /// so ordinary "research X" (deep dive) and casual "review this" aren't hijacked.
+    fn wants_researchops(text: &str) -> Option<(&'static str, String)> {
+        let l = text.trim().to_lowercase();
+        let after = |t: &str, pats: &[&str]| -> Option<String> {
+            for p in pats {
+                if let Some(i) = t.find(p) {
+                    let rest = t[i + p.len()..].trim().trim_end_matches(['.', '?', '!']).trim();
+                    // strip leading filler
+                    let rest = rest.trim_start_matches("my ").trim_start_matches("the ").trim_start_matches("for ").trim();
+                    if rest.len() >= 2 {
+                        return Some(rest.to_string());
+                    }
+                }
+            }
+            None
+        };
+        if let Some(sub) = after(&l, &["research review ", "reviewer 2 on ", "reviewer-2 on ", "red team ", "red-team ", "poke holes in ", "critique my ", "review my paper on ", "review my "]) {
+            return Some(("review", sub));
+        }
+        if let Some(sub) = after(&l, &["research related ", "related work for ", "related work on ", "related work ", "lit review ", "literature review "]) {
+            return Some(("related", sub));
+        }
+        if let Some(sub) = after(&l, &["research next ", "next experiment for ", "next experiments for ", "next steps for my ", "what should i test next in ", "next moves for "]) {
+            return Some(("next", sub));
         }
         None
     }
@@ -11083,6 +11113,122 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         Some(format!("\u{1f6f0} Work radar — I looked into **{fresh}** on my own (it's what you've been working on):\n\n{report}"))
     }
 
+    /// ---------- RESEARCHOPS (the research collaborator) ----------
+    /// Built on the recipe engine: durable, multi-step, citation-validated. The reviewer's rigor is
+    /// structural — ThinkCited forces every objection to cite a source, Validate strips the rest, so
+    /// no hand-wavy critique survives. Jobs run detached and post the grounded result on completion.
+
+    fn reviewer_recipe(subject: &str) -> mind_recipes::Recipe {
+        let notify = format!(
+            "🔬 Reviewer-2 — {subject}\nOnly objections grounded in the literature, your own claims, or your real code survived (stripped {{{{grounded__dropped}}}} ungrounded):\n\n{{{{out}}}}"
+        );
+        mind_recipes::Recipe {
+            id: "research-review".into(),
+            name: format!("reviewer-2: {subject}"),
+            steps: vec![
+                RecipeStep::Tool { tool_name: "research".into(), args: serde_json::json!({"query": format!("{subject} method novelty evaluation prior art")}), store_as: "lit".into(), on_error: ErrorAction::Skip },
+                RecipeStep::Tool { tool_name: "recall".into(), args: serde_json::json!({"query": subject}), store_as: "mine".into(), on_error: ErrorAction::Skip },
+                RecipeStep::Tool { tool_name: "code_digest".into(), args: serde_json::json!({"subject": subject}), store_as: "code".into(), on_error: ErrorAction::Skip },
+                RecipeStep::ThinkCited {
+                    prompt: format!(
+                        "You are Reviewer 2 at a top venue reviewing work on \"{subject}\" — sharp, fair, adversarial, never flattering. Using ONLY the sources, produce the STRONGEST objections that would threaten this work at peer review: novelty / prior-art collisions, methodology or evaluation gaps, claims the evidence does not support, and threats to validity. Each claim is ONE specific objection, citing the source that grounds it (a literature finding = source `lit`, the author's own claim = `mine`, or the real code = `code`). Rank most-severe first. An objection you cannot ground in a source does not belong in the output."
+                    ),
+                    store_as: "review".into(),
+                    source_vars: vec!["lit".into(), "mine".into(), "code".into()],
+                    on_error: ErrorAction::Fail,
+                },
+                RecipeStep::Validate { input_var: "review".into(), store_as: "grounded".into() },
+                RecipeStep::Render { input_var: "grounded".into(), store_as: "out".into(), format: mind_recipes::RenderFormat::Cards },
+                RecipeStep::Notify { message: notify },
+            ],
+        }
+    }
+
+    fn related_recipe(subject: &str) -> mind_recipes::Recipe {
+        let notify = format!("📚 Related work — {subject}:\n\n{{{{out}}}}");
+        mind_recipes::Recipe {
+            id: "research-related".into(),
+            name: format!("related-work: {subject}"),
+            steps: vec![
+                RecipeStep::Tool { tool_name: "research".into(), args: serde_json::json!({"query": format!("{subject} related work key papers survey")}), store_as: "lit".into(), on_error: ErrorAction::Fail },
+                RecipeStep::ThinkCited {
+                    prompt: format!(
+                        "Map the related work for \"{subject}\" from the sources. Each claim = one line of prior work: what it does and how \"{subject}\" differs from or builds on it, citing source `lit`. Write in the neutral third person of a paper's Related Work section — NEVER name the author, never use 'we/you', never reveal any assistant. Most-relevant first."
+                    ),
+                    store_as: "related".into(),
+                    source_vars: vec!["lit".into()],
+                    on_error: ErrorAction::Fail,
+                },
+                RecipeStep::Validate { input_var: "related".into(), store_as: "grounded".into() },
+                RecipeStep::Render { input_var: "grounded".into(), store_as: "out".into(), format: mind_recipes::RenderFormat::Cards },
+                RecipeStep::Notify { message: notify },
+            ],
+        }
+    }
+
+    fn next_recipe(subject: &str) -> mind_recipes::Recipe {
+        let notify = format!("🧭 Next moves — {subject}:\n\n{{{{out}}}}");
+        mind_recipes::Recipe {
+            id: "research-next".into(),
+            name: format!("next-experiments: {subject}"),
+            steps: vec![
+                RecipeStep::Tool { tool_name: "research".into(), args: serde_json::json!({"query": format!("{subject} open problems limitations future directions")}), store_as: "lit".into(), on_error: ErrorAction::Skip },
+                RecipeStep::Tool { tool_name: "recall".into(), args: serde_json::json!({"query": subject}), store_as: "mine".into(), on_error: ErrorAction::Skip },
+                RecipeStep::ThinkCited {
+                    prompt: format!(
+                        "Given the author's work on \"{subject}\" (source `mine`) and the field (source `lit`), propose the highest-value next experiments/directions. Each claim = one concrete move: what to test, why it matters now, and what result would prove or disprove it — citing the gap (`lit`) or the author's claim (`mine`) that motivates it. Prioritize by expected payoff."
+                    ),
+                    store_as: "next".into(),
+                    source_vars: vec!["lit".into(), "mine".into()],
+                    on_error: ErrorAction::Fail,
+                },
+                RecipeStep::Validate { input_var: "next".into(), store_as: "grounded".into() },
+                RecipeStep::Render { input_var: "grounded".into(), store_as: "out".into(), format: mind_recipes::RenderFormat::Cards },
+                RecipeStep::Notify { message: notify },
+            ],
+        }
+    }
+
+    /// Run a ResearchOps job detached; it posts the grounded result on completion.
+    pub async fn research_ops_run(&self, mode: &str, subject: &str) -> String {
+        let Some(recipes) = &self.recipes else {
+            return "(research engine not wired — the recipe host is unavailable)".to_string();
+        };
+        let subject = subject.trim().to_string();
+        if subject.len() < 2 {
+            return "What should I research? e.g. `research review SDF Protocol`.".to_string();
+        }
+        if !Self::treasury_try_draw("research") {
+            return "🔬 Research envelope is dry today (`ym treasury`) — the job will run tomorrow if you re-ask.".to_string();
+        }
+        let recipe = match mode {
+            "review" => Self::reviewer_recipe(&subject),
+            "related" => Self::related_recipe(&subject),
+            "next" => Self::next_recipe(&subject),
+            _ => return "Modes: review | related | next.".to_string(),
+        };
+        let recipes = recipes.clone();
+        let nq = self.notify_queue.clone();
+        tokio::spawn(async move {
+            let out = recipes.run_with(&recipe, std::collections::HashMap::new()).await;
+            if !out.notifications.is_empty() {
+                for n in out.notifications {
+                    nq.lock().unwrap().push(n);
+                }
+            } else if let Some(e) = out.error {
+                nq.lock().unwrap().push(format!("🔬 The research job couldn't finish: {e}"));
+            } else {
+                nq.lock().unwrap().push("🔬 The research job finished but nothing survived citation-validation — the sources didn't support a grounded answer.".to_string());
+            }
+        });
+        let verb = match mode {
+            "review" => "running Reviewer-2 on",
+            "related" => "mapping the related work for",
+            _ => "planning next experiments for",
+        };
+        format!("🔬 On it — {verb} **{subject}**: multi-angle research → grounded synthesis → citation-validated (ungrounded claims stripped). I'll post it here when it lands (a couple of minutes).")
+    }
+
     /// ---------- CODEOPS (the mind reads the real repos) ----------
     /// Registered git URLs are shallow-cloned onto the box; each project's WorkOps scan is grounded
     /// in its README + docs + recent commits — the mind reasons about the CURRENT code, not a web
@@ -16434,6 +16580,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             "work" | "workops" | "projects" => self.work_cmd(&rest).await,
             "code" | "repos" | "repo" => self.code_cmd(&rest).await,
+            "reviewer" | "review" if !rest.trim().is_empty() => self.research_ops_run("review", rest.trim()).await,
+            "researchops" | "ro" if !rest.trim().is_empty() => {
+                let mut it = rest.trim().splitn(2, ' ');
+                let mode = it.next().unwrap_or("");
+                let subject = it.next().unwrap_or("");
+                let m = match mode { "review" | "related" | "next" => mode, _ => "review" };
+                let subj = if subject.is_empty() { mode } else { subject };
+                self.research_ops_run(m, subj).await
+            }
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());
@@ -19236,6 +19391,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
         }
+        // RESEARCHOPS: reviewer-2 / related-work / next-experiments as durable, citation-validated
+        // research jobs. Deterministic intercept — a research ask should never be free-composed.
+        if let Some((mode, subject)) = Self::wants_researchops(user_text) {
+            let reply = self.research_ops_run(mode, &subject).await;
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
         // HARD-GROUNDED DRAFTING: "draft me an X plan about Y" composes STRICTLY from the complete
         // stored fact set about Y (no blending, no ranking lottery). Deterministic intercept ahead of
         // the agent loop's free composition — the small model confabulates a draft otherwise (SDF bug).
@@ -19710,6 +19873,56 @@ impl RecipeHost for MindRecipeHost {
                     anyhow::bail!("fetch needs a 'url'");
                 }
                 f.fetch(url).await
+            }
+            // ResearchOps: multi-angle web search over one query → a consolidated, URL-carrying
+            // findings blob for the ThinkCited reviewer/related-work steps to cite.
+            "research" => {
+                let s = self.search.as_ref().ok_or_else(|| anyhow::anyhow!("no web search configured"))?;
+                let q = _args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                if q.is_empty() {
+                    anyhow::bail!("research needs a 'query'");
+                }
+                let angles = [
+                    q.to_string(),
+                    format!("{q} prior work related approaches"),
+                    format!("{q} limitations criticism evaluation"),
+                ];
+                let mut out = String::new();
+                for a in &angles {
+                    if let Ok(hits) = s.search(a, 5).await {
+                        if !hits.is_empty() {
+                            out.push_str(&format!("\n## angle: {a}\n{}\n", mind_tools::render_search(&hits)));
+                        }
+                    }
+                }
+                if out.trim().is_empty() {
+                    anyhow::bail!("no research results for '{q}'");
+                }
+                Ok(out.chars().take(6000).collect())
+            }
+            // ResearchOps: the owner's ACTUAL repo for this subject (README + docs + recent commits),
+            // so the reviewer grounds critique in real code, not a web guess.
+            "code_digest" => {
+                let subject = _args.get("subject").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                let repos: Vec<String> = self
+                    .memory
+                    .profile_get("code_repos")
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let url = repos.into_iter().find(|u| {
+                    let n = mind_tools::code::repo_name(u).to_lowercase();
+                    subject.contains(&n) || (!subject.is_empty() && n.contains(subject.split_whitespace().next().unwrap_or("")))
+                });
+                match url {
+                    Some(u) => tokio::task::spawn_blocking(move || mind_tools::code::sync_and_digest(&u))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("code task panicked"))?
+                        .map_err(|e| anyhow::anyhow!("{e}")),
+                    None => anyhow::bail!("no registered repo matches that subject"),
+                }
             }
             other => anyhow::bail!("unknown source '{other}'"),
         }

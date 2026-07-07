@@ -11304,13 +11304,17 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
             return if repos.len() < before { format!("📁 Unregistered {name}.") } else { format!("Not registered: {name}") };
         }
-        if let Some(url) = a.strip_prefix("study ").map(str::trim).filter(|x| x.starts_with("http")) {
-            let mut repos = self.code_repos().await;
-            if !repos.iter().any(|x| x.eq_ignore_ascii_case(url)) {
-                repos.push(url.to_string());
-                let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
+        if let Some(rest) = a.strip_prefix("study ").map(str::trim) {
+            let deep = rest.strip_prefix("deep ").map(str::trim);
+            let url = deep.unwrap_or(rest);
+            if url.starts_with("http") {
+                let mut repos = self.code_repos().await;
+                if !repos.iter().any(|x| x.eq_ignore_ascii_case(url)) {
+                    repos.push(url.to_string());
+                    let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
+                }
+                return if deep.is_some() { self.code_study_deep(url).await } else { self.code_study(url).await };
             }
-            return self.code_study(url).await;
         }
         if let Some(rest) = a.strip_prefix("ask ").map(str::trim).filter(|x| !x.is_empty()) {
             let mut it = rest.splitn(2, char::is_whitespace);
@@ -11365,7 +11369,88 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// SYNTHESIS pass over the module summaries for the cross-module architecture. Every fact is
     /// tagged `[mod:<module>]` for provenance and namespaced by a distinctive `codekb<alnum>` token
     /// so a 100+-fact study is retrievable without truncation. Detached; reports honest coverage.
+    /// HYBRID study (default, cheap): parse the structural facts DETERMINISTICALLY (public API,
+    /// types, module docs, internal deps — zero LLM), then ONE interpretive synthesis pass over the
+    /// parsed skeleton for the cross-module "how it composes" facts. ~1 LLM call vs. deep's ~19.
     pub async fn code_study(&self, git_url: &str) -> String {
+        let name = mind_tools::code::repo_name(git_url);
+        let url = git_url.to_string();
+        let (det, _name) = match tokio::task::spawn_blocking(move || mind_tools::code::deterministic_study(&url)).await {
+            Ok(Ok((n, d))) => (d, n),
+            Ok(Err(e)) => return format!("📖 Couldn't study {name}: {e}"),
+            Err(_) => return format!("📖 Study of {name} panicked."),
+        };
+        if det.facts.is_empty() {
+            return format!("📖 Cloned {name} but parsed no public API to learn — try `code study deep {name}` for an LLM read.");
+        }
+        let module_count = det.module_count;
+        let file_count = det.file_count;
+        let det_n = det.facts.len();
+        let skeleton = det.skeleton.clone();
+        let det_facts = det.facts.clone();
+        let name2 = name.clone();
+        let nq = self.notify_queue.clone();
+        let inf = self.inference.clone();
+        let mem = self.memory.clone();
+        let persona = self.persona.clone();
+        tokio::spawn(async move {
+            let alnum: String = name2.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+            let token = format!("codekb{alnum}");
+            // 1. Save the deterministic (parsed) facts — free, grep-grounded, never invented.
+            let mut saved = 0usize;
+            for (module, fact) in &det_facts {
+                let statement = format!("{token} [code:{name2}] [mod:{module}] [det] {fact}");
+                if mem.remember_as_belief(BeliefAssertion {
+                    statement, polarity: 1.0, weight: 2.2,
+                    source_event: Some("code-study".into()), provenance: "studied".into(),
+                }).await.is_ok() { saved += 1; }
+            }
+            // 2. ONE synthesis pass: interpret the parsed skeleton for cross-module architecture.
+            let synth_prompt = format!(
+                "Below is the PARSED structure (modules, public types, functions, internal deps) of the \
+                 `{name2}` codebase — extracted deterministically, so treat it as ground truth. State 8-12 \
+                 CROSS-MODULE architecture facts a senior engineer needs that the raw structure doesn't make \
+                 explicit: the main entry point(s); the end-to-end control/data flow across modules; how the \
+                 modules compose and depend on each other; the central types that thread through several \
+                 modules; the concurrency model; and the single most important design decision. Each ONE \
+                 specific sentence naming real modules/types from the structure. Do NOT restate the raw lists. \
+                 Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{skeleton}"
+            );
+            let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
+            let mut synth_n = 0usize;
+            if let Ok(r) = inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&synth_prompt)], cfg).await {
+                let synth: Vec<String> = r.text
+                    .find('{')
+                    .and_then(|a| r.text.rfind('}').map(|b| r.text[a..=b].to_string()))
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|j| j.get("facts").and_then(|x| x.as_array()).cloned())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                    .unwrap_or_default();
+                for fact in synth {
+                    let statement = format!("{token} [code:{name2}] [mod:architecture] [syn] {fact}");
+                    if mem.remember_as_belief(BeliefAssertion {
+                        statement, polarity: 1.0, weight: 2.2,
+                        source_event: Some("code-study".into()), provenance: "studied".into(),
+                    }).await.is_ok() { saved += 1; synth_n += 1; }
+                }
+            }
+            let _ = mem.profile_set(&format!("code_studied_{name2}"), &chrono::Utc::now().timestamp_millis().to_string()).await;
+            nq.lock().unwrap().push(format!(
+                "📖 Studied **{name2}** — {det_n} facts parsed straight from source across {module_count} modules \
+                 ({file_count} files) + {synth_n} architecture facts from a single synthesis pass = {saved} total, \
+                 for the cost of ONE LLM call. Ask me anything: `code ask {name2} <question>`. (`code study deep {name2}` \
+                 for a fuller per-module LLM read.)"
+            ));
+        });
+        format!(
+            "📖 Studying {name} — parsing {module_count} modules / {file_count} files for structure now (no LLM cost), \
+             then one synthesis pass for the architecture. I'll confirm coverage in a moment; then `code ask {name} <question>`."
+        )
+    }
+
+    /// DEEP study (opt-in, `code study deep <url>`): per-module LLM deep-read + synthesis. Higher
+    /// fidelity, ~19 LLM calls — use when depth matters more than token cost.
+    pub async fn code_study_deep(&self, git_url: &str) -> String {
         let name = mind_tools::code::repo_name(git_url);
         let url = git_url.to_string();
         // ~14KB per deep-read chunk: big enough to hold real functions, small enough for one pass.

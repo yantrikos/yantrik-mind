@@ -381,3 +381,180 @@ pub fn study_modules(git_url: &str, chunk_bytes: usize) -> anyhow::Result<(Strin
 
     Ok((name, modules))
 }
+
+
+/// Deterministic study output: structural facts parsed straight from source (no LLM), plus a
+/// compact per-module skeleton to feed a single interpretive synthesis pass.
+#[derive(Debug, Clone, Default)]
+pub struct DetStudy {
+    pub facts: Vec<(String, String)>, // (module, fact) — tag with [det] at save time
+    pub skeleton: String,             // "## module\ndoc\nfns…\ntypes…\ndeps…" for the synth prompt
+    pub module_count: usize,
+    pub file_count: usize,
+}
+
+fn ident_after<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
+    let l = line.trim_start();
+    let rest = l.strip_prefix(kw)?;
+    let rest = rest.trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let id = &rest[..end];
+    if id.is_empty() { None } else { Some(id) }
+}
+
+/// Parse one source file for its public surface. Returns (fns, types, traits, doc_line, dep_tokens).
+fn parse_symbols(rel: &str, body: &str) -> (Vec<String>, Vec<String>, Vec<String>, Option<String>, Vec<String>) {
+    let mut fns = Vec::new();
+    let mut types = Vec::new();
+    let mut traits = Vec::new();
+    let mut doc: Option<String> = None;
+    let mut deps: Vec<String> = Vec::new();
+    let rust = rel.ends_with(".rs");
+    let py = rel.ends_with(".py");
+    let ts = rel.ends_with(".ts") || rel.ends_with(".tsx") || rel.ends_with(".js");
+    let go = rel.ends_with(".go");
+    for line in body.lines() {
+        let t = line.trim_start();
+        if rust {
+            if doc.is_none() {
+                if let Some(d) = t.strip_prefix("//!") {
+                    let d = d.trim();
+                    if d.len() > 8 { doc = Some(d.to_string()); }
+                }
+            }
+            for kw in ["pub fn ", "pub async fn ", "pub(crate) fn ", "pub(crate) async fn "] {
+                if let Some(id) = ident_after(t, kw) { fns.push(id.to_string()); break; }
+            }
+            if let Some(id) = ident_after(t, "pub struct ") { types.push(id.to_string()); }
+            if let Some(id) = ident_after(t, "pub enum ") { types.push(id.to_string()); }
+            if let Some(id) = ident_after(t, "pub trait ") { traits.push(id.to_string()); }
+            if let Some(rest) = t.strip_prefix("use crate::").or_else(|| t.strip_prefix("use ")) {
+                let seg: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if seg.len() > 2 { deps.push(seg); }
+            }
+        } else if py {
+            if let Some(id) = ident_after(t, "def ") { if !line.starts_with(' ') { fns.push(id.to_string()); } }
+            if let Some(id) = ident_after(t, "class ") { types.push(id.to_string()); }
+            if let Some(rest) = t.strip_prefix("from ") {
+                let seg: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if seg.len() > 2 { deps.push(seg); }
+            }
+        } else if ts {
+            for kw in ["export function ", "export async function ", "export default function "] {
+                if let Some(id) = ident_after(t, kw) { fns.push(id.to_string()); break; }
+            }
+            if let Some(id) = ident_after(t, "export class ") { types.push(id.to_string()); }
+            if let Some(id) = ident_after(t, "export interface ") { types.push(id.to_string()); }
+            if let Some(id) = ident_after(t, "export type ") { types.push(id.to_string()); }
+        } else if go {
+            if let Some(id) = ident_after(t, "func ") {
+                if id.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { fns.push(id.to_string()); }
+            }
+            if let Some(id) = ident_after(t, "type ") {
+                if id.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { types.push(id.to_string()); }
+            }
+        }
+    }
+    (fns, types, traits, doc, deps)
+}
+
+fn dedup_keep_order(v: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    v.into_iter().filter(|x| seen.insert(x.clone())).collect()
+}
+
+/// DETERMINISTIC study: clone + parse. Produces structural facts (public API, types, module docs,
+/// internal deps) with ZERO LLM calls, plus a skeleton for one interpretive synthesis pass.
+pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> {
+    let (name, modules) = study_modules(git_url, 40000)?;
+    let mod_names: std::collections::HashSet<String> =
+        modules.iter().map(|m| m.name.to_lowercase()).collect();
+    let mut det = DetStudy::default();
+    det.module_count = modules.len();
+    let mut skeleton = format!("# {name} — parsed structure ({} modules)\n", modules.len());
+
+    for m in &modules {
+        det.file_count += m.file_count;
+        let mut fns = Vec::new();
+        let mut types = Vec::new();
+        let mut traits = Vec::new();
+        let mut docs: Vec<String> = Vec::new();
+        let mut deps: Vec<String> = Vec::new();
+        for chunk in &m.chunks {
+            let mut cur_rel = String::new();
+            let mut cur_body = String::new();
+            for line in chunk.lines() {
+                if let Some(h) = line.strip_prefix("===== ") {
+                    if !cur_rel.is_empty() && !cur_body.is_empty() {
+                        let (f, ty, tr, doc, dp) = parse_symbols(&cur_rel, &cur_body);
+                        fns.extend(f); types.extend(ty); traits.extend(tr);
+                        if let Some(d) = doc { docs.push(d); }
+                        deps.extend(dp);
+                    }
+                    cur_rel = h.trim_end_matches(" =====").trim().to_string();
+                    cur_body.clear();
+                } else {
+                    cur_body.push_str(line);
+                    cur_body.push('\n');
+                }
+            }
+            if !cur_rel.is_empty() && !cur_body.is_empty() {
+                let (f, ty, tr, doc, dp) = parse_symbols(&cur_rel, &cur_body);
+                fns.extend(f); types.extend(ty); traits.extend(tr);
+                if let Some(d) = doc { docs.push(d); }
+                deps.extend(dp);
+            }
+        }
+        let fns = dedup_keep_order(fns);
+        let types = dedup_keep_order(types);
+        let traits = dedup_keep_order(traits);
+        let deps: Vec<String> = dedup_keep_order(deps)
+            .into_iter()
+            .filter(|d| mod_names.contains(&d.to_lowercase()) && d.to_lowercase() != m.name.to_lowercase())
+            .collect();
+
+        if let Some(doc) = docs.first() {
+            det.facts.push((m.name.clone(), format!("Module `{}` is documented as: {}", m.name, doc)));
+        }
+        if !traits.is_empty() {
+            det.facts.push((m.name.clone(), format!(
+                "Module `{}` defines traits: {}.", m.name, traits.join(", "))));
+        }
+        if !types.is_empty() {
+            let shown: Vec<_> = types.iter().take(24).cloned().collect();
+            det.facts.push((m.name.clone(), format!(
+                "Module `{}` defines {} public type(s): {}{}.",
+                m.name, types.len(), shown.join(", "),
+                if types.len() > shown.len() { ", …" } else { "" })));
+        }
+        if !fns.is_empty() {
+            let shown: Vec<_> = fns.iter().take(30).cloned().collect();
+            det.facts.push((m.name.clone(), format!(
+                "Module `{}` exposes {} public function(s): {}{}.",
+                m.name, fns.len(), shown.join(", "),
+                if fns.len() > shown.len() { ", …" } else { "" })));
+        }
+        if !deps.is_empty() {
+            det.facts.push((m.name.clone(), format!(
+                "Module `{}` depends internally on: {}.", m.name, deps.join(", "))));
+        }
+
+        skeleton.push_str(&format!("\n## {} ({} files)\n", m.name, m.file_count));
+        if let Some(doc) = docs.first() { skeleton.push_str(&format!("doc: {doc}\n")); }
+        if !traits.is_empty() { skeleton.push_str(&format!("traits: {}\n", traits.join(", "))); }
+        if !types.is_empty() {
+            let shown: Vec<_> = types.iter().take(30).cloned().collect();
+            skeleton.push_str(&format!("types: {}\n", shown.join(", ")));
+        }
+        if !fns.is_empty() {
+            let shown: Vec<_> = fns.iter().take(40).cloned().collect();
+            skeleton.push_str(&format!("fns: {}\n", shown.join(", ")));
+        }
+        if !deps.is_empty() { skeleton.push_str(&format!("deps: {}\n", deps.join(", "))); }
+    }
+
+    det.skeleton = skeleton;
+    Ok((name, det))
+}

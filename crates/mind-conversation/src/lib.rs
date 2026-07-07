@@ -19445,6 +19445,39 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
         }
+        // SKILL BANK (learn / remember / find / reuse of real code) is DETERMINISTIC and must run
+        // ahead of the agent loop — otherwise "save that as skill X" / "run skill X" get swallowed by
+        // build_capability and only a description is stored, never the runnable code. This is the
+        // memory-backed reuse loop over YantrikDB's skill store; the sandbox runs every reuse.
+        if let Some(reply) = self.handle_skills(user_text).await {
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
+        // Raw "run python/shell/rust: …" executes in the local no-network sandbox (deterministic,
+        // free, auth-free) and records last_run so the very next "save that as skill" banks the exact
+        // code — must be ahead of the agent loop so it isn't routed to the (auth'd, network) coder.
+        if let Some(sb) = &self.sandbox {
+            if let Some((lang, code)) = Self::parse_code_request(user_text) {
+                let res = match lang {
+                    CodeLang::Python => sb.run_python(&code).await,
+                    CodeLang::Shell => sb.run_shell(&code).await,
+                    CodeLang::Rust => sb.run_rust(&code).await,
+                };
+                let reply = match res {
+                    Ok(r) => {
+                        if r.exit_code == 0 && !r.timed_out {
+                            *self.last_run.lock().unwrap() = Some((lang, code.clone()));
+                        }
+                        format!("Ran it in the sandbox (no network, resource-limited):\n\n{}", r.render())
+                    }
+                    Err(e) => format!("Couldn't run it — the sandbox is unavailable here ({e})."),
+                };
+                let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+                let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+                return Ok(reply);
+            }
+        }
         // PRIMARY: the agentic loop (reason → pick ONE tool → observe → iterate → answer, with the
         // build_capability self-extension hook). It subsumes the capability paths below — research,
         // code, monitors, grounded chat — as tools. The stateful interceptors (onboarding capture +

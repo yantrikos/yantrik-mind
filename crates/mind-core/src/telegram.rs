@@ -1144,6 +1144,18 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // NIGHT SHIFT v0: compile packets against the fragile future nodes while the family sleeps.
+        // Silent by design until the morning done board ships — packets surface via `ym packets`.
+        {
+            if conv.night_shift_due().await {
+                let conv2 = conv.clone();
+                tokio::spawn(async move {
+                    let report = conv2.night_shift_run().await;
+                    eprintln!("[nightshift] {}", report.replace('\n', " | "));
+                });
+            }
+        }
+
         // WORK RADAR: autonomous research on whatever the user is actively working on (derived
         // from their own recent turns). Speaks only when the research changed stored beliefs.
         {

@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 98] = [
+    const CMDS: [&str; 104] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -368,6 +368,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
+        "packets", "packet", "approve", "reject", "nightshift", "shift",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9544,6 +9545,314 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
+    /// ---------- NIGHT SHIFT COMPILER (v0) ----------
+    /// The nightly anticipatory pass. v0 scope: deadline/event nodes get deterministic
+    /// prepared-action packets (what's due, when, everything the substrate knows about it, the
+    /// suggested move) — no LLM, so nothing rides a cloud lane. Festival/trip/birthday nodes are
+    /// left for their emissaries (FestivalOps first). Judged by useful packets, not activity.
+
+    /// Once per night, 2-5am local, persisted by date.
+    pub async fn night_shift_due(&self) -> bool {
+        use chrono::Timelike;
+        let today = local_now();
+        if !(2..=5).contains(&today.hour()) {
+            return false;
+        }
+        let date = today.format("%Y-%m-%d").to_string();
+        let last = self.memory.profile_get("nightshift_last").await.ok().flatten().unwrap_or_default();
+        last != date
+    }
+
+    /// One compile pass. Returns the shift report (also the `ym nightshift` output).
+    pub async fn night_shift_run(&self) -> String {
+        let today = local_now();
+        let _ = self
+            .memory
+            .profile_set("nightshift_last", &today.format("%Y-%m-%d").to_string())
+            .await;
+        let ranked = self.future_fragile(14).await;
+        let live = self.live_packets().await;
+        let mut built: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for (score, n) in ranked.iter().take(8) {
+            if built.len() >= 3 {
+                skipped.push("(cap: 3 packets/night)".into());
+                break;
+            }
+            let kind = n.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+            let node_id = n.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let title = n.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+            let when = n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+            // Emissary-owned kinds are not v0's job — say so honestly (the negative space).
+            if matches!(kind, "festival" | "trip" | "birthday") {
+                skipped.push(format!("{title} — waits for its emissary"));
+                continue;
+            }
+            let criterion = if kind == "deadline" { "prepared-action" } else { "prepared-note" };
+            let ticked = n
+                .get("readiness")
+                .and_then(|r| r.get(criterion))
+                .and_then(|v| v.as_bool())
+                == Some(true);
+            if ticked {
+                continue; // already prepared
+            }
+            // A live packet already covering this node also counts.
+            if live.iter().any(|p| p.get("node_id").and_then(|x| x.as_str()) == Some(node_id)) {
+                continue;
+            }
+            // Compose deterministically: everything the substrate knows about the subject.
+            let facts = self.memory.beliefs_matching(title).await.unwrap_or_default();
+            let evidence: Vec<String> = facts.iter().take(6).map(|b| format!("{} ({:.2})", b.statement, b.confidence)).collect();
+            let when_str = chrono::DateTime::from_timestamp_millis(when)
+                .map(|t| t.with_timezone(today.offset()).format("%A %b %-d").to_string())
+                .unwrap_or_default();
+            let days_left = ((when - chrono::Utc::now().timestamp_millis()).max(0)) / 86_400_000;
+            let body = format!(
+                "DUE {when_str} ({days_left} day(s) left).\n\nWhat I hold on this:\n{}\n\nSuggested move: handle it {} — say the word and I'll help (research, drafting, ordering prep — inside this packet's bounds).",
+                if evidence.is_empty() { "  (no stored facts beyond the deadline itself)".to_string() } else { evidence.iter().map(|e| format!("  · {e}")).collect::<Vec<_>>().join("\n") },
+                if days_left <= 1 { "today" } else { "in the next day or two" },
+            );
+            let _ = self
+                .packet_add(
+                    node_id,
+                    Some(criterion),
+                    "plan",
+                    &format!("Prepared: {title}"),
+                    &body,
+                    &format!("fragility {score:.1} — imminent and nothing was prepared"),
+                    evidence,
+                    0.9,
+                    false,
+                    when + 86_400_000, // expires a day after the deadline passes
+                )
+                .await;
+            built.push(title.to_string());
+        }
+        let mut out = format!("🌙 Night shift compiled {} packet(s).", built.len());
+        for b in &built {
+            out.push_str(&format!("\n  ✔ {b}"));
+        }
+        if !skipped.is_empty() {
+            out.push_str("\n  didn't do: ");
+            out.push_str(&skipped.join("; "));
+        }
+        out.push_str("\n`packets` to review.");
+        out
+    }
+
+    /// ---------- ACTION PACKETS (proof-carrying prepared work) ----------
+    /// The kernel's universal outward interface. A packet is work prepared to the LAST SAFE INCH:
+    /// the artifact plus its proof (reason, evidence, confidence, risk, reversibility, expiry,
+    /// alternatives rejected). Confirmation-required packets wait for a human word; everything
+    /// expires rather than nagging. Linking a packet to a FutureNode ticks the readiness
+    /// criterion it satisfies — this is how the twin's checklists actually fill.
+
+    async fn load_packets(&self) -> Vec<serde_json::Value> {
+        self.memory
+            .profile_get("action_packets")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_packets(&self, v: &[serde_json::Value]) {
+        let _ = self
+            .memory
+            .profile_set("action_packets", &serde_json::Value::Array(v.to_vec()).to_string())
+            .await;
+    }
+
+    /// Author one packet (emissaries call this). Returns the packet id. If `satisfies` names a
+    /// readiness criterion on the linked node, the node is ticked immediately — proposed work
+    /// counts as readiness; a rejection un-ticks it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn packet_add(
+        &self,
+        node_id: &str,
+        satisfies: Option<&str>,
+        kind: &str,          // checklist | plan | draft | cart | info
+        title: &str,
+        body: &str,
+        reason: &str,
+        evidence: Vec<String>,
+        confidence: f64,
+        confirmation_required: bool,
+        expiry_ms: i64,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp_millis();
+        let id = format!("pkt:{:x}", now);
+        let mut store = self.load_packets().await;
+        store.push(serde_json::json!({
+            "id": id, "node_id": node_id, "satisfies": satisfies, "kind": kind,
+            "title": title, "body": body, "reason": reason, "evidence": evidence,
+            "confidence": confidence, "confirmation_required": confirmation_required,
+            "expiry_ms": expiry_ms, "status": "proposed", "created_ms": now,
+            "alternatives_rejected": [],
+        }));
+        // keep the store bounded; drop the oldest terminal packets first
+        if store.len() > 200 {
+            store.retain(|p| {
+                matches!(p.get("status").and_then(|x| x.as_str()), Some("proposed") | Some("confirmed"))
+            });
+        }
+        self.save_packets(&store).await;
+        if let Some(criterion) = satisfies {
+            self.node_tick(node_id, criterion, true).await;
+        }
+        self.ledger_sent("packet", &format!("prepared: {title}")).await;
+        id
+    }
+
+    /// Tick (or un-tick) one readiness criterion on a FutureNode.
+    async fn node_tick(&self, node_id: &str, criterion: &str, done: bool) {
+        let mut nodes: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("future_nodes")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or_default();
+        for n in nodes.iter_mut() {
+            if n.get("id").and_then(|x| x.as_str()) == Some(node_id) {
+                if let Some(obj) = n.as_object_mut() {
+                    obj.entry("readiness").or_insert_with(|| serde_json::json!({}));
+                    if let Some(r) = obj.get_mut("readiness").and_then(|x| x.as_object_mut()) {
+                        r.insert(criterion.to_string(), serde_json::json!(done));
+                    }
+                }
+            }
+        }
+        let _ = self
+            .memory
+            .profile_set("future_nodes", &serde_json::Value::Array(nodes).to_string())
+            .await;
+    }
+
+    /// Lazily expire, then return live packets (proposed first, then confirmed), newest last.
+    async fn live_packets(&self) -> Vec<serde_json::Value> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut store = self.load_packets().await;
+        let mut changed = false;
+        for p in store.iter_mut() {
+            let live = matches!(p.get("status").and_then(|x| x.as_str()), Some("proposed"));
+            let exp = p.get("expiry_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+            if live && exp < now {
+                p["status"] = serde_json::json!("expired");
+                changed = true;
+                // an expired packet no longer vouches for readiness
+                if let (Some(nid), Some(c)) = (
+                    p.get("node_id").and_then(|x| x.as_str()).map(String::from),
+                    p.get("satisfies").and_then(|x| x.as_str()).map(String::from),
+                ) {
+                    self.node_tick(&nid, &c, false).await;
+                }
+            }
+        }
+        if changed {
+            self.save_packets(&store).await;
+        }
+        store
+            .into_iter()
+            .filter(|p| {
+                matches!(p.get("status").and_then(|x| x.as_str()), Some("proposed") | Some("confirmed"))
+            })
+            .collect()
+    }
+
+    /// `ym packets` — the live board: what's prepared, what needs a word.
+    pub async fn packets_view(&self) -> String {
+        let live = self.live_packets().await;
+        if live.is_empty() {
+            return "📦 No live packets. The Night Shift compiles them against the future nodes (`ym future`).".to_string();
+        }
+        let mut out = String::from("📦 ACTION PACKETS (live)\n");
+        for (i, p) in live.iter().enumerate() {
+            let title = p.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+            let kind = p.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
+            let st = p.get("status").and_then(|x| x.as_str()).unwrap_or("?");
+            let conf = p.get("confirmation_required").and_then(|x| x.as_bool()).unwrap_or(false);
+            out.push_str(&format!(
+                "{}. [{kind}] {title} — {st}{}\n",
+                i + 1,
+                if conf && st == "proposed" { " · NEEDS YOUR WORD (`approve N` / `reject N`)" } else { "" }
+            ));
+        }
+        out.push_str("`packet N` shows the full proof (reason, evidence, expiry).");
+        out
+    }
+
+    /// `ym packet N` — the full proof-carrying view.
+    pub async fn packet_show(&self, sel: &str) -> String {
+        let live = self.live_packets().await;
+        let idx = sel.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+        let Some(p) = idx.and_then(|i| live.get(i)) else {
+            return "Which packet? `packets` lists them; `packet 2` shows one.".to_string();
+        };
+        let g = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("—").to_string();
+        let ev: Vec<String> = p
+            .get("evidence")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| format!("  · {x}")).collect())
+            .unwrap_or_default();
+        let exp = p
+            .get("expiry_ms")
+            .and_then(|x| x.as_i64())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.with_timezone(local_now().offset()).format("%a %b %-d %H:%M").to_string())
+            .unwrap_or_else(|| "never".into());
+        format!(
+            "📦 {}\nkind: {} · status: {} · confidence: {:.2} · expires: {exp}\nnode: {} (satisfies: {})\n\nWHY: {}\n\nEVIDENCE:\n{}\n\n{}",
+            g("title"),
+            g("kind"),
+            g("status"),
+            p.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            g("node_id"),
+            g("satisfies"),
+            g("reason"),
+            if ev.is_empty() { "  (deterministic composition)".to_string() } else { ev.join("\n") },
+            g("body"),
+        )
+    }
+
+    /// `approve N` / `reject N [why]` — the human word. Rejection un-ticks readiness and records
+    /// the why as a correction the replay lab learns from.
+    pub async fn packet_decide(&self, sel: &str, approve: bool, why: &str) -> String {
+        let live = self.live_packets().await;
+        let idx = sel.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+        let Some(target) = idx.and_then(|i| live.get(i)) else {
+            return "Which packet? `packets` lists them by number.".to_string();
+        };
+        let id = target.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = target.get("title").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+        let mut store = self.load_packets().await;
+        for p in store.iter_mut() {
+            if p.get("id").and_then(|x| x.as_str()) == Some(id.as_str()) {
+                p["status"] = serde_json::json!(if approve { "confirmed" } else { "rejected" });
+                if !why.trim().is_empty() {
+                    p["decision_why"] = serde_json::json!(why.trim());
+                }
+            }
+        }
+        self.save_packets(&store).await;
+        if approve {
+            self.ledger_resolve(true).await;
+            format!("✅ Confirmed: {title}. I'll act within the packet's bounds — nothing beyond it.")
+        } else {
+            if let (Some(nid), Some(c)) = (
+                target.get("node_id").and_then(|x| x.as_str()),
+                target.get("satisfies").and_then(|x| x.as_str()),
+            ) {
+                self.node_tick(nid, c, false).await;
+            }
+            self.ledger_correction("packet", &title, if why.trim().is_empty() { "rejected" } else { why.trim() }).await;
+            format!("🗑 Rejected: {title}{} — noted for the replay lab.", if why.trim().is_empty() { String::new() } else { format!(" ({})", why.trim()) })
+        }
+    }
+
     /// ---------- FUTURE NODES (the world twin's seed) ----------
     /// One queryable forward store. Nodes carry a stable id, a kind, and READINESS CRITERIA —
     /// the checklist the Night Shift compiles ActionPackets against. Grown from what already
@@ -9778,23 +10087,33 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             None => "unforeseeable",
             Some(label) => {
                 wk2["linked"] = serde_json::json!(bump(&wk, "linked"));
-                // Did the mind already SPEAK about this subject recently (briefing/nudge/packet)?
-                // Word-match the subject against recent assistant lines — the v0 "was it prepared"
-                // proxy until ActionPackets exist (task 221 replaces this with packet records).
+                // Was there a LIVE PACKET for this subject? Real prepared-work records first
+                // (the honest signal); the spoken-recently proxy stays as the soft fallback.
                 let ll = label.to_lowercase();
                 let subj: Vec<String> = ll
                     .split(|c: char| !c.is_alphanumeric())
                     .filter(|w| w.len() >= 4 && !stop.contains(w))
                     .map(String::from)
                     .collect();
+                let packets = self.live_packets().await;
+                let packed = packets.iter().any(|p| {
+                    let hay = format!(
+                        "{} {}",
+                        p.get("title").and_then(|x| x.as_str()).unwrap_or(""),
+                        p.get("node_id").and_then(|x| x.as_str()).unwrap_or("")
+                    )
+                    .to_lowercase();
+                    subj.iter().any(|w| hay.contains(w.as_str()))
+                });
                 let recent = self.memory.recent_messages(80).await.unwrap_or_default();
-                let spoken = recent
-                    .iter()
-                    .filter(|(r, _)| r == "assistant")
-                    .any(|(_, txt)| {
-                        let xl = txt.to_lowercase();
-                        subj.iter().any(|w| xl.contains(w.as_str()))
-                    });
+                let spoken = packed
+                    || recent
+                        .iter()
+                        .filter(|(r, _)| r == "assistant")
+                        .any(|(_, txt)| {
+                            let xl = txt.to_lowercase();
+                            subj.iter().any(|w| xl.contains(w.as_str()))
+                        });
                 if spoken {
                     wk2["anticipated"] = serde_json::json!(bump(&wk, "anticipated"));
                     "anticipated"
@@ -14919,6 +15238,16 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "privacy" => mind_inference::privacy_report(self.inference.provider()),
             "regrets" | "regret" => self.regrets_report().await,
             "future" | "nodes" => self.future_view().await,
+            "nightshift" | "shift" => self.night_shift_run().await,
+            "packets" => self.packets_view().await,
+            "packet" if !rest.trim().is_empty() => self.packet_show(rest.trim()).await,
+            "approve" if !rest.trim().is_empty() => self.packet_decide(rest.trim(), true, "").await,
+            "reject" if !rest.trim().is_empty() => {
+                let mut it = rest.trim().splitn(2, ' ');
+                let n = it.next().unwrap_or("");
+                let why = it.next().unwrap_or("");
+                self.packet_decide(n, false, why).await
+            }
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());

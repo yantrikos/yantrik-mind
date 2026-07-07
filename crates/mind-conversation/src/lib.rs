@@ -11163,8 +11163,30 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let cursor: usize = self.memory.profile_get("workops_cursor").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
         let subject = subjects[cursor % subjects.len()].clone();
         let _ = self.memory.profile_set("workops_cursor", &((cursor + 1) % subjects.len()).to_string()).await;
+        // DISAMBIGUATE: a bare project name ("SDF Protocol") collides with unrelated things in
+        // search (Syrian Democratic Forces, Stellar, NIST). Ground the query in what the mind
+        // already knows THIS project is, so the scan is about HIS work, not a namesake.
+        let ident: Vec<String> = self
+            .memory
+            .beliefs_matching(&subject)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .take(3)
+            .map(|b| b.statement.chars().take(140).collect::<String>())
+            .collect();
+        let context = if ident.is_empty() {
+            String::new()
+        } else {
+            format!(" (this is Pranab Sarkar's project — for disambiguation: {})", ident.join("; "))
+        };
         // Belief-revising field scan on the project (treasury-gated inside research_revise).
-        let report = self.research_revise(&format!("{subject} — latest developments, competitors, and relevant research")).await.ok()?;
+        let report = self
+            .research_revise(&format!(
+                "{subject}{context} — latest developments in this specific space, competing/similar approaches, and relevant research. Ignore unrelated same-named entities."
+            ))
+            .await
+            .ok()?;
         // GitHub activity glance (proven-strong signal; only when there's genuinely unread work).
         let mut gh = String::new();
         if let Some(g) = &self.github {

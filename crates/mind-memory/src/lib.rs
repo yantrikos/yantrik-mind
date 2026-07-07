@@ -1078,10 +1078,13 @@ impl MemoryHandle {
                                         let toks: Vec<&str> =
                                             t.split(|c: char| !c.is_alphanumeric()).collect();
                                         words.iter().any(|(w, whole)| {
-                                            if *whole {
+                                            if *whole || w.len() <= 4 {
+                                                // short words whole-word: "rath" must not hit "RATHer"
                                                 toks.iter().any(|x| *x == w.as_str())
                                             } else {
-                                                t.contains(w.as_str())
+                                                // longer words match at word START: "adopt"->"adoption",
+                                                // but never mid-word accidents.
+                                                toks.iter().any(|x| x.starts_with(w.as_str()))
                                             }
                                         })
                                     })

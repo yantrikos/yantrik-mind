@@ -655,6 +655,10 @@ pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> 
         }
     }
 
+    // def name → defining module; ambiguous names (defined in 2+ modules) are dropped from the
+    // call-graph scan rather than guessed.
+    let mut defs: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+
     for m in &modules {
         det.file_count += m.file_count;
         let mut fns = Vec::new();
@@ -721,6 +725,18 @@ pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> 
                 "Module `{}` depends internally on: {}.", m.name, deps.join(", "))));
         }
 
+        for sym in fns.iter().chain(types.iter()).chain(traits.iter()) {
+            if sym.len() >= 5 {
+                defs.entry(sym.clone())
+                    .and_modify(|e| {
+                        if e.as_deref() != Some(m.name.as_str()) {
+                            *e = None; // ambiguous — defined in more than one module
+                        }
+                    })
+                    .or_insert_with(|| Some(m.name.clone()));
+            }
+        }
+
         skeleton.push_str(&format!("\n## {} ({} files)\n", m.name, m.file_count));
         if let Some(doc) = docs.first() { skeleton.push_str(&format!("doc: {doc}\n")); }
         if !traits.is_empty() { skeleton.push_str(&format!("traits: {}\n", traits.join(", "))); }
@@ -735,8 +751,127 @@ pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> 
         if !deps.is_empty() { skeleton.push_str(&format!("deps: {}\n", deps.join(", "))); }
     }
 
+    // CALL-GRAPH SCAN (deterministic): count references to each unambiguous def from every OTHER
+    // module. Yields "A calls into B via x, y, z" edges and a repo-wide most-referenced list —
+    // the relational layer that lets code_ask reason about impact and flow, not just inventory.
+    {
+        let mut edge: std::collections::HashMap<(String, String), std::collections::HashMap<String, usize>> =
+            std::collections::HashMap::new();
+        let mut hot: std::collections::HashMap<String, (usize, std::collections::HashSet<String>)> =
+            std::collections::HashMap::new();
+        for m in &modules {
+            for chunk in &m.chunks {
+                for line in chunk.lines() {
+                    if line.starts_with("===== ") {
+                        continue;
+                    }
+                    let mut cur = String::new();
+                    for c in line.chars().chain(std::iter::once(' ')) {
+                        if c.is_alphanumeric() || c == '_' {
+                            cur.push(c);
+                        } else if !cur.is_empty() {
+                            let ident = std::mem::take(&mut cur);
+                            if ident.len() >= 5 {
+                                if let Some(Some(home)) = defs.get(&ident) {
+                                    if home != &m.name {
+                                        *edge
+                                            .entry((m.name.clone(), home.clone()))
+                                            .or_default()
+                                            .entry(ident.clone())
+                                            .or_default() += 1;
+                                        let h = hot.entry(ident).or_default();
+                                        h.0 += 1;
+                                        h.1.insert(m.name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut hot_v: Vec<(String, usize, usize)> =
+            hot.into_iter().map(|(k, (n, mods))| (k, n, mods.len())).collect();
+        hot_v.sort_by(|a, b| (b.2, b.1).cmp(&(a.2, a.1)));
+        if !hot_v.is_empty() {
+            let line = hot_v.iter().take(12)
+                .map(|(k, n, mc)| format!("{k} ({n} refs from {mc} modules)"))
+                .collect::<Vec<_>>().join(", ");
+            det.facts.push(("(root)".into(), format!(
+                "Most-referenced symbols across `{name}` module boundaries (change these carefully): {line}."
+            )));
+            skeleton.push_str(&format!("\nhot symbols: {line}\n"));
+        }
+        let mut edges: Vec<((String, String), std::collections::HashMap<String, usize>)> =
+            edge.into_iter().collect();
+        edges.sort_by_key(|((_, _), syms)| std::cmp::Reverse(syms.values().sum::<usize>()));
+        for ((from, to), syms) in edges.into_iter().take(14) {
+            let mut sv: Vec<(String, usize)> = syms.into_iter().collect();
+            sv.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            let names = sv.iter().take(6).map(|(k, _)| k.clone()).collect::<Vec<_>>().join(", ");
+            det.facts.push((from.clone(), format!(
+                "Module `{from}` calls into `{to}` mainly via: {names}."
+            )));
+            skeleton.push_str(&format!("edge: {from} -> {to}: {names}\n"));
+        }
+    }
+
     det.skeleton = skeleton;
     Ok((name, det))
+}
+
+/// Targeted definition lookup in an already-synced repo — the ACTIVE-LEARNING primitive. For each
+/// identifier, grep source files for its definition-ish line and return that line plus context, so
+/// code_ask can fill a knowledge gap with one focused excerpt instead of a re-study. Deterministic.
+pub fn lookup_symbols(repo: &str, idents: &[String], ctx_lines: usize) -> Vec<(String, String)> {
+    let root = workdir().join(repo);
+    if !root.is_dir() || idents.is_empty() {
+        return vec![];
+    }
+    let files = collect_sources(&root, &root, 200_000, 400);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for ident in idents.iter().take(3) {
+        let mut best: Option<(usize, String, usize, bool)> = None; // (score, file, line_idx, is_def)
+        for (rel, body) in &files {
+            for (li, line) in body.lines().enumerate() {
+                if !line.contains(ident.as_str()) {
+                    continue;
+                }
+                // whole-word check
+                let ok = line
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|w| w == ident);
+                if !ok {
+                    continue;
+                }
+                let t = strip_modifiers(line.trim_start());
+                let is_def = ["fn ", "func ", "function ", "def ", "class ", "struct ", "enum ",
+                              "trait ", "interface ", "type ", "impl ", "module ", "protocol "]
+                    .iter()
+                    .any(|kw| ident_after(t, kw).map(|id| id == ident).unwrap_or(false))
+                    || (t.contains('(') && (t.ends_with('{') || t.ends_with(')')) && t.contains(ident.as_str()));
+                let score = if is_def { 2 } else { 1 };
+                if best.as_ref().map(|(s, _, _, _)| score > *s).unwrap_or(true) {
+                    best = Some((score, rel.clone(), li, is_def));
+                    if is_def {
+                        break;
+                    }
+                }
+            }
+            if best.as_ref().map(|(_, _, _, d)| *d).unwrap_or(false) {
+                break;
+            }
+        }
+        if let Some((_, rel, li, _)) = best {
+            if let Some((_, body)) = files.iter().find(|(r, _)| r == &rel) {
+                let lines: Vec<&str> = body.lines().collect();
+                let end = (li + ctx_lines).min(lines.len());
+                let excerpt = lines[li..end].join("\n");
+                out.push((format!("{rel}:{}", li + 1), excerpt));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -765,6 +900,28 @@ mod study_tests {
         assert!(deps.iter().any(|d| d == "stdio"), "deps: {deps:?}");
         // control-flow lines must NOT be misread as definitions
         assert!(!fns.iter().any(|f| f == "if" || f == "return"), "fns: {fns:?}");
+    }
+
+    #[test]
+    fn lookup_symbols_finds_definitions() {
+        let dir = std::env::temp_dir().join("ym_lookup_test_repo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rows.c"), "/* rows */
+struct erow {
+    int size;
+    char *chars;
+};
+
+void editorInsertRow(int at) {
+}
+").unwrap();
+        std::env::set_var("YM_CODE_DIR", std::env::temp_dir());
+        let hits = lookup_symbols("ym_lookup_test_repo", &["erow".to_string()], 5);
+        assert_eq!(hits.len(), 1, "hits: {hits:?}");
+        assert!(hits[0].0.starts_with("rows.c:"), "loc: {}", hits[0].0);
+        assert!(hits[0].1.contains("chars"), "excerpt: {}", hits[0].1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

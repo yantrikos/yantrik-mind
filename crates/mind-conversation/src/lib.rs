@@ -11614,18 +11614,92 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             t
         };
         let block = facts.iter().map(|f| format!("- {}", strip(f))).collect::<Vec<_>>().join("\n");
+
+        // ACTIVE LEARNING: identifiers the question names that NO stored fact mentions are knowledge
+        // gaps. Grep the synced repo for just those definitions and read a focused excerpt — then
+        // learn what the answer distills, so the same gap never needs disk again.
+        let facts_lower = facts.join(" ").to_lowercase();
+        let gaps: Vec<String> = question
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| w.len() >= 4 && w.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false))
+            .filter(|w| !facts_lower.contains(&w.to_lowercase()))
+            .map(|w| w.to_string())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .take(3)
+            .collect();
+        let repo_key = name.to_string();
+        let gaps2 = gaps.clone();
+        let excerpts = if gaps.is_empty() {
+            vec![]
+        } else {
+            tokio::task::spawn_blocking(move || mind_tools::code::lookup_symbols(&repo_key, &gaps2, 28))
+                .await
+                .unwrap_or_default()
+        };
+        let (extra, want_learn) = if excerpts.is_empty() {
+            (String::new(), false)
+        } else {
+            let ex = excerpts
+                .iter()
+                .map(|(loc, code)| format!("--- {loc} ---\n{code}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .chars()
+                .take(5000)
+                .collect::<String>();
+            (format!(
+                "\n\nTARGETED SOURCE (I just read these definitions from disk because my facts didn't cover them):\n{ex}\n\n\
+                 Since you have fresh source above, ALSO distill 1-3 new one-sentence facts about it worth remembering. \
+                 Output ONLY JSON: {{\"answer\":\"...\",\"learned\":[\"...\"]}}."
+            ), true)
+        };
         let prompt = format!(
-            "Answer the question about the {name} codebase using ONLY these facts I learned when I studied it. \
+            "Answer the question about the {name} codebase using the facts I learned when I studied it{}. \
              Each fact is prefixed with the module it came from, like `[mod:mind-memory]`. Be specific — name the \
-             modules and types the facts mention, and when useful cite the module a claim comes from. If the facts \
-             don't cover it, say exactly which module or file I'd need to re-read — never invent.\n\n\
-             WHAT I LEARNED ABOUT {name}:\n{block}\n\nQUESTION: {question}"
+             modules and types the facts mention, and when useful cite the module a claim comes from. If neither \
+             facts nor source cover it, say exactly which module or file I'd need to re-read — never invent.\n\n\
+             WHAT I LEARNED ABOUT {name}:\n{block}\n\nQUESTION: {question}{extra}",
+            if want_learn { " plus the targeted source below" } else { "" }
         );
-        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
-            Ok(r) => format!("{}\n\n_(answered from {} studied facts — no code re-read)_", r.text.trim(), facts.len()),
-            Err(e) => format!("(couldn't compose an answer: {e})"),
+        let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
+        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("(couldn't compose an answer: {e})"),
+        };
+        if !want_learn {
+            return format!("{}\n\n_(answered from {} studied facts — no code re-read)_", resp.trim(), facts.len());
         }
+        // Parse {answer, learned}; save learned facts so this gap is covered from memory next time.
+        let parsed = resp
+            .find('{')
+            .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let (answer, learned): (String, Vec<String>) = match &parsed {
+            Some(j) => (
+                j.get("answer").and_then(|x| x.as_str()).unwrap_or(resp.trim()).to_string(),
+                j.get("learned")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                    .unwrap_or_default(),
+            ),
+            None => (resp.trim().to_string(), vec![]),
+        };
+        let mut learned_n = 0usize;
+        for fact in &learned {
+            let loc = excerpts.first().map(|(l, _)| l.split(':').next().unwrap_or("?").to_string()).unwrap_or_else(|| "?".into());
+            let statement = format!("{token} {tag} [mod:{loc}] [learned] {fact}");
+            if self.memory.remember_as_belief(BeliefAssertion {
+                statement, polarity: 1.0, weight: 2.2,
+                source_event: Some("code-ask-learn".into()), provenance: "studied".into(),
+            }).await.is_ok() { learned_n += 1; }
+        }
+        format!(
+            "{}\n\n_(answered from {} studied facts + a targeted re-read of {}; learned {} new fact{} from it)_",
+            answer.trim(), facts.len(),
+            excerpts.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(", "),
+            learned_n, if learned_n == 1 { "" } else { "s" }
+        )
     }
 
     /// Local code digest for a WorkOps subject, if a registered repo name matches it. Grounds the

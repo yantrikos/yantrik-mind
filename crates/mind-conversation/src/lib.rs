@@ -15923,10 +15923,19 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 // window, not the treasury). The operator's "prepare this one, tonight" lever.
                 let q = rest.trim().to_lowercase();
                 let nodes = self.future_scan(30).await;
-                match nodes.iter().find(|n| {
-                    n.get("id").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
-                        || n.get("title").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
-                }) {
+                let mut matches: Vec<&serde_json::Value> = nodes
+                    .iter()
+                    .filter(|n| {
+                        n.get("id").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
+                            || n.get("title").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
+                    })
+                    .collect();
+                // Same title can exist as [deadline] AND [birthday] — prefer the kind an emissary serves.
+                matches.sort_by_key(|n| match n.get("kind").and_then(|x| x.as_str()).unwrap_or("") {
+                    "festival" | "birthday" | "trip" => 0,
+                    _ => 1,
+                });
+                match matches.first().copied() {
                     None => format!("No future node matching \"{q}\" — `future` lists them."),
                     Some(n) => {
                         let kind = n.get("kind").and_then(|x| x.as_str()).unwrap_or("");

@@ -285,16 +285,21 @@ impl LLMBackend for ScriptedLLM {
 /// (NanoGPT, Ollama Cloud, MiniMax, …), all OpenAI-compatible, so adding a provider is config-only.
 pub struct ChainBackend {
     links: Vec<Arc<dyn LLMBackend>>,
+    labels: Vec<String>,
     name: String,
 }
 
 impl ChainBackend {
     pub fn new(links: Vec<Arc<dyn LLMBackend>>) -> Self {
-        let name = format!(
-            "chain[{}]",
-            links.iter().map(|b| b.backend_name().to_string()).collect::<Vec<_>>().join(" -> ")
-        );
-        Self { links, name }
+        let labels: Vec<String> = links.iter().map(|b| b.backend_name().to_string()).collect();
+        Self::new_labeled(links, labels)
+    }
+
+    /// Provider-named links ("nanogpt", "minimax") — the stats record THESE, not the generic
+    /// backend_name ("api"), so `ym providers` says who actually answered.
+    pub fn new_labeled(links: Vec<Arc<dyn LLMBackend>>, labels: Vec<String>) -> Self {
+        let name = format!("chain[{}]", labels.join(" -> "));
+        Self { links, labels, name }
     }
 
     fn is_usable(r: &LLMResponse) -> bool {
@@ -337,19 +342,20 @@ impl LLMBackend for ChainBackend {
         tools: Option<&[serde_json::Value]>,
     ) -> anyhow::Result<LLMResponse> {
         let mut last_err: Option<anyhow::Error> = None;
-        for be in &self.links {
+        for (i, be) in self.links.iter().enumerate() {
+            let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
             match be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
-                    provider_record(be.backend_name(), true);
+                    provider_record(label, true);
                     return Ok(r);
                 }
                 Ok(_) => {
-                    provider_record(be.backend_name(), false);
+                    provider_record(label, false);
                     eprintln!("[chain] {} returned empty — failing over", be.backend_name());
                     last_err = Some(anyhow::anyhow!("empty response from {}", be.backend_name()));
                 }
                 Err(e) => {
-                    provider_record(be.backend_name(), false);
+                    provider_record(label, false);
                     eprintln!("[chain] {} failed ({e}) — failing over", be.backend_name());
                     last_err = Some(e);
                 }
@@ -443,7 +449,7 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     if links.len() == 1 {
         return Some((links.pop().unwrap(), label));
     }
-    Some((Arc::new(ChainBackend::new(links)), label))
+    Some((Arc::new(ChainBackend::new_labeled(links, labels.clone())), label))
 }
 
 /// Per-function model routing. Each role resolves to its own `InferencePool`; an unconfigured role

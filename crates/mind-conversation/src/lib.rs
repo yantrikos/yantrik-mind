@@ -9990,17 +9990,24 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let people = self.load_people().await;
                 let profiles = self.load_people_profiles().await;
                 let by_rel = |want: &str| -> Option<String> {
-                    let scan = |rows: &[serde_json::Value]| -> Option<String> {
+                    // EXACT relationship first across both stores — "daughter" must resolve to the
+                    // daughter, never to a "friend's daughter" that merely contains the word.
+                    let scan = |rows: &[serde_json::Value], exact: bool| -> Option<String> {
                         rows.iter()
                             .find(|p| {
                                 p.get("relationship")
                                     .and_then(|x| x.as_str())
-                                    .map(|r| r.to_lowercase().contains(want))
+                                    .map(|r| {
+                                        let rl = r.trim().to_lowercase();
+                                        if exact { rl == want } else { rl.contains(want) }
+                                    })
                                     .unwrap_or(false)
                             })
                             .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
                     };
-                    scan(&people).or_else(|| scan(&profiles))
+                    scan(&people, true)
+                        .or_else(|| scan(&profiles, true))
+                        .or_else(|| scan(&people, false))
                 };
                 let daughter = by_rel("daughter").unwrap_or_else(|| "little one".into());
                 let wife = by_rel("wife").unwrap_or_else(|| "dear".into());

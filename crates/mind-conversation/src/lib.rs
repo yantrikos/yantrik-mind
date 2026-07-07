@@ -10348,6 +10348,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             };
             push(title.trim_start_matches("fest:").trim().to_string(), kind, ms, end, vec![]);
         }
+        // 1b. The FESTIVALS registry — the authoritative festival dates (they are NOT calendar
+        // entries; the twin must read the registry directly or it misses every festival).
+        for e in self.load_festival_dates().await {
+            let (Some(name), Some(date)) = (e.get("name").and_then(|x| x.as_str()), e.get("date").and_then(|x| x.as_str())) else {
+                continue;
+            };
+            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else { continue };
+            let when_ms = d
+                .and_hms_opt(9, 0, 0)
+                .and_then(|dt| dt.and_local_timezone(*today.offset()).single())
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0);
+            if when_ms < now - 86_400_000 || when_ms > horizon {
+                continue;
+            }
+            push(name.to_string(), "festival", when_ms, when_ms, vec![]);
+        }
         // 2. People dates (birthdays/anniversaries) inside the horizon.
         for (name, label, d, _mmdd) in self.upcoming_people_dates(days).await {
             let kind = if label.to_lowercase().contains("birthday") { "birthday" } else { "event" };

@@ -11408,9 +11408,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             // Save the facts as per-repo beliefs; the [code:<name>] tag namespaces them for
             // retrieval. Re-study reinforces via the write-path dedup rather than a wipe.
+            let alnum: String = name2.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+            let token = format!("codekb{alnum}");
             let mut saved = 0usize;
             for fact in &facts {
-                let statement = format!("[code:{name2}] {fact}");
+                // The distinctive `token` makes these retrievable without being swamped by the
+                // hundreds of ordinary beliefs that mention the repo's common-word name.
+                let statement = format!("{token} [code:{name2}] {fact}");
                 if mem
                     .remember_as_belief(BeliefAssertion {
                         statement,
@@ -11435,32 +11439,25 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
 
     /// Answer a question about a studied repo from its DISTILLED beliefs — no source re-read.
     pub async fn code_ask(&self, name: &str, question: &str) -> String {
+        let alnum: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        let token = format!("codekb{alnum}");
         let tag = format!("[code:{name}]");
-        let mut facts: Vec<String> = self
+        // Retrieve by the DISTINCTIVE per-repo token only — matching on the repo name would be
+        // swamped by the hundreds of ordinary beliefs that mention it (the 20-cap buries the facts).
+        let facts: Vec<String> = self
             .memory
-            .beliefs_matching(&format!("{name} {question}"))
+            .beliefs_matching(&token)
             .await
             .unwrap_or_default()
             .into_iter()
             .map(|b| b.statement)
-            .filter(|st| st.contains(&tag))
+            .filter(|st| st.contains(&token))
             .collect();
-        if facts.is_empty() {
-            // fall back to the whole studied set for this repo
-            facts = self
-                .memory
-                .beliefs_matching(name)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|b| b.statement)
-                .filter(|st| st.contains(&tag))
-                .collect();
-        }
         if facts.is_empty() {
             return format!("I haven't studied {name} yet — `code study <git url>` first, then ask.");
         }
-        let block = facts.iter().take(25).map(|f| format!("- {}", f.replacen(&tag, "", 1).trim())).collect::<Vec<_>>().join("\n");
+        let strip = |f: &str| f.replacen(&token, "", 1).replacen(&tag, "", 1).trim().to_string();
+        let block = facts.iter().take(25).map(|f| format!("- {}", strip(f))).collect::<Vec<_>>().join("\n");
         let prompt = format!(
             "Answer the question about the {name} codebase using ONLY these facts I learned when I studied it. \
              Be specific (name the modules/types they mention). If the facts don't cover it, say exactly what I'd need to re-read — never invent.\n\n\

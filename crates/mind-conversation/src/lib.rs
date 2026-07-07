@@ -335,14 +335,25 @@ fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>)
 
 /// A pending get-to-know-you question must not swallow a turn that clearly ISN'T an answer — a
 /// command ("weather"), a question back at us, or a pasted URL. Conservative: only obvious cases,
+/// First word is a CLI verb — a command, not a conversational ask. Used by the regret classifier
+/// (which must NOT skip questions — questions are exactly the asks the curve measures).
+fn is_cli_verb(text: &str) -> bool {
+    looks_like_command_word(text)
+}
+
 /// so genuine answers (which rarely look like commands) always capture.
 fn looks_like_non_answer(text: &str) -> bool {
     let t = text.trim();
     if t.ends_with('?') || t.starts_with('/') || t.starts_with("http://") || t.starts_with("https://") {
         return true;
     }
+    looks_like_command_word(t)
+}
+
+/// The shared command-verb table: does the first word match a `ym` CLI verb?
+fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 94] = [
+    const CMDS: [&str; 96] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -356,7 +367,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "onedrive", "od",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
-        "dream", "radar", "privacy",
+        "dream", "radar", "privacy", "regrets", "regret",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9445,6 +9456,175 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
+    /// ---------- REGRET LOG (Night Shift baseline) ----------
+    /// The charter's eval: every owner ask is classified against the forward spine. An ask about
+    /// something that was FORESEEABLE (on the 21-day spine) with nothing prepared is a REGRET —
+    /// the unit the Night Shift exists to eliminate. Logged from day 1, before the kernel can
+    /// prevent anything, so the preventable-ask-rate curve has an honest untreated baseline.
+
+    /// Deterministic classification of one primary ask. No LLM, a few KV reads, called inline.
+    pub async fn regret_classify(&self, user_text: &str) {
+        let t = user_text.trim();
+        // Commands and micro-turns aren't asks; don't pollute the curve with "ym privacy".
+        if t.len() < 12 || is_cli_verb(t) || t.starts_with('/') {
+            return;
+        }
+        let stop = ["what", "when", "where", "there", "about", "have", "this", "that", "with",
+                    "will", "would", "could", "should", "going", "know", "need", "want", "does"];
+        let words: Vec<String> = t
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4 && !stop.contains(w))
+            .map(String::from)
+            .collect();
+        if words.is_empty() {
+            return;
+        }
+        // Forward spine = calendar (incl. fest: entries) + people dates + deadlined reminders.
+        let spine = self.upcoming_spine(21).await;
+        let hit: Option<String> = spine.iter().find_map(|(_, label)| {
+            let ll = label.to_lowercase();
+            let ltoks: std::collections::HashSet<String> = ll
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 4 && !stop.contains(w))
+                .map(String::from)
+                .collect();
+            words.iter().any(|w| ltoks.contains(w)).then(|| label.clone())
+        });
+        let now = chrono::Utc::now();
+        let today = local_now();
+        let week = format!("{}-W{:02}", today.format("%G"), chrono::Datelike::iso_week(&today).week());
+        let mut stats: serde_json::Value = self
+            .memory
+            .profile_get("regret_stats")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let wk = stats
+            .as_object_mut()
+            .map(|m| m.entry(week.clone()).or_insert_with(|| serde_json::json!({"asks":0,"linked":0,"anticipated":0,"missed":0})))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"asks":0,"linked":0,"anticipated":0,"missed":0}));
+        let bump = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0) + 1;
+        let mut wk2 = wk.clone();
+        wk2["asks"] = serde_json::json!(bump(&wk, "asks"));
+        let class = match &hit {
+            None => "unforeseeable",
+            Some(label) => {
+                wk2["linked"] = serde_json::json!(bump(&wk, "linked"));
+                // Did the mind already SPEAK about this subject recently (briefing/nudge/packet)?
+                // Word-match the subject against recent assistant lines — the v0 "was it prepared"
+                // proxy until ActionPackets exist (task 221 replaces this with packet records).
+                let ll = label.to_lowercase();
+                let subj: Vec<String> = ll
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() >= 4 && !stop.contains(w))
+                    .map(String::from)
+                    .collect();
+                let recent = self.memory.recent_messages(80).await.unwrap_or_default();
+                let spoken = recent
+                    .iter()
+                    .filter(|(r, _)| r == "assistant")
+                    .any(|(_, txt)| {
+                        let xl = txt.to_lowercase();
+                        subj.iter().any(|w| xl.contains(w.as_str()))
+                    });
+                if spoken {
+                    wk2["anticipated"] = serde_json::json!(bump(&wk, "anticipated"));
+                    "anticipated"
+                } else {
+                    wk2["missed"] = serde_json::json!(bump(&wk, "missed"));
+                    "missed_foreseeable"
+                }
+            }
+        };
+        if let Some(m) = stats.as_object_mut() {
+            m.insert(week, wk2);
+            // keep at most 12 weeks of stats
+            if m.len() > 12 {
+                let mut keys: Vec<String> = m.keys().cloned().collect();
+                keys.sort();
+                for old in keys.iter().take(m.len() - 12) {
+                    m.remove(old);
+                }
+            }
+        }
+        let _ = self.memory.profile_set("regret_stats", &stats.to_string()).await;
+        // A miss is a RegretRecord — the raw material for regression tests + self-build goals.
+        if class == "missed_foreseeable" {
+            let mut log: Vec<serde_json::Value> = self
+                .memory
+                .profile_get("regret_log")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|x| serde_json::from_str(&x).ok())
+                .unwrap_or_default();
+            log.push(serde_json::json!({
+                "ts": now.timestamp_millis(),
+                "ask": t.chars().take(160).collect::<String>(),
+                "subject": hit,
+                "class": class,
+                "prepared": serde_json::Value::Null, // becomes a packet id once ActionPackets exist
+            }));
+            if log.len() > 300 {
+                let cut = log.len() - 300;
+                log.drain(..cut);
+            }
+            let _ = self.memory.profile_set("regret_log", &serde_json::Value::Array(log).to_string()).await;
+        }
+    }
+
+    /// `ym regrets` — the curve so far + the recent misses. This is the metric the Night Shift
+    /// will be judged against; week 1 is the untreated baseline.
+    pub async fn regrets_report(&self) -> String {
+        let stats: serde_json::Value = self
+            .memory
+            .profile_get("regret_stats")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut out = String::from("📉 PREVENTABLE-ASK CURVE (charter metric — must decline once the Night Shift ships)\n");
+        let mut weeks: Vec<(String, serde_json::Value)> = stats
+            .as_object()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        weeks.sort_by(|a, b| a.0.cmp(&b.0));
+        if weeks.is_empty() {
+            out.push_str("(no asks classified yet — the log just turned on)\n");
+        }
+        for (wk, v) in &weeks {
+            let g = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+            let (linked, missed) = (g("linked"), g("missed"));
+            let rate = if linked > 0 { format!("{:.0}%", missed as f64 * 100.0 / linked as f64) } else { "—".to_string() };
+            out.push_str(&format!(
+                "{wk}: {} asks · {} foreseeable · {} anticipated · {} MISSED → preventable-ask rate {rate}\n",
+                g("asks"), linked, g("anticipated"), missed
+            ));
+        }
+        let log: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("regret_log")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or_default();
+        if !log.is_empty() {
+            out.push_str("\nRecent misses (what I should have prepared):\n");
+            for r in log.iter().rev().take(8) {
+                let ask = r.get("ask").and_then(|x| x.as_str()).unwrap_or("?");
+                let subj = r.get("subject").and_then(|x| x.as_str()).unwrap_or("?");
+                out.push_str(&format!("• \"{ask}\" — foreseeable via: {subj}\n"));
+            }
+        }
+        out
+    }
+
     /// ---------- WORK RADAR ----------
     /// Initiative on the LIVE work: no registration, no asking. Reads the user's own recent turns,
     /// derives what they are actively WORKING on, picks a subject not recently radared, and runs
@@ -14453,6 +14633,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 None => "💭 Nothing earned a dream right now — the bar is two verified citations across domains.".to_string(),
             },
             "privacy" => mind_inference::privacy_report(self.inference.provider()),
+            "regrets" | "regret" => self.regrets_report().await,
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());
@@ -17156,6 +17337,9 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let _ = self.memory.append_message_scoped("assistant", &reply, id.write_scope()).await;
             return Ok(reply);
         }
+        // NIGHT SHIFT regret baseline: classify this ask against the forward spine (deterministic,
+        // a few KV reads). Week 1 measures the untreated world; the kernel is judged by the drop.
+        self.regret_classify(user_text).await;
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.
         if let Some(reply) = self.handle_action(user_text).await {

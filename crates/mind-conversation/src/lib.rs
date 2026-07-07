@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 108] = [
+    const CMDS: [&str; 111] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -369,7 +369,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
-        "providers", "quota",
+        "providers", "quota", "board", "ops", "carrying",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -6928,6 +6928,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
         }
 
+        // 0b) The night shift's done-board: what was prepared while everyone slept (charter: the
+        // morning message is a DONE board, not a plan). Consumed once — tomorrow's shift rewrites it.
+        if let Some(rep) = self.memory.profile_get("nightshift_report").await.ok().flatten() {
+            if !rep.trim().is_empty() {
+                out.push_str(&format!("\n\n{rep}"));
+            }
+        }
+
         // 0b) Today on the calendar — your events (own + external feed) falling today.
         {
             let today_str = now.format("%Y-%m-%d").to_string();
@@ -9781,8 +9789,24 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let node_id = n.get("id").and_then(|x| x.as_str()).unwrap_or("");
             let title = n.get("title").and_then(|x| x.as_str()).unwrap_or("?");
             let when = n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
-            // Emissary-owned kinds are not v0's job — say so honestly (the negative space).
-            if matches!(kind, "festival" | "trip" | "birthday") {
+            // FESTIVALS have their emissary now; trips/birthdays wait for theirs (next builds).
+            if kind == "festival" {
+                let days_out = (when - chrono::Utc::now().timestamp_millis()) / 86_400_000;
+                if (0..=9).contains(&days_out) {
+                    let made = self.emissary_festival(n).await;
+                    if made.is_empty() {
+                        skipped.push(format!("{title} — emissary made nothing (dry treasury or all criteria met)"));
+                    } else {
+                        for m in made {
+                            built.push(format!("{title}: {m}"));
+                        }
+                    }
+                } else {
+                    skipped.push(format!("{title} — {days_out}d out; emissary engages at 9d"));
+                }
+                continue;
+            }
+            if matches!(kind, "trip" | "birthday") {
                 skipped.push(format!("{title} — waits for its emissary"));
                 continue;
             }
@@ -9836,6 +9860,196 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             out.push_str(&skipped.join("; "));
         }
         out.push_str("\n`packets` to review.");
+        // Persist for the morning briefing + ops board (the ONE morning message carries it).
+        let _ = self.memory.profile_set("nightshift_report", &out).await;
+        out
+    }
+
+    /// ---------- EMISSARIES (v1: FestivalOps) ----------
+    /// Bounded mission over one FutureNode. Privacy-lane disciplined: generic composition rides
+    /// the PUBLIC lane (no family data in prompts); family names are filled in DETERMINISTICALLY
+    /// after the model call (scaffold/fill). One treasury "emissary" pass per node per run.
+
+    /// FestivalOps: compile the festival node's unmet criteria into packets. Returns titles built.
+    pub async fn emissary_festival(&self, node: &serde_json::Value) -> Vec<String> {
+        let node_id = node.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = node.get("title").and_then(|x| x.as_str()).unwrap_or("the festival").to_string();
+        let when = node.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+        let unmet = |c: &str| {
+            node.get("readiness").and_then(|r| r.get(c)).and_then(|v| v.as_bool()) != Some(true)
+        };
+        if !Self::treasury_try_draw("emissary") {
+            return vec![];
+        }
+        let today = local_now();
+        let date_str = chrono::DateTime::from_timestamp_millis(when)
+            .map(|t| t.with_timezone(today.offset()).format("%A, %B %-d").to_string())
+            .unwrap_or_default();
+        let expiry = when + 86_400_000;
+        let evidence: Vec<String> = self
+            .memory
+            .beliefs_matching(&title)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .take(5)
+            .map(|b| format!("{} ({:.2})", b.statement, b.confidence))
+            .collect();
+        let mut built: Vec<String> = Vec::new();
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+
+        // ---- supplies: PUBLIC lane, generic by construction ----
+        if unmet("supplies") {
+            let prompt = format!(
+                "A Bengali-Hindu family will attend a local {title} celebration on {date_str}. \
+                 Write a practical READINESS CHECKLIST (8-12 short lines, grouped: bring / prepare at home / on the day). \
+                 Concrete items only (prasad/offerings, water, cash for donation, comfortable footwear, phone charged for photos, etc). No preamble."
+            );
+            if let Ok(r) = self
+                .inference
+                .chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Public)
+                .await
+            {
+                let id = self
+                    .packet_add(
+                        &node_id,
+                        Some("supplies"),
+                        "checklist",
+                        &format!("{title} — readiness checklist"),
+                        r.text.trim(),
+                        "festival within 9 days; supplies criterion unmet",
+                        evidence.clone(),
+                        0.8,
+                        false,
+                        expiry,
+                    )
+                    .await;
+                let _ = id;
+                built.push("supplies checklist".into());
+            }
+        }
+
+        // ---- logistics + weather + fallback: deterministic forecast, HOUSEHOLD-lane fuse ----
+        if unmet("logistics+weather") {
+            let mut fc_line = String::from("(forecast unavailable)");
+            if let Some(w) = &self.weather {
+                let city = self.home_city_now().await.unwrap_or_else(|| "Bentonville".to_string());
+                if let Ok(days) = w.daily_outlook(&city, 16).await {
+                    let fdate = chrono::DateTime::from_timestamp_millis(when)
+                        .map(|t| t.with_timezone(today.offset()).format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    if let Some(d) = days.iter().find(|d| d.date == fdate) {
+                        fc_line = format!(
+                            "{} {}: {}, {:.0}-{:.0}°F, {:.0}% rain, wind {:.0} mph, sunset {}",
+                            d.weekday, d.date, d.desc, d.lo_f, d.hi_f, d.precip_prob, d.wind_mph, d.sunset
+                        );
+                    }
+                }
+            }
+            let prompt = format!(
+                "Event: {title} on {date_str} (local community association event).\nForecast: {fc_line}\n\n\
+                 Write a short LOGISTICS PLAN: when to leave, what the weather means for the plan, \
+                 and ONE concrete fallback if weather or crowd turns bad. 5-7 lines, no preamble."
+            );
+            if let Ok(r) = self
+                .inference
+                .chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Household)
+                .await
+            {
+                self.packet_add(
+                    &node_id,
+                    Some("logistics+weather"),
+                    "plan",
+                    &format!("{title} — logistics, weather & fallback"),
+                    &format!("FORECAST: {fc_line}\n\n{}", r.text.trim()),
+                    "festival within 9 days; logistics criterion unmet",
+                    evidence.clone(),
+                    0.8,
+                    false,
+                    expiry,
+                )
+                .await;
+                built.push("logistics+weather plan".into());
+            }
+        }
+
+        // ---- story + family message: SCAFFOLD/FILL (public prompt, local names) ----
+        if unmet("story+message") {
+            let prompt = format!(
+                "Write two things about {title} (a Hindu festival), for a family observing it on {date_str}:\n\
+                 1) STORY: a warm, age-appropriate 120-word telling of the festival's story for a 7-year-old child. Simple words, wonder, no fear.\n\
+                 2) MESSAGE: a 2-sentence warm festival greeting a husband could send his wife.\n\
+                 Use NO personal names anywhere — write 'little one' and 'dear'. Label the sections STORY: and MESSAGE:."
+            );
+            if let Ok(r) = self
+                .inference
+                .chat_scoped(vec![ChatMessage::user(&prompt)], cfg, mind_inference::PrivacyScope::Public)
+                .await
+            {
+                // deterministic FILL: swap the placeholders for the real names, locally.
+                let people = self.load_people().await;
+                let by_rel = |want: &str| -> Option<String> {
+                    people
+                        .iter()
+                        .find(|p| p.get("relationship").and_then(|x| x.as_str()) == Some(want))
+                        .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+                };
+                let daughter = by_rel("daughter").unwrap_or_else(|| "little one".into());
+                let wife = by_rel("wife").unwrap_or_else(|| "dear".into());
+                let filled = r
+                    .text
+                    .trim()
+                    .replace("little one", &daughter)
+                    .replace("Little one", &daughter)
+                    .replace("dear", &wife)
+                    .replace("Dear", &wife);
+                self.packet_add(
+                    &node_id,
+                    Some("story+message"),
+                    "draft",
+                    &format!("{title} — {daughter}'s story + family message"),
+                    &format!("{filled}\n\n(Story composed on the public lane with no names; names filled locally — nothing family-identifying left this house.)"),
+                    "festival within 9 days; story+message criterion unmet",
+                    evidence,
+                    0.8,
+                    false,
+                    expiry,
+                )
+                .await;
+                built.push("story + family message".into());
+            }
+        }
+        built
+    }
+
+    /// `ym board` — what am I carrying? The pull-side operations view (the charter's cockpit).
+    pub async fn ops_board(&self) -> String {
+        let mut out = String::from("🗂 OPERATIONS BOARD\n");
+        let live = self.live_packets().await;
+        let needs_word: Vec<&serde_json::Value> = live
+            .iter()
+            .filter(|p| {
+                p.get("confirmation_required").and_then(|x| x.as_bool()).unwrap_or(false)
+                    && p.get("status").and_then(|x| x.as_str()) == Some("proposed")
+            })
+            .collect();
+        out.push_str(&format!(
+            "Packets: {} live ({} awaiting your word — `packets`)\n",
+            live.len(),
+            needs_word.len()
+        ));
+        let ranked = self.future_fragile(14).await;
+        if let Some((score, n)) = ranked.first() {
+            out.push_str(&format!(
+                "Most fragile: {} (fragility {score:.1})\n",
+                n.get("title").and_then(|x| x.as_str()).unwrap_or("?")
+            ));
+        }
+        if let Some(rep) = self.memory.profile_get("nightshift_report").await.ok().flatten() {
+            out.push_str(&format!("Last shift: {}\n", rep.replace('\n', " · ")));
+        }
+        out.push_str(&format!("\n{}\n", Self::treasury_report().lines().take(7).collect::<Vec<_>>().join("\n")));
+        out.push_str("\nDetail: `packets` · `future` · `regrets` · `providers` · `nightshift`");
         out
     }
 
@@ -15440,6 +15654,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "regrets" | "regret" => self.regrets_report().await,
             "future" | "nodes" => self.future_view().await,
             "nightshift" | "shift" => self.night_shift_run().await,
+            "board" | "ops" | "carrying" => self.ops_board().await,
             // "budget" belongs to the finance plugin (spending budgets); the pass envelope is "treasury".
             "treasury" if rest.trim().starts_with("set ") => {
                 let a: Vec<&str> = rest.trim().trim_start_matches("set").trim().split_whitespace().collect();

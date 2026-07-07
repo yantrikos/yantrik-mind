@@ -232,8 +232,12 @@ pub struct StudyModule {
 
 fn is_source(name: &str) -> bool {
     let n = name.to_lowercase();
-    [".rs", ".py", ".ts", ".tsx", ".js", ".go", ".java", ".c", ".cpp", ".h", ".rb",
-     ".sql", ".proto", ".sh", ".toml", ".yaml", ".yml"]
+    [".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".go", ".java", ".kt", ".kts",
+     ".swift", ".cs", ".php", ".rb", ".ex", ".exs", ".erl", ".hs", ".lua", ".pl", ".pm",
+     ".r", ".jl", ".zig", ".dart", ".scala", ".clj", ".cljs", ".ml", ".mli", ".fs",
+     ".groovy", ".vue", ".svelte", ".c", ".cc", ".cxx", ".cpp", ".h", ".hh", ".hpp",
+     ".m", ".mm", ".nim", ".cr", ".d", ".sql", ".proto", ".sh", ".ps1", ".toml",
+     ".yaml", ".yml", ".gradle"]
         .iter()
         .any(|e| n.ends_with(e))
 }
@@ -404,6 +408,113 @@ fn ident_after<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
     if id.is_empty() { None } else { Some(id) }
 }
 
+/// Strip leading visibility/qualifier keywords so `public static final class Foo` matches `class Foo`.
+fn strip_modifiers(mut l: &str) -> &str {
+    const MODS: [&str; 22] = [
+        "pub ", "public ", "private ", "protected ", "internal ", "static ", "final ",
+        "abstract ", "sealed ", "export ", "default ", "async ", "unsafe ", "extern ",
+        "virtual ", "override ", "open ", "inline ", "const ", "partial ", "data ", "case ",
+    ];
+    loop {
+        let before = l;
+        for m in MODS {
+            if let Some(rest) = l.strip_prefix(m) {
+                l = rest.trim_start();
+            }
+        }
+        if l == before {
+            return l;
+        }
+    }
+}
+
+/// Language-agnostic definition/dependency extraction for files with no precise fast-path.
+/// Keyword tables cover ~25 languages; a C-style `Type name(args) …{` heuristic catches
+/// keyword-less definitions (C functions, Java methods). Deterministic, never invents.
+fn universal_symbols(body: &str) -> (Vec<String>, Vec<String>, Vec<String>, Option<String>, Vec<String>) {
+    const FN_KWS: [&str; 10] = ["fn ", "func ", "function ", "def ", "defp ", "fun ", "sub ", "proc ", "method ", "task "];
+    const TYPE_KWS: [&str; 8] = ["class ", "struct ", "enum ", "record ", "union ", "object ", "module ", "type "];
+    const TRAIT_KWS: [&str; 4] = ["trait ", "interface ", "protocol ", "typeclass "];
+    const CTRL: [&str; 12] = ["if", "for", "while", "switch", "return", "else", "catch", "do", "match", "when", "case", "try"];
+    let mut fns = Vec::new();
+    let mut types = Vec::new();
+    let mut traits = Vec::new();
+    let mut doc: Option<String> = None;
+    let mut deps: Vec<String> = Vec::new();
+    for (li, raw) in body.lines().enumerate() {
+        let t = raw.trim_start();
+        // leading doc: first comment line with substance near the top of the file
+        if doc.is_none() && li < 12 {
+            for lead in ["//!", "///", "//", "#", "/*", "*", "--", ";;", "%", "\"\"\""] {
+                if let Some(d) = t.strip_prefix(lead) {
+                    let d = d.trim_start_matches(['*', '!', '/', '-']).trim();
+                    if d.len() > 8 && !d.starts_with('=') {
+                        doc = Some(d.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+        // dependencies
+        for kw in ["import ", "use ", "require ", "require(", "include ", "#include ", "from ", "using ", "open "] {
+            if let Some(rest) = t.strip_prefix(kw) {
+                let rest = rest.trim_start_matches(['<', '"', '\'', '(']);
+                let seg: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if seg.len() > 2 {
+                    deps.push(seg);
+                }
+                break;
+            }
+        }
+        let stripped = strip_modifiers(t);
+        let mut matched = false;
+        for kw in TRAIT_KWS {
+            if let Some(id) = ident_after(stripped, kw) {
+                traits.push(id.to_string());
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            for kw in TYPE_KWS {
+                if let Some(id) = ident_after(stripped, kw) {
+                    types.push(id.to_string());
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            for kw in FN_KWS {
+                if let Some(id) = ident_after(stripped, kw) {
+                    fns.push(id.to_string());
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        // C-style keyword-less definition: `ReturnType name(args…` at shallow indent, `{`-terminated
+        // region, first word not a control keyword.
+        if !matched && raw.len() - t.len() <= 4 && (t.ends_with('{') || t.ends_with('(') || t.ends_with(')')) {
+            let words: Vec<&str> = stripped.split_whitespace().collect();
+            if words.len() >= 2 && !CTRL.contains(&words[0].trim_end_matches('*')) {
+                if let Some(p) = stripped.find('(') {
+                    let before = &stripped[..p];
+                    if let Some(name) = before.rsplit(|c: char| !(c.is_alphanumeric() || c == '_')).next() {
+                        if name.len() > 2
+                            && name.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                            && before.trim_end().len() > name.len()
+                        {
+                            fns.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (fns, types, traits, doc, deps)
+}
+
 /// Parse one source file for its public surface. Returns (fns, types, traits, doc_line, dep_tokens).
 fn parse_symbols(rel: &str, body: &str) -> (Vec<String>, Vec<String>, Vec<String>, Option<String>, Vec<String>) {
     let mut fns = Vec::new();
@@ -415,6 +526,10 @@ fn parse_symbols(rel: &str, body: &str) -> (Vec<String>, Vec<String>, Vec<String
     let py = rel.ends_with(".py");
     let ts = rel.ends_with(".ts") || rel.ends_with(".tsx") || rel.ends_with(".js");
     let go = rel.ends_with(".go");
+    if !(rust || py || ts || go) {
+        // No precise fast-path for this language — the universal extractor covers it.
+        return universal_symbols(body);
+    }
     for line in body.lines() {
         let t = line.trim_start();
         if rust {
@@ -474,6 +589,71 @@ pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> 
     let mut det = DetStudy::default();
     det.module_count = modules.len();
     let mut skeleton = format!("# {name} — parsed structure ({} modules)\n", modules.len());
+
+    // LANGUAGE CENSUS + CONCEPT MINING — fully language-agnostic: extension counts, and identifier
+    // frequency across files (the identifiers threading the most files ARE the domain concepts).
+    let mut ext_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ident_files: std::collections::HashMap<String, std::collections::HashSet<u64>> =
+        std::collections::HashMap::new();
+    let mut file_id: u64 = 0;
+    const STOP: [&str; 34] = [
+        "return", "public", "private", "static", "string", "import", "package", "class",
+        "struct", "function", "const", "async", "await", "self", "this", "true", "false",
+        "None", "null", "void", "match", "while", "break", "continue", "export", "default",
+        "extends", "implements", "interface", "println", "printf", "include", "define", "endif",
+    ];
+    for m in &modules {
+        for chunk in &m.chunks {
+            for line in chunk.lines() {
+                if let Some(h) = line.strip_prefix("===== ") {
+                    file_id += 1;
+                    let p = h.trim_end_matches(" =====").trim();
+                    if let Some(ext) = p.rsplit('.').next().filter(|e| e.len() <= 6 && !e.contains('/')) {
+                        *ext_counts.entry(ext.to_lowercase()).or_default() += 1;
+                    }
+                    continue;
+                }
+                let mut cur = String::new();
+                for c in line.chars().chain(std::iter::once(' ')) {
+                    if c.is_alphanumeric() || c == '_' {
+                        cur.push(c);
+                    } else if !cur.is_empty() {
+                        if cur.len() >= 5
+                            && cur.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
+                            && !STOP.contains(&cur.to_lowercase().as_str())
+                        {
+                            ident_files.entry(std::mem::take(&mut cur)).or_default().insert(file_id);
+                        } else {
+                            cur.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !ext_counts.is_empty() {
+        let mut census: Vec<(String, usize)> = ext_counts.into_iter().collect();
+        census.sort_by(|a, b| b.1.cmp(&a.1));
+        let line = census.iter().take(6).map(|(e, n)| format!(".{e} ({n} files)")).collect::<Vec<_>>().join(", ");
+        det.facts.push(("(root)".into(), format!("The `{name}` codebase is composed of: {line}.")));
+        skeleton.push_str(&format!("languages: {line}\n"));
+    }
+    {
+        let min_spread = 3usize.max(file_id as usize / 12);
+        let mut concepts: Vec<(String, usize)> = ident_files
+            .into_iter()
+            .map(|(k, v)| (k, v.len()))
+            .filter(|(_, n)| *n >= min_spread)
+            .collect();
+        concepts.sort_by(|a, b| b.1.cmp(&a.1));
+        if !concepts.is_empty() {
+            let line = concepts.iter().take(18).map(|(k, n)| format!("{k} ({n} files)")).collect::<Vec<_>>().join(", ");
+            det.facts.push(("(root)".into(), format!(
+                "Core identifiers threading the `{name}` codebase (by cross-file spread): {line}."
+            )));
+            skeleton.push_str(&format!("core concepts: {line}\n"));
+        }
+    }
 
     for m in &modules {
         det.file_count += m.file_count;
@@ -557,4 +737,44 @@ pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> 
 
     det.skeleton = skeleton;
     Ok((name, det))
+}
+
+#[cfg(test)]
+mod study_tests {
+    use super::*;
+
+    #[test]
+    fn universal_extractor_reads_java() {
+        let src = "// Handles order checkout and payment capture.\nimport java.util.List;\n\npublic final class CheckoutService {\n    public static PaymentResult capturePayment(Order order) {\n        return gateway.charge(order);\n    }\n}\npublic interface PaymentGateway {\n}\n";
+        let (fns, types, traits, doc, deps) = parse_symbols("CheckoutService.java", src);
+        assert!(types.contains(&"CheckoutService".to_string()), "types: {types:?}");
+        assert!(traits.contains(&"PaymentGateway".to_string()), "traits: {traits:?}");
+        assert!(fns.contains(&"capturePayment".to_string()), "fns: {fns:?}");
+        assert!(doc.unwrap().contains("checkout"));
+        assert!(deps.iter().any(|d| d == "java"), "deps: {deps:?}");
+    }
+
+    #[test]
+    fn universal_extractor_reads_c() {
+        let src = "/* editor row operations */\n#include <stdio.h>\n\nstruct erow {\n    int size;\n};\n\nvoid editorInsertRow(int at, char *s, size_t len) {\n    if (at < 0) return;\n}\n\nint editorRowCxToRx(erow *row, int cx) {\n    return 0;\n}\n";
+        let (fns, types, _traits, doc, deps) = parse_symbols("kilo.c", src);
+        assert!(types.contains(&"erow".to_string()), "types: {types:?}");
+        assert!(fns.contains(&"editorInsertRow".to_string()), "fns: {fns:?}");
+        assert!(fns.contains(&"editorRowCxToRx".to_string()), "fns: {fns:?}");
+        assert!(doc.unwrap().contains("row operations"));
+        assert!(deps.iter().any(|d| d == "stdio"), "deps: {deps:?}");
+        // control-flow lines must NOT be misread as definitions
+        assert!(!fns.iter().any(|f| f == "if" || f == "return"), "fns: {fns:?}");
+    }
+
+    #[test]
+    fn rust_fast_path_still_precise() {
+        let src = "//! Belief store.\npub struct Belief { pub id: u64 }\npub fn assert_belief(b: Belief) {}\nfn private_helper() {}\n";
+        let (fns, types, _tr, doc, _deps) = parse_symbols("lib.rs", src);
+        assert!(types.contains(&"Belief".to_string()));
+        assert!(fns.contains(&"assert_belief".to_string()));
+        // Rust path stays pub-only precision: private items excluded
+        assert!(!fns.contains(&"private_helper".to_string()));
+        assert!(doc.unwrap().contains("Belief store"));
+    }
 }

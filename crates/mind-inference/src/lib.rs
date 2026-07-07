@@ -302,6 +302,33 @@ impl ChainBackend {
     }
 }
 
+/// Per-provider served/failed counters, recorded where the truth lives: the chain knows which
+/// link actually answered each call and which failed over. Process-lifetime; `ym providers` reads.
+static PROVIDER_STATS: std::sync::Mutex<Option<std::collections::HashMap<String, (u64, u64)>>> =
+    std::sync::Mutex::new(None);
+
+fn provider_record(name: &str, served: bool) {
+    let mut g = PROVIDER_STATS.lock().unwrap();
+    let m = g.get_or_insert_with(std::collections::HashMap::new);
+    let e = m.entry(name.to_string()).or_insert((0, 0));
+    if served {
+        e.0 += 1;
+    } else {
+        e.1 += 1;
+    }
+}
+
+/// (provider, served, failed) sorted by served desc — who is ACTUALLY answering.
+pub fn provider_stats() -> Vec<(String, u64, u64)> {
+    let g = PROVIDER_STATS.lock().unwrap();
+    let mut v: Vec<(String, u64, u64)> = g
+        .as_ref()
+        .map(|m| m.iter().map(|(k, (s, f))| (k.clone(), *s, *f)).collect())
+        .unwrap_or_default();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+
 impl LLMBackend for ChainBackend {
     fn chat(
         &self,
@@ -312,12 +339,17 @@ impl LLMBackend for ChainBackend {
         let mut last_err: Option<anyhow::Error> = None;
         for be in &self.links {
             match be.chat(messages, config, tools) {
-                Ok(r) if Self::is_usable(&r) => return Ok(r),
+                Ok(r) if Self::is_usable(&r) => {
+                    provider_record(be.backend_name(), true);
+                    return Ok(r);
+                }
                 Ok(_) => {
+                    provider_record(be.backend_name(), false);
                     eprintln!("[chain] {} returned empty — failing over", be.backend_name());
                     last_err = Some(anyhow::anyhow!("empty response from {}", be.backend_name()));
                 }
                 Err(e) => {
+                    provider_record(be.backend_name(), false);
                     eprintln!("[chain] {} failed ({e}) — failing over", be.backend_name());
                     last_err = Some(e);
                 }

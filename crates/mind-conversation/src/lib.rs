@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 106] = [
+    const CMDS: [&str; 108] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -369,6 +369,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
+        "providers", "quota",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9551,6 +9552,39 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
+    /// ---------- PROVIDER QUOTA (ground truth, honestly bounded) ----------
+    /// What each provider will actually tell us: NanoGPT has a real balance API; Ollama Cloud and
+    /// MiniMax expose nothing programmatic (web dashboards only) — for those we report OUR observed
+    /// served/failed counts from the chain layer, which is also how a dry first-hop shows itself.
+    pub async fn providers_report(&self) -> String {
+        let mut out = String::from("🔌 PROVIDERS — real quota where queryable, observed truth elsewhere\n");
+        // Live balance (blocking probe off the async thread).
+        let bal = tokio::task::spawn_blocking(mind_tools::nanogpt_balance).await.ok().flatten();
+        match bal {
+            Some((usd, _)) => {
+                out.push_str(&format!(
+                    "• nanogpt: ${usd:.2} remaining (live balance API){}\n",
+                    if usd < 0.50 { " ⚠️ DRY — every call fails over to the next provider (latency + hidden dependence)" } else { "" }
+                ));
+            }
+            None => out.push_str("• nanogpt: balance probe failed (key missing or endpoint down)\n"),
+        }
+        out.push_str("• ollama-cloud: no usage API (dashboard: ollama.com/settings) — observed counts below\n");
+        out.push_str("• minimax: no usage API (dashboard: platform.minimax.io) — observed counts below\n");
+        out.push_str("• anthropic (builder): Max subscription — not queryable; `claude` shows /status on the box\n");
+        let stats = mind_inference::provider_stats();
+        if stats.is_empty() {
+            out.push_str("\nNo chain traffic since last restart.");
+        } else {
+            out.push_str("\nWho actually answered since restart (served / failed-over):\n");
+            for (p, served, failed) in stats {
+                out.push_str(&format!("  {p}: {served} served · {failed} failed\n"));
+            }
+        }
+        out.push_str("\nOur own pacing lives in `treasury`; this view is the provider-side truth.");
+        out
+    }
+
     /// ---------- TREASURY (v1 — the spend envelope) ----------
     /// The owner declares how much autonomous work per day; subsystems draw PASSES before working
     /// and skip-with-log when dry. One JSON file so the bash ticks can read it too. Static shares
@@ -15355,6 +15389,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
             "treasury" => Self::treasury_report(),
+            "providers" | "quota" => self.providers_report().await,
             "packets" => self.packets_view().await,
             "packet" if !rest.trim().is_empty() => self.packet_show(rest.trim()).await,
             "approve" if !rest.trim().is_empty() => self.packet_decide(rest.trim(), true, "").await,

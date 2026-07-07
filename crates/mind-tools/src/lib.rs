@@ -1725,3 +1725,18 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+
+/// NanoGPT is the one chain provider with a REAL balance API. Returns (usd, nano) — the ground
+/// truth `ym providers` renders. Blocking (ureq); call via spawn_blocking.
+pub fn nanogpt_balance() -> Option<(f64, f64)> {
+    let key = std::env::var("NANOGPT_KEY").ok().filter(|k| !k.trim().is_empty())?;
+    let resp: serde_json::Value = ureq::post("https://nano-gpt.com/api/check-balance")
+        .set("x-api-key", &key)
+        .timeout(std::time::Duration::from_secs(12))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    let f = |k: &str| resp.get(k).and_then(|x| x.as_str()).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+    Some((f("usd_balance"), f("nano_balance")))
+}

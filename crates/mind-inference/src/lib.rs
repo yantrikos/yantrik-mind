@@ -368,6 +368,37 @@ fn provider_record_usage(name: &str, served: bool, tokens_in: u64, tokens_out: u
     }
 }
 
+/// Cached NanoGPT weekly utilization (0-100). Probed at most every 30 min; None = unknown
+/// (no key / probe failed) — unknown NEVER demotes. The chain uses this to route headroom-first.
+fn nanogpt_weekly_pct() -> Option<f64> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<f64>)>> = std::sync::Mutex::new(None);
+    {
+        let g = CACHE.lock().unwrap();
+        if let Some((t, v)) = *g {
+            if t.elapsed() < std::time::Duration::from_secs(1800) {
+                return v;
+            }
+        }
+    }
+    let key = std::env::var("NANOGPT_KEY").ok().filter(|k| !k.trim().is_empty());
+    let v: Option<f64> = key.and_then(|key| {
+        ureq::get("https://nano-gpt.com/api/subscription/v1/usage")
+            .set("x-api-key", &key)
+            .timeout(std::time::Duration::from_secs(8))
+            .call()
+            .ok()
+            .and_then(|r| r.into_json::<serde_json::Value>().ok())
+            .and_then(|j| {
+                j.get("weeklyInputTokens")
+                    .and_then(|w| w.get("percentUsed"))
+                    .and_then(|x| x.as_f64())
+                    .map(|p| p * 100.0)
+            })
+    });
+    *CACHE.lock().unwrap() = Some((std::time::Instant::now(), v));
+    v
+}
+
 /// Per-provider (today_in, today_out, week_in, week_out, week_served) from the persisted rollup —
 /// the local meter `ym providers` renders. ISO week of today.
 pub fn provider_usage_rollup() -> Vec<(String, u64, u64, u64, u64, u64)> {
@@ -430,7 +461,24 @@ impl LLMBackend for ChainBackend {
         tools: Option<&[serde_json::Value]>,
     ) -> anyhow::Result<LLMResponse> {
         let mut last_err: Option<anyhow::Error> = None;
-        for (i, be) in self.links.iter().enumerate() {
+        // HEADROOM-FIRST ROUTING: a link whose real quota is nearly burned is tried LAST, not
+        // first — it still serves if everything else fails (availability beats thrift), but the
+        // default path drains the provider with room. Unknown quota never demotes.
+        let demote_at: f64 = std::env::var("YM_DEMOTE_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(90.0);
+        let mut order: Vec<usize> = (0..self.links.len()).collect();
+        if self.links.len() > 1 {
+            let hot = |i: &usize| -> bool {
+                let l = self.labels.get(*i).map(String::as_str).unwrap_or("");
+                l.starts_with("nanogpt") && nanogpt_weekly_pct().map(|p| p >= demote_at).unwrap_or(false)
+            };
+            let (cold, warm): (Vec<usize>, Vec<usize>) = order.iter().partition(|i| !hot(*i));
+            if !warm.is_empty() {
+                eprintln!("[chain] demoting hot link(s) to last: {:?}", warm.iter().map(|i| self.labels.get(*i).cloned().unwrap_or_default()).collect::<Vec<_>>());
+                order = cold.into_iter().chain(warm.into_iter()).collect();
+            }
+        }
+        for i in order {
+            let be = &self.links[i];
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
             match be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {

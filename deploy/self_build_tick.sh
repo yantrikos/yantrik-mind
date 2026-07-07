@@ -57,6 +57,18 @@ export PATH="/usr/local/bin:/root/.cargo/bin:$PATH"
 echo "=========================================================="
 echo "$(date -u +%FT%TZ) self-build tick start"
 
+# QUOTA GUARD: the builder shares Pranab's Max subscription. If the 5-hour window is hot
+# (>= YM_BUILDER_HOT_PCT, default 85%), defer — his interactive hours outrank autonomous builds.
+# Runs BEFORE the goal pop, so nothing is consumed; cron retries in 6h.
+HOT="${YM_BUILDER_HOT_PCT:-85}"
+UTIL=$(curl -s -m 12 -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN"   -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage 2>/dev/null   | python3 -c "import json,sys
+try: print(int(json.load(sys.stdin).get(\"five_hour\",{}).get(\"utilization\",0)))
+except Exception: print(0)" 2>/dev/null || echo 0)
+if [ "${UTIL:-0}" -ge "$HOT" ]; then
+  echo "$(date -u +%FT%TZ) quota guard: Max 5h window at ${UTIL}% (>= ${HOT}%) — deferring build to after reset"
+  exit 0
+fi
+
 GOALS=/var/lib/yantrik-mind/selfbuild-goals.txt
 GOAL=""
 

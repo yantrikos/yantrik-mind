@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ureq = { version = "2", features = ["json"] }
 chrono = "0.4"
 # api-llm gates GenericOpenAIBackend — the provider chain/router builds OpenAI-compat backends.
 yantrik-ml = { workspace = true, default-features = false, features = ["api-llm"] }

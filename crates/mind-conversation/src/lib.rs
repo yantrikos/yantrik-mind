@@ -9878,6 +9878,58 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             out.push_str(&skipped.join("; "));
         }
         out.push_str("\n`packets` to review.");
+        // THE COMPOUNDING WIRE: regret clusters become self-build goals. >=2 misses on the same
+        // subject = a capability gap, not bad luck — enqueue ONE typed goal into the (proven)
+        // self-build loop's queue. Idempotent per cluster; human queue keeps priority (append).
+        {
+            let log: Vec<serde_json::Value> = self
+                .memory
+                .profile_get("regret_log")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|x| serde_json::from_str(&x).ok())
+                .unwrap_or_default();
+            let mut clusters: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for r in &log {
+                if let Some(subj) = r.get("subject").and_then(|x| x.as_str()) {
+                    *clusters.entry(subj.to_lowercase()).or_insert(0) += 1;
+                }
+            }
+            let mut wired: Vec<String> = self
+                .memory
+                .profile_get("regret_wired")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|x| serde_json::from_str(&x).ok())
+                .unwrap_or_default();
+            for (subj, n) in clusters {
+                if n < 2 || wired.contains(&subj) {
+                    continue;
+                }
+                let goal = format!(
+                    "Regret cluster ({n} misses): the owner repeatedly asked about \"{subj}\" before anything was prepared. Find why the Night Shift's future scan or packet compiler misses this subject class and fix the detection or add the missing packet type, with a test reproducing the miss."
+                );
+                let goals_path = std::path::PathBuf::from(
+                    std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()),
+                )
+                .join("selfbuild-goals.txt");
+                if let Ok(mut cur) = std::fs::read_to_string(&goals_path) {
+                    if !cur.contains(&subj) {
+                        cur.push_str(&format!("{goal}\n"));
+                        let _ = std::fs::write(&goals_path, cur);
+                        out.push_str(&format!("\n  🔧 regret cluster → self-build goal queued: {subj}"));
+                    }
+                }
+                wired.push(subj);
+            }
+            if wired.len() > 60 {
+                let cut = wired.len() - 60;
+                wired.drain(..cut);
+            }
+            let _ = self.memory.profile_set("regret_wired", &serde_json::to_string(&wired).unwrap_or_default()).await;
+        }
         // Persist for the morning briefing + ops board (the ONE morning message carries it).
         let _ = self.memory.profile_set("nightshift_report", &out).await;
         out

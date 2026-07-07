@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 111] = [
+    const CMDS: [&str; 112] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -369,7 +369,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
-        "providers", "quota", "board", "ops", "carrying",
+        "providers", "quota", "board", "ops", "carrying", "emissary",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9776,7 +9776,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .memory
             .profile_set("nightshift_last", &today.format("%Y-%m-%d").to_string())
             .await;
-        let ranked = self.future_fragile(14).await;
+        let ranked = self.future_fragile(18).await;
         let live = self.live_packets().await;
         let mut built: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
@@ -15918,6 +15918,32 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "regrets" | "regret" => self.regrets_report().await,
             "future" | "nodes" => self.future_view().await,
             "nightshift" | "shift" => self.night_shift_run().await,
+            "emissary" if !rest.trim().is_empty() => {
+                // Force-run the right emissary for a matching node NOW (bypasses the engagement
+                // window, not the treasury). The operator's "prepare this one, tonight" lever.
+                let q = rest.trim().to_lowercase();
+                let nodes = self.future_scan(30).await;
+                match nodes.iter().find(|n| {
+                    n.get("id").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
+                        || n.get("title").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
+                }) {
+                    None => format!("No future node matching \"{q}\" — `future` lists them."),
+                    Some(n) => {
+                        let kind = n.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+                        let made = match kind {
+                            "festival" => self.emissary_festival(n).await,
+                            "birthday" => self.emissary_birthday(n).await,
+                            "trip" => self.emissary_trip(n).await,
+                            _ => vec![],
+                        };
+                        if made.is_empty() {
+                            format!("Emissary for [{kind}] made nothing — criteria already met, dry treasury, or no emissary for this kind yet.")
+                        } else {
+                            format!("🫡 Emissary ran: {} packet(s) — {}. `packets` to review.", made.len(), made.join(", "))
+                        }
+                    }
+                }
+            }
             "board" | "ops" | "carrying" => self.ops_board().await,
             // "budget" belongs to the finance plugin (spending budgets); the pass envelope is "treasury".
             "treasury" if rest.trim().starts_with("set ") => {

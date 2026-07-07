@@ -141,3 +141,81 @@ pub fn recent_commits(name: &str, days: u32) -> Option<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
+
+/// STUDY reader: walk a synced repo and collect the highest-signal source for comprehension —
+/// a chunked bundle of {path + head-of-file} for the most important code/config/doc files, so an
+/// LLM can distill an architecture understanding ONCE. Skips vendored/build/binary noise; caps total
+/// size so it fits a study prompt. Returns (file_count, bundle). Blocking; call via spawn_blocking.
+pub fn study_bundle(git_url: &str, max_files: usize, budget_bytes: usize) -> anyhow::Result<(usize, String)> {
+    let root = sync_repo(git_url)?;
+    let name = repo_name(git_url);
+    let skip_dir = |n: &str| {
+        matches!(
+            n,
+            ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | "vendor"
+                | "__pycache__" | ".venv" | "venv" | ".astro" | "coverage" | "out"
+        )
+    };
+    let want_ext = |n: &str| {
+        let n = n.to_lowercase();
+        [".rs", ".py", ".ts", ".tsx", ".js", ".go", ".java", ".c", ".cpp", ".h", ".rb",
+         ".toml", ".json", ".yaml", ".yml", ".md", ".mdx", ".sql", ".proto", ".tex", ".sh"]
+            .iter()
+            .any(|e| n.ends_with(e))
+    };
+    // collect candidate files (bounded walk)
+    let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let fname = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !skip_dir(&fname) {
+                    stack.push(p);
+                }
+            } else if want_ext(&fname) {
+                let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+                if sz > 0 && sz < 400_000 {
+                    files.push((p, sz));
+                }
+            }
+        }
+        if files.len() > 4000 {
+            break;
+        }
+    }
+    // rank: entry/config/spec first, then by a "central-ish" heuristic (shallow path, meaty file)
+    let score = |p: &std::path::Path| -> i64 {
+        let s = p.to_string_lossy().to_lowercase();
+        let base = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let mut v = 0i64;
+        if base.starts_with("readme") { v -= 100; }
+        if base == "cargo.toml" || base == "package.json" || base == "pyproject.toml" || base == "go.mod" { v -= 90; }
+        if base == "lib.rs" || base == "main.rs" || base == "index.ts" || base == "__init__.py" || base == "mod.rs" { v -= 70; }
+        if s.contains("/spec") || s.contains("/docs") || base.ends_with(".md") { v -= 40; }
+        v += s.matches('/').count() as i64 * 5; // shallower = more central
+        v
+    };
+    files.sort_by_key(|(p, _)| score(p));
+    files.truncate(max_files.max(1));
+
+    let mut bundle = format!("REPOSITORY: {name}\n(the code to study — distill an architecture understanding from this)\n");
+    let mut used = 0usize;
+    let mut n = 0usize;
+    for (p, _) in &files {
+        if used >= budget_bytes {
+            break;
+        }
+        let rel = p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string();
+        let Ok(txt) = std::fs::read_to_string(p) else { continue };
+        // head of file — signatures/structure carry most of the signal
+        let head: String = txt.chars().take(2000).collect();
+        let chunk = format!("\n===== {rel} =====\n{head}\n");
+        used += chunk.len();
+        bundle.push_str(&chunk);
+        n += 1;
+    }
+    Ok((n, bundle.chars().take(budget_bytes + 4000).collect()))
+}

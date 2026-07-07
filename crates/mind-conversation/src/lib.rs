@@ -11304,6 +11304,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
             return if repos.len() < before { format!("📁 Unregistered {name}.") } else { format!("Not registered: {name}") };
         }
+        if let Some(url) = a.strip_prefix("study ").map(str::trim).filter(|x| x.starts_with("http")) {
+            let mut repos = self.code_repos().await;
+            if !repos.iter().any(|x| x.eq_ignore_ascii_case(url)) {
+                repos.push(url.to_string());
+                let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
+            }
+            return self.code_study(url).await;
+        }
+        if let Some(rest) = a.strip_prefix("ask ").map(str::trim).filter(|x| !x.is_empty()) {
+            let mut it = rest.splitn(2, char::is_whitespace);
+            let name = it.next().unwrap_or("").trim();
+            let question = it.next().unwrap_or("").trim();
+            if name.is_empty() || question.is_empty() {
+                return "Usage: code ask <repo-name> <question>  (study it first: `code study <git url>`)".to_string();
+            }
+            return self.code_ask(name, question).await;
+        }
         if a == "sync" || a == "pull" {
             let repos = self.code_repos().await;
             if repos.is_empty() {
@@ -11338,6 +11355,122 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "📁 CODEOPS — repos I read to ground WorkOps:\n{}\n\n`code add <url>` · `code sync` · `code <name>` (digest + recent commits).",
             repos.iter().map(|u| format!("  • {}", mind_tools::code::repo_name(u))).collect::<Vec<_>>().join("\n")
         )
+    }
+
+    /// STUDY a repo once → distilled architecture facts saved as per-repo beliefs ([code:<name>]),
+    /// so future questions answer from MEMORY without re-reading the source into context. Detached;
+    /// posts a learning summary on completion.
+    pub async fn code_study(&self, git_url: &str) -> String {
+        let name = mind_tools::code::repo_name(git_url);
+        let url = git_url.to_string();
+        let bundle = match tokio::task::spawn_blocking(move || mind_tools::code::study_bundle(&url, 40, 30000)).await {
+            Ok(Ok((n, b))) => {
+                if n == 0 {
+                    return format!("📖 Cloned {name} but found no readable source to study.");
+                }
+                b
+            }
+            Ok(Err(e)) => return format!("📖 Couldn't study {name}: {e}"),
+            Err(_) => return format!("📖 Study of {name} panicked."),
+        };
+        let name2 = name.clone();
+        let nq = self.notify_queue.clone();
+        let inf = self.inference.clone();
+        let mem = self.memory.clone();
+        let persona = self.persona.clone();
+        tokio::spawn(async move {
+            let prompt = format!(
+                "You have READ the repository source below. Extract 15-25 CONCRETE architecture facts a \
+                 senior engineer would want in order to work on it WITHOUT re-reading the code: what it \
+                 does; the main modules/files and each one's responsibility; key types/data structures; \
+                 the core control flow / entry points; notable patterns and external dependencies; and any \
+                 surprising design choices. Each fact ONE specific sentence naming real modules, types, or \
+                 functions from the code. Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{bundle}"
+            );
+            let cfg = GenerationConfig { max_tokens: 1200, ..GenerationConfig::default() };
+            let resp = match inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+                Ok(r) => r.text,
+                Err(e) => {
+                    nq.lock().unwrap().push(format!("📖 Study of {name2} failed at distillation: {e}"));
+                    return;
+                }
+            };
+            let facts: Vec<String> = resp
+                .find('{')
+                .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|j| j.get("facts").and_then(|x| x.as_array()).cloned())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                .unwrap_or_default();
+            if facts.is_empty() {
+                nq.lock().unwrap().push(format!("📖 Studied {name2} but couldn't distill clean facts — the source may be too sparse."));
+                return;
+            }
+            // Save the facts as per-repo beliefs; the [code:<name>] tag namespaces them for
+            // retrieval. Re-study reinforces via the write-path dedup rather than a wipe.
+            let mut saved = 0usize;
+            for fact in &facts {
+                let statement = format!("[code:{name2}] {fact}");
+                if mem
+                    .remember_as_belief(BeliefAssertion {
+                        statement,
+                        polarity: 1.0,
+                        weight: 2.2,
+                        source_event: Some("code-study".into()),
+                        provenance: "studied".into(),
+                    })
+                    .await
+                    .is_ok()
+                {
+                    saved += 1;
+                }
+            }
+            let _ = mem.profile_set(&format!("code_studied_{name2}"), &chrono::Utc::now().timestamp_millis().to_string()).await;
+            nq.lock().unwrap().push(format!(
+                "📖 Studied **{name2}** — learned {saved} architecture facts into memory. I can now answer questions about it WITHOUT re-reading the code: `code ask {name2} <question>`."
+            ));
+        });
+        format!("📖 Reading {name} now — I'll distill its architecture into memory and confirm when done (a minute). After that, `code ask {name} <question>` answers from what I learned, no re-reading needed.")
+    }
+
+    /// Answer a question about a studied repo from its DISTILLED beliefs — no source re-read.
+    pub async fn code_ask(&self, name: &str, question: &str) -> String {
+        let tag = format!("[code:{name}]");
+        let mut facts: Vec<String> = self
+            .memory
+            .beliefs_matching(&format!("{name} {question}"))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| b.statement)
+            .filter(|st| st.contains(&tag))
+            .collect();
+        if facts.is_empty() {
+            // fall back to the whole studied set for this repo
+            facts = self
+                .memory
+                .beliefs_matching(name)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| b.statement)
+                .filter(|st| st.contains(&tag))
+                .collect();
+        }
+        if facts.is_empty() {
+            return format!("I haven't studied {name} yet — `code study <git url>` first, then ask.");
+        }
+        let block = facts.iter().take(25).map(|f| format!("- {}", f.replacen(&tag, "", 1).trim())).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "Answer the question about the {name} codebase using ONLY these facts I learned when I studied it. \
+             Be specific (name the modules/types they mention). If the facts don't cover it, say exactly what I'd need to re-read — never invent.\n\n\
+             WHAT I LEARNED ABOUT {name}:\n{block}\n\nQUESTION: {question}"
+        );
+        let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
+        match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => format!("{}\n\n_(answered from {} studied facts — no code re-read)_", r.text.trim(), facts.len()),
+            Err(e) => format!("(couldn't compose an answer: {e})"),
+        }
     }
 
     /// Local code digest for a WorkOps subject, if a registered repo name matches it. Grounds the

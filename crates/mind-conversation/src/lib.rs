@@ -6430,8 +6430,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// LLM chat may PROPOSE profile changes; this verb is how they actually land (no freelancing).
     pub async fn family_set(&self, name: &str, field: &str, value: &str) -> String {
         let field = field.to_lowercase();
+        // `clear` removes a date entry — for when the stored value is WRONG and the truth unknown
+        // (never guess a family date to fill a slot).
+        let clearing = value.trim().eq_ignore_ascii_case("clear") || value.trim().eq_ignore_ascii_case("none");
         // Accept MM-DD or "July 23"-style month-name dates for the date fields.
-        let mmdd: Option<String> = if field == "birthday" || field == "anniversary" {
+        let mmdd: Option<String> = if (field == "birthday" || field == "anniversary") && !clearing {
             let v = value.trim();
             let direct = v.len() == 5 && v.as_bytes()[2] == b'-';
             if direct {
@@ -6445,8 +6448,8 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         } else {
             None
         };
-        if (field == "birthday" || field == "anniversary") && mmdd.is_none() {
-            return format!("Couldn't parse \"{value}\" as a date — use MM-DD or \"July 23\".");
+        if (field == "birthday" || field == "anniversary") && !clearing && mmdd.is_none() {
+            return format!("Couldn't parse \"{value}\" as a date — use MM-DD, \"July 23\", or `clear`.");
         }
         let mut store = self.load_people_profiles().await;
         let mut touched = false;
@@ -6480,7 +6483,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                         arr.retain(|d| {
                             d.get("label").and_then(|x| x.as_str()).map(|l| !l.eq_ignore_ascii_case(label)).unwrap_or(true)
                         });
-                        arr.push(serde_json::json!({"label": label, "mmdd": mmdd.clone().unwrap()}));
+                        if !clearing {
+                            arr.push(serde_json::json!({"label": label, "mmdd": mmdd.clone().unwrap()}));
+                        }
                         touched = true;
                     }
                 }
@@ -6492,6 +6497,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return format!("No profile named \"{name}\".");
         }
         self.save_people_profiles(&store).await;
+        if clearing {
+            return format!("🧹 {name}: {field} cleared (was wrong; truth unknown — I'll ask rather than guess).");
+        }
         // The correction is also a belief — recall stays consistent with the profile.
         let _ = self
             .memory
@@ -14828,12 +14836,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "people" | "household" => self.people_list().await,
             // --- family/people layer: living per-person profiles kept current from conversation ---
             "family" if rest.trim().starts_with("set ") => {
-                // family set <name> birthday|anniversary <MM-DD|July 23> | relationship <rel>
-                let args: Vec<&str> = rest.trim().trim_start_matches("set").trim().splitn(3, ' ').collect();
-                if args.len() < 3 {
-                    "Usage: family set <name> birthday|anniversary|relationship <value>".to_string()
-                } else {
-                    self.family_set(args[0], args[1], args[2]).await
+                // family set <name…> birthday|anniversary <MM-DD|July 23|clear> | relationship <rel>
+                // The FIELD KEYWORD is the separator, so multi-word names ("Brishti's Mom") work.
+                let body = rest.trim().trim_start_matches("set").trim();
+                let mut parsed: Option<(String, String, String)> = None;
+                for field in ["birthday", "anniversary", "relationship"] {
+                    if let Some(i) = body.to_lowercase().find(&format!(" {field} ")) {
+                        let name = body[..i].trim().to_string();
+                        let value = body[i + field.len() + 2..].trim().to_string();
+                        if !name.is_empty() && !value.is_empty() {
+                            parsed = Some((name, field.to_string(), value));
+                        }
+                        break;
+                    }
+                }
+                match parsed {
+                    Some((name, field, value)) => self.family_set(&name, &field, &value).await,
+                    None => "Usage: family set <name> birthday|anniversary|relationship <value>  (value `clear` removes a date)".to_string(),
                 }
             }
             "family" | "relationships" => self.family_view().await,

@@ -9626,6 +9626,21 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 out.push_str(&format!("  {p}: {served} served · {failed} failed\n"));
             }
         }
+        // LOCAL METER — our own persisted token counts (the workaround for no-API providers;
+        // for nanogpt it cross-checks their real weekly meter).
+        let roll = tokio::task::spawn_blocking(mind_inference::provider_usage_rollup).await.ok().unwrap_or_default();
+        if !roll.is_empty() {
+            out.push_str("\nLocal meter (our records — survives restarts):\n");
+            for (p, tin, tout, win, wout, wcalls) in roll {
+                out.push_str(&format!(
+                    "  {p}: today {:.1}k in / {:.1}k out · this week {:.1}k in / {:.1}k out ({wcalls} calls)\n",
+                    tin as f64 / 1e3,
+                    tout as f64 / 1e3,
+                    win as f64 / 1e3,
+                    wout as f64 / 1e3
+                ));
+            }
+        }
         out.push_str("\nOur own pacing lives in `treasury`; this view is the provider-side truth.");
         out
     }

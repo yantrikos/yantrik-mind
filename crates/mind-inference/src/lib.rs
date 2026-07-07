@@ -313,14 +313,102 @@ static PROVIDER_STATS: std::sync::Mutex<Option<std::collections::HashMap<String,
     std::sync::Mutex::new(None);
 
 fn provider_record(name: &str, served: bool) {
-    let mut g = PROVIDER_STATS.lock().unwrap();
-    let m = g.get_or_insert_with(std::collections::HashMap::new);
-    let e = m.entry(name.to_string()).or_insert((0, 0));
-    if served {
-        e.0 += 1;
-    } else {
-        e.1 += 1;
+    provider_record_usage(name, served, 0, 0);
+}
+
+/// Record one call: outcome + token usage. Persists a per-day rollup to provider_usage.json
+/// (14-day window) so "how much this week" survives restarts — the LOCAL METER for providers
+/// that expose no usage API (Ollama Cloud, MiniMax).
+fn provider_record_usage(name: &str, served: bool, tokens_in: u64, tokens_out: u64) {
+    {
+        let mut g = PROVIDER_STATS.lock().unwrap();
+        let m = g.get_or_insert_with(std::collections::HashMap::new);
+        let e = m.entry(name.to_string()).or_insert((0, 0));
+        if served {
+            e.0 += 1;
+        } else {
+            e.1 += 1;
+        }
     }
+    // Persistent daily rollup (best-effort; a failed write never blocks inference).
+    let dir = std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into());
+    let p = std::path::PathBuf::from(dir).join("provider_usage.json");
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut v: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|x| serde_json::from_str(&x).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let day = &mut v[&today];
+    if day.is_null() {
+        *day = serde_json::json!({});
+    }
+    let e = &mut day[name];
+    if e.is_null() {
+        *e = serde_json::json!({"in": 0, "out": 0, "served": 0, "failed": 0});
+    }
+    let bump = |e: &mut serde_json::Value, k: &str, n: u64| {
+        e[k] = serde_json::json!(e[k].as_u64().unwrap_or(0) + n);
+    };
+    bump(e, "in", tokens_in);
+    bump(e, "out", tokens_out);
+    bump(e, if served { "served" } else { "failed" }, 1);
+    // prune to 14 days
+    if let Some(m) = v.as_object_mut() {
+        if m.len() > 14 {
+            let mut keys: Vec<String> = m.keys().cloned().collect();
+            keys.sort();
+            for old in keys.iter().take(m.len() - 14) {
+                m.remove(old);
+            }
+        }
+    }
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// Per-provider (today_in, today_out, week_in, week_out, week_served) from the persisted rollup —
+/// the local meter `ym providers` renders. ISO week of today.
+pub fn provider_usage_rollup() -> Vec<(String, u64, u64, u64, u64, u64)> {
+    use chrono::Datelike;
+    let dir = std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into());
+    let p = std::path::PathBuf::from(dir).join("provider_usage.json");
+    let v: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|x| serde_json::from_str(&x).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let today = chrono::Local::now();
+    let today_s = today.format("%Y-%m-%d").to_string();
+    let week = today.iso_week().week();
+    let mut agg: std::collections::HashMap<String, (u64, u64, u64, u64, u64)> = std::collections::HashMap::new();
+    if let Some(days) = v.as_object() {
+        for (day, provs) in days {
+            let in_week = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+                .map(|d| d.iso_week().week() == week && d.year() == today.year())
+                .unwrap_or(false);
+            let is_today = *day == today_s;
+            if let Some(pm) = provs.as_object() {
+                for (prov, e) in pm {
+                    let g = |k: &str| e.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                    let a = agg.entry(prov.clone()).or_insert((0, 0, 0, 0, 0));
+                    if is_today {
+                        a.0 += g("in");
+                        a.1 += g("out");
+                    }
+                    if in_week {
+                        a.2 += g("in");
+                        a.3 += g("out");
+                        a.4 += g("served");
+                    }
+                }
+            }
+        }
+    }
+    let mut out: Vec<(String, u64, u64, u64, u64, u64)> =
+        agg.into_iter().map(|(k, (a, b, c, d, e))| (k, a, b, c, d, e)).collect();
+    out.sort_by(|a, b| b.3.cmp(&a.3));
+    out
 }
 
 /// (provider, served, failed) sorted by served desc — who is ACTUALLY answering.
@@ -346,7 +434,7 @@ impl LLMBackend for ChainBackend {
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
             match be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
-                    provider_record(label, true);
+                    provider_record_usage(label, true, r.prompt_tokens as u64, r.completion_tokens as u64);
                     return Ok(r);
                 }
                 Ok(_) => {

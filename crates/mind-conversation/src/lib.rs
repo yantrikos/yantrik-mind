@@ -10673,10 +10673,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let title = e.get("title").and_then(|x| x.as_str()).unwrap_or("?").to_string();
             let end = e.get("end_ms").and_then(|x| x.as_i64()).unwrap_or(ms);
             let tl = title.to_lowercase();
-            let kind = if title.starts_with("fest:") || tl.contains("puja") || tl.contains("yatra") || tl.contains("ashtami") {
-                "festival"
-            } else if tl.contains("trip") || tl.contains("travel") || tl.contains("resort") || tl.contains("hotel") || tl.contains("flight") {
+            // Trip beats festival when both signals appear ("Olathe trip — Puja at cousin's"):
+            // the drive is the operational load; the observance rides along.
+            let kind = if tl.contains("trip") || tl.contains("travel") || tl.contains("resort") || tl.contains("hotel") || tl.contains("flight") {
                 "trip"
+            } else if title.starts_with("fest:") || tl.contains("puja") || tl.contains("yatra") || tl.contains("ashtami") {
+                "festival"
             } else {
                 "event"
             };
@@ -16003,6 +16005,31 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             },
             "privacy" => mind_inference::privacy_report(self.inference.provider()),
             "regrets" | "regret" => self.regrets_report().await,
+            "future" if rest.trim().starts_with("tick ") => {
+                // future tick <node-substr> <criterion> — the operator marks a criterion handled
+                // or MOOT (e.g. logistics for an event we decided to skip). Deterministic lever.
+                let a = rest.trim().trim_start_matches("tick").trim();
+                let (q, criterion) = match a.rsplit_once(' ') {
+                    Some((q, c)) => (q.trim().to_lowercase(), c.trim().to_string()),
+                    None => (String::new(), String::new()),
+                };
+                if q.is_empty() || criterion.is_empty() {
+                    "Usage: future tick <node> <criterion>  (see `future` for criteria)".to_string()
+                } else {
+                    let nodes = self.future_scan(30).await;
+                    match nodes.iter().find(|n| {
+                        n.get("title").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
+                            || n.get("id").and_then(|x| x.as_str()).map(|v| v.to_lowercase().contains(&q)).unwrap_or(false)
+                    }) {
+                        None => format!("No future node matching \"{q}\"."),
+                        Some(n) => {
+                            let id = n.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            self.node_tick(&id, &criterion, true).await;
+                            format!("✅ {id}: \"{criterion}\" marked handled — the night shift won't rebuild it.")
+                        }
+                    }
+                }
+            }
             "future" | "nodes" => self.future_view().await,
             "nightshift" | "shift" => self.night_shift_run().await,
             "emissary" if !rest.trim().is_empty() => {

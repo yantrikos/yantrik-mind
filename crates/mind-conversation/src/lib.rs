@@ -9634,7 +9634,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 ));
             }
         }
-        out.push_str("`budget set <subsystem> <passes/day>` adjusts the envelope. A skipped pass runs tomorrow — nothing is lost, only deferred.");
+        out.push_str("`treasury set <subsystem> <passes/day>` adjusts the envelope. A skipped pass runs tomorrow — nothing is lost, only deferred.");
         out
     }
 
@@ -15346,14 +15346,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "regrets" | "regret" => self.regrets_report().await,
             "future" | "nodes" => self.future_view().await,
             "nightshift" | "shift" => self.night_shift_run().await,
-            "budget" if rest.trim().starts_with("set ") => {
+            // "budget" belongs to the finance plugin (spending budgets); the pass envelope is "treasury".
+            "treasury" if rest.trim().starts_with("set ") => {
                 let a: Vec<&str> = rest.trim().trim_start_matches("set").trim().split_whitespace().collect();
                 match (a.first(), a.get(1).and_then(|x| x.parse::<i64>().ok())) {
                     (Some(sub), Some(n)) => Self::treasury_set(sub, n),
-                    _ => "Usage: budget set <subsystem> <passes/day>".to_string(),
+                    _ => "Usage: treasury set <subsystem> <passes/day>".to_string(),
                 }
             }
-            "budget" | "treasury" => Self::treasury_report(),
+            "treasury" => Self::treasury_report(),
             "packets" => self.packets_view().await,
             "packet" if !rest.trim().is_empty() => self.packet_show(rest.trim()).await,
             "approve" if !rest.trim().is_empty() => self.packet_decide(rest.trim(), true, "").await,

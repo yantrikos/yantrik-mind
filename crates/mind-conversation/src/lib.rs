@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 118] = [
+    const CMDS: [&str; 121] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -370,7 +370,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
-        "work", "workops", "projects",
+        "work", "workops", "projects", "code", "repos", "repo",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -11083,6 +11083,97 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         Some(format!("\u{1f6f0} Work radar — I looked into **{fresh}** on my own (it's what you've been working on):\n\n{report}"))
     }
 
+    /// ---------- CODEOPS (the mind reads the real repos) ----------
+    /// Registered git URLs are shallow-cloned onto the box; each project's WorkOps scan is grounded
+    /// in its README + docs + recent commits — the mind reasons about the CURRENT code, not a web
+    /// snapshot. Read-only in spirit (clone/fetch/log, never push); token never logged.
+
+    async fn code_repos(&self) -> Vec<String> {
+        self.memory
+            .profile_get("code_repos")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// `code` / `code add <giturl>` / `code remove <name>` / `code sync` / `code <name>` (digest).
+    pub async fn code_cmd(&self, arg: &str) -> String {
+        let a = arg.trim();
+        if let Some(url) = a.strip_prefix("add ").map(str::trim).filter(|x| x.starts_with("http")) {
+            let mut repos = self.code_repos().await;
+            if !repos.iter().any(|x| x.eq_ignore_ascii_case(url)) {
+                repos.push(url.to_string());
+                let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
+            }
+            let url2 = url.to_string();
+            return match tokio::task::spawn_blocking(move || mind_tools::code::sync_and_digest(&url2)).await {
+                Ok(Ok(dig)) => format!("📁 Cloned {} — grounded now. Recent picture:\n{}", mind_tools::code::repo_name(url), dig.lines().take(8).collect::<Vec<_>>().join("\n")),
+                Ok(Err(e)) => format!("📁 Registered {} but clone failed: {e}", mind_tools::code::repo_name(url)),
+                Err(_) => "📁 clone task panicked".to_string(),
+            };
+        }
+        if let Some(name) = a.strip_prefix("remove ").or_else(|| a.strip_prefix("rm ")).map(str::trim).filter(|x| !x.is_empty()) {
+            let mut repos = self.code_repos().await;
+            let before = repos.len();
+            repos.retain(|x| mind_tools::code::repo_name(x) != name && !x.contains(name));
+            let _ = self.memory.profile_set("code_repos", &serde_json::to_string(&repos).unwrap_or_default()).await;
+            return if repos.len() < before { format!("📁 Unregistered {name}.") } else { format!("Not registered: {name}") };
+        }
+        if a == "sync" || a == "pull" {
+            let repos = self.code_repos().await;
+            if repos.is_empty() {
+                return "📁 No repos registered — `code add <git url>`.".to_string();
+            }
+            let mut ok = 0;
+            for url in &repos {
+                let u = url.clone();
+                if tokio::task::spawn_blocking(move || mind_tools::code::sync_repo(&u)).await.map(|r| r.is_ok()).unwrap_or(false) {
+                    ok += 1;
+                }
+            }
+            return format!("📁 Synced {ok}/{} repos.", repos.len());
+        }
+        if !a.is_empty() {
+            // treat as a repo name → show its digest (what's in it, recent commits)
+            let repos = self.code_repos().await;
+            if let Some(url) = repos.iter().find(|u| mind_tools::code::repo_name(u).eq_ignore_ascii_case(a) || u.contains(a)) {
+                let u = url.clone();
+                return match tokio::task::spawn_blocking(move || mind_tools::code::sync_and_digest(&u)).await {
+                    Ok(Ok(dig)) => format!("📁 {dig}"),
+                    _ => format!("📁 Couldn't read {a} right now."),
+                };
+            }
+            return format!("📁 Not registered: {a}. `code` lists them.");
+        }
+        let repos = self.code_repos().await;
+        if repos.is_empty() {
+            return "📁 CODEOPS — no repos yet. `code add <git url>` (private repos clone via my GitHub token). Then WorkOps grounds each project scan in the real code.".to_string();
+        }
+        format!(
+            "📁 CODEOPS — repos I read to ground WorkOps:\n{}\n\n`code add <url>` · `code sync` · `code <name>` (digest + recent commits).",
+            repos.iter().map(|u| format!("  • {}", mind_tools::code::repo_name(u))).collect::<Vec<_>>().join("\n")
+        )
+    }
+
+    /// Local code digest for a WorkOps subject, if a registered repo name matches it. Grounds the
+    /// field-scan in the actual current code + recent commits.
+    async fn code_context_for(&self, subject: &str) -> String {
+        let sl = subject.to_lowercase();
+        let repos = self.code_repos().await;
+        let Some(url) = repos.into_iter().find(|u| {
+            let n = mind_tools::code::repo_name(u).to_lowercase();
+            sl.contains(&n) || n.contains(&sl.split_whitespace().next().unwrap_or("").to_string())
+        }) else {
+            return String::new();
+        };
+        match tokio::task::spawn_blocking(move || mind_tools::code::sync_and_digest(&url)).await {
+            Ok(Ok(dig)) => format!("\n\nFROM THE ACTUAL REPO (current code — treat as authoritative over any web result):\n{}", dig.chars().take(2200).collect::<String>()),
+            _ => String::new(),
+        }
+    }
+
     /// ---------- WORKOPS (the research co-pilot) ----------
     /// Autonomous help on the OWNER'S WORK. A registry of his real projects (seeded from what the
     /// mind already knows he builds); a paced pass that research-revises the next project for field
@@ -11180,10 +11271,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         } else {
             format!(" (this is Pranab Sarkar's project — for disambiguation: {})", ident.join("; "))
         };
+        // Ground in the ACTUAL repo when we have it — the scan reasons about current code.
+        let code_ctx = self.code_context_for(&subject).await;
         // Belief-revising field scan on the project (treasury-gated inside research_revise).
         let report = self
             .research_revise(&format!(
-                "{subject}{context} — latest developments in this specific space, competing/similar approaches, and relevant research. Ignore unrelated same-named entities."
+                "{subject}{context} — latest developments in this specific space, competing/similar approaches, and relevant research. Ignore unrelated same-named entities.{code_ctx}"
             ))
             .await
             .ok()?;
@@ -16340,6 +16433,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 self.packet_decide(n, false, why).await
             }
             "work" | "workops" | "projects" => self.work_cmd(&rest).await,
+            "code" | "repos" | "repo" => self.code_cmd(&rest).await,
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());

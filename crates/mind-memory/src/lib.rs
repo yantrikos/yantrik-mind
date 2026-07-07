@@ -85,6 +85,11 @@ enum Cmd {
     RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
     DischargeTension { id: String, reply: Reply<bool> },
+    // retro-dedup: collapse norm_prop/Jaccard near-duplicates written before the write-path dedup existed
+    RetroDedupStore { reply: Reply<(usize, usize)> },
+    // test-only: insert a goal/pref row bypassing all dedup checks (simulates pre-PR#19 legacy data)
+    #[cfg(test)]
+    ForceInsertGoalPref { kind: String, text: String, reply: Reply<()> },
 }
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
@@ -738,6 +743,77 @@ fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<Memory
         .collect())
 }
 
+/// Retro-deduplication for the goals/prefs table: applies the same norm_prop + Jaccard logic as
+/// the write path to EXISTING rows, removing any near-duplicates that were written before PR #19
+/// added write-path dedup. Returns the count of rows deleted.
+fn retro_dedup_goals_prefs(db: &YantrikDB) -> usize {
+    let mut removed = 0usize;
+    for kind in ["goal", "preference"] {
+        let items = list_goal_prefs(db, kind).unwrap_or_default();
+        // Walk items in insertion order (id ASC — the same order stored by list_goal_prefs).
+        // Keep the first occurrence of each canonical / Jaccard-similar group; delete the rest.
+        let mut survivors: Vec<MemoryItem> = Vec::new();
+        for item in items {
+            let canon = norm_prop(&item.text);
+            let sig = task_word_set(&item.text);
+            let is_dup = survivors.iter().any(|s| norm_prop(&s.text) == canon)
+                || (sig.len() >= 2
+                    && survivors.iter().any(|s| jaccard(&task_word_set(&s.text), &sig) >= 0.6));
+            if is_dup {
+                if let Ok(id) = item.id.parse::<i64>() {
+                    let _ = db.conn().execute("DELETE FROM mind_goals_prefs WHERE id = ?1", [id]);
+                    removed += 1;
+                }
+            } else {
+                survivors.push(item);
+            }
+        }
+    }
+    removed
+}
+
+/// Retro-deduplication for beliefs: tombstones any CognitiveNode whose norm_prop(proposition)
+/// collides with an earlier node, first folding the duplicate's accumulated log_odds into the
+/// survivor as a single synthetic evidence event so no information is lost. Word-overlap dedup is
+/// intentionally NOT applied — "Rust is 1.70" vs "Rust is 1.96" differ only in significant tokens
+/// and must remain distinct contradicting nodes. Returns the count of nodes tombstoned.
+fn retro_dedup_beliefs(db: &YantrikDB) -> usize {
+    let beliefs = all_beliefs(db);
+    let mut seen: HashMap<String, NodeId> = HashMap::new();
+    let mut merged = 0usize;
+    for node in &beliefs {
+        let Some(prop) = node_prop(node) else { continue };
+        let canon = norm_prop(prop);
+        if let Some(&survivor_id) = seen.get(&canon) {
+            if let NodePayload::Belief(b) = &node.payload {
+                if b.log_odds != 0.0 {
+                    let ev = YEvidence {
+                        target_belief: survivor_id,
+                        weight: b.log_odds,
+                        source: "retro-dedup".to_string(),
+                        provenance: prov("system"),
+                        propagate: false,
+                        timestamp: now_secs(),
+                    };
+                    let _ = db.assert_belief_evidence(&ev, &BeliefRevisionConfig::default());
+                }
+            }
+            let _ = db.tombstone_cognitive_node(node.id);
+            merged += 1;
+        } else {
+            seen.insert(canon, node.id);
+        }
+    }
+    merged
+}
+
+/// Run retro-dedup over both the belief graph and the goals/prefs table. Safe to call on any live
+/// DB — idempotent; a second pass on an already-clean store is always a no-op. Returns
+/// `(beliefs_tombstoned, goals_prefs_deleted)`.
+fn retro_dedup_store(db: &YantrikDB) -> (usize, usize) {
+    (retro_dedup_beliefs(db), retro_dedup_goals_prefs(db))
+}
+
 fn ensure_tensions_table(db: &YantrikDB) {
     let _ = db.conn().execute(
         "CREATE TABLE IF NOT EXISTS mind_tensions \
@@ -1362,6 +1438,21 @@ impl MemoryHandle {
                         Cmd::DischargeTension { id, reply } => {
                             let _ = reply.send(discharge_tension_db(&db, &id));
                         }
+                        Cmd::RetroDedupStore { reply } => {
+                            let _ = reply.send(Ok(retro_dedup_store(&db)));
+                        }
+                        #[cfg(test)]
+                        Cmd::ForceInsertGoalPref { kind, text, reply } => {
+                            ensure_goals_prefs_table(&db);
+                            let r = db.conn()
+                                .execute(
+                                    "INSERT OR IGNORE INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)",
+                                    [kind.as_str(), text.as_str()],
+                                )
+                                .map(|_| ())
+                                .map_err(|e| e.to_string());
+                            let _ = reply.send(r);
+                        }
                     }
                 }
             })
@@ -1405,6 +1496,20 @@ impl MemoryHandle {
     }
     pub async fn list_preferences(&self) -> Result<Vec<MemoryItem>> {
         self.call(|reply| Cmd::ListGoalPrefs { kind: "preference".to_string(), reply }).await
+    }
+
+    /// Retro-dedup: collapse norm_prop / Jaccard near-duplicates in the belief graph and
+    /// goals/prefs table that existed before the write-path dedup was introduced (PR #19).
+    /// Safe to call repeatedly — idempotent on an already-clean store.
+    /// Returns `(beliefs_tombstoned, goals_prefs_deleted)`.
+    pub async fn retro_dedup_store(&self) -> Result<(usize, usize)> {
+        self.call(|reply| Cmd::RetroDedupStore { reply }).await
+    }
+
+    #[cfg(test)]
+    async fn force_insert_goal_pref_raw(&self, kind: &str, text: &str) -> Result<()> {
+        let (kind, text) = (kind.to_string(), text.to_string());
+        self.call(move |reply| Cmd::ForceInsertGoalPref { kind, text, reply }).await
     }
 }
 
@@ -1903,6 +2008,42 @@ mod tests {
         mem.store_preference("exercise.").await.unwrap(); // pure formatting variant → SAME entry
         let ex: Vec<_> = mem.list_preferences().await.unwrap().into_iter().filter(|p| p.text.to_lowercase().starts_with("exercise")).collect();
         assert_eq!(ex.len(), 1, "case/punctuation variant of a short goal collapses: {:?}", ex.iter().map(|p| &p.text).collect::<Vec<_>>());
+    }
+
+    /// Retro-dedup collapses trailing-punctuation and Jaccard paraphrases that were written BEFORE
+    /// the write-path dedup existed (simulated with force_insert_goal_pref_raw bypass).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn retro_dedup_store_collapses_legacy_near_duplicates() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+
+        // Trailing-punctuation / case variant (norm_prop dedup)
+        mem.force_insert_goal_pref_raw("preference", "Exercise daily").await.unwrap();
+        mem.force_insert_goal_pref_raw("preference", "exercise daily.").await.unwrap();
+
+        // Jaccard paraphrase (≈ 0.71 word overlap — caught by the ≥0.6 threshold)
+        mem.force_insert_goal_pref_raw("preference", "Prefers terse one-line summaries").await.unwrap();
+        mem.force_insert_goal_pref_raw("preference", "Prefers terse, one-line summaries when possible").await.unwrap();
+
+        // Distinct entry — must survive unchanged
+        mem.force_insert_goal_pref_raw("preference", "Drink more water").await.unwrap();
+
+        let before = mem.list_preferences().await.unwrap();
+        assert_eq!(before.len(), 5, "force-insert bypassed dedup; all 5 rows present before retro pass");
+
+        let (beliefs_merged, goals_prefs_removed) = mem.retro_dedup_store().await.unwrap();
+        assert_eq!(beliefs_merged, 0, "no belief duplicates in a fresh DB");
+        assert_eq!(goals_prefs_removed, 2, "one norm_prop dup + one Jaccard dup removed");
+
+        let after = mem.list_preferences().await.unwrap();
+        assert_eq!(after.len(), 3, "first occurrences and the distinct entry survive");
+        let texts: Vec<&str> = after.iter().map(|p| p.text.as_str()).collect();
+        assert!(texts.contains(&"Exercise daily"), "norm_prop survivor kept: {texts:?}");
+        assert!(texts.contains(&"Prefers terse one-line summaries"), "Jaccard survivor kept: {texts:?}");
+        assert!(texts.contains(&"Drink more water"), "distinct entry unchanged: {texts:?}");
+
+        // Idempotency: a second pass on the already-clean store removes nothing more.
+        let (b2, gp2) = mem.retro_dedup_store().await.unwrap();
+        assert_eq!((b2, gp2), (0, 0), "second retro-dedup pass on clean store is a no-op");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

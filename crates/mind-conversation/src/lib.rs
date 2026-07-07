@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 104] = [
+    const CMDS: [&str; 106] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -368,7 +368,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
-        "packets", "packet", "approve", "reject", "nightshift", "shift",
+        "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -2987,6 +2987,9 @@ impl ConversationEngine {
     /// is asserted (research-backed), and a contradiction edge is drawn. Every research run permanently
     /// updates the typed model; flat-RAG companions can't do this.
     pub async fn research_revise(&self, topic: &str) -> Result<String> {
+        if !Self::treasury_try_draw("research") {
+            return Ok("Research envelope is dry today — deferred to tomorrow (`ym budget`).".into());
+        }
         let agent = match &self.researcher {
             Some(a) => a,
             None => return Ok("(no researcher configured)".into()),
@@ -3071,6 +3074,9 @@ impl ConversationEngine {
     }
 
     async fn deep_research(&self, topic: &str) -> Result<String> {
+        if !Self::treasury_try_draw("research") {
+            return Ok("Research envelope is dry today — deferred to tomorrow (`ym budget`).".into());
+        }
         let agent = match &self.researcher {
             Some(a) => a,
             None => return Ok("(no researcher configured)".into()),
@@ -9545,6 +9551,101 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
+    /// ---------- TREASURY (v1 — the spend envelope) ----------
+    /// The owner declares how much autonomous work per day; subsystems draw PASSES before working
+    /// and skip-with-log when dry. One JSON file so the bash ticks can read it too. Static shares
+    /// now; bidding/credit-ratings later (charter: boring first).
+
+    fn budget_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()),
+        )
+        .join("budget.json")
+    }
+
+    fn budget_load() -> serde_json::Value {
+        let default = serde_json::json!({
+            "date": "",
+            "envelope": { "nightshift": 4, "radar": 4, "research": 6, "selfbuild": 4, "emissary": 8 },
+            "spent": {},
+            "skipped": {},
+        });
+        std::fs::read_to_string(Self::budget_path())
+            .ok()
+            .and_then(|x| serde_json::from_str::<serde_json::Value>(&x).ok())
+            .map(|mut v| {
+                // envelope keys the owner hasn't set fall back to defaults (new subsystems appear)
+                if let (Some(env), Some(defs)) = (v.get_mut("envelope").and_then(|x| x.as_object_mut()), default["envelope"].as_object()) {
+                    for (k, d) in defs {
+                        env.entry(k.clone()).or_insert(d.clone());
+                    }
+                }
+                v
+            })
+            .unwrap_or(default)
+    }
+
+    fn budget_save(v: &serde_json::Value) {
+        let p = Self::budget_path();
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+
+    /// Draw one pass for `subsystem`. False = dry (the caller must skip AND the skip is logged —
+    /// budget exhaustion is visible state, never silence).
+    pub fn treasury_try_draw(subsystem: &str) -> bool {
+        let today = local_now().format("%Y-%m-%d").to_string();
+        let mut b = Self::budget_load();
+        if b.get("date").and_then(|x| x.as_str()) != Some(today.as_str()) {
+            b["date"] = serde_json::json!(today);
+            b["spent"] = serde_json::json!({});
+            b["skipped"] = serde_json::json!({});
+        }
+        let cap = b["envelope"].get(subsystem).and_then(|x| x.as_i64()).unwrap_or(2);
+        let used = b["spent"].get(subsystem).and_then(|x| x.as_i64()).unwrap_or(0);
+        let ok = used < cap;
+        let bucket = if ok { "spent" } else { "skipped" };
+        let n = b[bucket].get(subsystem).and_then(|x| x.as_i64()).unwrap_or(0) + 1;
+        b[bucket][subsystem] = serde_json::json!(n);
+        Self::budget_save(&b);
+        if !ok {
+            eprintln!("[treasury] {subsystem} is DRY today ({used}/{cap}) — pass skipped");
+        }
+        ok
+    }
+
+    /// `ym budget` — envelope, spend, and what was skipped for lack of funds (the negative space).
+    pub fn treasury_report() -> String {
+        let b = Self::budget_load();
+        let date = b.get("date").and_then(|x| x.as_str()).unwrap_or("(fresh)");
+        let mut out = format!("💰 TREASURY — daily pass envelope ({date})\n");
+        if let Some(env) = b.get("envelope").and_then(|x| x.as_object()) {
+            let mut keys: Vec<&String> = env.keys().collect();
+            keys.sort();
+            for k in keys {
+                let cap = env.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+                let used = b["spent"].get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+                let skip = b["skipped"].get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+                out.push_str(&format!(
+                    "  {k}: {used}/{cap}{}\n",
+                    if skip > 0 { format!(" · {skip} pass(es) SKIPPED dry") } else { String::new() }
+                ));
+            }
+        }
+        out.push_str("`budget set <subsystem> <passes/day>` adjusts the envelope. A skipped pass runs tomorrow — nothing is lost, only deferred.");
+        out
+    }
+
+    /// `ym budget set <subsystem> <n>` — the owner's declaration.
+    pub fn treasury_set(subsystem: &str, n: i64) -> String {
+        let mut b = Self::budget_load();
+        b["envelope"][subsystem] = serde_json::json!(n.max(0));
+        Self::budget_save(&b);
+        format!("💰 {subsystem}: {} passes/day.", n.max(0))
+    }
+
     /// ---------- NIGHT SHIFT COMPILER (v0) ----------
     /// The nightly anticipatory pass. v0 scope: deadline/event nodes get deterministic
     /// prepared-action packets (what's due, when, everything the substrate knows about it, the
@@ -9565,6 +9666,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
 
     /// One compile pass. Returns the shift report (also the `ym nightshift` output).
     pub async fn night_shift_run(&self) -> String {
+        if !Self::treasury_try_draw("nightshift") {
+            return "🌙 Night shift skipped — treasury envelope for `nightshift` is dry today (`ym budget`).".to_string();
+        }
         let today = local_now();
         let _ = self
             .memory
@@ -10234,6 +10338,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     pub async fn work_radar_run(&self) -> Option<String> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let _ = self.memory.profile_set("radar_last", &now_ms.to_string()).await;
+        if !Self::treasury_try_draw("radar") {
+            return None; // dry — logged by the treasury; the pass runs tomorrow
+        }
         self.researcher.as_ref()?;
         // 1. The user's own recent words are the radar's only antenna.
         let recent = self.memory.recent_messages(160).await.ok()?;
@@ -15239,6 +15346,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "regrets" | "regret" => self.regrets_report().await,
             "future" | "nodes" => self.future_view().await,
             "nightshift" | "shift" => self.night_shift_run().await,
+            "budget" if rest.trim().starts_with("set ") => {
+                let a: Vec<&str> = rest.trim().trim_start_matches("set").trim().split_whitespace().collect();
+                match (a.first(), a.get(1).and_then(|x| x.parse::<i64>().ok())) {
+                    (Some(sub), Some(n)) => Self::treasury_set(sub, n),
+                    _ => "Usage: budget set <subsystem> <passes/day>".to_string(),
+                }
+            }
+            "budget" | "treasury" => Self::treasury_report(),
             "packets" => self.packets_view().await,
             "packet" if !rest.trim().is_empty() => self.packet_show(rest.trim()).await,
             "approve" if !rest.trim().is_empty() => self.packet_decide(rest.trim(), true, "").await,

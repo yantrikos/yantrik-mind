@@ -13,6 +13,35 @@ set -euo pipefail
 KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
 [ -f "$KILL" ] && { echo "$(date -u +%FT%TZ) kill-switch present — tick skipped"; exit 0; }
 
+# TREASURY: draw one selfbuild pass from the shared daily envelope (budget.json — same file the
+# Rust engine meters). Dry = skip-with-log; the goal queue is untouched, the pass runs tomorrow.
+BUDGET=/var/lib/yantrik-mind/budget.json
+if [ -f "$BUDGET" ]; then
+  DRAW=$(python3 - "$BUDGET" <<'PY'
+import json, sys, datetime
+p = sys.argv[1]
+try:
+    b = json.load(open(p))
+except Exception:
+    sys.exit(0)  # unreadable -> fail open (the box-side gates still hold)
+today = datetime.date.today().isoformat()
+if b.get("date") != today:
+    b["date"], b["spent"], b["skipped"] = today, {}, {}
+cap = b.get("envelope", {}).get("selfbuild", 4)
+used = b.get("spent", {}).get("selfbuild", 0)
+ok = used < cap
+bucket = "spent" if ok else "skipped"
+b.setdefault(bucket, {})["selfbuild"] = b.get(bucket, {}).get("selfbuild", 0) + 1
+json.dump(b, open(p, "w"), indent=1)
+print("ok" if ok else "dry")
+PY
+)
+  if [ "$DRAW" = "dry" ]; then
+    echo "$(date -u +%FT%TZ) treasury: selfbuild envelope dry — tick skipped (goal queue untouched)"
+    exit 0
+  fi
+fi
+
 # Single-flight: never let a new tick stack on top of a still-running one.
 exec 9>/var/lib/yantrik-mind/.selfbuild.lock
 flock -n 9 || { echo "$(date -u +%FT%TZ) another tick is still running — skip"; exit 0; }

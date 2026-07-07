@@ -771,7 +771,14 @@ pub fn deterministic_study(git_url: &str) -> anyhow::Result<(String, DetStudy)> 
                             cur.push(c);
                         } else if !cur.is_empty() {
                             let ident = std::mem::take(&mut cur);
-                            if ident.len() >= 5 {
+                            // ubiquitous method names give false "hot symbol" signal: a bare-ident
+                            // scan can't tell MyType::is_empty from Vec::is_empty.
+                            const HOT_STOP: [&str; 20] = [
+                                "default", "is_empty", "from_str", "to_string", "clone", "deref",
+                                "as_str", "as_ref", "unwrap_or", "to_owned", "into_iter", "chars",
+                                "lines", "trim", "split", "collect", "filter", "insert", "remove", "plain",
+                            ];
+                            if ident.len() >= 5 && !HOT_STOP.contains(&ident.as_str()) {
                                 if let Some(Some(home)) = defs.get(&ident) {
                                     if home != &m.name {
                                         *edge

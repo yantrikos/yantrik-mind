@@ -14,6 +14,7 @@ pub use onedrive::{DeviceCode, OdItem, OneDriveClient};
 pub mod gphotos;
 pub use gphotos::{GPhotosClient, GpItem, PickSession};
 pub mod code;
+pub mod paper;
 pub mod mail;
 pub use mail::{
     render_inbox_digest, EmailMsg, ImapClient, MailClient, MailSender, ScriptedMailClient,

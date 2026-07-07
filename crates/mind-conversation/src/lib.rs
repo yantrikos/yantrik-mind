@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 125] = [
+    const CMDS: [&str; 127] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -371,7 +371,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
-        "reviewer", "review", "researchops", "ro",
+        "reviewer", "review", "researchops", "ro", "paper", "papers",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -11282,6 +11282,312 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     }
 
     /// `code` / `code add <giturl>` / `code remove <name>` / `code sync` / `code <name>` (digest).
+    /// RESEARCH READER — read a paper/article ONCE into memory, then answer/relate/adapt from what
+    /// was learned. `paper study <url>` | `paper ask <key> <q>` | `paper adapt <key> [repo]` |
+    /// `paper adopt <key> <n>` (queues the proposal into the self-build goal queue) | `paper list`.
+    pub async fn paper_cmd(&self, arg: &str) -> String {
+        let a = arg.trim();
+        if let Some(url) = a.strip_prefix("study ").or_else(|| a.strip_prefix("read ")).map(str::trim).filter(|x| x.starts_with("http")) {
+            return self.paper_study(url).await;
+        }
+        if let Some(rest) = a.strip_prefix("ask ").map(str::trim).filter(|x| !x.is_empty()) {
+            let mut it = rest.splitn(2, char::is_whitespace);
+            let key = it.next().unwrap_or("").trim().to_lowercase();
+            let q = it.next().unwrap_or("").trim();
+            if key.is_empty() || q.is_empty() {
+                return "Usage: paper ask <key> <question>  (study first: `paper study <url>`)".into();
+            }
+            return self.paper_ask(&key, q).await;
+        }
+        if let Some(rest) = a.strip_prefix("adapt ").map(str::trim).filter(|x| !x.is_empty()) {
+            let mut it = rest.splitn(2, char::is_whitespace);
+            let key = it.next().unwrap_or("").trim().to_lowercase();
+            let repo = it.next().unwrap_or("yantrik-mind").trim().to_string();
+            return self.paper_adapt(&key, &repo).await;
+        }
+        if let Some(rest) = a.strip_prefix("adopt ").map(str::trim) {
+            let mut it = rest.split_whitespace();
+            let key = it.next().unwrap_or("").to_lowercase();
+            let n: usize = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            if key.is_empty() || n == 0 {
+                return "Usage: paper adopt <key> <n>  (after `paper adapt <key>` listed proposals)".into();
+            }
+            return self.paper_adopt(&key, n).await;
+        }
+        if a.is_empty() || a == "list" {
+            let idx = self.memory.profile_get("paper_index").await.ok().flatten().unwrap_or_default();
+            let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
+            if map.is_empty() {
+                return "No papers studied yet. `paper study <url>` — arxiv links work best.".into();
+            }
+            let lines = map.iter().map(|(k, t)| format!("• `{k}` — {t}")).collect::<Vec<_>>().join("\n");
+            return format!("📚 Studied papers:\n{lines}\n\n`paper ask <key> <q>` · `paper adapt <key>`");
+        }
+        "paper study <url> | paper ask <key> <q> | paper adapt <key> [repo] | paper adopt <key> <n> | paper list".into()
+    }
+
+    /// READ + LEARN + RELATE: fetch/extract deterministically, ONE distill pass into typed facts,
+    /// ONE relate pass connecting the paper to everything already in memory (studied code, prior
+    /// papers). Detached; ~2 LLM calls total.
+    pub async fn paper_study(&self, url: &str) -> String {
+        let url2 = url.to_string();
+        let fetched = tokio::task::spawn_blocking(move || {
+            mind_tools::paper::fetch_paper(&url2).map(|(t, x)| (mind_tools::paper::paper_key(&url2), t, x))
+        })
+        .await;
+        let (key, title, text) = match fetched {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return format!("📄 Couldn't read that: {e}"),
+            Err(_) => return "📄 Reader panicked.".into(),
+        };
+        let sections = mind_tools::paper::section_skeleton(&text);
+        let head: String = text.chars().take(24000).collect();
+        let tail: String = if text.len() > 30000 {
+            text.chars().skip(text.chars().count().saturating_sub(4000)).collect()
+        } else {
+            String::new()
+        };
+        let nq = self.notify_queue.clone();
+        let inf = self.inference.clone();
+        let mem = self.memory.clone();
+        let persona = self.persona.clone();
+        let key2 = key.clone();
+        let title2 = title.clone();
+        tokio::spawn(async move {
+            let token = format!("paperkb{key2}");
+            let sec_line = if sections.is_empty() { String::new() } else { format!("Sections: {}\n", sections.join(" | ")) };
+            let prompt = format!(
+                "You just read this paper/article. Distill 12-18 CONCRETE facts worth keeping: the core \
+                 claim(s); the method/mechanism (how it actually works); key results WITH numbers; \
+                 limitations the authors admit; and context (what it builds on). Prefix each fact with its \
+                 kind: claim:/method:/result:/limitation:/context:. One specific sentence each — never vague. \
+                 Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{sec_line}\nTEXT:\n{head}\n{tail}"
+            );
+            let cfg = GenerationConfig { max_tokens: 1100, ..GenerationConfig::default() };
+            let resp = match inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+                Ok(r) => r.text,
+                Err(e) => {
+                    nq.lock().unwrap().push(format!("📄 Read {key2} but distillation failed: {e}"));
+                    return;
+                }
+            };
+            let facts: Vec<String> = resp
+                .find('{')
+                .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|j| j.get("facts").and_then(|x| x.as_array()).cloned())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                .unwrap_or_default();
+            if facts.is_empty() {
+                nq.lock().unwrap().push(format!("📄 Read {key2} but couldn't distill clean facts."));
+                return;
+            }
+            let mut saved = 0usize;
+            for fact in &facts {
+                let statement = format!("{token} [paper:{key2}] {fact}");
+                if mem.remember_as_belief(BeliefAssertion {
+                    statement, polarity: 1.0, weight: 2.2,
+                    source_event: Some("paper-study".into()), provenance: "studied".into(),
+                }).await.is_ok() { saved += 1; }
+            }
+            // RELATE: connect the paper to what memory already holds — studied code repos + prior
+            // papers. This is where reading compounds instead of piling up.
+            let mut known: Vec<String> = Vec::new();
+            let code_repos = mem.profile_get("code_repos").await.ok().flatten().unwrap_or_default();
+            let repo_names: Vec<String> = serde_json::from_str::<Vec<String>>(&code_repos)
+                .unwrap_or_default()
+                .iter()
+                .map(|u| mind_tools::code::repo_name(u))
+                .collect();
+            for rn in repo_names.iter().take(4) {
+                let alnum: String = rn.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+                let t = format!("codekb{alnum}");
+                for b in mem.beliefs_matching_n(&t, 30).await.unwrap_or_default() {
+                    known.push(b.statement.replacen(&t, "", 1));
+                }
+            }
+            let idx = mem.profile_get("paper_index").await.ok().flatten().unwrap_or_default();
+            let pmap: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
+            for (pk, _) in pmap.iter().filter(|(pk, _)| pk.as_str() != key2).take(3) {
+                let t = format!("paperkb{pk}");
+                for b in mem.beliefs_matching_n(&t, 10).await.unwrap_or_default() {
+                    known.push(b.statement.replacen(&t, "", 1));
+                }
+            }
+            let mut related_n = 0usize;
+            if !known.is_empty() {
+                let known_block: String = known.iter().map(|k| format!("- {k}")).collect::<Vec<_>>().join("\n").chars().take(9000).collect();
+                let paper_block = facts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+                let rprompt = format!(
+                    "PAPER I JUST READ ({title2}):\n{paper_block}\n\nWHAT I ALREADY KNOW (my studied codebases and prior papers):\n{known_block}\n\n\
+                     State 2-5 SPECIFIC connections: where a paper idea maps onto a module/mechanism I already \
+                     know, confirms it, contradicts it, or suggests a concrete upgrade to it. Each ONE sentence \
+                     naming both sides. Skip generic similarities. Output ONLY JSON: {{\"relations\":[\"...\"]}}."
+                );
+                let cfg2 = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+                if let Ok(r) = inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&rprompt)], cfg2).await {
+                    let rels: Vec<String> = r.text
+                        .find('{')
+                        .and_then(|a| r.text.rfind('}').map(|b| r.text[a..=b].to_string()))
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .and_then(|j| j.get("relations").and_then(|x| x.as_array()).cloned())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                        .unwrap_or_default();
+                    for rel in rels {
+                        let statement = format!("{token} [paper:{key2}] [relate] {rel}");
+                        if mem.remember_as_belief(BeliefAssertion {
+                            statement, polarity: 1.0, weight: 2.4,
+                            source_event: Some("paper-relate".into()), provenance: "studied".into(),
+                        }).await.is_ok() { related_n += 1; }
+                    }
+                }
+            }
+            let mut pmap2 = pmap;
+            pmap2.insert(key2.clone(), title2.chars().take(90).collect());
+            let _ = mem.profile_set("paper_index", &serde_json::to_string(&pmap2).unwrap_or_default()).await;
+            nq.lock().unwrap().push(format!(
+                "📄 Studied **{key2}** — learned {saved} facts + {related_n} connections to what I already know. \
+                 `paper ask {key2} <q>` answers from memory; `paper adapt {key2}` proposes improvements to our code from it."
+            ));
+        });
+        format!("📄 Reading \"{}\" now — I'll distill it into memory, relate it to what I already know, and confirm (key: `{key}`).", title.chars().take(90).collect::<String>())
+    }
+
+    /// Answer from the paper's learned facts; on gaps, targeted re-read of the CACHED text (then the
+    /// distilled answer is learned — same compounding loop as code_ask).
+    pub async fn paper_ask(&self, key: &str, question: &str) -> String {
+        let token = format!("paperkb{key}");
+        let tag = format!("[paper:{key}]");
+        let facts: Vec<String> = self.memory.beliefs_matching_n(&token, 300).await.unwrap_or_default()
+            .into_iter().map(|b| b.statement).filter(|st| st.contains(&token)).collect();
+        if facts.is_empty() {
+            return format!("I haven't studied `{key}` yet — `paper study <url>` first.");
+        }
+        let facts_lower = facts.join(" ").to_lowercase();
+        let gaps: Vec<String> = question
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+            .filter(|w| w.len() >= 5 && !facts_lower.contains(&w.to_lowercase()))
+            .map(|w| w.to_string())
+            .collect::<std::collections::HashSet<_>>().into_iter().take(4).collect();
+        let key2 = key.to_string();
+        let excerpts: Vec<String> = if gaps.is_empty() {
+            vec![]
+        } else {
+            tokio::task::spawn_blocking(move || mind_tools::paper::paper_lookup(&key2, &gaps, 4))
+                .await.unwrap_or_default()
+        };
+        let strip = |f: &str| f.replacen(&token, "", 1).replacen(&tag, "", 1).trim().to_string();
+        let block = facts.iter().map(|f| format!("- {}", strip(f))).collect::<Vec<_>>().join("\n");
+        let (extra, want_learn) = if excerpts.is_empty() {
+            (String::new(), false)
+        } else {
+            let ex: String = excerpts.join("\n…\n").chars().take(4000).collect();
+            (format!(
+                "\n\nTARGETED PASSAGES (just re-read from the cached paper because my facts didn't cover them):\n{ex}\n\n\
+                 Since you have fresh passages, ALSO distill 1-2 new facts worth remembering. \
+                 Output ONLY JSON: {{\"answer\":\"...\",\"learned\":[\"...\"]}}."
+            ), true)
+        };
+        let prompt = format!(
+            "Answer the question about the paper `{key}` using the facts I learned{}. Be specific; keep the \
+             kind prefixes' meaning in mind (claim/method/result/limitation). If nothing covers it, say what \
+             section I'd need to re-read — never invent.\n\nWHAT I LEARNED:\n{block}\n\nQUESTION: {question}{extra}",
+            if want_learn { " plus the passages below" } else { "" }
+        );
+        let cfg = GenerationConfig { max_tokens: 550, ..GenerationConfig::default() };
+        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("(couldn't compose an answer: {e})"),
+        };
+        if !want_learn {
+            return format!("{}\n\n_(answered from {} learned facts — no re-read)_", resp.trim(), facts.len());
+        }
+        let parsed = resp.find('{')
+            .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let (answer, learned): (String, Vec<String>) = match &parsed {
+            Some(j) => (
+                j.get("answer").and_then(|x| x.as_str()).unwrap_or(resp.trim()).to_string(),
+                j.get("learned").and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                    .unwrap_or_default(),
+            ),
+            None => (resp.trim().to_string(), vec![]),
+        };
+        let mut learned_n = 0usize;
+        for fact in &learned {
+            let statement = format!("{token} {tag} [learned] {fact}");
+            if self.memory.remember_as_belief(BeliefAssertion {
+                statement, polarity: 1.0, weight: 2.2,
+                source_event: Some("paper-ask-learn".into()), provenance: "studied".into(),
+            }).await.is_ok() { learned_n += 1; }
+        }
+        format!("{}\n\n_(answered from {} learned facts + a targeted re-read; learned {} more)_",
+            answer.trim(), facts.len(), learned_n)
+    }
+
+    /// ADAPT: paper facts × studied-repo facts → 2-3 concrete improvement proposals in self-build
+    /// goal format. `paper adopt <key> <n>` then queues one — reading becomes shipped code.
+    pub async fn paper_adapt(&self, key: &str, repo: &str) -> String {
+        let ptoken = format!("paperkb{key}");
+        let pfacts: Vec<String> = self.memory.beliefs_matching_n(&ptoken, 100).await.unwrap_or_default()
+            .into_iter().map(|b| b.statement.replacen(&ptoken, "", 1)).filter(|st| st.contains("[paper:")).collect();
+        if pfacts.is_empty() {
+            return format!("I haven't studied `{key}` — `paper study <url>` first.");
+        }
+        let alnum: String = repo.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        let ctoken = format!("codekb{alnum}");
+        let cfacts: Vec<String> = self.memory.beliefs_matching_n(&ctoken, 200).await.unwrap_or_default()
+            .into_iter().map(|b| b.statement.replacen(&ctoken, "", 1)).collect();
+        if cfacts.is_empty() {
+            return format!("I haven't studied the `{repo}` codebase — `code study <git url>` first, then adapt.");
+        }
+        let pblock = pfacts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+        let cblock: String = cfacts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n").chars().take(10000).collect();
+        let prompt = format!(
+            "PAPER `{key}`:\n{pblock}\n\nMY `{repo}` CODEBASE (studied facts):\n{cblock}\n\n\
+             Propose 2-3 CONCRETE, minimal improvements to {repo} that adapt an idea from the paper. Each must \
+             be: implementable as ONE focused PR, testable, reversible, and grounded in a REAL module/type from \
+             the codebase facts (name it). Write each as one imperative sentence suitable for an autonomous \
+             build goal. Output ONLY JSON: {{\"proposals\":[\"...\"]}}."
+        );
+        let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
+        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("(adapt failed: {e})"),
+        };
+        let props: Vec<String> = resp.find('{')
+            .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|j| j.get("proposals").and_then(|x| x.as_array()).cloned())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 20).collect())
+            .unwrap_or_default();
+        if props.is_empty() {
+            return "Couldn't derive grounded proposals from that pairing.".into();
+        }
+        let _ = self.memory.profile_set(&format!("paper_adapt_{key}"), &serde_json::to_string(&props).unwrap_or_default()).await;
+        let list = props.iter().enumerate().map(|(i, p)| format!("{}. {p}", i + 1)).collect::<Vec<_>>().join("\n");
+        format!("💡 From `{key}` → `{repo}`:\n{list}\n\nSay `paper adopt {key} <n>` and I'll queue it for my next self-build.")
+    }
+
+    /// ADOPT: append the chosen proposal to the self-build goal queue — the tick implements it.
+    pub async fn paper_adopt(&self, key: &str, n: usize) -> String {
+        let raw = self.memory.profile_get(&format!("paper_adapt_{key}")).await.ok().flatten().unwrap_or_default();
+        let props: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(goal) = props.get(n.saturating_sub(1)) else {
+            return format!("No proposal #{n} for `{key}` — run `paper adapt {key}` first.");
+        };
+        let path = std::env::var("YM_SELFBUILD_GOALS").unwrap_or_else(|_| "/var/lib/yantrik-mind/selfbuild-goals.txt".into());
+        use std::io::Write as _;
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(mut fh) => {
+                let _ = writeln!(fh, "{goal}");
+                format!("✅ Queued for self-build: {goal}\nThe next build tick will pick it up, implement it behind the usual gates (compile+tests+small-diff), and deploy.")
+            }
+            Err(e) => format!("Couldn't write the goal queue ({e})."),
+        }
+    }
+
     pub async fn code_cmd(&self, arg: &str) -> String {
         let a = arg.trim();
         if let Some(url) = a.strip_prefix("add ").map(str::trim).filter(|x| x.starts_with("http")) {
@@ -16979,6 +17285,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             "work" | "workops" | "projects" => self.work_cmd(&rest).await,
             "code" | "repos" | "repo" => self.code_cmd(&rest).await,
+            "paper" | "papers" => self.paper_cmd(&rest).await,
             "reviewer" | "review" if !rest.trim().is_empty() => self.research_ops_run("review", rest.trim()).await,
             "researchops" | "ro" if !rest.trim().is_empty() => {
                 let mut it = rest.trim().splitn(2, ' ');

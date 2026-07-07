@@ -1726,6 +1726,23 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 
+/// Anthropic Max subscription usage — the /status meters (five_hour + seven_day utilization),
+/// queryable with the Claude Code OAuth token. None = no token or request failed;
+/// Some(json) may be an {"type":"error"} body (expired token) — caller renders both honestly.
+pub fn anthropic_subscription_usage() -> Option<serde_json::Value> {
+    let tok = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|k| !k.trim().is_empty())?;
+    let resp = ureq::get("https://api.anthropic.com/api/oauth/usage")
+        .set("Authorization", &format!("Bearer {tok}"))
+        .set("anthropic-beta", "oauth-2025-04-20")
+        .timeout(std::time::Duration::from_secs(12))
+        .call();
+    match resp {
+        Ok(r) => r.into_json().ok(),
+        Err(ureq::Error::Status(_, r)) => r.into_json().ok(), // 401 body says "expired" — render it
+        Err(_) => None,
+    }
+}
+
 /// NanoGPT subscription usage — the REAL quota (weekly input tokens used/remaining/reset).
 /// GET /api/subscription/v1/usage with x-api-key. Blocking (ureq); call via spawn_blocking.
 pub fn nanogpt_quota() -> Option<serde_json::Value> {

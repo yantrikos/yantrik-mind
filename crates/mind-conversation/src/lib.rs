@@ -9594,7 +9594,29 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         out.push_str("• ollama-cloud: no usage API (dashboard: ollama.com/settings) — observed counts below\n");
         out.push_str("• minimax: no usage API (dashboard: platform.minimax.io) — observed counts below\n");
-        out.push_str("• anthropic (builder): Max subscription — not queryable; `claude` shows /status on the box\n");
+        let a = tokio::task::spawn_blocking(mind_tools::anthropic_subscription_usage).await.ok().flatten();
+        match a {
+            Some(v) if v.get("five_hour").is_some() => {
+                let pct = |k: &str| v.get(k).and_then(|x| x.get("utilization")).and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let reset = |k: &str| {
+                    v.get(k)
+                        .and_then(|x| x.get("resets_at"))
+                        .and_then(|x| x.as_str())
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                        .map(|t| t.with_timezone(local_now().offset()).format("%a %-I%P").to_string())
+                        .unwrap_or_default()
+                };
+                out.push_str(&format!(
+                    "• anthropic (builder, Max): 5h window {:.0}% used (resets {}) · 7-day {:.0}% used (resets {})\n",
+                    pct("five_hour"),
+                    reset("five_hour"),
+                    pct("seven_day"),
+                    reset("seven_day"),
+                ));
+            }
+            Some(_) => out.push_str("• anthropic (builder): OAuth token EXPIRED — self-build is dark until `claude setup-token` refreshes it\n"),
+            None => out.push_str("• anthropic (builder): no OAuth token in env\n"),
+        }
         let stats = mind_inference::provider_stats();
         if stats.is_empty() {
             out.push_str("\nNo chain traffic since last restart.");

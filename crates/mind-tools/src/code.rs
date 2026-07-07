@@ -339,7 +339,7 @@ pub fn study_modules(git_url: &str, chunk_bytes: usize) -> anyhow::Result<(Strin
                 if skip_dir(&mname) {
                     continue;
                 }
-                let files = collect_sources(&e.path(), &root, 12000, 120);
+                let files = collect_sources(&e.path(), &root, 200_000, 160);
                 if !files.is_empty() {
                     let fc = files.len();
                     modules.push(StudyModule { name: mname, file_count: fc, chunks: chunk_files(&files, chunk_bytes) });
@@ -357,7 +357,7 @@ pub fn study_modules(git_url: &str, chunk_bytes: usize) -> anyhow::Result<(Strin
                 if skip_dir(&dname) {
                     continue;
                 }
-                let files = collect_sources(&e.path(), &root, 12000, 120);
+                let files = collect_sources(&e.path(), &root, 200_000, 160);
                 if !files.is_empty() {
                     let fc = files.len();
                     modules.push(StudyModule { name: dname, file_count: fc, chunks: chunk_files(&files, chunk_bytes) });
@@ -373,7 +373,7 @@ pub fn study_modules(git_url: &str, chunk_bytes: usize) -> anyhow::Result<(Strin
             let fname = e.file_name().to_string_lossy().to_string();
             if is_source(&fname) || fname.to_lowercase().starts_with("readme") {
                 if let Ok(txt) = std::fs::read_to_string(e.path()) {
-                    root_files.push((fname, txt.chars().take(12000).collect()));
+                    root_files.push((fname, txt.chars().take(200_000).collect()));
                 }
             }
         }

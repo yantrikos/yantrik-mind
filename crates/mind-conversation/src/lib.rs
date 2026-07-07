@@ -342,7 +342,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         return true;
     }
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 92] = [
+    const CMDS: [&str; 93] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -356,7 +356,7 @@ fn looks_like_non_answer(text: &str) -> bool {
         "onedrive", "od",
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
-        "dream",
+        "dream", "radar",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9445,6 +9445,112 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
+    /// ---------- WORK RADAR ----------
+    /// Initiative on the LIVE work: no registration, no asking. Reads the user's own recent turns,
+    /// derives what they are actively WORKING on, picks a subject not recently radared, and runs
+    /// belief-revising research on it. Speaks only when the research CHANGED what the mind believes.
+
+    /// Waking hours, every YM_RADAR_HOURS (default 6h), persisted stamp.
+    pub async fn work_radar_due(&self) -> bool {
+        use chrono::Timelike;
+        let h = local_now().hour();
+        if !(8..=22).contains(&h) {
+            return false;
+        }
+        let period_ms = (std::env::var("YM_RADAR_HOURS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(6.0)
+            * 3_600_000.0) as i64;
+        let last: i64 = self.memory.profile_get("radar_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        chrono::Utc::now().timestamp_millis() - last >= period_ms
+    }
+
+    /// One radar pass. Returns Some(message) only when research revised beliefs; None = silence
+    /// (nothing new, or nothing to research). Always stamps radar_last so failures don't hot-loop.
+    pub async fn work_radar_run(&self) -> Option<String> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let _ = self.memory.profile_set("radar_last", &now_ms.to_string()).await;
+        self.researcher.as_ref()?;
+        // 1. The user's own recent words are the radar's only antenna.
+        let recent = self.memory.recent_messages(160).await.ok()?;
+        let user_lines: Vec<&str> = recent
+            .iter()
+            .filter(|(r, t)| r == "user" && t.len() > 12 && !t.starts_with('/'))
+            .map(|(_, t)| t.as_str())
+            .collect();
+        if user_lines.len() < 3 {
+            return None;
+        }
+        let sample = user_lines
+            .iter()
+            .rev()
+            .take(40)
+            .rev()
+            .map(|t| format!("- {}", t.chars().take(240).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 2. Extract ACTIVE WORK subjects (projects/tech/papers/deals) — not family, not chores.
+        let prompt = format!(
+            "Below are the user's own recent messages. Identify what they are actively WORKING ON \
+             right now — concrete projects, technologies, research topics, papers, negotiations. \
+             NOT family life, chores, reminders, photos, or questions about the assistant itself.\n\n{sample}\n\n\
+             Output ONLY JSON: {{\"subjects\":[\"<2-5 word concrete subject>\", ...]}} — 1 to 4 subjects, \
+             most active first. Empty array if none."
+        );
+        let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
+        let resp = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
+        let txt = resp.text;
+        let j: serde_json::Value = txt
+            .find('{')
+            .and_then(|a| txt.rfind('}').map(|b| txt[a..=b].to_string()))
+            .and_then(|t| serde_json::from_str(&t).ok())?;
+        let subjects: Vec<String> = j["subjects"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() >= 3).collect())
+            .unwrap_or_default();
+        if subjects.is_empty() {
+            return None;
+        }
+        // 3. Per-subject cooldown so the radar walks the work instead of drilling one hole.
+        let cooldown_ms = (std::env::var("YM_RADAR_COOLDOWN_H")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(72.0)
+            * 3_600_000.0) as i64;
+        let mut seen: std::collections::HashMap<String, i64> = self
+            .memory
+            .profile_get("radar_seen")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let fresh = subjects.into_iter().find(|sub| {
+            let n = sub.to_lowercase();
+            !seen.iter().any(|(k, ts)| {
+                (k.contains(&n) || n.contains(k.as_str())) && now_ms - ts < cooldown_ms
+            })
+        })?;
+        // 4. Belief-revising research (the moat's signature move) — cited, priors reconciled.
+        let report = self.research_revise(&fresh).await.ok()?;
+        seen.insert(fresh.to_lowercase(), now_ms);
+        if seen.len() > 40 {
+            let mut rows: Vec<(String, i64)> = seen.into_iter().collect();
+            rows.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
+            rows.truncate(40);
+            seen = rows.into_iter().collect();
+        }
+        let _ = self.memory.profile_set("radar_seen", &serde_json::to_string(&seen).unwrap_or_default()).await;
+        // 5. NOVELTY GATE: only interrupt when something actually changed. (The silent pass still
+        // recorded its research into the belief store via research_revise — the learning happened.)
+        if report.contains("nothing changed in what I believe") {
+            return None;
+        }
+        self.ledger_sent("radar", &format!("autonomous research on {fresh} revised beliefs")).await;
+        Some(format!("\u{1f6f0} Work radar — I looked into **{fresh}** on my own (it's what you've been working on):\n\n{report}"))
+    }
+
     /// ---------- THE FAMILY FRAME ----------
     /// Ambient presence: one photo a day on a wall tablet, chosen with intent — anniversaries
     /// first, then this-day-in-history, then a slow walk through the archive. Silent by design.
@@ -14346,6 +14452,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
                 None => "💭 Nothing earned a dream right now — the bar is two verified citations across domains.".to_string(),
             },
+            "radar" => match self.work_radar_run().await {
+                Some(m) => {
+                    self.notify_queue.lock().unwrap().push(m.clone());
+                    format!("(sent to chat)\n{m}")
+                }
+                None => "🛰️ Radar ran — either nothing work-shaped in recent conversation, everything is on cooldown, or the research changed nothing I believe (silence is the honest output).".to_string(),
+            },
             "frame" => match self.frame_today().await {
                 Some((_, cap)) => format!(
                     "🖼 Today's frame: {cap}\nWall tablet URL: http://<box-ip>:{}/frame/<YM_FRAME_TOKEN> (set YM_FRAME_TOKEN in the env to enable the LAN listener).",
@@ -15846,6 +15959,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
             "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
+            "work_radar" | "radar" => self.work_radar_run().await.unwrap_or_else(|| "Radar ran — no belief-changing findings; stayed silent.".to_string()),
             "self_limits" | "limits" | "capabilities" => self.limits_report().await,
             "onedrive" => {
                 let a = s("action");

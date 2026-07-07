@@ -1144,6 +1144,27 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // WORK RADAR: autonomous research on whatever the user is actively working on (derived
+        // from their own recent turns). Speaks only when the research changed stored beliefs.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && !in_quiet_hours_now() && conv.work_radar_due().await {
+                let conv2 = conv.clone();
+                let api2 = api.clone();
+                tokio::spawn(async move {
+                    match conv2.work_radar_run().await {
+                        Some(msg) => {
+                            if tg_send_mirrored(&conv2, &api2, chat, &msg).await.is_ok() {
+                                conv2.note_proactive_sent().await;
+                                eprintln!("[radar] autonomous work research delivered");
+                            }
+                        }
+                        None => eprintln!("[radar] pass complete — silent (no belief change)"),
+                    }
+                });
+            }
+        }
+
         // Book interview: ONE question per period about a chapter the archive can't explain;
         // the answer becomes lore and rewrites its chapter.
         {

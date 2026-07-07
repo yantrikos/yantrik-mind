@@ -11118,30 +11118,43 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// structural — ThinkCited forces every objection to cite a source, Validate strips the rest, so
     /// no hand-wavy critique survives. Jobs run detached and post the grounded result on completion.
 
-    fn reviewer_recipe(subject: &str) -> mind_recipes::Recipe {
+    /// Reviewer recipe v2: full-text-grounded referee with optional paper URL and prior-review
+    /// diff. "Referee" vocabulary throughout — precise, and free of security-flavored phrasing.
+    fn reviewer_recipe(subject: &str, paper_url: Option<&str>, prior: Option<&str>) -> mind_recipes::Recipe {
         let notify = format!(
-            "🔬 Reviewer-2 — {subject}\nOnly objections grounded in the literature, your own claims, or your real code survived (stripped {{{{grounded__dropped}}}} ungrounded):\n\n{{{{out}}}}"
+            "🔬 Referee report — {subject}\nEvery objection below is grounded in the literature (full-text), your own claims, your real code{} — ungrounded critique was stripped ({{{{grounded__dropped}}}} dropped):\n\n{{{{out}}}}",
+            if paper_url.is_some() { ", or the submitted draft" } else { "" }
         );
-        mind_recipes::Recipe {
-            id: "research-review".into(),
-            name: format!("reviewer-2: {subject}"),
-            steps: vec![
-                RecipeStep::Tool { tool_name: "research".into(), args: serde_json::json!({"query": format!("{subject} method novelty evaluation prior art")}), store_as: "lit".into(), on_error: ErrorAction::Skip },
-                RecipeStep::Tool { tool_name: "recall".into(), args: serde_json::json!({"query": subject}), store_as: "mine".into(), on_error: ErrorAction::Skip },
-                RecipeStep::Tool { tool_name: "code_digest".into(), args: serde_json::json!({"subject": subject}), store_as: "code".into(), on_error: ErrorAction::Skip },
-                RecipeStep::ThinkCited {
-                    prompt: format!(
-                        "You are Reviewer 2 at a top venue reviewing work on \"{subject}\" — sharp, fair, adversarial, never flattering. Using ONLY the sources, produce the STRONGEST objections that would threaten this work at peer review: novelty / prior-art collisions, methodology or evaluation gaps, claims the evidence does not support, and threats to validity. Each claim is ONE specific objection, citing the source that grounds it (a literature finding = source `lit`, the author's own claim = `mine`, or the real code = `code`). Rank most-severe first. An objection you cannot ground in a source does not belong in the output."
-                    ),
-                    store_as: "review".into(),
-                    source_vars: vec!["lit".into(), "mine".into(), "code".into()],
-                    on_error: ErrorAction::Fail,
-                },
-                RecipeStep::Validate { input_var: "review".into(), store_as: "grounded".into() },
-                RecipeStep::Render { input_var: "grounded".into(), store_as: "out".into(), format: mind_recipes::RenderFormat::Cards },
-                RecipeStep::Notify { message: notify },
-            ],
+        let mut steps = vec![
+            RecipeStep::Tool { tool_name: "research".into(), args: serde_json::json!({"query": format!("{subject} method novelty evaluation prior art")}), store_as: "lit".into(), on_error: ErrorAction::Skip },
+            RecipeStep::Tool { tool_name: "recall".into(), args: serde_json::json!({"query": subject}), store_as: "mine".into(), on_error: ErrorAction::Skip },
+            RecipeStep::Tool { tool_name: "code_digest".into(), args: serde_json::json!({"subject": subject}), store_as: "code".into(), on_error: ErrorAction::Skip },
+        ];
+        let mut source_vars: Vec<String> = vec!["lit".into(), "mine".into(), "code".into()];
+        if let Some(url) = paper_url {
+            steps.push(RecipeStep::Tool { tool_name: "fetch".into(), args: serde_json::json!({"url": url}), store_as: "paper".into(), on_error: ErrorAction::Skip });
+            source_vars.push("paper".into());
         }
+        let prior_clause = match prior {
+            Some(_) => {
+                source_vars.push("prior".into());
+                " A PRIOR referee report exists (source `prior`): for each prior objection, judge whether the current evidence shows it ADDRESSED (say so in one line, cite what addressed it) or STILL STANDING (restate it, updated). New objections come after the diff."
+            }
+            None => "",
+        };
+        steps.push(RecipeStep::ThinkCited {
+            prompt: format!(
+                "You are a rigorous, fair journal referee reviewing work on \"{subject}\" — precise, skeptical, never flattering. Using ONLY the sources, produce the strongest objections a top-venue review would raise: novelty/prior-art overlap, methodology or evaluation gaps, claims the evidence does not support, and threats to validity. RULES: each claim is ONE specific objection; start its text with a severity tag [FATAL] (kills the contribution), [MAJOR] (must fix before acceptance), or [MINOR]; end it with a one-clause fix hint ('fixable by …'); no two claims may make the same point; cite the grounding source for each (`lit` = literature full-text, `mine` = the author's own claims, `code` = the real repository{}). Rank [FATAL] first.{prior_clause} An objection you cannot ground in a source does not belong in the output.",
+                if paper_url.is_some() { ", `paper` = the submitted draft" } else { "" }
+            ),
+            store_as: "review".into(),
+            source_vars,
+            on_error: ErrorAction::Fail,
+        });
+        steps.push(RecipeStep::Validate { input_var: "review".into(), store_as: "grounded".into() });
+        steps.push(RecipeStep::Render { input_var: "grounded".into(), store_as: "out".into(), format: mind_recipes::RenderFormat::Cards });
+        steps.push(RecipeStep::Notify { message: notify });
+        mind_recipes::Recipe { id: "research-review".into(), name: format!("referee: {subject}"), steps }
     }
 
     fn related_recipe(subject: &str) -> mind_recipes::Recipe {
@@ -11201,17 +11214,41 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if !Self::treasury_try_draw("research") {
             return "🔬 Research envelope is dry today (`ym treasury`) — the job will run tomorrow if you re-ask.".to_string();
         }
+        // A URL anywhere in the subject = the actual draft/paper to referee (source `paper`).
+        let paper_url: Option<String> = subject.split_whitespace().find(|w| w.starts_with("http")).map(String::from);
+        let clean_subject = subject
+            .split_whitespace()
+            .filter(|w| !w.starts_with("http"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+        let subject = if clean_subject.len() >= 2 { clean_subject } else { subject.clone() };
+        // Review memory: a re-review diffs against the prior report (ADDRESSED vs STILL STANDING).
+        let slug: String = subject.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+        let review_key = format!("research_{mode}_{}", slug.split('-').filter(|x| !x.is_empty()).take(5).collect::<Vec<_>>().join("-"));
+        let prior: Option<String> = self.memory.profile_get(&review_key).await.ok().flatten().filter(|p| !p.trim().is_empty());
+        let mut vars: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        if let Some(p) = &prior {
+            vars.insert("prior".into(), serde_json::Value::String(p.chars().take(3000).collect()));
+        }
         let recipe = match mode {
-            "review" => Self::reviewer_recipe(&subject),
+            "review" => Self::reviewer_recipe(&subject, paper_url.as_deref(), prior.as_deref()),
             "related" => Self::related_recipe(&subject),
             "next" => Self::next_recipe(&subject),
             _ => return "Modes: review | related | next.".to_string(),
         };
         let recipes = recipes.clone();
         let nq = self.notify_queue.clone();
+        let mem = self.memory.clone();
         tokio::spawn(async move {
-            let out = recipes.run_with(&recipe, std::collections::HashMap::new()).await;
+            let out = recipes.run_with(&recipe, vars).await;
             if !out.notifications.is_empty() {
+                // Persist the report — the next run of this subject diffs against it.
+                if let Some(rendered) = out.vars.get("out").and_then(|v| v.as_str()) {
+                    let stamped = format!("({})\n{}", chrono::Utc::now().format("%Y-%m-%d"), rendered);
+                    let _ = mem.profile_set(&review_key, &stamped.chars().take(6000).collect::<String>()).await;
+                }
                 for n in out.notifications {
                     nq.lock().unwrap().push(n);
                 }
@@ -19886,19 +19923,53 @@ impl RecipeHost for MindRecipeHost {
                     q.to_string(),
                     format!("{q} prior work related approaches"),
                     format!("{q} limitations criticism evaluation"),
+                    format!("{q} arxiv paper"), // scholarly bias — real papers over blog posts
                 ];
                 let mut out = String::new();
+                let mut all_hits: Vec<mind_tools::SearchHit> = Vec::new();
                 for a in &angles {
                     if let Ok(hits) = s.search(a, 5).await {
                         if !hits.is_empty() {
                             out.push_str(&format!("\n## angle: {a}\n{}\n", mind_tools::render_search(&hits)));
+                            all_hits.extend(hits);
                         }
                     }
                 }
                 if out.trim().is_empty() {
                     anyhow::bail!("no research results for '{q}'");
                 }
-                Ok(out.chars().take(6000).collect())
+                // FULL-TEXT GROUNDING: read the top distinct pages, don't referee from snippets.
+                // Prefer scholarly hosts; cap extracts so four angles + three pages fit one prompt.
+                if let Some(f) = &self.web {
+                    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let mut ranked: Vec<&mind_tools::SearchHit> = all_hits.iter().collect();
+                    ranked.sort_by_key(|h| {
+                        let u = h.url.to_lowercase();
+                        if u.contains("arxiv.org") || u.contains("aclanthology") || u.contains("doi.org") || u.contains("openreview") {
+                            0
+                        } else {
+                            1
+                        }
+                    });
+                    let mut fetched = 0usize;
+                    for h in ranked {
+                        if fetched >= 3 {
+                            break;
+                        }
+                        let host_path: String = h.url.chars().take(80).collect();
+                        if !seen.insert(host_path) {
+                            continue;
+                        }
+                        if let Ok(page) = f.fetch(&h.url).await {
+                            let extract: String = page.chars().take(2200).collect();
+                            if extract.trim().len() > 200 {
+                                out.push_str(&format!("\n## full text: {} ({})\n{}\n", h.title, h.url, extract));
+                                fetched += 1;
+                            }
+                        }
+                    }
+                }
+                Ok(out.chars().take(14000).collect())
             }
             // ResearchOps: the owner's ACTUAL repo for this subject (README + docs + recent commits),
             // so the reviewer grounds critique in real code, not a web guess.

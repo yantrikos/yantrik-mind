@@ -219,3 +219,165 @@ pub fn study_bundle(git_url: &str, max_files: usize, budget_bytes: usize) -> any
     }
     Ok((n, bundle.chars().take(budget_bytes + 4000).collect()))
 }
+
+/// A study MODULE: a logical unit (a crate under crates/, a top-level source dir, or the root) with
+/// its concatenated source, chunked so each piece fits one deep-read LLM pass. Real full contents,
+/// not file heads — the point is to actually read the functions.
+#[derive(Debug, Clone)]
+pub struct StudyModule {
+    pub name: String,       // e.g. "mind-memory" or "src"
+    pub file_count: usize,
+    pub chunks: Vec<String>, // each ~<budget> bytes of "===== path =====\n<full source>"
+}
+
+fn is_source(name: &str) -> bool {
+    let n = name.to_lowercase();
+    [".rs", ".py", ".ts", ".tsx", ".js", ".go", ".java", ".c", ".cpp", ".h", ".rb",
+     ".sql", ".proto", ".sh", ".toml", ".yaml", ".yml"]
+        .iter()
+        .any(|e| n.ends_with(e))
+}
+
+fn skip_dir(n: &str) -> bool {
+    matches!(
+        n,
+        ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | "vendor"
+            | "__pycache__" | ".venv" | "venv" | ".astro" | "coverage" | "out" | ".turbo"
+    )
+}
+
+/// Collect source files under a dir (recursive, bounded), returned as (relative-path, full-text).
+fn collect_sources(base: &Path, root: &Path, per_file_cap: usize, max_files: usize) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut stack = vec![base.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let fname = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !skip_dir(&fname) {
+                    stack.push(p);
+                }
+            } else if is_source(&fname) {
+                let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+                if sz == 0 || sz > 600_000 {
+                    continue;
+                }
+                if let Ok(txt) = std::fs::read_to_string(&p) {
+                    let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().to_string();
+                    let body: String = txt.chars().take(per_file_cap).collect();
+                    files.push((rel, body));
+                }
+            }
+            if files.len() >= max_files {
+                return files;
+            }
+        }
+    }
+    files
+}
+
+/// Chunk (path, full-text) pairs into <=budget-byte study chunks (keeps whole files together when
+/// they fit; splits a giant file across chunks with a continuation marker).
+fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for (rel, body) in files {
+        let header = format!("\n===== {rel} =====\n");
+        if body.len() + header.len() > budget {
+            // giant file — flush current, then split it
+            if !cur.is_empty() {
+                chunks.push(std::mem::take(&mut cur));
+            }
+            let mut off = 0;
+            let chars: Vec<char> = body.chars().collect();
+            let mut part = 0;
+            while off < chars.len() {
+                let end = (off + budget).min(chars.len());
+                let piece: String = chars[off..end].iter().collect();
+                chunks.push(format!("===== {rel} (part {part}) =====\n{piece}"));
+                off = end;
+                part += 1;
+            }
+            continue;
+        }
+        if cur.len() + header.len() + body.len() > budget && !cur.is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(&header);
+        cur.push_str(body);
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Build the study module map for a synced repo. A Cargo/pnpm-style `crates/`, `packages/`, or
+/// `apps/` workspace → one module per member; otherwise group by top-level source dir; the root
+/// files are their own module. Each module's source is chunked to `chunk_bytes`.
+pub fn study_modules(git_url: &str, chunk_bytes: usize) -> anyhow::Result<(String, Vec<StudyModule>)> {
+    let root = sync_repo(git_url)?;
+    let name = repo_name(git_url);
+    let mut modules: Vec<StudyModule> = Vec::new();
+
+    let workspace_dirs = ["crates", "packages", "apps", "services", "libs"];
+    let mut grouped = false;
+    for wd in workspace_dirs {
+        let wpath = root.join(wd);
+        if !wpath.is_dir() {
+            continue;
+        }
+        if let Ok(rd) = std::fs::read_dir(&wpath) {
+            for e in rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                let mname = e.file_name().to_string_lossy().to_string();
+                if skip_dir(&mname) {
+                    continue;
+                }
+                let files = collect_sources(&e.path(), &root, 12000, 120);
+                if !files.is_empty() {
+                    let fc = files.len();
+                    modules.push(StudyModule { name: mname, file_count: fc, chunks: chunk_files(&files, chunk_bytes) });
+                    grouped = true;
+                }
+            }
+        }
+    }
+
+    if !grouped {
+        // No workspace layout: group by top-level source directory.
+        if let Ok(rd) = std::fs::read_dir(&root) {
+            for e in rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                let dname = e.file_name().to_string_lossy().to_string();
+                if skip_dir(&dname) {
+                    continue;
+                }
+                let files = collect_sources(&e.path(), &root, 12000, 120);
+                if !files.is_empty() {
+                    let fc = files.len();
+                    modules.push(StudyModule { name: dname, file_count: fc, chunks: chunk_files(&files, chunk_bytes) });
+                }
+            }
+        }
+    }
+
+    // Root-level files (README, top configs, root src files) as their own module.
+    let mut root_files: Vec<(String, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()) {
+            let fname = e.file_name().to_string_lossy().to_string();
+            if is_source(&fname) || fname.to_lowercase().starts_with("readme") {
+                if let Ok(txt) = std::fs::read_to_string(e.path()) {
+                    root_files.push((fname, txt.chars().take(12000).collect()));
+                }
+            }
+        }
+    }
+    if !root_files.is_empty() {
+        let fc = root_files.len();
+        modules.insert(0, StudyModule { name: "(root)".into(), file_count: fc, chunks: chunk_files(&root_files, chunk_bytes) });
+    }
+
+    Ok((name, modules))
+}

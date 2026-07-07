@@ -253,6 +253,13 @@ pub trait MemoryFacade: Send + Sync {
         let _ = needle;
         Ok(vec![])
     }
+
+    /// Same as `beliefs_matching` with an explicit result cap — for namespaced knowledge bases
+    /// (studied repos) where the default 20 would silently truncate. Default: empty.
+    async fn beliefs_matching_n(&self, needle: &str, limit: usize) -> Result<Vec<Belief>> {
+        let _ = (needle, limit);
+        Ok(vec![])
+    }
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;
 

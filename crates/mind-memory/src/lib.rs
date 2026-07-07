@@ -42,7 +42,7 @@ enum Cmd {
     GetText { rid: String, reply: Reply<Option<String>> },
     AssertBelief { statement: String, signed_weight: f64, source: String, provenance: String, evidence_version: Option<u64>, reply: Reply<Belief> },
     RecallTyped { text: String, top_k: usize, reply: Reply<Vec<Recalled>> },
-    BeliefsMatching { needle: String, reply: Reply<Vec<Belief>> },
+    BeliefsMatching { needle: String, limit: usize, reply: Reply<Vec<Belief>> },
     Conflicts { reply: Reply<Vec<Contradiction>> },
     Explain { statement: String, reply: Reply<Option<(Belief, Vec<MEvidence>)>> },
     Relate { src: String, dst: String, rel: String, weight: f64, reply: Reply<()> },
@@ -1047,7 +1047,7 @@ impl MemoryHandle {
                         Cmd::RecallTyped { text, top_k, reply } => {
                             let _ = reply.send(Ok(recall_beliefs(&db, &text, top_k)));
                         }
-                        Cmd::BeliefsMatching { needle, reply } => {
+                        Cmd::BeliefsMatching { needle, limit, reply } => {
                             // Classify each needle token: SHORT ALL-CAPS ACRONYMS (SDF, ML, API — the
                             // exact shape of work subjects) match WHOLE-WORD to avoid noise ("AI" inside
                             // "domain"); ordinary words (len>=4) keep substring match ("adopt"->"adoption").
@@ -1088,7 +1088,7 @@ impl MemoryHandle {
                                             }
                                         })
                                     })
-                                    .take(20)
+                                    .take(limit.max(1))
                                     .collect()
                             };
                             let _ = reply.send(Ok(hits));
@@ -1417,7 +1417,12 @@ impl MemoryFacade for MemoryHandle {
 
     async fn beliefs_matching(&self, needle: &str) -> Result<Vec<Belief>> {
         let needle = needle.to_string();
-        self.call(|reply| Cmd::BeliefsMatching { needle, reply }).await
+        self.call(|reply| Cmd::BeliefsMatching { needle, limit: 20, reply }).await
+    }
+
+    async fn beliefs_matching_n(&self, needle: &str, limit: usize) -> Result<Vec<Belief>> {
+        let needle = needle.to_string();
+        self.call(move |reply| Cmd::BeliefsMatching { needle, limit, reply }).await
     }
 
     async fn remember_observation(&self, text: &str, source: mind_types::ProvenanceCategory) -> Result<String> {

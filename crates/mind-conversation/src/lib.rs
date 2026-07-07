@@ -11360,61 +11360,116 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// STUDY a repo once → distilled architecture facts saved as per-repo beliefs ([code:<name>]),
     /// so future questions answer from MEMORY without re-reading the source into context. Detached;
     /// posts a learning summary on completion.
+    /// STUDY a repo the way an engineer actually would: build a module map (one unit per crate /
+    /// top-level source dir), DEEP-READ each module's full source in its own LLM pass, then a final
+    /// SYNTHESIS pass over the module summaries for the cross-module architecture. Every fact is
+    /// tagged `[mod:<module>]` for provenance and namespaced by a distinctive `codekb<alnum>` token
+    /// so a 100+-fact study is retrievable without truncation. Detached; reports honest coverage.
     pub async fn code_study(&self, git_url: &str) -> String {
         let name = mind_tools::code::repo_name(git_url);
         let url = git_url.to_string();
-        let bundle = match tokio::task::spawn_blocking(move || mind_tools::code::study_bundle(&url, 40, 30000)).await {
-            Ok(Ok((n, b))) => {
-                if n == 0 {
-                    return format!("📖 Cloned {name} but found no readable source to study.");
-                }
-                b
-            }
+        // ~14KB per deep-read chunk: big enough to hold real functions, small enough for one pass.
+        let modules = match tokio::task::spawn_blocking(move || mind_tools::code::study_modules(&url, 14000)).await {
+            Ok(Ok((_n, m))) => m,
             Ok(Err(e)) => return format!("📖 Couldn't study {name}: {e}"),
             Err(_) => return format!("📖 Study of {name} panicked."),
         };
+        if modules.is_empty() {
+            return format!("📖 Cloned {name} but found no readable source to study.");
+        }
+        let total_files: usize = modules.iter().map(|m| m.file_count).sum();
+        let module_count = modules.len();
         let name2 = name.clone();
         let nq = self.notify_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona.clone();
         tokio::spawn(async move {
-            let prompt = format!(
-                "You have READ the repository source below. Extract 15-25 CONCRETE architecture facts a \
-                 senior engineer would want in order to work on it WITHOUT re-reading the code: what it \
-                 does; the main modules/files and each one's responsibility; key types/data structures; \
-                 the core control flow / entry points; notable patterns and external dependencies; and any \
-                 surprising design choices. Each fact ONE specific sentence naming real modules, types, or \
-                 functions from the code. Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{bundle}"
-            );
-            let cfg = GenerationConfig { max_tokens: 1200, ..GenerationConfig::default() };
-            let resp = match inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
-                Ok(r) => r.text,
-                Err(e) => {
-                    nq.lock().unwrap().push(format!("📖 Study of {name2} failed at distillation: {e}"));
-                    return;
-                }
-            };
-            let facts: Vec<String> = resp
-                .find('{')
-                .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .and_then(|j| j.get("facts").and_then(|x| x.as_array()).cloned())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
-                .unwrap_or_default();
-            if facts.is_empty() {
-                nq.lock().unwrap().push(format!("📖 Studied {name2} but couldn't distill clean facts — the source may be too sparse."));
-                return;
-            }
-            // Save the facts as per-repo beliefs; the [code:<name>] tag namespaces them for
-            // retrieval. Re-study reinforces via the write-path dedup rather than a wipe.
             let alnum: String = name2.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
             let token = format!("codekb{alnum}");
+            // Bound total LLM passes so a huge monorepo can't run away: at most 24 deep-read passes.
+            let mut budget_passes = 24usize;
+            let mut all_facts: Vec<(String, String)> = Vec::new(); // (module, fact)
+            let mut modules_covered = 0usize;
+            let mut chunks_read = 0usize;
+
+            for m in &modules {
+                if budget_passes == 0 { break; }
+                let mut module_facts: Vec<String> = Vec::new();
+                // At most 2 chunks/module so breadth wins over depth-in-one-place on a first study.
+                for chunk in m.chunks.iter().take(2) {
+                    if budget_passes == 0 { break; }
+                    budget_passes -= 1;
+                    chunks_read += 1;
+                    let prompt = format!(
+                        "You are reading the FULL source of module `{module}` from the `{repo}` codebase. \
+                         Extract 4-8 CONCRETE facts a senior engineer needs to work on THIS module without \
+                         re-reading it: its responsibility; the key types/structs/enums and functions and what \
+                         each does; the important control flow; notable patterns, invariants, and external deps. \
+                         Each fact ONE specific sentence naming real identifiers from the code. Do NOT speculate \
+                         beyond what's shown. Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{src}",
+                        module = m.name, repo = name2, src = chunk
+                    );
+                    let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+                    let resp = match inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+                        Ok(r) => r.text,
+                        Err(_) => continue,
+                    };
+                    let got: Vec<String> = resp
+                        .find('{')
+                        .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .and_then(|j| j.get("facts").and_then(|x| x.as_array()).cloned())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                        .unwrap_or_default();
+                    module_facts.extend(got);
+                }
+                if !module_facts.is_empty() {
+                    modules_covered += 1;
+                    for fact in module_facts {
+                        all_facts.push((m.name.clone(), fact));
+                    }
+                }
+            }
+
+            if all_facts.is_empty() {
+                nq.lock().unwrap().push(format!(
+                    "📖 Read {module_count} modules of {name2} but couldn't distill clean facts — the source may be too sparse."
+                ));
+                return;
+            }
+
+            // SYNTHESIS pass: cross-module architecture the per-module passes structurally can't see —
+            // entry points, the end-to-end data/control flow, how the modules compose.
+            let module_summary = all_facts.iter()
+                .map(|(m, fct)| format!("[{m}] {fct}"))
+                .collect::<Vec<_>>().join("\n");
+            let synth_prompt = format!(
+                "Below are per-module facts I learned studying the `{name2}` codebase. Now state 6-10 \
+                 CROSS-MODULE architecture facts the per-module view misses: the main entry point(s); the \
+                 end-to-end control/data flow across modules; how the modules depend on and compose with each \
+                 other; the central types that thread through several modules; and the single most important \
+                 design decision. Each ONE specific sentence. Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{module_summary}"
+            );
+            let cfg = GenerationConfig { max_tokens: 800, ..GenerationConfig::default() };
+            if let Ok(r) = inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&synth_prompt)], cfg).await {
+                let synth: Vec<String> = r.text
+                    .find('{')
+                    .and_then(|a| r.text.rfind('}').map(|b| r.text[a..=b].to_string()))
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|j| j.get("facts").and_then(|x| x.as_array()).cloned())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| x.len() > 12).collect())
+                    .unwrap_or_default();
+                for fact in synth {
+                    all_facts.push(("architecture".to_string(), fact));
+                }
+            }
+
+            // Save every fact: {token} [code:<repo>] [mod:<module>] <fact>. The token namespaces the
+            // study; [mod:] carries provenance so code_ask can cite which module grounds an answer.
             let mut saved = 0usize;
-            for fact in &facts {
-                // The distinctive `token` makes these retrievable without being swamped by the
-                // hundreds of ordinary beliefs that mention the repo's common-word name.
-                let statement = format!("{token} [code:{name2}] {fact}");
+            for (module, fact) in &all_facts {
+                let statement = format!("{token} [code:{name2}] [mod:{module}] {fact}");
                 if mem
                     .remember_as_belief(BeliefAssertion {
                         statement,
@@ -11431,10 +11486,16 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             let _ = mem.profile_set(&format!("code_studied_{name2}"), &chrono::Utc::now().timestamp_millis().to_string()).await;
             nq.lock().unwrap().push(format!(
-                "📖 Studied **{name2}** — learned {saved} architecture facts into memory. I can now answer questions about it WITHOUT re-reading the code: `code ask {name2} <question>`."
+                "📖 Studied **{name2}** in depth — read {chunks_read} source passes across {modules_covered}/{module_count} modules \
+                 ({total_files} files) and learned {saved} facts into memory (per-module + cross-module synthesis). \
+                 I can now answer questions about it WITHOUT re-reading the code: `code ask {name2} <question>`."
             ));
         });
-        format!("📖 Reading {name} now — I'll distill its architecture into memory and confirm when done (a minute). After that, `code ask {name} <question>` answers from what I learned, no re-reading needed.")
+        format!(
+            "📖 Studying {name} in depth now — {module_count} modules / {total_files} files, one deep-read pass per \
+             module plus a synthesis pass. I'll distill it into memory and confirm coverage when done (a few minutes). \
+             After that, `code ask {name} <question>` answers from what I learned, no re-reading needed."
+        )
     }
 
     /// Answer a question about a studied repo from its DISTILLED beliefs — no source re-read.
@@ -11444,9 +11505,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let tag = format!("[code:{name}]");
         // Retrieve by the DISTINCTIVE per-repo token only — matching on the repo name would be
         // swamped by the hundreds of ordinary beliefs that mention it (the 20-cap buries the facts).
+        // Uncapped retrieval (beliefs_matching_n) — a real study is 100+ facts; the default 20-cap
+        // would silently drop most of the knowledge at answer time.
         let facts: Vec<String> = self
             .memory
-            .beliefs_matching(&token)
+            .beliefs_matching_n(&token, 400)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -11456,14 +11519,22 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         if facts.is_empty() {
             return format!("I haven't studied {name} yet — `code study <git url>` first, then ask.");
         }
-        let strip = |f: &str| f.replacen(&token, "", 1).replacen(&tag, "", 1).trim().to_string();
-        let block = facts.iter().take(25).map(|f| format!("- {}", strip(f))).collect::<Vec<_>>().join("\n");
+        // Keep the [mod:<module>] provenance visible to the LLM so it can cite which module grounds
+        // each claim; strip only the retrieval token and the [code:] tag.
+        let strip = |f: &str| {
+            let mut t = f.replacen(&token, "", 1).replacen(&tag, "", 1);
+            t = t.trim().to_string();
+            t
+        };
+        let block = facts.iter().map(|f| format!("- {}", strip(f))).collect::<Vec<_>>().join("\n");
         let prompt = format!(
             "Answer the question about the {name} codebase using ONLY these facts I learned when I studied it. \
-             Be specific (name the modules/types they mention). If the facts don't cover it, say exactly what I'd need to re-read — never invent.\n\n\
+             Each fact is prefixed with the module it came from, like `[mod:mind-memory]`. Be specific — name the \
+             modules and types the facts mention, and when useful cite the module a claim comes from. If the facts \
+             don't cover it, say exactly which module or file I'd need to re-read — never invent.\n\n\
              WHAT I LEARNED ABOUT {name}:\n{block}\n\nQUESTION: {question}"
         );
-        let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
+        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
         match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => format!("{}\n\n_(answered from {} studied facts — no code re-read)_", r.text.trim(), facts.len()),
             Err(e) => format!("(couldn't compose an answer: {e})"),

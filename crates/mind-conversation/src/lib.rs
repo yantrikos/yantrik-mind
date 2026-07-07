@@ -6988,6 +6988,24 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 out.push_str(&format!("\n  • {name}'s {label} {when}{plan_s}"));
             }
         }
+        // Festivals and trips from the forward store — the twin knows what people-dates don't
+        // (Rath Yatra was invisible to the briefing until this line).
+        for n in self.future_scan(21).await {
+            let kind = n.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+            if !matches!(kind, "festival" | "trip") {
+                continue;
+            }
+            let title = n.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+            if let Some(when) = n.get("when_ms").and_then(|x| x.as_i64()) {
+                let days = (when - chrono::Utc::now().timestamp_millis()) / 86_400_000;
+                if (0..=21).contains(&days) {
+                    let date = chrono::DateTime::from_timestamp_millis(when)
+                        .map(|t| t.with_timezone(now.offset()).format("%b %-d").to_string())
+                        .unwrap_or_default();
+                    out.push_str(&format!("\n  • {} {title} in {days} day(s) ({date})", if kind == "festival" { "🪔" } else { "🧳" }));
+                }
+            }
+        }
 
         // 2) Personal reminders I'm holding — deduped + deadline-first, and ONLY genuine to-dos
         //    (internal agent/dev work is split out so it never clutters your morning).
@@ -9792,10 +9810,22 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // FESTIVALS have their emissary now; trips/birthdays wait for theirs (next builds).
             if kind == "festival" {
                 let days_out = (when - chrono::Utc::now().timestamp_millis()) / 86_400_000;
+                let all_met = n
+                    .get("criteria")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter().filter_map(|c| c.as_str()).all(|c| {
+                            n.get("readiness").and_then(|r| r.get(c)).and_then(|v| v.as_bool()) == Some(true)
+                        })
+                    })
+                    .unwrap_or(false);
+                if all_met {
+                    continue; // fully prepared = done, not a didn't-do
+                }
                 if (0..=9).contains(&days_out) {
                     let made = self.emissary_festival(n).await;
                     if made.is_empty() {
-                        skipped.push(format!("{title} — emissary made nothing (dry treasury or all criteria met)"));
+                        skipped.push(format!("{title} — emissary treasury dry (runs tomorrow)"));
                     } else {
                         for m in made {
                             built.push(format!("{title}: {m}"));
@@ -9869,7 +9899,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 .await;
             built.push(title.to_string());
         }
-        let mut out = format!("🌙 Night shift compiled {} packet(s).", built.len());
+        let standing = self.live_packets().await.len();
+        let mut out = format!(
+            "🌙 Night shift compiled {} packet(s){}.",
+            built.len(),
+            if standing > 0 { format!(" — {standing} standing by (`packets`)") } else { String::new() }
+        );
         for b in &built {
             out.push_str(&format!("\n  ✔ {b}"));
         }
@@ -18707,6 +18742,44 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         } else {
             None // interview slots (whois / onboarding / interests) belong to the primary only
         };
+        // WHOIS FOLLOW-UP: "show me more pictures of the same person" while a who-is-this question
+        // is armed must send MORE OF THAT CLUSTER — not fall through to generic photo search (it
+        // once sent an unrelated photo mid-interview). Slot stays armed; the question still stands.
+        if let Some(slot) = &onboard {
+            if let Some(rest) = slot.strip_prefix("whois:") {
+                let tl = user_text.to_lowercase();
+                let wants_more = (tl.contains("more") || tl.contains("another") || tl.contains("couple") || tl.contains("few"))
+                    && (tl.contains("photo") || tl.contains("picture") || tl.contains("pic") || tl.contains("image") || tl.contains("same person"));
+                if wants_more {
+                    let mut it = rest.splitn(3, ':');
+                    let src_name = it.next().unwrap_or("").to_string();
+                    let pid = it.next().unwrap_or("").to_string();
+                    let sources = mind_tools::PhotoSource::all_from_env();
+                    if let Some(src) = sources.iter().find(|s| s.name() == src_name) {
+                        let assets = src.assets_of_person(&pid, 8).await;
+                        let mut sent = 0usize;
+                        for a in assets.iter() {
+                            if sent >= 3 {
+                                break;
+                            }
+                            if let Some(bytes) = src.image_bytes(a).await {
+                                let cap = format!("👀 same person — {}{}", a.date.chars().take(10).collect::<String>(), if a.place.is_empty() { String::new() } else { format!(" · {}", a.place) });
+                                self.photo_queue.lock().unwrap().push((bytes, cap, None));
+                                sent += 1;
+                            }
+                        }
+                        let reply = if sent > 0 {
+                            format!("Here are {sent} more of the same person — so, who are they? (\"skip\" is fine.)")
+                        } else {
+                            "I couldn't pull more photos of that cluster right now — but the question stands: who are they?".to_string()
+                        };
+                        let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+                        let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+                        return Ok(reply);
+                    }
+                }
+            }
+        }
         if let Some(slot) = onboard {
             if looks_like_non_answer(user_text) {
                 // They asked for something else instead of answering — don't capture a command or a

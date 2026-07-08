@@ -11644,31 +11644,56 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .await
             .unwrap_or_else(|_| Ok(vec![]))
             .unwrap_or_default();
-        let fresh = found.into_iter().find(|(url, _)| {
-            let k = mind_tools::paper::paper_key(url);
-            !studied.contains_key(&k) && !seen.contains(&k)
-        });
-        let Some((url, title)) = fresh else {
+        // Relevance-rank: arXiv 'all:' matches loosely, so score by topic-word overlap in the
+        // title+abstract and study the MOST RELEVANT unseen paper, not merely the newest.
+        let topic_words: Vec<String> = topic.to_lowercase().split_whitespace()
+            .filter(|w| w.len() >= 4).map(|w| w.to_string()).collect();
+        let mut candidates: Vec<(usize, String, String)> = found.into_iter()
+            .filter(|(url, _, _)| {
+                let k = mind_tools::paper::paper_key(url);
+                !studied.contains_key(&k) && !seen.contains(&k)
+            })
+            .map(|(url, title, summary)| {
+                let hay = format!("{} {}", title.to_lowercase(), summary.to_lowercase());
+                let score = topic_words.iter().filter(|w| hay.contains(w.as_str())).count();
+                (score, url, title)
+            })
+            .collect();
+        candidates.sort_by_key(|(sc, _, _)| std::cmp::Reverse(*sc));
+        if candidates.is_empty() {
             return format!("🔭 night research: nothing new on \"{topic}\" tonight.");
-        };
-        let key = mind_tools::paper::paper_key(&url);
-        seen.push(key.clone());
-        if seen.len() > 300 { let cut = seen.len() - 300; seen.drain(..cut); }
-        let _ = self.memory.profile_set("research_seen", &serde_json::to_string(&seen).unwrap_or_default()).await;
-        // STUDY (detached distill+relate), then wait for the facts to land before adapting.
-        let _ = self.paper_study(&url).await;
-        for _ in 0..12 {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        // Try the most relevant candidate; if it distills to nothing (ar5iv stub, bad render),
+        // try the runner-up before giving up the night.
+        let mut chosen: Option<(String, String, usize)> = None;
+        let mut tried: Vec<String> = Vec::new();
+        for (_, url, title) in candidates.into_iter().take(2) {
+            let key = mind_tools::paper::paper_key(&url);
+            seen.push(key.clone());
+            tried.push(title.chars().take(80).collect());
+            let _ = self.paper_study(&url).await;
+            for _ in 0..12 {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let token = format!("paperkb{key}");
+                if !self.memory.beliefs_matching_n(&token, 3).await.unwrap_or_default().is_empty() {
+                    break;
+                }
+            }
             let token = format!("paperkb{key}");
-            if !self.memory.beliefs_matching_n(&token, 3).await.unwrap_or_default().is_empty() {
+            let n = self.memory.beliefs_matching_n(&token, 300).await.unwrap_or_default().len();
+            if n > 0 {
+                chosen = Some((key, title, n));
                 break;
             }
         }
-        let token = format!("paperkb{key}");
-        let n_facts = self.memory.beliefs_matching_n(&token, 300).await.unwrap_or_default().len();
-        if n_facts == 0 {
-            return format!("🔭 night research: read \"{title}\" but distillation produced nothing usable — skipped.");
-        }
+        if seen.len() > 300 { let cut = seen.len() - 300; seen.drain(..cut); }
+        let _ = self.memory.profile_set("research_seen", &serde_json::to_string(&seen).unwrap_or_default()).await;
+        let Some((key, title, n_facts)) = chosen else {
+            return format!(
+                "🔭 night research: tried {} paper(s) on \"{topic}\" but none distilled cleanly — will hunt again tomorrow. (tried: {})",
+                tried.len(), tried.join(" · ")
+            );
+        };
         // ADAPT against the studied self-codebase; auto-adopt top proposal only when the human
         // queue is short (human goals keep priority) and the proposal is grounded (names a module).
         let _ = self.paper_adapt(&key, "yantrik-mind").await;

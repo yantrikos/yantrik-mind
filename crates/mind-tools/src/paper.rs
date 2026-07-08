@@ -133,7 +133,24 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
             clean.push('\n');
         }
     }
-    let clean: String = clean.chars().take(400_000).collect();
+    let mut clean: String = clean.chars().take(400_000).collect();
+    // Brand-new arXiv papers often have no ar5iv rendering yet (stub page). Fall back to the
+    // /abs/ page — an abstract-grounded study is thinner but honest.
+    if clean.len() < 5000 && fetch_url.contains("ar5iv") && url.contains("arxiv.org/") {
+        let abs_url = url.replace("/pdf/", "/abs/");
+        if let Ok(resp2) = ureq::get(&abs_url)
+            .set("User-Agent", "Mozilla/5.0 (yantrik-mind research reader)")
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+        {
+            if let Ok(html2) = resp2.into_string() {
+                let alt = strip_html(&html2);
+                if alt.len() > clean.len() {
+                    clean = alt.chars().take(400_000).collect();
+                }
+            }
+        }
+    }
     if clean.len() < 800 {
         anyhow::bail!("extracted only {} chars — page may be JS-rendered or paywalled", clean.len());
     }
@@ -185,8 +202,8 @@ pub fn paper_lookup(key: &str, words: &[String], max_hits: usize) -> Vec<String>
 }
 
 /// Deterministic arXiv discovery: query the export API (Atom XML), parse entries by string ops —
-/// no XML dep. Returns (abs_url, title) newest-first.
-pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, String)>> {
+/// no XML dep. Returns (abs_url, title, abstract) newest-first.
+pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, String, String)>> {
     let q: String = query
         .chars()
         .map(|c| if c.is_alphanumeric() { c.to_string() } else if c == ' ' { "+".into() } else { format!("%{:02X}", c as u32) })
@@ -208,7 +225,8 @@ pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, Stri
         };
         if let (Some(id), Some(title)) = (grab("<id>", "</id>"), grab("<title>", "</title>")) {
             if id.contains("arxiv.org/abs/") {
-                out.push((id.replace("http://", "https://"), title));
+                let summary = grab("<summary>", "</summary>").unwrap_or_default();
+                out.push((id.replace("http://", "https://"), title, summary));
             }
         }
         if out.len() >= max { break; }

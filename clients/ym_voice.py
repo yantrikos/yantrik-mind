@@ -72,13 +72,26 @@ def record() -> np.ndarray:
     return np.concatenate(chunks).flatten() if chunks else np.zeros(1, dtype="float32")
 
 
+def play(samples, sr):
+    # Windows: PortAudio's default output can be a different device than the one Windows actually
+    # uses (earbuds vs speakers) — winsound plays via the Windows default, which is what you hear.
+    if sys.platform == "win32":
+        import tempfile
+        import winsound
+        p = os.path.join(tempfile.gettempdir(), "ym_reply.wav")
+        sf.write(p, samples, sr)
+        winsound.PlaySound(p, winsound.SND_FILENAME)
+    else:
+        sd.play(samples, sr)
+        sd.wait()
+
+
 def speak(text: str):
     spoken = text.replace("**", "").replace("`", "").replace("•", ",").replace("#", "")
     if len(spoken) > 1200:
         spoken = spoken[:1200].rsplit(".", 1)[0] + "."
     samples, sr = kokoro().create(spoken, voice=VOICE, speed=1.05)
-    sd.play(samples, sr)
-    sd.wait()
+    play(samples, sr)
 
 
 def turn_local(audio: np.ndarray):
@@ -105,8 +118,7 @@ def turn_server(audio: np.ndarray):
     print(f"you: {uq(r.headers.get('X-Transcript', ''))}")
     print(f"ym : {uq(r.headers.get('X-Reply-Text', ''))[:500]}")
     data, sr = sf.read(io.BytesIO(r.content), dtype="float32")
-    sd.play(data, sr)
-    sd.wait()
+    play(data, sr)
 
 
 def main():

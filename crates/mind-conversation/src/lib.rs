@@ -11640,10 +11640,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let idx = self.memory.profile_get("paper_index").await.ok().flatten().unwrap_or_default();
         let studied: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
         let topic2 = topic.clone();
-        let found = tokio::task::spawn_blocking(move || mind_tools::paper::arxiv_search(&topic2, 10))
-            .await
-            .unwrap_or_else(|_| Ok(vec![]))
-            .unwrap_or_default();
+        let found = match tokio::task::spawn_blocking(move || mind_tools::paper::arxiv_search(&topic2, 10)).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return format!("🔭 night research: arXiv unreachable tonight ({e}) — will hunt again tomorrow."),
+            Err(_) => return "🔭 night research: discovery task panicked — will hunt again tomorrow.".into(),
+        };
         // Relevance-rank: arXiv 'all:' matches loosely, so score by topic-word overlap in the
         // title+abstract and study the MOST RELEVANT unseen paper, not merely the newest.
         let topic_words: Vec<String> = topic.to_lowercase().split_whitespace()

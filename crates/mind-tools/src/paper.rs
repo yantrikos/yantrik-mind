@@ -209,13 +209,20 @@ pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, Stri
         .map(|c| if c.is_alphanumeric() { c.to_string() } else if c == ' ' { "+".into() } else { format!("%{:02X}", c as u32) })
         .collect();
     let url = format!(
-        "http://export.arxiv.org/api/query?search_query=all:{q}&sortBy=submittedDate&sortOrder=descending&max_results={max}"
+        "https://export.arxiv.org/api/query?search_query=all:{q}&sortBy=submittedDate&sortOrder=descending&max_results={max}"
     );
     let body = ureq::get(&url)
-        .set("User-Agent", "yantrik-mind research reader")
+        .set("User-Agent", "yantrik-mind research reader (contact: developer@pranab.co.in)")
         .timeout(std::time::Duration::from_secs(30))
         .call()?
         .into_string()?;
+    if !body.contains("<entry>") {
+        // Distinguish "no results" from throttling/outage: a healthy empty feed still carries
+        // an opensearch totalResults element; anything else is the API refusing us.
+        if !body.contains("totalResults") {
+            anyhow::bail!("arXiv API unavailable or rate-limited (empty/non-feed response)");
+        }
+    }
     let mut out = Vec::new();
     for entry in body.split("<entry>").skip(1) {
         let grab = |open: &str, close: &str| -> Option<String> {

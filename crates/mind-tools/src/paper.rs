@@ -204,10 +204,15 @@ pub fn paper_lookup(key: &str, words: &[String], max_hits: usize) -> Vec<String>
 /// Deterministic arXiv discovery: query the export API (Atom XML), parse entries by string ops —
 /// no XML dep. Returns (abs_url, title, abstract) newest-first.
 pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+    // arXiv's query parser chokes on percent-encoded punctuation (all:self%2Dimproving returns
+    // nothing) — treat every non-alphanumeric as a word break instead.
     let q: String = query
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_string() } else if c == ' ' { "+".into() } else { format!("%{:02X}", c as u32) })
-        .collect();
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("+");
     let url = format!(
         "https://export.arxiv.org/api/query?search_query=all:{q}&sortBy=submittedDate&sortOrder=descending&max_results={max}"
     );

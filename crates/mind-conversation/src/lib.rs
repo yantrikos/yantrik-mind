@@ -354,7 +354,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 131] = [
+    const CMDS: [&str; 132] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -369,7 +369,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "horizon", "anticipations", "lookahead", "festivals", "festival", "anticipate",
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
-        "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
+        "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury", "ledger",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
         "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "envision", "vision",
@@ -9801,6 +9801,97 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         out
     }
 
+    /// The economic ledger: cash balance, monthly burn, runway in days, break-even signal.
+    /// `treasury ledger` renders it; `treasury seed <usd>` sets starting cash; `treasury earn <usd>
+    /// <source>` records income (the forge's approved revenue lands here); `treasury burn <item>
+    /// <usd/mo>` declares a recurring cost. The honest answer to "can it pay its own rent yet".
+    pub fn ledger_cmd(arg: &str) -> String {
+        let a = arg.trim();
+        let mut b = Self::budget_load();
+        if b.get("ledger").is_none() {
+            b["ledger"] = serde_json::json!({"balance_usd": 0.0, "burn": {}, "income": []});
+        }
+        if let Some(rest) = a.strip_prefix("seed ").map(str::trim) {
+            if let Ok(v) = rest.parse::<f64>() {
+                b["ledger"]["balance_usd"] = serde_json::json!(v);
+                Self::budget_save(&b);
+                return format!("💵 Seed capital set: ${v:.2}. This is the runway I start with.");
+            }
+            return "Usage: treasury seed <usd>".into();
+        }
+        if let Some(rest) = a.strip_prefix("earn ").map(str::trim) {
+            let mut it = rest.splitn(2, char::is_whitespace);
+            let amt = it.next().unwrap_or("").parse::<f64>().unwrap_or(f64::NAN);
+            let src = it.next().unwrap_or("unspecified").trim().to_string();
+            if amt.is_nan() || amt <= 0.0 {
+                return "Usage: treasury earn <usd> <source>".into();
+            }
+            let bal = b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0) + amt;
+            b["ledger"]["balance_usd"] = serde_json::json!(bal);
+            let entry = serde_json::json!({"day": Self::ledger_today(), "usd": amt, "source": src});
+            if let Some(arr) = b["ledger"]["income"].as_array_mut() {
+                arr.push(entry);
+                if arr.len() > 500 { arr.remove(0); }
+            }
+            Self::budget_save(&b);
+            let first = b["ledger"]["income"].as_array().map(|a| a.len() == 1).unwrap_or(false);
+            let milestone = if first { "\n\n🎉 First earned dollar — the first income I ever generated. This is the milestone: an entity that earns, not only spends." } else { "" };
+            return format!("💵 Recorded income: ${amt:.2} from {src}. Balance now ${bal:.2}.{milestone}");
+        }
+        if let Some(rest) = a.strip_prefix("burn ").map(str::trim) {
+            let mut it = rest.splitn(2, char::is_whitespace);
+            let item = it.next().unwrap_or("").trim().to_string();
+            let monthly = it.next().unwrap_or("").parse::<f64>().unwrap_or(f64::NAN);
+            if item.is_empty() || monthly.is_nan() {
+                return "Usage: treasury burn <item> <usd-per-month>  (0 removes it)".into();
+            }
+            if monthly <= 0.0 {
+                b["ledger"]["burn"].as_object_mut().map(|m| m.remove(&item));
+            } else {
+                b["ledger"]["burn"][&item] = serde_json::json!(monthly);
+            }
+            Self::budget_save(&b);
+            return format!("💸 Burn line '{item}' set to ${monthly:.2}/mo.");
+        }
+        // default: render the ledger
+        let bal = b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0);
+        let burn_obj = b["ledger"]["burn"].as_object().cloned().unwrap_or_default();
+        let monthly_burn: f64 = burn_obj.values().filter_map(|v| v.as_f64()).sum();
+        let daily_burn = monthly_burn / 30.0;
+        // trailing-30-day income
+        let today = Self::ledger_today();
+        let inc30: f64 = b["ledger"]["income"].as_array().map(|arr| arr.iter()
+            .filter(|e| today - e.get("day").and_then(|x| x.as_i64()).unwrap_or(0) <= 30)
+            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum()).unwrap_or(0.0);
+        let mut out = format!("💰 ECONOMIC LEDGER — can I pay my own rent?\n\nBalance: ${bal:.2}\n");
+        if burn_obj.is_empty() {
+            out.push_str("Burn: none declared — `treasury burn <item> <usd/mo>` (e.g. nanogpt 8, vps 1.25)\n");
+        } else {
+            out.push_str(&format!("Burn: ${monthly_burn:.2}/mo\n"));
+            let mut items: Vec<(&String, &serde_json::Value)> = burn_obj.iter().collect();
+            items.sort_by(|a, c| a.0.cmp(c.0));
+            for (k, v) in items {
+                out.push_str(&format!("  · {k}: ${:.2}/mo\n", v.as_f64().unwrap_or(0.0)));
+            }
+        }
+        out.push_str(&format!("Income (trailing 30d): ${inc30:.2}\n"));
+        if daily_burn > 0.0 {
+            let runway = (bal / daily_burn).floor() as i64;
+            out.push_str(&format!("\n⏳ Runway: {runway} days at current burn"));
+            if inc30 >= monthly_burn && monthly_burn > 0.0 {
+                out.push_str("\n✅ BREAK-EVEN: trailing income covers the burn — I am paying my own rent.");
+            } else if monthly_burn > 0.0 {
+                let gap = monthly_burn - inc30;
+                out.push_str(&format!("\n📈 To break even: earn ${gap:.2} more per month ({:.0}% of the way there).", (inc30 / monthly_burn * 100.0).min(100.0)));
+            }
+        } else {
+            out.push_str("\n(declare burn lines to see runway)");
+        }
+        out
+    }
+
+    fn ledger_today() -> i64 { (chrono::Utc::now().timestamp() / 86_400) as i64 }
+
     /// `ym budget set <subsystem> <n>` — the owner's declaration.
     pub fn treasury_set(subsystem: &str, n: i64) -> String {
         let mut b = Self::budget_load();
@@ -18002,6 +18093,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     _ => "Usage: treasury set <subsystem> <passes/day>".to_string(),
                 }
             }
+            // the ECONOMIC ledger (money, not attention): balance / burn / runway / break-even
+            "treasury" if ["ledger", "seed", "earn", "burn"].iter().any(|k| rest.trim() == *k || rest.trim().starts_with(&format!("{k} "))) => {
+                let r = rest.trim();
+                if let Some(sub) = r.strip_prefix("ledger").map(str::trim) { Self::ledger_cmd(sub) }
+                else { Self::ledger_cmd(r) }
+            }
+            "ledger" => Self::ledger_cmd(rest.trim()),
             "treasury" => Self::treasury_report(),
             "providers" | "quota" => self.providers_report().await,
             "packets" => self.packets_view().await,

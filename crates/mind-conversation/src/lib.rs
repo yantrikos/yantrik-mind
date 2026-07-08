@@ -11967,7 +11967,16 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                      \"kill_reason\": \"which pre-registered criterion fired, or empty\"}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                // CROSS-FAMILY JUDGING: the referee must not share the builder's model family —
+                // same-family self-grading inflates scores. Judge on minimax (env-overridable);
+                // fall back to the default chain only if the judge provider is down.
+                let judge_label = std::env::var("YM_FORGE_JUDGE").unwrap_or_else(|_| "minimax".into());
+                let msgs = vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)];
+                let judged = match self.inference.clone().with_provider(&judge_label).chat(msgs.clone(), cfg.clone()).await {
+                    Ok(r) => Ok(r),
+                    Err(_) => self.inference.chat(msgs, cfg).await,
+                };
+                match judged {
                     Ok(r) => match Self::forge_json_grab(&r.text) {
                         Some(j) => {
                             let score = j.get("score").and_then(|x| x.as_i64()).unwrap_or(0);

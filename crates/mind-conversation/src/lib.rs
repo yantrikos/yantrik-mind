@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 127] = [
+    const CMDS: [&str; 128] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -371,7 +371,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
-        "reviewer", "review", "researchops", "ro", "paper", "papers",
+        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -11610,6 +11610,334 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
     }
 
+    // ============================ PRODUCT FORGE ============================
+    // A durable, staged, long-running mission executor. v1 mission type: build a product from a
+    // single idea. Stages tick one at a time (treasury-metered, poll-loop driven, restart-safe).
+
+    fn forge_dir(id: &str) -> std::path::PathBuf {
+        let d = std::path::PathBuf::from(
+            std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()),
+        )
+        .join("forge")
+        .join(id);
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    async fn forge_load(&self) -> serde_json::Value {
+        self.memory.profile_get("forge_ventures").await.ok().flatten()
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
+    async fn forge_save(&self, v: &serde_json::Value) {
+        let _ = self.memory.profile_set("forge_ventures", &v.to_string()).await;
+    }
+
+    fn forge_json_grab(resp: &str) -> Option<serde_json::Value> {
+        resp.find('{')
+            .and_then(|a| resp.rfind('}').map(|b| resp[a..=b].to_string()))
+            .and_then(|t| serde_json::from_str(&t).ok())
+    }
+
+    /// `forge start <idea>` | `forge status` | `forge tick` | `forge kill` | `forge show <id>`
+    pub async fn forge_cmd(&self, arg: &str) -> String {
+        let a = arg.trim();
+        if let Some(idea) = a.strip_prefix("start ").map(str::trim).filter(|x| x.len() > 8) {
+            let mut all = self.forge_load().await;
+            if all.as_object().map(|m| m.values().any(|v| v.get("stage").and_then(|x| x.as_str()).map(|st| st != "shipped" && st != "killed").unwrap_or(false))).unwrap_or(false) {
+                return "⚒️ A venture is already in flight — `forge status`, and `forge kill` first if you want to replace it (v1 runs one at a time).".into();
+            }
+            let id = format!("v{}", chrono::Utc::now().timestamp() % 1_000_000);
+            all[&id] = serde_json::json!({
+                "id": id, "idea": idea, "stage": "brainstorm", "iter": 0, "max_iter": 2,
+                "log": [], "updated_ms": 0_i64,
+            });
+            self.forge_save(&all).await;
+            return format!(
+                "⚒️ Venture `{id}` forged from: \"{idea}\"\nStages: brainstorm → research → spec (with kill criteria) → build → test → rate → iterate → ship/kill.\nIt advances on its own (one treasury-metered stage at a time); `forge status` any time, or `forge tick` to push it now."
+            );
+        }
+        if a == "tick" {
+            return self.forge_tick(true).await.unwrap_or_else(|| "⚒️ Nothing to tick — no active venture (`forge start <idea>`).".into());
+        }
+        if a == "kill" {
+            let mut all = self.forge_load().await;
+            let Some(m) = all.as_object_mut() else { return "⚒️ No ventures.".into() };
+            for (_, v) in m.iter_mut() {
+                let st = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+                if st != "shipped" && st != "killed" {
+                    v["stage"] = serde_json::json!("killed");
+                    v["log"].as_array_mut().map(|l| l.push(serde_json::json!("killed by owner")));
+                    let out = format!("⚒️ Venture `{}` killed.", v.get("id").and_then(|x| x.as_str()).unwrap_or("?"));
+                    self.forge_save(&all).await;
+                    return out;
+                }
+            }
+            return "⚒️ No active venture to kill.".into();
+        }
+        // status (default)
+        let all = self.forge_load().await;
+        let Some(m) = all.as_object().filter(|m| !m.is_empty()) else {
+            return "⚒️ The forge is cold. `forge start <one-line product idea>` lights it.".into();
+        };
+        let mut out = String::from("⚒️ Forge:");
+        for (id, v) in m {
+            let stage = v.get("stage").and_then(|x| x.as_str()).unwrap_or("?");
+            let idea = v.get("idea").and_then(|x| x.as_str()).unwrap_or("?");
+            let iter = v.get("iter").and_then(|x| x.as_i64()).unwrap_or(0);
+            let score = v.get("rating").and_then(|r| r.get("score")).and_then(|x| x.as_i64());
+            out.push_str(&format!("\n• `{id}` [{stage}{}] {}{}",
+                if iter > 0 { format!(" iter{iter}") } else { String::new() },
+                idea.chars().take(90).collect::<String>(),
+                score.map(|sc| format!(" — rated {sc}/10")).unwrap_or_default()));
+            if let Some(log) = v.get("log").and_then(|x| x.as_array()) {
+                if let Some(last) = log.last().and_then(|x| x.as_str()) {
+                    out.push_str(&format!("\n    last: {}", last.chars().take(160).collect::<String>()));
+                }
+            }
+        }
+        out
+    }
+
+    /// True when a venture wants its next stage (active + cooled ≥90s since last stage).
+    pub async fn forge_due(&self) -> bool {
+        let all = self.forge_load().await;
+        let now = chrono::Utc::now().timestamp_millis();
+        all.as_object().map(|m| m.values().any(|v| {
+            let st = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+            let up = v.get("updated_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+            st != "shipped" && st != "killed" && now - up > 90_000
+        })).unwrap_or(false)
+    }
+
+    /// Advance the active venture by exactly ONE stage. Returns the stage report (None = idle).
+    /// `manual` bypasses the treasury (owner pushed it); autonomous ticks draw from the envelope.
+    pub async fn forge_tick(&self, manual: bool) -> Option<String> {
+        let mut all = self.forge_load().await;
+        let id = all.as_object()?.iter().find(|(_, v)| {
+            let st = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+            st != "shipped" && st != "killed"
+        }).map(|(k, _)| k.clone())?;
+        if !manual && !Self::treasury_try_draw("forge") {
+            return Some("⚒️ forge envelope dry today — venture resumes tomorrow.".into());
+        }
+        let v = all[&id].clone();
+        let stage = v.get("stage").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let idea = v.get("idea").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let report = match stage.as_str() {
+            "brainstorm" => {
+                // 3 independent persona takes + a synthesis — a real panel, not one voice.
+                let mut takes: Vec<String> = Vec::new();
+                for persona in ["a pragmatic staff engineer (feasibility, MVP scope)",
+                                "a skeptical investor (who pays, what kills this)",
+                                "a product visionary (the wedge that makes it 10x, not 10%)"] {
+                    let p = format!("As {persona}, give your sharpest 4-sentence take on this product idea — concrete, no fluff:\n{idea}");
+                    let cfg = GenerationConfig { max_tokens: 260, ..GenerationConfig::default() };
+                    if let Ok(r) = self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                        takes.push(r.text.trim().to_string());
+                    }
+                }
+                let panel = takes.iter().enumerate().map(|(i, t)| format!("PANELIST {}:\n{t}", i + 1)).collect::<Vec<_>>().join("\n\n");
+                let p = format!("Panel takes on \"{idea}\":\n\n{panel}\n\nSynthesize ONE chosen direction: the sharpest version of this product. Output ONLY JSON: {{\"direction\":\"2-3 sentences\",\"differentiator\":\"1 sentence\",\"biggest_risk\":\"1 sentence\"}}.");
+                let cfg = GenerationConfig { max_tokens: 350, ..GenerationConfig::default() };
+                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                    Ok(r) => match Self::forge_json_grab(&r.text) {
+                        Some(j) => {
+                            all[&id]["brainstorm"] = j.clone();
+                            all[&id]["stage"] = serde_json::json!("research");
+                            format!("⚒️ `{id}` brainstormed ({} panelists): {}", takes.len(), j.get("direction").and_then(|x| x.as_str()).unwrap_or("?"))
+                        }
+                        None => format!("⚒️ `{id}` brainstorm synthesis didn't parse — will retry next tick."),
+                    },
+                    Err(e) => format!("⚒️ `{id}` brainstorm failed ({e}) — will retry next tick."),
+                }
+            }
+            "research" => {
+                // Deterministic: arXiv related work + everything memory already holds. No LLM.
+                let q: String = idea.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+                let q2 = q.clone();
+                let papers = tokio::task::spawn_blocking(move || mind_tools::paper::arxiv_search(&q2, 4))
+                    .await.ok().and_then(|r| r.ok()).unwrap_or_default();
+                let paper_lines = papers.iter()
+                    .map(|(_, t, sm)| format!("- {t}: {}", sm.chars().take(200).collect::<String>()))
+                    .collect::<Vec<_>>().join("\n");
+                let mem_facts = self.memory.beliefs_matching(&q).await.unwrap_or_default();
+                let mem_lines = mem_facts.iter().take(8).map(|b| format!("- {}", b.statement)).collect::<Vec<_>>().join("\n");
+                all[&id]["research"] = serde_json::json!({"papers": paper_lines, "memory": mem_lines});
+                all[&id]["stage"] = serde_json::json!("spec");
+                format!("⚒️ `{id}` researched: {} related papers + {} memory facts attached.", papers.len(), mem_facts.len().min(8))
+            }
+            "spec" => {
+                let bs = v.get("brainstorm").cloned().unwrap_or_default();
+                let rs = v.get("research").cloned().unwrap_or_default();
+                let p = format!(
+                    "Write the PRD for this venture as JSON.\nIDEA: {idea}\nDIRECTION: {bs}\nRESEARCH: {rs}\n\n\
+                     The product must be buildable as a SMALL self-contained artifact (a single-page web app \
+                     or a small Python tool — no external paid services). Output ONLY JSON: \
+                     {{\"name\":\"...\",\"one_liner\":\"...\",\"mvp_features\":[\"3-5 items\"],\
+                     \"kill_criteria\":[\"2-3 PRE-REGISTERED conditions under which this venture should be killed, testable against the artifact\"],\
+                     \"stack\":\"html|python\",\"acceptance\":[\"3-4 concrete checks a referee can verify\"]}}"
+                );
+                let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
+                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                    Ok(r) => match Self::forge_json_grab(&r.text) {
+                        Some(j) => {
+                            let name = j.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+                            all[&id]["spec"] = j;
+                            all[&id]["stage"] = serde_json::json!("build");
+                            format!("⚒️ `{id}` spec locked: **{name}** — kill criteria pre-registered.")
+                        }
+                        None => format!("⚒️ `{id}` spec didn't parse — will retry next tick."),
+                    },
+                    Err(e) => format!("⚒️ `{id}` spec failed ({e}) — will retry."),
+                }
+            }
+            "build" => {
+                let spec = v.get("spec").cloned().unwrap_or_default();
+                let issues = v.get("rating").and_then(|r| r.get("issues")).cloned().unwrap_or(serde_json::json!([]));
+                let fix = if issues.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                    format!("\nFIX THESE ISSUES from the last review: {issues}")
+                } else { String::new() };
+                let p = format!(
+                    "Build the MVP per this spec. SPEC: {spec}{fix}\n\nWrite COMPLETE, working files — no \
+                     placeholders, no TODOs, self-contained (inline CSS/JS if html; stdlib-only if python). \
+                     At most 4 files. Output ONLY JSON: {{\"files\":[{{\"path\":\"relative.ext\",\"content\":\"...\"}}]}}"
+                );
+                let cfg = GenerationConfig { max_tokens: 3500, ..GenerationConfig::default() };
+                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                    Ok(r) => match Self::forge_json_grab(&r.text).and_then(|j| j.get("files").and_then(|x| x.as_array()).cloned()) {
+                        Some(files) if !files.is_empty() => {
+                            let dir = Self::forge_dir(&id);
+                            let mut written: Vec<String> = Vec::new();
+                            let mut total = 0usize;
+                            for fspec in files.iter().take(6) {
+                                let (Some(path), Some(content)) = (fspec.get("path").and_then(|x| x.as_str()), fspec.get("content").and_then(|x| x.as_str())) else { continue };
+                                if path.contains("..") || path.starts_with('/') || path.len() > 80 { continue; }
+                                total += content.len();
+                                if total > 400_000 { break; }
+                                let fp = dir.join(path);
+                                if let Some(parent) = fp.parent() { let _ = std::fs::create_dir_all(parent); }
+                                if std::fs::write(&fp, content).is_ok() { written.push(path.to_string()); }
+                            }
+                            all[&id]["files"] = serde_json::json!(written);
+                            all[&id]["stage"] = serde_json::json!("test");
+                            format!("⚒️ `{id}` built: {} file(s) → {}", written.len(), dir.display())
+                        }
+                        _ => format!("⚒️ `{id}` build output didn't parse — will retry next tick."),
+                    },
+                    Err(e) => format!("⚒️ `{id}` build failed ({e}) — will retry."),
+                }
+            }
+            "test" => {
+                // Deterministic gates: files exist and non-trivial; python compiles in the sandbox;
+                // html is structurally whole. Honest results either way.
+                let dir = Self::forge_dir(&id);
+                let files: Vec<String> = v.get("files").and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.to_string()).collect())
+                    .unwrap_or_default();
+                let mut results: Vec<String> = Vec::new();
+                let mut pass = !files.is_empty();
+                if files.is_empty() { results.push("FAIL: no files were written".into()); }
+                for fname in &files {
+                    let fp = dir.join(fname);
+                    let content = std::fs::read_to_string(&fp).unwrap_or_default();
+                    if content.len() < 80 {
+                        results.push(format!("FAIL: {fname} is trivially small ({} bytes)", content.len()));
+                        pass = false;
+                        continue;
+                    }
+                    if fname.ends_with(".py") {
+                        if let Some(sb) = &self.sandbox {
+                            let check = format!("import ast, sys\nsrc = open({:?}).read()\ntry:\n    ast.parse(src)\n    print('OK')\nexcept SyntaxError as e:\n    print('SYNTAX:', e)", fp.to_string_lossy());
+                            match sb.run_python(&check).await {
+                                Ok(r) if r.exit_code == 0 && !r.render().contains("SYNTAX") => results.push(format!("PASS: {fname} parses")),
+                                Ok(r) => { results.push(format!("FAIL: {fname} — {}", r.render().chars().take(150).collect::<String>())); pass = false; }
+                                Err(_) => results.push(format!("SKIP: {fname} (sandbox unavailable)")),
+                            }
+                        }
+                    } else if fname.ends_with(".html") {
+                        let whole = content.contains("<html") && content.contains("</html>");
+                        if whole { results.push(format!("PASS: {fname} structurally whole")); }
+                        else { results.push(format!("FAIL: {fname} missing html envelope")); pass = false; }
+                    } else {
+                        results.push(format!("PASS: {fname} present ({} bytes)", content.len()));
+                    }
+                }
+                all[&id]["test"] = serde_json::json!({"pass": pass, "results": results});
+                all[&id]["stage"] = serde_json::json!("rate");
+                format!("⚒️ `{id}` tested: {} — {}", if pass { "GREEN" } else { "RED" }, results.join("; ").chars().take(220).collect::<String>())
+            }
+            "rate" => {
+                let dir = Self::forge_dir(&id);
+                let spec = v.get("spec").cloned().unwrap_or_default();
+                let test = v.get("test").cloned().unwrap_or_default();
+                let files: Vec<String> = v.get("files").and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.to_string()).collect())
+                    .unwrap_or_default();
+                let mut listing = String::new();
+                for fname in files.iter().take(4) {
+                    let c = std::fs::read_to_string(dir.join(fname)).unwrap_or_default();
+                    listing.push_str(&format!("\n===== {fname} =====\n{}", c.chars().take(6000).collect::<String>()));
+                }
+                let p = format!(
+                    "You are the REFEREE. Judge this MVP strictly against its own spec and PRE-REGISTERED kill \
+                     criteria.\nSPEC: {spec}\nTEST RESULTS: {test}\nARTIFACT:{listing}\n\nOutput ONLY JSON: \
+                     {{\"score\": 0-10, \"issues\": [\"most important fixes, concrete\"], \"kill\": true|false, \
+                     \"kill_reason\": \"which pre-registered criterion fired, or empty\"}}"
+                );
+                let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                    Ok(r) => match Self::forge_json_grab(&r.text) {
+                        Some(j) => {
+                            let score = j.get("score").and_then(|x| x.as_i64()).unwrap_or(0);
+                            let kill = j.get("kill").and_then(|x| x.as_bool()).unwrap_or(false);
+                            all[&id]["rating"] = j.clone();
+                            all[&id]["stage"] = serde_json::json!("iterate");
+                            format!("⚒️ `{id}` rated {score}/10{}", if kill { " — a kill criterion FIRED" } else { "" })
+                        }
+                        None => format!("⚒️ `{id}` rating didn't parse — will retry."),
+                    },
+                    Err(e) => format!("⚒️ `{id}` rating failed ({e}) — will retry."),
+                }
+            }
+            "iterate" => {
+                let rating = v.get("rating").cloned().unwrap_or_default();
+                let score = rating.get("score").and_then(|x| x.as_i64()).unwrap_or(0);
+                let kill = rating.get("kill").and_then(|x| x.as_bool()).unwrap_or(false);
+                let iter = v.get("iter").and_then(|x| x.as_i64()).unwrap_or(0);
+                let max_iter = v.get("max_iter").and_then(|x| x.as_i64()).unwrap_or(2);
+                let test_pass = v.get("test").and_then(|t| t.get("pass")).and_then(|x| x.as_bool()).unwrap_or(false);
+                if kill {
+                    all[&id]["stage"] = serde_json::json!("killed");
+                    format!("⚒️ `{id}` KILLED by its own pre-registered criterion: {} — that's the discipline working, not a failure.",
+                        rating.get("kill_reason").and_then(|x| x.as_str()).unwrap_or("unspecified"))
+                } else if score >= 7 && test_pass {
+                    all[&id]["stage"] = serde_json::json!("shipped");
+                    let dir = Self::forge_dir(&id);
+                    let name = v.get("spec").and_then(|sp| sp.get("name")).and_then(|x| x.as_str()).unwrap_or("the product");
+                    format!("🚢 `{id}` SHIPPED: **{name}** rated {score}/10 after {iter} iteration(s). Artifact: {} — open it and judge for yourself.", dir.display())
+                } else if iter >= max_iter {
+                    all[&id]["stage"] = serde_json::json!("shipped");
+                    format!("⚒️ `{id}` shipped AS-IS at {score}/10 after exhausting {max_iter} iterations — honest ceiling, artifacts kept for review.")
+                } else {
+                    all[&id]["iter"] = serde_json::json!(iter + 1);
+                    all[&id]["stage"] = serde_json::json!("build");
+                    format!("⚒️ `{id}` iterating ({}/{max_iter}): rebuilding against {} referee issue(s).",
+                        iter + 1, rating.get("issues").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0))
+                }
+            }
+            _ => return None,
+        };
+        all[&id]["updated_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
+        if let Some(l) = all[&id]["log"].as_array_mut() {
+            l.push(serde_json::json!(report.clone()));
+            if l.len() > 40 { l.remove(0); }
+        }
+        self.forge_save(&all).await;
+        Some(report)
+    }
+
     async fn research_topics(&self) -> Vec<String> {
         let raw = self.memory.profile_get("research_topics").await.ok().flatten().unwrap_or_default();
         let t: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
@@ -17425,6 +17753,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "work" | "workops" | "projects" => self.work_cmd(&rest).await,
             "code" | "repos" | "repo" => self.code_cmd(&rest).await,
             "paper" | "papers" => self.paper_cmd(&rest).await,
+            "forge" => self.forge_cmd(&rest).await,
             "reviewer" | "review" if !rest.trim().is_empty() => self.research_ops_run("review", rest.trim()).await,
             "researchops" | "ro" if !rest.trim().is_empty() => {
                 let mut it = rest.trim().splitn(2, ' ');

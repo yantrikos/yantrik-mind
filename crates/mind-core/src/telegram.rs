@@ -1144,6 +1144,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // FORGE: advance the active venture one stage per due-tick (treasury-metered inside).
+        // Stage reports go to the active chat — the owner watches the product take shape live.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if conv.forge_due().await {
+                let conv_f = conv.clone();
+                let api_f = api.clone();
+                tokio::spawn(async move {
+                    if let Some(report) = conv_f.forge_tick(false).await {
+                        eprintln!("[forge] {}", report.replace('\n', " | "));
+                        if chat != 0 {
+                            let _ = tg_send_mirrored(&conv_f, &api_f, chat, &report).await;
+                        }
+                    }
+                });
+            }
+        }
+
         // NIGHT SHIFT v0: compile packets against the fragile future nodes while the family sleeps.
         // Silent by design until the morning done board ships — packets surface via `ym packets`.
         {

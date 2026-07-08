@@ -11820,6 +11820,47 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "build" => {
                 let spec = v.get("spec").cloned().unwrap_or_default();
                 let issues = v.get("rating").and_then(|r| r.get("issues")).cloned().unwrap_or(serde_json::json!([]));
+                // STRONG-BUILDER PATH (default): two ventures proved the chain models can't emit a
+                // working artifact — the referee killed both. Claude Code builds directly into the
+                // venture dir via deploy/forge_build.sh; the chain remains only as a fallback when
+                // the script is missing (dev boxes) or the builder fails.
+                let builder_sh = std::env::var("YM_FORGE_BUILD_SH")
+                    .unwrap_or_else(|_| "/root/codes/yantrik-mind/deploy/forge_build.sh".into());
+                if std::path::Path::new(&builder_sh).exists() {
+                    let dir = Self::forge_dir(&id);
+                    let _ = std::fs::write(dir.join("spec.json"), spec.to_string());
+                    if issues.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                        let _ = std::fs::write(dir.join("issues.json"), issues.to_string());
+                    }
+                    let dir2 = dir.clone();
+                    let sh2 = builder_sh.clone();
+                    let out = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("bash").arg(&sh2).arg(&dir2).output()
+                    }).await;
+                    let ok = matches!(&out, Ok(Ok(o)) if String::from_utf8_lossy(&o.stdout).contains("FORGE_BUILD_DONE"));
+                    if ok {
+                        let mut written: Vec<String> = Vec::new();
+                        if let Ok(rd) = std::fs::read_dir(&dir) {
+                            for e in rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()) {
+                                let n = e.file_name().to_string_lossy().to_string();
+                                if !n.ends_with(".json") && e.metadata().map(|m| m.len() > 60).unwrap_or(false) {
+                                    written.push(n);
+                                }
+                            }
+                        }
+                        if !written.is_empty() {
+                            all[&id]["files"] = serde_json::json!(written);
+                            all[&id]["stage"] = serde_json::json!("test");
+                            all[&id]["updated_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
+                            if let Some(l) = all[&id]["log"].as_array_mut() {
+                                l.push(serde_json::json!(format!("built (strong builder): {} files", written.len())));
+                            }
+                            self.forge_save(&all).await;
+                            return Some(format!("⚒️ `{id}` built by the STRONG builder: {} file(s) → {}", written.len(), dir.display()));
+                        }
+                    }
+                    // fall through to the chain path below — honest note in the report
+                }
                 let fix = if issues.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
                     format!("\nFIX THESE ISSUES from the last review: {issues}")
                 } else { String::new() };

@@ -156,4 +156,12 @@ if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded
   fi
   tg_alert builder "builder unavailable mid-run (credit/quota/auth) — goal re-queued; check token + Max window"
 fi
+# CRASH SAFETY: an empty OUT means self_improve died before producing anything (workdir deleted,
+# OOM, kill) — the goal never got a fair attempt, so put it back (dup-guarded).
+if [ -z "$OUT" ] && [ "$FROM_QUEUE" = "1" ] && ! grep -qxF "$GOAL" "$GOALS" 2>/dev/null; then
+  printf '%s
+' "$GOAL" >> "$GOALS"
+  echo "==> empty build output — goal re-queued (not consumed)"
+  tg_alert emptyout "build produced no output - goal re-queued; check selfbuild-cron.log"
+fi
 echo "$(date -u +%FT%TZ) self-build tick done"

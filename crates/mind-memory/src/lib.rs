@@ -85,6 +85,7 @@ enum Cmd {
     RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
     DischargeTension { id: String, reply: Reply<bool> },
+    RecallDemandFor { about: String, reply: Reply<f64> },
     // retro-dedup: collapse norm_prop/Jaccard near-duplicates written before the write-path dedup existed
     RetroDedupStore { reply: Reply<(usize, usize)> },
     // test-only: insert a goal/pref row bypassing all dedup checks (simulates pre-PR#19 legacy data)
@@ -889,6 +890,33 @@ fn discharge_tension_db(db: &YantrikDB, id: &str) -> std::result::Result<bool, S
     Ok(n > 0)
 }
 
+/// Engine demand for a topic: aggregate confidence-deficit of beliefs whose text overlaps with the
+/// `about` string. Uses the same word-match logic as BeliefsMatching (words ≥4 chars, case-insensitive,
+/// matched at word-start). Result is normalised to [0,1] via sum/(1+sum) so it saturates smoothly.
+fn recall_demand_for_db(db: &YantrikDB, about: &str) -> f64 {
+    let words: Vec<String> = about
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 4)
+        .map(|w| w.to_lowercase())
+        .collect();
+    if words.is_empty() {
+        return 0.0;
+    }
+    let uncertainty_sum: f64 = all_beliefs(db)
+        .iter()
+        .filter_map(|n| {
+            let stmt = node_prop(n)?.to_lowercase();
+            let toks: Vec<&str> = stmt.split(|c: char| !c.is_alphanumeric()).collect();
+            if words.iter().any(|w| toks.iter().any(|x| x.starts_with(w.as_str()))) {
+                Some(1.0_f64 - n.attrs.confidence.clamp(0.0, 1.0))
+            } else {
+                None
+            }
+        })
+        .sum();
+    uncertainty_sum / (1.0 + uncertainty_sum)
+}
+
 fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
     let tags_json: String = r.get(4)?;
     Ok(Skill {
@@ -1438,6 +1466,9 @@ impl MemoryHandle {
                         Cmd::DischargeTension { id, reply } => {
                             let _ = reply.send(discharge_tension_db(&db, &id));
                         }
+                        Cmd::RecallDemandFor { about, reply } => {
+                            let _ = reply.send(Ok(recall_demand_for_db(&db, &about)));
+                        }
                         Cmd::RetroDedupStore { reply } => {
                             let _ = reply.send(Ok(retro_dedup_store(&db)));
                         }
@@ -1671,6 +1702,10 @@ impl MemoryFacade for MemoryHandle {
     async fn discharge_tension(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
         self.call(|reply| Cmd::DischargeTension { id, reply }).await
+    }
+    async fn recall_demand_for(&self, about: &str) -> Result<f64> {
+        let about = about.to_string();
+        self.call(|reply| Cmd::RecallDemandFor { about, reply }).await
     }
 
     async fn explain_belief(&self, belief_id: &str) -> Result<Option<(Belief, Vec<MEvidence>)>> {

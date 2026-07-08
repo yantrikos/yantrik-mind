@@ -106,7 +106,10 @@ if [ "${YM_AUTOMERGE:-0}" = "1" ]; then
   fi
   if [ "$AUTOMERGE" = "1" ] && git diff --cached --name-only | grep -q '\.rs$'; then
     pkgs=$(git diff --cached --name-only | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u)
-    PFLAGS="-p mind-core"; for p in $pkgs; do [ "$p" = "mind-core" ] || PFLAGS="$PFLAGS -p $p"; done
+    # mind-evals ALWAYS runs: the behavioral suite (standard_suite_is_green) gates every merge, not
+    # just changes touching the evals crate — scoped-only testing let 3 regressions land invisibly.
+    PFLAGS="-p mind-core -p mind-evals"
+    for p in $pkgs; do { [ "$p" = "mind-core" ] || [ "$p" = "mind-evals" ]; } || PFLAGS="$PFLAGS -p $p"; done
     echo "==> test-gate (cargo test --release $PFLAGS)"
     if ! cargo test --release $PFLAGS 2>&1 | tail -15; then
       echo "auto-merge BLOCKED: tests failed — draft for human (no merge)"; AUTOMERGE=0

@@ -11710,14 +11710,15 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         out
     }
 
-    /// True when a venture wants its next stage (active + cooled ≥90s since last stage).
+    /// True when a venture wants its next stage (active + cooled ≥15min since last stage —
+    /// 90s pacing burned the whole daily envelope in half an hour, live incident).
     pub async fn forge_due(&self) -> bool {
         let all = self.forge_load().await;
         let now = chrono::Utc::now().timestamp_millis();
         all.as_object().map(|m| m.values().any(|v| {
             let st = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
             let up = v.get("updated_ms").and_then(|x| x.as_i64()).unwrap_or(0);
-            st != "shipped" && st != "killed" && now - up > 90_000
+            st != "shipped" && st != "killed" && now - up > 900_000
         })).unwrap_or(false)
     }
 
@@ -11729,8 +11730,18 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             let st = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
             st != "shipped" && st != "killed"
         }).map(|(k, _)| k.clone())?;
-        if !manual && !Self::treasury_try_draw("forge") {
-            return Some("⚒️ forge envelope dry today — venture resumes tomorrow.".into());
+        if !manual {
+            // Dry-day latch: say "envelope dry" ONCE, then stay silent until tomorrow — without
+            // this the poll loop re-fired the dry message every tick (live chat-flood incident).
+            let today = local_now().format("%Y-%m-%d").to_string();
+            let dry_day = self.memory.profile_get("forge_dry_day").await.ok().flatten().unwrap_or_default();
+            if dry_day == today {
+                return None;
+            }
+            if !Self::treasury_try_draw("forge") {
+                let _ = self.memory.profile_set("forge_dry_day", &today).await;
+                return Some("⚒️ forge envelope dry today — venture resumes tomorrow.".into());
+            }
         }
         let v = all[&id].clone();
         let stage = v.get("stage").and_then(|x| x.as_str()).unwrap_or("").to_string();

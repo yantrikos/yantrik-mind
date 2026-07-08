@@ -11801,7 +11801,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                      DOWN to that wall; ambition beyond it belongs in a 'later' note, not the MVP or the kill \
                      criteria. Kill criteria must be testable against the small artifact itself. Output ONLY JSON: \
                      {{\"name\":\"...\",\"one_liner\":\"...\",\"mvp_features\":[\"3-5 items\"],\
-                     \"kill_criteria\":[\"2-3 PRE-REGISTERED conditions under which this venture should be killed, testable against the artifact\"],\
+                     \"kill_criteria\":[\"2-3 PRE-REGISTERED kill conditions, each verifiable by a referee READING THE ARTIFACT TODAY (missing or broken feature, structural defect, spec violation) — NEVER future usage, adoption, or time-based conditions\"],\
                      \"stack\":\"html|python\",\"acceptance\":[\"3-4 concrete checks a referee can verify\"]}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };

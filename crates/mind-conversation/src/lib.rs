@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 128] = [
+    const CMDS: [&str; 129] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -371,7 +371,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
-        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge",
+        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9933,6 +9933,13 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         // NIGHT RESEARCH: the autonomous-scientist stage — discover, study, relate, adapt,
         // (bounded) adopt. Its line joins the morning board like any other shift work.
         let research_line = self.night_research_run().await;
+        // SELF-IDEATION: the inward turn — ideas mined from the day's own experience. Weekly-ish
+        // cadence (every 3rd day) keeps the goal queue from flooding with self-proposals.
+        let ideate_line = if (chrono::Utc::now().timestamp() / 86_400) % 3 == 0 {
+            Some(self.self_ideate().await)
+        } else {
+            None
+        };
 
         let standing = self.live_packets().await.len();
         let mut out = format!(
@@ -9948,6 +9955,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             out.push_str(&skipped.join("; "));
         }
         out.push_str(&format!("\n{research_line}"));
+        if let Some(il) = &ideate_line {
+            out.push_str(&format!("\n{}", il.lines().next().unwrap_or("")));
+        }
         out.push_str("\n`packets` to review.");
         // THE COMPOUNDING WIRE: regret clusters become self-build goals. >=2 misses on the same
         // subject = a capability gap, not bad luck — enqueue ONE typed goal into the (proven)
@@ -11953,6 +11963,89 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         self.forge_save(&all).await;
         Some(report)
+    }
+
+    /// SELF-IDEATION — improvement ideas mined from the mind's OWN experience, not imagination:
+    /// recent build outcomes (evolution.log), regret clusters, treasury skips (what it wanted to do
+    /// but couldn't afford), forge referee verdicts, and its studied self-architecture (codekb).
+    /// One panel pass ranks 3 ideas; the top grounded one auto-queues into the self-build loop.
+    pub async fn self_ideate(&self) -> String {
+        let state = std::path::PathBuf::from(
+            std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()));
+        // Evidence 1: what recent builds did (outcomes, failures)
+        let evo = std::fs::read_to_string(state.join("evolution.log")).unwrap_or_default();
+        let evo_tail: String = evo.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev()
+            .collect::<Vec<_>>().join("\n");
+        // Evidence 2: what the owner asked for that wasn't ready (regrets)
+        let regrets = self.memory.profile_get("regret_log").await.ok().flatten().unwrap_or_default();
+        let regrets: String = regrets.chars().take(1200).collect();
+        // Evidence 3: what the treasury refused (ambition beyond budget)
+        let budget = Self::budget_load();
+        let skipped = budget.get("skipped").cloned().unwrap_or_default().to_string();
+        // Evidence 4: what the forge referee said about its own products
+        let ventures = self.forge_load().await;
+        let verdicts: String = ventures.as_object().map(|m| m.values()
+            .filter_map(|v| v.get("rating").map(|r| r.to_string()))
+            .collect::<Vec<_>>().join("\n")).unwrap_or_default().chars().take(1200).collect();
+        // Evidence 5: its own studied architecture — it KNOWS what it is
+        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 60).await
+            .unwrap_or_default().into_iter()
+            .map(|b| format!("- {}", b.statement.replacen("codekbyantrikmind", "", 1)))
+            .collect::<Vec<_>>().join("\n").chars().take(6000).collect();
+        let p = format!(
+            "You are yantrik-mind reflecting on YOUR OWN lived experience to decide how to improve \
+             yourself. Ground every idea in the evidence — no generic wishes.\n\n\
+             RECENT BUILD OUTCOMES:\n{evo_tail}\n\nOWNER REGRETS (asked before I was ready):\n{regrets}\n\n\
+             TREASURY SKIPS (wanted but couldn't afford):\n{skipped}\n\nMY PRODUCT REFEREE VERDICTS:\n{verdicts}\n\n\
+             MY OWN ARCHITECTURE (studied):\n{self_facts}\n\n\
+             Propose exactly 3 improvements to yourself, ranked: at least ONE brand-new capability and \
+             at least ONE hardening/refinement of an existing feature. Each must cite which evidence \
+             motivates it, name the real module it lands in, be buildable as ONE focused PR with a test, \
+             and never touch mind-governance. Output ONLY JSON: \
+             {{\"ideas\":[{{\"title\":\"...\",\"evidence\":\"...\",\"goal\":\"one imperative buildable sentence\"}}]}}"
+        );
+        let cfg = GenerationConfig { max_tokens: 800, ..GenerationConfig::default() };
+        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("(self-ideation failed: {e})"),
+        };
+        let ideas: Vec<serde_json::Value> = Self::forge_json_grab(&resp)
+            .and_then(|j| j.get("ideas").and_then(|x| x.as_array()).cloned())
+            .unwrap_or_default();
+        if ideas.is_empty() {
+            return "🧠 Self-ideation produced nothing parseable this round.".into();
+        }
+        // Persist all ideas as beliefs (the idea ledger), auto-queue the top one if grounded + room.
+        let mut lines: Vec<String> = Vec::new();
+        for (i, idea) in ideas.iter().enumerate() {
+            let title = idea.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+            let ev = idea.get("evidence").and_then(|x| x.as_str()).unwrap_or("");
+            let _ = self.memory.remember_as_belief(BeliefAssertion {
+                statement: format!("selfidea [self-improvement] {title} — motivated by: {ev}"),
+                polarity: 1.0, weight: 2.0,
+                source_event: Some("self-ideate".into()), provenance: "reflected".into(),
+            }).await;
+            lines.push(format!("{}. **{title}** — {ev}", i + 1));
+        }
+        let mut queued = String::new();
+        if let Some(goal) = ideas.first().and_then(|x| x.get("goal")).and_then(|x| x.as_str()) {
+            let grounded = goal.contains("mind-") && goal.len() > 40 && !goal.to_lowercase().contains("governance");
+            let goals_path = state.join("selfbuild-goals.txt");
+            let qlen = std::fs::read_to_string(&goals_path)
+                .map(|c| c.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).count())
+                .unwrap_or(99);
+            if grounded && qlen < 8 {
+                use std::io::Write as _;
+                if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(&goals_path) {
+                    let _ = writeln!(fh, "{goal}");
+                    queued = format!("\n\n→ Top idea queued for self-build: {}", goal.chars().take(180).collect::<String>());
+                }
+            } else {
+                queued = format!("\n\n→ Not auto-queued ({}) — `forge` it or queue manually.",
+                    if !grounded { "goal too vague/ungrounded" } else { "self-build queue is full" });
+            }
+        }
+        format!("🧠 Self-ideation (from my own logs, regrets, verdicts, and studied architecture):\n{}{queued}", lines.join("\n"))
     }
 
     async fn research_topics(&self) -> Vec<String> {
@@ -17771,6 +17864,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "code" | "repos" | "repo" => self.code_cmd(&rest).await,
             "paper" | "papers" => self.paper_cmd(&rest).await,
             "forge" => self.forge_cmd(&rest).await,
+            "ideate" => self.self_ideate().await,
             "reviewer" | "review" if !rest.trim().is_empty() => self.research_ops_run("review", rest.trim()).await,
             "researchops" | "ro" if !rest.trim().is_empty() => {
                 let mut it = rest.trim().splitn(2, ' ');

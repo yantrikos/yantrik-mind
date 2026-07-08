@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod plugins;
 pub use plugins::{PluginRegistry, PluginSpec, SecurityLevel};
+mod emotion;
 
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
@@ -20751,6 +20752,10 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // NIGHT SHIFT regret baseline: classify this ask against the forward spine (deterministic,
         // a few KV reads). Week 1 measures the untreated world; the kernel is judged by the drop.
         self.regret_classify(user_text).await;
+        // Emotional-continuity ledger: infer coarse valence from the message, persist a rolling
+        // 14-day baseline per person, and record a wellbeing Tension when a 3-day flat-or-negative
+        // deviation is detected (surfaced by proactive_digest; rate-limited to once per 3 days).
+        let _ = emotion::record_turn(self.memory.as_ref(), &id.owner, user_text).await;
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.
         if let Some(reply) = self.handle_action(user_text).await {

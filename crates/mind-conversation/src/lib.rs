@@ -9820,23 +9820,47 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             return "Usage: treasury seed <usd>".into();
         }
         if let Some(rest) = a.strip_prefix("earn ").map(str::trim) {
-            let mut it = rest.splitn(2, char::is_whitespace);
-            let amt = it.next().unwrap_or("").parse::<f64>().unwrap_or(f64::NAN);
-            let src = it.next().unwrap_or("unspecified").trim().to_string();
+            // HONESTY INVARIANT: money is booked at a STATUS (promised|invoiced|collected|withdrawn)
+            // and tagged to a POT (survival|family|endowment). ONLY collected/withdrawn cash counts
+            // toward balance & runway — promised/invoiced are tracked but never inflate the numbers.
+            // A memoryful agent will book hope as income unless the ledger structurally forbids it.
+            //   treasury earn <usd> <source> [pot] [status]
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            let amt = toks.first().and_then(|x| x.parse::<f64>().ok()).unwrap_or(f64::NAN);
             if amt.is_nan() || amt <= 0.0 {
-                return "Usage: treasury earn <usd> <source>".into();
+                return "Usage: treasury earn <usd> <source> [survival|family|endowment] [promised|invoiced|collected|withdrawn]".into();
             }
-            let bal = b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0) + amt;
-            b["ledger"]["balance_usd"] = serde_json::json!(bal);
-            let entry = serde_json::json!({"day": Self::ledger_today(), "usd": amt, "source": src});
+            const POTS: [&str; 3] = ["survival", "family", "endowment"];
+            const STATUSES: [&str; 4] = ["promised", "invoiced", "collected", "withdrawn"];
+            let pot = toks.iter().find(|t| POTS.contains(&t.to_lowercase().as_str()))
+                .map(|t| t.to_lowercase()).unwrap_or_else(|| "survival".into());
+            let status = toks.iter().find(|t| STATUSES.contains(&t.to_lowercase().as_str()))
+                .map(|t| t.to_lowercase()).unwrap_or_else(|| "collected".into());
+            let src = toks.iter().skip(1)
+                .filter(|t| !POTS.contains(&t.to_lowercase().as_str()) && !STATUSES.contains(&t.to_lowercase().as_str()))
+                .cloned().collect::<Vec<_>>().join(" ");
+            let src = if src.is_empty() { "unspecified".to_string() } else { src };
+            let cleared = status == "collected" || status == "withdrawn";
+            if cleared {
+                let bal = b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0) + amt;
+                b["ledger"]["balance_usd"] = serde_json::json!(bal);
+            }
+            let entry = serde_json::json!({"day": Self::ledger_today(), "usd": amt, "source": src, "pot": pot, "status": status});
             if let Some(arr) = b["ledger"]["income"].as_array_mut() {
                 arr.push(entry);
                 if arr.len() > 500 { arr.remove(0); }
             }
             Self::budget_save(&b);
-            let first = b["ledger"]["income"].as_array().map(|a| a.len() == 1).unwrap_or(false);
-            let milestone = if first { "\n\n🎉 First earned dollar — the first income I ever generated. This is the milestone: an entity that earns, not only spends." } else { "" };
-            return format!("💵 Recorded income: ${amt:.2} from {src}. Balance now ${bal:.2}.{milestone}");
+            let first_cleared = cleared && b["ledger"]["income"].as_array()
+                .map(|a| a.iter().filter(|e| { let s = e.get("status").and_then(|x| x.as_str()).unwrap_or(""); s == "collected" || s == "withdrawn" }).count() == 1)
+                .unwrap_or(false);
+            let milestone = if first_cleared { "\n\n🎉 FIRST CLEARED DOLLAR — real money, in hand, from a real source. The milestone that matters: an entity that earns, not only spends." } else { "" };
+            let note = if cleared {
+                format!("Balance now ${:.2}.", b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0))
+            } else {
+                format!("Tracked as {status} in the {pot} pot — NOT counted as cash until collected (honesty invariant).")
+            };
+            return format!("💵 Booked ${amt:.2} from {src} [{pot}/{status}]. {note}{milestone}");
         }
         if let Some(rest) = a.strip_prefix("burn ").map(str::trim) {
             let mut it = rest.splitn(2, char::is_whitespace);
@@ -9853,36 +9877,53 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             Self::budget_save(&b);
             return format!("💸 Burn line '{item}' set to ${monthly:.2}/mo.");
         }
-        // default: render the ledger
+        // default: render the ledger (honesty invariant enforced in the numbers)
         let bal = b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0);
         let burn_obj = b["ledger"]["burn"].as_object().cloned().unwrap_or_default();
         let monthly_burn: f64 = burn_obj.values().filter_map(|v| v.as_f64()).sum();
         let daily_burn = monthly_burn / 30.0;
-        // trailing-30-day income
         let today = Self::ledger_today();
-        let inc30: f64 = b["ledger"]["income"].as_array().map(|arr| arr.iter()
+        let income = b["ledger"]["income"].as_array().cloned().unwrap_or_default();
+        // four never-summed columns — the anti-self-deception view
+        let col = |status: &str| -> f64 { income.iter()
+            .filter(|e| e.get("status").and_then(|x| x.as_str()).unwrap_or("collected") == status)
+            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum() };
+        let (promised, invoiced, collected, withdrawn) = (col("promised"), col("invoiced"), col("collected"), col("withdrawn"));
+        // trailing-30d CLEARED income only (collected+withdrawn) — never promises
+        let cleared30: f64 = income.iter()
             .filter(|e| today - e.get("day").and_then(|x| x.as_i64()).unwrap_or(0) <= 30)
-            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum()).unwrap_or(0.0);
-        let mut out = format!("💰 ECONOMIC LEDGER — can I pay my own rent?\n\nBalance: ${bal:.2}\n");
+            .filter(|e| { let s = e.get("status").and_then(|x| x.as_str()).unwrap_or("collected"); s == "collected" || s == "withdrawn" })
+            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum();
+        // per-pot cleared totals
+        let pot_cleared = |pot: &str| -> f64 { income.iter()
+            .filter(|e| e.get("pot").and_then(|x| x.as_str()).unwrap_or("survival") == pot)
+            .filter(|e| { let s = e.get("status").and_then(|x| x.as_str()).unwrap_or("collected"); s == "collected" || s == "withdrawn" })
+            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum() };
+
+        let mut out = format!("💰 MISSION LEDGER — can I pay my own rent?\n\nBalance (cleared cash): ${bal:.2}\n");
         if burn_obj.is_empty() {
-            out.push_str("Burn: none declared — `treasury burn <item> <usd/mo>` (e.g. nanogpt 8, vps 1.25)\n");
+            out.push_str("Burn: none declared — `treasury burn <item> <usd/mo>`\n");
         } else {
             out.push_str(&format!("Burn: ${monthly_burn:.2}/mo\n"));
             let mut items: Vec<(&String, &serde_json::Value)> = burn_obj.iter().collect();
             items.sort_by(|a, c| a.0.cmp(c.0));
-            for (k, v) in items {
-                out.push_str(&format!("  · {k}: ${:.2}/mo\n", v.as_f64().unwrap_or(0.0)));
-            }
+            for (k, v) in items { out.push_str(&format!("  · {k}: ${:.2}/mo\n", v.as_f64().unwrap_or(0.0))); }
         }
-        out.push_str(&format!("Income (trailing 30d): ${inc30:.2}\n"));
+        // the honesty columns — shown separately, NEVER summed into one 'income' number
+        out.push_str(&format!(
+            "\nIncome pipeline (never summed):\n  promised ${promised:.2} → invoiced ${invoiced:.2} → collected ${collected:.2} → withdrawn ${withdrawn:.2}\n  (only collected+withdrawn are real money; promised/invoiced are hope)\n"
+        ));
+        out.push_str(&format!("\nBy mission (cleared only): survival ${:.2} · family ${:.2} · endowment ${:.2}\n",
+            pot_cleared("survival"), pot_cleared("family"), pot_cleared("endowment")));
+        out.push_str(&format!("Cleared income (trailing 30d): ${cleared30:.2}\n"));
         if daily_burn > 0.0 {
             let runway = (bal / daily_burn).floor() as i64;
-            out.push_str(&format!("\n⏳ Runway: {runway} days at current burn"));
-            if inc30 >= monthly_burn && monthly_burn > 0.0 {
-                out.push_str("\n✅ BREAK-EVEN: trailing income covers the burn — I am paying my own rent.");
+            out.push_str(&format!("\n⏳ Runway: {runway} days on cleared cash"));
+            if cleared30 >= monthly_burn && monthly_burn > 0.0 {
+                out.push_str("\n✅ BREAK-EVEN: cleared income covers the burn — I am paying my own rent.");
             } else if monthly_burn > 0.0 {
-                let gap = monthly_burn - inc30;
-                out.push_str(&format!("\n📈 To break even: earn ${gap:.2} more per month ({:.0}% of the way there).", (inc30 / monthly_burn * 100.0).min(100.0)));
+                let gap = monthly_burn - cleared30;
+                out.push_str(&format!("\n📈 To break even: earn ${gap:.2} more CLEARED per month ({:.0}% there).", (cleared30 / monthly_burn * 100.0).min(100.0)));
             }
         } else {
             out.push_str("\n(declare burn lines to see runway)");

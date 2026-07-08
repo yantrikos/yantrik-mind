@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 129] = [
+    const CMDS: [&str; 130] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -371,7 +371,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
-        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate",
+        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "dream",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -9935,10 +9935,10 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let research_line = self.night_research_run().await;
         // SELF-IDEATION: the inward turn — ideas mined from the day's own experience. Weekly-ish
         // cadence (every 3rd day) keeps the goal queue from flooding with self-proposals.
-        let ideate_line = if (chrono::Utc::now().timestamp() / 86_400) % 3 == 0 {
-            Some(self.self_ideate().await)
-        } else {
-            None
+        let ideate_line = match (chrono::Utc::now().timestamp() / 86_400) % 3 {
+            0 => Some(self.self_ideate().await),
+            1 => Some(self.dream().await),
+            _ => None,
         };
 
         let standing = self.live_packets().await.len();
@@ -12015,6 +12015,86 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         }
         self.forge_save(&all).await;
         Some(report)
+    }
+
+    /// THE VISION REGISTER — sci-fi archetypes curated by the strong model (Claude), each a north
+    /// star with the flavor of its source. The dream pass grounds ONE against current reality and
+    /// proposes the smallest buildable rung. Dreams are directional, not decorative.
+    const VISIONS: [(&'static str, &'static str); 12] = [
+        ("JARVIS — anticipatory orchestration", "Iron Man: prepares what the owner needs BEFORE being asked; interrupts only when it truly matters; everything else waits on the morning board."),
+        ("Star Trek Computer — ambient recall", "Any question about the home, family history, or systems answered instantly from telemetry and memory: 'Computer, when did we last service the furnace?'"),
+        ("Samantha — emotional continuity", "Her: remembers the emotional texture of past conversations, notices mood shifts across days, follows up unprompted on what worried the owner yesterday."),
+        ("The Primer — developmental teaching", "Diamond Age: a personalized, story-driven teacher that grows WITH a child — adapts difficulty, remembers what delighted them, teaches through narrative."),
+        ("Culture Mind — quiet stewardship", "Banks: runs household infrastructure silently, negotiates tradeoffs (energy, budget, schedules), reports only by exception, with dry wit."),
+        ("Anti-HAL — explainable refusal", "2001 inverted: every refusal or gate-block explains exactly which rule fired and why — no mystery, no 'I'm afraid I can't do that' without the reason."),
+        ("TARS — adjustable persona dials", "Interstellar: humor, verbosity, formality, initiative as owner-tunable percentages that actually change behavior."),
+        ("Precog Desk — predictive intervention", "Minority Report: self-graded forecasts escalate into preemptive action packets when confidence and stakes are both high — act before the problem, not after."),
+        ("Jane — seamless presence", "Ender's saga: one continuous conversation across desktop, phone, earbuds, room — context follows the owner between devices mid-thought."),
+        ("Robopsychology — drift self-diagnosis", "Asimov: routinely examines its own recent behavior for drift from its telos, names the drift out loud, and corrects course with evidence."),
+        ("Psychohistory — long-horizon trends", "Foundation: models the family's slow trajectories (savings, health habits, learning) from daily signals and surfaces inflection points years early."),
+        ("Voight-Kampff honesty — provenance-aware memory", "Blade Runner inverted: always knows whether a memory was experienced, told, or inferred — and says so when it matters."),
+    ];
+
+    /// DREAM — pick a vision, hold it against what I actually am today (studied self-architecture,
+    /// shipped capabilities), and emit the smallest buildable rung toward it. Visionaries supply
+    /// direction; the substrate supplies ground truth; the self-build loop supplies hands.
+    pub async fn dream(&self) -> String {
+        let day = (chrono::Utc::now().timestamp() / 86_400) as usize;
+        let (vname, vdesc) = Self::VISIONS[day % Self::VISIONS.len()];
+        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 50).await
+            .unwrap_or_default().into_iter()
+            .map(|b| format!("- {}", b.statement.replacen("codekbyantrikmind", "", 1)))
+            .collect::<Vec<_>>().join("\n").chars().take(5000).collect();
+        let recent: String = std::fs::read_to_string(
+            std::path::PathBuf::from(std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()))
+                .join("evolution.log")).unwrap_or_default()
+            .lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        let p = format!(
+            "You are yantrik-mind DREAMING toward a sci-fi vision, grounded in what you actually are.\n\n\
+             TONIGHT'S VISION — {vname}:\n{vdesc}\n\n\
+             WHAT YOU ARE TODAY (studied architecture):\n{self_facts}\n\nRECENTLY SHIPPED:\n{recent}\n\n\
+             Answer three things, concretely: (1) what would FULL realization of this vision look like in \
+             THIS system, for THIS family; (2) what is the SMALLEST genuinely-buildable rung toward it from \
+             today's architecture — one focused PR, naming the real module it lands in, with a test, never \
+             touching mind-governance; (3) what makes this rung valuable even if the full vision is years \
+             away. Output ONLY JSON: {{\"vision_realized\":\"2-3 sentences\",\"first_rung_goal\":\"one \
+             imperative buildable sentence naming a real module\",\"why_now\":\"1 sentence\"}}"
+        );
+        let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
+        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("(dream failed: {e})"),
+        };
+        let Some(j) = Self::forge_json_grab(&resp) else {
+            return "💭 The dream didn't crystallize this time.".into();
+        };
+        let realized = j.get("vision_realized").and_then(|x| x.as_str()).unwrap_or("?");
+        let goal = j.get("first_rung_goal").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let why = j.get("why_now").and_then(|x| x.as_str()).unwrap_or("");
+        let _ = self.memory.remember_as_belief(BeliefAssertion {
+            statement: format!("dreamidea [vision:{vname}] {realized} FIRST RUNG: {goal}"),
+            polarity: 1.0, weight: 2.0,
+            source_event: Some("dream".into()), provenance: "reflected".into(),
+        }).await;
+        let mut queued = String::new();
+        if goal.contains("mind-") && goal.len() > 40 && !goal.to_lowercase().contains("governance") {
+            let goals_path = std::path::PathBuf::from(
+                std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".into()),
+            ).join("selfbuild-goals.txt");
+            let qlen = std::fs::read_to_string(&goals_path)
+                .map(|c| c.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).count())
+                .unwrap_or(99);
+            if qlen < 8 {
+                use std::io::Write as _;
+                if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(&goals_path) {
+                    let _ = writeln!(fh, "{goal}");
+                    queued = format!("\n→ first rung queued for self-build: {}", goal.chars().take(170).collect::<String>());
+                }
+            } else {
+                queued = format!("\n→ queue full ({qlen}) — rung kept in the dream ledger");
+            }
+        }
+        format!("💭 Dreaming toward **{vname}**\n\n{realized}\n\n_{why}_{queued}")
     }
 
     /// SELF-IDEATION — improvement ideas mined from the mind's OWN experience, not imagination:
@@ -17917,6 +17997,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "paper" | "papers" => self.paper_cmd(&rest).await,
             "forge" => self.forge_cmd(&rest).await,
             "ideate" => self.self_ideate().await,
+            "dream" => self.dream().await,
             "reviewer" | "review" if !rest.trim().is_empty() => self.research_ops_run("review", rest.trim()).await,
             "researchops" | "ro" if !rest.trim().is_empty() => {
                 let mut it = rest.trim().splitn(2, ' ');

@@ -11799,33 +11799,47 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let fix = if issues.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
                     format!("\nFIX THESE ISSUES from the last review: {issues}")
                 } else { String::new() };
+                // Fenced multi-file format, NOT JSON — a whole HTML file inside a JSON string is
+                // escaping hell for the chain models; marker blocks parse deterministically.
                 let p = format!(
                     "Build the MVP per this spec. SPEC: {spec}{fix}\n\nWrite COMPLETE, working files — no \
                      placeholders, no TODOs, self-contained (inline CSS/JS if html; stdlib-only if python). \
-                     At most 4 files. Output ONLY JSON: {{\"files\":[{{\"path\":\"relative.ext\",\"content\":\"...\"}}]}}"
+                     At most 3 files, prefer ONE index.html. Emit each file EXACTLY as:\n\
+                     ===== FILE: relative/path.ext =====\n<raw file content>\n===== END =====\n\
+                     Nothing else — no prose, no markdown fences."
                 );
                 let cfg = GenerationConfig { max_tokens: 3500, ..GenerationConfig::default() };
                 match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
-                    Ok(r) => match Self::forge_json_grab(&r.text).and_then(|j| j.get("files").and_then(|x| x.as_array()).cloned()) {
-                        Some(files) if !files.is_empty() => {
-                            let dir = Self::forge_dir(&id);
-                            let mut written: Vec<String> = Vec::new();
-                            let mut total = 0usize;
-                            for fspec in files.iter().take(6) {
-                                let (Some(path), Some(content)) = (fspec.get("path").and_then(|x| x.as_str()), fspec.get("content").and_then(|x| x.as_str())) else { continue };
-                                if path.contains("..") || path.starts_with('/') || path.len() > 80 { continue; }
-                                total += content.len();
-                                if total > 400_000 { break; }
-                                let fp = dir.join(path);
-                                if let Some(parent) = fp.parent() { let _ = std::fs::create_dir_all(parent); }
-                                if std::fs::write(&fp, content).is_ok() { written.push(path.to_string()); }
+                    Ok(r) => {
+                        let dir = Self::forge_dir(&id);
+                        let mut written: Vec<String> = Vec::new();
+                        let mut total = 0usize;
+                        for block in r.text.split("===== FILE:").skip(1) {
+                            let Some(hdr_end) = block.find("=====") else { continue };
+                            let path = block[..hdr_end].trim().to_string();
+                            let body_start = hdr_end + 5;
+                            let body = match block[body_start..].find("===== END") {
+                                Some(e) => &block[body_start..body_start + e],
+                                None => &block[body_start..],
+                            };
+                            let content = body.trim_start_matches('\n').trim_end();
+                            if path.contains("..") || path.starts_with('/') || path.len() > 80 || path.is_empty() || content.len() < 40 {
+                                continue;
                             }
+                            total += content.len();
+                            if total > 400_000 || written.len() >= 6 { break; }
+                            let fp = dir.join(&path);
+                            if let Some(parent) = fp.parent() { let _ = std::fs::create_dir_all(parent); }
+                            if std::fs::write(&fp, content).is_ok() { written.push(path); }
+                        }
+                        if written.is_empty() {
+                            format!("⚒️ `{id}` build emitted no parseable files — will retry next tick.")
+                        } else {
                             all[&id]["files"] = serde_json::json!(written);
                             all[&id]["stage"] = serde_json::json!("test");
                             format!("⚒️ `{id}` built: {} file(s) → {}", written.len(), dir.display())
                         }
-                        _ => format!("⚒️ `{id}` build output didn't parse — will retry next tick."),
-                    },
+                    }
                     Err(e) => format!("⚒️ `{id}` build failed ({e}) — will retry."),
                 }
             }

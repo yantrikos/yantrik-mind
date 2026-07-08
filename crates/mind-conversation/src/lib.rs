@@ -353,7 +353,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 130] = [
+    const CMDS: [&str; 131] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -371,7 +371,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
-        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "dream",
+        "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "envision", "vision",
     ];
     CMDS.contains(&first.as_str())
 }
@@ -17997,7 +17997,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "paper" | "papers" => self.paper_cmd(&rest).await,
             "forge" => self.forge_cmd(&rest).await,
             "ideate" => self.self_ideate().await,
-            "dream" => self.dream().await,
+            "envision" | "vision" => self.dream().await,
             "reviewer" | "review" if !rest.trim().is_empty() => self.research_ops_run("review", rest.trim()).await,
             "researchops" | "ro" if !rest.trim().is_empty() => {
                 let mut it = rest.trim().splitn(2, ' ');

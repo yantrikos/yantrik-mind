@@ -411,4 +411,23 @@ pub trait MemoryFacade: Send + Sync {
     async fn belief_count(&self) -> Result<u64> {
         Ok(0)
     }
+
+    // ── engine demand (cognitive-urgency scoring for the proactive digest) ──────────────────────
+    /// How urgently does the mind need to recall / verify the given topic? Derived from the
+    /// cumulative confidence-deficit of matching beliefs: a topic backed by many uncertain or
+    /// sparse beliefs scores closer to 1.0; a well-understood topic scores near 0.0. Returns [0,1].
+    /// Default: 0.0 (no engine data — callers must degrade gracefully to raw pressure order).
+    async fn recall_demand_for(&self, _about: &str) -> Result<f64> {
+        Ok(0.0)
+    }
+
+    /// Engine demand — batch variant: one [0,1] demand score per entry in `topics`, in the same
+    /// order. Default: delegates to `recall_demand_for` per entry; override for efficiency.
+    async fn knowledge_gaps(&self, topics: &[String]) -> Result<Vec<f64>> {
+        let mut out = Vec::with_capacity(topics.len());
+        for t in topics {
+            out.push(self.recall_demand_for(t).await?);
+        }
+        Ok(out)
+    }
 }

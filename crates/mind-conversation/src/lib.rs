@@ -3805,14 +3805,25 @@ impl ConversationEngine {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.7);
         let open = self.memory.open_tensions(12).await.unwrap_or_default();
-        let mut winners: Vec<_> = open.into_iter().filter(|t| t.pressure >= min_pressure).collect();
+        let winners: Vec<_> = open.into_iter().filter(|t| t.pressure >= min_pressure).collect();
         if winners.is_empty() {
             return None; // nothing clears the bar → stay silent (the default)
         }
-        winners.sort_by(|a, b| b.pressure.partial_cmp(&a.pressure).unwrap_or(std::cmp::Ordering::Equal));
-        winners.truncate(3);
+        // Re-rank by cognitive urgency: base pressure × (1 + engine demand for the topic). Tensions
+        // whose subject overlaps with low-confidence beliefs score higher — what the mind most needs
+        // to address surfaces first rather than treating all passing tensions as pressure-equivalent.
+        let topics: Vec<String> = winners.iter().map(|t| t.about.clone()).collect();
+        let demands = self.memory.knowledge_gaps(&topics).await.unwrap_or_else(|_| vec![0.0; topics.len()]);
+        let mut scored: Vec<(usize, f64)> = winners
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i, t.pressure * (1.0 + demands.get(i).copied().unwrap_or(0.0))))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(3);
         let mut s = String::from("A few things surfaced while you were away:");
-        for t in &winners {
+        for (idx, _urgency) in &scored {
+            let t = &winners[*idx];
             let tag = match t.kind {
                 mind_types::TensionKind::Contradiction => "possible contradiction",
                 mind_types::TensionKind::Staleness => "may be going stale",
@@ -22463,6 +22474,49 @@ mod tests {
         assert!(digest.contains("X is true"), "digest must name the urge: {digest}");
         // already surfaced → a second call stays silent (no repeats)
         assert!(conv.proactive_digest().await.is_none(), "a surfaced urge must not repeat");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn proactive_digest_engine_demand_reranks_by_cognitive_urgency() {
+        // Tension A has LOWER raw pressure than B, but its topic overlaps a low-confidence belief.
+        // The engine demand score must boost A's cognitive urgency past B's so it surfaces first.
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+
+        // Plant a low-confidence belief about "alpha" → high recall demand for that topic.
+        // Negative polarity + high weight → sigmoid(log_odds) ≈ 0.047, uncertainty ≈ 0.953.
+        memarc
+            .remember_as_belief(BeliefAssertion {
+                statement: "alpha decay rate is highly uncertain and unconfirmed".to_string(),
+                polarity: -1.0,
+                weight: 3.0,
+                source_event: None,
+                provenance: "test".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // A: lower raw pressure (0.72) but its about-text overlaps the low-confidence belief.
+        memarc
+            .record_tension(mind_types::TensionKind::VerificationDebt, 0.72, "alpha decay rate needs verification")
+            .await
+            .unwrap();
+        // B: higher raw pressure (0.75) but unrelated topic → no demand boost.
+        memarc
+            .record_tension(mind_types::TensionKind::Contradiction, 0.75, "zeta flux contradicts prior model")
+            .await
+            .unwrap();
+
+        let digest = conv.proactive_digest().await.expect("tensions clear the bar");
+        // cognitive_urgency_A = 0.72 × (1 + ~0.49) ≈ 1.07  >  cognitive_urgency_B = 0.75 × 1.0
+        let alpha_pos = digest.find("alpha").expect("alpha tension must appear: {digest}");
+        let zeta_pos = digest.find("zeta").expect("zeta tension must appear: {digest}");
+        assert!(
+            alpha_pos < zeta_pos,
+            "engine demand must rank alpha (lower pressure, high demand) before zeta (higher pressure, no demand): {digest}"
+        );
     }
 
     #[test]

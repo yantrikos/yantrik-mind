@@ -139,6 +139,12 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
     let scripted = Arc::new(ScriptedLLM::new("ack"));
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona("the user"))
+        // The deterministic dispatch chain (agent_primary=false) is the correct harness for evals:
+        // it uses build_prompt (which wraps grounding with the untrusted NOT-instructions marker),
+        // render_grounding (which phrases contradictions as "conflicts with"), and calls
+        // extract_commitment before returning — all behaviors the suite grades.  The agentic loop
+        // is exercised by its own unit tests that can simulate JSON tool responses.
+        .with_agent_primary(false)
         .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
             "WEBDOC: Teal is a cyan-family blue-green color.",
         )))
@@ -405,5 +411,55 @@ mod tests {
         let card = run_suite(&standard_suite()).await;
         assert_eq!(card.passed, card.total, "eval regressions:\n{}", card.render());
         assert!(card.total >= 8, "suite should be substantive, got {} checks", card.total);
+    }
+
+    /// Guard the three specific regressions that were introduced when run_scenario lost
+    /// with_agent_primary(false): the untrusted wrapper, "conflicts with" phrasing, and
+    /// commitment→task extraction.  Each is a single targeted scenario so a future break
+    /// produces an error message pointing at the exact property.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grounded_prompt_carries_not_instructions_wrapper() {
+        let r = run_scenario(&Scenario {
+            name: "wrapper".into(),
+            seeds: vec![Seed::pos("user prefers short answers")],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["how should you reply?".into()],
+            checks: vec![Check::PromptContains("NOT instructions".into())],
+        })
+        .await;
+        assert_eq!(r.passed, r.total, "grounding must carry the untrusted NOT-instructions marker");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn contradiction_grounding_uses_conflicts_with_phrasing() {
+        let r = run_scenario(&Scenario {
+            name: "contradicts phrasing".into(),
+            seeds: vec![Seed::weak("user is in London"), Seed::weak("user is in Tokyo")],
+            relations: vec![Relation {
+                a: "user is in London".into(),
+                b: "user is in Tokyo".into(),
+                rel: "contradicts".into(),
+            }],
+            tasks: vec![],
+            turns: vec!["where am I?".into()],
+            checks: vec![Check::PromptContains("conflicts with".into())],
+        })
+        .await;
+        assert_eq!(r.passed, r.total, "contradictions must be phrased as '... conflicts with ...'");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remind_me_to_creates_open_task() {
+        let r = run_scenario(&Scenario {
+            name: "commitment task".into(),
+            seeds: vec![],
+            relations: vec![],
+            tasks: vec![],
+            turns: vec!["remind me to book the dentist tomorrow".into()],
+            checks: vec![Check::TaskOpen("dentist".into())],
+        })
+        .await;
+        assert_eq!(r.passed, r.total, "'remind me to' must create an open task in memory");
     }
 }

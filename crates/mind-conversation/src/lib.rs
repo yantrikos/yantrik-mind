@@ -11773,8 +11773,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 let rs = v.get("research").cloned().unwrap_or_default();
                 let p = format!(
                     "Write the PRD for this venture as JSON.\nIDEA: {idea}\nDIRECTION: {bs}\nRESEARCH: {rs}\n\n\
-                     The product must be buildable as a SMALL self-contained artifact (a single-page web app \
-                     or a small Python tool — no external paid services). Output ONLY JSON: \
+                     FEASIBILITY WALL (non-negotiable): the MVP must be a SMALL self-contained artifact — a \
+                     single-page web app (localStorage only, NO WebRTC, NO servers, NO external APIs) or a \
+                     stdlib-only Python tool — deliverable in under ~500 lines total. Scope the feature list \
+                     DOWN to that wall; ambition beyond it belongs in a 'later' note, not the MVP or the kill \
+                     criteria. Kill criteria must be testable against the small artifact itself. Output ONLY JSON: \
                      {{\"name\":\"...\",\"one_liner\":\"...\",\"mvp_features\":[\"3-5 items\"],\
                      \"kill_criteria\":[\"2-3 PRE-REGISTERED conditions under which this venture should be killed, testable against the artifact\"],\
                      \"stack\":\"html|python\",\"acceptance\":[\"3-4 concrete checks a referee can verify\"]}}"
@@ -11808,7 +11811,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                      ===== FILE: relative/path.ext =====\n<raw file content>\n===== END =====\n\
                      Nothing else — no prose, no markdown fences."
                 );
-                let cfg = GenerationConfig { max_tokens: 3500, ..GenerationConfig::default() };
+                let cfg = GenerationConfig { max_tokens: 7500, ..GenerationConfig::default() };
                 match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
                     Ok(r) => {
                         let dir = Self::forge_dir(&id);

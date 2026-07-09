@@ -292,7 +292,7 @@ async def ws_voice(ws: WebSocket):
         await send_json({"type": "thinking"})
         t1 = _t.monotonic()
         try:
-            reply = await asyncio.to_thread(_brain_call, transcript, ws_person)
+            reply = await asyncio.to_thread(_brain_call, transcript, ws_person, True)  # fast path for voice
         except Exception as e:
             await send_json({"type": "error", "text": f"brain: {e}"})
             return
@@ -382,12 +382,15 @@ async def ws_voice(ws: WebSocket):
             pass
 
 
-def _brain_call(text: str, person: str | None = None) -> str:
+def _brain_call(text: str, person: str | None = None, fast: bool = False) -> str:
     # Forward the speaker's identity so the brain scopes memory per-person (read-isolation).
+    # fast=True → X-YM-Fast: the single-call grounded path (voice wants snappy, not the agent loop).
     headers = {"Content-Type": "text/plain"}
     if person:
         headers["X-YM-Person"] = person
         headers["X-YM-Channel"] = "app"
+    if fast:
+        headers["X-YM-Fast"] = "1"
     req = urllib.request.Request(BRAIN, data=text.encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=150) as r:
         return r.read().decode("utf-8", "replace").strip()

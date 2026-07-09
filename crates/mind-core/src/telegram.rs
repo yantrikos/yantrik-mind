@@ -486,15 +486,27 @@ fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt
         .lines()
         .find_map(|l| l.to_ascii_lowercase().strip_prefix("x-ym-person:").map(|v| v.trim().to_string()))
         .filter(|p| !p.is_empty());
+    // Voice/quick turns set X-YM-Fast: 1 → the single-call grounded path (fast_reply), skipping the
+    // agentic loop. The difference between snappy spoken conversation and multi-second dead air.
+    let fast = head
+        .lines()
+        .any(|l| l.to_ascii_lowercase().starts_with("x-ym-fast:") && l.contains('1'));
 
     let (status, reply) = match (method, path.split('?').next().unwrap_or(path)) {
         // `ym <name> <args>` — the top-level CLI router (core commands + skill-registered commands +
         // chat fallback). Data-driven: a new capability skill becomes a new `ym` command, no recompile.
         ("POST", "/cli") if !body.is_empty() => ("200 OK", rt.block_on(conv.cli_dispatch(&body))),
         ("POST", "/chat") if !body.is_empty() => {
-            let r = match &person {
-                Some(p) => rt.block_on(conv.handle_turn_as(&body, mind_conversation::TurnIdentity::new(p.clone(), false))),
-                None => rt.block_on(conv.handle_turn(&body)),
+            let ident = mind_conversation::TurnIdentity::new(
+                person.clone().unwrap_or_else(|| mind_conversation::TurnIdentity::primary().owner),
+                false,
+            );
+            let r = if fast {
+                rt.block_on(conv.fast_reply(&body, ident))
+            } else if person.is_some() {
+                rt.block_on(conv.handle_turn_as(&body, ident))
+            } else {
+                rt.block_on(conv.handle_turn(&body))
             }.unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
         }

@@ -20832,6 +20832,37 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         self.handle_turn_as(user_text, TurnIdentity::primary()).await
     }
 
+    /// FAST conversational reply for VOICE: exactly ONE grounded LLM call — no agent loop, no tool
+    /// selection, no onboarding/whois/github machinery. The difference between a snappy spoken turn
+    /// and the multi-call agentic path (the "feels like 2015" latency). Still grounds in typed
+    /// memory and appends the transcript (background consolidation catches it later). Short, spoken,
+    /// no markdown. Falls back to a graceful line rather than erroring mid-conversation.
+    pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        let scope = id.write_scope();
+        let recent = self.memory.recent_messages_as(8, id.viewer()).await.unwrap_or_default();
+        let ws = self.memory.hydrate_working_set_as(user_text, id.viewer()).await.unwrap_or_default();
+        let grounding = Self::render_grounding(&ws);
+        let recent_text: String = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "{grounding}\n\nRecent conversation:\n{recent_text}\n\nUser (speaking aloud): {user_text}\n\n\
+             Reply as if SPEAKING — 1 to 3 short natural sentences, no markdown, no lists, no headings. \
+             Ground in what you actually know; if you don't know, say so briefly and ask one short question. \
+             Never invent facts about people or events you have no stored knowledge of."
+        );
+        let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
+        let reply = match self
+            .inference
+            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .await
+        {
+            Ok(r) => r.text.trim().to_string(),
+            Err(_) => "Sorry — I couldn't think of a reply just now. Say that again?".to_string(),
+        };
+        let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
+        let _ = self.memory.append_message_scoped("assistant", &reply, scope).await;
+        Ok(reply)
+    }
+
     /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged

@@ -21,7 +21,8 @@ import urllib.request
 import numpy as np
 import soundfile as sf
 import uvicorn
-from fastapi import FastAPI, Request, Response
+import asyncio
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
 app = FastAPI()
 KEY = os.environ.get("YM_WORKER_KEY", "")
@@ -171,6 +172,170 @@ async def voice(request: Request):
         media_type="audio/wav",
         headers={"X-Transcript": q(transcript), "X-Reply-Text": q(reply[:2000])},
     )
+
+
+# ---------------- CONTINUOUS VOICE (Tier 1: hands-free, VAD-endpointed, streaming TTS) ----------------
+# Protocol (ws /ws/voice?key=<device-token>):
+#   client → server: BINARY frames = PCM16 mono 16kHz audio (any chunk size; server reframes to 20ms)
+#   client → server: TEXT  {"type":"barge"}  — user started talking over the reply; abort TTS now
+#   client → server: TEXT  {"type":"bye"}    — close
+#   server → client: TEXT  {"type":"listening"} | {"type":"transcript","text":..} |
+#                          {"type":"thinking"} | {"type":"reply","text":..} |
+#                          {"type":"speaking_done"} | {"type":"error","text":..}
+#   server → client: BINARY = WAV audio chunk (one per sentence) to play in order
+FRAME_MS = 20
+FRAME_BYTES = int(16000 * 2 * FRAME_MS / 1000)   # 640 bytes = 320 samples * 2
+SILENCE_HANGOVER_MS = 700                          # trailing silence that ends an utterance
+MIN_UTTERANCE_MS = 300                             # ignore blips shorter than this
+MAX_UTTERANCE_MS = 20000                           # hard cap
+
+
+def _sentences(text: str):
+    # split reply into speakable chunks so TTS can stream sentence-by-sentence
+    clean = text.replace("**", "").replace("`", "").replace("#", "").replace("•", ",")
+    parts = re.split(r'(?<=[.!?])\s+', clean)
+    out, buf = [], ""
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        buf = (buf + " " + p).strip() if buf else p
+        if len(buf) >= 60 or p[-1:] in ".!?":
+            out.append(buf)
+            buf = ""
+    if buf:
+        out.append(buf)
+    return out[:12]  # cap spoken length
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(ws: WebSocket):
+    # auth via ?key= (WebSocket clients can't always set headers)
+    token = ws.query_params.get("key", "")
+    if not (device_label(token) or (not KEY and not os.path.exists(DEVICE_TOKENS_PATH))):
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    import webrtcvad
+    vad = webrtcvad.Vad(2)  # 0..3 aggressiveness
+    pcm = bytearray()        # rolling raw bytes to reframe to 20ms
+    speech = bytearray()     # accumulated speech PCM for the current utterance
+    in_speech = False
+    silence_ms = 0
+    speech_ms = 0
+    abort = {"tts": False}
+
+    async def send_json(obj):
+        try:
+            await ws.send_json(obj)
+        except Exception:
+            pass
+
+    async def speak(reply_text):
+        # stream TTS sentence-by-sentence; stop if barge-in flagged
+        abort["tts"] = False
+        for sent in _sentences(reply_text):
+            if abort["tts"]:
+                break
+            try:
+                samples, out_sr = await asyncio.to_thread(kokoro().create, sent, VOICE, 1.05)
+            except Exception:
+                continue
+            buf = io.BytesIO()
+            sf.write(buf, samples, out_sr, format="WAV")
+            if abort["tts"]:
+                break
+            try:
+                await ws.send_bytes(buf.getvalue())
+            except Exception:
+                return
+        await send_json({"type": "speaking_done"})
+
+    async def handle_utterance(utter: bytes):
+        data = np.frombuffer(utter, dtype=np.int16).astype(np.float32) / 32768.0
+        try:
+            segs, _ = await asyncio.to_thread(lambda: list(whisper().transcribe(data, language="en", vad_filter=False)[0]))
+        except Exception as e:
+            await send_json({"type": "error", "text": f"stt: {e}"})
+            return
+        transcript = " ".join(x.text.strip() for x in segs).strip()
+        if not transcript:
+            return
+        await send_json({"type": "transcript", "text": transcript})
+        await send_json({"type": "thinking"})
+        try:
+            reply = await asyncio.to_thread(_brain_call, transcript)
+        except Exception as e:
+            await send_json({"type": "error", "text": f"brain: {e}"})
+            return
+        await send_json({"type": "reply", "text": reply})
+        await speak(reply)
+
+    await send_json({"type": "listening"})
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            if msg.get("text"):
+                import json as _json
+                try:
+                    ctl = _json.loads(msg["text"])
+                except Exception:
+                    continue
+                if ctl.get("type") == "barge":
+                    abort["tts"] = True
+                elif ctl.get("type") == "bye":
+                    break
+                continue
+            chunk = msg.get("bytes")
+            if not chunk:
+                continue
+            pcm.extend(chunk)
+            while len(pcm) >= FRAME_BYTES:
+                frame = bytes(pcm[:FRAME_BYTES])
+                del pcm[:FRAME_BYTES]
+                try:
+                    voiced = vad.is_speech(frame, 16000)
+                except Exception:
+                    voiced = False
+                if voiced:
+                    if not in_speech:
+                        in_speech = True
+                        speech = bytearray()
+                        speech_ms = 0
+                    speech.extend(frame)
+                    speech_ms += FRAME_MS
+                    silence_ms = 0
+                    if speech_ms >= MAX_UTTERANCE_MS:
+                        utter = bytes(speech)
+                        in_speech = False
+                        await handle_utterance(utter)
+                        await send_json({"type": "listening"})
+                elif in_speech:
+                    speech.extend(frame)   # keep trailing silence for natural endpoint
+                    silence_ms += FRAME_MS
+                    if silence_ms >= SILENCE_HANGOVER_MS:
+                        utter = bytes(speech)
+                        in_speech = False
+                        if speech_ms >= MIN_UTTERANCE_MS:
+                            await handle_utterance(utter)
+                        await send_json({"type": "listening"})
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+def _brain_call(text: str) -> str:
+    req = urllib.request.Request(BRAIN, data=text.encode(), headers={"Content-Type": "text/plain"})
+    with urllib.request.urlopen(req, timeout=150) as r:
+        return r.read().decode("utf-8", "replace").strip()
 
 
 if __name__ == "__main__":

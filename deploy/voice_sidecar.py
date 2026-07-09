@@ -86,6 +86,24 @@ def kokoro():
     return _kokoro
 
 
+def _decode_via_ffmpeg(raw: bytes):
+    """Transcode ANY container (m4a/AAC/AMR/mp3/…) to 16k mono float32 via ffmpeg stdin→stdout.
+    Returns (np.ndarray, 16000) or (None, 0) if ffmpeg is unavailable/fails."""
+    import subprocess
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+             "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1"],
+            input=raw, capture_output=True, timeout=30,
+        )
+        if p.returncode != 0 or len(p.stdout) < 100:
+            return None, 0
+        data, sr = sf.read(io.BytesIO(p.stdout), dtype="float32")
+        return data, sr
+    except Exception:
+        return None, 0
+
+
 @app.get("/voice/health")
 def health():
     ok_stt = os.path.isdir(os.path.expanduser("~/.cache")) is not None
@@ -118,8 +136,14 @@ async def voice(request: Request):
     raw = await request.body()
     if len(raw) < 1000:
         return Response("audio too short", status_code=400)
-    # --- ears ---
-    data, sr = sf.read(io.BytesIO(raw), dtype="float32")
+    # --- ears --- decode format-tolerantly: libsndfile handles WAV/FLAC/OGG (iOS sends WAV);
+    # anything it can't read (Android m4a/AAC, which MediaRecorder forces) is transcoded via ffmpeg.
+    try:
+        data, sr = sf.read(io.BytesIO(raw), dtype="float32")
+    except Exception:
+        data, sr = _decode_via_ffmpeg(raw)
+        if data is None:
+            return Response("unsupported audio format (need wav/m4a/aac; ffmpeg missing?)", status_code=415)
     if data.ndim > 1:
         data = data.mean(axis=1)
     if sr != 16000:

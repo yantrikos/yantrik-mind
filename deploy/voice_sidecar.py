@@ -227,6 +227,8 @@ async def ws_voice(ws: WebSocket):
     silence_ms = 0
     speech_ms = 0
     abort = {"tts": False}
+    speaking = {"on": False}   # while the DEVICE is speaking (tts=client), drop mic frames so the
+                               # reply's audio bleed isn't endpointed as a new user turn (echo guard)
 
     async def send_json(obj):
         try:
@@ -257,7 +259,9 @@ async def ws_voice(ws: WebSocket):
     async def handle_utterance(utter: bytes):
         data = np.frombuffer(utter, dtype=np.int16).astype(np.float32) / 32768.0
         try:
-            segs, _ = await asyncio.to_thread(lambda: list(whisper().transcribe(data, language="en", vad_filter=False)[0]))
+            # transcribe() returns (segments_generator, info); grab [0] then materialize the list.
+            # (do NOT `a, _ = list(...)` — that unpacks the SEGMENT list, the bug the app caught.)
+            segs = await asyncio.to_thread(lambda: list(whisper().transcribe(data, language="en", vad_filter=False)[0]))
         except Exception as e:
             await send_json({"type": "error", "text": f"stt: {e}"})
             return
@@ -290,14 +294,24 @@ async def ws_voice(ws: WebSocket):
                     ctl = _json.loads(msg["text"])
                 except Exception:
                     continue
-                if ctl.get("type") == "barge":
+                ct = ctl.get("type")
+                if ct == "barge":
                     abort["tts"] = True
-                elif ctl.get("type") == "bye":
+                    speaking["on"] = False
+                    in_speech = False; speech = bytearray(); silence_ms = 0; speech_ms = 0; pcm.clear()
+                    await send_json({"type": "listening"})
+                elif ct == "speaking_start":
+                    speaking["on"] = True   # device TTS began — ignore mic frames until it ends
+                elif ct == "speaking_end":
+                    speaking["on"] = False
+                    in_speech = False; speech = bytearray(); silence_ms = 0; speech_ms = 0; pcm.clear()
+                    await send_json({"type": "listening"})
+                elif ct == "bye":
                     break
                 continue
             chunk = msg.get("bytes")
-            if not chunk:
-                continue
+            if not chunk or speaking["on"]:
+                continue   # drop frames while the device is speaking (echo-bleed guard)
             pcm.extend(chunk)
             while len(pcm) >= FRAME_BYTES:
                 frame = bytes(pcm[:FRAME_BYTES])

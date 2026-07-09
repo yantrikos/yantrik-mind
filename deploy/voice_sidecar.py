@@ -36,20 +36,31 @@ VDIR = os.environ.get("YM_VOICE_DIR", "/opt/yantrik-mind/voice")
 DEVICE_TOKENS_PATH = os.environ.get("YM_DEVICE_TOKENS", "/etc/yantrik-mind.devices.json")
 
 
-def device_label(token: str) -> str | None:
-    """Return the device label for a token (per-device file first, shared key fallback), else None."""
+def device_identity(token: str):
+    """Resolve a token → (label, person, channel). The device file value may be a plain string
+    (label; person defaults to 'primary') or an object {"label","person","channel"}. Returns None
+    if the token is unknown (shared dev key → primary/app)."""
     if not token:
         return None
     try:
         with open(DEVICE_TOKENS_PATH) as fh:
             toks = json.load(fh)
         if token in toks:
-            return toks[token]
+            v = toks[token]
+            if isinstance(v, dict):
+                return (v.get("label", "device"), v.get("person", "primary"), v.get("channel", "app"))
+            return (v, "primary", "app")
     except Exception:
         pass
     if KEY and token == KEY:
-        return "shared-dev-key"
+        return ("shared-dev-key", "primary", "app")
     return None
+
+
+def device_label(token: str):
+    """Back-compat: just the label (or None)."""
+    ident = device_identity(token)
+    return ident[0] if ident else None
 
 
 def authorize(request: Request) -> str | None:
@@ -121,10 +132,8 @@ async def chat(request: Request):
     msg = (await request.body()).decode("utf-8", "replace").strip()
     if not msg:
         return Response("empty message", status_code=400)
-    req = urllib.request.Request(BRAIN, data=msg.encode(), headers={"Content-Type": "text/plain"})
     try:
-        with urllib.request.urlopen(req, timeout=150) as r:
-            reply = r.read().decode("utf-8", "replace")
+        reply = _brain_call(msg, _person_of(request))
     except Exception as e:
         return Response(f"brain unreachable: {e}", status_code=502)
     return Response(reply, media_type="text/plain; charset=utf-8")
@@ -154,10 +163,8 @@ async def voice(request: Request):
     transcript = " ".join(s.text.strip() for s in segments).strip()
     if not transcript:
         return Response("could not transcribe", status_code=422)
-    # --- brain (the same live mind telegram talks to) ---
-    req = urllib.request.Request(BRAIN, data=transcript.encode(), headers={"Content-Type": "text/plain"})
-    with urllib.request.urlopen(req, timeout=150) as r:
-        reply = r.read().decode("utf-8", "replace").strip()
+    # --- brain (the same live mind telegram talks to), scoped to the speaker ---
+    reply = _brain_call(transcript, _person_of(request))
     # strip markdown-ish noise for speech
     spoken = (reply.replace("**", "").replace("`", "").replace("•", ",").replace("#", ""))
     if len(spoken) > 1200:
@@ -218,6 +225,8 @@ async def ws_voice(ws: WebSocket):
     # tts=client → device speaks (send text only, skip server Kokoro): lower latency + bandwidth +
     # server load. Default streams server-side WAV for non-app clients (desktop, browser).
     client_tts = ws.query_params.get("tts", "") == "client"
+    _ident = device_identity(token)
+    ws_person = _ident[1] if _ident else None   # scope this conversation to the speaker
     await ws.accept()
     import webrtcvad
     vad = webrtcvad.Vad(2)  # 0..3 aggressiveness
@@ -271,7 +280,7 @@ async def ws_voice(ws: WebSocket):
         await send_json({"type": "transcript", "text": transcript})
         await send_json({"type": "thinking"})
         try:
-            reply = await asyncio.to_thread(_brain_call, transcript)
+            reply = await asyncio.to_thread(_brain_call, transcript, ws_person)
         except Exception as e:
             await send_json({"type": "error", "text": f"brain: {e}"})
             return
@@ -353,10 +362,26 @@ async def ws_voice(ws: WebSocket):
             pass
 
 
-def _brain_call(text: str) -> str:
-    req = urllib.request.Request(BRAIN, data=text.encode(), headers={"Content-Type": "text/plain"})
+def _brain_call(text: str, person: str | None = None) -> str:
+    # Forward the speaker's identity so the brain scopes memory per-person (read-isolation).
+    headers = {"Content-Type": "text/plain"}
+    if person:
+        headers["X-YM-Person"] = person
+        headers["X-YM-Channel"] = "app"
+    req = urllib.request.Request(BRAIN, data=text.encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=150) as r:
         return r.read().decode("utf-8", "replace").strip()
+
+
+def _person_of(request: Request) -> str | None:
+    """Resolve the request's device token → person slug (for X-YM-Person scoping)."""
+    tok = request.headers.get("x-ym-key", "")
+    if not tok:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            tok = auth[7:].strip()
+    ident = device_identity(tok)
+    return ident[1] if ident else None
 
 
 if __name__ == "__main__":

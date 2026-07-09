@@ -479,13 +479,23 @@ fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt
         }
     }
     let body = String::from_utf8_lossy(&body).trim().to_string();
+    // Channel identity: a client (the app, via the sidecar) may declare WHO is speaking with an
+    // `X-YM-Person: <slug>` header → scoped memory (read-isolation, private/household lanes), exactly
+    // like telegram. Absent → primary (the legacy single-user path). `X-YM-Channel` is advisory.
+    let person = head
+        .lines()
+        .find_map(|l| l.to_ascii_lowercase().strip_prefix("x-ym-person:").map(|v| v.trim().to_string()))
+        .filter(|p| !p.is_empty());
 
     let (status, reply) = match (method, path.split('?').next().unwrap_or(path)) {
         // `ym <name> <args>` — the top-level CLI router (core commands + skill-registered commands +
         // chat fallback). Data-driven: a new capability skill becomes a new `ym` command, no recompile.
         ("POST", "/cli") if !body.is_empty() => ("200 OK", rt.block_on(conv.cli_dispatch(&body))),
         ("POST", "/chat") if !body.is_empty() => {
-            let r = rt.block_on(conv.handle_turn(&body)).unwrap_or_else(|e| format!("(error: {e})"));
+            let r = match &person {
+                Some(p) => rt.block_on(conv.handle_turn_as(&body, mind_conversation::TurnIdentity::new(p.clone(), false))),
+                None => rt.block_on(conv.handle_turn(&body)),
+            }.unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
         }
         ("POST", "/chat") | ("POST", "/cli") => ("400 Bad Request", "(empty message)".to_string()),

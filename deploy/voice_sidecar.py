@@ -86,7 +86,11 @@ def whisper():
     global _whisper
     if _whisper is None:
         from faster_whisper import WhisperModel
-        _whisper = WhisperModel("small", device="cpu", compute_type="int8")
+        # "small" on this CPU was ~6.8s/utterance (4 threads) — the dead-air killer. base.en at all
+        # cores is ~1.1s with identical transcripts for English; tiny.en ~0.67s if more speed needed.
+        model = os.environ.get("YM_STT_MODEL", "base.en")
+        threads = int(os.environ.get("YM_STT_THREADS", str(os.cpu_count() or 8)))
+        _whisper = WhisperModel(model, device="cpu", compute_type="int8", cpu_threads=threads)
     return _whisper
 
 

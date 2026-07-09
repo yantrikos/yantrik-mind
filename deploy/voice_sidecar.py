@@ -28,6 +28,43 @@ BRAIN = os.environ.get("YM_BRAIN_URL", "http://127.0.0.1:8077/chat")
 VOICE = os.environ.get("YM_TTS_VOICE", "bm_george")
 VDIR = os.environ.get("YM_VOICE_DIR", "/opt/yantrik-mind/voice")
 
+# Per-device tokens: JSON {"<token>": "<device-label>"} at YM_DEVICE_TOKENS path. Each client
+# (phone, laptop) gets its own revocable token — the first brick of the security layer, arriving
+# exactly when access leaves the LAN. The shared YM_WORKER_KEY still works as a dev fallback.
+DEVICE_TOKENS_PATH = os.environ.get("YM_DEVICE_TOKENS", "/etc/yantrik-mind.devices.json")
+
+
+def device_label(token: str) -> str | None:
+    """Return the device label for a token (per-device file first, shared key fallback), else None."""
+    if not token:
+        return None
+    try:
+        with open(DEVICE_TOKENS_PATH) as fh:
+            toks = json.load(fh)
+        if token in toks:
+            return toks[token]
+    except Exception:
+        pass
+    if KEY and token == KEY:
+        return "shared-dev-key"
+    return None
+
+
+def authorize(request: Request) -> str | None:
+    """Accept X-YM-Key header or Bearer token. Returns device label if authorized, else None.
+    If no auth is configured at all (no shared key, no device file), allow (LAN dev mode)."""
+    tok = request.headers.get("x-ym-key", "")
+    if not tok:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            tok = auth[7:].strip()
+    lbl = device_label(tok)
+    if lbl:
+        return lbl
+    if not KEY and not os.path.exists(DEVICE_TOKENS_PATH):
+        return "lan-open"  # nothing configured → don't lock the owner out on first run
+    return None
+
 _whisper = None
 _kokoro = None
 
@@ -55,9 +92,27 @@ def health():
     return {"stt": ok_stt, "tts": ok_tts, "voice": VOICE}
 
 
+@app.post("/chat")
+async def chat(request: Request):
+    """Text path for the mobile app: plain-text body → the live brain → plain-text reply.
+    One authenticated surface (per-device token) so the app only ever talks to :8090."""
+    if not authorize(request):
+        return Response("unauthorized", status_code=401)
+    msg = (await request.body()).decode("utf-8", "replace").strip()
+    if not msg:
+        return Response("empty message", status_code=400)
+    req = urllib.request.Request(BRAIN, data=msg.encode(), headers={"Content-Type": "text/plain"})
+    try:
+        with urllib.request.urlopen(req, timeout=150) as r:
+            reply = r.read().decode("utf-8", "replace")
+    except Exception as e:
+        return Response(f"brain unreachable: {e}", status_code=502)
+    return Response(reply, media_type="text/plain; charset=utf-8")
+
+
 @app.post("/voice")
 async def voice(request: Request):
-    if KEY and request.headers.get("x-ym-key", "") != KEY:
+    if not authorize(request):
         return Response("unauthorized", status_code=401)
     raw = await request.body()
     if len(raw) < 1000:

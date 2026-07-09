@@ -227,6 +227,10 @@ async def ws_voice(ws: WebSocket):
     client_tts = ws.query_params.get("tts", "") == "client"
     _ident = device_identity(token)
     ws_person = _ident[1] if _ident else None   # scope this conversation to the speaker
+    try:
+        endpoint_ms = max(300, min(1500, int(ws.query_params.get("endpoint_ms", SILENCE_HANGOVER_MS))))
+    except Exception:
+        endpoint_ms = SILENCE_HANGOVER_MS
     await ws.accept()
     import webrtcvad
     vad = webrtcvad.Vad(2)  # 0..3 aggressiveness
@@ -266,7 +270,9 @@ async def ws_voice(ws: WebSocket):
         await send_json({"type": "speaking_done"})
 
     async def handle_utterance(utter: bytes):
+        import time as _t
         data = np.frombuffer(utter, dtype=np.int16).astype(np.float32) / 32768.0
+        t0 = _t.monotonic()
         try:
             # transcribe() returns (segments_generator, info); grab [0] then materialize the list.
             # (do NOT `a, _ = list(...)` — that unpacks the SEGMENT list, the bug the app caught.)
@@ -274,19 +280,29 @@ async def ws_voice(ws: WebSocket):
         except Exception as e:
             await send_json({"type": "error", "text": f"stt: {e}"})
             return
+        stt_ms = int((_t.monotonic() - t0) * 1000)
         transcript = " ".join(x.text.strip() for x in segs).strip()
         if not transcript:
             return
         await send_json({"type": "transcript", "text": transcript})
         await send_json({"type": "thinking"})
+        t1 = _t.monotonic()
         try:
             reply = await asyncio.to_thread(_brain_call, transcript, ws_person)
         except Exception as e:
             await send_json({"type": "error", "text": f"brain: {e}"})
             return
+        brain_ms = int((_t.monotonic() - t1) * 1000)
+        # reply_delta per sentence: with client TTS the phone can Speech.speak(sentence) the moment
+        # each arrives (expo-speech queues), so time-to-first-audio = stt + brain + first-sentence-tts
+        # instead of waiting to assemble the whole reply. (Real streaming needs brain token-streaming;
+        # this is the cheap half — the deep fix is the fast brain path below.)
+        for sent in _sentences(reply):
+            await send_json({"type": "reply_delta", "text": sent})
         await send_json({"type": "reply", "text": reply})
+        await send_json({"type": "timing", "stt_ms": stt_ms, "brain_ms": brain_ms,
+                         "total_ms": int((_t.monotonic() - t0) * 1000)})
         if client_tts:
-            # device speaks the reply text itself — nothing more to stream
             await send_json({"type": "speaking_done"})
         else:
             await speak(reply)
@@ -345,7 +361,7 @@ async def ws_voice(ws: WebSocket):
                 elif in_speech:
                     speech.extend(frame)   # keep trailing silence for natural endpoint
                     silence_ms += FRAME_MS
-                    if silence_ms >= SILENCE_HANGOVER_MS:
+                    if silence_ms >= endpoint_ms:
                         utter = bytes(speech)
                         in_speech = False
                         if speech_ms >= MIN_UTTERANCE_MS:

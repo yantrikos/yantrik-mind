@@ -215,6 +215,9 @@ async def ws_voice(ws: WebSocket):
     if not (device_label(token) or (not KEY and not os.path.exists(DEVICE_TOKENS_PATH))):
         await ws.close(code=4401)
         return
+    # tts=client → device speaks (send text only, skip server Kokoro): lower latency + bandwidth +
+    # server load. Default streams server-side WAV for non-app clients (desktop, browser).
+    client_tts = ws.query_params.get("tts", "") == "client"
     await ws.accept()
     import webrtcvad
     vad = webrtcvad.Vad(2)  # 0..3 aggressiveness
@@ -269,7 +272,11 @@ async def ws_voice(ws: WebSocket):
             await send_json({"type": "error", "text": f"brain: {e}"})
             return
         await send_json({"type": "reply", "text": reply})
-        await speak(reply)
+        if client_tts:
+            # device speaks the reply text itself — nothing more to stream
+            await send_json({"type": "speaking_done"})
+        else:
+            await speak(reply)
 
     await send_json({"type": "listening"})
     try:

@@ -417,8 +417,27 @@ fn recall_beliefs(db: &YantrikDB, text: &str, top_k: usize) -> Vec<Recalled> {
         .collect()
 }
 
+/// Build a `ContradictionConfig` from `YM_CONTRADICTION_SENSITIVITY` (float in [0.0, 1.0],
+/// default 0.5). Higher values lower the confidence/severity thresholds so more conflicts are
+/// surfaced; lower values raise them to suppress noisy, low-confidence conflicts.
+/// Tradeoff: high sensitivity catches real contradictions earlier but risks false positives in
+/// ambiguous domains; low sensitivity is quieter but may miss genuine belief conflicts.
+fn contradiction_config_from_env() -> ContradictionConfig {
+    let s: f64 = std::env::var("YM_CONTRADICTION_SENSITIVITY")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    // At s=0.5 these reproduce the library defaults (min_confidence=0.6, min_severity=0.2).
+    ContradictionConfig {
+        min_confidence_for_conflict: 0.6 + (0.5 - s) * 0.4,
+        min_severity: 0.2 + (0.5 - s) * 0.2,
+        ..ContradictionConfig::default()
+    }
+}
+
 fn detect_conflicts(db: &YantrikDB) -> Vec<Contradiction> {
-    let res = match db.detect_belief_contradictions(&ContradictionConfig::default()) {
+    let res = match db.detect_belief_contradictions(&contradiction_config_from_env()) {
         Ok(r) => r,
         Err(_) => return vec![],
     };
@@ -2519,4 +2538,44 @@ mod tests {
             hits.iter().map(|r| &r.why).collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn contradiction_config_sensitivity_knob() {
+        // Default (s=0.5) must reproduce library defaults.
+        let default = contradiction_config_from_env();
+        assert!((default.min_confidence_for_conflict - 0.6).abs() < 1e-9);
+        assert!((default.min_severity - 0.2).abs() < 1e-9);
+
+        // High sensitivity (s=1.0): lower thresholds → more conflicts surfaced.
+        std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "1.0");
+        let high = contradiction_config_from_env();
+        assert!(high.min_confidence_for_conflict < default.min_confidence_for_conflict,
+            "high sensitivity must lower min_confidence");
+        assert!(high.min_severity < default.min_severity,
+            "high sensitivity must lower min_severity");
+
+        // Low sensitivity (s=0.0): higher thresholds → fewer conflicts surfaced.
+        std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "0.0");
+        let low = contradiction_config_from_env();
+        assert!(low.min_confidence_for_conflict > default.min_confidence_for_conflict,
+            "low sensitivity must raise min_confidence");
+        assert!(low.min_severity > default.min_severity,
+            "low sensitivity must raise min_severity");
+
+        // Out-of-range values are clamped, not panicked.
+        std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "9999.0");
+        let clamped = contradiction_config_from_env();
+        assert!((clamped.min_confidence_for_conflict - high.min_confidence_for_conflict).abs() < 1e-9,
+            "values >1.0 must clamp to 1.0 behaviour");
+
+        // Garbage value falls back to default.
+        std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "not_a_number");
+        let fallback = contradiction_config_from_env();
+        assert!((fallback.min_confidence_for_conflict - 0.6).abs() < 1e-9,
+            "unparseable env var must fall back to default");
+
+        // Clean up so other tests aren't affected.
+        std::env::remove_var("YM_CONTRADICTION_SENSITIVITY");
+    }
+
 }

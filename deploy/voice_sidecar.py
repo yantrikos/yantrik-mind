@@ -13,6 +13,7 @@ Everything stays on home hardware: audio never leaves the LAN, matching the
 privacy lanes. Clients are dumb push-to-talk scripts (clients/ym_voice.py).
 """
 import io
+import json
 import os
 import urllib.parse
 import urllib.request

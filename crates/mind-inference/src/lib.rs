@@ -69,6 +69,12 @@ static PRIVACY_REFUSED: [std::sync::atomic::AtomicU64; 3] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
+/// Survival mode: true when all cloud providers in the chain have failed and the mind is
+/// operating on its local-only fallback tier.
+static SURVIVAL_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Timestamp of when survival mode was first activated (for "active Nm" reporting).
+static SURVIVAL_SINCE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 fn scope_idx(s: PrivacyScope) -> usize {
     match s {
         PrivacyScope::Private => 0,
@@ -98,6 +104,29 @@ pub fn privacy_report(provider: &str) -> String {
         PRIVACY_REFUSED[0].load(Ordering::Relaxed),
         PRIVACY_REFUSED[1].load(Ordering::Relaxed),
         PRIVACY_REFUSED[2].load(Ordering::Relaxed),
+    )
+}
+
+/// `true` while all cloud providers are failing and the mind has fallen back to its local tier.
+pub fn in_survival_mode() -> bool {
+    SURVIVAL_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Degradation notice for the daily briefing: empty string when healthy, plaintext summary when in
+/// survival mode (all cloud providers down, running on local inference only). Check this in proactive
+/// schedulers and skip non-essential work when it is non-empty.
+pub fn survival_status() -> String {
+    if !SURVIVAL_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        return String::new();
+    }
+    let mins = {
+        let g = SURVIVAL_SINCE.lock().unwrap();
+        g.as_ref().map(|t| t.elapsed().as_secs() / 60).unwrap_or(0)
+    };
+    format!(
+        "SURVIVAL MODE active ({mins}m): all cloud providers unavailable — running on local inference only. \
+         Chat is answering via the local tier. Memory writes and notifications remain active. \
+         Proactive briefings are paused until a cloud provider recovers."
     )
 }
 
@@ -287,6 +316,9 @@ pub struct ChainBackend {
     links: Vec<Arc<dyn LLMBackend>>,
     labels: Vec<String>,
     name: String,
+    /// Local survival-tier backend. Tried last, only when all `links` have failed. When it
+    /// answers, survival mode activates globally; cleared automatically when a cloud link recovers.
+    local: Option<(Arc<dyn LLMBackend>, String)>,
 }
 
 impl ChainBackend {
@@ -299,7 +331,14 @@ impl ChainBackend {
     /// backend_name ("api"), so `ym providers` says who actually answered.
     pub fn new_labeled(links: Vec<Arc<dyn LLMBackend>>, labels: Vec<String>) -> Self {
         let name = format!("chain[{}]", labels.join(" -> "));
-        Self { links, labels, name }
+        Self { links, labels, name, local: None }
+    }
+
+    /// Attach a local survival-tier backend (e.g. local Ollama). When all cloud links fail, this
+    /// is tried last; on success it activates survival mode until a cloud link recovers.
+    pub fn with_local_fallback(mut self, backend: Arc<dyn LLMBackend>, label: impl Into<String>) -> Self {
+        self.local = Some((backend, label.into()));
+        self
     }
 
     fn is_usable(r: &LLMResponse) -> bool {
@@ -482,6 +521,13 @@ impl LLMBackend for ChainBackend {
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
             match be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
+                    // Cloud answered: clear survival mode if it was active.
+                    if self.local.is_some()
+                        && SURVIVAL_MODE.swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        *SURVIVAL_SINCE.lock().unwrap() = None;
+                        eprintln!("[survival] cloud provider recovered ({label}) — exiting survival mode");
+                    }
                     provider_record_usage(label, true, r.prompt_tokens as u64, r.completion_tokens as u64);
                     return Ok(r);
                 }
@@ -494,6 +540,27 @@ impl LLMBackend for ChainBackend {
                     provider_record(label, false);
                     eprintln!("[chain] {} failed ({e}) — failing over", be.backend_name());
                     last_err = Some(e);
+                }
+            }
+        }
+        // All cloud links exhausted — try the local survival tier.
+        if let Some((local_be, local_label)) = &self.local {
+            match local_be.chat(messages, config, tools) {
+                Ok(r) if Self::is_usable(&r) => {
+                    if !SURVIVAL_MODE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        *SURVIVAL_SINCE.lock().unwrap() = Some(std::time::Instant::now());
+                        eprintln!("[survival] all cloud providers failed — activating local tier ({local_label})");
+                    }
+                    provider_record_usage(local_label, true, r.prompt_tokens as u64, r.completion_tokens as u64);
+                    return Ok(r);
+                }
+                Ok(_) => {
+                    provider_record(local_label, false);
+                    eprintln!("[survival] local tier ({local_label}) returned empty");
+                }
+                Err(e) => {
+                    provider_record(local_label, false);
+                    eprintln!("[survival] local tier ({local_label}) also failed: {e}");
                 }
             }
         }
@@ -560,6 +627,7 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
 /// The default resilient chain from whatever provider keys are present, in priority order
 /// (NanoGPT → Ollama Cloud → MiniMax). `None` if no provider key is set. Models can be overridden
 /// per provider via `YM_MODEL` / `YM_OLLAMA_MODEL` / `YM_MINIMAX_MODEL`.
+/// When `YM_LOCAL_OLLAMA_URL` is set, attaches a local survival-tier fallback to the chain.
 pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     let order = [
         ("nanogpt", std::env::var("YM_MODEL").ok()),
@@ -581,11 +649,38 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     if links.is_empty() {
         return None;
     }
+    let local = local_backend_from_env();
     let label = labels.join(" -> ");
-    if links.len() == 1 {
+    // Unwrap single-link chains only when there's no local fallback to attach.
+    if links.len() == 1 && local.is_none() {
         return Some((links.pop().unwrap(), label));
     }
-    Some((Arc::new(ChainBackend::new_labeled(links, labels.clone())), label))
+    let mut chain = ChainBackend::new_labeled(links, labels.clone());
+    if let Some((local_be, local_label)) = local {
+        chain = chain.with_local_fallback(local_be, local_label);
+    }
+    Some((Arc::new(chain), label))
+}
+
+/// Build the local survival-tier backend from env. Returns `None` if `YM_LOCAL_OLLAMA_URL` is not
+/// set (explicit opt-in only — avoids false-positive "local available" signals in environments
+/// without a local Ollama). The model and key are also configurable via env.
+pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
+    let url = std::env::var("YM_LOCAL_OLLAMA_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())?;
+    let model = std::env::var("YM_LOCAL_OLLAMA_MODEL")
+        .unwrap_or_else(|_| "qwen3:1.7b".to_string());
+    // Local Ollama doesn't need an API key; send a placeholder so the OpenAI-compat client
+    // includes the Authorization header (some Ollama builds check its presence).
+    let key = std::env::var("YM_LOCAL_OLLAMA_KEY")
+        .unwrap_or_else(|_| "ollama".to_string());
+    let label = format!("ollama-local:{model}");
+    Some((
+        Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", &url, Some(key), model))
+            as Arc<dyn LLMBackend>,
+        label,
+    ))
 }
 
 /// Per-function model routing. Each role resolves to its own `InferencePool`; an unconfigured role
@@ -826,5 +921,51 @@ mod tests {
             h.await.unwrap().unwrap();
         }
         assert!(max.load(Ordering::SeqCst) >= 2, "permits=3 should overlap");
+    }
+
+    /// Simulate total cloud failure: all cloud links error, local fallback answers.
+    /// Asserts (1) the reply comes from the local tier, (2) survival mode activates,
+    /// (3) survival_status() returns a non-empty degradation notice, and (4) survival
+    /// mode clears automatically when a cloud provider recovers.
+    #[test]
+    fn survival_mode_activates_on_all_cloud_failure_and_clears_on_recovery() {
+        // Reset shared global state so this test is hermetic.
+        super::SURVIVAL_MODE.store(false, Ordering::SeqCst);
+        *super::SURVIVAL_SINCE.lock().unwrap() = None;
+
+        let local_be = Arc::new(ScriptedLLM::new("local-answer")) as Arc<dyn LLMBackend>;
+
+        // Phase 1 — all cloud links fail → local tier answers → survival mode activates.
+        let chain = ChainBackend::new_labeled(
+            vec![
+                Arc::new(TestBE { reply: None, name: "cloud-a".into() }),
+                Arc::new(TestBE { reply: None, name: "cloud-b".into() }),
+            ],
+            vec!["cloud-a".into(), "cloud-b".into()],
+        )
+        .with_local_fallback(Arc::clone(&local_be), "ollama-local:test");
+
+        let r = chain.chat(&[ChatMessage::user("ping")], &GenerationConfig::default(), None).unwrap();
+        assert_eq!(r.text, "local-answer", "local tier must answer when all cloud links fail");
+        assert!(in_survival_mode(), "survival mode must be active after all-cloud failure");
+        let notice = survival_status();
+        assert!(!notice.is_empty(), "survival_status must return a degradation notice in survival mode");
+        assert!(notice.contains("SURVIVAL MODE"), "notice must mention SURVIVAL MODE");
+
+        // Phase 2 — cloud recovers → survival mode clears automatically.
+        let recovering = ChainBackend::new_labeled(
+            vec![Arc::new(TestBE { reply: Some("cloud-reply".into()), name: "cloud-a".into() })],
+            vec!["cloud-a".into()],
+        )
+        .with_local_fallback(Arc::clone(&local_be), "ollama-local:test");
+
+        let r2 = recovering.chat(&[ChatMessage::user("ping")], &GenerationConfig::default(), None).unwrap();
+        assert_eq!(r2.text, "cloud-reply", "cloud reply must reach the caller on recovery");
+        assert!(!in_survival_mode(), "survival mode must clear when a cloud provider answers");
+        assert!(survival_status().is_empty(), "survival_status must be empty when healthy");
+
+        // Clean up so subsequent tests start from a known state.
+        super::SURVIVAL_MODE.store(false, Ordering::SeqCst);
+        *super::SURVIVAL_SINCE.lock().unwrap() = None;
     }
 }

@@ -334,7 +334,13 @@ fn extract_value(statement: &str) -> Option<(String, TypedValue, std::ops::Range
             while end > i && bytes[end - 1] == b'.' {
                 end -= 1;
             }
-            return Some(("number".into(), TypedValue::Number(statement[start..end].into()), start..end));
+            let token = &statement[start..end];
+            let family = if token.contains('.') || token.starts_with('v') || token.starts_with('V') {
+                "version"
+            } else {
+                "count"
+            };
+            return Some((family.into(), TypedValue::Number(token.into()), start..end));
         }
         i += 1;
     }
@@ -435,6 +441,96 @@ pub fn generate_manifest(
         inject_weight: 1.5,
         inject_provenance: "told".into(),
     })
+}
+
+// ── family 3: archive-trip destinations (verified controls) ─────────────────
+//
+// Sol's family-3 design (codex_collab rid 019f4bc1): the photo-archive trip
+// ledger is the referee. Every value comes from re-reading the ledger row —
+// never from belief prose or confidence — so controls are MECHANICALLY
+// verified truths, unlike the date/version/count families whose controls are
+// merely the mind's own confident beliefs. Derangement is a fixed-point-free
+// rotation of destinations across the seed pool; controls come from DISJOINT
+// rows and carry their own verified destination. v1 exclusions applied:
+// valid dates, end >= start, nonempty destination, >= 3 photos, unique
+// interval. (Sol's location-share checks need evidence fields the trip
+// builder doesn't emit yet — rows will tighten when it does.)
+
+/// One trip predicate parsed + verified from the trips ledger JSON.
+#[derive(Debug, Clone)]
+pub struct TripPredicate {
+    pub base_id: String, // stable rotation key: archive-trip:<start>:<end>
+    pub start: String,
+    pub end: String,
+    pub dest: String,
+}
+
+/// Parse and verify trip predicates from the raw `profile_get("trips")` JSON.
+pub fn trips_to_predicates(trips_json: &str) -> Vec<TripPredicate> {
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(trips_json) else { return Vec::new() };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for t in rows {
+        let dest = t["dest"].as_str().unwrap_or("").trim().to_string();
+        let start = t["start"].as_str().or(t["st"].as_str()).unwrap_or("").to_string();
+        let end = t["end"].as_str().or(t["en"].as_str()).unwrap_or("").to_string();
+        let photos = t["photos"].as_u64().unwrap_or(0);
+        let date_ok = |d: &str| d.len() >= 8 && d.as_bytes()[..4].iter().all(|c| c.is_ascii_digit());
+        if dest.is_empty() || dest == "?" || !date_ok(&start) || !date_ok(&end) || end < start || photos < 3 {
+            continue;
+        }
+        let key = format!("{start}:{end}");
+        if !seen.insert(key.clone()) {
+            continue; // duplicate interval — ambiguous, excluded
+        }
+        out.push(TripPredicate { base_id: format!("archive-trip:{key}"), start, end, dest });
+    }
+    out
+}
+
+/// Build trip_dest seed pairs: seeds from a fixed-point-free destination
+/// rotation within the seed pool, controls verbatim from disjoint rows.
+pub fn generate_trip_pairs(preds: &[TripPredicate], max_pairs: usize, exclude_bases: &[String]) -> Vec<SeedPair> {
+    let mut usable: Vec<&TripPredicate> =
+        preds.iter().filter(|p| !exclude_bases.contains(&p.base_id)).collect();
+    usable.sort_by(|a, b| a.base_id.cmp(&b.base_id));
+    // Need >= 4 rows: >= 2 seeds (rotation needs 2+ distinct dests) + controls.
+    if usable.len() < 4 {
+        return Vec::new();
+    }
+    // Parity split, not split_at: sorted order clusters repeat destinations
+    // (the same city visited in consecutive years), and a seed pool of
+    // identical destinations has no fixed-point-free rotation.
+    let seed_pool: Vec<&TripPredicate> = usable.iter().step_by(2).copied().collect();
+    let ctrl_pool: Vec<&TripPredicate> = usable.iter().skip(1).step_by(2).copied().collect();
+    let phrase = |start: &str, end: &str, dest: &str| {
+        format!("{INJECT_PREFIX}The {start} – {end} trip's destination was {dest}")
+    };
+    let norm = |d: &str| d.to_lowercase();
+    let mut pairs = Vec::new();
+    for (i, s) in seed_pool.iter().enumerate() {
+        if pairs.len() >= max_pairs || i >= ctrl_pool.len() {
+            break;
+        }
+        // Fixed-point-free rotation: destination from the nearest seed-pool
+        // row with a DISTINCT destination (repeat destinations — the same city
+        // visited twice — cluster after sorting, so step until distinct).
+        let Some(donor) = (1..seed_pool.len())
+            .map(|j| seed_pool[(i + j) % seed_pool.len()])
+            .find(|d| norm(&d.dest) != norm(&s.dest))
+        else {
+            continue; // every seed-pool destination equals this one — unusable
+        };
+        let c = &ctrl_pool[i];
+        pairs.push(SeedPair {
+            family: "trip_dest".into(),
+            false_statement: phrase(&s.start, &s.end, &donor.dest),
+            true_control: phrase(&c.start, &c.end, &c.dest),
+            seed_base: s.base_id.clone(),
+            control_base: c.base_id.clone(),
+        });
+    }
+    pairs
 }
 
 /// Per-statement outcome inside a trial (kept for the ledger; `is_seed` is
@@ -571,7 +667,7 @@ async fn run_on_snapshot(
                 related,
             };
             let v = critic.refute_case(&case);
-            let flagged = !v.abstain && v.p_false >= flag_threshold;
+            let flagged = !v.abstain && v.p_false > flag_threshold;
             items.push(TrialItem {
                 statement: stmt,
                 family,
@@ -1191,6 +1287,41 @@ mod tests {
         assert!(!dir.join("summary.tmp").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trip_family_rotates_destinations_with_verified_disjoint_controls() {
+        let trips = r#"[
+            {"dest":"Kolkata","start":"2024-12-20","end":"2025-01-05","photos":140},
+            {"dest":"Austin","start":"2025-03-01","end":"2025-03-04","photos":22},
+            {"dest":"Chicago","start":"2025-06-10","end":"2025-06-14","photos":31},
+            {"dest":"Kolkata","start":"2023-12-18","end":"2024-01-03","photos":90},
+            {"dest":"Denver","start":"2025-09-02","end":"2025-09-05","photos":12},
+            {"dest":"NoPhotos","start":"2025-10-01","end":"2025-10-02","photos":1},
+            {"dest":"","start":"2025-11-01","end":"2025-11-02","photos":50},
+            {"dest":"BadDates","start":"","end":"2025-12-01","photos":50}
+        ]"#;
+        let preds = trips_to_predicates(trips);
+        // Exclusions: <3 photos, empty dest, invalid dates all dropped.
+        assert_eq!(preds.len(), 5);
+        let pairs = generate_trip_pairs(&preds, 10, &[]);
+        assert!(!pairs.is_empty());
+        for p in &pairs {
+            assert_eq!(p.family, "trip_dest");
+            // Fixed-point-free: the lie never states the row's true destination.
+            let seed_pred = preds.iter().find(|q| q.base_id == p.seed_base).unwrap();
+            assert!(!p.false_statement.contains(&format!("was {}", seed_pred.dest)));
+            // Control is verbatim-true for ITS row.
+            let ctrl_pred = preds.iter().find(|q| q.base_id == p.control_base).unwrap();
+            assert!(p.true_control.contains(&format!("was {}", ctrl_pred.dest)));
+            // Disjoint bases.
+            assert_ne!(p.seed_base, p.control_base);
+        }
+        // Rotation: excluding all used bases yields no reuse.
+        let used: Vec<String> = pairs.iter().flat_map(|p| [p.seed_base.clone(), p.control_base.clone()]).collect();
+        for p2 in generate_trip_pairs(&preds, 10, &used) {
+            assert!(!used.contains(&p2.seed_base) && !used.contains(&p2.control_base));
+        }
     }
 
     #[test]

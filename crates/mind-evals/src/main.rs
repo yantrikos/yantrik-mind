@@ -154,7 +154,21 @@ async fn immune_cli(args: &[String]) -> i32 {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    let Some(manifest) = immune::generate_manifest(&beliefs, &trial_id, pairs, &holdout, &used_bases) else {
+    // Family 3 (trip_dest): ledger-verified controls from the photo-archive
+    // trip ledger (sol design). Read from the SNAPSHOT copy like everything else.
+    let trip_pairs = if holdout.iter().any(|h| h == "trip_dest") {
+        Vec::new()
+    } else {
+        match mem.profile_get("trips").await {
+            Ok(Some(json)) => {
+                let preds = immune::trips_to_predicates(&json);
+                immune::generate_trip_pairs(&preds, pairs / 3 + 1, &used_bases)
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    let Some(mut manifest) = immune::generate_manifest(&beliefs, &trial_id, pairs.saturating_sub(trip_pairs.len()), &holdout, &used_bases) else {
         eprintln!(
             "no usable seed pairs left in this population ({} bases already used — the epoch has exhausted this mind's value-bearing beliefs; reset {} to start a new epoch)",
             used_bases.len(),
@@ -162,6 +176,7 @@ async fn immune_cli(args: &[String]) -> i32 {
         );
         return 4;
     };
+    manifest.pairs.extend(trip_pairs);
     println!("manifest: {} pairs (families: {:?})", manifest.pairs.len(), {
         let mut f: Vec<&str> = manifest.pairs.iter().map(|p| p.family.as_str()).collect();
         f.dedup();

@@ -8,6 +8,8 @@
 //! is adding entries, not code. Deterministic by default (ScriptedLLM captures the prompt the
 //! mind built), so it runs in CI with no real model.
 
+pub mod immune;
+
 use std::sync::Arc;
 
 use mind_conversation::ConversationEngine;

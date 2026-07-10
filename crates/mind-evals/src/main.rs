@@ -49,6 +49,19 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
+/// True iff the URL's host parses as a loopback or RFC1918 IPv4 literal.
+fn host_is_local_ip(url: &str) -> bool {
+    let after = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => return false,
+    };
+    let host = after.split(['/', ':']).next().unwrap_or("");
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_private(),
+        Err(_) => false,
+    }
+}
+
 async fn immune_cli(args: &[String]) -> i32 {
     use mind_evals::immune;
     use mind_types::MemoryFacade;
@@ -114,8 +127,20 @@ async fn immune_cli(args: &[String]) -> i32 {
     };
     println!("population: {} beliefs", beliefs.len());
 
-    let Some(manifest) = immune::generate_manifest(&beliefs, &trial_id, pairs, &holdout) else {
-        eprintln!("no usable seed pairs in this population (need confident, evidenced, value-bearing beliefs)");
+    // Rotation state: bases used in earlier trials are excluded so the epoch
+    // accumulates DISTINCT observations, not repeats of the same 15 seeds.
+    let used_path = ledger.with_file_name("immune_used_bases.json");
+    let mut used_bases: Vec<String> = std::fs::read_to_string(&used_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let Some(manifest) = immune::generate_manifest(&beliefs, &trial_id, pairs, &holdout, &used_bases) else {
+        eprintln!(
+            "no usable seed pairs left in this population ({} bases already used — the epoch has exhausted this mind's value-bearing beliefs; reset {} to start a new epoch)",
+            used_bases.len(),
+            used_path.display()
+        );
         return 4;
     };
     println!("manifest: {} pairs (families: {:?})", manifest.pairs.len(), {
@@ -130,6 +155,13 @@ async fn immune_cli(args: &[String]) -> i32 {
             let model = std::env::var("YM_CRITIC_MODEL").unwrap_or_default();
             if url.is_empty() || model.is_empty() {
                 eprintln!("--critic api needs YM_CRITIC_URL and YM_CRITIC_MODEL (local-only endpoint)");
+                return 2;
+            }
+            // Belief text never leaves home hardware: the endpoint host must
+            // BE a loopback/RFC1918 IP literal (hostname prefixes like
+            // 127.0.0.1.evil.example are exactly the bypass this refuses).
+            if !host_is_local_ip(&url) {
+                eprintln!("REFUSING YM_CRITIC_URL={url} — host must be a loopback or RFC1918 IPv4 literal");
                 return 2;
             }
             let backend =
@@ -168,11 +200,19 @@ async fn immune_cli(args: &[String]) -> i32 {
         }
     };
 
+    // Persist rotation state only after the trial landed in the ledger.
+    for p in &manifest.pairs {
+        used_bases.push(p.seed_base.clone());
+        used_bases.push(p.control_base.clone());
+    }
+    used_bases.dedup();
+    let _ = std::fs::write(&used_path, serde_json::to_string_pretty(&used_bases).unwrap_or_default());
+
     let all = immune::read_trial_ledger(&ledger);
-    let epoch = immune::epoch_summary(&all);
+    let epoch = immune::epoch_summary(&all); // homogeneous by construction: filters to the latest run-config
     println!(
-        "epoch: {} trials, detection LB {:.3}, damage UB {:.3}, promotion bar met: {}",
-        epoch.trials, epoch.detection_lower_bound, epoch.damage_upper_bound, epoch.promotion_bar_met
+        "epoch: {} trials, {} unique seeds across {} family(ies), detection LB {:.3}, damage UB {:.3}, promotion bar met: {}",
+        epoch.trials, epoch.unique_seeds, epoch.families, epoch.detection_lower_bound, epoch.damage_upper_bound, epoch.promotion_bar_met
     );
     println!("chain head: {head}");
 

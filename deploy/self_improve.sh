@@ -54,10 +54,21 @@ echo "==> Claude Code (subscription) implementing: $GOAL"
 # Cargo-scoped Bash so the builder can SELF-VERIFY (write a test, run it, prove green) — this is what
 # lets good changes clear the auto-merge test-gate instead of piling up as drafts. Only cargo
 # build/test/check are allowed; any other shell command is denied by the tool allowlist.
-timeout 1500 claude -p "You are improving the yantrik-mind codebase (you are the companion improving your own code). GOAL: $GOAL
+BUILDER_PROMPT="You are improving the yantrik-mind codebase (you are the companion improving your own code). GOAL: $GOAL
 
-Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under crates/mind-governance (the harm-gate is off-limits). If you change Rust, keep it compiling. ADD a #[test] covering your change and RUN it (you can execute cargo build / cargo test / cargo check) — verify green before you finish. Do not touch secrets or CI auth." \
-  --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25
+Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under crates/mind-governance (the harm-gate is off-limits). Do NOT modify anything under crates/mind-evals (you cannot edit the judge you must pass). If you change Rust, keep it compiling. ADD a #[test] covering your change and RUN it (cargo build / cargo test / cargo check) — verify green before you finish. Do not touch secrets or CI auth."
+# BUILDER FLEET: YM_BUILDER selects the agent. codex = OpenAI Codex CLI (utilizes the ChatGPT Plus
+# quota, self-refreshing auth in ~/.codex); default = Claude Code (Max). Both edit files + run cargo,
+# then the SAME gates below (compile + eval-custody + test-presence + behavioral suite + small-diff)
+# decide auto-merge vs draft — the builder identity doesn't change what's allowed to merge.
+if [ "${YM_BUILDER:-claude}" = "codex" ]; then
+  echo "==> builder: OpenAI Codex CLI (codex exec)"
+  timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" 2>&1 | tail -25
+else
+  echo "==> builder: Claude Code"
+  timeout 1500 claude -p "$BUILDER_PROMPT" \
+    --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25
+fi
 
 echo "==> enforce bounds"
 git add -A   # stage everything incl. NEW files (git diff alone ignores untracked)

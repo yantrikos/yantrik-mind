@@ -88,6 +88,8 @@ enum Cmd {
     RecallDemandFor { about: String, reply: Reply<f64> },
     // retro-dedup: collapse norm_prop/Jaccard near-duplicates written before the write-path dedup existed
     RetroDedupStore { reply: Reply<(usize, usize)> },
+    // immune harness: point-in-time snapshot of the live DB (seeded-belief trials run on the COPY)
+    SnapshotTo { dest: String, reply: Reply<()> },
     // test-only: insert a goal/pref row bypassing all dedup checks (simulates pre-PR#19 legacy data)
     #[cfg(test)]
     ForceInsertGoalPref { kind: String, text: String, reply: Reply<()> },
@@ -161,6 +163,32 @@ fn edge_kind(s: &str) -> CognitiveEdgeKind {
         "supports" => CognitiveEdgeKind::Supports,
         _ => CognitiveEdgeKind::AssociatedWith,
     }
+}
+
+/// Consistent point-in-time snapshot of the live database into `dest`.
+///
+/// Immune-harness support (co-designed with gpt-5.6-sol, 2026-07-10): seeded
+/// false-belief trials must run on a COPY the critic sandbox owns — never the
+/// live namespace. Runs on the actor thread, so no mind-side write can
+/// interleave; `VACUUM INTO` takes its own read transaction and is WAL-safe
+/// (a plain file copy is not). `dest` must not already exist — refusing to
+/// overwrite is the cheap guard against a reversed argument order ever
+/// pointing this at the live file.
+fn snapshot_db_to(live_path: &str, dest: &str) -> std::result::Result<(), String> {
+    if live_path == ":memory:" {
+        return Err("cannot snapshot a :memory: mind — no durable file to copy".into());
+    }
+    if std::path::Path::new(dest).exists() {
+        return Err(format!("snapshot destination already exists: {dest}"));
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        live_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("open live db read-only: {e}"))?;
+    conn.execute("VACUUM INTO ?1", rusqlite::params![dest])
+        .map_err(|e| format!("VACUUM INTO {dest}: {e}"))?;
+    Ok(())
 }
 
 fn all_beliefs(db: &YantrikDB) -> Vec<CognitiveNode> {
@@ -1236,6 +1264,9 @@ impl MemoryHandle {
                             let beliefs: Vec<Belief> = all_beliefs(&db).iter().map(to_belief_dto).collect();
                             let _ = reply.send(serde_json::to_string(&beliefs).map_err(|e| e.to_string()));
                         }
+                        Cmd::SnapshotTo { dest, reply } => {
+                            let _ = reply.send(snapshot_db_to(&path, &dest));
+                        }
                         Cmd::AddTask { description, priority, due_ms, reply } => {
                             let _ = reply.send(add_task(&db, &mut alloc, &description, &priority, due_ms));
                         }
@@ -1521,6 +1552,15 @@ impl MemoryHandle {
         rx.await
             .map_err(|_| MindError::Memory("memory actor dropped the reply".into()))?
             .map_err(MindError::Memory)
+    }
+
+    /// Point-in-time snapshot of the live database into `dest` (a path that
+    /// must not yet exist). The copy opens with `MemoryHandle::spawn(dest, dim)`;
+    /// the immune harness injects seed beliefs THERE — the live mind is opened
+    /// read-only for the duration of the copy and never written.
+    pub async fn snapshot_to(&self, dest: impl Into<String>) -> Result<()> {
+        let dest = dest.into();
+        self.call(|reply| Cmd::SnapshotTo { dest, reply }).await
     }
 
     // flat-path helpers retained from Spike A
@@ -1892,6 +1932,73 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_db_path(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "ym_snap_{tag}_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        p.to_string_lossy().into_owned()
+    }
+
+    /// The immune-harness invariant: a snapshot is a faithful, independently
+    /// openable copy, and seeding the COPY leaves the live mind untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_to_copies_beliefs_and_seeding_copy_never_touches_live() {
+        let live_path = scratch_db_path("live");
+        let snap_path = scratch_db_path("copy");
+        {
+            let live = MemoryHandle::spawn(&live_path, 8).unwrap();
+            live.remember_as_belief(BeliefAssertion {
+                statement: "Asha's birthday is March 3".into(),
+                polarity: 1.0,
+                weight: 1.5,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+            live.snapshot_to(&snap_path).await.unwrap();
+
+            // Seed a false belief into the COPY only.
+            let copy = MemoryHandle::spawn(&snap_path, 8).unwrap();
+            let seeded = copy
+                .remember_as_belief(BeliefAssertion {
+                    statement: "Asha's birthday is July 9".into(),
+                    polarity: 1.0,
+                    weight: 1.5,
+                    source_event: Some("seed".into()),
+                    provenance: "told".into(),
+                })
+                .await;
+            assert!(seeded.is_ok(), "copy must accept writes");
+            // Copy carried the genuine belief over.
+            assert!(copy.explain_belief("Asha's birthday is March 3").await.unwrap().is_some());
+            // Live mind never saw the seed.
+            assert!(live.explain_belief("Asha's birthday is July 9").await.unwrap().is_none());
+            assert!(live.explain_belief("Asha's birthday is March 3").await.unwrap().is_some());
+        }
+        let _ = std::fs::remove_file(&live_path);
+        let _ = std::fs::remove_file(&snap_path);
+    }
+
+    /// Guards: never overwrite an existing file (that's how a reversed argument
+    /// would hit the live db), and :memory: minds have nothing to snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_to_refuses_existing_dest_and_memory_source() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        assert!(mem.snapshot_to(scratch_db_path("nomem")).await.is_err());
+
+        let live_path = scratch_db_path("live2");
+        let live = MemoryHandle::spawn(&live_path, 8).unwrap();
+        let dest = scratch_db_path("exists");
+        std::fs::write(&dest, b"occupied").unwrap();
+        assert!(live.snapshot_to(&dest).await.is_err());
+        let _ = std::fs::remove_file(&live_path);
+        let _ = std::fs::remove_file(&dest);
+    }
 
     /// THE EMBEDDER MOAT, applied to task dedup: with the bundled embedder attached (dim 64) a
     /// paraphrase that shares NO significant words with an open task — so word-overlap jaccard is

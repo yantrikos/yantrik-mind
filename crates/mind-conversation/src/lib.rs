@@ -10046,9 +10046,14 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if live.iter().any(|p| p.get("node_id").and_then(|x| x.as_str()) == Some(node_id)) {
                 continue;
             }
-            // Compose deterministically: everything the substrate knows about the subject.
+            // Compose deterministically: everything the substrate knows about the subject. Evidence
+            // that is only an INFERENCE (not observed/told) is labeled so a prepared action never
+            // silently rests on the mind's own guesswork (Terra's epistemic-authority protocol).
             let facts = self.memory.beliefs_matching(title).await.unwrap_or_default();
-            let evidence: Vec<String> = facts.iter().take(6).map(|b| format!("{} ({:.2})", b.statement, b.confidence)).collect();
+            let evidence: Vec<String> = facts.iter().take(6).map(|b| {
+                let tag = if Self::belief_actionable(&b.provenance) { String::new() } else { format!(" [{} — unconfirmed]", Self::epistemic_class(&b.provenance)) };
+                format!("{} ({:.2}){tag}", b.statement, b.confidence)
+            }).collect();
             let when_str = chrono::DateTime::from_timestamp_millis(when)
                 .map(|t| t.with_timezone(today.offset()).format("%A %b %-d").to_string())
                 .unwrap_or_default();
@@ -19308,6 +19313,31 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         )
     }
 
+    /// EPISTEMIC CLASS of a belief, derived from its provenance string (Terra's protocol, co-designed
+    /// via gpt-5.6-terra). The class GATES what a belief may DO — the fix for "confusing accumulated
+    /// observation with earned authority" (the domestic-surveillance-machine failure mode). Unknown /
+    /// inferred / reflected all collapse to `inferred` (the least authority).
+    pub fn epistemic_class(provenance: &str) -> &'static str {
+        let p = provenance.trim().to_lowercase();
+        if p.starts_with("observ") {
+            "observed"
+        } else if p.starts_with("told") || p.starts_with("said") || p.starts_with("stated") || p.starts_with("user") {
+            "told"
+        } else if p.starts_with("stud") || p.starts_with("read") || p.starts_with("web") || p.starts_with("doc") || p.starts_with("source") {
+            "studied"
+        } else {
+            "inferred" // inferred / reflected / derived / unknown → least authority
+        }
+    }
+
+    /// ACTIONABLE = may drive a PROACTIVE nudge, an automation, or a shared/cross-person write.
+    /// ONLY `observed` or `told` qualify. An `inferred` (or `studied`) belief may still GROUND a reply
+    /// — clearly labeled as inference — but it may NEVER silently initiate an unprompted action until
+    /// it is promoted (user ratification, or independent corroboration / a graded prediction come true).
+    pub fn belief_actionable(provenance: &str) -> bool {
+        matches!(Self::epistemic_class(provenance), "observed" | "told")
+    }
+
     /// Render the typed working-set as a grounding block: stable facts as-is, uncertain beliefs
     /// hedged with their confidence, open contradictions flagged as ask-don't-assert.
     fn render_grounding(ws: &WorkingSet) -> String {
@@ -21618,6 +21648,26 @@ mod tests {
     use mind_tools::{ScriptedMailSender, ToolActionExecutor};
     use mind_types::BeliefAssertion;
     use yantrik_ml::LLMBackend;
+
+    #[test]
+    fn epistemic_gate_only_observed_or_told_may_act() {
+        // taxonomy: observed/told = high authority; studied/inferred/reflected/unknown = low
+        assert_eq!(ConversationEngine::epistemic_class("observed"), "observed");
+        assert_eq!(ConversationEngine::epistemic_class("told"), "told");
+        assert_eq!(ConversationEngine::epistemic_class("user"), "told");
+        assert_eq!(ConversationEngine::epistemic_class("studied"), "studied");
+        assert_eq!(ConversationEngine::epistemic_class("inferred"), "inferred");
+        assert_eq!(ConversationEngine::epistemic_class("reflected"), "inferred");
+        assert_eq!(ConversationEngine::epistemic_class(""), "inferred"); // unknown → least authority
+        assert_eq!(ConversationEngine::epistemic_class("wild-guess"), "inferred");
+        // the gate: ONLY observed/told may drive a proactive nudge / automation / shared write
+        assert!(ConversationEngine::belief_actionable("observed"));
+        assert!(ConversationEngine::belief_actionable("told"));
+        assert!(!ConversationEngine::belief_actionable("inferred")); // a guess can't silently act
+        assert!(!ConversationEngine::belief_actionable("studied"));  // general knowledge ≠ personal evidence
+        assert!(!ConversationEngine::belief_actionable("reflected"));
+        assert!(!ConversationEngine::belief_actionable("")); // unknown provenance never acts unprompted
+    }
 
     fn gated_runtime(sender: Arc<ScriptedMailSender>) -> Arc<dyn ActionRuntime> {
         let executor = Arc::new(ToolActionExecutor::new().with_mail_sender(sender));

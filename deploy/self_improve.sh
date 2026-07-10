@@ -94,6 +94,14 @@ if [ "${YM_AUTOMERGE:-0}" = "1" ]; then
   if git diff --cached --name-only | grep -qE '^(\.github/|deploy/|Cargo\.lock|.*\.env$)'; then
     echo "auto-merge BLOCKED: touches CI/deploy/lock/env — leaving as draft for human"; AUTOMERGE=0
   fi
+  # EVAL-CUSTODY GATE: the self-build author may NOT modify the judge it must pass. A PR touching
+  # the behavioral eval suite (crates/mind-evals) is human-review-only — otherwise the loop could
+  # weaken/delete a failing assertion and merge itself green (silent rot). Eval changes are legitimate
+  # but require a separate human-approved cycle. This is the architectural teeth for audit≥growth.
+  if git diff --cached --name-only | grep -qE '^crates/mind-evals/'; then
+    echo "auto-merge BLOCKED: self-authored change touches crates/mind-evals (the judge) — human-review-only (eval custody)"; AUTOMERGE=0
+    echo "$(date -u +%FT%TZ) | build | EVAL-CUSTODY-DRAFT | $GOAL" >> "$EVLOG"
+  fi
   if [ "$files_changed" -gt 10 ] || [ "$lines_changed" -gt 400 ]; then
     echo "auto-merge BLOCKED: diff too large ($files_changed files / $lines_changed lines) — draft for human"; AUTOMERGE=0
   fi

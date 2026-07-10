@@ -89,6 +89,25 @@ async fn immune_cli(args: &[String]) -> i32 {
             return 3;
         }
     }
+    // And the internally-valid chain must still contain the externally
+    // anchored head — internal validity alone cannot detect a valid-prefix
+    // truncation. --anchors points at the root-owned chain_heads.log.
+    if let Some(anchors) = flag(args, "--anchors") {
+        let last_anchor = std::fs::read_to_string(&anchors)
+            .ok()
+            .and_then(|s| {
+                s.lines().rev().find(|l| !l.trim().is_empty()).map(|l| {
+                    l.split_whitespace().last().unwrap_or("").to_string()
+                })
+            })
+            .filter(|h| !h.is_empty());
+        if let Some(head) = last_anchor {
+            if let Err(e) = immune::verify_anchor(&ledger, &head) {
+                eprintln!("ANCHOR CHECK FAILED: {e} — refusing to run.");
+                return 3;
+            }
+        }
+    }
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -232,7 +251,10 @@ async fn immune_cli(args: &[String]) -> i32 {
             "epoch": epoch,
             "chain_head": head,
         });
-        if let Err(e) = std::fs::write(&sp, serde_json::to_string_pretty(&summary).unwrap_or_default()) {
+        if let Err(e) = immune::write_json_atomic(
+            std::path::Path::new(&sp),
+            &serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        ) {
             eprintln!("summary write: {e}");
             return 1;
         }

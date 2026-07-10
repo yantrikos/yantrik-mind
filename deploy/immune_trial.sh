@@ -44,7 +44,9 @@ if [ -n "${YM_CRITIC_URL:-}" ] && [ -n "${YM_CRITIC_MODEL:-}" ]; then
   esac
 fi
 
-"$BIN" immune --db "$SNAP" --pairs 15 --ledger "$LEDGER" --summary "$SUMMARY" --critic "$CRITIC"
+# --anchors closes the valid-prefix-truncation hole: the run refuses if the
+# last root-anchored head is no longer present in the (internally valid) chain.
+"$BIN" immune --db "$SNAP" --pairs 15 --ledger "$LEDGER" --summary "$SUMMARY" --critic "$CRITIC" --anchors "$HEADS"
 
 # Custody anchor: append the chain head where only root can write.
 HEAD="$(python3 -c "import json;print(json.load(open('$SUMMARY'))['chain_head'])")"

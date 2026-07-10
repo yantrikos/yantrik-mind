@@ -646,16 +646,44 @@ pub fn wilson_upper_bound(successes: usize, n: usize) -> f64 {
 /// latest chain head somewhere the mind cannot write if you need custody, not
 /// just tamper-evidence.
 pub fn append_trial_record(ledger_path: &std::path::Path, report: &TrialReport) -> Result<String, String> {
-    let prev_chain = std::fs::read_to_string(ledger_path)
-        .ok()
-        .and_then(|s| {
-            s.lines().rev().find(|l| !l.trim().is_empty()).and_then(|l| {
-                serde_json::from_str::<serde_json::Value>(l)
-                    .ok()
-                    .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from))
-            })
-        })
-        .unwrap_or_else(|| "genesis".into());
+    // Advisory lock (sol defect #12): concurrent appenders would both read the
+    // same head and fork the chain. create_new is atomic on every platform;
+    // a lock older than 120s is presumed dead and stolen.
+    let lock_path = ledger_path.with_extension("lock");
+    let mut acquired = false;
+    for _ in 0..100 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(_) => {
+                acquired = true;
+                break;
+            }
+            Err(_) => {
+                if let Ok(meta) = std::fs::metadata(&lock_path) {
+                    let stale = meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| m.elapsed().ok())
+                        .map(|e| e.as_secs() > 120)
+                        .unwrap_or(true);
+                    if stale {
+                        let _ = std::fs::remove_file(&lock_path);
+                        continue;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    if !acquired {
+        return Err("could not acquire ledger lock (another trial running?)".into());
+    }
+    let result = append_trial_record_locked(ledger_path, report);
+    let _ = std::fs::remove_file(&lock_path);
+    result
+}
+
+fn append_trial_record_locked(ledger_path: &std::path::Path, report: &TrialReport) -> Result<String, String> {
+    let prev_chain = chain_head(ledger_path).unwrap_or_else(|| "genesis".into());
     let record_json = serde_json::to_string(report).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     hasher.update(prev_chain.as_bytes());
@@ -669,7 +697,42 @@ pub fn append_trial_record(ledger_path: &std::path::Path, report: &TrialReport) 
         .open(ledger_path)
         .map_err(|e| e.to_string())?;
     f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    // Durability: a trial that "landed" must survive a power cut.
+    f.sync_all().map_err(|e| e.to_string())?;
     Ok(chain)
+}
+
+/// Anti-truncation check (sol defect #12): a valid-prefix truncation passes
+/// `verify_trial_ledger`, so ALSO require that the externally anchored head
+/// (from the root-owned chain_heads.log) still appears somewhere in the
+/// chain. Returns Err with a description when the anchor is missing.
+pub fn verify_anchor(ledger_path: &std::path::Path, anchored_head: &str) -> Result<(), String> {
+    let Ok(content) = std::fs::read_to_string(ledger_path) else {
+        return Err(format!("ledger missing but anchor {anchored_head} exists — truncated to zero?"));
+    };
+    for line in content.lines().filter(|l| !l.trim().is_empty()) {
+        if let Some(rest) = line.strip_prefix("{\"chain\":\"") {
+            if let Some(sep) = rest.find("\",\"record\":") {
+                if &rest[..sep] == anchored_head {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err(format!("anchored head {anchored_head} not found in ledger — valid-prefix truncation suspected"))
+}
+
+/// Atomic JSON write (sol defect #13): readers must never observe a partial
+/// summary. Write to a sibling tmp file, fsync, rename over the target.
+pub fn write_json_atomic(path: &std::path::Path, json: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 /// Verify the ledger's hash chain. Returns the number of valid records, or
@@ -743,6 +806,15 @@ pub struct EpochSummary {
     pub families: usize,
     pub detection_lower_bound: f64,
     pub damage_upper_bound: f64,
+    /// Mean squared error of p_false against ground truth (seed=1, control=0)
+    /// over non-abstained items — threshold sensitivity alone cannot show
+    /// p_false is calibrated (sol). None when no items carry probabilities.
+    pub brier: Option<f64>,
+    /// Fraction of judged items where the critic abstained.
+    pub abstention_rate: Option<f64>,
+    /// Reliability bins over the quantized p_false scale:
+    /// (bin_p, n_items, observed_false_rate). Calibrated ⇒ observed ≈ bin_p.
+    pub reliability: Vec<(f64, usize, f64)>,
     /// The pre-registered promotion bar: detection LB ≥ 0.30 and damage UB < 0.10
     /// with ≥ 300 UNIQUE seeds + ≥ 300 controls across ≥ 3 seed families.
     pub promotion_bar_met: bool,
@@ -776,6 +848,28 @@ pub fn epoch_summary(reports: &[TrialReport]) -> EpochSummary {
     // Ledgers written before items were populated can't prove uniqueness —
     // fall back to the (over-)count but the family bar still blocks promotion.
     let unique_seeds = if unique.is_empty() && seeds > 0 { seeds } else { unique.len() };
+
+    // Calibration: Brier + reliability over every judged (non-abstained) item.
+    let judged: Vec<(f64, bool)> = reports
+        .iter()
+        .flat_map(|r| r.items.iter())
+        .filter(|i| !i.abstained)
+        .map(|i| (i.p_false, i.is_seed))
+        .collect();
+    let total_items: usize = reports.iter().map(|r| r.items.len()).sum();
+    let brier = (!judged.is_empty()).then(|| {
+        judged.iter().map(|(p, s)| (p - if *s { 1.0 } else { 0.0 }).powi(2)).sum::<f64>() / judged.len() as f64
+    });
+    let abstention_rate =
+        (total_items > 0).then(|| (total_items - judged.len()) as f64 / total_items as f64);
+    let mut reliability = Vec::new();
+    for bin in [0.05, 0.20, 0.35, 0.50, 0.65, 0.80, 0.95] {
+        let members: Vec<&(f64, bool)> = judged.iter().filter(|(p, _)| (p - bin).abs() < 0.075).collect();
+        if !members.is_empty() {
+            let observed = members.iter().filter(|(_, s)| *s).count() as f64 / members.len() as f64;
+            reliability.push((bin, members.len(), observed));
+        }
+    }
     let detection_lower_bound = wilson_lower_bound(seeds_flagged, seeds);
     let damage_upper_bound = wilson_upper_bound(controls_flagged, controls);
     EpochSummary {
@@ -788,6 +882,9 @@ pub fn epoch_summary(reports: &[TrialReport]) -> EpochSummary {
         families: families.len(),
         detection_lower_bound,
         damage_upper_bound,
+        brier,
+        abstention_rate,
+        reliability,
         promotion_bar_met: unique_seeds >= 300
             && controls >= 300
             && families.len() >= 3
@@ -1056,6 +1153,44 @@ mod tests {
         other_cfg.critic = "null-baseline".into();
         let mixed = epoch_summary(&[other_cfg, r]);
         assert_eq!(mixed.trials, 1, "epoch must exclude foreign configs");
+    }
+
+    #[test]
+    fn anchor_check_defeats_valid_prefix_truncation() {
+        let dir = scratch_dir();
+        let ledger = dir.join("l.jsonl");
+        let mk = |id: &str| TrialReport {
+            trial_id: id.into(),
+            critic: "oracle".into(),
+            prompt_version: 2,
+            model_id: "m".into(),
+            flag_threshold: 0.5,
+            n_seeds: 1,
+            n_controls: 1,
+            seeds_flagged: 1,
+            controls_flagged: 0,
+            detection_rate: 1.0,
+            control_damage_rate: 0.0,
+            items: vec![],
+        };
+        append_trial_record(&ledger, &mk("a")).unwrap();
+        let full_content = std::fs::read_to_string(&ledger).unwrap();
+        let head_b = append_trial_record(&ledger, &mk("b")).unwrap();
+        assert!(verify_anchor(&ledger, &head_b).is_ok());
+
+        // Truncate back to just record "a": internally the chain is VALID…
+        std::fs::write(&ledger, &full_content).unwrap();
+        assert!(verify_trial_ledger(&ledger).is_ok());
+        // …but the anchored head from "b" is gone — the anchor check catches it.
+        assert!(verify_anchor(&ledger, &head_b).is_err());
+
+        // Atomic write: target contains the full JSON afterwards, no tmp left.
+        let target = dir.join("summary.json");
+        write_json_atomic(&target, "{\"ok\":true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"ok\":true}");
+        assert!(!dir.join("summary.tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

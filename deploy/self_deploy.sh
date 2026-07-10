@@ -57,3 +57,31 @@ else
   echo "$(date -u +%FT%TZ) | deploy | ROLLED-BACK | $COMMIT health probe failed" >> "$EVLOG"
   exit 1
 fi
+
+# ── companion components (idempotent; added 2026-07-10 with the immune system) ──
+# The main binary is deployed above with health-gate + rollback; these are
+# sidecars that ride the same tick. Failures here must NOT roll back the mind.
+set +e
+echo "==> self-deploy: companion components (immune + observatory)"
+if cargo build --release -p mind-evals 2>&1 | tail -2; then
+  cp "$CARGO_TARGET_DIR/release/mind-evals" /opt/yantrik-mind/mind-evals
+  chmod 755 /opt/yantrik-mind/mind-evals
+fi
+cp "$CLONE/deploy/immune_trial.sh" /opt/yantrik-mind/immune_trial.sh && chmod 755 /opt/yantrik-mind/immune_trial.sh
+cp "$CLONE/deploy/observatory.py" /opt/yantrik-mind/observatory.py
+for unit in immune-trial.service immune-trial.timer observatory.service; do
+  if ! cmp -s "$CLONE/deploy/$unit" "/etc/systemd/system/$unit" 2>/dev/null; then
+    cp "$CLONE/deploy/$unit" "/etc/systemd/system/$unit"
+    UNITS_CHANGED=1
+  fi
+done
+[ "${UNITS_CHANGED:-0}" = "1" ] && systemctl daemon-reload
+systemctl enable --now immune-trial.timer 2>/dev/null
+systemctl enable --now observatory.service 2>/dev/null || systemctl restart observatory.service 2>/dev/null
+# First-ever trial: if the ledger doesn't exist yet, run one now so the board
+# and observatory show real numbers by morning.
+if [ ! -f /var/lib/yantrik-mind/immune/immune_trials.jsonl ]; then
+  systemctl start immune-trial.service 2>/dev/null
+fi
+echo "$(date -u +%FT%TZ) | deploy | COMPONENTS | immune+observatory synced @ $COMMIT" >> "$EVLOG"
+set -e

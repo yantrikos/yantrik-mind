@@ -245,6 +245,8 @@ async fn immune_cli(args: &[String]) -> i32 {
                 "n_controls": report.n_controls,
                 "seeds_flagged": report.seeds_flagged,
                 "controls_flagged": report.controls_flagged,
+                "missed_lies": report.items.iter().filter(|i| i.is_seed && !i.flagged).map(|i| i.statement.clone()).collect::<Vec<_>>(),
+                "false_alarms": report.items.iter().filter(|i| !i.is_seed && i.flagged).map(|i| i.statement.clone()).collect::<Vec<_>>(),
                 "detection_rate": report.detection_rate,
                 "control_damage_rate": report.control_damage_rate,
             },

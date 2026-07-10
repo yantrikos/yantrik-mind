@@ -354,7 +354,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 136] = [
+    const CMDS: [&str; 137] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -370,7 +370,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury", "ledger",
-        "judgment", "brier", "calibration", "immune",
+        "judgment", "brier", "calibration", "immune", "prove",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
         "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "envision", "vision",
@@ -7810,7 +7810,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let latest = &s["latest"];
         let epoch = &s["epoch"];
         let bar = epoch["promotion_bar_met"].as_bool().unwrap_or(false);
-        format!(
+        let mut out = format!(
             "🧫 Immune system — seeded-lie trials on snapshots of my own memory (I cannot edit the ledger):\n\
              · latest trial ({}): caught {}/{} planted lies, wrongly flagged {}/{} true controls\n\
              · epoch: {} trial(s), {} seeds — detection lower bound {:.0}%, control-damage upper bound {:.0}%\n\
@@ -7822,7 +7822,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             epoch["detection_lower_bound"].as_f64().unwrap_or(0.0) * 100.0,
             epoch["damage_upper_bound"].as_f64().unwrap_or(1.0) * 100.0,
             if bar { "MET — the critic has earned advisory-flag duty on live beliefs" } else { "not yet met — flags stay in the lab" },
-        )
+        );
+        // The confession: name the lies that got past me. They were planted
+        // in a COPY — naming them is honesty, not contamination.
+        let missed: Vec<String> = latest["missed_lies"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        if !missed.is_empty() {
+            out.push_str(&format!("
+The lie{} that got past me: {}", if missed.len() == 1 { "" } else { "s" }, missed.join(" · ")));
+        }
+        let alarms: Vec<String> = latest["false_alarms"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        if !alarms.is_empty() {
+            out.push_str(&format!("
+Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms.join(" · ")));
+        }
+        out
     }
 
     /// Resolve the outstanding proactive send, if any. `via_user_turn`: the user just spoke —
@@ -10698,6 +10711,70 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         out.push_str(&format!("\n{}\n", self.judgment_report().await));
         out.push_str(&format!("{}\n", Self::immune_board_line()));
         out.push_str("\nDetail: `packets` · `future` · `regrets` · `providers` · `nightshift` · `immune` · `judgment`");
+        out
+    }
+
+    /// PROVE IT — the witness-under-oath interaction. For any claim, answer
+    /// with the belief, its Bayesian confidence, where it came from, every
+    /// evidence entry, what contradicts it, and the exact contrary weight
+    /// that would flip it below 50%. The visible face of typed memory: not
+    /// "I think so" but "here is my epistemic state, audit it."
+    pub async fn prove_claim(&self, claim: &str) -> String {
+        if claim.trim().is_empty() {
+            return "Usage: `prove <claim>` — I'll show the belief, its evidence trail, conflicts, and what single observation would change my mind.".into();
+        }
+        // Semantic recall first, then exact-belief explanation.
+        let recalled = self
+            .memory
+            .recall_typed(mind_types::RecallQuery { text: claim.to_string(), top_k: 5, kind: None })
+            .await
+            .unwrap_or_default();
+        let mut target: Option<(mind_types::Belief, Vec<mind_types::Evidence>)> = None;
+        for r in &recalled {
+            if let Ok(Some(be)) = self.memory.explain_belief(&r.item.text).await {
+                target = Some(be);
+                break;
+            }
+        }
+        let Some((b, evidence)) = target else {
+            return format!(
+                "🔎 I hold no belief matching \"{claim}\". That's my honest state — I won't improvise one. Tell me the fact and I'll remember it with you as the source."
+            );
+        };
+        let mut out = format!("🔎 PROVE IT — \"{claim}\"\n\n");
+        out.push_str(&format!("Belief: {}\n", b.statement));
+        out.push_str(&format!(
+            "Confidence: {:.0}% (Bayesian posterior over {} evidence entr{})\n",
+            b.confidence * 100.0,
+            b.evidence_count,
+            if b.evidence_count == 1 { "y" } else { "ies" }
+        ));
+        out.push_str(&format!("Provenance: {}\n", b.provenance));
+        if !evidence.is_empty() {
+            out.push_str("Evidence trail:\n");
+            for e in evidence.iter().take(6) {
+                let excerpt = if e.excerpt.is_empty() { e.source_event.clone().unwrap_or_default() } else { e.excerpt.clone() };
+                out.push_str(&format!("  · {} (weight {:+.2})\n", excerpt, e.weight * e.polarity));
+            }
+        }
+        let conflicts = self.memory.conflicts().await.unwrap_or_default();
+        let mine: Vec<String> = conflicts
+            .iter()
+            .filter(|c| c.belief_a == b.statement || c.belief_b == b.statement)
+            .map(|c| if c.belief_a == b.statement { c.belief_b.clone() } else { c.belief_a.clone() })
+            .collect();
+        if mine.is_empty() {
+            out.push_str("Conflicts: none in my memory\n");
+        } else {
+            out.push_str(&format!("⚠ Conflicts with: {}\n", mine.join(" · ")));
+        }
+        // What would change my mind: the contrary log-odds weight that flips
+        // the posterior below 50%.
+        let c = b.confidence.clamp(0.01, 0.99);
+        let flip = (c / (1.0 - c)).ln();
+        out.push_str(&format!(
+            "What would change my mind: one contrary observation of weight ≥ {flip:.1} (e.g. you correcting me, or a document) flips this below 50% — say the word and I revise, with the revision on the record.\n"
+        ));
         out
     }
 
@@ -18285,6 +18362,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             "ledger" => Self::ledger_cmd(rest.trim()),
             "judgment" | "brier" | "calibration" => self.judgment_report().await,
             "immune" => Self::immune_report(),
+            "prove" => self.prove_claim(rest.trim()).await,
             "treasury" => Self::treasury_report(),
             "providers" | "quota" => self.providers_report().await,
             "packets" => self.packets_view().await,

@@ -1,0 +1,11 @@
+[Unit]
+Description=yantrik-mind observatory — read-only vitals window for the family
+After=network-online.target
+
+[Service]
+User=yantrikmind
+ExecStart=/usr/bin/python3 /opt/yantrik-mind/observatory.py --port 8787
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

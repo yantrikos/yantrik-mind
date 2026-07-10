@@ -52,7 +52,8 @@ set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 WORK="$(mktemp -d /root/codes/projbuild.XXXXXX)"
 CFGHOME="$(mktemp -d /opt/yantrik-mind/projhome.XXXXXX)"
 trap 'rm -rf "$WORK" "$CFGHOME"' EXIT
-export HOME="$CFGHOME"
+export HOME="$CFGHOME"                       # isolate the builder's config from the git tree…
+export CODEX_HOME="${CODEX_HOME:-/root/.codex}"  # …but the Codex builder still needs its real auth
 export CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
 export PATH="/usr/local/bin:/root/.cargo/bin:$PATH"
 

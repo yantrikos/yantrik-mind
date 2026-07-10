@@ -20455,7 +20455,10 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
-            let text = match self.inference.chat(messages, cfg.clone()).await {
+            // PRIVATE-GROUNDED: this turn carries the speaker's private memory grounding, so it must
+            // PREFER the private (owned-hardware) lane and only escalate to cloud with an audit —
+            // Sol's Constitutional-Kernel first rung (was an unscoped Household call = silent leak).
+            let text = match self.inference.chat_grounded(messages, cfg.clone()).await {
                 Ok(r) => r.text,
                 Err(e) => return Ok(format!("(couldn't think just now: {e})")),
             };
@@ -20965,9 +20968,10 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
              Never invent facts about people or events you have no stored knowledge of."
         );
         let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
+        // private-grounded (carries the speaker's memory) → private lane first, audited escalation
         let reply = match self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
         {
             Ok(r) => r.text.trim().to_string(),

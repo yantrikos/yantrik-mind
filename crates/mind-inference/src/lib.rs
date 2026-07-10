@@ -68,6 +68,11 @@ static PRIVACY_REFUSED: [std::sync::atomic::AtomicU64; 3] = [
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
 ];
+/// Private-grounded turns that ESCALATED to the household (cloud) lane because no owned-hardware
+/// provider was configured. This is the honest audit of the privacy gap: it should be 0 once
+/// YM_PRIVATE_PROVIDERS names a local/on-device provider. A NON-zero value means private family
+/// context reached a cloud provider — the Constitutional-Kernel invariant is not yet true here.
+static PRIVACY_ESCALATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Survival mode: true when all cloud providers in the chain have failed and the mind is
 /// operating on its local-only fallback tier.
@@ -95,8 +100,8 @@ pub fn privacy_report(provider: &str) -> String {
          private allowlist (YM_PRIVATE_PROVIDERS): {}\n\
          served  — private {} · household {} · public {}\n\
          refused — private {} · household {} · public {}\n\
-         Private-scope refusals are correct behavior until an owned-hardware provider is configured:\n\
-         callers fall back to deterministic rendering (scaffold/fill), family data stays home.",
+         private-grounded turns ESCALATED to cloud: {}  ← should be 0; a non-zero count means private context reached a cloud provider\n\
+         Configure YM_PRIVATE_PROVIDERS with an owned/on-device provider to keep private-grounded turns home (escalations auto-drop to 0).",
         if private.is_empty() { "(none — private lane HARD-REFUSES; deterministic fallback only)" } else { private.as_str() },
         PRIVACY_SERVED[0].load(Ordering::Relaxed),
         PRIVACY_SERVED[1].load(Ordering::Relaxed),
@@ -104,6 +109,7 @@ pub fn privacy_report(provider: &str) -> String {
         PRIVACY_REFUSED[0].load(Ordering::Relaxed),
         PRIVACY_REFUSED[1].load(Ordering::Relaxed),
         PRIVACY_REFUSED[2].load(Ordering::Relaxed),
+        PRIVACY_ESCALATED.load(Ordering::Relaxed),
     )
 }
 
@@ -212,6 +218,30 @@ impl InferencePool {
             backend.chat(&messages, &config, None)
         })
         .await?
+    }
+
+    /// PRIVATE-GROUNDED inference (Constitutional-Kernel first rung, tier-agnostic): a turn that
+    /// carries private personal context must PREFER the private lane (owned hardware / on-device).
+    /// If a private provider is configured and serves it → the data stays home. If none is (the
+    /// current default), the call ESCALATES to the household lane so the turn still works, but the
+    /// escalation is COUNTED and logged — the privacy gap becomes visible and auto-closes the moment
+    /// YM_PRIVATE_PROVIDERS names a local/on-device provider. Never breaks the turn.
+    pub async fn chat_grounded(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+    ) -> anyhow::Result<LLMResponse> {
+        match self.chat_scoped(messages.clone(), config.clone(), PrivacyScope::Private).await {
+            Ok(r) => Ok(r), // served locally — private context stayed home
+            Err(_) => {
+                PRIVACY_ESCALATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!(
+                    "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — no owned-hardware provider in YM_PRIVATE_PROVIDERS; configure one to keep private context home",
+                    self.provider
+                );
+                self.chat_scoped(messages, config, PrivacyScope::Household).await
+            }
+        }
     }
 
     pub fn available_permits(&self) -> usize {
@@ -744,6 +774,22 @@ mod privacy_tests {
         assert!(!scope_allows(PrivacyScope::Private, "scripted", hh, pv));
         assert!(scope_allows(PrivacyScope::Private, "ollama-local:qwen3", hh, "ollama-local"));
         assert!(!scope_allows(PrivacyScope::Private, "minimax", hh, "ollama-local"));
+    }
+
+    #[tokio::test]
+    async fn chat_grounded_prefers_private_and_audits_escalation() {
+        // a cloud-only pool with NO private provider configured → private-grounded turn escalates,
+        // still returns a reply (never breaks the turn), and the escalation is counted honestly.
+        let pool = InferencePool::new(
+            std::sync::Arc::new(ScriptedLLM::new("answer")) as std::sync::Arc<dyn LLMBackend>,
+            1,
+        )
+        .with_provider("minimax");
+        let before = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
+        let out = pool.chat_grounded(vec![ChatMessage::user("private family context")], GenerationConfig::default()).await;
+        assert!(out.is_ok(), "chat_grounded must never break the turn");
+        let after = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after, before + 1, "the cloud escalation of a private-grounded turn must be counted");
     }
 
     #[tokio::test]

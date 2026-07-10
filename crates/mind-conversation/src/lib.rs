@@ -354,7 +354,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 132] = [
+    const CMDS: [&str; 135] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -370,6 +370,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury", "ledger",
+        "judgment", "brier", "calibration",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
         "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "envision", "vision",
@@ -7706,10 +7707,91 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// it up: a user reply within 90 min = ENGAGED; silence past the window = IGNORED (resolved by
     /// the poll loop). Last send wins; one outstanding ledger entry at a time.
     pub async fn note_proactive_sent(&self) {
-        let _ = self
-            .memory
-            .profile_set("proactive_pending", &chrono::Utc::now().timestamp_millis().to_string())
-            .await;
+        let now = chrono::Utc::now().timestamp_millis();
+        let _ = self.memory.profile_set("proactive_pending", &now.to_string()).await;
+        // JUDGMENT LEDGER: a proactive send IS a falsifiable prediction — "the recipient engages
+        // within the window". p = the learned engagement rate (improvable). Graded on resolve. This
+        // is the mandatory-eligibility auto-log (Terra's anti-gaming rule): no opt-in, no post-hoc p.
+        let p = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.5);
+        self.judgment_log("proactive", "engagement", "recipient engages within 90m", p, now + 90 * 60_000, &now.to_string()).await;
+    }
+
+    /// JUDGMENT LEDGER (co-designed via gpt-5.6-terra) — the north-star instrument. Every proactive
+    /// send / self-graded forecast / forge pre-registration logs an IMMUTABLE prediction (p at
+    /// emission, binary outcome graded later). A domain-level Brier score tracked over months that
+    /// FALLS on frozen weights = "wiser without getting smarter" — the falsifiable proof of the bet.
+    async fn judgment_log(&self, source: &str, domain: &str, claim: &str, p: f64, grade_due_ms: i64, subject_ref: &str) {
+        let mut led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        led.push(serde_json::json!({
+            "t": chrono::Utc::now().timestamp_millis(), "source": source, "domain": domain,
+            "claim": claim, "p": p.clamp(0.0, 1.0), "outcome": serde_json::Value::Null,
+            "outcome_at": serde_json::Value::Null, "grade_due": grade_due_ms, "ref": subject_ref,
+        }));
+        if led.len() > 1000 { let c = led.len() - 1000; led.drain(..c); }
+        let _ = self.memory.profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap_or_default()).await;
+    }
+
+    /// Grade a pending prediction by its subject_ref (binary outcome). Immutable once graded.
+    async fn judgment_grade(&self, subject_ref: &str, outcome: bool) {
+        let mut led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut changed = false;
+        for r in led.iter_mut() {
+            if r.get("ref").and_then(|x| x.as_str()) == Some(subject_ref)
+                && r.get("outcome").map(|o| o.is_null()).unwrap_or(false)
+            {
+                r["outcome"] = serde_json::json!(if outcome { 1 } else { 0 });
+                r["outcome_at"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = self.memory.profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap_or_default()).await;
+        }
+    }
+
+    /// The morning-board judgment line: 90-day domain-shrunk macro Brier + graded/pending counts.
+    /// Shrinkage (toward the global mean, weight 10) stops a 2-item domain from dominating early.
+    pub async fn judgment_report(&self) -> String {
+        let led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let now = chrono::Utc::now().timestamp_millis();
+        let win = 90i64 * 86_400_000;
+        let (mut graded, mut pending) = (0usize, 0usize);
+        let mut per: std::collections::HashMap<String, (f64, usize)> = std::collections::HashMap::new();
+        let mut all_sq: Vec<f64> = Vec::new();
+        for r in &led {
+            let o = r.get("outcome").and_then(|x| x.as_i64());
+            let recent = now - r.get("t").and_then(|x| x.as_i64()).unwrap_or(0) <= win;
+            match o {
+                Some(oc) if recent => {
+                    graded += 1;
+                    let p = r.get("p").and_then(|x| x.as_f64()).unwrap_or(0.5);
+                    let sq = (p - oc as f64).powi(2);
+                    all_sq.push(sq);
+                    let d = r.get("domain").and_then(|x| x.as_str()).unwrap_or("general").to_string();
+                    let e = per.entry(d).or_insert((0.0, 0));
+                    e.0 += sq;
+                    e.1 += 1;
+                }
+                None if r.get("grade_due").and_then(|x| x.as_i64()).unwrap_or(0) >= now => pending += 1,
+                _ => {}
+            }
+        }
+        if graded == 0 {
+            return format!("🎯 Judgment Brier: no graded predictions yet ({pending} pending) — the score begins once outcomes land.");
+        }
+        let global = all_sq.iter().sum::<f64>() / all_sq.len() as f64;
+        let shrunk: Vec<f64> = per.values().map(|(sum, n)| {
+            let raw = sum / (*n as f64);
+            ((*n as f64) * raw + 10.0 * global) / ((*n as f64) + 10.0)
+        }).collect();
+        let macro_brier = shrunk.iter().sum::<f64>() / shrunk.len() as f64;
+        format!(
+            "🎯 Judgment Brier (90d): {macro_brier:.3} across {} domain(s) · {graded} graded / {pending} pending. Lower = better-calibrated; the north star is this FALLING over months on frozen weights (wiser without getting smarter).",
+            per.len()
+        )
     }
 
     /// Resolve the outstanding proactive send, if any. `via_user_turn`: the user just spoke —
@@ -7729,9 +7811,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let within = now - sent_ms <= 90 * 60_000;
         if via_user_turn {
             let _ = self.memory.record_proactive_outcome(sent_ms, within).await;
+            self.judgment_grade(&sent_ms.to_string(), within).await; // grade the engagement prediction
             let _ = self.memory.profile_set("proactive_pending", "").await;
         } else if !within {
             let _ = self.memory.record_proactive_outcome(sent_ms, false).await;
+            self.judgment_grade(&sent_ms.to_string(), false).await;
             let _ = self.memory.profile_set("proactive_pending", "").await;
         }
     }
@@ -18146,6 +18230,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 else { Self::ledger_cmd(r) }
             }
             "ledger" => Self::ledger_cmd(rest.trim()),
+            "judgment" | "brier" | "calibration" => self.judgment_report().await,
             "treasury" => Self::treasury_report(),
             "providers" | "quota" => self.providers_report().await,
             "packets" => self.packets_view().await,
@@ -21648,6 +21733,24 @@ mod tests {
     use mind_tools::{ScriptedMailSender, ToolActionExecutor};
     use mind_types::BeliefAssertion;
     use yantrik_ml::LLMBackend;
+
+    #[tokio::test]
+    async fn judgment_ledger_logs_grades_and_scores_brier() {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(mem, pool, "JARVIS");
+        // well-calibrated (p=0.9 → true) + badly-miscalibrated (p=0.9 → false)
+        conv.judgment_log("proactive", "engagement", "engages", 0.9, 0, "ref1").await;
+        conv.judgment_log("proactive", "engagement", "engages", 0.9, 0, "ref2").await;
+        conv.judgment_grade("ref1", true).await;
+        conv.judgment_grade("ref2", false).await;
+        let r = conv.judgment_report().await;
+        assert!(r.contains("Judgment Brier"), "report: {r}");
+        assert!(r.contains("2 graded"), "should show 2 graded: {r}");
+        // grading is immutable — a re-grade of an already-graded ref changes nothing
+        conv.judgment_grade("ref1", false).await;
+        assert!(conv.judgment_report().await.contains("2 graded"));
+    }
 
     #[test]
     fn epistemic_gate_only_observed_or_told_may_act() {

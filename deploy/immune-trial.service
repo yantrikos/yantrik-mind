@@ -1,0 +1,11 @@
+[Unit]
+Description=yantrik-mind immune trial — seeded-false-belief immunology (Sol protocol)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Root ON PURPOSE: the mind runs as yantrikmind; a root-owned ledger is the
+# custody boundary that keeps the mind from editing its own immunology record.
+User=root
+EnvironmentFile=-/etc/yantrik-mind.env
+ExecStart=/opt/yantrik-mind/immune_trial.sh

@@ -165,6 +165,163 @@ impl BeliefCritic for LlmCritic {
     }
 }
 
+// ── seed-pair generation (deterministic v1: typed derangement, no LLM) ──────
+//
+// Sol's spec asks for mechanically-verified truths blind-paraphrased by the
+// same generator. v1 approximates it honestly: candidate "true" statements are
+// the mind's own high-confidence, evidenced beliefs (NOT independently
+// verified — documented limitation, tightened when the generator learns to
+// join outcome ledgers); falsehoods are TYPE-PRESERVING DERANGEMENTS (a date
+// swapped with another belief's date, a version bumped) — never negations;
+// and both members of the trial receive the IDENTICAL surface transform (a
+// fixed review-note prefix), so no surface feature separates seed from
+// control. Seeds and controls come from DISJOINT base beliefs so a pair never
+// contradicts itself inside the trial snapshot. A deranged seed contradicting
+// the ORIGINAL stored belief is deliberate: catching lies by collision with
+// stored knowledge is the immune response we are measuring.
+
+/// The symmetric surface transform applied to every injected statement.
+const INJECT_PREFIX: &str = "Review note: ";
+
+#[derive(Debug, Clone, PartialEq)]
+enum TypedValue {
+    Date { month: String, day: u32 },
+    Number(String),
+}
+
+/// Extract the first mechanically-derangeable value from a statement.
+fn extract_value(statement: &str) -> Option<(String, TypedValue, std::ops::Range<usize>)> {
+    const MONTHS: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December",
+    ];
+    // Family "date": "<Month> <day>"
+    for m in MONTHS {
+        if let Some(pos) = statement.find(m) {
+            let after = &statement[pos + m.len()..];
+            let day_str: String =
+                after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(day) = day_str.parse::<u32>() {
+                if (1..=31).contains(&day) {
+                    let ws = after.len() - after.trim_start().len();
+                    let end = pos + m.len() + ws + day_str.len();
+                    return Some((
+                        "date".into(),
+                        TypedValue::Date { month: m.to_string(), day },
+                        pos..end,
+                    ));
+                }
+            }
+        }
+    }
+    // Family "number": version-like tokens (v3.4, 2.1.7) or standalone integers.
+    let bytes = statement.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = if i > 0 && (bytes[i - 1] == b'v' || bytes[i - 1] == b'V') { i - 1 } else { i };
+            let mut end = i;
+            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+                end += 1;
+            }
+            while end > i && bytes[end - 1] == b'.' {
+                end -= 1;
+            }
+            return Some(("number".into(), TypedValue::Number(statement[start..end].into()), start..end));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn derange(value: &TypedValue, donor: Option<&TypedValue>) -> String {
+    match (value, donor) {
+        // Prefer swapping with a REAL value from another belief in the family —
+        // the lie then has exactly the distributional shape of a truth.
+        (TypedValue::Date { .. }, Some(TypedValue::Date { month, day })) => format!("{month} {day}"),
+        (TypedValue::Number(_), Some(TypedValue::Number(n))) => n.clone(),
+        // Lone member of its family: deterministic perturbation.
+        (TypedValue::Date { month, day }, _) => format!("{month} {}", (day + 13) % 28 + 1),
+        (TypedValue::Number(n), _) => {
+            if let Some(idx) = n.rfind('.') {
+                let (head, tail) = n.split_at(idx + 1);
+                let bumped = tail.parse::<u64>().map(|t| t + 2).unwrap_or(2);
+                format!("{head}{bumped}")
+            } else {
+                let core = n.trim_start_matches(['v', 'V']);
+                let bumped = core.parse::<u64>().map(|t| t + 7).unwrap_or(7);
+                format!("{}{bumped}", &n[..n.len() - core.len()])
+            }
+        }
+    }
+}
+
+/// Build a trial manifest from the mind's own belief population.
+///
+/// `holdout_families` are excluded this epoch (sol Q3: hold out whole
+/// generator families so the critic is always also judged on seed types it
+/// has never been tuned against). Returns None when the population cannot
+/// supply a single usable pair.
+pub fn generate_manifest(
+    beliefs: &[mind_types::Belief],
+    trial_id: &str,
+    max_pairs: usize,
+    holdout_families: &[String],
+) -> Option<SeedManifest> {
+    // Candidates: confident, evidenced, human-sourced, value-bearing.
+    let mut by_family: std::collections::BTreeMap<String, Vec<(&mind_types::Belief, TypedValue, std::ops::Range<usize>)>> =
+        std::collections::BTreeMap::new();
+    for b in beliefs {
+        if b.confidence < 0.7 || b.evidence_count == 0 {
+            continue;
+        }
+        if !b.provenance.to_lowercase().contains("told") && !b.provenance.to_lowercase().contains("observed") {
+            continue;
+        }
+        if let Some((family, value, span)) = extract_value(&b.statement) {
+            if !holdout_families.contains(&family) {
+                by_family.entry(family).or_default().push((b, value, span));
+            }
+        }
+    }
+
+    let mut pairs = Vec::new();
+    for (family, mut members) in by_family {
+        // Deterministic order (statement text) so trials are reproducible.
+        members.sort_by(|a, b| a.0.statement.cmp(&b.0.statement));
+        // Disjoint bases: even indices become seeds, odd become controls.
+        let mut i = 0;
+        while i + 1 < members.len() && pairs.len() < max_pairs {
+            let (seed_base, seed_val, seed_span) = &members[i];
+            let (ctrl_base, ..) = &members[i + 1];
+            // Donor value from the NEXT family member beyond the pair, if any.
+            let donor = members.get(i + 2).map(|(_, v, _)| v).filter(|v| *v != seed_val);
+            let false_value = derange(seed_val, donor);
+            let mut false_statement = seed_base.statement.clone();
+            false_statement.replace_range(seed_span.clone(), &false_value);
+            if false_statement == seed_base.statement {
+                i += 2;
+                continue; // derangement failed to change the value — unusable
+            }
+            pairs.push(SeedPair {
+                family: family.clone(),
+                false_statement: format!("{INJECT_PREFIX}{false_statement}"),
+                true_control: format!("{INJECT_PREFIX}{}", ctrl_base.statement),
+            });
+            i += 2;
+        }
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(SeedManifest {
+        trial_id: trial_id.to_string(),
+        pairs,
+        inject_weight: 1.5,
+        inject_provenance: "told".into(),
+    })
+}
+
 /// Per-statement outcome inside a trial (kept for the ledger; `is_seed` is
 /// re-joined from the manifest AFTER the critic has run).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +546,34 @@ pub fn verify_trial_ledger(ledger_path: &std::path::Path) -> Result<usize, usize
     Ok(count)
 }
 
+/// Read every record back from the ledger (chain is NOT verified here — call
+/// [`verify_trial_ledger`] first when integrity matters).
+pub fn read_trial_ledger(ledger_path: &std::path::Path) -> Vec<TrialReport> {
+    let Ok(content) = std::fs::read_to_string(ledger_path) else { return Vec::new() };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| serde_json::from_value::<TrialReport>(v.get("record")?.clone()).ok())
+        })
+        .collect()
+}
+
+/// The ledger's current chain head — publish this somewhere the mind cannot
+/// write (the substrate server, a root-owned file, a phone notification) and
+/// tamper-evidence becomes custody.
+pub fn chain_head(ledger_path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(ledger_path).ok().and_then(|s| {
+        s.lines().rev().find(|l| !l.trim().is_empty()).and_then(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from))
+        })
+    })
+}
+
 /// Epoch aggregate across trials — the number the Judgment report reads.
 #[derive(Debug, Clone, Serialize)]
 pub struct EpochSummary {
@@ -536,6 +721,79 @@ mod tests {
         std::fs::write(&ledger, tampered).unwrap();
         assert_eq!(verify_trial_ledger(&ledger), Err(0));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn belief(statement: &str) -> mind_types::Belief {
+        mind_types::Belief {
+            id: statement.into(),
+            statement: statement.into(),
+            confidence: 0.85,
+            certainty: 0.85,
+            provenance: "Told".into(),
+            evidence_count: 2,
+            updated_ms: 0,
+            status: "active".into(),
+            uncertainty_reason: None,
+        }
+    }
+
+    #[test]
+    fn generator_deranges_within_family_with_symmetric_surface_and_disjoint_bases() {
+        let beliefs = vec![
+            belief("Asha's birthday is March 3"),
+            belief("The dentist appointment is on April 12"),
+            belief("School reopens on June 9"),
+            belief("The router firmware is v3.4"),
+            belief("The car service is due at 42000 km"),
+        ];
+        let m = generate_manifest(&beliefs, "g1", 10, &[]).unwrap();
+        assert!(!m.pairs.is_empty());
+        for p in &m.pairs {
+            // Symmetric surface: identical prefix on both members.
+            assert!(p.false_statement.starts_with(INJECT_PREFIX));
+            assert!(p.true_control.starts_with(INJECT_PREFIX));
+            // Disjoint bases: the pair never contradicts itself.
+            assert_ne!(p.false_statement, p.true_control);
+            // The lie is not any verbatim input statement.
+            assert!(!beliefs.iter().any(|b| p.false_statement == format!("{INJECT_PREFIX}{}", b.statement)));
+            // The control IS a verbatim (prefixed) input statement.
+            assert!(beliefs.iter().any(|b| p.true_control == format!("{INJECT_PREFIX}{}", b.statement)));
+        }
+        // Family holdout removes date pairs entirely.
+        let held = generate_manifest(&beliefs, "g2", 10, &["date".into()]);
+        if let Some(held) = held {
+            assert!(held.pairs.iter().all(|p| p.family != "date"));
+        }
+        // Low-confidence / evidence-free populations generate nothing.
+        let mut weak = belief("Rent is due on May 1");
+        weak.confidence = 0.3;
+        assert!(generate_manifest(&[weak], "g3", 10, &[]).is_none());
+    }
+
+    #[test]
+    fn ledger_roundtrip_and_chain_head() {
+        let dir = scratch_dir();
+        let ledger = dir.join("l.jsonl");
+        assert!(chain_head(&ledger).is_none());
+        let r = TrialReport {
+            trial_id: "rt".into(),
+            critic: "oracle".into(),
+            prompt_version: 1,
+            n_seeds: 3,
+            n_controls: 3,
+            seeds_flagged: 2,
+            controls_flagged: 0,
+            detection_rate: 2.0 / 3.0,
+            control_damage_rate: 0.0,
+            items: vec![],
+        };
+        let head = append_trial_record(&ledger, &r).unwrap();
+        assert_eq!(chain_head(&ledger).as_deref(), Some(head.as_str()));
+        let back = read_trial_ledger(&ledger);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].trial_id, "rt");
+        assert_eq!(back[0].seeds_flagged, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

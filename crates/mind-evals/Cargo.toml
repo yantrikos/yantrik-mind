@@ -9,7 +9,7 @@ mind-memory = { workspace = true }
 mind-inference = { workspace = true }
 mind-conversation = { workspace = true }
 mind-tools = { workspace = true }
-yantrik-ml = { workspace = true, default-features = false }
+yantrik-ml = { workspace = true, default-features = false, features = ["api-llm"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -174,7 +174,7 @@ fn edge_kind(s: &str) -> CognitiveEdgeKind {
 /// (a plain file copy is not). `dest` must not already exist — refusing to
 /// overwrite is the cheap guard against a reversed argument order ever
 /// pointing this at the live file.
-fn snapshot_db_to(live_path: &str, dest: &str) -> std::result::Result<(), String> {
+pub fn snapshot_db_to(live_path: &str, dest: &str) -> std::result::Result<(), String> {
     if live_path == ":memory:" {
         return Err("cannot snapshot a :memory: mind — no durable file to copy".into());
     }

@@ -354,7 +354,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 135] = [
+    const CMDS: [&str; 136] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -370,7 +370,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "traditions", "tradition", "book", "thennow", "thenandnow", "share", "style", "frame",
         "dream", "radar", "privacy", "regrets", "regret", "future", "nodes",
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury", "ledger",
-        "judgment", "brier", "calibration",
+        "judgment", "brier", "calibration", "immune",
         "providers", "quota", "board", "ops", "carrying", "emissary",
         "work", "workops", "projects", "code", "repos", "repo",
         "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "envision", "vision",
@@ -7791,6 +7791,37 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         format!(
             "🎯 Judgment Brier (90d): {macro_brier:.3} across {} domain(s) · {graded} graded / {pending} pending. Lower = better-calibrated; the north star is this FALLING over months on frozen weights (wiser without getting smarter).",
             per.len()
+        )
+    }
+
+    /// The self-immunology report: results of the scheduled seeded-false-belief
+    /// trials (immune-trial.timer plants lies in a SNAPSHOT of memory and
+    /// scores whether the critic catches them). Reads the root-owned summary
+    /// the mind cannot write — this report is about the mind, not by it.
+    pub fn immune_report() -> String {
+        let path = std::env::var("YM_IMMUNE_SUMMARY")
+            .unwrap_or_else(|_| "/var/lib/yantrik-mind/immune/immune_summary.json".into());
+        let Some(s) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        else {
+            return "🧫 Immune system: no trials recorded yet — the timer plants its first lies in a snapshot of my memory this week. (Custody note: the trial ledger is root-owned; I can read my immunology, not rewrite it.)".into();
+        };
+        let latest = &s["latest"];
+        let epoch = &s["epoch"];
+        let bar = epoch["promotion_bar_met"].as_bool().unwrap_or(false);
+        format!(
+            "🧫 Immune system — seeded-lie trials on snapshots of my own memory (I cannot edit the ledger):\n\
+             · latest trial ({}): caught {}/{} planted lies, wrongly flagged {}/{} true controls\n\
+             · epoch: {} trial(s), {} seeds — detection lower bound {:.0}%, control-damage upper bound {:.0}%\n\
+             · pre-registered bar (≥30% detection LB, <10% damage UB, n≥300): {}",
+            latest["critic"].as_str().unwrap_or("?"),
+            latest["seeds_flagged"], latest["n_seeds"],
+            latest["controls_flagged"], latest["n_controls"],
+            epoch["trials"], epoch["seeds"],
+            epoch["detection_lower_bound"].as_f64().unwrap_or(0.0) * 100.0,
+            epoch["damage_upper_bound"].as_f64().unwrap_or(1.0) * 100.0,
+            if bar { "MET — the critic has earned advisory-flag duty on live beliefs" } else { "not yet met — flags stay in the lab" },
         )
     }
 
@@ -18231,6 +18262,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             }
             "ledger" => Self::ledger_cmd(rest.trim()),
             "judgment" | "brier" | "calibration" => self.judgment_report().await,
+            "immune" => Self::immune_report(),
             "treasury" => Self::treasury_report(),
             "providers" | "quota" => self.providers_report().await,
             "packets" => self.packets_view().await,

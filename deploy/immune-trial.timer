@@ -1,0 +1,11 @@
+[Unit]
+Description=Run yantrik-mind immune trials 4x/week (Sol protocol: 4 disjoint trials x 15 seeds = 60/week, 480/8-week epoch)
+
+[Timer]
+# Mon/Wed/Fri/Sun at 03:40 local — inside the night-shift window, after the
+# nightly backup, before the household wakes.
+OnCalendar=Mon,Wed,Fri,Sun 03:40
+Persistent=true
+
+[Install]
+WantedBy=timers.target

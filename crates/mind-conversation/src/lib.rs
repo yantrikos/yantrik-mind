@@ -10693,8 +10693,30 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             out.push_str(&format!("Last shift: {}\n", rep.replace('\n', " · ")));
         }
         out.push_str(&format!("\n{}\n", Self::treasury_report().lines().take(7).collect::<Vec<_>>().join("\n")));
-        out.push_str("\nDetail: `packets` · `future` · `regrets` · `providers` · `nightshift`");
+        // Self-accountability lines: calibration + immunology. The board is
+        // where the family SEES that the mind measures itself.
+        out.push_str(&format!("\n{}\n", self.judgment_report().await));
+        out.push_str(&format!("{}\n", Self::immune_board_line()));
+        out.push_str("\nDetail: `packets` · `future` · `regrets` · `providers` · `nightshift` · `immune` · `judgment`");
         out
+    }
+
+    /// One-line immunology status for the morning board; `ym immune` has the
+    /// full report. Reads the root-owned summary the mind cannot write.
+    pub fn immune_board_line() -> String {
+        let path = std::env::var("YM_IMMUNE_SUMMARY")
+            .unwrap_or_else(|_| "/var/lib/yantrik-mind/immune/immune_summary.json".into());
+        let Some(s) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        else {
+            return "🧫 Immune: no trials yet — first lies get planted this week (`immune`)".into();
+        };
+        let l = &s["latest"];
+        format!(
+            "🧫 Immune: last trial caught {}/{} planted lies, {}/{} false alarms — ledger sealed ({} epoch trials)",
+            l["seeds_flagged"], l["n_seeds"], l["controls_flagged"], l["n_controls"], s["epoch"]["trials"]
+        )
     }
 
     /// ---------- ACTION PACKETS (proof-carrying prepared work) ----------

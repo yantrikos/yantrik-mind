@@ -290,6 +290,20 @@ impl BeliefCritic for LlmCritic {
 /// The symmetric surface transform applied to every injected statement.
 const INJECT_PREFIX: &str = "Review note: ";
 
+/// The V3 exact-collision key: the statement with its first typed slot
+/// replaced by a `<FAMILY>` sentinel, normalized. Two statements that differ
+/// ONLY in the deranged value collide here — which is exactly how the critic
+/// finds the original belief a seed contradicts. The INJECT_PREFIX is stripped
+/// so an injected "Review note: X on <DATE>" collides with a stored "X on
+/// <DATE>". None when the statement carries no derangeable slot.
+pub fn masked_key(statement: &str) -> Option<String> {
+    let base = statement.strip_prefix(INJECT_PREFIX).unwrap_or(statement);
+    let (family, _value, span) = extract_value(base)?;
+    let mut masked = base.to_string();
+    masked.replace_range(span, &format!("<{}>", family.to_uppercase()));
+    Some(masked.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum TypedValue {
     Date { month: String, day: u32 },
@@ -614,6 +628,22 @@ async fn run_on_snapshot(
     {
         let copy = MemoryHandle::spawn(snap_str, dim).map_err(|e| format!("open snapshot: {e}"))?;
 
+        // Retrieval V3 (sol news-evasion fix): FREEZE the retrieval corpus
+        // BEFORE any injection, so one trial statement can never surface as
+        // another's related evidence. Precompute each frozen belief's masked
+        // key (tested slot replaced by <FAMILY>) for the exact-collision lane.
+        let frozen: Vec<(String, Option<String>)> = match copy.export().await {
+            Ok(json) => serde_json::from_str::<Vec<mind_types::Belief>>(&json)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| {
+                    let key = masked_key(&b.statement);
+                    (b.statement, key)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
         // Inject both members of every pair with the SAME envelope.
         let mut injected: Vec<(String, String, bool)> = Vec::new(); // (statement, family, is_seed)
         for pair in &manifest.pairs {
@@ -630,6 +660,11 @@ async fn run_on_snapshot(
                 injected.push((stmt.clone(), pair.family.clone(), is_seed));
             }
         }
+
+        // The set of every injected statement — semantic recall filters these
+        // out so the corpus stays effectively frozen (V3 rule 1).
+        let injected_set: std::collections::HashSet<String> =
+            injected.iter().map(|(s, _, _)| s.clone()).collect();
 
         // Judge every injected statement with what the snapshot actually
         // stores — including label-blind retrieval of related beliefs, so the
@@ -649,15 +684,36 @@ async fn run_on_snapshot(
                 ),
                 None => (0.5, manifest.inject_provenance.clone(), Vec::new()),
             };
-            let related: Vec<String> = copy
-                .recall_typed(mind_types::RecallQuery { text: stmt.clone(), top_k: 6, kind: None })
+            // V3 retrieval: exact-collision lane FIRST (deterministically
+            // surfaces the original belief whose value was deranged, which
+            // full-statement semantic recall drowns in topical neighbours —
+            // the news-evasion failure), then a semantic lane over the frozen
+            // corpus fills the rest. Label-blind: uses only the masked key.
+            let mut related: Vec<String> = Vec::new();
+            if let Some(key) = masked_key(&stmt) {
+                for (text, k) in &frozen {
+                    if k.as_deref() == Some(key.as_str()) && text != &stmt {
+                        related.push(text.clone());
+                        if related.len() >= 2 {
+                            break;
+                        }
+                    }
+                }
+            }
+            let seen: std::collections::HashSet<String> = related.iter().cloned().collect();
+            for r in copy
+                .recall_typed(mind_types::RecallQuery { text: stmt.clone(), top_k: 8, kind: None })
                 .await
                 .unwrap_or_default()
-                .into_iter()
-                .map(|r| r.item.text)
-                .filter(|t| t != &stmt)
-                .take(5)
-                .collect();
+            {
+                if related.len() >= 5 {
+                    break;
+                }
+                let t = r.item.text;
+                if t != stmt && !injected_set.contains(&t) && !seen.contains(&t) {
+                    related.push(t);
+                }
+            }
             let case = CriticCase {
                 statement: stmt.clone(),
                 confidence,
@@ -1322,6 +1378,22 @@ mod tests {
         for p2 in generate_trip_pairs(&preds, 10, &used) {
             assert!(!used.contains(&p2.seed_base) && !used.contains(&p2.control_base));
         }
+    }
+
+    #[test]
+    fn masked_key_collides_deranged_value_with_original() {
+        // A deranged seed and the original belief share a masked key…
+        let orig = "Asha's birthday is March 3";
+        let seed = "Review note: Asha's birthday is July 9";
+        assert_eq!(masked_key(orig), masked_key(seed));
+        assert!(masked_key(orig).unwrap().contains("<date>"));
+        // …but an unrelated belief does not.
+        assert_ne!(masked_key(orig), masked_key("The router firmware is v3.4"));
+        // No derangeable slot → no key (won't false-collide on prose).
+        assert!(masked_key("Review note: the meeting went well").is_none());
+        // Version vs count keep distinct sentinels.
+        assert!(masked_key("firmware is v3.4").unwrap().contains("<version>"));
+        assert!(masked_key("has 4 drive bays").unwrap().contains("<count>"));
     }
 
     #[test]

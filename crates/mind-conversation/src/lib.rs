@@ -10917,6 +10917,39 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 let _ = self.memory.profile_set("snr_class_mute", "1").await;
                 "Muted the whole support-nudge class. `support on` re-enables it.".into()
             }
+            "feedback" if !rest.trim().is_empty() => {
+                // Grades the most recent ungraded nudge. "pressured"/"monitored"/"creepy"
+                // feed the kill switch; "helpful"/"neutral" feed the trust bound. This is
+                // the metric — how it FELT, never whether you acted.
+                let word = rest.trim().to_lowercase();
+                let mut audits = self.support_audits().await;
+                let Some(last) = audits.iter_mut().rev().find(|a| a.feedback.is_none()) else {
+                    return "No ungraded support nudge on record.".into();
+                };
+                last.feedback = Some(word.clone());
+                let person = last.person.clone();
+                let harm = support_nudge::feedback_is_harm(&word);
+                if harm {
+                    // A harm report immediately pauses that person (sol's kill rule).
+                    let mut muted = self.support_muted_people().await;
+                    let p = person.to_lowercase();
+                    if !muted.contains(&p) {
+                        muted.push(p);
+                        let _ = self.memory.profile_set("snr_muted_people", &muted.join(",")).await;
+                    }
+                }
+                let health = support_nudge::class_health(&audits);
+                let _ = self.memory.profile_set("snr_audits", &serde_json::to_string(&audits).unwrap_or_default()).await;
+                if health == support_nudge::ClassHealth::KillDisabled {
+                    let _ = self.memory.profile_set("snr_class_mute", "1").await;
+                    return "Understood — and that's twice recently, so I've disabled support nudges entirely pending your review (`support on` re-enables). Thank you for telling me.".into();
+                }
+                if harm {
+                    format!("Understood — I'm sorry it landed that way. I've muted support nudges for {person} and recorded the report.")
+                } else {
+                    "Noted, thank you — that grades the last nudge.".into()
+                }
+            }
             _ => {
                 let on = self.memory.profile_get("snr_optin").await.ok().flatten().as_deref() == Some("1");
                 let muted = self.support_muted_people().await;

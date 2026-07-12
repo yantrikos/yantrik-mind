@@ -1293,6 +1293,22 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // Support-not-replace (CR-1): if the owner OPTED IN and someone they know has a
+        // birthday coming with prep unmet, offer to help them show up — opportunity-first,
+        // never guilt. Silent by default; every gate (opt-in, mutes, one-shot event key,
+        // kill switch, quiet hours) lives inside support_nudge_candidate.
+        {
+            let chat = active_chat.load(Ordering::Relaxed);
+            if chat != 0 && conv.proactive_receptivity_ok().await {
+                if let Some(msg) = conv.support_nudge_candidate(in_quiet_hours_now(), false).await {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                        conv.note_proactive_sent().await;
+                        eprintln!("[support] opportunity nudge sent");
+                    }
+                }
+            }
+        }
+
         // Gift scout: someone's day within 25 days → study their photos unprompted and deliver
         // gift intelligence while there's still shipping time. Daily-capped, quiet-gated, detached
         // (12 vision reads take minutes and must never stall the poll loop).

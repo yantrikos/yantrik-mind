@@ -97,6 +97,13 @@ fn spawn_web_server() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `ym setup` — the first-run onboarding wizard. Handled before anything
+    // else boots (no DB, no backend, no channel): it only talks to Telegram
+    // and writes the env file, then exits so the service can start clean.
+    if std::env::args().nth(1).as_deref() == Some("setup") {
+        return mind_core::setup::run();
+    }
+
     let (backend, name) = build_backend();
     let permits = if name.starts_with("nanogpt") { 4 } else { 1 };
     let pool = InferencePool::new(backend, permits).with_provider(&name);

@@ -36,6 +36,7 @@ WORK="$(mktemp -d /root/codes/ymbuild.XXXXXX)"          # the repo clone (siblin
 CFGHOME="$(mktemp -d /opt/yantrik-mind/ymhome.XXXXXX)"  # Claude config, outside the git tree
 trap 'rm -rf "$WORK" "$CFGHOME"' EXIT
 export HOME="$CFGHOME"
+export CODEX_HOME="${CODEX_HOME:-/root/.codex}"         # isolated HOME blanks codex auth → point at real ~/.codex
 export CARGO_HOME=/root/.cargo                          # warm crates registry (avoid re-download)
 export RUSTUP_HOME=/root/.rustup                        # keep rustup's default toolchain (HOME moved)
 # cron runs with a minimal PATH; claude lives in /usr/local/bin, cargo in /root/.cargo/bin.
@@ -63,7 +64,7 @@ Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under c
 # decide auto-merge vs draft — the builder identity doesn't change what's allowed to merge.
 if [ "${YM_BUILDER:-claude}" = "codex" ]; then
   echo "==> builder: OpenAI Codex CLI (codex exec)"
-  timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" 2>&1 | tail -25
+  timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" </dev/null 2>&1 | tail -25
 else
   echo "==> builder: Claude Code"
   timeout 1500 claude -p "$BUILDER_PROMPT" \

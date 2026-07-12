@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 pub mod plugins;
 pub use plugins::{PluginRegistry, PluginSpec, SecurityLevel};
 mod emotion;
@@ -62,6 +64,94 @@ use mind_types::{
     MemoryFacade, MindError, Result, RiskLevel, Skill, Task, UncertaintyReason, WorkingSet,
 };
 use yantrik_ml::{ChatMessage, GenerationConfig};
+
+const PROJECT_PROPOSALS_DIR: &str = "/var/lib/yantrik-mind/project-proposals";
+
+/// A research-wing suggestion for a future project change. Proposals are data only: the
+/// conversation crate can validate and display them, but does not execute them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectProposal {
+    pub repo: String,
+    pub goal: String,
+    pub citations: Vec<String>,
+    pub base_sha: String,
+    pub acceptance_test: String,
+    pub why_not: String,
+    pub p_merge: f64,
+}
+
+impl ProjectProposal {
+    /// Reject incomplete or nonsensical proposals before they enter the pending spool.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        for (name, value) in [
+            ("repo", &self.repo),
+            ("goal", &self.goal),
+            ("base_sha", &self.base_sha),
+            ("acceptance_test", &self.acceptance_test),
+            ("why_not", &self.why_not),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("missing required field: {name}"));
+            }
+        }
+        if self.citations.is_empty() || self.citations.iter().any(|citation| citation.trim().is_empty()) {
+            return Err("citations must contain at least one nonempty citation".to_string());
+        }
+        if !self.p_merge.is_finite() || !(0.0..=1.0).contains(&self.p_merge) {
+            return Err("p_merge must be between 0 and 1".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn from_json(input: &str) -> std::result::Result<Self, String> {
+        let proposal: Self = serde_json::from_str(input).map_err(|error| error.to_string())?;
+        proposal.validate()?;
+        Ok(proposal)
+    }
+}
+
+fn proposal_age(modified: std::time::SystemTime) -> String {
+    let seconds = modified.elapsed().unwrap_or_default().as_secs();
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+fn pending_proposals() -> String {
+    let entries = match std::fs::read_dir(PROJECT_PROPOSALS_DIR) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return "No pending project proposals.".to_string(),
+        Err(error) => return format!("Could not read proposal spool: {error}"),
+    };
+    let mut paths: Vec<_> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+
+    let mut lines = Vec::new();
+    for path in paths {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("<unknown>");
+        let age = path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map(proposal_age)
+            .unwrap_or_else(|_| "unknown age".to_string());
+        match std::fs::read_to_string(&path).map_err(|error| error.to_string()).and_then(|json| ProjectProposal::from_json(&json)) {
+            Ok(proposal) => lines.push(format!("{name} · {age} old · {} · {}", proposal.repo, proposal.goal)),
+            Err(error) => lines.push(format!("{name} · {age} old · invalid: {error}")),
+        }
+    }
+    if lines.is_empty() {
+        "No pending project proposals.".to_string()
+    } else {
+        format!("Pending project proposals (shadow mode only):\n{}", lines.join("\n"))
+    }
+}
 
 /// Parse a loose due expression ("tomorrow", "tonight", "next week", "in 3 days", "in 2 hours") to
 /// an absolute epoch-ms. None for null/empty/unparseable — the commitment still becomes an open task,
@@ -354,7 +444,7 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// The shared command-verb table: does the first word match a `ym` CLI verb?
 fn looks_like_command_word(t: &str) -> bool {
     let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
-    const CMDS: [&str; 137] = [
+    const CMDS: [&str; 138] = [
         "weather", "news", "calc", "deals", "watch", "foresee", "forecast", "predict", "calendar",
         "cal", "tasks", "todo", "remind", "search", "wiki", "stock", "crypto", "translate",
         "briefing", "brief", "family", "about", "evolution", "track", "recall", "remember",
@@ -372,7 +462,7 @@ fn looks_like_command_word(t: &str) -> bool {
         "packets", "packet", "approve", "reject", "nightshift", "shift", "budget", "treasury", "ledger",
         "judgment", "brier", "calibration", "immune", "prove",
         "providers", "quota", "board", "ops", "carrying", "emissary",
-        "work", "workops", "projects", "code", "repos", "repo",
+        "work", "workops", "projects", "proposals", "code", "repos", "repo",
         "reviewer", "review", "researchops", "ro", "paper", "papers", "forge", "ideate", "envision", "vision",
     ];
     CMDS.contains(&first.as_str())
@@ -18107,6 +18197,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         match cmd.as_str() {
             "" => "ym — say something, or `ym commands` to see the plugins you have.".to_string(),
             "commands" | "cmds" | "?" => self.cli_commands(),
+            "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
             "search" | "google" | "ddg" if !rest.is_empty() => self.run_agent_tool("search", &serde_json::json!({ "query": rest })).await,
             "news" | "headlines" => self.news_cmd(&rest).await,
@@ -19014,6 +19105,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         lines.push("ym analyze <ticker>      deep multi-source stock/crypto analysis (not advice)".to_string());
         lines.push("ym discover              find subscriptions in your email + track them".to_string());
         lines.push("ym plugins · ym plugin enable|disable <name>   manage plugins (toggle + security)".to_string());
+        lines.push("ym proposals             pending research proposals (shadow mode; read-only)".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -23299,6 +23391,34 @@ mod tests {
         assert!(d2.contains("email"));
         assert!(due2.is_none(), "no date word => no due");
         assert!(ConversationEngine::extract_commitment("what's the weather?").is_none(), "questions aren't commitments");
+    }
+
+    fn valid_project_proposal() -> ProjectProposal {
+        ProjectProposal {
+            repo: "yantrikos/yantrik-mind".into(),
+            goal: "Add a typed proposal spool".into(),
+            citations: vec!["https://example.com/research".into()],
+            base_sha: "0123456789abcdef".into(),
+            acceptance_test: "cargo test -p mind-conversation".into(),
+            why_not: "The research may not generalize".into(),
+            p_merge: 0.7,
+        }
+    }
+
+    #[test]
+    fn project_proposal_rejects_missing_citations() {
+        let mut proposal = valid_project_proposal();
+        proposal.citations.clear();
+        assert!(proposal.validate().is_err());
+    }
+
+    #[test]
+    fn project_proposal_rejects_out_of_range_p_merge() {
+        for p_merge in [-0.01, 1.01] {
+            let mut proposal = valid_project_proposal();
+            proposal.p_merge = p_merge;
+            assert!(proposal.validate().is_err(), "accepted p_merge={p_merge}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

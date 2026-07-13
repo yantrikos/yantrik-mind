@@ -464,9 +464,9 @@ fn contradiction_config_from_env() -> ContradictionConfig {
     }
 }
 
-/// Minimum topical overlap required before two beliefs can be surfaced as contradictory.
-/// Semantic cosine is normalized so the embedder's ordinary background similarity does not make
-/// unrelated subjects appear related; significant-word overlap provides the no-embedder fallback.
+/// Minimum predicate overlap required before two beliefs about a shared entity can be surfaced as
+/// contradictory. Semantic cosine is normalized so the embedder's ordinary background similarity
+/// does not make unrelated predicates appear related; word overlap provides the no-embedder fallback.
 fn contradiction_relatedness_threshold() -> f64 {
     let value = std::env::var("YM_CONTRADICTION_RELATEDNESS_THRESHOLD").ok();
     parse_relatedness_threshold(value.as_deref())
@@ -479,36 +479,74 @@ fn parse_relatedness_threshold(value: Option<&str>) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+fn entity_terms(text: &str) -> std::collections::HashSet<String> {
+    let tokens: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut entities: std::collections::HashSet<String> = tokens
+        .iter()
+        .filter(|word| {
+            let lower = word.to_ascii_lowercase();
+            (word.chars().next().is_some_and(char::is_uppercase)
+                || word.chars().any(|c| c.is_ascii_digit()))
+                && !matches!(
+                    lower.as_str(),
+                    "the" | "a" | "an" | "this" | "that" | "he" | "she" | "it" | "they"
+                )
+        })
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+
+    // Lowercase/common-noun subjects still need an identity. Use the first content word only when
+    // the statement contains no stronger proper-name or numeric entity signal.
+    if entities.is_empty() {
+        let content = task_word_set(text);
+        if let Some(subject) = tokens
+            .iter()
+            .map(|w| w.to_ascii_lowercase())
+            .find(|w| content.contains(w))
+        {
+            entities.insert(subject);
+        }
+    }
+    entities
+}
+
+fn predicate_text(text: &str, shared_entities: &std::collections::HashSet<String>) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty() && !shared_entities.contains(&word.to_ascii_lowercase()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn topical_relatedness(a: &str, b: &str, semantic_cosine: Option<f64>) -> f64 {
-    let a_words = task_word_set(a);
-    let b_words = task_word_set(b);
-    let word_overlap = jaccard(&a_words, &b_words);
-    let leading_subject_matches = |text: &str, words: &std::collections::HashSet<String>| {
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .find(|word| words.contains(*word))
-            .map(str::to_string)
-    };
-    let subject_overlap = match (
-        leading_subject_matches(a, &a_words),
-        leading_subject_matches(b, &b_words),
-    ) {
-        (Some(a_subject), Some(b_subject)) if a_subject == b_subject => 1.0,
-        _ => 0.0,
-    };
+    let shared_entities: std::collections::HashSet<String> =
+        entity_terms(a).intersection(&entity_terms(b)).cloned().collect();
+    if shared_entities.is_empty() {
+        return 0.0;
+    }
+    let a_predicate = predicate_text(a, &shared_entities);
+    let b_predicate = predicate_text(b, &shared_entities);
+    let word_overlap = jaccard(&task_word_set(&a_predicate), &task_word_set(&b_predicate));
     // Cosines around 0.5 are common even for unrelated natural-language sentences. Map the useful
     // 0.5..1.0 range onto 0..1 so only meaningful semantic similarity contributes to this gate.
     let semantic = semantic_cosine
         .map(|s| ((s - 0.5) * 2.0).clamp(0.0, 1.0))
         .unwrap_or(0.0);
-    word_overlap.max(subject_overlap).max(semantic)
+    word_overlap.max(semantic)
 }
 
 fn beliefs_are_topically_related(db: &YantrikDB, a: &str, b: &str, threshold: f64) -> bool {
+    let shared_entities: std::collections::HashSet<String> =
+        entity_terms(a).intersection(&entity_terms(b)).cloned().collect();
+    if shared_entities.is_empty() {
+        return false;
+    }
     let semantic = if db.has_embedder() {
-        db.embed(a)
+        db.embed(&predicate_text(a, &shared_entities))
             .ok()
-            .zip(db.embed(b).ok())
+            .zip(db.embed(&predicate_text(b, &shared_entities)).ok())
             .map(|(a_vec, b_vec)| cosine(&a_vec, &b_vec))
     } else {
         None
@@ -2396,11 +2434,18 @@ mod tests {
         let unrelated = topical_relatedness(
             "The Pacific Ocean is deep",
             "Rust 1.96 has improved diagnostics",
-            Some(0.55),
+            Some(0.95),
         );
         assert!(
             unrelated < threshold,
-            "background semantic similarity must not pass the topical gate: {unrelated}"
+            "semantic similarity without a shared entity must not pass the topical gate: {unrelated}"
+        );
+
+        let different_topics =
+            topical_relatedness("Pranab likes coffee", "Pranab lives in Kolkata", None);
+        assert!(
+            different_topics < threshold,
+            "a shared subject alone must not pair unrelated predicates: {different_topics}"
         );
 
         let same_subject = topical_relatedness(
@@ -2414,14 +2459,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn topical_relatedness_requires_shared_entity_and_predicate() {
+        let threshold = 0.25;
+        assert!(
+            topical_relatedness("Pranab likes coffee", "Pranab lives in Kolkata", None)
+                < threshold,
+            "sharing an entity must not be enough when the predicates are unrelated"
+        );
+        assert!(
+            topical_relatedness(
+                "The Pacific Ocean is deep",
+                "Rust has clearer diagnostics",
+                Some(0.95),
+            ) < threshold,
+            "semantic similarity must not be enough when the entities differ"
+        );
+        assert!(
+            topical_relatedness(
+                "Pranab prefers terse replies",
+                "Pranab prefers detailed replies",
+                None,
+            ) >= threshold,
+            "shared entity and predicate should pass the gate"
+        );
+
+        let db = YantrikDB::new(":memory:", 64).unwrap();
+        assert!(
+            !beliefs_are_topically_related(
+                &db,
+                "Pranab likes coffee",
+                "Pranab lives in Kolkata",
+                threshold,
+            ),
+            "the semantic predicate gate must reject unrelated facts about one entity"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn contradiction_scan_skips_unrelated_belief_pairs() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         for statement in [
             "The Pacific Ocean is deep",
             "Rust 1.96 has improved diagnostics",
-            "Pranab sleeps early",
-            "Pranab stays up late",
+            "Pranab's sleep schedule is early",
+            "Pranab's sleep schedule is late",
         ] {
             mem.remember_as_belief(BeliefAssertion {
                 statement: statement.into(),
@@ -2442,8 +2524,8 @@ mod tests {
         .await
         .unwrap();
         mem.relate(
-            "Pranab sleeps early",
-            "Pranab stays up late",
+            "Pranab's sleep schedule is early",
+            "Pranab's sleep schedule is late",
             "contradicts",
             0.9,
         )
@@ -2451,7 +2533,11 @@ mod tests {
         .unwrap();
 
         let conflicts = mem.conflicts().await.unwrap();
-        assert_eq!(conflicts.len(), 1, "only the related pair should survive: {conflicts:?}");
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "only the related pair should survive: {conflicts:?}"
+        );
         assert!(conflicts[0].belief_a.contains("Pranab"));
         assert!(conflicts[0].belief_b.contains("Pranab"));
     }
@@ -2653,7 +2739,7 @@ mod tests {
 
         // Establish two contradicting beliefs and link them.
         mem.remember_as_belief(BeliefAssertion {
-            statement: "Pranab sleeps early".into(),
+            statement: "Pranab's sleep schedule is early".into(),
             polarity: 1.0,
             weight: 2.0,
             source_event: None,
@@ -2662,7 +2748,7 @@ mod tests {
         .await
         .unwrap();
         mem.remember_as_belief(BeliefAssertion {
-            statement: "Pranab stays up late".into(),
+            statement: "Pranab's sleep schedule is late".into(),
             polarity: 1.0,
             weight: 2.0,
             source_event: None,
@@ -2670,7 +2756,12 @@ mod tests {
         })
         .await
         .unwrap();
-        mem.relate("Pranab sleeps early", "Pranab stays up late", "contradicts", 0.8)
+        mem.relate(
+            "Pranab's sleep schedule is early",
+            "Pranab's sleep schedule is late",
+            "contradicts",
+            0.8,
+        )
             .await
             .unwrap();
 
@@ -2683,7 +2774,7 @@ mod tests {
 
         // A new assert_belief triggers the scan — the pre-existing conflict must now appear.
         mem.remember_as_belief(BeliefAssertion {
-            statement: "Pranab sleeps early".into(),
+            statement: "Pranab's sleep schedule is early".into(),
             polarity: 1.0,
             weight: 0.5,
             source_event: Some("second observation".into()),
@@ -2699,7 +2790,7 @@ mod tests {
         );
         let tension = after.iter().find(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)).unwrap();
         assert!(
-            tension.about.contains("sleeps early") || tension.about.contains("stays up late"),
+            tension.about.contains("schedule is early") || tension.about.contains("schedule is late"),
             "tension description should name the conflicting beliefs, got: {}",
             tension.about
         );

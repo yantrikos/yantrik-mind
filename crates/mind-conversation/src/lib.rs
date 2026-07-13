@@ -21108,6 +21108,69 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         }
     }
 
+    /// ARCH-3 slice 2 — EGRESS-CLEAN TOOL PLANNING. For an outbound tool whose argument is a
+    /// self-contained query/url the model can build from the LITERAL request, RE-AUTHOR the argument
+    /// in a SEPARATE, STATELESS model call that never saw the private grounding, working-set, people
+    /// layer, rolling summary, or work-log — so a private fact the grounded model saw can never be
+    /// written into what actually leaves the device. The grounded model still chooses WHICH tool; a
+    /// clean model authors the ARG that reaches the connector; the broker then mediates the result.
+    ///
+    /// Returns the args to dispatch. `None` = fail-closed refusal (an eligible egress tool whose clean
+    /// authoring could not produce usable args — better to refuse than fall back to grounded args that
+    /// might carry a private fact). A non-eligible tool returns its grounded args unchanged (these are
+    /// documented as NOT-yet-egress-clean-planned; widen `eligible` as each connector is proven).
+    ///
+    /// HONEST RESIDUAL LEAKS (per the slice-2 spec, NOT covered here): the user's literal request may
+    /// itself contain a private detail; the clean model's pretraining; values a later local tool-result
+    /// introduces. Clean planning is complementary to the credential/value tripwire, not a total guard.
+    async fn egress_clean_args(&self, tool: &str, user_text: &str, grounded: serde_json::Value) -> Option<serde_json::Value> {
+        // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
+        if self.egress.is_none() {
+            return Some(grounded);
+        }
+        // Eligible = external tools whose arg is a self-contained query/url/text authored from the
+        // literal request. Contextual tools ("more like that") are deliberately excluded for now —
+        // widen this set only as each connector's isolation boundary is proven with a test.
+        let eligible = matches!(
+            tool,
+            "search" | "web_search" | "google" | "ddg" | "mail_search" | "mailsearch" | "search_mail"
+                | "findmail" | "web_fetch" | "fetch" | "web" | "wikipedia" | "wiki" | "translate" | "tr"
+        );
+        if !eligible {
+            return Some(grounded);
+        }
+        if !matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
+            return Some(grounded);
+        }
+        let schema = match tool {
+            "web_fetch" | "fetch" | "web" => "{\"url\": \"<the URL, taken ONLY from the user's literal request>\"}",
+            "translate" | "tr" => "{\"to\": \"<target language>\", \"text\": \"<the text to translate, from the literal request>\"}",
+            _ => "{\"query\": \"<a concise query built ONLY from the user's literal request>\"}",
+        };
+        let sys = "You author the ARGUMENTS for an OUTBOUND tool call that will LEAVE this device and \
+            reach an external service. You have NO access to the user's private memory, notes, files, or \
+            prior conversation. You MUST NOT invent or add any personal detail (names, dates, health, \
+            finances, addresses, account numbers) that is not present VERBATIM in the user's literal \
+            request below. Build the argument ONLY from the literal request. Output ONLY one JSON object.";
+        let user = format!("Tool: {tool}\nArgument shape: {schema}\nUser's literal request: {user_text}\n\nOutput ONLY the JSON args.");
+        let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+        // A plain (ungrounded) call — no private lane, no grounding, a FRESH message list with no
+        // shared state carrying private context.
+        let text = self.inference.chat(vec![ChatMessage::system(sys), ChatMessage::user(&user)], cfg).await.ok()?.text;
+        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let obj = match (body.find('{'), body.rfind('}')) {
+            (Some(a), Some(b)) if b > a => &body[a..=b],
+            _ => return None, // fail closed: no usable JSON from the clean planner
+        };
+        let parsed: serde_json::Value = serde_json::from_str(obj).ok()?;
+        if parsed.is_object() {
+            let _ = grounded; // grounded args are intentionally DISCARDED for eligible egress tools
+            Some(parsed)
+        } else {
+            None
+        }
+    }
+
     /// THE AGENTIC LOOP — the mind AS an agent (mimicking Claude Code): reason → select ONE tool → act →
     /// observe → iterate → answer. Tools = primitives + the build_capability self-extension hook, so
     /// "I can't" becomes "I didn't have that, so I built it." Bounded to MAX_STEPS. This is the PRIMARY
@@ -21409,7 +21472,17 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                 return Ok(a);
             }
-            let args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let grounded_args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            // ARCH-3 slice 2: for an eligible EGRESS tool, re-author the args in a clean context that
+            // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
+            let args = match self.egress_clean_args(&tool, user_text, grounded_args).await {
+                Some(a) => a,
+                None => {
+                    let msg = format!("(I couldn't compose a safe outbound request for {tool} without pulling in private context — tell me the exact terms you want me to search/fetch)");
+                    scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
+                    continue;
+                }
+            };
             // Loop-guard: a weaker chat model often re-issues the SAME tool call instead of answering
             // (it spun on `home` 5× in testing). If the call is identical to the last one, we already
             // have that result in the work log — stop and compose the answer instead of refetching.
@@ -23416,6 +23489,53 @@ mod tests {
     /// A minimal shared-memory facade for the recipe-host arm of the ARCH-3 test.
     fn mem_arc_for_host() -> Arc<dyn MemoryFacade> {
         Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap())
+    }
+
+    /// ARCH-3 slice 2 acceptance: egress-clean tool planning. The grounded model may author a tool
+    /// arg that carries a private fact; for an eligible egress tool those grounded args are DISCARDED
+    /// and replaced by a SEPARATE clean-context call's output — so the private fact never reaches the
+    /// connector. Non-eligible tools keep their grounded args; garbage from the clean planner fails
+    /// closed (None). We drive egress_clean_args directly (the clean call's output is scripted).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
+        use mind_governance::egress::EgressBroker;
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        // The inference backend (the CLEAN re-authoring call) is scripted to return a private-free arg.
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"query":"best oncology hospitals in Pune"}"#)) as Arc<dyn LLMBackend>, 1);
+        let broker = Arc::new(EgressBroker::open(std::env::temp_dir(), false));
+        let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(broker);
+
+        // The grounded model authored a web_search arg that LEAKS a stored private fact.
+        let grounded = serde_json::json!({ "query": "Alice oncology appointment July 18 47-12-33" });
+        let clean = conv.egress_clean_args("web_search", "find me good oncology hospitals in pune", grounded.clone()).await.unwrap();
+        // The clean-context call's args are what dispatch — the grounded (leaky) args are gone.
+        assert_eq!(clean, serde_json::json!({ "query": "best oncology hospitals in Pune" }), "grounded args must be discarded and re-authored");
+        assert_ne!(clean, grounded, "the private-fact-bearing grounded args must NOT survive");
+        assert!(!clean.to_string().contains("47-12-33"), "the private detail must not reach the connector");
+
+        // A NON-eligible egress tool (github) keeps its grounded args (documented not-yet-covered).
+        let g = serde_json::json!({ "repo": "owner/repo" });
+        let kept = conv.egress_clean_args("github_repo_items", "my open PRs", g.clone()).await.unwrap();
+        assert_eq!(kept, g, "a non-eligible tool keeps its grounded args");
+
+        // With NO egress broker wired, planning is inert (legacy path unchanged).
+        let mem2: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool2 = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv2 = ConversationEngine::new(mem2, pool2, "JARVIS");
+        let g2 = serde_json::json!({ "query": "leaky Alice oncology" });
+        assert_eq!(conv2.egress_clean_args("web_search", "hi", g2.clone()).await.unwrap(), g2, "no broker → egress-clean planning is inert");
+    }
+
+    /// Egress-clean planning fails CLOSED: if the clean planner can't produce a usable JSON arg for an
+    /// eligible egress tool, the call is refused (None) rather than falling back to the grounded args.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch3_slice2_clean_planner_fails_closed_on_garbage() {
+        use mind_governance::egress::EgressBroker;
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("sorry, I cannot help with that")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+        let grounded = serde_json::json!({ "query": "Alice oncology" });
+        assert!(conv.egress_clean_args("web_search", "search", grounded).await.is_none(), "no usable clean args → fail closed (refuse), not fall back to grounded");
     }
 
     #[test]

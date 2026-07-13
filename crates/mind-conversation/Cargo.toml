@@ -9,6 +9,7 @@ mind-inference = { workspace = true }
 mind-tools = { workspace = true }
 mind-recipes = { workspace = true }
 mind-agents = { workspace = true }
+mind-governance = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false }
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -20,4 +21,3 @@ chrono-tz = "0.10"
 
 [dev-dependencies]
 mind-memory = { workspace = true }
-mind-governance = { workspace = true }

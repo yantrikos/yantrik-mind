@@ -6,6 +6,10 @@ edition.workspace = true
 [dependencies]
 mind-types = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true }

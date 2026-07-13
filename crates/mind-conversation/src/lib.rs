@@ -2620,6 +2620,9 @@ pub struct ConversationEngine {
     coder: Option<Arc<Coder>>,
     /// Remote worker pool — when set, the mind can fan work out to the transferred LXCs over SSH.
     workers: Option<Arc<WorkerPool>>,
+    /// Device-trust store (ARCH-2) — backs the `device pair/list/revoke` console verbs. The control
+    /// server holds its own handle for request authentication; this one serves the operator console.
+    devices: Option<Arc<mind_governance::devices::DeviceStore>>,
     /// A vague deep-dive topic awaiting a scoping answer (clarify-before-research).
     pending_research: Mutex<Option<String>>,
     /// The last GREEN sandbox run (lang, code) — promotable into a saved skill.
@@ -2690,6 +2693,7 @@ impl ConversationEngine {
             sandbox: None,
             coder: None,
             workers: None,
+            devices: None,
             pending_research: Mutex::new(None),
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
@@ -3037,6 +3041,12 @@ impl ConversationEngine {
 
     pub fn with_workers(mut self, workers: Arc<WorkerPool>) -> Self {
         self.workers = Some(workers);
+        self
+    }
+
+    /// Give the operator console its device-trust store (ARCH-2) — enables `device pair/list/revoke`.
+    pub fn with_devices(mut self, devices: Arc<mind_governance::devices::DeviceStore>) -> Self {
+        self.devices = Some(devices);
         self
     }
 
@@ -18701,7 +18711,14 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         format!("Forgot {forgotten} belief(s) matching \"{needle}\".")
     }
 
-    pub async fn cli_dispatch(&self, line: &str) -> String {
+    /// The `ym` operator console router. ARCH-2: this is an OPERATOR surface — the control server
+    /// admits it only for an authenticated operator device, and `ctx` carries that authority. A
+    /// non-operator ctx is refused here too (defense in depth: the API requires operator authority,
+    /// not just the route). Memory-touching verbs run under `ctx`, completing ARCH-1 for the CLI path.
+    pub async fn cli_dispatch(&self, line: &str, ctx: &mind_types::AccessContext) -> String {
+        if !ctx.is_operator() {
+            return "(the ym console requires operator authorization)".to_string();
+        }
         let line = line.trim();
         let mut it = line.splitn(2, char::is_whitespace);
         let cmd = it.next().unwrap_or("").to_lowercase();
@@ -18709,6 +18726,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         match cmd.as_str() {
             "" => "ym — say something, or `ym commands` to see the plugins you have.".to_string(),
             "commands" | "cmds" | "?" => self.cli_commands(),
+            "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
             "search" | "google" | "ddg" if !rest.is_empty() => self.run_agent_tool("search", &serde_json::json!({ "query": rest })).await,
@@ -19591,6 +19609,86 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
 
     /// List the `ym` commands = always-on core + every wired PLUGIN's namespace (a plugin appears only
     /// when configured, so this reflects what's actually connected right now).
+    /// `ym device …` — the pairing ceremony (ARCH-2). Operator-only (its `cli_dispatch` caller
+    /// already gated on operator authority). Prints a paired device's raw token EXACTLY ONCE.
+    async fn device_cmd(&self, rest: &str) -> String {
+        use mind_governance::devices::DeviceRole;
+        let Some(store) = &self.devices else {
+            return "(device trust is not configured on this build)".to_string();
+        };
+        let mut p = rest.trim().splitn(2, char::is_whitespace);
+        let action = p.next().unwrap_or("").to_lowercase();
+        let arg = p.next().unwrap_or("").trim();
+        match action.as_str() {
+            "" | "list" | "ls" => {
+                let devs = store.list();
+                if devs.is_empty() {
+                    return "No paired devices.".to_string();
+                }
+                let mut out = String::from("Paired devices:\n");
+                for d in devs {
+                    let state = if d.revoked { " (revoked)" } else { "" };
+                    out.push_str(&format!("• {} — {} [{}]{}\n", d.id, d.name, d.role, state));
+                }
+                out.push_str("\nym device pair <name> [--person <slug> | --operator]  ·  ym device revoke <id>");
+                out
+            }
+            "pair" | "add" => {
+                if arg.is_empty() {
+                    return "Usage: ym device pair <name> [--person <slug> | --operator]".to_string();
+                }
+                // Parse: <name...> with optional trailing --person <slug> / --operator flags.
+                let toks: Vec<&str> = arg.split_whitespace().collect();
+                let mut name_parts: Vec<&str> = Vec::new();
+                let mut person: Option<String> = None;
+                let mut operator = false;
+                let mut i = 0;
+                while i < toks.len() {
+                    match toks[i] {
+                        "--operator" | "--op" => operator = true,
+                        "--person" | "--member" => {
+                            i += 1;
+                            person = toks.get(i).map(|s| s.to_string());
+                        }
+                        other => name_parts.push(other),
+                    }
+                    i += 1;
+                }
+                let name = name_parts.join(" ");
+                if name.is_empty() {
+                    return "Usage: ym device pair <name> [--person <slug> | --operator]".to_string();
+                }
+                let role = if operator {
+                    let who = self.memory.profile_get("primary_person").await.ok().flatten();
+                    DeviceRole::Operator { default_person: who.unwrap_or_else(|| mind_types::PRIMARY.to_string()) }
+                } else {
+                    match person {
+                        Some(slug) => DeviceRole::Member { person: slug },
+                        None => return "A member device needs a person: ym device pair <name> --person <slug>  (or --operator)".to_string(),
+                    }
+                };
+                match store.pair(&name, role) {
+                    Ok(token) => format!(
+                        "Paired '{name}'. Its token (shown ONCE — store it now, it can't be recovered):\n\n{}\n\nRevoke anytime with: ym device revoke <id>  (see `ym device list`).",
+                        token.expose()
+                    ),
+                    Err(e) => format!("(couldn't pair: {e})"),
+                }
+            }
+            "revoke" | "rm" | "remove" => {
+                if arg.is_empty() {
+                    return "Usage: ym device revoke <id>   (see `ym device list` for ids)".to_string();
+                }
+                match store.revoke(arg) {
+                    Ok(true) => format!("Revoked {arg}. It can no longer authenticate."),
+                    Ok(false) => format!("(no active device with id '{arg}')"),
+                    Err(e) => format!("(couldn't revoke: {e})"),
+                }
+            }
+            other => format!("(unknown device command '{other}' — try: list, pair, revoke)"),
+        }
+    }
+
     fn cli_commands(&self) -> String {
         let mut lines = vec![
             "ym now                   date/time".to_string(),
@@ -19625,6 +19723,9 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         lines.push("ym analyze <ticker>      deep multi-source stock/crypto analysis (not advice)".to_string());
         lines.push("ym discover              find subscriptions in your email + track them".to_string());
         lines.push("ym plugins · ym plugin enable|disable <name>   manage plugins (toggle + security)".to_string());
+        if self.devices.is_some() {
+            lines.push("ym device list · ym device pair <name> --person <slug>|--operator · ym device revoke <id>   paired-device trust".to_string());
+        }
         lines.push("ym proposals             pending research proposals (shadow mode; read-only)".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
@@ -23244,15 +23345,15 @@ mod tests {
         }])));
         // on-demand quick headlines on a topic (`news <topic>` is now the in-depth brief; `news
         // headlines <topic>` is the fast list)
-        let h = conv.cli_dispatch("news headlines geopolitics").await;
+        let h = conv.cli_dispatch("news headlines geopolitics", &mind_types::AccessContext::Operator).await;
         assert!(h.contains("Talks stall in Geneva") && h.contains("Reuters"), "headlines: {h}");
         // tracking: add → list → remove
-        assert!(conv.cli_dispatch("news track geopolitics").await.contains("Tracking"));
-        assert!(conv.cli_dispatch("news tracking").await.contains("geopolitics"), "tracked list");
+        assert!(conv.cli_dispatch("news track geopolitics", &mind_types::AccessContext::Operator).await.contains("Tracking"));
+        assert!(conv.cli_dispatch("news tracking", &mind_types::AccessContext::Operator).await.contains("geopolitics"), "tracked list");
         // digest watch primes silently on first call, then dedups identical items (no repeat spam)
         let _ = conv.news_digests_due().await;
         assert!(conv.news_digests_due().await.is_empty(), "deduped after prime");
-        assert!(conv.cli_dispatch("news untrack geopolitics").await.contains("Stopped"));
+        assert!(conv.cli_dispatch("news untrack geopolitics", &mind_types::AccessContext::Operator).await.contains("Stopped"));
     }
 
     #[test]
@@ -23302,10 +23403,10 @@ mod tests {
         let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
             .with_markets(Arc::new(ScriptedMarkets { crypto: "💰 Bitcoin (BTC): $67,000 ▲2%".into(), stock: "📈 Apple (AAPL): $211".into(), price: 200.0 }))
             .with_translator(Arc::new(ScriptedTranslator { text: "🌐 (en→fr) bonjour".into() }));
-        assert!(conv.cli_dispatch("crypto btc").await.contains("Bitcoin"), "crypto routes");
-        assert!(conv.cli_dispatch("stock AAPL").await.contains("Apple"), "stock routes");
-        assert!(conv.cli_dispatch("translate french good morning").await.contains("bonjour"), "translate routes (first token = lang)");
-        assert!(conv.cli_dispatch("translate french").await.contains("Usage"), "translate without text shows usage");
+        assert!(conv.cli_dispatch("crypto btc", &mind_types::AccessContext::Operator).await.contains("Bitcoin"), "crypto routes");
+        assert!(conv.cli_dispatch("stock AAPL", &mind_types::AccessContext::Operator).await.contains("Apple"), "stock routes");
+        assert!(conv.cli_dispatch("translate french good morning", &mind_types::AccessContext::Operator).await.contains("bonjour"), "translate routes (first token = lang)");
+        assert!(conv.cli_dispatch("translate french", &mind_types::AccessContext::Operator).await.contains("Usage"), "translate without text shows usage");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -23315,9 +23416,9 @@ mod tests {
         let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
             .with_weather(Arc::new(ScriptedWeather::new("🌦 London: rain, 14°C")))
             .with_wiki(Arc::new(ScriptedWiki::new("📖 Rust\nA systems language.")));
-        assert!(conv.cli_dispatch("weather london").await.contains("London: rain"), "weather routes");
-        assert!(conv.cli_dispatch("wiki rust language").await.contains("systems language"), "wiki routes");
-        assert!(conv.cli_dispatch("calc 6*7").await.contains("= 42"), "calc routes");
+        assert!(conv.cli_dispatch("weather london", &mind_types::AccessContext::Operator).await.contains("London: rain"), "weather routes");
+        assert!(conv.cli_dispatch("wiki rust language", &mind_types::AccessContext::Operator).await.contains("systems language"), "wiki routes");
+        assert!(conv.cli_dispatch("calc 6*7", &mind_types::AccessContext::Operator).await.contains("= 42"), "calc routes");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -23334,7 +23435,7 @@ mod tests {
             url: "https://rust-lang.org".into(),
             snippet: "a guide".into(),
         }])));
-        let out = conv.cli_dispatch("search rust async").await;
+        let out = conv.cli_dispatch("search rust async", &mind_types::AccessContext::Operator).await;
         assert!(out.contains("Rust async") && out.contains("https://rust-lang.org"), "search renders results: {out}");
         // not configured → clear message, no confabulation
         let conv2 = ConversationEngine::new(
@@ -23515,12 +23616,12 @@ mod tests {
             HaEntity { entity_id: "person.pranab".into(), domain: "person".into(), state: "home".into(), friendly_name: "Pranab".into(), attributes: serde_json::json!({}) },
         ])));
         // the home PLUGIN command routes to the HA tool
-        assert!(conv.cli_dispatch("home").await.contains("Pranab: home"), "home plugin → HA tool");
+        assert!(conv.cli_dispatch("home", &mind_types::AccessContext::Operator).await.contains("Pranab: home"), "home plugin → HA tool");
         // `commands` lists only WIRED plugins — home present, github absent (present-plugin → live-command)
-        let cmds = conv.cli_dispatch("commands").await;
+        let cmds = conv.cli_dispatch("commands", &mind_types::AccessContext::Operator).await;
         assert!(cmds.contains("ym home") && !cmds.contains("ym github"), "lists only wired plugins: {cmds}");
         // unknown → chat fallback (doesn't error)
-        assert!(!conv.cli_dispatch("hey what's up").await.is_empty(), "unknown → chat");
+        assert!(!conv.cli_dispatch("hey what's up", &mind_types::AccessContext::Operator).await.is_empty(), "unknown → chat");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

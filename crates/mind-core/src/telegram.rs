@@ -437,15 +437,32 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// One control request from `ym`: `POST /chat` (body = message → handle_turn → reply) or
-/// `GET /status` (liveness). Runs the async turn on the shared runtime via `rt.block_on` (this is a
-/// plain OS thread, not a runtime worker, so block_on is allowed). Shares the live conv → live memory.
-fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
+/// Count how many header lines start with a given (lowercase) field name.
+fn header_count(head: &str, name_lc: &str) -> usize {
+    head.lines().filter(|l| l.to_ascii_lowercase().trim_start().starts_with(name_lc)).count()
+}
+fn header_value(head: &str, name_lc: &str) -> Option<String> {
+    head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix(name_lc).map(|_| {
+        // strip_prefix on the lowercased copy tells us it matched; re-slice the ORIGINAL for the value.
+        l[name_lc.len()..].trim().to_string()
+    }))
+}
+
+/// One control request from `ym` (`POST /cli`, operator-only) or the app sidecar (`POST /chat`,
+/// principal-scoped) or a liveness probe (`GET /status`). ARCH-2: every data route is AUTHENTICATED
+/// against the device-trust store BEFORE any dispatch, and the memory `AccessContext` is derived from
+/// the authenticated device — never from a client-asserted header. Runs the async turn on the shared
+/// runtime via `rt.block_on` (a plain OS thread, not a runtime worker). Shares the live conv → memory.
+fn ctl_handle(
+    mut stream: std::net::TcpStream,
+    conv: Arc<ConversationEngine>,
+    devices: Arc<mind_governance::devices::DeviceStore>,
+    rt: tokio::runtime::Handle,
+) {
     use std::io::{Read, Write};
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(150)));
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 4096];
-    // read until the headers are complete
     let hend = loop {
         match stream.read(&mut tmp) {
             Ok(0) => return,
@@ -454,7 +471,9 @@ fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt
                 if let Some(p) = find_sub(&buf, b"\r\n\r\n") {
                     break p;
                 }
-                if buf.len() > 2_000_000 {
+                if buf.len() > 65_536 {
+                    // Header section is bounded — an oversized/slow header set is refused, not buffered.
+                    let _ = stream.write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     return;
                 }
             }
@@ -465,11 +484,62 @@ fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt
     let mut first = head.lines().next().unwrap_or("").split_whitespace();
     let method = first.next().unwrap_or("");
     let path = first.next().unwrap_or("/");
-    let clen: usize = head
-        .lines()
-        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
-        .unwrap_or(0);
-    // body = whatever followed the headers, plus any remaining content-length bytes
+    let path = path.split('?').next().unwrap_or(path);
+
+    let send = |stream: &mut std::net::TcpStream, status: &str, reply: &str| {
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    };
+
+    // ── HTTP request-smuggling / ambiguity hardening (sol #10): reject duplicate framing/auth ──
+    if header_count(&head, "content-length:") > 1
+        || header_count(&head, "authorization:") > 1
+        || header_value(&head, "transfer-encoding:").is_some()
+    {
+        send(&mut stream, "400 Bad Request", "ambiguous request framing");
+        return;
+    }
+
+    // /status is content-free liveness — no identity, no counts. Stays open, but method-checked.
+    if path == "/status" {
+        if method == "GET" {
+            send(&mut stream, "200 OK", "ok");
+        } else {
+            send(&mut stream, "405 Method Not Allowed", "");
+        }
+        return;
+    }
+
+    // Every other route is a data route → authenticate FIRST, before reading a large body or dispatching.
+    if method != "POST" || (path != "/cli" && path != "/chat") {
+        send(&mut stream, "404 Not Found", "not found");
+        return;
+    }
+    let bearer = header_value(&head, "authorization:")
+        .map(|v| {
+            let t = v.trim();
+            // Accept "Bearer <token>" (any case) or a bare token.
+            if t.len() >= 7 && t[..7].eq_ignore_ascii_case("bearer ") {
+                t[7..].trim().to_string()
+            } else {
+                t.to_string()
+            }
+        })
+        .unwrap_or_default();
+    let Some(authed) = devices.authenticate(&bearer) else {
+        // Unknown OR revoked — no oracle, no hint about which.
+        send(&mut stream, "401 Unauthorized", "device not authorized");
+        return;
+    };
+
+    let clen: usize = header_value(&head, "content-length:").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    if clen > 2_000_000 {
+        send(&mut stream, "413 Payload Too Large", "");
+        return;
+    }
     let mut body = buf[hend + 4..].to_vec();
     while body.len() < clen {
         match stream.read(&mut tmp) {
@@ -479,61 +549,101 @@ fn ctl_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, rt
         }
     }
     let body = String::from_utf8_lossy(&body).trim().to_string();
-    // Channel identity: a client (the app, via the sidecar) may declare WHO is speaking with an
-    // `X-YM-Person: <slug>` header → scoped memory (read-isolation, private/household lanes), exactly
-    // like telegram. Absent → primary (the legacy single-user path). `X-YM-Channel` is advisory.
-    let person = head
-        .lines()
-        .find_map(|l| l.to_ascii_lowercase().strip_prefix("x-ym-person:").map(|v| v.trim().to_string()))
-        .filter(|p| !p.is_empty());
-    // Voice/quick turns set X-YM-Fast: 1 → the single-call grounded path (fast_reply), skipping the
-    // agentic loop. The difference between snappy spoken conversation and multi-second dead air.
-    let fast = head
-        .lines()
-        .any(|l| l.to_ascii_lowercase().starts_with("x-ym-fast:") && l.contains('1'));
+    if body.is_empty() {
+        send(&mut stream, "400 Bad Request", "(empty message)");
+        return;
+    }
 
-    let (status, reply) = match (method, path.split('?').next().unwrap_or(path)) {
-        // `ym <name> <args>` — the top-level CLI router (core commands + skill-registered commands +
-        // chat fallback). Data-driven: a new capability skill becomes a new `ym` command, no recompile.
-        ("POST", "/cli") if !body.is_empty() => ("200 OK", rt.block_on(conv.cli_dispatch(&body))),
-        ("POST", "/chat") if !body.is_empty() => {
-            let ident = mind_conversation::TurnIdentity::new(
-                person.clone().unwrap_or_else(|| mind_conversation::TurnIdentity::primary().owner),
-                false,
-            );
+    let (status, reply) = match path {
+        // `ym <name> <args>` — the operator console. Requires an OPERATOR device (a member token
+        // authenticates but is refused here); the memory ctx is Operator only after that check.
+        "/cli" => {
+            if !authed.is_operator() {
+                ("403 Forbidden", "the ym console requires an operator device".to_string())
+            } else {
+                ("200 OK", rt.block_on(conv.cli_dispatch(&body, &mind_types::AccessContext::Operator)))
+            }
+        }
+        // A conversation turn. The speaker is the AUTHENTICATED device's bound person; the turn runs
+        // Principal-scoped (never Operator, even for an operator device — actor ≠ principal, sol #4).
+        // `X-YM-Person` is honored ONLY to let an OPERATOR device delegate the turn to another person;
+        // a member device supplying a different person is a 403 (confused-deputy, sol #5). Absent →
+        // the device's bound person; NEVER a silent fall-back to primary.
+        "/chat" => {
+            let asserted = header_value(&head, "x-ym-person:").filter(|p| !p.trim().is_empty()).map(|p| p.trim().to_string());
+            let effective_person = match (&asserted, authed.is_operator()) {
+                (Some(p), true) => p.clone(),                       // operator delegation
+                (Some(p), false) if p != authed.chat_person() => {  // member trying to impersonate
+                    send(&mut stream, "403 Forbidden", "device may not speak as another person");
+                    return;
+                }
+                _ => authed.chat_person().to_string(),              // bound person (member, or operator-self)
+            };
+            let fast = head.lines().any(|l| l.to_ascii_lowercase().starts_with("x-ym-fast:") && l.contains('1'));
+            let ident = mind_conversation::TurnIdentity::new(effective_person, false);
             let r = if fast {
                 rt.block_on(conv.fast_reply(&body, ident))
-            } else if person.is_some() {
-                rt.block_on(conv.handle_turn_as(&body, ident))
             } else {
-                rt.block_on(conv.handle_turn(&body))
-            }.unwrap_or_else(|e| format!("(error: {e})"));
+                rt.block_on(conv.handle_turn_as(&body, ident))
+            }
+            .unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
         }
-        ("POST", "/chat") | ("POST", "/cli") => ("400 Bad Request", "(empty message)".to_string()),
-        ("GET", "/status") => ("200 OK", "ok".to_string()),
         _ => ("404 Not Found", "not found".to_string()),
     };
-    let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-        reply.len()
-    );
-    let _ = stream.write_all(resp.as_bytes());
+    send(&mut stream, status, &reply);
 }
 
 /// Tiny localhost-only control server (own thread) backing the `ym` CLI. Lets a terminal talk to the
 /// SAME running companion as telegram (shared memory). 127.0.0.1 only; YM_CTL=off disables.
-fn spawn_control_server(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
+/// The mind's state directory: the parent of `YM_DB`, else `/var/lib/yantrik-mind`. The device store
+/// and its `console.token` anchor live here (owner-only), the same dir the sandbox is denied.
+fn state_dir() -> String {
+    std::env::var("YM_DB")
+        .ok()
+        .and_then(|p| std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string()))
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "/var/lib/yantrik-mind".to_string())
+}
+
+/// Open the device-trust store and one-time-init the console operator. Returns None (fail-closed) if
+/// the store is corrupt/inconsistent — the caller then refuses to start the authenticated surface.
+fn arch2_open_device_store() -> Option<Arc<mind_governance::devices::DeviceStore>> {
+    let dir = state_dir();
+    let store = match mind_governance::devices::DeviceStore::open(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[devtrust] device store at {dir} is unusable ({e}) — fail-closed, not auto-repaired");
+            return None;
+        }
+    };
+    // The console speaks as the primary on /chat; mint it exactly once for a virgin store.
+    match store.init_console_once(mind_types::PRIMARY) {
+        Ok(true) => eprintln!("[devtrust] minted the local console operator → {dir}/console.token (owner-only)"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("[devtrust] console init failed ({e}) — fail-closed");
+            return None;
+        }
+    }
+    Some(Arc::new(store))
+}
+
+fn spawn_control_server(
+    conv: Arc<ConversationEngine>,
+    devices: Arc<mind_governance::devices::DeviceStore>,
+    rt: tokio::runtime::Handle,
+) {
     if std::env::var("YM_CTL").map(|v| v == "off").unwrap_or(false) {
         return;
     }
     let port: u16 = std::env::var("YM_CTL_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8077);
     std::thread::spawn(move || match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => {
-            eprintln!("[ctl] control endpoint on 127.0.0.1:{port} (for the `ym` CLI)");
+            eprintln!("[ctl] authenticated control endpoint on 127.0.0.1:{port} (for the `ym` CLI)");
             for stream in listener.incoming().flatten() {
-                let (conv, rt) = (conv.clone(), rt.clone());
-                std::thread::spawn(move || ctl_handle(stream, conv, rt));
+                let (conv, devices, rt) = (conv.clone(), devices.clone(), rt.clone());
+                std::thread::spawn(move || ctl_handle(stream, conv, devices, rt));
             }
         }
         Err(e) => eprintln!("[ctl] could not bind 127.0.0.1:{port}: {e}"),
@@ -623,15 +733,28 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             return Err(anyhow::anyhow!("telegram getMe failed (bad token?): {e}"));
         }
     }
+    // ARCH-2 device trust: open (or first-time create) the device store, then one-time-init the local
+    // console operator. A corrupt/inconsistent store is FAIL-CLOSED — the authenticated control
+    // surface is not started at all rather than opened insecurely. The Telegram channel runs regardless.
+    let devices = arch2_open_device_store();
+
+    // Give the engine its device store so the `ym device …` console verbs can pair/list/revoke.
+    let conv = match &devices {
+        Some(d) => conv.with_devices(d.clone()),
+        None => conv,
+    };
     // Shared so each turn can be processed in its OWN task — a slow turn (a multi-step agent loop with
     // big generations) must never freeze the poll loop or the background ticks (the old "no-reply" /
     // frozen-bot failure mode). The memory actor serializes writes, so concurrent turns are safe.
     let conv = Arc::new(conv);
 
     // Local control endpoint for the `ym` CLI: same running process → SHARES live memory/continuity
-    // with the telegram channel (one mind, two surfaces). Bound to 127.0.0.1 only (no new LAN port;
-    // SSH stays the trust boundary). Disable with YM_CTL=off.
-    spawn_control_server(conv.clone(), tokio::runtime::Handle::current());
+    // with the telegram channel (one mind, two surfaces). Bound to 127.0.0.1 only, and AUTHENTICATED
+    // against the device store (ARCH-2). Disable with YM_CTL=off.
+    match &devices {
+        Some(d) => spawn_control_server(conv.clone(), d.clone(), tokio::runtime::Handle::current()),
+        None => eprintln!("[ctl] control endpoint DISABLED — device store unavailable (fail-closed). Fix the store, then restart."),
+    }
     spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
 
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT").ok().and_then(|s| s.trim().parse().ok());
@@ -1558,5 +1681,101 @@ mod tests {
     #[test]
     fn no_quiet_window_when_equal() {
         assert!(!is_quiet_hour(3, 0, 0));
+    }
+
+    // ── ARCH-2 slice-1 acceptance: the authenticated control-server gate ──
+    use super::{ctl_handle, find_sub};
+    use mind_conversation::ConversationEngine;
+    use mind_governance::devices::{DeviceRole, DeviceStore};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    /// Fire one raw HTTP request at a `ctl_handle` listener and return (status_code, body).
+    fn req(addr: std::net::SocketAddr, raw: &str) -> (u16, String) {
+        let mut s = std::net::TcpStream::connect(addr).unwrap();
+        s.write_all(raw.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap();
+        let text = String::from_utf8_lossy(&buf).to_string();
+        let code = text
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        let body = find_sub(&buf, b"\r\n\r\n").map(|p| String::from_utf8_lossy(&buf[p + 4..]).to_string()).unwrap_or_default();
+        (code, body)
+    }
+
+    /// Spawn a one-per-connection ctl_handle listener on an ephemeral port; returns its address.
+    fn spawn_gate(conv: Arc<ConversationEngine>, devices: Arc<DeviceStore>) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rt = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (conv, devices, rt) = (conv.clone(), devices.clone(), rt.clone());
+                std::thread::spawn(move || ctl_handle(stream, conv, devices, rt));
+            }
+        });
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn control_server_is_fail_closed_and_principal_scoped() {
+        use mind_inference::{InferencePool, ScriptedLLM};
+        use mind_memory::MemoryHandle;
+        use yantrik_ml::LLMBackend;
+
+        let dir = std::env::temp_dir().join(format!("ym_ctlgate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(DeviceStore::open(&dir).unwrap());
+        store.init_console_once("primary").unwrap();
+        let console = std::fs::read_to_string(dir.join("console.token")).unwrap().trim().to_string();
+        let member = store.pair("asha-phone", DeviceRole::Member { person: "asha".into() }).unwrap().expose().to_string();
+
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = Arc::new(crate::engine(&mem, pool));
+        let addr = spawn_gate(conv, store.clone());
+        let host = format!("Host: localhost\r\n");
+
+        // /status is open (content-free liveness).
+        let (code, body) = req(addr, &format!("GET /status HTTP/1.1\r\n{host}Connection: close\r\n\r\n"));
+        assert_eq!((code, body.as_str()), (200, "ok"));
+
+        // /cli with NO token → 401 (fail-closed).
+        let (code, _) = req(addr, &format!("POST /cli HTTP/1.1\r\n{host}Content-Length: 3\r\nConnection: close\r\n\r\nnow"));
+        assert_eq!(code, 401, "unauthenticated /cli must be refused");
+
+        // /cli with the console operator token → 200.
+        let (code, body) = req(addr, &format!("POST /cli HTTP/1.1\r\n{host}Authorization: Bearer {console}\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnow"));
+        assert_eq!(code, 200, "operator /cli must be admitted");
+        assert!(body.contains('-'), "date-shaped reply: {body}");
+
+        // /cli with a MEMBER token → 403 (authenticates, but not operator).
+        let (code, _) = req(addr, &format!("POST /cli HTTP/1.1\r\n{host}Authorization: Bearer {member}\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnow"));
+        assert_eq!(code, 403, "a member device must not reach the operator console");
+
+        // /chat as the member (their own bound person) → 200.
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{host}Authorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 200, "member /chat as themselves must work");
+
+        // /chat member asserting SOMEONE ELSE via X-YM-Person → 403 (confused-deputy blocked).
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{host}Authorization: Bearer {member}\r\nX-YM-Person: bob\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 403, "a member may not speak as another person");
+
+        // Duplicate Authorization headers → 400 (request-smuggling hardening).
+        let (code, _) = req(addr, &format!("POST /cli HTTP/1.1\r\n{host}Authorization: Bearer {console}\r\nAuthorization: Bearer {member}\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnow"));
+        assert_eq!(code, 400, "duplicate Authorization must be rejected");
+
+        // Revoke the member; its token must be refused IMMEDIATELY (no restart).
+        let dev_id = store.list().into_iter().find(|d| d.name == "asha-phone").unwrap().id;
+        store.revoke(&dev_id).unwrap();
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{host}Authorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 401, "a revoked device must be refused immediately");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

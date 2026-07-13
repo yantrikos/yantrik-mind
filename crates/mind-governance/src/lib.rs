@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+pub mod devices;
 use mind_types::{
     ActionDecision, ActionExecutor, ActionIntent, ActionReceipt, ActionRequest, ActionRuntime,
     Capability, Decision, HarmGate, MindError, Result, RiskLevel, TurnContext,

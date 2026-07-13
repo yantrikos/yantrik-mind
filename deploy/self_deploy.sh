@@ -43,7 +43,11 @@ systemctl start yantrik-mind
 sleep 6
 
 # Health probe: the control endpoint must answer a trivial command with a date-shaped reply.
-if printf "now" | curl -s -m 20 --data-binary @- http://127.0.0.1:8077/cli | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+# ARCH-2: /cli is now authenticated — present the local console operator token minted at first boot
+# (owner-only file in the state dir). The daemon creates it before the endpoint starts listening.
+CONSOLE_TOKEN_FILE="${YM_STATE_DIR:-/var/lib/yantrik-mind}/console.token"
+CONSOLE_TOKEN="$(cat "$CONSOLE_TOKEN_FILE" 2>/dev/null || true)"
+if printf "now" | curl -s -m 20 -H "Authorization: Bearer ${CONSOLE_TOKEN}" --data-binary @- http://127.0.0.1:8077/cli | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
   echo "$(date -u +%FT%TZ) | deploy | DEPLOYED | $COMMIT health-ok" >> "$EVLOG"
   echo "==> self-deploy OK @ $COMMIT"
 else

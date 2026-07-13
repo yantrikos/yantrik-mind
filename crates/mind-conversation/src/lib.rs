@@ -2004,6 +2004,41 @@ fn now_str() -> String {
     format!("{} {} ({})", n.format("%Y-%m-%d %H:%M"), tz_label(), n.format("%A"))
 }
 
+/// ARCH-3 slice 2: extract DISTINCTIVE, high-precision PII-shaped values from text — the only class
+/// the exact-value exfil guard acts on (near-zero false positives). Catches: email addresses
+/// (`local@domain.tld`), contiguous 7–15 digit numbers (phone / account / card, unseparated), and
+/// long (≥16-char) alphanumeric tokens that mix letters and digits (ids/keys). Deliberately misses
+/// separated phone numbers, names, and dates — those are low precision and are clean planning's job.
+fn distinctive_pii(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | ',' | '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ';' | '/' | '\\' | ':' | '=' | '&' | '?' | '|')) {
+        let tok = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+');
+        if tok.len() < 7 {
+            continue;
+        }
+        let is_email = {
+            if let Some(at) = tok.find('@') {
+                at > 0 && tok[at + 1..].contains('.') && !tok[at + 1..].ends_with('.')
+            } else {
+                false
+            }
+        };
+        let digits = tok.chars().filter(|c| c.is_ascii_digit()).count();
+        let is_phone_like = tok.chars().all(|c| c.is_ascii_digit()) && (7..=15).contains(&tok.len());
+        let is_long_id = tok.len() >= 16
+            && tok.chars().all(|c| c.is_ascii_alphanumeric())
+            && digits > 0
+            && tok.chars().any(|c| c.is_ascii_alphabetic());
+        if is_email || is_phone_like || is_long_id {
+            let v = tok.to_string();
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
 /// AND the defensive auto-publish (so a raw-HTML reply becomes a link, never a wall of HTML in chat).
 fn publish_html(name_hint: &str, html: &str) -> Option<String> {
@@ -21171,6 +21206,43 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         }
     }
 
+    /// ARCH-3 slice 2 — the high-precision EXACT-VALUE exfil guard (sol's complementary layer to
+    /// egress-clean planning). It catches the leak clean planning can't: a distinctive stored value
+    /// the GROUNDED model injected into a NON-clean-planned external tool's args (an MCP read, a
+    /// github/translate/coder call) that the user did NOT type. Precise signal, near-zero false
+    /// positives: a value that is (1) PII-shaped (email / 7–15-digit number / long alphanumeric id),
+    /// (2) present verbatim in the outbound args, (3) present verbatim in the speaker's typed memory,
+    /// and (4) NOT in the user's literal request = the model reproducing a stored private value the
+    /// user never asked to send. Returns a GENERIC reason (never names the value — no oracle) or None.
+    ///
+    /// Deliberately narrow (high precision over recall, per sol): separated phone numbers, paraphrase,
+    /// encoding, and non-PII-shaped facts are NOT caught here — that residue is clean planning's job
+    /// (for eligible tools) and remains open for the rest (documented).
+    async fn model_injected_private_value(&self, tool: &str, args: &serde_json::Value, user_text: &str, id: &TurnIdentity) -> Option<String> {
+        if !matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
+            return None;
+        }
+        let canon = mind_governance::egress::canonicalize(args);
+        let user_lc = user_text.to_lowercase();
+        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        for value in distinctive_pii(&canon) {
+            let vlc = value.to_lowercase();
+            if user_lc.contains(&vlc) {
+                continue; // the user typed it themselves — their call, not a model exfil
+            }
+            // Is this exact value a stored fact the speaker's memory holds? (substring-confirm, not
+            // just word-overlap, so we don't false-positive on a shared token.)
+            if let Ok(hits) = self.memory.beliefs_matching(&value, &ctx).await {
+                if hits.iter().any(|b| b.statement.to_lowercase().contains(&vlc)) {
+                    return Some(format!(
+                        "(that would send what looks like a stored private detail out through `{tool}`, and you didn't include it in your request — I'll hold off. Tell me the exact terms to send if that's intended.)"
+                    ));
+                }
+            }
+        }
+        None
+    }
+
     /// THE AGENTIC LOOP — the mind AS an agent (mimicking Claude Code): reason → select ONE tool → act →
     /// observe → iterate → answer. Tools = primitives + the build_capability self-extension hook, so
     /// "I can't" becomes "I didn't have that, so I built it." Bounded to MAX_STEPS. This is the PRIMARY
@@ -21483,6 +21555,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                     continue;
                 }
             };
+            // ARCH-3 slice 2 (complementary): the high-precision exact-value guard — refuse if the model
+            // injected a distinctive stored private value (email/phone/id) the user didn't type into a
+            // NON-clean-planned external tool. Catches the residue clean planning can't.
+            if let Some(msg) = self.model_injected_private_value(&tool, &args, user_text, id).await {
+                eprintln!("[egress] step {step}: blocked exact-value exfil via {tool}");
+                scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
+                continue;
+            }
             // Loop-guard: a weaker chat model often re-issues the SAME tool call instead of answering
             // (it spun on `home` 5× in testing). If the call is identical to the last one, we already
             // have that result in the work log — stop and compose the answer instead of refetching.
@@ -23524,6 +23604,53 @@ mod tests {
         let conv2 = ConversationEngine::new(mem2, pool2, "JARVIS");
         let g2 = serde_json::json!({ "query": "leaky Alice oncology" });
         assert_eq!(conv2.egress_clean_args("web_search", "hi", g2.clone()).await.unwrap(), g2, "no broker → egress-clean planning is inert");
+    }
+
+    /// ARCH-3 slice 2 (complementary): the exact-value exfil guard. A distinctive stored private value
+    /// (email/phone/id) the model injects into a NON-clean-planned external tool arg — that the user
+    /// did NOT type — is refused. A value the user typed themselves, or one not in memory, passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch3_slice2_exact_value_exfil_guard() {
+        use mind_governance::egress::EgressBroker;
+        let mem = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        // Plant a private fact holding a distinctive value (an email).
+        mem.remember_as_belief_scoped(
+            BeliefAssertion { statement: "Alice's private email is alice.secret@example.com".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            mind_types::Scope::primary(),
+        ).await.unwrap();
+        let memf: Arc<dyn MemoryFacade> = mem;
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memf, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+        let primary = TurnIdentity::primary();
+
+        // The model injects the stored email into a github (external, NOT clean-planned) arg, and the
+        // user's request never mentioned it → guarded.
+        let args = serde_json::json!({ "repo": "alice.secret@example.com/notes" });
+        let blocked = conv.model_injected_private_value("github_repo_items", &args, "show my open PRs", &primary).await;
+        assert!(blocked.is_some(), "a model-injected stored private email must be guarded");
+        assert!(!blocked.unwrap().contains("alice.secret@example.com"), "the refusal must not echo the value (no oracle)");
+
+        // If the USER typed the value themselves, it's their call — allowed.
+        let ok = conv.model_injected_private_value("github_repo_items", &args, "check alice.secret@example.com/notes", &primary).await;
+        assert!(ok.is_none(), "a value the user typed themselves must pass");
+
+        // A value NOT in memory passes (nothing stored to leak).
+        let novel = serde_json::json!({ "repo": "bob.unknown@nowhere.com/x" });
+        assert!(conv.model_injected_private_value("github_repo_items", &novel, "my PRs", &primary).await.is_none(), "an unknown value is not a leak");
+
+        // A LOCAL tool is never guarded here (no egress).
+        assert!(conv.model_injected_private_value("calc", &args, "math", &primary).await.is_none(), "local tools are not egress-guarded");
+    }
+
+    #[test]
+    fn distinctive_pii_extracts_only_high_precision_values() {
+        let vals = distinctive_pii("email a.b@ex.com call 5551234567 id ABC123DEF456GHI7 word");
+        assert!(vals.iter().any(|v| v == "a.b@ex.com"), "email");
+        assert!(vals.iter().any(|v| v == "5551234567"), "unseparated phone");
+        assert!(vals.iter().any(|v| v == "ABC123DEF456GHI7"), "long mixed id");
+        assert!(!vals.iter().any(|v| v == "word"), "plain words are not PII");
+        // Short numbers and pure-word tokens are ignored (high precision).
+        assert!(distinctive_pii("meet at 7 on July 4 in Pune").is_empty(), "dates/short numbers are not distinctive PII");
     }
 
     /// Egress-clean planning fails CLOSED: if the clean planner can't produce a usable JSON arg for an

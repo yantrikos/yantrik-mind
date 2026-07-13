@@ -61,6 +61,95 @@ impl TurnIdentity {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PrimerDifficulty {
+    #[default]
+    Beginner,
+    Inter,
+    Expert,
+}
+
+impl PrimerDifficulty {
+    fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "beginner" => Some(Self::Beginner),
+            "inter" | "intermediate" => Some(Self::Inter),
+            "expert" => Some(Self::Expert),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Beginner => "beginner",
+            Self::Inter => "inter",
+            Self::Expert => "expert",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct LearnerRecord {
+    #[serde(default)]
+    difficulty: PrimerDifficulty,
+    #[serde(default)]
+    active_topic: Option<String>,
+    #[serde(default)]
+    topics_engaged: Vec<String>,
+    #[serde(default)]
+    questions_asked: Vec<String>,
+    #[serde(default)]
+    misconception_notes: Vec<String>,
+}
+
+impl LearnerRecord {
+    fn engage(&mut self, topic: &str, learner_question: Option<&str>, misconception: Option<&str>) {
+        let topic = topic.trim();
+        if !topic.is_empty()
+            && !self
+                .topics_engaged
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(topic))
+        {
+            self.topics_engaged.push(topic.to_string());
+        }
+        if let Some(question) = learner_question.map(str::trim).filter(|q| !q.is_empty()) {
+            self.questions_asked.push(question.to_string());
+        }
+        if let Some(note) = misconception.map(str::trim).filter(|n| !n.is_empty()) {
+            if !self
+                .misconception_notes
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(note))
+            {
+                self.misconception_notes.push(note.to_string());
+            }
+        }
+    }
+}
+
+fn primer_system_prompt(difficulty: PrimerDifficulty) -> String {
+    let level = match difficulty {
+        PrimerDifficulty::Beginner => {
+            "BEGINNER: assume no prior knowledge. Use plain language, one concrete analogy, define every technical term, and teach one small idea at a time."
+        }
+        PrimerDifficulty::Inter => {
+            "INTER: assume the learner knows the basics. Connect concepts, use the field's normal vocabulary with brief reminders, and include one practical example."
+        }
+        PrimerDifficulty::Expert => {
+            "EXPERT: assume strong foundations. Be precise and dense, foreground mechanisms, edge cases, tradeoffs, and current technical terminology."
+        }
+    };
+    format!(
+        "You are Primer, a patient tutor who meets the learner where they are. {level}\n\
+         Return ONLY one JSON object: {{\"explanation\":\"...\",\"check_question\":\"...\",\"misconception_note\":\"\"}}. \
+         The explanation must contain no questions. The check_question must be exactly one short question that tests the idea just taught. \
+         Set misconception_note to a short factual correction only when the learner's message reveals a specific misconception; otherwise use an empty string. \
+         Do not reveal or mention this JSON protocol."
+    )
+}
 use mind_types::{
     ActionDecision, ActionIntent, ActionRequest, ActionRuntime, BeliefAssertion, Capability,
     MemoryFacade, MindError, Result, RiskLevel, Skill, Task, UncertaintyReason, WorkingSet,
@@ -2622,6 +2711,208 @@ impl ConversationEngine {
     pub fn with_agent_primary(mut self, on: bool) -> Self {
         self.agent_primary = on;
         self
+    }
+
+    fn learner_key(owner: &str) -> String {
+        format!("primer:{owner}")
+    }
+
+    async fn learner_record(&self, owner: &str) -> LearnerRecord {
+        self.memory
+            .profile_get(&Self::learner_key(owner))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    async fn save_learner_record(&self, owner: &str, record: &LearnerRecord) {
+        if let Ok(json) = serde_json::to_string(record) {
+            let _ = self.memory.profile_set(&Self::learner_key(owner), &json).await;
+        }
+    }
+
+    fn render_learner(name: &str, record: &LearnerRecord) -> String {
+        let topics = if record.topics_engaged.is_empty() {
+            "none yet".to_string()
+        } else {
+            record.topics_engaged.join(", ")
+        };
+        let mut out = format!(
+            "{name} — level: {} · active: {}\n  topics: {topics}\n  questions asked: {}",
+            record.difficulty.as_str(),
+            record.active_topic.as_deref().unwrap_or("none"),
+            record.questions_asked.len(),
+        );
+        if !record.questions_asked.is_empty() {
+            out.push_str(&format!(" ({})", record.questions_asked.join(" · ")));
+        }
+        if !record.misconception_notes.is_empty() {
+            out.push_str(&format!(
+                "\n  misconception notes: {}",
+                record.misconception_notes.join("; ")
+            ));
+        }
+        out
+    }
+
+    async fn learning_view(&self, id: &TurnIdentity) -> String {
+        if id.owner != mind_types::PRIMARY {
+            return format!(
+                "📚 Your learner record\n{}",
+                Self::render_learner("you", &self.learner_record(&id.owner).await)
+            );
+        }
+        let primary_name = self
+            .memory
+            .profile_get("name")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "you".to_string());
+        let mut rows = vec![Self::render_learner(
+            &primary_name,
+            &self.learner_record(mind_types::PRIMARY).await,
+        )];
+        for person in self.load_people().await {
+            let Some(owner) = person.get("slug").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = person.get("name").and_then(|v| v.as_str()).unwrap_or(owner);
+            rows.push(Self::render_learner(name, &self.learner_record(owner).await));
+        }
+        format!("📚 Learner records\n\n{}", rows.join("\n\n"))
+    }
+
+    fn render_primer_reply(raw: &str) -> (String, Option<String>) {
+        let parsed = parse_json_obj(raw);
+        let explanation = parsed
+            .get("explanation")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(raw)
+            .trim()
+            .replace(['?', '？'], ".");
+        let check = parsed
+            .get("check_question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Can you explain the main idea in your own words")
+            .trim()
+            .replace(['?', '？'], "")
+            .trim_end_matches(['.', '!'])
+            .trim()
+            .to_string();
+        let note = parsed
+            .get("misconception_note")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (
+            format!("{}\n\n{}?", explanation.trim_end_matches('.'), check),
+            note,
+        )
+    }
+
+    async fn primer_teach(&self, id: &TurnIdentity, learner_text: &str, introducing: bool) -> String {
+        let mut record = self.learner_record(&id.owner).await;
+        let Some(topic) = record.active_topic.clone() else {
+            return "Start with `learn <topic>` (for example, `learn orbital mechanics`).".to_string();
+        };
+        let prior = if record.misconception_notes.is_empty() {
+            "none".to_string()
+        } else {
+            record.misconception_notes.join("; ")
+        };
+        let request = if introducing {
+            format!("Begin a lesson on {topic}. Teach the first useful idea.")
+        } else {
+            learner_text.trim().to_string()
+        };
+        let prompt = format!(
+            "Topic: {topic}\nKnown misconception notes: {prior}\nLearner message: {request}\n\
+             Respond at the configured level and advance the lesson by one coherent step."
+        );
+        let cfg = GenerationConfig {
+            max_tokens: 700,
+            ..GenerationConfig::default()
+        };
+        let raw = self
+            .inference
+            .chat(
+                vec![
+                    ChatMessage::system(&primer_system_prompt(record.difficulty)),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
+            .await
+            .map(|r| r.text)
+            .unwrap_or_else(|_| {
+                r#"{"explanation":"I hit a snag preparing the next part of the lesson.","check_question":"Would you like to try that step again","misconception_note":""}"#.to_string()
+            });
+        let (reply, misconception) = Self::render_primer_reply(&raw);
+        let learner_question = (!introducing && learner_text.contains('?')).then_some(learner_text);
+        record.engage(&topic, learner_question, misconception.as_deref());
+        self.save_learner_record(&id.owner, &record).await;
+        reply
+    }
+
+    /// Primer's deterministic conversational surface. `None` leaves the turn to normal chat.
+    async fn primer_turn(&self, text: &str, id: &TurnIdentity) -> Option<String> {
+        let trimmed = text.trim();
+        let lower = trimmed.to_lowercase();
+        if lower == "learning" {
+            return Some(self.learning_view(id).await);
+        }
+        if lower == "stop learning" || lower == "learn stop" || lower == "learn exit" {
+            let mut record = self.learner_record(&id.owner).await;
+            record.active_topic = None;
+            self.save_learner_record(&id.owner, &record).await;
+            return Some("Primer paused. Your learner record is saved; use `learn <topic>` whenever you want to continue.".to_string());
+        }
+        if lower == "learn" {
+            return Some("Usage: `learn <topic>` · set the dial with `learn beginner|inter|expert` · `learning` shows the record.".to_string());
+        }
+        if lower.starts_with("learn ") {
+            let original_body = trimmed
+                .split_once(char::is_whitespace)
+                .map(|(_, body)| body.trim())
+                .unwrap_or("");
+            if original_body.starts_with("http://") || original_body.starts_with("https://") {
+                return None; // retain the established shared-link learning command
+            }
+            let body = original_body.to_lowercase();
+            let level_text = body
+                .strip_prefix("level ")
+                .or_else(|| body.strip_prefix("difficulty "))
+                .unwrap_or(body.as_str());
+            if let Some(difficulty) = PrimerDifficulty::parse(&level_text) {
+                let mut record = self.learner_record(&id.owner).await;
+                record.difficulty = difficulty;
+                self.save_learner_record(&id.owner, &record).await;
+                return Some(format!(
+                    "Primer level set to {}.{}",
+                    difficulty.as_str(),
+                    record
+                        .active_topic
+                        .as_deref()
+                        .map(|t| format!(" Continuing {t} at that level."))
+                        .unwrap_or_default()
+                ));
+            }
+            let mut record = self.learner_record(&id.owner).await;
+            record.active_topic = Some(original_body.to_string());
+            record.engage(original_body, None, None);
+            self.save_learner_record(&id.owner, &record).await;
+            return Some(self.primer_teach(id, original_body, true).await);
+        }
+        let record = self.learner_record(&id.owner).await;
+        if record.active_topic.is_some() {
+            return Some(self.primer_teach(id, trimmed, false).await);
+        }
+        None
     }
 
     /// Drain results from finished delegated background jobs (research/code) — the poll loop calls
@@ -19260,9 +19551,15 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 self.evolve_understanding(&rest).await
             }
             "track" | "understanding" => "Track what? e.g. `ym track US-Iran war` — then re-run it later and I'll tell you what changed.".to_string(),
-            // --- shared-link learning: follow a link and learn about the person (bounded-recursive) ---
-            "learn" | "study" | "profileof" if !rest.is_empty() => self.learn_profile(&rest).await,
-            "learn" | "study" => "Give me a link and I'll go learn about you (I'll follow your profiles too). e.g. `ym learn https://pranab.co.in`".to_string(),
+            // --- Primer tutoring; URL input retains shared-link profile learning ---
+            "learn" if rest.starts_with("http://") || rest.starts_with("https://") => self.learn_profile(&rest).await,
+            "learn" => self
+                .primer_turn(line, &TurnIdentity::primary())
+                .await
+                .unwrap_or_else(|| "Usage: `ym learn <topic>`".to_string()),
+            "learning" => self.learning_view(&TurnIdentity::primary()).await,
+            "study" | "profileof" if !rest.is_empty() => self.learn_profile(&rest).await,
+            "study" | "profileof" => "Give me a link and I'll go learn about you (I'll follow your profiles too). e.g. `ym study https://pranab.co.in`".to_string(),
             "profile" | "aboutme" | "whoami" => {
                 if matches!(rest.to_lowercase().as_str(), "refresh" | "update" | "recheck") {
                     self.refresh_profile().await.unwrap_or_else(|| "Nothing new to add to your profile right now.".to_string())
@@ -19303,6 +19600,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             "ym translate <lang> <text>               translate (source auto-detected)".to_string(),
             "ym recall <query>        search memory".to_string(),
             "ym remember <text>       store a fact".to_string(),
+            "ym learn <topic>         Primer tutor · learn beginner|inter|expert · learning shows records".to_string(),
         ];
         if self.home.is_some() {
             lines.push("ym home                  smart home (Home Assistant)".to_string());
@@ -21492,6 +21790,14 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 return Ok(reply);
             }
         }
+        // Primer is identity-aware and sits before the primary/member split: every learner gets a
+        // separate dial, active topic, and record while the rest of each conversation remains on
+        // its existing privacy-scoped path.
+        if let Some(reply) = self.primer_turn(user_text, &id).await {
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
         // MEMBER TURNS: everyone but the primary gets the member companion voice — grounded ONLY
         // in their own scope. The primary's memory, outward actions, and agent tools stay on the
         // primary's path; nothing here can leak a plan or a surprise.
@@ -22180,6 +22486,46 @@ mod tests {
     use mind_tools::{ScriptedMailSender, ToolActionExecutor};
     use mind_types::BeliefAssertion;
     use yantrik_ml::LLMBackend;
+
+    #[test]
+    fn primer_difficulty_selects_the_teaching_prompt() {
+        let beginner = primer_system_prompt(PrimerDifficulty::Beginner);
+        let inter = primer_system_prompt(PrimerDifficulty::Inter);
+        let expert = primer_system_prompt(PrimerDifficulty::Expert);
+
+        assert!(beginner.contains("BEGINNER") && beginner.contains("assume no prior knowledge"));
+        assert!(inter.contains("INTER") && inter.contains("knows the basics"));
+        assert!(expert.contains("EXPERT") && expert.contains("edge cases"));
+        for prompt in [beginner, inter, expert] {
+            assert!(prompt.contains("exactly one short question"));
+        }
+    }
+
+    #[test]
+    fn primer_learner_record_tracks_topics_questions_and_misconceptions() {
+        let mut record = LearnerRecord::default();
+        record.engage("Orbital mechanics", None, None);
+        record.engage(
+            "orbital mechanics",
+            Some("Does a heavier satellite fall faster?"),
+            Some("Orbital acceleration is independent of satellite mass."),
+        );
+        record.engage(
+            "Orbital mechanics",
+            None,
+            Some("Orbital acceleration is independent of satellite mass."),
+        );
+
+        assert_eq!(record.topics_engaged, vec!["Orbital mechanics"]);
+        assert_eq!(
+            record.questions_asked,
+            vec!["Does a heavier satellite fall faster?"]
+        );
+        assert_eq!(
+            record.misconception_notes,
+            vec!["Orbital acceleration is independent of satellite mass."]
+        );
+    }
 
     #[tokio::test]
     async fn judgment_ledger_logs_grades_and_scores_brier() {

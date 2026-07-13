@@ -9,6 +9,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{io::Write, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,41 @@ impl ProjectProposal {
         proposal.validate()?;
         Ok(proposal)
     }
+}
+
+/// Persist at most one valid proposal from a single research pass. The temporary file stays in
+/// the spool directory so the final rename is atomic on the same filesystem.
+fn spool_project_proposals(
+    dir: &Path,
+    proposals: impl IntoIterator<Item = ProjectProposal>,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let Some(proposal) = proposals.into_iter().find(|proposal| proposal.validate().is_ok()) else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(dir)?;
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+    let id = format!(
+        "{:032x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .wrapping_add(NEXT_ID.fetch_add(1, Ordering::Relaxed) as u128)
+    );
+    let final_path = dir.join(format!("{id}.json"));
+    let temp_path = dir.join(format!(".{id}.tmp"));
+    let json = serde_json::to_vec_pretty(&proposal).map_err(std::io::Error::other)?;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path)?;
+    if let Err(error) = file.write_all(&json).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&temp_path, &final_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    Ok(Some(final_path))
 }
 
 fn proposal_age(modified: std::time::SystemTime) -> String {
@@ -13357,6 +13393,24 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         }
     }
 
+    /// Ask for one referee-bound suggestion after a repo-grounded WorkOps scan. Invalid or absent
+    /// model output is simply discarded; this shadow path never builds or executes proposals.
+    async fn spool_work_proposal(&self, repo: &str, report: &str, code_ctx: &str) {
+        let prompt = format!(
+            "A WorkOps research pass just studied repository {repo}.\n\nRESEARCH REPORT:\n{report}\n\nREPOSITORY DIGEST:\n{code_ctx}\n\n\
+             If the evidence supports one concrete, minimal code improvement, output ONLY one JSON object with exactly these fields:\n\
+             {{\"repo\":\"{repo}\",\"goal\":\"one imperative sentence\",\"citations\":[\"source from the report\"],\"base_sha\":\"current commit hash from the digest\",\"acceptance_test\":\"specific test command\",\"why_not\":\"strongest reason not to merge\",\"p_merge\":0.0}}\n\
+             p_merge must be between 0 and 1. Use only citations present in the report. If any field cannot be grounded, output null. This is a shadow proposal only; do not suggest executing it."
+        );
+        let cfg = GenerationConfig { max_tokens: 450, ..GenerationConfig::default() };
+        let Ok(response) = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await else { return };
+        let Some(start) = response.text.find('{') else { return };
+        let Some(end) = response.text.rfind('}') else { return };
+        if end <= start { return; }
+        let Ok(proposal) = ProjectProposal::from_json(&response.text[start..=end]) else { return };
+        let _ = spool_project_proposals(Path::new(PROJECT_PROPOSALS_DIR), [proposal]);
+    }
+
     /// ---------- WORKOPS (the research co-pilot) ----------
     /// Autonomous help on the OWNER'S WORK. A registry of his real projects (seeded from what the
     /// mind already knows he builds); a paced pass that research-revises the next project for field
@@ -13463,6 +13517,9 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             ))
             .await
             .ok()?;
+        if !code_ctx.is_empty() {
+            self.spool_work_proposal(&subject, &report, &code_ctx).await;
+        }
         // GitHub activity glance (proven-strong signal; only when there's genuinely unread work).
         let mut gh = String::new();
         if let Some(g) = &self.github {
@@ -23581,6 +23638,26 @@ mod tests {
             proposal.p_merge = p_merge;
             assert!(proposal.validate().is_err(), "accepted p_merge={p_merge}");
         }
+    }
+
+    #[test]
+    fn project_proposal_spool_caps_each_pass_at_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "ym-project-proposals-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let first = valid_project_proposal();
+        let mut second = valid_project_proposal();
+        second.goal = "A second proposal must not escape this pass".into();
+
+        let written = spool_project_proposals(&dir, [first.clone(), second]).unwrap();
+        assert!(written.is_some());
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|entry| entry.ok()).collect();
+        assert_eq!(files.len(), 1, "one research pass may emit at most one proposal");
+        let stored = ProjectProposal::from_json(&std::fs::read_to_string(files[0].path()).unwrap()).unwrap();
+        assert_eq!(stored, first);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

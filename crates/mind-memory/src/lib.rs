@@ -464,6 +464,58 @@ fn contradiction_config_from_env() -> ContradictionConfig {
     }
 }
 
+/// Minimum topical overlap required before two beliefs can be surfaced as contradictory.
+/// Semantic cosine is normalized so the embedder's ordinary background similarity does not make
+/// unrelated subjects appear related; significant-word overlap provides the no-embedder fallback.
+fn contradiction_relatedness_threshold() -> f64 {
+    let value = std::env::var("YM_CONTRADICTION_RELATEDNESS_THRESHOLD").ok();
+    parse_relatedness_threshold(value.as_deref())
+}
+
+fn parse_relatedness_threshold(value: Option<&str>) -> f64 {
+    value
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.25)
+        .clamp(0.0, 1.0)
+}
+
+fn topical_relatedness(a: &str, b: &str, semantic_cosine: Option<f64>) -> f64 {
+    let a_words = task_word_set(a);
+    let b_words = task_word_set(b);
+    let word_overlap = jaccard(&a_words, &b_words);
+    let leading_subject_matches = |text: &str, words: &std::collections::HashSet<String>| {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .find(|word| words.contains(*word))
+            .map(str::to_string)
+    };
+    let subject_overlap = match (
+        leading_subject_matches(a, &a_words),
+        leading_subject_matches(b, &b_words),
+    ) {
+        (Some(a_subject), Some(b_subject)) if a_subject == b_subject => 1.0,
+        _ => 0.0,
+    };
+    // Cosines around 0.5 are common even for unrelated natural-language sentences. Map the useful
+    // 0.5..1.0 range onto 0..1 so only meaningful semantic similarity contributes to this gate.
+    let semantic = semantic_cosine
+        .map(|s| ((s - 0.5) * 2.0).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    word_overlap.max(subject_overlap).max(semantic)
+}
+
+fn beliefs_are_topically_related(db: &YantrikDB, a: &str, b: &str, threshold: f64) -> bool {
+    let semantic = if db.has_embedder() {
+        db.embed(a)
+            .ok()
+            .zip(db.embed(b).ok())
+            .map(|(a_vec, b_vec)| cosine(&a_vec, &b_vec))
+    } else {
+        None
+    };
+    topical_relatedness(a, b, semantic) >= threshold
+}
+
 fn detect_conflicts(db: &YantrikDB) -> Vec<Contradiction> {
     let res = match db.detect_belief_contradictions(&contradiction_config_from_env()) {
         Ok(r) => r,
@@ -473,14 +525,21 @@ fn detect_conflicts(db: &YantrikDB) -> Vec<Contradiction> {
         .iter()
         .filter_map(|n| node_prop(n).map(|p| (n.id, p.to_string())))
         .collect();
+    let relatedness_threshold = contradiction_relatedness_threshold();
     res.conflicts
         .iter()
-        .map(|c| Contradiction {
-            id: format!("{}~{}", c.belief_a, c.belief_b),
-            belief_a: id_to_prop.get(&c.belief_a).cloned().unwrap_or_default(),
-            belief_b: id_to_prop.get(&c.belief_b).cloned().unwrap_or_default(),
-            severity: c.severity,
-            status: "open".into(),
+        .filter_map(|c| {
+            let belief_a = id_to_prop.get(&c.belief_a)?;
+            let belief_b = id_to_prop.get(&c.belief_b)?;
+            beliefs_are_topically_related(db, belief_a, belief_b, relatedness_threshold).then(
+                || Contradiction {
+                    id: format!("{}~{}", c.belief_a, c.belief_b),
+                    belief_a: belief_a.clone(),
+                    belief_b: belief_b.clone(),
+                    severity: c.severity,
+                    status: "open".into(),
+                },
+            )
         })
         .collect()
 }
@@ -2326,6 +2385,75 @@ mod tests {
             .await
             .unwrap();
         assert!(down.confidence < 0.5, "negative evidence should lower confidence, got {}", down.confidence);
+    }
+
+    #[test]
+    fn topical_relatedness_rejects_unrelated_subjects() {
+        let threshold = 0.25;
+        assert_eq!(parse_relatedness_threshold(None), threshold);
+        assert_eq!(parse_relatedness_threshold(Some("0.7")), 0.7);
+        assert_eq!(parse_relatedness_threshold(Some("2")), 1.0);
+        let unrelated = topical_relatedness(
+            "The Pacific Ocean is deep",
+            "Rust 1.96 has improved diagnostics",
+            Some(0.55),
+        );
+        assert!(
+            unrelated < threshold,
+            "background semantic similarity must not pass the topical gate: {unrelated}"
+        );
+
+        let same_subject = topical_relatedness(
+            "Pranab prefers terse replies",
+            "Pranab prefers long detailed replies",
+            None,
+        );
+        assert!(
+            same_subject >= threshold,
+            "contradictory claims about the same subject must pass the topical gate: {same_subject}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn contradiction_scan_skips_unrelated_belief_pairs() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        for statement in [
+            "The Pacific Ocean is deep",
+            "Rust 1.96 has improved diagnostics",
+            "Pranab sleeps early",
+            "Pranab stays up late",
+        ] {
+            mem.remember_as_belief(BeliefAssertion {
+                statement: statement.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+        }
+        mem.relate(
+            "The Pacific Ocean is deep",
+            "Rust 1.96 has improved diagnostics",
+            "contradicts",
+            0.9,
+        )
+        .await
+        .unwrap();
+        mem.relate(
+            "Pranab sleeps early",
+            "Pranab stays up late",
+            "contradicts",
+            0.9,
+        )
+        .await
+        .unwrap();
+
+        let conflicts = mem.conflicts().await.unwrap();
+        assert_eq!(conflicts.len(), 1, "only the related pair should survive: {conflicts:?}");
+        assert!(conflicts[0].belief_a.contains("Pranab"));
+        assert!(conflicts[0].belief_b.contains("Pranab"));
     }
 
     /// The CHEAP task tier: plain CRUD, no cognitive ops, in the same store.

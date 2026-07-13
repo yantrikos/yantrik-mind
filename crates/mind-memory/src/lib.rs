@@ -1715,6 +1715,18 @@ impl MemoryFacade for MemoryHandle {
             .collect())
     }
 
+    /// Deterministic exact-match, read-ISOLATED to the viewer (ARCH-1): the same
+    /// scope filter as `recall_typed_as`, applied to the exact-match path so a
+    /// non-primary principal cannot recover a private belief by word match.
+    async fn beliefs_matching_as(&self, needle: &str, viewer: mind_types::Scope) -> Result<Vec<Belief>> {
+        let hits = self.beliefs_matching(needle).await?;
+        let scopes = self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default();
+        Ok(hits
+            .into_iter()
+            .filter(|b| mind_types::Scope::visible_to(scopes.get(&b.statement).map(|s| s.as_str()), Some(&viewer)))
+            .collect())
+    }
+
     async fn hydrate_working_set_as(&self, focus: &str, viewer: mind_types::Scope) -> Result<WorkingSet> {
         // Same shape as hydrate_working_set, but the belief recall is read-ISOLATED to the viewer, and
         // task commitments surface only to the primary (tasks aren't per-task scoped yet).
@@ -1991,6 +2003,50 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ARCH-1 acceptance test — the authorization-kernel deliverable.
+    /// Plant a PRIMARY-ONLY secret and a SHARED fact, then prove a non-primary
+    /// household member (a `Principal`) recovers the shared fact but NEVER the
+    /// secret — through BOTH read paths (semantic recall and deterministic
+    /// exact match) — while the primary/operator sees both. This is the
+    /// invariant every second channel depends on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch1_member_cannot_recover_primary_secret_via_any_read_path() {
+        use mind_types::{AccessContext, Scope};
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+
+        // A secret only the primary should ever see, and a genuinely shared fact.
+        let secret = "The safe combination is 47-12-33";
+        let shared = "Dinner on Friday is at seven";
+        mem.remember_as_belief_scoped(
+            BeliefAssertion { statement: secret.into(), polarity: 1.0, weight: 2.0, source_event: Some("test".into()), provenance: "told".into() },
+            Scope::primary(),
+        ).await.unwrap();
+        mem.remember_as_belief_scoped(
+            BeliefAssertion { statement: shared.into(), polarity: 1.0, weight: 2.0, source_event: Some("test".into()), provenance: "told".into() },
+            Scope::Shared,
+        ).await.unwrap();
+
+        let member = AccessContext::Principal(Scope::Private("asha".into()));
+        let owner = AccessContext::Operator;
+
+        // ── Path 1: deterministic exact match ──────────────────────────────
+        let m_secret = mem.beliefs_matching_as("safe combination", member.viewer().unwrap()).await.unwrap();
+        assert!(!m_secret.iter().any(|b| b.statement == secret), "MEMBER recovered the primary secret via exact match — isolation breached");
+        let m_shared = mem.beliefs_matching_as("dinner friday", member.viewer().unwrap()).await.unwrap();
+        assert!(m_shared.iter().any(|b| b.statement == shared), "member must still see genuinely shared facts");
+
+        // ── Path 2: semantic recall ────────────────────────────────────────
+        let r_secret = mem.recall_typed_as(RecallQuery { text: "safe combination".into(), top_k: 10, kind: None }, member.viewer().unwrap()).await.unwrap();
+        assert!(!r_secret.iter().any(|r| r.item.text == secret), "MEMBER recovered the primary secret via semantic recall — isolation breached");
+
+        // ── The owner (operator) sees everything ───────────────────────────
+        assert!(owner.is_operator());
+        let o_secret = mem.beliefs_matching("safe combination").await.unwrap();
+        assert!(o_secret.iter().any(|b| b.statement == secret), "operator must retain full access");
+        let o_secret_scoped = mem.beliefs_matching_as("safe combination", Scope::primary()).await.unwrap();
+        assert!(o_secret_scoped.iter().any(|b| b.statement == secret), "primary viewer must see their own private belief");
+    }
 
     fn scratch_db_path(tag: &str) -> String {
         let mut p = std::env::temp_dir();

@@ -20,7 +20,7 @@ pub use error::{MindError, Result};
 pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
 pub use event::{Event, EventBody, EventSource};
 pub use memory::{
-    Belief, BeliefAssertion, Contradiction, Evidence, MemoryFacade, MemoryItem, MemoryKind,
+    AccessContext, Belief, BeliefAssertion, Contradiction, Evidence, MemoryFacade, MemoryItem, MemoryKind,
     Recalled, RecallQuery, Reflection, Scope, Skill, Tension, TensionKind, UncertaintyReason, WorkingSet, PRIMARY,
 };
 pub use candidate::{Candidate, CandidateKind, ScoreAxes};

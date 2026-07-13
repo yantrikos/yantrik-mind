@@ -149,6 +149,45 @@ impl Scope {
     }
 }
 
+/// The authorization context a read/egress is performed under (ARCH-1, the
+/// authorization kernel). Every personal-data read should carry one, so the
+/// resource layer — not the channel — decides what is visible. `Operator`
+/// (unscoped) is the privileged capability that only the trusted owner path
+/// may mint; a `Principal(scope)` is filtered at the resource boundary and can
+/// never see beyond its scope, whatever channel/command/tool/recipe it arrives
+/// through.
+#[derive(Debug, Clone)]
+pub enum AccessContext {
+    /// Full, unfiltered access — the explicit operator capability. Reserved for
+    /// the trusted owner path; never derive this from an untrusted channel.
+    Operator,
+    /// Access limited to what `scope` may see. Enforced by the memory layer.
+    Principal(Scope),
+}
+
+impl AccessContext {
+    /// The viewer scope for filtering: None for the operator (unfiltered),
+    /// Some(scope) for a principal. Feeds `Scope::visible_to` / `recall_typed_as`.
+    pub fn viewer(&self) -> Option<Scope> {
+        match self {
+            AccessContext::Operator => None,
+            AccessContext::Principal(s) => Some(s.clone()),
+        }
+    }
+    /// True when this context is the privileged, unfiltered operator.
+    pub fn is_operator(&self) -> bool {
+        matches!(self, AccessContext::Operator)
+    }
+    /// A short label for sensitive-read receipts.
+    pub fn principal_label(&self) -> String {
+        match self {
+            AccessContext::Operator => "operator".into(),
+            AccessContext::Principal(Scope::Shared) => "shared".into(),
+            AccessContext::Principal(Scope::Private(o)) => format!("private:{o}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recalled {
     pub item: MemoryItem,
@@ -259,6 +298,16 @@ pub trait MemoryFacade: Send + Sync {
     async fn beliefs_matching_n(&self, needle: &str, limit: usize) -> Result<Vec<Belief>> {
         let _ = (needle, limit);
         Ok(vec![])
+    }
+
+    /// Deterministic exact belief lookup, FILTERED to what `viewer` may see
+    /// (ARCH-1). The unscoped `beliefs_matching` had no isolated variant — a
+    /// direct path by which a non-primary principal could recover a private
+    /// belief by exact word match. The real (isolating) impl in mind-memory
+    /// filters by belief scope; the default delegates (fine for non-isolating
+    /// mocks, which hold no private data).
+    async fn beliefs_matching_as(&self, needle: &str, _viewer: Scope) -> Result<Vec<Belief>> {
+        self.beliefs_matching(needle).await
     }
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;

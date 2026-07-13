@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 pub mod devices;
+pub mod egress;
 use mind_types::{
     ActionDecision, ActionExecutor, ActionIntent, ActionReceipt, ActionRequest, ActionRuntime,
     Capability, Decision, HarmGate, MindError, Result, RiskLevel, TurnContext,
@@ -90,7 +91,7 @@ fn normalize(s: &str) -> String {
 
 /// Collapse to bare letters with leetspeak folded, so separator/leet evasion ("b-o-m-b", "b0mb",
 /// "b.o.m.b", "k e y l o g g e r") still matches. Monotonic-safe (it only ever merges).
-fn squeeze(s: &str) -> String {
+pub(crate) fn squeeze(s: &str) -> String {
     s.chars()
         .filter_map(|ch| {
             let folded = match ch.to_ascii_lowercase() {

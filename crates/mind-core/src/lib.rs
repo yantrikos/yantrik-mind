@@ -478,11 +478,26 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         eng = eng.with_runtime(rt.clone());
     }
 
+    // ARCH-3A egress broker: mediates + audits every outbound (External) tool call. Rooted at the
+    // owner-only state dir (persistent HMAC key + hash-chained receipt ledger there); a :memory: DB
+    // gets an in-memory broker. Shared by the agent loop AND the recipe/sub-agent host.
+    let egress_dir = std::env::var("YM_DB")
+        .ok()
+        .and_then(|p| std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string()))
+        .filter(|d| !d.is_empty());
+    let egress_persist = std::env::var("YM_DB").map(|d| !d.is_empty() && d != ":memory:").unwrap_or(false);
+    let egress = Arc::new(mind_governance::egress::EgressBroker::open(
+        egress_dir.clone().unwrap_or_else(|| ".".to_string()),
+        egress_persist,
+    ));
+    eng = eng.with_egress(egress.clone());
+
     // Shared tool host: recipe Tool steps + sub-agent tool calls both go through it. Includes web
-    // research tools (keyless DuckDuckGo search + SSRF-guarded fetch).
+    // research tools (keyless DuckDuckGo search + SSRF-guarded fetch) and the egress broker.
     let host: Arc<dyn mind_recipes::RecipeHost> = Arc::new(
         mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone())
-            .with_web(Arc::new(mind_tools::HttpFetcher::new()), searcher.clone()),
+            .with_web(Arc::new(mind_tools::HttpFetcher::new()), searcher.clone())
+            .with_egress(egress.clone()),
     );
 
     // A research sub-agent: web search + fetch + the mind's own read tools. Bounded ReAct, read-only.

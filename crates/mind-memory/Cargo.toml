@@ -8,6 +8,8 @@ mind-types = { workspace = true }
 yantrikdb-core = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 async-trait = { workspace = true }
 tracing = { workspace = true }

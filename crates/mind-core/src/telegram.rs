@@ -815,7 +815,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     return;
                 }
                 let identity = mind_conversation::TurnIdentity::new(owner, shared_channel);
-                let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity);
+                // ARCH-1: Telegram is a REMOTE channel — it mints a Principal, never Operator.
+                // Even the primary over Telegram reads resource-filtered (their own + shared;
+                // other members' private facts stay invisible), and every read is receipted.
+                let ctx = mind_types::AccessContext::Principal(identity.viewer());
+                let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity, &ctx);
                 tokio::pin!(work);
                 let outcome = loop {
                     tokio::select! {

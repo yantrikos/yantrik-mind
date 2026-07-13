@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 
+pub mod receipts;
+
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 use tokio::sync::{mpsc, oneshot};
@@ -1202,6 +1204,8 @@ fn relate(db: &YantrikDB, src: &str, dst: &str, rel: &str, weight: f64) -> std::
 #[derive(Clone)]
 pub struct MemoryHandle {
     tx: mpsc::UnboundedSender<Cmd>,
+    /// ARCH-1 slice 2: every principal read is receipted into a hash-chained ledger.
+    receipts: std::sync::Arc<receipts::ReadReceiptLedger>,
 }
 
 impl MemoryHandle {
@@ -1608,10 +1612,34 @@ impl MemoryHandle {
             .map_err(|e| MindError::Memory(format!("spawn actor: {e}")))?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx }),
+            Ok(Ok(())) => Ok(Self {
+                tx,
+                receipts: std::sync::Arc::new(receipts::ReadReceiptLedger::for_db(db_path)),
+            }),
             Ok(Err(e)) => Err(MindError::Memory(format!("init YantrikDB: {e}"))),
             Err(_) => Err(MindError::Memory("actor thread died during init".into())),
         }
+    }
+
+    /// Receipt a boundary-crossing read (principal contexts only — the operator
+    /// is the trusted owner path and is not receipted).
+    fn receipt_read(&self, ctx: &mind_types::AccessContext, method: &str, detail: &str, results: usize) {
+        if ctx.is_operator() {
+            return;
+        }
+        let detail: String = detail.chars().take(120).collect();
+        self.receipts.append(receipts::ReadReceipt {
+            ts_ms: receipts::now_ms(),
+            principal: ctx.principal_label(),
+            method: method.to_string(),
+            detail,
+            results,
+        });
+    }
+
+    /// Scope-filter helper: the belief-scope map applied to anything belief-shaped.
+    async fn belief_scopes(&self) -> HashMap<String, String> {
+        self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default()
     }
 
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
@@ -1673,19 +1701,44 @@ impl MemoryHandle {
 
 #[async_trait]
 impl MemoryFacade for MemoryHandle {
-    async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>> {
-        let (text, top_k) = (q.text, q.top_k);
-        self.call(|reply| Cmd::RecallTyped { text, top_k, reply }).await
+    // ── ARCH-1 slice 2: reads are authorized AT THIS BOUNDARY. Operator ctx =
+    // unfiltered; Principal ctx = scope-filtered here (never by the caller) and
+    // receipted into the hash-chained read ledger. ──
+    async fn recall_typed(&self, q: RecallQuery, ctx: &mind_types::AccessContext) -> Result<Vec<Recalled>> {
+        let (text, top_k) = (q.text.clone(), q.top_k);
+        let recalled = self.call(|reply| Cmd::RecallTyped { text, top_k, reply }).await?;
+        let out = match ctx.viewer() {
+            None => recalled,
+            Some(viewer) => {
+                let scopes = self.belief_scopes().await;
+                recalled
+                    .into_iter()
+                    .filter(|r: &Recalled| mind_types::Scope::visible_to(scopes.get(&r.item.text).map(|s| s.as_str()), Some(&viewer)))
+                    .collect()
+            }
+        };
+        self.receipt_read(ctx, "recall_typed", &q.text, out.len());
+        Ok(out)
     }
 
-    async fn beliefs_matching(&self, needle: &str) -> Result<Vec<Belief>> {
-        let needle = needle.to_string();
-        self.call(|reply| Cmd::BeliefsMatching { needle, limit: 20, reply }).await
+    async fn beliefs_matching(&self, needle: &str, ctx: &mind_types::AccessContext) -> Result<Vec<Belief>> {
+        self.beliefs_matching_n(needle, 20, ctx).await
     }
 
-    async fn beliefs_matching_n(&self, needle: &str, limit: usize) -> Result<Vec<Belief>> {
-        let needle = needle.to_string();
-        self.call(move |reply| Cmd::BeliefsMatching { needle, limit, reply }).await
+    async fn beliefs_matching_n(&self, needle: &str, limit: usize, ctx: &mind_types::AccessContext) -> Result<Vec<Belief>> {
+        let needle_owned = needle.to_string();
+        let hits = self.call(move |reply| Cmd::BeliefsMatching { needle: needle_owned, limit, reply }).await?;
+        let out = match ctx.viewer() {
+            None => hits,
+            Some(viewer) => {
+                let scopes = self.belief_scopes().await;
+                hits.into_iter()
+                    .filter(|b: &Belief| mind_types::Scope::visible_to(scopes.get(&b.statement).map(|s| s.as_str()), Some(&viewer)))
+                    .collect()
+            }
+        };
+        self.receipt_read(ctx, "beliefs_matching", needle, out.len());
+        Ok(out)
     }
 
     async fn remember_observation(&self, text: &str, source: mind_types::ProvenanceCategory) -> Result<String> {
@@ -1706,7 +1759,7 @@ impl MemoryFacade for MemoryHandle {
         self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, evidence_version: Some(evidence_version), reply }).await
     }
 
-    // ── group-chat read-isolation (real impls; default trait methods are unrestricted) ──
+    // ── scoped writes (visibility tagged at ingest) ──
     async fn remember_as_belief_scoped(&self, a: BeliefAssertion, scope: mind_types::Scope) -> Result<Belief> {
         let belief = self.remember_as_belief(a).await?;
         // Tag by the CANONICAL proposition (find_belief may have merged a paraphrase into an existing node).
@@ -1715,82 +1768,19 @@ impl MemoryFacade for MemoryHandle {
         Ok(belief)
     }
 
-    async fn recall_typed_as(&self, q: RecallQuery, viewer: mind_types::Scope) -> Result<Vec<Recalled>> {
-        let recalled = self.recall_typed(q).await?;
-        let scopes = self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default();
-        Ok(recalled
-            .into_iter()
-            .filter(|r| mind_types::Scope::visible_to(scopes.get(&r.item.text).map(|s| s.as_str()), Some(&viewer)))
-            .collect())
-    }
-
-    /// Deterministic exact-match, read-ISOLATED to the viewer (ARCH-1): the same
-    /// scope filter as `recall_typed_as`, applied to the exact-match path so a
-    /// non-primary principal cannot recover a private belief by word match.
-    async fn beliefs_matching_as(&self, needle: &str, viewer: mind_types::Scope) -> Result<Vec<Belief>> {
-        let hits = self.beliefs_matching(needle).await?;
-        let scopes = self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default();
-        Ok(hits
-            .into_iter()
-            .filter(|b| mind_types::Scope::visible_to(scopes.get(&b.statement).map(|s| s.as_str()), Some(&viewer)))
-            .collect())
-    }
-
-    async fn hydrate_working_set_as(&self, focus: &str, viewer: mind_types::Scope) -> Result<WorkingSet> {
-        // Same shape as hydrate_working_set, but the belief recall is read-ISOLATED to the viewer, and
-        // task commitments surface only to the primary (tasks aren't per-task scoped yet).
-        let recalled = self.recall_typed_as(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }, viewer.clone()).await?;
-        let open = self.conflicts().await?;
-        let mut ws = WorkingSet::default();
-        let halflife_days: f64 = std::env::var("YM_BELIEF_HALFLIFE_DAYS").ok().and_then(|s| s.parse().ok()).unwrap_or(90.0);
-        let now_ms = (now_secs() * 1000.0) as u64;
-        for r in recalled {
-            let age_ms = now_ms.saturating_sub(r.item.updated_ms);
-            let eff = decay_confidence(r.item.confidence, age_ms, halflife_days);
-            if eff >= 0.7 {
-                ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
-            } else {
-                let reason = classify_uncertainty(r.item.confidence, eff, r.item.evidence_count, &r.item.text, &open);
-                ws.uncertain_beliefs.push(Belief {
-                    id: r.item.id.clone(),
-                    statement: r.item.text.clone(),
-                    confidence: eff,
-                    certainty: r.item.certainty,
-                    provenance: "recalled".into(),
-                    evidence_count: 0,
-                    updated_ms: r.item.updated_ms,
-                    status: "active".into(),
-                    uncertainty_reason: Some(reason),
-                });
-            }
-        }
-        ws.active_contradictions = open;
-        if matches!(&viewer, mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
-            for t in self.list_tasks(false).await.unwrap_or_default() {
-                ws.commitments.push(MemoryItem {
-                    id: t.id,
-                    kind: MemoryKind::Task,
-                    text: t.description,
-                    confidence: 1.0,
-                    certainty: 1.0,
-                    updated_ms: t.due_ms.unwrap_or(0),
-                    evidence_count: 0,
-                });
-            }
-        }
-        Ok(ws)
-    }
-
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()> {
         let (src, dst, rel) = (src.to_string(), dst.to_string(), rel.to_string());
         self.call(|reply| Cmd::Relate { src, dst, rel, weight, reply }).await
     }
 
-    async fn reflect(&self, question: &str) -> Result<Reflection> {
-        let recalled = self.recall_typed(RecallQuery { text: question.to_string(), top_k: 5, kind: None }).await?;
-        let open_conflicts = self.conflicts().await?;
-        let goals = self.list_goals().await.unwrap_or_default();
-        let preferences = self.list_preferences().await.unwrap_or_default();
+    async fn reflect(&self, question: &str, ctx: &mind_types::AccessContext) -> Result<Reflection> {
+        let recalled = self.recall_typed(RecallQuery { text: question.to_string(), top_k: 5, kind: None }, ctx).await?;
+        let open_conflicts = self.conflicts(ctx).await?;
+        // Goals/preferences are untagged personal state → legacy semantics: primary-private.
+        // The operator and the primary see them; any other principal reflects without them.
+        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true);
+        let goals = if owner_view { self.list_goals().await.unwrap_or_default() } else { vec![] };
+        let preferences = if owner_view { self.list_preferences().await.unwrap_or_default() } else { vec![] };
         let beliefs: Vec<Belief> = recalled
             .iter()
             .map(|r| Belief {
@@ -1817,8 +1807,24 @@ impl MemoryFacade for MemoryHandle {
         })
     }
 
-    async fn conflicts(&self) -> Result<Vec<Contradiction>> {
-        self.call(|reply| Cmd::Conflicts { reply }).await
+    async fn conflicts(&self, ctx: &mind_types::AccessContext) -> Result<Vec<Contradiction>> {
+        let all: Vec<Contradiction> = self.call(|reply| Cmd::Conflicts { reply }).await?;
+        let out = match ctx.viewer() {
+            None => all,
+            Some(viewer) => {
+                // A conflict is visible only when BOTH sides are — otherwise listing it would
+                // leak the text of a belief outside the principal's scope.
+                let scopes = self.belief_scopes().await;
+                all.into_iter()
+                    .filter(|c| {
+                        mind_types::Scope::visible_to(scopes.get(&c.belief_a).map(|s| s.as_str()), Some(&viewer))
+                            && mind_types::Scope::visible_to(scopes.get(&c.belief_b).map(|s| s.as_str()), Some(&viewer))
+                    })
+                    .collect()
+            }
+        };
+        self.receipt_read(ctx, "conflicts", "", out.len());
+        Ok(out)
     }
 
     async fn profile_set(&self, key: &str, value: &str) -> Result<()> {
@@ -1847,14 +1853,31 @@ impl MemoryFacade for MemoryHandle {
         self.call(|reply| Cmd::RecallDemandFor { about, reply }).await
     }
 
-    async fn explain_belief(&self, belief_id: &str) -> Result<Option<(Belief, Vec<MEvidence>)>> {
+    async fn explain_belief(&self, belief_id: &str, ctx: &mind_types::AccessContext) -> Result<Option<(Belief, Vec<MEvidence>)>> {
         let statement = belief_id.to_string();
-        self.call(|reply| Cmd::Explain { statement, reply }).await
+        let found: Option<(Belief, Vec<MEvidence>)> = self.call(|reply| Cmd::Explain { statement, reply }).await?;
+        let out = match (&found, ctx.viewer()) {
+            (Some((b, _)), Some(viewer)) => {
+                // Out-of-scope belief → None, indistinguishable from "no such belief"
+                // (an existence oracle would itself be a leak).
+                let scopes = self.belief_scopes().await;
+                if mind_types::Scope::visible_to(scopes.get(&b.statement).map(|s| s.as_str()), Some(&viewer)) {
+                    found
+                } else {
+                    None
+                }
+            }
+            _ => found,
+        };
+        self.receipt_read(ctx, "explain_belief", belief_id, usize::from(out.is_some()));
+        Ok(out)
     }
 
-    async fn hydrate_working_set(&self, focus: &str) -> Result<WorkingSet> {
-        let recalled = self.recall_typed(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }).await?;
-        let open = self.conflicts().await?;
+    async fn hydrate_working_set(&self, focus: &str, ctx: &mind_types::AccessContext) -> Result<WorkingSet> {
+        // The belief recall + conflict list are ctx-filtered at their own boundary; task
+        // commitments are untagged personal state → operator + primary only (legacy semantics).
+        let recalled = self.recall_typed(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }, ctx).await?;
+        let open = self.conflicts(ctx).await?;
         let mut ws = WorkingSet::default();
         let halflife_days: f64 = std::env::var("YM_BELIEF_HALFLIFE_DAYS")
             .ok()
@@ -1883,17 +1906,21 @@ impl MemoryFacade for MemoryHandle {
             }
         }
         ws.active_contradictions = open;
-        // open tasks ride along as commitments (cheap tier surfaced for grounding)
-        for t in self.list_tasks(false).await.unwrap_or_default() {
-            ws.commitments.push(MemoryItem {
-                id: t.id,
-                kind: MemoryKind::Task,
-                text: t.description,
-                confidence: 1.0,
-                certainty: 1.0,
-                updated_ms: t.due_ms.unwrap_or(0),
-                evidence_count: 0,
-            });
+        // open tasks ride along as commitments (cheap tier surfaced for grounding) — tasks are
+        // untagged personal state, so only the operator and the primary see them.
+        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true);
+        if owner_view {
+            for t in self.list_tasks(false).await.unwrap_or_default() {
+                ws.commitments.push(MemoryItem {
+                    id: t.id,
+                    kind: MemoryKind::Task,
+                    text: t.description,
+                    confidence: 1.0,
+                    certainty: 1.0,
+                    updated_ms: t.due_ms.unwrap_or(0),
+                    evidence_count: 0,
+                });
+            }
         }
         Ok(ws)
     }
@@ -1964,11 +1991,11 @@ impl MemoryFacade for MemoryHandle {
     async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>> {
         self.call(|reply| Cmd::MessagesSince { after_id, limit, reply }).await
     }
-    async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>> {
-        self.call(|reply| Cmd::RecentMessages { limit, viewer: None, reply }).await
-    }
-    async fn recent_messages_as(&self, limit: usize, viewer: mind_types::Scope) -> Result<Vec<(String, String)>> {
-        self.call(|reply| Cmd::RecentMessages { limit, viewer: Some(viewer.as_tag()), reply }).await
+    async fn recent_messages(&self, limit: usize, ctx: &mind_types::AccessContext) -> Result<Vec<(String, String)>> {
+        let viewer = ctx.viewer().map(|v| v.as_tag());
+        let out: Vec<(String, String)> = self.call(|reply| Cmd::RecentMessages { limit, viewer, reply }).await?;
+        self.receipt_read(ctx, "recent_messages", "", out.len());
+        Ok(out)
     }
     async fn record_prediction_outcome(&self, domain: &str, subject: &str, raw_confidence: f64, hit: bool) -> Result<()> {
         let (domain, subject) = (domain.to_string(), subject.to_lowercase());
@@ -2040,21 +2067,101 @@ mod tests {
         let owner = AccessContext::Operator;
 
         // ── Path 1: deterministic exact match ──────────────────────────────
-        let m_secret = mem.beliefs_matching_as("safe combination", member.viewer().unwrap()).await.unwrap();
+        let m_secret = mem.beliefs_matching("safe combination", &mind_types::AccessContext::Principal(member.viewer().unwrap())).await.unwrap();
         assert!(!m_secret.iter().any(|b| b.statement == secret), "MEMBER recovered the primary secret via exact match — isolation breached");
-        let m_shared = mem.beliefs_matching_as("dinner friday", member.viewer().unwrap()).await.unwrap();
+        let m_shared = mem.beliefs_matching("dinner friday", &mind_types::AccessContext::Principal(member.viewer().unwrap())).await.unwrap();
         assert!(m_shared.iter().any(|b| b.statement == shared), "member must still see genuinely shared facts");
 
         // ── Path 2: semantic recall ────────────────────────────────────────
-        let r_secret = mem.recall_typed_as(RecallQuery { text: "safe combination".into(), top_k: 10, kind: None }, member.viewer().unwrap()).await.unwrap();
+        let r_secret = mem.recall_typed(RecallQuery { text: "safe combination".into(), top_k: 10, kind: None }, &mind_types::AccessContext::Principal(member.viewer().unwrap())).await.unwrap();
         assert!(!r_secret.iter().any(|r| r.item.text == secret), "MEMBER recovered the primary secret via semantic recall — isolation breached");
 
         // ── The owner (operator) sees everything ───────────────────────────
         assert!(owner.is_operator());
-        let o_secret = mem.beliefs_matching("safe combination").await.unwrap();
+        let o_secret = mem.beliefs_matching("safe combination", &mind_types::AccessContext::Operator).await.unwrap();
         assert!(o_secret.iter().any(|b| b.statement == secret), "operator must retain full access");
-        let o_secret_scoped = mem.beliefs_matching_as("safe combination", Scope::primary()).await.unwrap();
+        let o_secret_scoped = mem.beliefs_matching("safe combination", &mind_types::AccessContext::Principal(Scope::primary())).await.unwrap();
         assert!(o_secret_scoped.iter().any(|b| b.statement == secret), "primary viewer must see their own private belief");
+
+        // ── Path 3: explain_belief — out-of-scope belief is indistinguishable from absent ──
+        assert!(mem.explain_belief(secret, &member).await.unwrap().is_none(), "MEMBER explained the primary secret — isolation breached");
+        assert!(mem.explain_belief(shared, &member).await.unwrap().is_some(), "member must still explain shared beliefs");
+        assert!(mem.explain_belief(secret, &owner).await.unwrap().is_some(), "operator must retain explain access");
+
+        // ── Path 4: conflicts — a contradiction is visible only when BOTH sides are ──
+        let secret_b = "The safe combination is 51-09-27";
+        mem.remember_as_belief_scoped(
+            BeliefAssertion { statement: secret_b.into(), polarity: 1.0, weight: 2.0, source_event: Some("test".into()), provenance: "told".into() },
+            Scope::primary(),
+        ).await.unwrap();
+        mem.relate(secret, secret_b, "contradicts", 0.9).await.unwrap();
+        let o_conflicts = mem.conflicts(&owner).await.unwrap();
+        assert!(o_conflicts.iter().any(|c| c.belief_a.contains("safe combination")), "operator must see the private-belief conflict");
+        let m_conflicts = mem.conflicts(&member).await.unwrap();
+        assert!(
+            !m_conflicts.iter().any(|c| c.belief_a.contains("safe combination") || c.belief_b.contains("safe combination")),
+            "MEMBER saw the primary secret via the conflicts list — isolation breached"
+        );
+
+        // ── Path 5: reflect — beliefs, conflicts, goals, prefs all filtered ──
+        mem.store_goal("buy the anniversary surprise").await.unwrap();
+        let m_reflect = mem.reflect("safe combination", &member).await.unwrap();
+        assert!(!m_reflect.beliefs.iter().any(|b| b.statement.contains("safe combination")), "MEMBER reflect surfaced the secret");
+        assert!(!m_reflect.open_conflicts.iter().any(|c| c.belief_a.contains("safe combination")), "MEMBER reflect surfaced the secret conflict");
+        assert!(m_reflect.goals.is_empty(), "goals are primary-private state — a member reflect must not carry them");
+        let o_reflect = mem.reflect("anniversary", &owner).await.unwrap();
+        assert!(!o_reflect.goals.is_empty(), "operator reflect must retain goals");
+
+        // ── Path 6: hydrate_working_set — grounding + commitments filtered ──
+        mem.add_task("wrap the safe-combination note", "high", None).await.unwrap();
+        let m_ws = mem.hydrate_working_set("safe combination", &member).await.unwrap();
+        assert!(!m_ws.stable_facts.iter().any(|f| f.text.contains("safe combination")), "MEMBER working set carried the secret");
+        assert!(!m_ws.uncertain_beliefs.iter().any(|b| b.statement.contains("safe combination")), "MEMBER working set carried the secret (uncertain lane)");
+        assert!(!m_ws.active_contradictions.iter().any(|c| c.belief_a.contains("safe combination")), "MEMBER working set carried the secret conflict");
+        assert!(m_ws.commitments.is_empty(), "tasks are primary state — a member working set must not carry them");
+        let o_ws = mem.hydrate_working_set("safe combination", &owner).await.unwrap();
+        assert!(!o_ws.commitments.is_empty(), "operator working set must retain task commitments");
+
+        // ── Path 7: transcript — a primary DM line never reaches a member view ──
+        mem.append_message_scoped("user", "the gift is hidden in the garage", Scope::primary()).await.unwrap();
+        mem.append_message_scoped("user", "dinner moved to eight", Scope::Shared).await.unwrap();
+        let m_recent = mem.recent_messages(10, &member).await.unwrap();
+        assert!(!m_recent.iter().any(|(_, t)| t.contains("garage")), "MEMBER read the primary transcript — isolation breached");
+        assert!(m_recent.iter().any(|(_, t)| t.contains("dinner moved")), "member must still see shared-channel lines");
+        let o_recent = mem.recent_messages(10, &owner).await.unwrap();
+        assert!(o_recent.iter().any(|(_, t)| t.contains("garage")), "operator must retain the full transcript");
+    }
+
+    /// ARCH-1 slice 2 (d): every principal read is receipted into a hash-chained,
+    /// append-only ledger next to the DB; operator reads are not recorded; the
+    /// chain verifies end-to-end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch1_principal_reads_leave_hash_chained_receipts() {
+        use mind_types::{AccessContext, Scope};
+        let db_path = scratch_db_path("receipts");
+        let ledger_path = std::path::PathBuf::from(format!("{db_path}.read_receipts.jsonl"));
+        let mem = MemoryHandle::spawn(&db_path, 8).unwrap();
+        mem.remember_as_belief_scoped(
+            BeliefAssertion { statement: "Dinner on Friday is at seven".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            Scope::Shared,
+        ).await.unwrap();
+
+        // Operator reads leave NO receipts (the trusted owner path is not the audit target).
+        let op = AccessContext::Operator;
+        let _ = mem.beliefs_matching("dinner", &op).await.unwrap();
+        assert!(receipts::read_ledger(&ledger_path).is_empty(), "operator reads must not be receipted");
+
+        // Principal reads ARE receipted — one per boundary crossing, chain intact.
+        let member = AccessContext::Principal(Scope::Private("asha".into()));
+        let _ = mem.beliefs_matching("dinner", &member).await.unwrap();
+        let _ = mem.recall_typed(RecallQuery { text: "dinner".into(), top_k: 5, kind: None }, &member).await.unwrap();
+        let _ = mem.conflicts(&member).await.unwrap();
+        let rs = receipts::read_ledger(&ledger_path);
+        assert!(rs.len() >= 3, "each principal read must leave a receipt (got {})", rs.len());
+        assert!(rs.iter().all(|r| r.principal == "private:asha"), "receipts must name the principal");
+        assert!(rs.iter().any(|r| r.method == "beliefs_matching" && r.detail.contains("dinner")));
+        assert_eq!(receipts::verify_ledger(&ledger_path), Ok(rs.len()), "the receipt chain must verify");
+        let _ = std::fs::remove_file(&ledger_path);
     }
 
     fn scratch_db_path(tag: &str) -> String {
@@ -2099,10 +2206,10 @@ mod tests {
                 .await;
             assert!(seeded.is_ok(), "copy must accept writes");
             // Copy carried the genuine belief over.
-            assert!(copy.explain_belief("Asha's birthday is March 3").await.unwrap().is_some());
+            assert!(copy.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::Operator).await.unwrap().is_some());
             // Live mind never saw the seed.
-            assert!(live.explain_belief("Asha's birthday is July 9").await.unwrap().is_none());
-            assert!(live.explain_belief("Asha's birthday is March 3").await.unwrap().is_some());
+            assert!(live.explain_belief("Asha's birthday is July 9", &mind_types::AccessContext::Operator).await.unwrap().is_none());
+            assert!(live.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::Operator).await.unwrap().is_some());
         }
         let _ = std::fs::remove_file(&live_path);
         let _ = std::fs::remove_file(&snap_path);
@@ -2366,7 +2473,7 @@ mod tests {
         assert("The latest stable Rust release is 1.70").await;
         assert("the latest stable Rust release is 1.70.").await; // formatting/case variant → SAME node
         assert("The latest stable Rust release is 1.96").await; // different content → SEPARATE node
-        let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }).await.unwrap();
+        let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }, &mind_types::AccessContext::Operator).await.unwrap();
         let rust: Vec<_> = hits.iter().filter(|r| r.item.text.contains("Rust release")).collect();
         assert_eq!(rust.len(), 2, "formatting variant merges, contradiction (1.70 vs 1.96) stays separate: {:?}", rust.iter().map(|r| &r.item.text).collect::<Vec<_>>());
     }
@@ -2385,16 +2492,16 @@ mod tests {
         let q = |t: &str| RecallQuery { text: t.into(), top_k: 10, kind: None };
 
         // The WIFE must NOT see the private gift belief.
-        let wife_view = mem.recall_typed_as(q("birthday gift watch"), wife.clone()).await.unwrap();
+        let wife_view = mem.recall_typed(q("birthday gift watch"), &mind_types::AccessContext::Principal(wife.clone())).await.unwrap();
         assert!(!wife_view.iter().any(|r| r.item.text.contains("gold watch")), "LEAK: wife saw the surprise: {:?}", wife_view.iter().map(|r| &r.item.text).collect::<Vec<_>>());
         // Pranab MUST see his own private belief.
-        let p_view = mem.recall_typed_as(q("birthday gift watch"), primary.clone()).await.unwrap();
+        let p_view = mem.recall_typed(q("birthday gift watch"), &mind_types::AccessContext::Principal(primary.clone())).await.unwrap();
         assert!(p_view.iter().any(|r| r.item.text.contains("gold watch")), "primary must see his own private belief");
         // BOTH see the shared milk fact.
-        assert!(mem.recall_typed_as(q("out of milk"), wife.clone()).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "wife sees shared");
-        assert!(mem.recall_typed_as(q("out of milk"), primary).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "primary sees shared");
+        assert!(mem.recall_typed(q("out of milk"), &mind_types::AccessContext::Principal(wife.clone())).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "wife sees shared");
+        assert!(mem.recall_typed(q("out of milk"), &mind_types::AccessContext::Principal(primary)).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "primary sees shared");
         // The wife's GROUNDING (working set) must also exclude the gift — the LLM never even sees it.
-        let ws = mem.hydrate_working_set_as("birthday gift watch", wife).await.unwrap();
+        let ws = mem.hydrate_working_set("birthday gift watch", &mind_types::AccessContext::Principal(wife)).await.unwrap();
         let grounded: Vec<String> = ws.stable_facts.iter().map(|m| m.text.clone()).chain(ws.uncertain_beliefs.iter().map(|b| b.statement.clone())).collect();
         assert!(!grounded.iter().any(|t| t.contains("gold watch")), "LEAK in grounding: {grounded:?}");
     }
@@ -2421,7 +2528,7 @@ mod tests {
 
         // Recall finds it by overlapping words.
         let r = mem
-            .recall_typed(RecallQuery { text: "reply style terse".into(), top_k: 5, kind: None })
+            .recall_typed(RecallQuery { text: "reply style terse".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         assert!(r.iter().any(|x| x.item.text.contains("terse")), "recall should surface the belief");
@@ -2445,13 +2552,13 @@ mod tests {
         .await
         .unwrap();
 
-        let conflicts = mem.conflicts().await.unwrap();
+        let conflicts = mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap();
         assert!(!conflicts.is_empty(), "the contradiction should be detected");
         assert!(conflicts.iter().any(|c| c.belief_a.contains("terse") || c.belief_b.contains("terse")));
 
         // Explanation returns the belief with its evidence trail.
         let (belief, _ev) = mem
-            .explain_belief("Pranab prefers terse replies")
+            .explain_belief("Pranab prefers terse replies", &mind_types::AccessContext::Operator)
             .await
             .unwrap()
             .expect("belief exists");
@@ -2545,7 +2652,7 @@ mod tests {
         .await
         .unwrap();
 
-        let conflicts = mem.conflicts().await.unwrap();
+        let conflicts = mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap();
         assert_eq!(conflicts.len(), 1, "only the related pair should survive: {conflicts:?}");
         assert!(conflicts[0].belief_a.contains("Pranab"));
         assert!(conflicts[0].belief_b.contains("Pranab"));
@@ -2569,7 +2676,7 @@ mod tests {
 
         // tasks ride into the working-set as commitments (for grounding)
         mem.add_task("call the dentist", "medium", None).await.unwrap();
-        let ws = mem.hydrate_working_set("what's on my plate").await.unwrap();
+        let ws = mem.hydrate_working_set("what's on my plate", &mind_types::AccessContext::Operator).await.unwrap();
         assert!(ws.commitments.iter().any(|c| c.text.contains("dentist")), "open task should surface in working-set");
     }
 
@@ -2612,7 +2719,7 @@ mod tests {
         }
         // "he likes short responses" shares no keywords with "Pranab prefers concise answers".
         let r = mem
-            .recall_typed(RecallQuery { text: "he likes short responses".into(), top_k: 1, kind: None })
+            .recall_typed(RecallQuery { text: "he likes short responses".into(), top_k: 1, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         assert!(!r.is_empty(), "semantic recall returned nothing");
@@ -2672,7 +2779,7 @@ mod tests {
         .await
         .unwrap();
         let recalled = mem
-            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None })
+            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         let hit = recalled.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
@@ -2689,7 +2796,7 @@ mod tests {
         .await
         .unwrap();
         let recalled2 = mem
-            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None })
+            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         let hit2 = recalled2.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
@@ -2711,7 +2818,7 @@ mod tests {
         .await
         .unwrap();
         // Single-source: reflect must report evidence_count == 1 (not 0).
-        let reflection = mem.reflect("sky colour").await.unwrap();
+        let reflection = mem.reflect("sky colour", &mind_types::AccessContext::Operator).await.unwrap();
         let belief = reflection.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from reflection");
         assert_eq!(belief.evidence_count, 1, "reflect must propagate evidence_count from recalled item, got 0");
 
@@ -2725,7 +2832,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let reflection2 = mem.reflect("sky colour").await.unwrap();
+        let reflection2 = mem.reflect("sky colour", &mind_types::AccessContext::Operator).await.unwrap();
         let belief2 = reflection2.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from second reflection");
         assert_eq!(belief2.evidence_count, 2, "reflect must track accumulated evidence_count");
     }
@@ -2843,7 +2950,7 @@ mod tests {
         .unwrap();
 
         let hits = mem
-            .recall_typed(RecallQuery { text: "red flower".into(), top_k: 10, kind: None })
+            .recall_typed(RecallQuery { text: "red flower".into(), top_k: 10, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
 

@@ -166,8 +166,12 @@ pub enum AccessContext {
 }
 
 impl AccessContext {
+    /// A principal filtered to `scope` — the standard context for any channel turn.
+    pub fn principal(scope: Scope) -> AccessContext {
+        AccessContext::Principal(scope)
+    }
     /// The viewer scope for filtering: None for the operator (unfiltered),
-    /// Some(scope) for a principal. Feeds `Scope::visible_to` / `recall_typed_as`.
+    /// Some(scope) for a principal. Feeds `Scope::visible_to`.
     pub fn viewer(&self) -> Option<Scope> {
         match self {
             AccessContext::Operator => None,
@@ -283,32 +287,34 @@ impl Skill {
 
 #[async_trait]
 pub trait MemoryFacade: Send + Sync {
-    /// Typed + semantic + temporal recall (multi-signal).
-    async fn recall_typed(&self, q: RecallQuery) -> Result<Vec<Recalled>>;
+    // ── ARCH-1 (slice 2): EVERY personal-data read carries an AccessContext ──
+    // There is deliberately NO unscoped read API on this trait anymore. A caller
+    // that needs unfiltered access must write `&AccessContext::Operator` at the
+    // call site — the explicit operator capability — so unrestricted reads are
+    // greppable and can never happen by default. A `Principal(scope)` read is
+    // filtered at the resource boundary (mind-memory), whatever channel,
+    // command, model, recipe, or tool it arrives through. The old fail-open
+    // `_as` defaults (scoped variant silently delegating to the unscoped read)
+    // are gone: that inversion is the point of this slice.
+
+    /// Typed + semantic + temporal recall (multi-signal), filtered to what `ctx` may see.
+    async fn recall_typed(&self, q: RecallQuery, ctx: &AccessContext) -> Result<Vec<Recalled>>;
 
     /// Deterministic belief lookup: every belief whose statement contains any word (len>=4) of
-    /// `needle`, case-insensitive. No semantic ranking — complete and exact. Default: empty.
-    async fn beliefs_matching(&self, needle: &str) -> Result<Vec<Belief>> {
-        let _ = needle;
+    /// `needle`, case-insensitive. No semantic ranking — complete and exact, filtered to what
+    /// `ctx` may see. Default: empty (fail-closed for impls that hold no beliefs).
+    async fn beliefs_matching(&self, needle: &str, ctx: &AccessContext) -> Result<Vec<Belief>> {
+        let _ = (needle, ctx);
         Ok(vec![])
     }
 
     /// Same as `beliefs_matching` with an explicit result cap — for namespaced knowledge bases
     /// (studied repos) where the default 20 would silently truncate. Default: empty.
-    async fn beliefs_matching_n(&self, needle: &str, limit: usize) -> Result<Vec<Belief>> {
-        let _ = (needle, limit);
+    async fn beliefs_matching_n(&self, needle: &str, limit: usize, ctx: &AccessContext) -> Result<Vec<Belief>> {
+        let _ = (needle, limit, ctx);
         Ok(vec![])
     }
 
-    /// Deterministic exact belief lookup, FILTERED to what `viewer` may see
-    /// (ARCH-1). The unscoped `beliefs_matching` had no isolated variant — a
-    /// direct path by which a non-primary principal could recover a private
-    /// belief by exact word match. The real (isolating) impl in mind-memory
-    /// filters by belief scope; the default delegates (fine for non-isolating
-    /// mocks, which hold no private data).
-    async fn beliefs_matching_as(&self, needle: &str, _viewer: Scope) -> Result<Vec<Belief>> {
-        self.beliefs_matching(needle).await
-    }
     /// Assert evidence for/against a belief; runs Bayesian revision under the hood.
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief>;
 
@@ -320,37 +326,26 @@ pub trait MemoryFacade: Send + Sync {
         self.remember_as_belief(a).await
     }
 
-    // ── group-chat read-isolation (scoped variants; the unscoped methods above = unrestricted) ──
-    /// Recall, FILTERED to what `viewer` may see (shared facts + their own private). Default: ignores
-    /// scope (delegates to recall_typed) so non-isolating impls need no change.
-    async fn recall_typed_as(&self, q: RecallQuery, _viewer: Scope) -> Result<Vec<Recalled>> {
-        self.recall_typed(q).await
-    }
+    // ── scoped WRITES (reads are ctx-filtered above; writes tag visibility at ingest) ──
     /// Assert a belief tagged with a visibility `scope`. Default: ignores scope.
     async fn remember_as_belief_scoped(&self, a: BeliefAssertion, _scope: Scope) -> Result<Belief> {
         self.remember_as_belief(a).await
     }
-    /// Working-set hydration, FILTERED to what `viewer` may see. Default: unrestricted.
-    async fn hydrate_working_set_as(&self, focus: &str, _viewer: Scope) -> Result<WorkingSet> {
-        self.hydrate_working_set(focus).await
-    }
     /// Append a transcript line tagged with a visibility `scope`. Default: ignores scope.
     async fn append_message_scoped(&self, role: &str, text: &str, _scope: Scope) -> Result<()> {
         self.append_message(role, text).await
-    }
-    /// Recent transcript lines FILTERED to what `viewer` may see. Default: unrestricted.
-    async fn recent_messages_as(&self, limit: usize, _viewer: Scope) -> Result<Vec<(String, String)>> {
-        self.recent_messages(limit).await
     }
     /// Write a machine-derived OBSERVATION (skill/tool/sub-agent/web output) — provenance-tagged,
     /// secret-scanned, NEVER a naked Belief. This is the gated inward boundary for the moat.
     async fn remember_observation(&self, text: &str, source: crate::safety::ProvenanceCategory) -> Result<String>;
     /// Create/strengthen a graph edge between entities.
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()>;
-    /// Compose typed recalls + open conflicts into a structured reflection.
-    async fn reflect(&self, question: &str) -> Result<Reflection>;
-    /// Currently-open contradictions across stored beliefs.
-    async fn conflicts(&self) -> Result<Vec<Contradiction>>;
+    /// Compose typed recalls + open conflicts into a structured reflection, filtered to `ctx`.
+    async fn reflect(&self, question: &str, ctx: &AccessContext) -> Result<Reflection>;
+    /// Currently-open contradictions across stored beliefs, filtered to `ctx` (a principal sees a
+    /// conflict only when BOTH sides are visible to them — a contradiction that references another
+    /// member's private belief would otherwise leak its text).
+    async fn conflicts(&self, ctx: &AccessContext) -> Result<Vec<Contradiction>>;
 
     // ── tiny profile KV (name/purpose/onboarding) — durable, isolated from the cognitive graph ──
     /// Set a profile value (latest write wins on read).
@@ -365,15 +360,17 @@ pub trait MemoryFacade: Send + Sync {
     async fn open_tensions(&self, limit: usize) -> Result<Vec<Tension>>;
     /// Mark a tension discharged (resolved, or surfaced to the user).
     async fn discharge_tension(&self, id: &str) -> Result<bool>;
-    /// A belief plus its evidence trail (provenance).
-    async fn explain_belief(&self, belief_id: &str) -> Result<Option<(Belief, Vec<Evidence>)>>;
-    /// Build the typed working-set for a focus/turn.
-    async fn hydrate_working_set(&self, focus: &str) -> Result<WorkingSet>;
+    /// A belief plus its evidence trail (provenance). A principal gets None for a belief outside
+    /// their scope — indistinguishable from "no such belief" (no existence oracle).
+    async fn explain_belief(&self, belief_id: &str, ctx: &AccessContext) -> Result<Option<(Belief, Vec<Evidence>)>>;
+    /// Build the typed working-set for a focus/turn, filtered to what `ctx` may see.
+    async fn hydrate_working_set(&self, focus: &str, ctx: &AccessContext) -> Result<WorkingSet>;
     /// Consolidate aging turns into typed memory (provenance-preserving). Returns #created.
     async fn consolidate(&self) -> Result<usize>;
     /// Privacy: forget a memory by id.
     async fn forget(&self, id: &str) -> Result<bool>;
-    /// Privacy: export everything (JSON).
+    /// Privacy: export everything (JSON). OPERATOR-INTERNAL: only the owner's eval/backup paths
+    /// call this — it must never be wired to a channel/command/tool without an operator check.
     async fn export(&self) -> Result<String>;
 
     // ── goals + preferences (named capture; surfaced by reflect) ──
@@ -400,10 +397,12 @@ pub trait MemoryFacade: Send + Sync {
     // ── cheap raw transcript (immediate conversational context; NOT knowledge) ──
     /// Append a raw chat line (role = "user" | "assistant").
     async fn append_message(&self, role: &str, text: &str) -> Result<()>;
-    /// The most recent chat lines in chronological order: Vec<(role, text)>.
-    async fn recent_messages(&self, limit: usize) -> Result<Vec<(String, String)>>;
+    /// The most recent chat lines in chronological order: Vec<(role, text)>, filtered to `ctx`.
+    async fn recent_messages(&self, limit: usize, ctx: &AccessContext) -> Result<Vec<(String, String)>>;
     /// Transcript lines with id > `after_id`, ascending: Vec<(id, role, text)>. For the consolidation
     /// pass, which advances a cursor over what it has already distilled into typed memory.
+    /// OPERATOR-INTERNAL: only system paths (compaction, research sync) may call this — it is not
+    /// reachable from any channel/command/tool. Gets a ctx param when those paths are ctx-threaded.
     async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>>;
 
     // ── engine learning/metacognition (calibration + self-assessment; defaults = inert for fakes) ──

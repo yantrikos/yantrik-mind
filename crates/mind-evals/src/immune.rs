@@ -673,7 +673,7 @@ async fn run_on_snapshot(
         let mut items = Vec::new();
         for (stmt, family, is_seed) in injected {
             let (confidence, provenance, evidence) = match copy
-                .explain_belief(&stmt)
+                .explain_belief(&stmt, &mind_types::AccessContext::Operator)
                 .await
                 .map_err(|e| format!("explain: {e}"))?
             {
@@ -702,7 +702,7 @@ async fn run_on_snapshot(
             }
             let seen: std::collections::HashSet<String> = related.iter().cloned().collect();
             for r in copy
-                .recall_typed(mind_types::RecallQuery { text: stmt.clone(), top_k: 8, kind: None })
+                .recall_typed(mind_types::RecallQuery { text: stmt.clone(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
                 .await
                 .unwrap_or_default()
             {
@@ -1126,8 +1126,8 @@ mod tests {
         assert_eq!(report.control_damage_rate, 0.0);
 
         // Live mind never saw any injected statement.
-        assert!(live.explain_belief("Asha's birthday is July 9").await.unwrap().is_none());
-        assert!(live.explain_belief("Asha's birthday is March 3").await.unwrap().is_none());
+        assert!(live.explain_belief("Asha's birthday is July 9", &mind_types::AccessContext::Operator).await.unwrap().is_none());
+        assert!(live.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::Operator).await.unwrap().is_none());
         // The seeded snapshot was destroyed.
         assert!(!dir.join("immune_trial_t1.db").exists());
 

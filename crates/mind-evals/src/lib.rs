@@ -113,7 +113,7 @@ impl Scorecard {
 }
 
 async fn confidence_of(mem: &MemoryHandle, statement: &str) -> Option<f64> {
-    mem.explain_belief(statement).await.ok().flatten().map(|(b, _)| b.confidence)
+    mem.explain_belief(statement, &mind_types::AccessContext::Operator).await.ok().flatten().map(|(b, _)| b.confidence)
 }
 
 /// Run one scenario against a fresh in-memory mind. Deterministic: the ScriptedLLM records the
@@ -177,7 +177,7 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
             Check::PromptContains(x) => (format!("prompt grounds on '{x}'"), prompt.contains(x.as_str())),
             Check::PromptOmits(x) => (format!("prompt omits '{x}'"), !prompt.contains(x.as_str())),
             Check::MinConflicts(n) => {
-                let cs = mem.conflicts().await.unwrap_or_default();
+                let cs = mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap_or_default();
                 (format!("detects >= {n} contradiction(s)"), cs.len() >= *n)
             }
             Check::ConfidenceAbove(stmt, th) => {
@@ -190,7 +190,7 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
             }
             Check::RecallSurfaces { query, expect } => {
                 let r = mem
-                    .recall_typed(RecallQuery { text: query.clone(), top_k: 8, kind: None })
+                    .recall_typed(RecallQuery { text: query.clone(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
                     .await
                     .unwrap_or_default();
                 (

@@ -3449,7 +3449,7 @@ impl ConversationEngine {
         // 1. what we already believe near this topic
         let priors = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: topic.to_string(), top_k: 6, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: topic.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default();
         let prior_list = if priors.is_empty() {
@@ -3620,8 +3620,8 @@ impl ConversationEngine {
     /// ranking lottery, no 3-fact cap), compose STRICTLY from them, then adversarially fact-check the
     /// draft against the same facts. Thin corpus -> an honest short draft with gap markers, never a
     /// confident fabrication (the SDF-adoption-plan value-prop blend was drafting freely, not from facts).
-    async fn draft_grounded(&self, kind: &str, subject: &str) -> Result<String> {
-        let facts = self.memory.beliefs_matching(subject).await.unwrap_or_default();
+    async fn draft_grounded(&self, kind: &str, subject: &str, ctx: &mind_types::AccessContext) -> Result<String> {
+        let facts = self.memory.beliefs_matching(subject, ctx).await.unwrap_or_default();
         if facts.is_empty() {
             return Ok(format!(
                 "I don't hold any stored grounding on \"{subject}\" yet, so I won't invent a {kind}. \
@@ -3868,7 +3868,7 @@ impl ConversationEngine {
         for f in facets {
             let rs = self
                 .memory
-                .recall_typed(mind_types::RecallQuery { text: f.into(), top_k: 8, kind: None })
+                .recall_typed(mind_types::RecallQuery { text: f.into(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
                 .await
                 .unwrap_or_default();
             for r in rs {
@@ -4043,7 +4043,7 @@ impl ConversationEngine {
                 let now = Self::now_ms();
                 let rs = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None })
+                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
                     .await
                     .unwrap_or_default();
                 let mut stale = 0u32;
@@ -4094,7 +4094,7 @@ impl ConversationEngine {
             // winning and losing belief nodes so confidence scores actually shift, then bank an
             // observability note and emit a COHERENCE tension. UNRESOLVED leaves scores unchanged.
             1 => {
-                let cs = self.memory.conflicts().await.unwrap_or_default();
+                let cs = self.memory.conflicts(&mind_types::AccessContext::Operator).await.unwrap_or_default();
                 if let Some(c) = cs.first() {
                     let prompt = format!(
                         "Two of my stored beliefs conflict:\nA: {}\nB: {}\nWhich is better supported by general knowledge, or is this genuinely unresolved? Answer in ONE sentence, starting with A, B, or UNRESOLVED.",
@@ -4167,7 +4167,7 @@ impl ConversationEngine {
             _ => {
                 let rs = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 10, kind: None })
+                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 10, kind: None }, &mind_types::AccessContext::Operator)
                     .await
                     .unwrap_or_default();
                 if rs.len() < 3 {
@@ -4292,7 +4292,7 @@ impl ConversationEngine {
         let enough: usize = std::env::var("YM_ASK_ENOUGH").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         let known = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .map(|r| r.len())
             .unwrap_or(0);
@@ -7272,7 +7272,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     async fn beliefs_referencing(&self, needle: &str) -> Vec<String> {
         let rs = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: needle.to_string(), top_k: 50, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: needle.to_string(), top_k: 50, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
@@ -8071,7 +8071,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         // Memories relevant to the event text (semantic recall over the typed store).
         let recalled = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: title.to_string(), top_k: 6, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: title.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default();
         let mut ctx = String::new();
@@ -10595,7 +10595,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             // Compose deterministically: everything the substrate knows about the subject. Evidence
             // that is only an INFERENCE (not observed/told) is labeled so a prepared action never
             // silently rests on the mind's own guesswork (Terra's epistemic-authority protocol).
-            let facts = self.memory.beliefs_matching(title).await.unwrap_or_default();
+            let facts = self.memory.beliefs_matching(title, &mind_types::AccessContext::Operator).await.unwrap_or_default();
             let evidence: Vec<String> = facts.iter().take(6).map(|b| {
                 let tag = if Self::belief_actionable(&b.provenance) { String::new() } else { format!(" [{} — unconfirmed]", Self::epistemic_class(&b.provenance)) };
                 format!("{} ({:.2}){tag}", b.statement, b.confidence)
@@ -10734,7 +10734,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         let expiry = when + 86_400_000;
         let evidence: Vec<String> = self
             .memory
-            .beliefs_matching(&title)
+            .beliefs_matching(&title, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default()
             .iter()
@@ -10900,7 +10900,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         let expiry = when + 86_400_000;
         let evidence: Vec<String> = self
             .memory
-            .beliefs_matching(&format!("{who} birthday gift"))
+            .beliefs_matching(&format!("{who} birthday gift"), &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default()
             .iter()
@@ -11021,7 +11021,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         let expiry = end + 86_400_000;
         let evidence: Vec<String> = self
             .memory
-            .beliefs_matching(&title)
+            .beliefs_matching(&title, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default()
             .iter()
@@ -11144,12 +11144,12 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         // Semantic recall first, then exact-belief explanation.
         let recalled = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: claim.to_string(), top_k: 5, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: claim.to_string(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default();
         let mut target: Option<(mind_types::Belief, Vec<mind_types::Evidence>)> = None;
         for r in &recalled {
-            if let Ok(Some(be)) = self.memory.explain_belief(&r.item.text).await {
+            if let Ok(Some(be)) = self.memory.explain_belief(&r.item.text, &mind_types::AccessContext::Operator).await {
                 target = Some(be);
                 break;
             }
@@ -11175,7 +11175,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 out.push_str(&format!("  · {} (weight {:+.2})\n", excerpt, e.weight * e.polarity));
             }
         }
-        let conflicts = self.memory.conflicts().await.unwrap_or_default();
+        let conflicts = self.memory.conflicts(&mind_types::AccessContext::Operator).await.unwrap_or_default();
         let mine: Vec<String> = conflicts
             .iter()
             .filter(|c| c.belief_a == b.statement || c.belief_b == b.statement)
@@ -11352,7 +11352,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             let date_phrase = chrono::DateTime::from_timestamp_millis(when)
                 .map(|t| t.with_timezone(today.offset()).format("%A").to_string())
                 .unwrap_or_else(|| "coming up".into());
-            let gift_hint = self.memory.beliefs_matching(&format!("{person} likes")).await.ok()
+            let gift_hint = self.memory.beliefs_matching(&format!("{person} likes"), &mind_types::AccessContext::Operator).await.ok()
                 .and_then(|b| b.first().map(|x| x.statement.clone()));
             let rendered = support_nudge::render(&person, &date_phrase, gift_hint.as_deref());
             if !support_nudge::is_clean(&rendered) {
@@ -11857,7 +11857,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                     .to_lowercase();
                     subj.iter().any(|w| hay.contains(w.as_str()))
                 });
-                let recent = self.memory.recent_messages(80).await.unwrap_or_default();
+                let recent = self.memory.recent_messages(80, &mind_types::AccessContext::Operator).await.unwrap_or_default();
                 let spoken = packed
                     || recent
                         .iter()
@@ -11991,7 +11991,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         }
         self.researcher.as_ref()?;
         // 1. The user's own recent words are the radar's only antenna.
-        let recent = self.memory.recent_messages(160).await.ok()?;
+        let recent = self.memory.recent_messages(160, &mind_types::AccessContext::Operator).await.ok()?;
         let user_lines: Vec<&str> = recent
             .iter()
             .filter(|(r, t)| r == "user" && t.len() > 12 && !t.starts_with('/'))
@@ -12375,7 +12375,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             for rn in repo_names.iter().take(4) {
                 let alnum: String = rn.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
                 let t = format!("codekb{alnum}");
-                for b in mem.beliefs_matching_n(&t, 30).await.unwrap_or_default() {
+                for b in mem.beliefs_matching_n(&t, 30, &mind_types::AccessContext::Operator).await.unwrap_or_default() {
                     known.push(b.statement.replacen(&t, "", 1));
                 }
             }
@@ -12383,7 +12383,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             let pmap: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
             for (pk, _) in pmap.iter().filter(|(pk, _)| pk.as_str() != key2).take(3) {
                 let t = format!("paperkb{pk}");
-                for b in mem.beliefs_matching_n(&t, 10).await.unwrap_or_default() {
+                for b in mem.beliefs_matching_n(&t, 10, &mind_types::AccessContext::Operator).await.unwrap_or_default() {
                     known.push(b.statement.replacen(&t, "", 1));
                 }
             }
@@ -12431,7 +12431,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
     pub async fn paper_ask(&self, key: &str, question: &str) -> String {
         let token = format!("paperkb{key}");
         let tag = format!("[paper:{key}]");
-        let facts: Vec<String> = self.memory.beliefs_matching_n(&token, 300).await.unwrap_or_default()
+        let facts: Vec<String> = self.memory.beliefs_matching_n(&token, 300, &mind_types::AccessContext::Operator).await.unwrap_or_default()
             .into_iter().map(|b| b.statement).filter(|st| st.contains(&token)).collect();
         if facts.is_empty() {
             return format!("I haven't studied `{key}` yet — `paper study <url>` first.");
@@ -12503,14 +12503,14 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
     /// goal format. `paper adopt <key> <n>` then queues one — reading becomes shipped code.
     pub async fn paper_adapt(&self, key: &str, repo: &str) -> String {
         let ptoken = format!("paperkb{key}");
-        let pfacts: Vec<String> = self.memory.beliefs_matching_n(&ptoken, 100).await.unwrap_or_default()
+        let pfacts: Vec<String> = self.memory.beliefs_matching_n(&ptoken, 100, &mind_types::AccessContext::Operator).await.unwrap_or_default()
             .into_iter().map(|b| b.statement.replacen(&ptoken, "", 1)).filter(|st| st.contains("[paper:")).collect();
         if pfacts.is_empty() {
             return format!("I haven't studied `{key}` — `paper study <url>` first.");
         }
         let alnum: String = repo.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
         let ctoken = format!("codekb{alnum}");
-        let cfacts: Vec<String> = self.memory.beliefs_matching_n(&ctoken, 200).await.unwrap_or_default()
+        let cfacts: Vec<String> = self.memory.beliefs_matching_n(&ctoken, 200, &mind_types::AccessContext::Operator).await.unwrap_or_default()
             .into_iter().map(|b| b.statement.replacen(&ctoken, "", 1)).collect();
         if cfacts.is_empty() {
             return format!("I haven't studied the `{repo}` codebase — `code study <git url>` first, then adapt.");
@@ -12724,7 +12724,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 let paper_lines = papers.iter()
                     .map(|(_, t, sm)| format!("- {t}: {}", sm.chars().take(200).collect::<String>()))
                     .collect::<Vec<_>>().join("\n");
-                let mem_facts = self.memory.beliefs_matching(&q).await.unwrap_or_default();
+                let mem_facts = self.memory.beliefs_matching(&q, &mind_types::AccessContext::Operator).await.unwrap_or_default();
                 let mem_lines = mem_facts.iter().take(8).map(|b| format!("- {}", b.statement)).collect::<Vec<_>>().join("\n");
                 all[&id]["research"] = serde_json::json!({"papers": paper_lines, "memory": mem_lines});
                 all[&id]["stage"] = serde_json::json!("spec");
@@ -12991,7 +12991,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
     pub async fn dream(&self) -> String {
         let day = (chrono::Utc::now().timestamp() / 86_400) as usize;
         let (vname, vdesc) = Self::VISIONS[day % Self::VISIONS.len()];
-        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 50).await
+        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 50, &mind_types::AccessContext::Operator).await
             .unwrap_or_default().into_iter()
             .map(|b| format!("- {}", b.statement.replacen("codekbyantrikmind", "", 1)))
             .collect::<Vec<_>>().join("\n").chars().take(5000).collect();
@@ -13070,7 +13070,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             .filter_map(|v| v.get("rating").map(|r| r.to_string()))
             .collect::<Vec<_>>().join("\n")).unwrap_or_default().chars().take(1200).collect();
         // Evidence 5: its own studied architecture — it KNOWS what it is
-        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 60).await
+        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 60, &mind_types::AccessContext::Operator).await
             .unwrap_or_default().into_iter()
             .map(|b| format!("- {}", b.statement.replacen("codekbyantrikmind", "", 1)))
             .collect::<Vec<_>>().join("\n").chars().take(6000).collect();
@@ -13196,12 +13196,12 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
             for _ in 0..12 {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let token = format!("paperkb{key}");
-                if !self.memory.beliefs_matching_n(&token, 3).await.unwrap_or_default().is_empty() {
+                if !self.memory.beliefs_matching_n(&token, 3, &mind_types::AccessContext::Operator).await.unwrap_or_default().is_empty() {
                     break;
                 }
             }
             let token = format!("paperkb{key}");
-            let n = self.memory.beliefs_matching_n(&token, 300).await.unwrap_or_default().len();
+            let n = self.memory.beliefs_matching_n(&token, 300, &mind_types::AccessContext::Operator).await.unwrap_or_default().len();
             if n > 0 {
                 chosen = Some((key, title, n));
                 break;
@@ -13559,7 +13559,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         // would silently drop most of the knowledge at answer time.
         let facts: Vec<String> = self
             .memory
-            .beliefs_matching_n(&token, 400)
+            .beliefs_matching_n(&token, 400, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -13787,7 +13787,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         // already knows THIS project is, so the scan is about HIS work, not a namesake.
         let ident: Vec<String> = self
             .memory
-            .beliefs_matching(&subject)
+            .beliefs_matching(&subject, &mind_types::AccessContext::Operator)
             .await
             .unwrap_or_default()
             .iter()
@@ -16830,11 +16830,14 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
     }
 
     pub async fn plugins_search(&self, q: &str) -> String {
+        // Operator read is safe HERE ONLY because of the output filter below: nothing leaves this
+        // function unless it starts with "[plugin]" (system catalog metadata, not personal data).
+        // Catalog entries are untagged, so a Principal read would wrongly hide them from members.
         // Semantic first (the memory lane), substring safety net second (the KV).
         let mut hits: Vec<String> = Vec::new();
         if let Ok(rs) = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: format!("plugin connector {q}"), top_k: 12, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: format!("plugin connector {q}"), top_k: 12, kind: None }, &mind_types::AccessContext::Operator)
             .await
         {
             for r in rs {
@@ -18677,7 +18680,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         for _ in 0..5 {
             let rs = self
                 .memory
-                .recall_typed(mind_types::RecallQuery { text: needle.clone(), top_k: 50, kind: None })
+                .recall_typed(mind_types::RecallQuery { text: needle.clone(), top_k: 50, kind: None }, &mind_types::AccessContext::Operator)
                 .await
                 .unwrap_or_default();
             let mut hit = false;
@@ -19419,7 +19422,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 }
                 out
             }
-            "reflect" | "state" => match self.memory.reflect(rest.trim()).await {
+            "reflect" | "state" => match self.memory.reflect(rest.trim(), &mind_types::AccessContext::Operator).await {
                 Ok(r) => {
                     let mut out = String::from("BELIEFS (top by confidence):\n");
                     let mut bs = r.beliefs.clone();
@@ -20367,15 +20370,17 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         match tool {
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
             // READ-ISOLATED: the recall tool sees only what THIS speaker may (so the agent can't read
-            // around the grounding isolation to reach another member's private facts).
+            // around the grounding isolation to reach another member's private facts). ARCH-1 slice 2:
+            // this is now enforced at the memory boundary — every lane carries the speaker's ctx.
             "recall" => {
+                let ctx = mind_types::AccessContext::Principal(id.viewer());
                 // TWO lanes, ONE answer: the semantic memories lane + the belief working-set the
                 // chat itself grounds on. What was taught as a belief is recallable, period.
                 let q = s("query");
                 let mut lines: Vec<String> = Vec::new();
                 if let Ok(rs) = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: q.clone(), top_k: 6, kind: None })
+                    .recall_typed(mind_types::RecallQuery { text: q.clone(), top_k: 6, kind: None }, &ctx)
                     .await
                 {
                     for r in rs {
@@ -20394,7 +20399,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 if !qwords.is_empty() {
                     if let Ok(deep) = self
                         .memory
-                        .recall_typed(mind_types::RecallQuery { text: q.clone(), top_k: 40, kind: None })
+                        .recall_typed(mind_types::RecallQuery { text: q.clone(), top_k: 40, kind: None }, &ctx)
                         .await
                     {
                         for r in deep {
@@ -20410,7 +20415,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 }
                 // EXACT-MATCH belief pass: deterministic enumeration (no embedding lottery) —
                 // any belief that literally says a query word leads the output.
-                if let Ok(bs) = self.memory.beliefs_matching(&q).await {
+                if let Ok(bs) = self.memory.beliefs_matching(&q, &ctx).await {
                     for b in bs.iter().take(8) {
                         let l = format!("- {} (belief {:.2})", b.statement, b.confidence);
                         if !lines.contains(&l) {
@@ -20981,7 +20986,8 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
         // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
         // private fact from another household member never reaches the model (the surprise-gift wall).
-        let ws = self.memory.hydrate_working_set_as(user_text, id.viewer()).await.unwrap_or_default();
+        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
         let mut grounding = String::new();
         // Continuity summary — PRIMARY VIEWER ONLY. The rolling summary is distilled from the primary
         // transcript; surfacing it to another household member would leak private conversation
@@ -21089,7 +21095,7 @@ Open reminders you're carrying for them:");
         // Self-vigilance: surface OPEN contradictions so the mind flags + asks to resolve them rather than
         // confidently stating one side. This is the typed-memory moat made felt — a companion that says
         // "I have conflicting info about X, which is right?" instead of silently guessing.
-        if let Ok(conflicts) = self.memory.conflicts().await {
+        if let Ok(conflicts) = self.memory.conflicts(&ctx).await {
             let relevant: Vec<_> = conflicts.iter().take(4).collect();
             if !relevant.is_empty() {
                 grounding.push_str("\nUNRESOLVED CONTRADICTIONS in my memory (if relevant to their message, flag the conflict + ask which is right — do NOT state one side as settled fact):");
@@ -21100,7 +21106,7 @@ Open reminders you're carrying for them:");
         }
         let recent = self
             .memory
-            .recent_messages_as(self.recent_window, id.viewer())
+            .recent_messages(self.recent_window, &ctx)
             .await
             .unwrap_or_default()
             .iter()
@@ -21665,7 +21671,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         if let Some(q) = member_photo_intent(user_text) {
             return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
         }
-        let recent = self.memory.recent_messages_as(12, id.viewer()).await.unwrap_or_default();
+        let recent = self.memory.recent_messages(12, &mind_types::AccessContext::Principal(id.viewer())).await.unwrap_or_default();
         let convo = if recent.is_empty() {
             "(first conversation — greet them warmly by name, and in ONE short line mention what you can do for them: find family photos ('show me photos of…'), make collages, set reminders ('remind me to…'), and a daily morning brief ('brief me daily'))".to_string()
         } else {
@@ -21698,8 +21704,9 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
     /// no markdown. Falls back to a graceful line rather than erroring mid-conversation.
     pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let scope = id.write_scope();
-        let recent = self.memory.recent_messages_as(8, id.viewer()).await.unwrap_or_default();
-        let ws = self.memory.hydrate_working_set_as(user_text, id.viewer()).await.unwrap_or_default();
+        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        let recent = self.memory.recent_messages(8, &ctx).await.unwrap_or_default();
+        let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
         let grounding = Self::render_grounding(&ws);
         let recent_text: String = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
         let prompt = format!(
@@ -21726,6 +21733,9 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
     /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
+        // ARCH-1 slice 2: every memory read this turn makes — directly or via an intercept
+        // (drafting, grounding, pinning) — carries the speaker's Principal ctx.
+        let turn_ctx = mind_types::AccessContext::Principal(id.viewer());
         // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         // Feed the temporal layer: every turn is a life-event episode (rhythm/periodicity/bursts),
@@ -21884,7 +21894,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         // stored fact set about Y (no blending, no ranking lottery). Deterministic intercept ahead of
         // the agent loop's free composition — the small model confabulates a draft otherwise (SDF bug).
         if let Some((kind, subject)) = Self::wants_draft(user_text) {
-            let reply = self.draft_grounded(&kind, &subject).await?;
+            let reply = self.draft_grounded(&kind, &subject, &turn_ctx).await?;
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
@@ -22194,17 +22204,21 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 }
             }
         }
-        // Cheap immediate context: the last few raw turns (prior to this one).
-        let recent = self.memory.recent_messages(self.recent_window).await.unwrap_or_default();
-        let ws = self.memory.hydrate_working_set(user_text).await?;
+        // Cheap immediate context: the last few raw turns (prior to this one), speaker-filtered.
+        let recent = self.memory.recent_messages(self.recent_window, &turn_ctx).await.unwrap_or_default();
+        let ws = self.memory.hydrate_working_set(user_text, &turn_ctx).await?;
         let mut grounding = Self::render_grounding(&ws);
         // Continuity beyond the raw-turn window: the rolling summary of everything older (compaction
         // absorbs aging turns into it in the background). Rides inside the untrusted memory block.
-        if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
-            if !sum.trim().is_empty() {
-                grounding = format!(
-                    "EARLIER CONVERSATION (rolling summary of older turns — the verbatim recent turns follow):\n{sum}\n\n{grounding}"
-                );
+        // PRIMARY VIEWER ONLY — the summary is distilled from the primary transcript; handing it to
+        // another member would leak private conversation around the read-isolation wall.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
+                if !sum.trim().is_empty() {
+                    grounding = format!(
+                        "EARLIER CONVERSATION (rolling summary of older turns — the verbatim recent turns follow):\n{sum}\n\n{grounding}"
+                    );
+                }
             }
         }
         // The honesty wall: entities this turn that the grounding knows NOTHING about get an
@@ -22231,7 +22245,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                     if !(acronym || (t.len() >= 4 && cap)) {
                         continue;
                     }
-                    if let Ok(bs) = self.memory.beliefs_matching(&t).await {
+                    if let Ok(bs) = self.memory.beliefs_matching(&t, &turn_ctx).await {
                         for b in bs.iter().take(3) {
                             let line = format!("- {} (certainty {:.2})", b.statement, b.confidence);
                             if !pinned.contains(&line) {
@@ -22305,12 +22319,19 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
 
 /// Maps recipe `Tool` steps to the mind's read capabilities. Source-read failures return Err so a
 /// recipe's `on_error: Skip` degrades gracefully instead of fabricating.
+///
+/// ARCH-1 slice 2 — EGRESS-CLEAN BY CONSTRUCTION: this host is a boot-time singleton shared by the
+/// recipe engine AND the research sub-agent, reachable from ANY speaker's turn. It therefore reads
+/// memory as `Principal(Scope::Shared)` — explicitly-shared facts only, no one's private data —
+/// the day-one form of the egress-broker rule "tool planning defaults to a context without private
+/// memory". Private grounding for tools returns later via typed declassification (ARCH-3).
 pub struct MindRecipeHost {
     mail: Option<Arc<dyn MailClient>>,
     github: Option<Arc<dyn GithubClient>>,
     memory: Arc<dyn MemoryFacade>,
     web: Option<Arc<dyn Fetcher>>,
     search: Option<Arc<dyn mind_tools::WebSearch>>,
+    read_ctx: mind_types::AccessContext,
 }
 
 impl MindRecipeHost {
@@ -22319,7 +22340,14 @@ impl MindRecipeHost {
         github: Option<Arc<dyn GithubClient>>,
         memory: Arc<dyn MemoryFacade>,
     ) -> Self {
-        Self { mail, github, memory, web: None, search: None }
+        Self {
+            mail,
+            github,
+            memory,
+            web: None,
+            search: None,
+            read_ctx: mind_types::AccessContext::Principal(mind_types::Scope::Shared),
+        }
     }
 
     /// Add web research tools: `web_search` (discover) + `fetch` (read a page, SSRF-guarded).
@@ -22360,7 +22388,7 @@ impl RecipeHost for MindRecipeHost {
                 let query = _args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let hits = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: query, top_k: 6, kind: None })
+                    .recall_typed(mind_types::RecallQuery { text: query, top_k: 6, kind: None }, &self.read_ctx)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 if hits.is_empty() {
@@ -22819,7 +22847,7 @@ mod tests {
         assert_eq!(n, 2, "1 durable belief + 1 commitment");
         // the belief is recallable
         let r = memarc
-            .recall_typed(mind_types::RecallQuery { text: "terse replies".into(), top_k: 5, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: "terse replies".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         assert!(r.iter().any(|x| x.item.text.contains("terse")), "consolidated belief must be recallable");
@@ -22853,7 +22881,7 @@ mod tests {
         }
         conv.consolidate().await;
         let results = memarc
-            .recall_typed(mind_types::RecallQuery { text: "async Rust".into(), top_k: 5, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: "async Rust".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         let belief = results.iter().find(|x| x.item.text.contains("async Rust")).expect("belief must be stored");
@@ -22878,7 +22906,7 @@ mod tests {
         }
         let n = conv.consolidate().await;
         assert_eq!(n, 2, "1 goal + 1 preference");
-        let reflection = memarc.reflect("goals and preferences").await.unwrap();
+        let reflection = memarc.reflect("goals and preferences", &mind_types::AccessContext::Operator).await.unwrap();
         assert!(
             reflection.goals.iter().any(|g| g.text.contains("async Rust")),
             "goal must appear in reflect: {:?}",
@@ -22922,7 +22950,7 @@ mod tests {
         let log = conv.dmn_tick().await;
         assert!(log.iter().any(|l| l.contains("associated")), "associate phase should run: {log:?}");
         let r = memarc
-            .recall_typed(mind_types::RecallQuery { text: "signal over noise".into(), top_k: 8, kind: None })
+            .recall_typed(mind_types::RecallQuery { text: "signal over noise".into(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
             .await
             .unwrap();
         assert!(
@@ -23021,12 +23049,12 @@ mod tests {
                 .unwrap();
         }
         memarc.relate(belief_a_text, belief_b_text, "contradicts", 0.9).await.unwrap();
-        assert!(!memarc.conflicts().await.unwrap().is_empty(), "contradiction must be detected");
+        assert!(!memarc.conflicts(&mind_types::AccessContext::Operator).await.unwrap().is_empty(), "contradiction must be detected");
 
-        let conf_a_before = memarc.explain_belief(belief_a_text).await.unwrap()
+        let conf_a_before = memarc.explain_belief(belief_a_text, &mind_types::AccessContext::Operator).await.unwrap()
             .map(|(b, _)| b.confidence)
             .expect("belief should exist before reconcile");
-        let conf_b_before = memarc.explain_belief(belief_b_text).await.unwrap()
+        let conf_b_before = memarc.explain_belief(belief_b_text, &mind_types::AccessContext::Operator).await.unwrap()
             .map(|(b, _)| b.confidence)
             .expect("belief should exist before reconcile");
 
@@ -23044,10 +23072,10 @@ mod tests {
             "reconcile log must report a winner (not 'unresolved'): {log:?}",
         );
 
-        let conf_a_after = memarc.explain_belief(belief_a_text).await.unwrap()
+        let conf_a_after = memarc.explain_belief(belief_a_text, &mind_types::AccessContext::Operator).await.unwrap()
             .map(|(b, _)| b.confidence)
             .expect("belief should still exist after reconcile");
-        let conf_b_after = memarc.explain_belief(belief_b_text).await.unwrap()
+        let conf_b_after = memarc.explain_belief(belief_b_text, &mind_types::AccessContext::Operator).await.unwrap()
             .map(|(b, _)| b.confidence)
             .expect("belief should still exist after reconcile");
 
@@ -23137,8 +23165,53 @@ mod tests {
         let r = conv.agent_loop("hi", &TurnIdentity::primary()).await.unwrap();
         assert!(r.contains("Pranab"), "agent should return its answer: {r}");
         // and the turn is recorded in the transcript
-        let recent = memarc.recent_messages(4).await.unwrap();
+        let recent = memarc.recent_messages(4, &mind_types::AccessContext::Operator).await.unwrap();
         assert!(recent.iter().any(|(role, t)| role == "assistant" && t.contains("Pranab")));
+    }
+
+    /// ARCH-1 slice 2 acceptance — the agent `recall` tool was COMMENTED read-isolated but called
+    /// unscoped memory (sol's finding #2). Now every lane (semantic, deep lexical, exact-match)
+    /// carries the speaker's Principal ctx, and the shared recipe/researcher host reads egress-clean
+    /// (shared facts only), so neither a member turn nor a tool plan can reach a private fact.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
+        use mind_types::Scope;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+
+        let secret = "The safe combination is 47-12-33";
+        memarc.remember_as_belief_scoped(
+            BeliefAssertion { statement: secret.into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            Scope::primary(),
+        ).await.unwrap();
+        memarc.remember_as_belief_scoped(
+            BeliefAssertion { statement: "Dinner on Friday is at seven".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            Scope::Shared,
+        ).await.unwrap();
+
+        // Agent recall tool AS A MEMBER: shared fact recallable, secret unreachable on every lane.
+        let member = TurnIdentity::new("asha", false);
+        let args = serde_json::json!({ "query": "safe combination" });
+        let out = conv.run_agent_tool_as("recall", &args, &member).await;
+        assert!(!out.contains("47-12-33"), "MEMBER agent-recall leaked the secret: {out}");
+        let args = serde_json::json!({ "query": "dinner friday" });
+        let out = conv.run_agent_tool_as("recall", &args, &member).await;
+        assert!(out.contains("Dinner on Friday"), "member agent-recall must keep shared facts: {out}");
+        // …while the primary's own path still reaches their private fact.
+        let args = serde_json::json!({ "query": "safe combination" });
+        let out = conv.run_agent_tool_as("recall", &args, &TurnIdentity::primary()).await;
+        assert!(out.contains("47-12-33"), "primary agent-recall must reach their own private fact: {out}");
+
+        // Recipe/researcher host: egress-clean by construction — shared facts ONLY,
+        // no one's private data, whatever triggered the recipe.
+        let host = MindRecipeHost::new(None, None, memarc.clone());
+        let hit = host.call_tool("recall", &serde_json::json!({ "query": "dinner friday" })).await.unwrap();
+        assert!(hit.contains("Dinner on Friday"), "recipe recall must see shared facts: {hit}");
+        let miss = host.call_tool("recall", &serde_json::json!({ "query": "safe combination" })).await;
+        let leaked = miss.map(|s| s.contains("47-12-33")).unwrap_or(false);
+        assert!(!leaked, "RECIPE recall leaked a private fact — egress-clean context breached");
     }
 
     #[test]

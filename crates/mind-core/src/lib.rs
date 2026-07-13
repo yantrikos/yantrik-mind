@@ -66,15 +66,28 @@ const HELP_TEXT: &str = "\
 ///   `:help` / `:commands`                                   print every command with a one-line description
 ///   `:quit`
 pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngine) -> Outcome {
-    handle_line_as(line, mem, conv, mind_conversation::TurnIdentity::primary()).await
+    // The local `ym` REPL is the trusted owner console — the ONE place the explicit
+    // operator capability is minted for interactive commands (ARCH-1).
+    handle_line_as(
+        line,
+        mem,
+        conv,
+        mind_conversation::TurnIdentity::primary(),
+        &mind_types::AccessContext::Operator,
+    )
+    .await
 }
 
 /// As `handle_line`, but the chat turn is attributed to a known household member (read-isolation).
+/// `ctx` is the authorization the channel earned: remote channels (Telegram) pass
+/// `Principal(identity.viewer())` so every command in here is filtered at the memory boundary;
+/// only the local owner console passes `Operator`. Never derive Operator from `identity`.
 pub async fn handle_line_as(
     line: &str,
     mem: &MemoryHandle,
     conv: &ConversationEngine,
     identity: mind_conversation::TurnIdentity,
+    ctx: &mind_types::AccessContext,
 ) -> Outcome {
     let raw = line.trim();
     if raw.is_empty() {
@@ -104,11 +117,16 @@ pub async fn handle_line_as(
         return Outcome::Said(conv.workers_status().await);
     }
     if t == ":patterns" || t == ":insights" {
+        // Bulk cross-memory mining — operator-only (a member channel could otherwise
+        // harvest patterns distilled from everyone's private facts).
+        if !ctx.is_operator() {
+            return Outcome::Said("(patterns is an owner-console command)".into());
+        }
         return Outcome::Said(conv.find_patterns().await);
     }
     if let Some(query) = t.strip_prefix(":beliefs") {
         let query = query.trim();
-        return match mem.recall_typed(RecallQuery { text: query.to_string(), top_k: 10, kind: None }).await {
+        return match mem.recall_typed(RecallQuery { text: query.to_string(), top_k: 10, kind: None }, ctx).await {
             Ok(rs) if rs.is_empty() => Outcome::Said("(no beliefs stored)".into()),
             Ok(mut rs) => {
                 rs.sort_by(|a, b| b.item.confidence.partial_cmp(&a.item.confidence).unwrap_or(std::cmp::Ordering::Equal));
@@ -119,7 +137,7 @@ pub async fn handle_line_as(
     }
     if let Some(topic) = t.strip_prefix(":reflect") {
         let topic = topic.trim();
-        return match mem.reflect(topic).await {
+        return match mem.reflect(topic, ctx).await {
             Err(e) => Outcome::Said(format!("(error: {e})")),
             Ok(r) => {
                 let mut out = String::new();
@@ -173,7 +191,7 @@ pub async fn handle_line_as(
         };
     }
     if t == ":conflicts" {
-        return match mem.conflicts().await {
+        return match mem.conflicts(ctx).await {
             Ok(cs) if cs.is_empty() => Outcome::Said("(no open contradictions)".into()),
             Ok(cs) => Outcome::Said(
                 cs.iter()
@@ -206,8 +224,8 @@ pub async fn handle_line_as(
             return Outcome::Said(format!("(could not parse beliefs from tension: {about})"));
         };
         // Weaken the less-confident side so the contradiction resolves.
-        let conf_a = mem.explain_belief(&belief_a).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
-        let conf_b = mem.explain_belief(&belief_b).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
+        let conf_a = mem.explain_belief(&belief_a, ctx).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
+        let conf_b = mem.explain_belief(&belief_b, ctx).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
         let weaker = if conf_a <= conf_b { belief_a } else { belief_b };
         let result = mem
             .remember_as_belief(BeliefAssertion {
@@ -228,7 +246,7 @@ pub async fn handle_line_as(
         };
     }
     if let Some(stmt) = t.strip_prefix(":explain ") {
-        return match mem.explain_belief(stmt.trim()).await {
+        return match mem.explain_belief(stmt.trim(), ctx).await {
             Ok(Some((b, ev))) => Outcome::Said(format!(
                 "{} — confidence {:.2}, {} evidence item(s), provenance {}",
                 b.statement, b.confidence, ev.len().max(b.evidence_count as usize), b.provenance
@@ -567,6 +585,73 @@ mod tests {
 
         // :quit
         assert!(matches!(handle_line(":quit", &mem, &conv).await, Outcome::Quit));
+    }
+
+    /// ARCH-1 slice 2 acceptance — the REPL commands were the loudest bypass sol found:
+    /// `:beliefs`/`:reflect`/`:conflicts`/`:explain` reached UNSCOPED memory even when the line
+    /// arrived from a member over Telegram. Now the channel's ctx rides into every command and
+    /// the memory boundary filters: the member sees shared facts, never the primary's secret,
+    /// and bulk mining (`:patterns`) is refused outright for principals.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn arch1_member_repl_commands_cannot_reach_primary_secret() {
+        use mind_types::{AccessContext, Scope};
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = engine(&mem, pool);
+
+        let secret = "The safe combination is 47-12-33";
+        mem.remember_as_belief_scoped(
+            mind_types::BeliefAssertion { statement: secret.into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            Scope::primary(),
+        ).await.unwrap();
+        mem.remember_as_belief_scoped(
+            mind_types::BeliefAssertion { statement: "Dinner on Friday is at seven".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            Scope::Shared,
+        ).await.unwrap();
+
+        let member_id = mind_conversation::TurnIdentity::new("asha", false);
+        let member_ctx = AccessContext::Principal(member_id.viewer());
+
+        // :beliefs — filtered list; shared visible, secret absent
+        match handle_line_as(":beliefs safe combination", &mem, &conv, member_id.clone(), &member_ctx).await {
+            Outcome::Said(s) => assert!(!s.contains("47-12-33"), "MEMBER :beliefs leaked the secret: {s}"),
+            _ => panic!("expected output"),
+        }
+        match handle_line_as(":beliefs dinner", &mem, &conv, member_id.clone(), &member_ctx).await {
+            Outcome::Said(s) => assert!(s.contains("Dinner on Friday"), "member :beliefs must keep shared facts: {s}"),
+            _ => panic!("expected output"),
+        }
+        // :reflect — filtered reflection
+        match handle_line_as(":reflect safe combination", &mem, &conv, member_id.clone(), &member_ctx).await {
+            Outcome::Said(s) => assert!(!s.contains("47-12-33"), "MEMBER :reflect leaked the secret: {s}"),
+            _ => panic!("expected output"),
+        }
+        // :explain — out-of-scope belief indistinguishable from absent
+        match handle_line_as(&format!(":explain {secret}"), &mem, &conv, member_id.clone(), &member_ctx).await {
+            Outcome::Said(s) => assert!(s.contains("no such belief"), "MEMBER :explain leaked the secret: {s}"),
+            _ => panic!("expected output"),
+        }
+        // :conflicts — a secret-referencing contradiction stays invisible
+        mem.remember_as_belief_scoped(
+            mind_types::BeliefAssertion { statement: "The safe combination is 51-09-27".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            Scope::primary(),
+        ).await.unwrap();
+        mem.relate(secret, "The safe combination is 51-09-27", "contradicts", 0.9).await.unwrap();
+        match handle_line_as(":conflicts", &mem, &conv, member_id.clone(), &member_ctx).await {
+            Outcome::Said(s) => assert!(!s.contains("safe combination"), "MEMBER :conflicts leaked the secret: {s}"),
+            _ => panic!("expected output"),
+        }
+        // :patterns — bulk mining refused for principals
+        match handle_line_as(":patterns", &mem, &conv, member_id.clone(), &member_ctx).await {
+            Outcome::Said(s) => assert!(s.contains("owner-console"), ":patterns must be operator-only: {s}"),
+            _ => panic!("expected output"),
+        }
+        // The owner console (operator ctx) retains everything.
+        match handle_line(":explain The safe combination is 47-12-33", &mem, &conv).await {
+            Outcome::Said(s) => assert!(s.contains("confidence"), "operator :explain must still work: {s}"),
+            _ => panic!("expected output"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -336,6 +336,81 @@ impl LLMBackend for ScriptedLLM {
     }
 }
 
+/// A deterministic backend that returns a SCRIPTED SEQUENCE of replies, one per call, for exercising
+/// MULTI-STEP control flow (the agentic loop) with no real model. Call 0 returns `replies[0]`, call 1
+/// `replies[1]`, …; once exhausted it repeats the LAST reply (so a loop that keeps calling gets a
+/// stable terminal response). Records every prompt it saw (per call) so an eval can grade what the
+/// loop fed the model on each step. This is the enabling primitive for a deterministic agent-loop eval.
+pub struct SequencedLLM {
+    replies: Vec<String>,
+    calls: std::sync::atomic::AtomicUsize,
+    prompts: std::sync::Mutex<Vec<String>>,
+}
+
+impl SequencedLLM {
+    pub fn new(replies: Vec<impl Into<String>>) -> Self {
+        Self {
+            replies: replies.into_iter().map(Into::into).collect(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            prompts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+    /// How many times the model was called (loop steps + compose).
+    pub fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Every prompt (all roles, "role: content") the model saw, in call order.
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+    /// The prompt seen on call `i` (0-based), or empty.
+    pub fn prompt_at(&self, i: usize) -> String {
+        self.prompts.lock().unwrap().get(i).cloned().unwrap_or_default()
+    }
+}
+
+impl LLMBackend for SequencedLLM {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _config: &GenerationConfig,
+        _tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<LLMResponse> {
+        let all = messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
+        self.prompts.lock().unwrap().push(all);
+        let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reply = self
+            .replies
+            .get(i)
+            .or_else(|| self.replies.last())
+            .cloned()
+            .unwrap_or_default();
+        Ok(LLMResponse {
+            text: reply,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            tool_calls: vec![],
+            api_tool_calls: vec![],
+            stop_reason: "stop".into(),
+        })
+    }
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+        _on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<LLMResponse> {
+        self.chat(messages, config, tools)
+    }
+    fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        Ok(text.len() / 4)
+    }
+    fn backend_name(&self) -> &str {
+        "sequenced"
+    }
+}
+
 /// A resilience chain over several `LLMBackend`s: try each in order; the first that returns a
 /// non-empty success wins. An error OR an empty reply (some reasoning models emit nothing under a
 /// tight token budget) falls over to the next link. For an always-on companion this means it keeps

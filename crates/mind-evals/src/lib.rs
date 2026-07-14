@@ -9,6 +9,7 @@
 //! mind built), so it runs in CI with no real model.
 
 pub mod immune;
+pub mod loop_eval;
 
 use std::sync::Arc;
 

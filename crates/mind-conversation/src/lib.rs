@@ -6358,10 +6358,17 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
-            // reliability becomes measured self-knowledge instead of a blind spot.
-            let tool_ok = obs.chars().count() > 10
-                && !(obs.trim_start().starts_with('(')
-                    && (obs.contains("error") || obs.contains("couldn't") || obs.contains("failed") || obs.contains("isn't configured")));
+            // reliability becomes measured self-knowledge instead of a blind spot. A short parenthetical
+            // carrying a negative marker is a failure (an empty/unconfigured/errored tool) — the marker
+            // set is broad so "(github not configured)" / "(couldn't reach …)" all register (the
+            // agent-loop eval caught the earlier gap where "not configured" slipped through).
+            let obs_lc = obs.to_lowercase();
+            let failure_marker = ["error", "couldn't", "could not", "failed", "not configured",
+                "isn't configured", "no mailbox", "not set", "unavailable", "unable", "no such",
+                "nothing", "no results", "not found"]
+                .iter()
+                .any(|m| obs_lc.contains(m));
+            let tool_ok = obs.chars().count() > 10 && !(obs.trim_start().starts_with('(') && failure_marker);
             let _ = self.memory.record_tool_outcome(&tool, tool_ok).await;
             // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
             // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
@@ -6431,6 +6438,15 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
     /// Per-member reminders/tasks and an opt-in daily brief — owner-keyed KVs (`m:<owner>:…`),
     /// delivered to the member's own chat. Structurally isolated from the primary's task spine;
     /// connected to the household only through deliberately-shared surfaces (family dates).
+
+    /// Eval/test seam: drive the AGENTIC LOOP directly, bypassing the deterministic turn
+    /// interceptors in `handle_turn_as`, so a harness can score the loop's machinery in isolation
+    /// (tool selection, loop-guard, budget/termination, failed-tool recovery, grounding). Not used
+    /// on any production path.
+    #[doc(hidden)]
+    pub async fn agent_loop_for_eval(&self, user_text: &str, id: &TurnIdentity) -> Result<String> {
+        self.agent_loop(user_text, id).await
+    }
 
     /// Single-user entry — acts as the primary member (the `ym` CLI + legacy callers).
     pub async fn handle_turn(&self, user_text: &str) -> Result<String> {

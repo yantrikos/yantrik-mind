@@ -6233,8 +6233,17 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
         let mut scratch = String::new();
         let mut last_call = String::new();
         for step in 0..MAX_STEPS {
+            // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
+            // steps remain either loops or gets truncated mid-thought. Surfacing "N left" makes it
+            // commit to an answer before the hard cutoff. `MAX_STEPS - step` counts THIS step.
+            let steps_left = MAX_STEPS - step;
+            let budget_note = if steps_left <= 1 {
+                "This is your LAST step — you MUST give the final answer now (no more tools).".to_string()
+            } else {
+                format!("You have {steps_left} tool-steps left before you must give the final answer — prefer answering as soon as you can.")
+            };
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}{mcp_line}\n\nWork log:{}\n\nUser: {user_text}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Prefer answering as soon as you can. Output ONLY the JSON.",
+                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}{mcp_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Output ONLY the JSON.",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let messages = vec![
@@ -6380,7 +6389,17 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
                 return Ok(obs);
             }
-            scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
+            // SOTA finding: a failed/empty tool result must CHANGE the next action — feeding it back
+            // for a verbatim retry is the dominant loop trigger. Mark failures explicitly so the model
+            // switches tool or answers, rather than re-issuing the same call.
+            if tool_ok {
+                scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
+            } else {
+                scratch.push_str(&format!(
+                    "\n[{step}] {tool} FAILED/empty ({}) — do NOT repeat this exact call; try a DIFFERENT tool or answer with what you already have.",
+                    obs.chars().take(300).collect::<String>()
+                ));
+            }
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model
         // literally cannot weave in the gift deadline sitting next to the birthday it's reporting.

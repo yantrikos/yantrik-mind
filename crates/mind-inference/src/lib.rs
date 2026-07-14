@@ -633,6 +633,13 @@ impl LLMBackend for ChainBackend {
 
 /// Resolve a "provider" or "provider:model" spec to an OpenAI-compat backend, reading the provider's
 /// API key from env. `None` for an unknown provider or a missing/empty key.
+fn configured_api_key(key_env: &str) -> Option<String> {
+    std::env::var(key_env)
+        .ok()
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty())
+}
+
 pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
     let (provider, model) = match spec.split_once(':') {
         Some((p, m)) => (p.trim(), m.trim()),
@@ -649,7 +656,7 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         "anthropic" => ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY", "claude-sonnet-5"),
         _ => return None,
     };
-    let key = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty())?;
+    let key = configured_api_key(key_env)?;
     let model = if model.is_empty() { default_model.to_string() } else { model.to_string() };
     Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", base, Some(key), model)) as Arc<dyn LLMBackend>)
 }
@@ -825,6 +832,14 @@ mod tests {
             api_tool_calls: vec![],
             stop_reason: "stop".into(),
         }
+    }
+
+    #[test]
+    fn configured_api_key_trims_surrounding_whitespace() {
+        let key_env = "YM_TEST_PADDED_API_KEY";
+        std::env::set_var(key_env, "  valid-key\n");
+        assert_eq!(configured_api_key(key_env).as_deref(), Some("valid-key"));
+        std::env::remove_var(key_env);
     }
 
     /// Configurable test backend: `None` => errors, `Some("")` => empty reply, `Some(x)` => Ok(x).

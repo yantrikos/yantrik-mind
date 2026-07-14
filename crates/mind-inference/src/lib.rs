@@ -969,6 +969,13 @@ mod tests {
         assert!(max.load(Ordering::SeqCst) >= 2, "permits=3 should overlap");
     }
 
+    #[test]
+    fn self_build_requeues_claude_authentication_failures() {
+        let tick = include_str!("../../../deploy/self_build_tick.sh").to_ascii_lowercase();
+        assert!(tick.contains("failed to authenticate"));
+        assert!(tick.contains("invalid authentication credentials"));
+    }
+
     /// Simulate total cloud failure: all cloud links error, local fallback answers.
     /// Asserts (1) the reply comes from the local tier, (2) survival mode activates,
     /// (3) survival_status() returns a non-empty degradation notice, and (4) survival

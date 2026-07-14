@@ -153,7 +153,7 @@ echo "$OUT"
 # Builder unavailable (credit/quota/auth) — the goal never got a fair attempt, so DON'T let the pop
 # consume it. Re-queue it (if it came from the human queue) and log a distinct outcome; otherwise a
 # dry builder silently drains the whole queue over successive ticks (4/day) with nothing to show.
-if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded|invalid api key|authentication_error|oauth token.*expired|401 unauthorized"; then
+if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded|invalid api key|authentication_error|failed to authenticate|invalid authentication credentials|oauth token.*expired|401 unauthorized"; then
   echo "$(date -u +%FT%TZ) | build | BUILDER-NO-CREDIT | $GOAL" >> "$EVLOG"
   if [ "$FROM_QUEUE" = "1" ] && ! grep -qxF "$GOAL" "$GOALS" 2>/dev/null; then
     printf '%s\n' "$GOAL" >> "$GOALS"

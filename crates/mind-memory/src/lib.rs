@@ -480,28 +480,29 @@ fn parse_relatedness_threshold(value: Option<&str>) -> f64 {
 }
 
 fn topical_relatedness(a: &str, b: &str, semantic_cosine: Option<f64>) -> f64 {
-    let a_words = task_word_set(a);
-    let b_words = task_word_set(b);
-    let word_overlap = jaccard(&a_words, &b_words);
-    let leading_subject_matches = |text: &str, words: &std::collections::HashSet<String>| {
+    let mut a_words = task_word_set(a);
+    let mut b_words = task_word_set(b);
+    let leading_subject = |text: &str, words: &std::collections::HashSet<String>| {
         text.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
             .find(|word| words.contains(*word))
             .map(str::to_string)
     };
-    let subject_overlap = match (
-        leading_subject_matches(a, &a_words),
-        leading_subject_matches(b, &b_words),
-    ) {
-        (Some(a_subject), Some(b_subject)) if a_subject == b_subject => 1.0,
-        _ => 0.0,
+    let subject = match (leading_subject(a, &a_words), leading_subject(b, &b_words)) {
+        (Some(a_subject), Some(b_subject)) if a_subject == b_subject => a_subject,
+        _ => return 0.0,
     };
+    // A shared subject is necessary but not sufficient: compare the remaining words so claims about
+    // different predicates ("Pranab prefers ..." vs "Pranab lives ...") cannot become conflicts.
+    a_words.remove(&subject);
+    b_words.remove(&subject);
+    let predicate_overlap = jaccard(&a_words, &b_words);
     // Cosines around 0.5 are common even for unrelated natural-language sentences. Map the useful
     // 0.5..1.0 range onto 0..1 so only meaningful semantic similarity contributes to this gate.
     let semantic = semantic_cosine
         .map(|s| ((s - 0.5) * 2.0).clamp(0.0, 1.0))
         .unwrap_or(0.0);
-    word_overlap.max(subject_overlap).max(semantic)
+    predicate_overlap.max(semantic)
 }
 
 fn beliefs_are_topically_related(db: &YantrikDB, a: &str, b: &str, threshold: f64) -> bool {
@@ -2468,6 +2469,16 @@ mod tests {
             same_subject >= threshold,
             "contradictory claims about the same subject must pass the topical gate: {same_subject}"
         );
+
+        let different_predicate = topical_relatedness(
+            "Pranab prefers terse replies",
+            "Pranab lives in Delhi",
+            None,
+        );
+        assert_eq!(
+            different_predicate, 0.0,
+            "a shared subject must not conflate unrelated predicate contexts"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2477,7 +2488,8 @@ mod tests {
             "The Pacific Ocean is deep",
             "Rust 1.96 has improved diagnostics",
             "Pranab sleeps early",
-            "Pranab stays up late",
+            "Pranab sleeps late",
+            "Pranab prefers terse replies",
         ] {
             mem.remember_as_belief(BeliefAssertion {
                 statement: statement.into(),
@@ -2499,7 +2511,15 @@ mod tests {
         .unwrap();
         mem.relate(
             "Pranab sleeps early",
-            "Pranab stays up late",
+            "Pranab prefers terse replies",
+            "contradicts",
+            0.9,
+        )
+        .await
+        .unwrap();
+        mem.relate(
+            "Pranab sleeps early",
+            "Pranab sleeps late",
             "contradicts",
             0.9,
         )
@@ -2718,7 +2738,7 @@ mod tests {
         .await
         .unwrap();
         mem.remember_as_belief(BeliefAssertion {
-            statement: "Pranab stays up late".into(),
+            statement: "Pranab sleeps late".into(),
             polarity: 1.0,
             weight: 2.0,
             source_event: None,
@@ -2726,7 +2746,7 @@ mod tests {
         })
         .await
         .unwrap();
-        mem.relate("Pranab sleeps early", "Pranab stays up late", "contradicts", 0.8)
+        mem.relate("Pranab sleeps early", "Pranab sleeps late", "contradicts", 0.8)
             .await
             .unwrap();
 
@@ -2755,7 +2775,7 @@ mod tests {
         );
         let tension = after.iter().find(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)).unwrap();
         assert!(
-            tension.about.contains("sleeps early") || tension.about.contains("stays up late"),
+            tension.about.contains("sleeps early") || tension.about.contains("sleeps late"),
             "tension description should name the conflicting beliefs, got: {}",
             tension.about
         );

@@ -476,7 +476,9 @@ fn parse_relatedness_threshold(value: Option<&str>) -> f64 {
     value
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.25)
-        .clamp(0.0, 1.0)
+        // This is a correctness gate, not just a sensitivity knob: allowing zero would make every
+        // pair related and could surface unrelated beliefs as an open contradiction.
+        .clamp(0.25, 1.0)
 }
 
 fn topical_relatedness(a: &str, b: &str, semantic_cosine: Option<f64>) -> f64 {
@@ -2467,6 +2469,16 @@ mod tests {
         assert!(
             same_subject >= threshold,
             "contradictory claims about the same subject must pass the topical gate: {same_subject}"
+        );
+    }
+
+    #[test]
+    fn topical_relatedness_threshold_cannot_disable_the_gate() {
+        let threshold = parse_relatedness_threshold(Some("0"));
+        assert_eq!(threshold, 0.25);
+        assert!(
+            topical_relatedness("The Pacific Ocean is deep", "Rust has improved diagnostics", None)
+                < threshold
         );
     }
 

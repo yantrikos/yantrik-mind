@@ -650,6 +650,211 @@ fn spawn_control_server(
     });
 }
 
+/// Global in-flight connection counter for the WG chat listener (availability guard, sol #4). A
+/// bounded cap blunts slot/parser exhaustion from a compromised WireGuard peer.
+static CHAT_CONNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const CHAT_MAX_CONNS: usize = 24;
+
+/// ARCH-2 WireGuard-ingress slice / ARCH-4 web-v1 substrate: a SEPARATE listener, bound to the
+/// WireGuard interface address, that serves ONLY `POST /chat` (+ content-free `GET /status`). The
+/// operator console (`/cli`) is NOT registered here and stays loopback-only (sol #1) — full-console
+/// execution is never network-reachable. Member devices only: an operator credential is rejected on
+/// this socket (sol #6), and no `X-YM-Person` delegation is honored. Fail-closed config: refuses to
+/// start unless `YM_CHAT_BIND` parses to a concrete non-wildcard, non-loopback IP AND `YM_CHAT_HOST`
+/// (the canonical authority, e.g. `10.7.0.1:8078`) is set. The host firewall must enforce that the
+/// port is reachable ONLY via `wg0` — binding an address does not itself prove WireGuard ingress.
+fn spawn_chat_server(
+    conv: Arc<ConversationEngine>,
+    devices: Arc<mind_governance::devices::DeviceStore>,
+    rt: tokio::runtime::Handle,
+) {
+    let Ok(bind) = std::env::var("YM_CHAT_BIND") else { return }; // disabled unless explicitly set
+    let bind = bind.trim().to_string();
+    if bind.is_empty() {
+        return;
+    }
+    // Classify the bind address semantically (sol #2) — never a string compare. A concrete,
+    // non-loopback, non-wildcard IP is required; a hostname or wildcard is a config error → refuse.
+    let ip: std::net::IpAddr = match bind.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            eprintln!("[chat] YM_CHAT_BIND='{bind}' is not a concrete IP address — WG chat listener DISABLED (fail-closed)");
+            return;
+        }
+    };
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        eprintln!("[chat] YM_CHAT_BIND='{bind}' must be a concrete non-loopback, non-wildcard interface IP (the WireGuard address) — DISABLED (fail-closed)");
+        return;
+    }
+    let host = match std::env::var("YM_CHAT_HOST").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(h) => h,
+        None => {
+            eprintln!("[chat] YM_CHAT_HOST (the canonical authority, e.g. {bind}:<port>) is required for a non-loopback bind — WG chat listener DISABLED (fail-closed)");
+            return;
+        }
+    };
+    let port: u16 = std::env::var("YM_CHAT_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8078);
+    std::thread::spawn(move || match std::net::TcpListener::bind((ip, port)) {
+        Ok(listener) => {
+            eprintln!("[chat] WireGuard chat endpoint on {ip}:{port} (member /chat only; expects Host {host}). NOTE: the firewall must restrict this port to wg0.");
+            for stream in listener.incoming().flatten() {
+                if CHAT_CONNS.load(std::sync::atomic::Ordering::Relaxed) >= CHAT_MAX_CONNS {
+                    // Availability guard: shed load rather than spawn unbounded handlers.
+                    let mut s = stream;
+                    let _ = std::io::Write::write_all(&mut s, b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                CHAT_CONNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (conv, devices, rt, host) = (conv.clone(), devices.clone(), rt.clone(), host.clone());
+                std::thread::spawn(move || {
+                    chat_handle(stream, conv, devices, rt, &host);
+                    CHAT_CONNS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+        }
+        Err(e) => eprintln!("[chat] could not bind {ip}:{port}: {e}"),
+    });
+}
+
+/// One request on the WireGuard chat listener. ONLY `POST /chat` (member-scoped turn) and content-free
+/// `GET /status`; everything else is 404 — `/cli` does not exist here. Member bearer required; an
+/// operator credential is refused (member-only remote chat). Same HTTP hardening as the control server
+/// plus a canonical-Host check and native-only Origin policy. One request per connection.
+fn chat_handle(
+    mut stream: std::net::TcpStream,
+    conv: Arc<ConversationEngine>,
+    devices: Arc<mind_governance::devices::DeviceStore>,
+    rt: tokio::runtime::Handle,
+    expected_host: &str,
+) {
+    use std::io::{Read, Write};
+    // A total wall-clock deadline (sol #4): a drip-fed request cannot hold a handler indefinitely.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(20)));
+    let send = |stream: &mut std::net::TcpStream, status: &str, reply: &str| {
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let hend = loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => return,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(p) = find_sub(&buf, b"\r\n\r\n") {
+                    break p;
+                }
+                if buf.len() > 32_768 {
+                    let _ = stream.write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..hend]).to_string();
+    let mut first = head.lines().next().unwrap_or("").split_whitespace();
+    let method = first.next().unwrap_or("");
+    let target = first.next().unwrap_or("/");
+    // Origin-form targets only (reject absolute/authority-form, sol #7).
+    if !target.starts_with('/') {
+        send(&mut stream, "400 Bad Request", "bad request target");
+        return;
+    }
+    let path = target.split('?').next().unwrap_or(target);
+
+    // Framing / smuggling hardening (same as the control server).
+    if header_count(&head, "content-length:") > 1
+        || header_count(&head, "authorization:") > 1
+        || header_count(&head, "host:") > 1
+        || header_count(&head, "origin:") > 1
+        || header_value(&head, "transfer-encoding:").is_some()
+    {
+        send(&mut stream, "400 Bad Request", "ambiguous request framing");
+        return;
+    }
+    // Canonical Host check (sol #3 — a policy/anti-rebinding filter, NOT a security boundary).
+    match header_value(&head, "host:") {
+        Some(h) if h.eq_ignore_ascii_case(expected_host) => {}
+        _ => {
+            send(&mut stream, "403 Forbidden", "host not allowed");
+            return;
+        }
+    }
+    // Native-only policy (sol #3): any present Origin (a browser request) is refused. This is a
+    // product-policy filter, not the auth boundary — the bearer is the boundary.
+    if header_value(&head, "origin:").is_some() {
+        send(&mut stream, "403 Forbidden", "browser origins are not permitted on this endpoint");
+        return;
+    }
+
+    // Content-free liveness (method-checked). Kept open for a paired device's reachability probe.
+    if path == "/status" {
+        if method == "GET" {
+            send(&mut stream, "200 OK", "ok");
+        } else {
+            send(&mut stream, "405 Method Not Allowed", "");
+        }
+        return;
+    }
+    // The ONLY other route. No /cli here, by construction.
+    if method != "POST" || path != "/chat" {
+        send(&mut stream, "404 Not Found", "not found");
+        return;
+    }
+
+    // Authenticate BEFORE reading the body / any dispatch.
+    let bearer = header_value(&head, "authorization:")
+        .map(|v| {
+            let t = v.trim();
+            if t.len() >= 7 && t[..7].eq_ignore_ascii_case("bearer ") { t[7..].trim().to_string() } else { t.to_string() }
+        })
+        .unwrap_or_default();
+    let Some(authed) = devices.authenticate(&bearer) else {
+        send(&mut stream, "401 Unauthorized", "device not authorized");
+        return;
+    };
+    // Member-only remote chat: an operator credential is refused on the WG socket (sol #6). Remote
+    // full-console execution never happens; the operator console is loopback-only.
+    if authed.is_operator() {
+        send(&mut stream, "403 Forbidden", "operator devices are local-only; pair a member device for remote chat");
+        return;
+    }
+    // No delegation from members: an X-YM-Person that differs from the bound person is refused.
+    if let Some(p) = header_value(&head, "x-ym-person:").filter(|p| !p.trim().is_empty()) {
+        if p.trim() != authed.chat_person() {
+            send(&mut stream, "403 Forbidden", "device may not speak as another person");
+            return;
+        }
+    }
+
+    let clen: usize = header_value(&head, "content-length:").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    if clen > 65_536 {
+        send(&mut stream, "413 Payload Too Large", "");
+        return;
+    }
+    let mut body = buf[hend + 4..].to_vec();
+    while body.len() < clen {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&tmp[..n]),
+            Err(_) => break,
+        }
+    }
+    let body = String::from_utf8_lossy(&body).trim().to_string();
+    if body.is_empty() {
+        send(&mut stream, "400 Bad Request", "(empty message)");
+        return;
+    }
+    // Principal-scoped turn as the device's bound person (never Operator).
+    let ident = mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false);
+    let reply = rt.block_on(conv.handle_turn_as(&body, ident)).unwrap_or_else(|e| format!("(error: {e})"));
+    send(&mut stream, "200 OK", &reply);
+}
+
 /// The family-frame listener: LAN-exposed, token-guarded, read-only. Serves ONE thing — today's
 /// photo pick — so a wall tablet can live on it. Enabled only when YM_FRAME_TOKEN is set.
 fn spawn_frame_server(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
@@ -752,8 +957,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // with the telegram channel (one mind, two surfaces). Bound to 127.0.0.1 only, and AUTHENTICATED
     // against the device store (ARCH-2). Disable with YM_CTL=off.
     match &devices {
-        Some(d) => spawn_control_server(conv.clone(), d.clone(), tokio::runtime::Handle::current()),
-        None => eprintln!("[ctl] control endpoint DISABLED — device store unavailable (fail-closed). Fix the store, then restart."),
+        Some(d) => {
+            spawn_control_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
+            // ARCH-2 WireGuard slice: the separate, member-only /chat listener for a paired phone over
+            // WireGuard. Disabled unless YM_CHAT_BIND is set to the WG interface IP (fail-closed config).
+            spawn_chat_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
+        }
+        None => eprintln!("[ctl] control + chat endpoints DISABLED — device store unavailable (fail-closed). Fix the store, then restart."),
     }
     spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
 
@@ -1684,7 +1894,7 @@ mod tests {
     }
 
     // ── ARCH-2 slice-1 acceptance: the authenticated control-server gate ──
-    use super::{ctl_handle, find_sub};
+    use super::{chat_handle, ctl_handle, find_sub};
     use mind_conversation::ConversationEngine;
     use mind_governance::devices::{DeviceRole, DeviceStore};
     use std::io::{Read, Write};
@@ -1774,6 +1984,85 @@ mod tests {
         let dev_id = store.list().into_iter().find(|d| d.name == "asha-phone").unwrap().id;
         store.revoke(&dev_id).unwrap();
         let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{host}Authorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 401, "a revoked device must be refused immediately");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Spawn the WG chat handler on an ephemeral port with a fixed expected Host.
+    fn spawn_chat_gate(conv: Arc<ConversationEngine>, devices: Arc<DeviceStore>, host: String) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rt = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (conv, devices, rt, host) = (conv.clone(), devices.clone(), rt.clone(), host.clone());
+                std::thread::spawn(move || chat_handle(stream, conv, devices, rt, &host));
+            }
+        });
+        addr
+    }
+
+    /// ARCH-2 WireGuard slice acceptance: the WG chat listener serves ONLY member `/chat` (+ content-free
+    /// `/status`). The operator console is not reachable here (`/cli` is 404, operator tokens are 403),
+    /// browser origins are refused, the Host must be canonical, and auth is fail-closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wg_chat_listener_is_member_only_and_has_no_console() {
+        use mind_inference::{InferencePool, ScriptedLLM};
+        use mind_memory::MemoryHandle;
+        use yantrik_ml::LLMBackend;
+
+        let dir = std::env::temp_dir().join(format!("ym_wgchat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(DeviceStore::open(&dir).unwrap());
+        store.init_console_once("primary").unwrap();
+        let console = std::fs::read_to_string(dir.join("console.token")).unwrap().trim().to_string();
+        let member = store.pair("asha-phone", DeviceRole::Member { person: "asha".into() }).unwrap().expose().to_string();
+
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = Arc::new(crate::engine(&mem, pool));
+        let expected = "wg.local:8078";
+        let addr = spawn_chat_gate(conv, store.clone(), expected.to_string());
+        let h = format!("Host: {expected}\r\n");
+
+        // Content-free status is open.
+        let (code, body) = req(addr, &format!("GET /status HTTP/1.1\r\n{h}Connection: close\r\n\r\n"));
+        assert_eq!((code, body.as_str()), (200, "ok"));
+
+        // Member /chat works.
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{h}Authorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 200, "member /chat must work over WG");
+
+        // The OPERATOR console token is refused on this socket (member-only remote chat).
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{h}Authorization: Bearer {console}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 403, "operator devices are local-only on the WG chat listener");
+
+        // /cli does not exist here — 404 even with the operator token.
+        let (code, _) = req(addr, &format!("POST /cli HTTP/1.1\r\n{h}Authorization: Bearer {console}\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnow"));
+        assert_eq!(code, 404, "the operator console must not be routable over WireGuard");
+
+        // Wrong Host → 403 (anti-rebinding policy filter).
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 403, "a non-canonical Host must be refused");
+
+        // A browser request (Origin present) → 403 (native-only policy).
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{h}Origin: https://evil.example\r\nAuthorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 403, "browser origins are refused");
+
+        // No token → 401.
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{h}Content-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 401, "unauthenticated /chat must be refused");
+
+        // A member impersonating another person via X-YM-Person → 403.
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{h}Authorization: Bearer {member}\r\nX-YM-Person: bob\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
+        assert_eq!(code, 403, "a member may not speak as another person");
+
+        // Revoke → immediate 401.
+        let dev_id = store.list().into_iter().find(|d| d.name == "asha-phone").unwrap().id;
+        store.revoke(&dev_id).unwrap();
+        let (code, _) = req(addr, &format!("POST /chat HTTP/1.1\r\n{h}Authorization: Bearer {member}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"));
         assert_eq!(code, 401, "a revoked device must be refused immediately");
 
         let _ = std::fs::remove_dir_all(&dir);

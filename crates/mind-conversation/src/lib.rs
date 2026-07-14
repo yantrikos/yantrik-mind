@@ -45,6 +45,7 @@ mod studio;
 mod timeline;
 mod support;
 pub mod support_nudge;
+mod tool_catalog;
 mod treasury;
 
 use mind_agents::SubAgent;
@@ -5941,10 +5942,37 @@ impl ConversationEngine {
             }
             "discover_tools" | "search_skills" => {
                 let q = s("query");
-                match self.memory.recall_skills(&q, 6).await {
-                    Ok(hits) if !hits.is_empty() => "Skills that may fit (run with run_skill {name, target}):\n".to_string()
-                        + &hits.iter().map(|s| format!("- {} [{}]: {}", s.name, s.lang, s.summary)).collect::<Vec<_>>().join("\n"),
-                    _ => "(no saved skill matches — use build_capability to create one, then run_skill it)".to_string(),
+                // The escape hatch of the retrieval-gated catalog: search the FULL native/plugin/MCP
+                // tool set (not just the skill library), so a tool abbreviated to name-only in the
+                // loop prompt gets its full description back on demand.
+                let native = {
+                    let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
+                    let mcp = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
+                    let src = format!(
+                        "{}\n{plugin_catalog}\n{}\n{mcp}",
+                        tool_catalog::CORE_HEAD,
+                        tool_catalog::LIFE_LINES
+                    );
+                    tool_catalog::search_lines(&q, &src, 6)
+                };
+                let mut out = String::new();
+                if !native.is_empty() {
+                    out.push_str("Native tools that may fit (call directly by name with JSON args):\n");
+                    out.push_str(&native.join("\n"));
+                }
+                if let Ok(hits) = self.memory.recall_skills(&q, 6).await {
+                    if !hits.is_empty() {
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str("Skills that may fit (run with run_skill {name, target}):\n");
+                        out.push_str(&hits.iter().map(|s| format!("- {} [{}]: {}", s.name, s.lang, s.summary)).collect::<Vec<_>>().join("\n"));
+                    }
+                }
+                if out.is_empty() {
+                    "(no tool or saved skill matches — use build_capability to create one, then run_skill it)".to_string()
+                } else {
+                    out
                 }
             }
             "build_capability" => {
@@ -6162,70 +6190,20 @@ Open reminders you're carrying for them:");
         // The MCP force-multiplier: whatever integrations have connected expose their tools here,
         // appended live to the catalog so the model can select `mcp.<server>.<tool>` directly.
         let mcp_line = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
-        // CORE tools (always on) + the SKILL LIBRARY section. The PLUGIN tools in between are generated
-        // from the registry's ENABLED entries (a disabled plugin simply isn't offered) — so capabilities
-        // are configured, not hardcoded into this prompt.
-        const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per step):\n\
-- recall {query}: search your typed memory\n\
-- remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
-- add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
-- now {}: the current date and time\n\
-PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
-        // NATIVE life/shopping capabilities — always available, and preferred over building a skill for
-        // these tasks (the deal-tracker-skill confabulation came from these NOT being in the catalog).
-        const LIFE_SECTION: &str = "\nLIFE & SHOPPING TOOLS (native — prefer these; do NOT build a skill for these tasks):\n\
-- deals {query, budget?}: find + compare REAL deals on something (great for gifts — I factor in who it's for + budget)\n\
-- watch_price {query, target?}: start tracking an item's price and ping on a real drop / when it hits a target\n\
-- watches {}: list what I'm currently price-watching\n\
-- learn_about {url}: follow a link and learn about a person/thing (recursive: their profiles too)\n\
-- track_subject {subject}: keep a living, evolving understanding of an ongoing topic (re-run → what changed)\n\
-- patterns {}: surface non-obvious patterns across what I know about the user\n\
-- family {}: the people I keep track of + their upcoming key dates\n\
-- about_person {name}: what I know about someone in the user's life\n\
-- calendar {}: the unified upcoming view · calendar_add {text}: add an event (Dinner on July 4 at 7pm)\n\
-- calendar_remove {title}: remove a calendar event by (partial) title — USE THIS when the user says an event/date is wrong or should go\n\
-- forget_date {name, label}: remove one dated entry (e.g. open house) from a person's profile — the other place a wrong date can live\n\
-- see_page {url, question?}: render a page in the real browser, screenshot it, and ANALYZE the image — use when text extraction fails or layout/visuals matter\n\
-- photo_send {query}: find a REAL photo in the user's own libraries (face-matched people + semantic search over the whole archive) and SEND it to the chat — use for ANY 'show/send me a photo/pic of X', including events like 'our wedding'\n\
-- photo_patterns {name?}: read someone's photos and learn their style/preferences (no name = recent across libraries)\n\
-- ask_whois {}: send the next unknown-face 'who is this?' question to the chat\n\
-- growup_reel {name}: build a time-lapse FILM of a person growing up (best face per month across the whole photo archive) and send it — pure magic for family\n\
-- on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
-- enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
-- gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
-- inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action / from-people / money-in-motion / purchases / noise, with body-peek state verification (read-only)\n\
-- mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
-- mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
-- self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
-- bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop\n\
-- trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
-- event_ledger {query?}: heavily-photographed DAYS related to family dates and occasions (birthday parties, pujas, ceremonies) — list or look one up; unknown days get asked about\n\
-- life_horizon {}: the PROJECTED life — annual patterns from the family's own rhythms (festivals, recurring visits) with next dates and evidence\n\
-- festival_calendar {}: the Bengali Hindu festival year — per-year resolved dates (lunar calendar) + what each festival is\n\
-- traditions {}: the family's per-festival traditions (photoshoots, feasts) — weather-dependent ones get forecast-planned day suggestions\n\
-- family_book {year?}: the family's living biography compiled from the archive — chapters per year, open questions, exportable volume\n\
-- then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
-- find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
-- share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back\n\
-- style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
-- family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
-- nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
-- self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
-- plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all\n\
-- mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders. Results ARE the answer — never fetch links or sign-in pages from email bodies\n\
-- onedrive {action}: read the family's OLDER photo years from OneDrive (pre-Immich) — status/auth/find <date-range>/onthisday. Read-only\n\
-- photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
-- person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
-- taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
-- photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim\n\
-- NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly";
-        const SKILL_SECTION: &str = "\nSKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
-- discover_tools {query}: SEARCH your skill library for a capability that fits the task — ALWAYS try this before assuming you can't do something\n\
-- run_skill {name, target, url?}: run a skill you found via discover_tools\n\
-- build_capability {name, summary, recipe}: create a NEW reusable skill when discover_tools finds nothing — then run_skill it\n\
-- answer {text}: give the user your final reply";
+        // HYBRID RETRIEVAL-GATED CATALOG (Tier's design; see tool_catalog.rs): core + pinned +
+        // top-K relevant tools rendered in full, everything else abbreviated to a NAME-ONLY tail —
+        // never removed (an absent tool made the model confabulate the capability: the deal-tracker
+        // scar). The plugin lines come from the registry's ENABLED entries (a disabled plugin isn't
+        // offered at all); dispatch below accepts any enabled tool however it was rendered here.
         let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
-        let tools = format!("{CORE_HEAD}\n{plugin_catalog}\n{LIFE_SECTION}\n{SKILL_SECTION}");
+        let gated_src = format!("{plugin_catalog}\n{}\n{mcp_line}", tool_catalog::LIFE_LINES);
+        let (detailed, name_tail) = tool_catalog::gate_catalog(user_text, &gated_src);
+        let tools = format!(
+            "{}\n{detailed}\n{}\n{}\n{name_tail}",
+            tool_catalog::CORE_HEAD,
+            tool_catalog::NEVER_RULE,
+            tool_catalog::SKILL_SECTION
+        );
         let now = now_str();
         // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
@@ -6243,7 +6221,7 @@ PLUGIN TOOLS (enabled capabilities — the user can toggle these):";
                 format!("You have {steps_left} tool-steps left before you must give the final answer — prefer answering as soon as you can.")
             };
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}{mcp_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Output ONLY the JSON.",
+                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Output ONLY the JSON.",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let messages = vec![

@@ -35,6 +35,9 @@ pub enum Grade {
     /// The prompt on model call `i` (0-based) contains this substring — e.g. an observation fed
     /// forward, the "FAILED" guidance, or the step-budget note.
     PromptAtContains(usize, String),
+    /// The prompt on model call `i` does NOT contain this substring — e.g. an irrelevant tool's
+    /// detail line gated out of the catalog (the retrieval-gating token-cut property).
+    PromptAtOmits(usize, String),
 }
 
 /// One agent-loop scenario: seed memory, a scripted reply SEQUENCE, the user turn, and graders.
@@ -93,6 +96,10 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
             Grade::PromptAtContains(i, x) => (
                 format!("prompt[{i}] contains '{x}'"),
                 seq.prompt_at(*i).contains(x.as_str()),
+            ),
+            Grade::PromptAtOmits(i, x) => (
+                format!("prompt[{i}] omits '{x}'"),
+                !seq.prompt_at(*i).contains(x.as_str()),
             ),
         };
         checks.push(CheckResult { desc, pass });
@@ -198,6 +205,55 @@ pub fn loop_suite() -> Vec<LoopScenario> {
             grades: vec![
                 Grade::PromptAtContains(1, "FAILED".into()), // failure guidance injected
                 Grade::AnswerContains("couldn't reach GitHub".into()),
+            ],
+        },
+        // 5. Retrieval-gating (Tier hybrid): a message-relevant tool keeps its full detail line,
+        //    an irrelevant one is abbreviated to its NAME in the tail — smaller prompt, but the
+        //    tool stays visible (an absent tool → confabulation was the original scar).
+        LoopScenario {
+            name: "gated catalog: relevant detailed, irrelevant name-only".into(),
+            seeds: vec![],
+            replies: vec![
+                call("weather", serde_json::json!({ "place": "pune" })),
+                answer("Sunny in Pune today."),
+            ],
+            turn: "what's the weather in pune?".into(),
+            grades: vec![
+                Grade::PromptAtContains(0, "- weather {place}".into()), // relevant → full line
+                Grade::PromptAtOmits(0, "growup_reel {name}".into()),   // irrelevant → no detail line
+                Grade::PromptAtContains(0, "growup_reel".into()),       // …but the NAME survives in the tail
+                Grade::AnswerContains("Sunny in Pune".into()),
+            ],
+        },
+        // 6. Every tool reachable: a tool rendered NAME-ONLY for this turn must still dispatch
+        //    when called — gating is prompt-presentation, never a capability wall.
+        LoopScenario {
+            name: "name-only tail tool still dispatches".into(),
+            seeds: vec![],
+            replies: vec![
+                call("home", serde_json::json!({})), // irrelevant to the turn → name-only in the catalog
+                answer("The house systems look fine."),
+            ],
+            turn: "what color is teal?".into(),
+            grades: vec![
+                Grade::PromptAtOmits(0, "- home {}".into()), // gated out of the detailed section
+                Grade::PromptAtContains(1, "home".into()),   // yet the call ran: its result is in the work log
+                Grade::AnswerContains("house systems look fine".into()),
+            ],
+        },
+        // 7. The escape hatch: discover_tools searches the NATIVE catalog too, so a gated-out tool's
+        //    full description is one call away (not just the skill library).
+        LoopScenario {
+            name: "discover_tools surfaces a gated native tool".into(),
+            seeds: vec![],
+            replies: vec![
+                call("discover_tools", serde_json::json!({ "query": "track a price drop" })),
+                answer("I can watch that price for you — say the word."),
+            ],
+            turn: "help me with something".into(),
+            grades: vec![
+                Grade::PromptAtContains(1, "watch_price".into()), // the native tool came back with detail
+                Grade::AnswerContains("watch that price".into()),
             ],
         },
     ]

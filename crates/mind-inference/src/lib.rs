@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use yantrik_ml::{ChatMessage, GenerationConfig, LLMBackend, LLMResponse};
+use yantrik_ml::{ChatMessage, GenerationConfig, LLMBackend, LLMResponse, ToolCall};
 
 /// NIGHT SHIFT privacy lanes. Every inference request declares what class of data rides in the
 /// prompt; the facade routes or REFUSES based on where the backing provider runs. This is the wall
@@ -188,6 +188,20 @@ impl InferencePool {
         config: GenerationConfig,
         scope: PrivacyScope,
     ) -> anyhow::Result<LLMResponse> {
+        self.chat_scoped_tools(messages, config, scope, Vec::new()).await
+    }
+
+    /// Scope-aware chat WITH native function-calling: `tools` is the OpenAI-format schema list
+    /// forwarded to the backend (which adapts it to Anthropic/Ollama). A tool-capable backend
+    /// returns structured `tool_calls`; a backend that ignores the param degrades to free-text (the
+    /// caller keeps its text-JSON fallback). An empty list is identical to plain `chat_scoped`.
+    pub async fn chat_scoped_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        scope: PrivacyScope,
+        tools: Vec<serde_json::Value>,
+    ) -> anyhow::Result<LLMResponse> {
         use std::sync::atomic::Ordering;
         let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
         let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
@@ -215,7 +229,8 @@ impl InferencePool {
         let backend = self.backend.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
-            backend.chat(&messages, &config, None)
+            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+            backend.chat(&messages, &config, tools_ref)
         })
         .await?
     }
@@ -231,7 +246,22 @@ impl InferencePool {
         messages: Vec<ChatMessage>,
         config: GenerationConfig,
     ) -> anyhow::Result<LLMResponse> {
-        match self.chat_scoped(messages.clone(), config.clone(), PrivacyScope::Private).await {
+        self.chat_grounded_tools(messages, config, Vec::new()).await
+    }
+
+    /// Private-grounded chat WITH native function-calling — same private-lane-first / audited
+    /// escalation policy as [`chat_grounded`], but forwards the tool schema list so a tool-capable
+    /// backend returns structured `tool_calls`. This is the agent loop's inference entry point.
+    pub async fn chat_grounded_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        tools: Vec<serde_json::Value>,
+    ) -> anyhow::Result<LLMResponse> {
+        match self
+            .chat_scoped_tools(messages.clone(), config.clone(), PrivacyScope::Private, tools.clone())
+            .await
+        {
             Ok(r) => Ok(r), // served locally — private context stayed home
             Err(_) => {
                 PRIVACY_ESCALATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -239,7 +269,7 @@ impl InferencePool {
                     "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — no owned-hardware provider in YM_PRIVATE_PROVIDERS; configure one to keep private context home",
                     self.provider
                 );
-                self.chat_scoped(messages, config, PrivacyScope::Household).await
+                self.chat_scoped_tools(messages, config, PrivacyScope::Household, tools).await
             }
         }
     }
@@ -343,17 +373,37 @@ impl LLMBackend for ScriptedLLM {
 /// loop fed the model on each step. This is the enabling primitive for a deterministic agent-loop eval.
 pub struct SequencedLLM {
     replies: Vec<String>,
+    /// Optional NATIVE tool call scripted for each call — `native[i]`, when `Some`, is returned in
+    /// `LLMResponse.tool_calls` (structured function-calling path) instead of relying on the text
+    /// carrying a free-text JSON blob. Empty/short vec ⇒ no native call for that step. This is what
+    /// lets a scenario exercise the native function-calling loop with no real model.
+    native: Vec<Option<ToolCall>>,
     calls: std::sync::atomic::AtomicUsize,
     prompts: std::sync::Mutex<Vec<String>>,
+    /// The `tools` param (the OpenAI-format schema list) seen on each call — so an eval can assert
+    /// the loop actually PASSED tool schemas to the backend (the native-calling migration property).
+    tools_seen: std::sync::Mutex<Vec<Vec<serde_json::Value>>>,
 }
 
 impl SequencedLLM {
     pub fn new(replies: Vec<impl Into<String>>) -> Self {
         Self {
             replies: replies.into_iter().map(Into::into).collect(),
+            native: Vec::new(),
             calls: std::sync::atomic::AtomicUsize::new(0),
             prompts: std::sync::Mutex::new(Vec::new()),
+            tools_seen: std::sync::Mutex::new(Vec::new()),
         }
+    }
+    /// Script a NATIVE tool call for each step (parallel to `replies`): `Some((name, args))` makes
+    /// call `i` return that structured tool call; `None` leaves it a text-only reply. Extra text in
+    /// `replies[i]` still rides along (mirrors a model that emits both content and a tool call).
+    pub fn with_native(mut self, native: Vec<Option<(&str, serde_json::Value)>>) -> Self {
+        self.native = native
+            .into_iter()
+            .map(|o| o.map(|(name, arguments)| ToolCall { name: name.to_string(), arguments }))
+            .collect();
+        self
     }
     /// How many times the model was called (loop steps + compose).
     pub fn call_count(&self) -> usize {
@@ -367,6 +417,10 @@ impl SequencedLLM {
     pub fn prompt_at(&self, i: usize) -> String {
         self.prompts.lock().unwrap().get(i).cloned().unwrap_or_default()
     }
+    /// The tool schemas passed on call `i` (0-based), or empty if none/out of range.
+    pub fn tools_at(&self, i: usize) -> Vec<serde_json::Value> {
+        self.tools_seen.lock().unwrap().get(i).cloned().unwrap_or_default()
+    }
 }
 
 impl LLMBackend for SequencedLLM {
@@ -374,10 +428,11 @@ impl LLMBackend for SequencedLLM {
         &self,
         messages: &[ChatMessage],
         _config: &GenerationConfig,
-        _tools: Option<&[serde_json::Value]>,
+        tools: Option<&[serde_json::Value]>,
     ) -> anyhow::Result<LLMResponse> {
         let all = messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
         self.prompts.lock().unwrap().push(all);
+        self.tools_seen.lock().unwrap().push(tools.map(|t| t.to_vec()).unwrap_or_default());
         let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let reply = self
             .replies
@@ -385,13 +440,15 @@ impl LLMBackend for SequencedLLM {
             .or_else(|| self.replies.last())
             .cloned()
             .unwrap_or_default();
+        let tool_calls = self.native.get(i).cloned().flatten().into_iter().collect::<Vec<_>>();
+        let stop_reason = if tool_calls.is_empty() { "stop" } else { "tool_calls" }.to_string();
         Ok(LLMResponse {
             text: reply,
             prompt_tokens: 0,
             completion_tokens: 0,
-            tool_calls: vec![],
+            tool_calls,
             api_tool_calls: vec![],
-            stop_reason: "stop".into(),
+            stop_reason,
         })
     }
     fn chat_streaming(

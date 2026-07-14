@@ -6204,6 +6204,12 @@ Open reminders you're carrying for them:");
             tool_catalog::NEVER_RULE,
             tool_catalog::SKILL_SECTION
         );
+        // NATIVE FUNCTION-CALLING: the structured OpenAI-format schemas for the SAME detailed set,
+        // forwarded to the backend so a tool-capable model returns typed `tool_calls` instead of a
+        // free-text JSON blob (killing the parse-fragility + publish_page-salvage hacks). Backends
+        // that ignore the `tools` param fall back to parsing the prose catalog above — so the prose
+        // stays authoritative for them and the name-only tail remains reachable via that path.
+        let schemas = tool_catalog::tool_schemas(user_text, &gated_src);
         let now = now_str();
         // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
@@ -6232,17 +6238,36 @@ Open reminders you're carrying for them:");
             // PRIVATE-GROUNDED: this turn carries the speaker's private memory grounding, so it must
             // PREFER the private (owned-hardware) lane and only escalate to cloud with an audit —
             // Sol's Constitutional-Kernel first rung (was an unscoped Household call = silent leak).
-            let text = match self.inference.chat_grounded(messages, cfg.clone()).await {
-                Ok(r) => r.text,
+            let resp = match self.inference.chat_grounded_tools(messages, cfg.clone(), schemas.clone()).await {
+                Ok(r) => r,
                 Err(e) => return Ok(format!("(couldn't think just now: {e})")),
             };
-            let body = text.rsplit("</think>").next().unwrap_or(&text);
-            let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
-            let obj = match (body.find('{'), body.rfind('}')) {
-                (Some(a), Some(b)) if b > a => &body[a..=b],
-                _ => "",
+            let text = resp.text;
+            // SOURCE-AGNOSTIC INTENT: prefer the model's NATIVE structured tool call (reliable args,
+            // no string-slicing); fall back to parsing a free-text JSON object from the reply for
+            // backends that don't do tool-calling. Either way we produce the same `{tool,args}` /
+            // `{answer}` shape the rest of the loop already consumes, so every downstream guard
+            // (egress, exact-value, loop-guard, terminal tools, failed-tool, compose) is unchanged.
+            // `body` is the raw slice the publish_page salvage inspects — empty on the native path,
+            // where structured args mean there is no truncated blob to rescue.
+            let (v, body): (serde_json::Value, String) = match resp.tool_calls.into_iter().next() {
+                Some(tc) if tc.name == "answer" => {
+                    // Some backends model the final reply as an answer(text) call — normalize it.
+                    let ans = tc.arguments.get("text").and_then(|x| x.as_str()).unwrap_or_default();
+                    (serde_json::json!({ "answer": ans }), String::new())
+                }
+                Some(tc) => (serde_json::json!({ "tool": tc.name, "args": tc.arguments }), String::new()),
+                None => {
+                    let body = text.rsplit("</think>").next().unwrap_or(&text);
+                    let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+                    let obj = match (body.find('{'), body.rfind('}')) {
+                        (Some(a), Some(b)) if b > a => &body[a..=b],
+                        _ => "",
+                    };
+                    (serde_json::from_str(obj).unwrap_or(serde_json::json!({})), body.to_string())
+                }
             };
-            let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+            let body = body.as_str();
             // Recover a broken/truncated publish_page call: pull the html out of the (unparseable) blob
             // and HOST it — never let the raw JSON wrapper fall through and get published as a "page".
             let parsed = v.get("answer").is_some() || v.get("tool").is_some();

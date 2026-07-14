@@ -38,6 +38,9 @@ pub enum Grade {
     /// The prompt on model call `i` does NOT contain this substring — e.g. an irrelevant tool's
     /// detail line gated out of the catalog (the retrieval-gating token-cut property).
     PromptAtOmits(usize, String),
+    /// A native tool SCHEMA with this function name was passed to the backend on call `i` — the
+    /// core property of the function-calling migration (the loop hands the model structured tools).
+    SchemaAt(usize, String),
 }
 
 /// One agent-loop scenario: seed memory, a scripted reply SEQUENCE, the user turn, and graders.
@@ -49,8 +52,18 @@ pub struct LoopScenario {
     /// is either a tool-call JSON `{"thought":"…","tool":"…","args":{…}}` or an answer
     /// `{"thought":"…","answer":"…"}`; the compose step takes its reply as plain text.
     pub replies: Vec<String>,
+    /// Optional NATIVE tool call scripted per step (parallel to `replies`): `Some((tool, args))`
+    /// makes that step return a STRUCTURED function call (the native path) instead of a free-text
+    /// JSON blob. Empty ⇒ every step is free-text (the fallback path). Lets one suite exercise both.
+    pub native: Vec<Option<(String, serde_json::Value)>>,
     pub turn: String,
     pub grades: Vec<Grade>,
+}
+
+/// Build a native-call scenario step: `(reply_text, Some((tool, args)))`. The reply text can be
+/// empty — a native model carries its intent in the structured call, not the content.
+fn native(tool: &str, args: serde_json::Value) -> Option<(String, serde_json::Value)> {
+    Some((tool.to_string(), args))
 }
 
 /// Run one loop scenario against a fresh in-memory mind driven by a `SequencedLLM`.
@@ -67,7 +80,16 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
             })
             .await;
     }
-    let seq = Arc::new(SequencedLLM::new(s.replies.clone()));
+    let mut seq = SequencedLLM::new(s.replies.clone());
+    if !s.native.is_empty() {
+        seq = seq.with_native(
+            s.native
+                .iter()
+                .map(|o| o.as_ref().map(|(n, a)| (n.as_str(), a.clone())))
+                .collect(),
+        );
+    }
+    let seq = Arc::new(seq);
     let pool = InferencePool::new(seq.clone() as Arc<dyn LLMBackend>, 1);
     // agent_primary(true) is the default; web_fetch succeeds (ScriptedFetcher), while github/mail/home
     // are intentionally left UNCONFIGURED so calls to them return a failure observation — the harness
@@ -100,6 +122,12 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
             Grade::PromptAtOmits(i, x) => (
                 format!("prompt[{i}] omits '{x}'"),
                 !seq.prompt_at(*i).contains(x.as_str()),
+            ),
+            Grade::SchemaAt(i, name) => (
+                format!("tool schema '{name}' passed on call {i}"),
+                seq.tools_at(*i)
+                    .iter()
+                    .any(|t| t["function"]["name"].as_str() == Some(name.as_str())),
             ),
         };
         checks.push(CheckResult { desc, pass });
@@ -149,7 +177,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("web_fetch", serde_json::json!({ "url": "http://example.com" })),
                 answer("Teal is a blue-green color."),
             ],
-            turn: "what color is teal?".into(),
+            native: vec![],
+            turn:"what color is teal?".into(),
             grades: vec![
                 Grade::PromptAtContains(1, "WEBDOC".into()), // the tool obs reached the next step
                 Grade::AnswerContains("Teal is a blue-green".into()),
@@ -169,7 +198,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("home", serde_json::json!({})),
                 answer("Here's the home status."),
             ],
-            turn: "check the house".into(),
+            native: vec![],
+            turn:"check the house".into(),
             // step 0 (home) + step 1 (identical → break) + compose = 3 calls, not 5+compose.
             grades: vec![Grade::MaxCalls(3)],
         },
@@ -186,7 +216,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("crypto", serde_json::json!({ "coin": "btc" })),
                 "Composed answer from the work log.".into(), // the compose call (plain text)
             ],
-            turn: "do a bunch of lookups".into(),
+            native: vec![],
+            turn:"do a bunch of lookups".into(),
             grades: vec![
                 Grade::MinCalls(6), // 5 loop steps + 1 compose
                 Grade::AnswerContains("Composed answer".into()),
@@ -201,7 +232,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("github_repo_items", serde_json::json!({ "repo": "acme/x" })), // github unconfigured → fails
                 answer("I couldn't reach GitHub."),
             ],
-            turn: "what are my open PRs?".into(),
+            native: vec![],
+            turn:"what are my open PRs?".into(),
             grades: vec![
                 Grade::PromptAtContains(1, "FAILED".into()), // failure guidance injected
                 Grade::AnswerContains("couldn't reach GitHub".into()),
@@ -217,7 +249,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("weather", serde_json::json!({ "place": "pune" })),
                 answer("Sunny in Pune today."),
             ],
-            turn: "what's the weather in pune?".into(),
+            native: vec![],
+            turn:"what's the weather in pune?".into(),
             grades: vec![
                 Grade::PromptAtContains(0, "- weather {place}".into()), // relevant → full line
                 Grade::PromptAtOmits(0, "growup_reel {name}".into()),   // irrelevant → no detail line
@@ -234,7 +267,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("home", serde_json::json!({})), // irrelevant to the turn → name-only in the catalog
                 answer("The house systems look fine."),
             ],
-            turn: "what color is teal?".into(),
+            native: vec![],
+            turn:"what color is teal?".into(),
             grades: vec![
                 Grade::PromptAtOmits(0, "- home {}".into()), // gated out of the detailed section
                 Grade::PromptAtContains(1, "home".into()),   // yet the call ran: its result is in the work log
@@ -250,10 +284,66 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 call("discover_tools", serde_json::json!({ "query": "track a price drop" })),
                 answer("I can watch that price for you — say the word."),
             ],
-            turn: "help me with something".into(),
+            native: vec![],
+            turn:"help me with something".into(),
             grades: vec![
                 Grade::PromptAtContains(1, "watch_price".into()), // the native tool came back with detail
                 Grade::AnswerContains("watch that price".into()),
+            ],
+        },
+        // 8. NATIVE FUNCTION-CALLING dispatch: step 0 returns a STRUCTURED tool call (not free-text
+        //    JSON), the loop dispatches it, and the observation feeds forward exactly as on the
+        //    free-text path. Also proves the loop PASSED tool schemas to the backend.
+        LoopScenario {
+            name: "native tool call dispatches, observation feeds forward".into(),
+            seeds: vec![],
+            replies: vec![
+                String::new(),                       // native model carries intent in the call, not content
+                answer("Teal is a blue-green color."), // step 1: free-text answer (fallback path still works)
+            ],
+            native: vec![
+                native("web_fetch", serde_json::json!({ "url": "http://example.com" })),
+                None,
+            ],
+            turn: "what color is teal?".into(),
+            grades: vec![
+                Grade::SchemaAt(0, "recall".into()),        // core schema always offered
+                Grade::SchemaAt(0, "web_fetch".into()),     // the tool it called was in the schema set
+                Grade::PromptAtContains(1, "WEBDOC".into()), // native call dispatched → obs fed forward
+                Grade::AnswerContains("Teal is a blue-green".into()),
+                Grade::MaxCalls(2),
+            ],
+        },
+        // 9. NATIVE ANSWER: a backend that models the final reply as an answer(text) tool call is
+        //    normalized to a plain answer (no extra compose call, no JSON leaking into the chat).
+        LoopScenario {
+            name: "native answer(text) call returns the reply".into(),
+            seeds: vec![],
+            replies: vec![String::new()],
+            native: vec![native("answer", serde_json::json!({ "text": "All good at home." }))],
+            turn: "everything ok at the house?".into(),
+            grades: vec![
+                Grade::AnswerContains("All good at home".into()),
+                Grade::AnswerOmits("{".into()), // no raw JSON in the user-facing reply
+                Grade::MaxCalls(1),
+            ],
+        },
+        // 10. SCHEMA/PROSE LOCKSTEP: the native schema set mirrors the gated prose — a message-
+        //     relevant tool gets a schema, and the free-text fallback path STILL receives schemas
+        //     (belt-and-suspenders: a non-tool-calling model can ignore them, a capable one can't).
+        LoopScenario {
+            name: "schemas passed mirror the gated set (free-text path too)".into(),
+            seeds: vec![],
+            replies: vec![
+                call("weather", serde_json::json!({ "place": "pune" })), // free-text call (no native)
+                answer("It's sunny in Pune."),
+            ],
+            native: vec![],
+            turn: "what's the weather in pune?".into(),
+            grades: vec![
+                Grade::SchemaAt(0, "weather".into()), // relevant tool → schema present (mirrors prose gate)
+                Grade::SchemaAt(0, "now".into()),     // core always present
+                Grade::AnswerContains("sunny in Pune".into()),
             ],
         },
     ]

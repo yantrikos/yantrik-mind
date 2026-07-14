@@ -12,6 +12,7 @@
 //! Gating is PROMPT-PRESENTATION ONLY. Dispatch (`run_agent_tool_as`) accepts every enabled tool
 //! regardless of how it was rendered, so "every tool reachable" is structural, not statistical.
 
+use serde_json::{json, Value};
 use std::collections::HashSet;
 
 /// Core tools + the header for the gated (relevance-ranked) section that follows.
@@ -166,6 +167,137 @@ pub(crate) fn gate_catalog(user_text: &str, gated_lines: &str) -> (String, Strin
     (detailed.join("\n"), tail_line)
 }
 
+// ── NATIVE FUNCTION-CALLING schemas ─────────────────────────────────────────────────────────────
+// The agent loop passes OpenAI-format tool schemas to the backend (which yantrik-ml adapts to the
+// Anthropic/Ollama shapes). A tool-capable model then returns STRUCTURED tool_calls instead of a
+// free-text JSON blob — killing the parse-fragility + publish_page-salvage hacks. The schema set is
+// derived from the SAME gated catalog lines the prose surface shows, so the two never drift; the
+// free-text catalog + parser stay as the fallback for backends that ignore the `tools` param.
+
+/// One catalog line → OpenAI function schema(s). A line can pack two tools with a `·` separator
+/// ("- calendar {}: … · calendar_add {text}: …") — each half becomes its own schema.
+fn line_schemas(line: &str) -> Vec<Value> {
+    line.split('·').filter_map(|piece| one_schema(piece)).collect()
+}
+
+/// Parse a single "name {arg, arg2?}: description" fragment into a function schema. Returns None for
+/// header/rule lines (no lowercase tool name).
+fn one_schema(fragment: &str) -> Option<Value> {
+    let body = fragment.trim().trim_start_matches("- ").trim();
+    let name = body.split([' ', '{', ':']).next().unwrap_or("").trim();
+    if name.is_empty() || name.chars().all(|c| !c.is_lowercase()) {
+        return None;
+    }
+    // Args inside {...}: each becomes a property; a trailing `?` marks it optional. Properties are
+    // left UNTYPED (an empty schema accepts any JSON) so numeric/array args (shares, sections, html)
+    // aren't wrongly forced to string — the loop's dispatch reads args leniently either way.
+    let mut props = serde_json::Map::new();
+    let mut required: Vec<String> = Vec::new();
+    if let (Some(a), Some(b)) = (body.find('{'), body.find('}')) {
+        if b > a {
+            for raw in body[a + 1..b].split(',') {
+                let arg = raw.trim();
+                if arg.is_empty() {
+                    continue;
+                }
+                let optional = arg.ends_with('?');
+                let key = arg.trim_end_matches('?').trim();
+                if key.is_empty() {
+                    continue;
+                }
+                props.insert(key.to_string(), json!({ "description": key }));
+                if !optional {
+                    required.push(key.to_string());
+                }
+            }
+        }
+    }
+    // Description = whatever follows the `}` (or the name), stripped of the joining punctuation.
+    let after = match body.find('}') {
+        Some(b) => &body[b + 1..],
+        None => body.strip_prefix(name).unwrap_or(body),
+    };
+    let desc = after.trim_start_matches([':', ' ', '—', '-']).trim();
+    Some(function_schema(name, desc, props, required))
+}
+
+/// Assemble the OpenAI `{type:function, function:{…}}` envelope.
+fn function_schema(name: &str, desc: &str, props: serde_json::Map<String, Value>, required: Vec<String>) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {
+                "type": "object",
+                "properties": props,
+                "required": required,
+                "additionalProperties": true,
+            }
+        }
+    })
+}
+
+/// Build a schema from an explicit (arg, required) list — for the core + meta tools that live in the
+/// prompt scaffolding rather than the plugin/life catalog constants.
+fn arg_schema(name: &str, desc: &str, args: &[(&str, bool)]) -> Value {
+    let mut props = serde_json::Map::new();
+    let mut required = Vec::new();
+    for (a, req) in args {
+        props.insert((*a).to_string(), json!({ "description": a }));
+        if *req {
+            required.push((*a).to_string());
+        }
+    }
+    function_schema(name, desc, props, required)
+}
+
+/// The always-present tools that aren't in the plugin/life catalog: the CORE four + the skill
+/// meta-tools. `answer` is deliberately absent — under native calling the model answers by returning
+/// TEXT with no tool call (empty `tool_calls`), which is the standard convention.
+fn core_meta_schemas() -> Vec<Value> {
+    vec![
+        arg_schema("recall", "search your typed memory", &[("query", true)]),
+        arg_schema("remember", "store a durable fact about the user or the world", &[("text", true)]),
+        arg_schema(
+            "add_reminder",
+            "mark a date/commitment (birthday, deadline) so you follow up when it's due",
+            &[("text", true), ("when", true)],
+        ),
+        arg_schema("now", "the current date and time", &[]),
+        arg_schema(
+            "discover_tools",
+            "search your tools + skill library for a capability that fits the task",
+            &[("query", true)],
+        ),
+        arg_schema("run_skill", "run a skill you found via discover_tools", &[("name", true), ("target", false), ("url", false)]),
+        arg_schema(
+            "build_capability",
+            "create a NEW reusable skill when discover_tools finds nothing",
+            &[("name", true), ("summary", true), ("recipe", true)],
+        ),
+    ]
+}
+
+/// The native tool-schema list for this message: core + meta + a schema for every DETAILED
+/// (relevance-selected) catalog tool. Deliberately mirrors `gate_catalog`'s detailed set, so the
+/// structured surface and the prose surface list the SAME tools; the name-only tail stays
+/// prose-and-fallback-only (kept lightweight — a tail tool is reached via discover_tools + the
+/// retained free-text path). Deduped by function name (first wins).
+pub(crate) fn tool_schemas(user_text: &str, gated_src: &str) -> Vec<Value> {
+    let (detailed, _tail) = gate_catalog(user_text, gated_src);
+    let mut out = core_meta_schemas();
+    for line in detailed.lines() {
+        out.extend(line_schemas(line));
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    out.retain(|s| {
+        let name = s["function"]["name"].as_str().unwrap_or("").to_string();
+        !name.is_empty() && seen.insert(name)
+    });
+    out
+}
+
 /// Top catalog lines matching a discover_tools query — the escape hatch that turns a name-only
 /// (or forgotten) tool back into a fully-described one on demand.
 pub(crate) fn search_lines(query: &str, catalog: &str, top_n: usize) -> Vec<String> {
@@ -231,6 +363,61 @@ mod tests {
                 "hybrid catalog should be less than half the full catalog for {turn:?} ({gated_len} vs {})",
                 full.len()
             );
+        }
+    }
+
+    #[test]
+    fn schema_parses_name_args_and_required() {
+        let s = one_schema("- deals {query, budget?}: find + compare REAL deals on something").unwrap();
+        assert_eq!(s["function"]["name"], "deals");
+        assert!(s["function"]["description"].as_str().unwrap().contains("compare REAL deals"));
+        let props = &s["function"]["parameters"]["properties"];
+        assert!(props.get("query").is_some() && props.get("budget").is_some());
+        let req: Vec<&str> = s["function"]["parameters"]["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(req, vec!["query"], "budget is optional (trailing ?), query is required");
+    }
+
+    #[test]
+    fn schema_splits_dot_joined_line_into_two_tools() {
+        let two = line_schemas("- calendar {}: the unified upcoming view · calendar_add {text}: add an event");
+        let names: Vec<&str> = two.iter().map(|s| s["function"]["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["calendar", "calendar_add"], "the `·`-joined line yields both tools");
+    }
+
+    #[test]
+    fn schema_skips_rule_lines() {
+        assert!(one_schema("- NEVER claim you removed/changed a date unless a tool confirmed it").is_none());
+        assert!(line_schemas("LIFE & SHOPPING TOOLS (native):").is_empty());
+    }
+
+    #[test]
+    fn tool_schemas_always_include_core_and_exclude_answer() {
+        let schemas = tool_schemas("what's the weather in pune?", LIFE_LINES);
+        let names: HashSet<&str> = schemas.iter().map(|s| s["function"]["name"].as_str().unwrap()).collect();
+        for core in ["recall", "remember", "add_reminder", "now", "discover_tools", "run_skill", "build_capability"] {
+            assert!(names.contains(core), "core/meta schema '{core}' must always be present");
+        }
+        assert!(!names.contains("answer"), "answer is not a native tool — text with no call IS the answer");
+        // the message-relevant tool got a schema; an irrelevant one did not (mirrors the prose gate)
+        assert!(names.contains("family"), "pinned tool schema present");
+        // every schema is well-formed OpenAI shape
+        for s in &schemas {
+            assert_eq!(s["type"], "function");
+            assert!(s["function"]["parameters"]["type"] == "object");
+        }
+    }
+
+    #[test]
+    fn schema_set_stays_compact_and_relevant() {
+        let plugin_catalog = crate::plugins::PluginRegistry::builtin().enabled_catalog();
+        let full = format!("{plugin_catalog}\n{LIFE_LINES}");
+        for turn in ["what's the weather in pune?", "find me a gift for my wife", "hey, good morning!"] {
+            let schemas = tool_schemas(turn, &full);
+            let json = serde_json::to_string(&schemas).unwrap();
+            println!("{turn:?}: {} schemas, {} chars", schemas.len(), json.len());
+            // core+meta (7) plus a bounded relevant set — never the whole ~60-tool catalog.
+            assert!(schemas.len() >= 7, "core+meta always present");
+            assert!(schemas.len() <= 30, "schema set is gated, not the full catalog ({} tools)", schemas.len());
         }
     }
 

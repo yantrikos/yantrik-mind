@@ -54,7 +54,7 @@ impl Coder {
     ) -> Self {
         Self {
             base_url: base_url.into(),
-            token: token.into(),
+            token: token.into().trim().to_owned(),
             model: model.into(),
             scratch_root: scratch_root.into(),
             timeout_secs: 300,
@@ -185,5 +185,12 @@ mod tests {
             .with_oauth("  oauth-token\n");
 
         assert_eq!(coder.oauth_token.as_deref(), Some("oauth-token"));
+    }
+
+    #[test]
+    fn provider_token_trims_surrounding_whitespace() {
+        let coder = Coder::new("  provider-token\n", "model", "https://example.com", "/tmp");
+
+        assert_eq!(coder.token, "provider-token");
     }
 }

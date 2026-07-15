@@ -70,7 +70,10 @@ impl Coder {
     /// Run on real Claude via a subscription OAuth token (`claude setup-token`), instead of MiniMax.
     pub fn with_oauth(mut self, token: impl Into<String>) -> Self {
         let t = token.into();
-        self.oauth_token = if t.trim().is_empty() { None } else { Some(t) };
+        self.oauth_token = match t.trim() {
+            "" => None,
+            token => Some(token.to_owned()),
+        };
         self
     }
 
@@ -170,4 +173,17 @@ pub fn render_coder(r: &CoderResult) -> String {
         s.push_str(&format!("\nfiles ({}) in {}: {}", r.files.len(), r.workdir, r.files.join(", ")));
     }
     s.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_token_trims_surrounding_whitespace() {
+        let coder = Coder::new("fallback", "model", "https://example.com", "/tmp")
+            .with_oauth("  oauth-token\n");
+
+        assert_eq!(coder.oauth_token.as_deref(), Some("oauth-token"));
+    }
 }

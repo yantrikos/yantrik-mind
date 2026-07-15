@@ -651,14 +651,24 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         "minimax" => ("https://api.minimax.io/v1", "MINIMAX_API_KEY", "MiniMax-M2.7"),
         "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY", "deepseek/deepseek-chat"),
         "grok" => ("https://api.x.ai/v1", "GROK_API_KEY", "grok-2-latest"),
-        // Anthropic direct (OpenAI-compatible endpoint). Default Sonnet 5 (fast + cheap enough for an
+        // Anthropic direct. Default Sonnet 5 (fast + cheap enough for an
         // always-on brain); swap the model to claude-opus-4-8 or claude-fable-5 (when it un-gates).
-        "anthropic" => ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY", "claude-sonnet-5"),
+        "anthropic" => (
+            "https://api.anthropic.com",
+            "ANTHROPIC_API_KEY",
+            "claude-sonnet-5",
+        ),
         _ => return None,
     };
     let key = configured_api_key(key_env)?;
     let model = if model.is_empty() { default_model.to_string() } else { model.to_string() };
-    Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", base, Some(key), model)) as Arc<dyn LLMBackend>)
+    if provider == "anthropic" {
+        Some(Arc::new(yantrik_ml::AnthropicBackend::with_base_url(
+            key, base, model,
+        )) as Arc<dyn LLMBackend>)
+    } else {
+        Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", base, Some(key), model)) as Arc<dyn LLMBackend>)
+    }
 }
 
 /// The default resilient chain from whatever provider keys are present, in priority order
@@ -840,6 +850,20 @@ mod tests {
         std::env::set_var(key_env, "  valid-key\n");
         assert_eq!(configured_api_key(key_env).as_deref(), Some("valid-key"));
         std::env::remove_var(key_env);
+    }
+
+    #[test]
+    fn anthropic_spec_uses_anthropic_auth_backend() {
+        let key_env = "ANTHROPIC_API_KEY";
+        let previous = std::env::var_os(key_env);
+        std::env::set_var(key_env, "test-key");
+        let backend = backend_from_spec("anthropic:claude-test").expect("configured backend");
+        match previous {
+            Some(value) => std::env::set_var(key_env, value),
+            None => std::env::remove_var(key_env),
+        }
+
+        assert_eq!(backend.backend_name(), "anthropic");
     }
 
     /// Configurable test backend: `None` => errors, `Some("")` => empty reply, `Some(x)` => Ok(x).

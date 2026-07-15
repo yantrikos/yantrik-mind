@@ -232,13 +232,19 @@ fn to_belief_dto(n: &CognitiveNode) -> Belief {
     }
 }
 
-/// Normalize a proposition for dedup: lowercase, collapse whitespace, drop trailing punctuation.
+/// Normalize a proposition before storage while preserving meaningful case.
+fn normalize_belief_text(s: &str) -> String {
+    s.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '!' | '?' | ','))
+        .to_string()
+}
+
+/// Normalize a proposition for comparison: lowercase and collapse whitespace.
 /// Merges trivial formatting/case restatements ("July 23" / "july 23.") WITHOUT touching content —
 /// "…Rust is 1.70" and "…Rust is 1.96" stay DISTINCT, so contradictions remain separate nodes.
 /// (Word-overlap dedup is unsafe here: it strips the very tokens — numbers/versions — that
 /// distinguish contradicting claims.)
 fn norm_prop(s: &str) -> String {
-    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(['.', '!', '?', ',']).to_string()
+    normalize_belief_text(s).to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn find_belief(db: &YantrikDB, statement: &str) -> Option<CognitiveNode> {
@@ -256,15 +262,16 @@ fn assert_belief(
     evidence_version: Option<u64>,
 ) -> std::result::Result<Belief, String> {
     gate_write(statement)?;
-    let node = match find_belief(db, statement) {
+    let statement = normalize_belief_text(statement);
+    let node = match find_belief(db, &statement) {
         Some(n) => n,
         None => {
             let id = alloc.alloc(NodeKind::Belief);
             let mut n = CognitiveNode::new(
                 id,
-                statement.to_string(),
+                statement.clone(),
                 NodePayload::Belief(BeliefPayload {
-                    proposition: statement.to_string(),
+                    proposition: statement.clone(),
                     log_odds: 0.0,
                     domain: "general".into(),
                     evidence_trail: vec![],
@@ -283,7 +290,7 @@ fn assert_belief(
     // stored one is an out-of-order or replayed update: drop it and return the current (fresher)
     // belief unchanged so its confidence is never overwritten. The unversioned (None) legacy path
     // always advances the counter by one and is never rejected.
-    let canonical = node_prop(&node).unwrap_or(statement).to_string();
+    let canonical = node_prop(&node).unwrap_or(&statement).to_string();
     let stored_version = get_belief_evidence_version(db, &canonical);
     if let (Some(incoming), Some(current)) = (evidence_version, stored_version) {
         if incoming <= current {
@@ -2193,6 +2200,26 @@ mod tests {
         // A genuinely newer version (v4) is applied — the guard only blocks stale/replayed writes.
         let advanced = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 4).await.unwrap();
         assert!(advanced.confidence < fresh_conf, "a strictly-newer version must still apply: {}", advanced.confidence);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn belief_surface_variants_are_normalized_and_deduplicated() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let assertion = |statement: &str| BeliefAssertion {
+            statement: statement.into(),
+            polarity: 1.0,
+            weight: 1.0,
+            source_event: None,
+            provenance: "told".into(),
+        };
+
+        let first = mem.remember_as_belief(assertion("Exercise improves mood.  ")).await.unwrap();
+        let second = mem.remember_as_belief(assertion("exercise improves mood")).await.unwrap();
+
+        assert_eq!(first.statement, "Exercise improves mood");
+        assert_eq!(second.id, first.id, "case and trailing punctuation must not create another belief");
+        assert_eq!(mem.belief_count().await.unwrap(), 1);
+        assert!(mem.conflicts().await.unwrap().is_empty(), "surface variants are not contradictions");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

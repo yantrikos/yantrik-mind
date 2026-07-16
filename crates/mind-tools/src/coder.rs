@@ -29,7 +29,7 @@ pub struct Coder {
     scratch_root: String,
     timeout_secs: u64,
     /// When set, run on real Claude via the subscription OAuth token (Max-plan), dropping the MiniMax
-    /// base/model override. Falls back to MiniMax (base_url/token/model) when None.
+    /// base/model override. Falls back to MiniMax (base_url/token/model) when absent or rejected.
     oauth_token: Option<String>,
 }
 
@@ -98,27 +98,22 @@ impl Coder {
         Ok(wd)
     }
 
-    /// Run an agentic coding task. The agent works in a fresh isolated scratch dir and reports back.
-    pub async fn run(&self, task: &str) -> anyhow::Result<CoderResult> {
-        let wd = self.fresh_workdir()?;
-
+    fn command(&self, wd: &str, task: &str, use_oauth: bool) -> Command {
         let mut cmd = Command::new("claude");
-        cmd.current_dir(&wd)
+        cmd.current_dir(wd)
             .env_clear()
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .env("HOME", &wd)
+            .env("HOME", wd)
             .env("USER", "yantrikmind");
-        match &self.oauth_token {
-            // Subscription (real Claude): only the OAuth token; no MiniMax base/model override.
-            Some(tok) => {
-                cmd.env("CLAUDE_CODE_OAUTH_TOKEN", tok);
-            }
-            // Fallback: MiniMax via its Anthropic-compat endpoint.
-            None => {
-                cmd.env("ANTHROPIC_BASE_URL", &self.base_url)
-                    .env("ANTHROPIC_AUTH_TOKEN", &self.token)
-                    .env("ANTHROPIC_MODEL", &self.model);
-            }
+        if use_oauth {
+            cmd.env(
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                self.oauth_token.as_deref().unwrap_or_default(),
+            );
+        } else {
+            cmd.env("ANTHROPIC_BASE_URL", &self.base_url)
+                .env("ANTHROPIC_AUTH_TOKEN", &self.token)
+                .env("ANTHROPIC_MODEL", &self.model);
         }
         cmd.arg("-p")
             .arg(task)
@@ -130,8 +125,15 @@ impl Coder {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd
+    }
 
-        let child = cmd.spawn()?;
+    /// Run an agentic coding task. The agent works in a fresh isolated scratch dir and reports back.
+    pub async fn run(&self, task: &str) -> anyhow::Result<CoderResult> {
+        let wd = self.fresh_workdir()?;
+
+        let use_oauth = self.oauth_token.is_some();
+        let child = self.command(&wd, task, use_oauth).spawn()?;
         let out = match tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
             child.wait_with_output(),
@@ -140,6 +142,26 @@ impl Coder {
         {
             Ok(r) => r?,
             Err(_) => anyhow::bail!("coder timed out after {}s", self.timeout_secs),
+        };
+
+        let auth_error = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = if use_oauth && !self.token.is_empty() && is_revoked_oauth_error(&auth_error) {
+            let fallback = self.command(&wd, task, false).spawn()?;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(self.timeout_secs),
+                fallback.wait_with_output(),
+            )
+            .await
+            {
+                Ok(r) => r?,
+                Err(_) => anyhow::bail!("coder fallback timed out after {}s", self.timeout_secs),
+            }
+        } else {
+            out
         };
 
         let mut summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -155,8 +177,20 @@ impl Coder {
             })
             .unwrap_or_default();
 
-        Ok(CoderResult { ok: out.status.success(), summary, workdir: wd, files })
+        Ok(CoderResult {
+            ok: out.status.success(),
+            summary,
+            workdir: wd,
+            files,
+        })
     }
+}
+
+fn is_revoked_oauth_error(output: &str) -> bool {
+    let error = output.to_ascii_lowercase();
+    error.contains("401")
+        && error.contains("oauth")
+        && (error.contains("revoked") || error.contains("invalid authentication credentials"))
 }
 
 /// Render a coder result for the chat.
@@ -170,7 +204,12 @@ pub fn render_coder(r: &CoderResult) -> String {
         s.push('\n');
     }
     if !r.files.is_empty() {
-        s.push_str(&format!("\nfiles ({}) in {}: {}", r.files.len(), r.workdir, r.files.join(", ")));
+        s.push_str(&format!(
+            "\nfiles ({}) in {}: {}",
+            r.files.len(),
+            r.workdir,
+            r.files.join(", ")
+        ));
     }
     s.trim().to_string()
 }
@@ -192,5 +231,15 @@ mod tests {
         let coder = Coder::new("  provider-token\n", "model", "https://example.com", "/tmp");
 
         assert_eq!(coder.token, "provider-token");
+    }
+
+    #[test]
+    fn recognizes_revoked_oauth_error_for_provider_fallback() {
+        assert!(is_revoked_oauth_error(
+            "Failed to authenticate. API Error: 401 OAuth access token has been revoked."
+        ));
+        assert!(!is_revoked_oauth_error(
+            "API Error: 429 usage limit exceeded"
+        ));
     }
 }

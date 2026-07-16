@@ -2326,7 +2326,10 @@ mod tests {
         assert_eq!(first.statement, "Exercise improves mood");
         assert_eq!(second.id, first.id, "case and trailing punctuation must not create another belief");
         assert_eq!(mem.belief_count().await.unwrap(), 1);
-        assert!(mem.conflicts().await.unwrap().is_empty(), "surface variants are not contradictions");
+        assert!(
+            mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap().is_empty(),
+            "surface variants are not contradictions"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

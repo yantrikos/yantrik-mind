@@ -1265,6 +1265,15 @@ fn vigilance_detects_a_failed_self_build_only() {
     // a controlled draft (auto-merge BLOCKED) is NOT a failure
     let draft = "self-build tick start\nauto-merge BLOCKED: diff too large — draft for human\nPR: https://...\n==> done\n";
     assert!(ConversationEngine::vigilance_scan_text(draft).is_none(), "a controlled draft must not alarm");
+    // AUTH failures — the blind spot found 2026-07-16: a revoked OAuth token failed the self-improve
+    // loop for DAYS (5 junk PRs #41-#48 merged with the error text as the title) and none of the
+    // signatures matched, so the mind reported itself healthy the whole time. These are the real
+    // messages from those PRs — they must alarm.
+    let revoked = "self-build tick start\n==> Claude implementing\nFailed to authenticate. API Error: 401 OAuth access token has been revoked.\n";
+    let v = ConversationEngine::vigilance_scan_text(revoked).expect("a revoked token must alarm");
+    assert!(v.contains("401") || v.to_lowercase().contains("authenticate"), "names the auth failure: {v}");
+    let badcreds = "self-build tick start\nAPI Error: 401 Invalid authentication credentials\n==> done\n";
+    assert!(ConversationEngine::vigilance_scan_text(badcreds).is_some(), "bad credentials must alarm");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

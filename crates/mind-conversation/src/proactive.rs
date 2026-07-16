@@ -22,9 +22,15 @@ impl super::ConversationEngine {
     pub(crate) fn vigilance_scan_text(log: &str) -> Option<String> {
         let block = log.rsplit_once("self-build tick start").map(|(_, a)| a).unwrap_or(log);
         // Real failures only — NOT "auto-merge BLOCKED" (that's a controlled draft, working as intended).
+        // The auth signatures exist because of a real blind spot (2026-07-16): a revoked OAuth token
+        // failed the self-improve loop for DAYS — five junk PRs merged with "Failed to authenticate.
+        // API Error: 401 …" as the title — and nothing here matched, so the self-healing rung stayed
+        // silent and the mind reported itself healthy. The watchdog must know what a lockout looks like.
         const SIGS: &[&str] = &[
             "No such file", "ABORT:", "MERGE-FAIL", "PR-FAIL", "could not compile",
             "clone failed", "tests failed", "timeout: failed to run",
+            "Failed to authenticate", "API Error: 401", "API Error: 403",
+            "access token has been revoked", "Invalid authentication credentials", "Invalid API key",
         ];
         let hit = SIGS.iter().find(|s| block.contains(**s))?;
         let line = block.lines().find(|l| l.contains(*hit)).unwrap_or(hit).trim();

@@ -920,6 +920,41 @@ impl Router {
 mod privacy_tests {
     use super::*;
 
+    /// REAL-MODEL smoke test for the native function-calling path — the one thing the scripted eval
+    /// suite structurally cannot prove (SequencedLLM fakes the model). Drives the actual
+    /// ApiLLM(Ollama) backend through chat_scoped_tools with an agent-loop-shaped schema and asserts
+    /// a STRUCTURED tool call comes back parsed. Ignored by default (needs the homelab desktop's
+    /// Ollama up); run manually: cargo test -p mind-inference real_model -- --ignored --nocapture
+    /// Override the endpoint/model with YM_SMOKE_OLLAMA_URL / YM_SMOKE_OLLAMA_MODEL.
+    #[tokio::test]
+    #[ignore = "needs a live local Ollama with a tool-calling model"]
+    async fn real_model_native_tool_call_roundtrip() {
+        let url = std::env::var("YM_SMOKE_OLLAMA_URL").unwrap_or_else(|_| "http://192.168.4.35:11434".into());
+        let model = std::env::var("YM_SMOKE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.6:27b".into());
+        let backend = yantrik_ml::ApiLLM::new(url, None, model);
+        let pool = InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1).with_provider("ollama-local");
+        let tools = vec![serde_json::json!({"type":"function","function":{
+            "name":"weather","description":"current conditions + today's forecast for a city/town",
+            "parameters":{"type":"object","properties":{"place":{"description":"place"}},
+                          "required":["place"],"additionalProperties":true}}})];
+        let messages = vec![
+            ChatMessage::system("You are an agent, not a chatbot — you ACT. Use ONE tool, observe, then answer."),
+            ChatMessage::user("what's the weather in pune?"),
+        ];
+        // Public scope: the smoke prompt carries no private data, and Public routes to any provider.
+        let r = pool
+            .chat_scoped_tools(messages, GenerationConfig::default(), PrivacyScope::Public, tools)
+            .await
+            .expect("live ollama chat");
+        let tc = r.tool_calls.first().expect("the model should return a STRUCTURED tool call");
+        assert_eq!(tc.name, "weather", "picked the offered tool: {:?}", r.tool_calls);
+        assert!(
+            tc.arguments.get("place").and_then(|v| v.as_str()).map(|s| s.to_lowercase().contains("pune")).unwrap_or(false),
+            "parsed structured args carry the place: {:?}",
+            tc.arguments
+        );
+    }
+
     #[test]
     fn lanes_route_correctly() {
         let hh = "minimax,nanogpt,scripted";

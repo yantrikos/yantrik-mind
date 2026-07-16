@@ -10,6 +10,8 @@
 # Kill-switch: touch /var/lib/yantrik-mind/SELF_IMPROVE_OFF to halt all self-build.
 set -euo pipefail
 
+. "$(dirname "${BASH_SOURCE[0]}")/self_build_common.sh"
+
 KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
 [ -f "$KILL" ] && { echo "$(date -u +%FT%TZ) kill-switch present — tick skipped"; exit 0; }
 
@@ -153,7 +155,7 @@ echo "$OUT"
 # Builder unavailable (credit/quota/auth) — the goal never got a fair attempt, so DON'T let the pop
 # consume it. Re-queue it (if it came from the human queue) and log a distinct outcome; otherwise a
 # dry builder silently drains the whole queue over successive ticks (4/day) with nothing to show.
-if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded|invalid api key|authentication_error|oauth token.*expired|401 unauthorized"; then
+if builder_unavailable "$OUT"; then
   echo "$(date -u +%FT%TZ) | build | BUILDER-NO-CREDIT | $GOAL" >> "$EVLOG"
   if [ "$FROM_QUEUE" = "1" ] && ! grep -qxF "$GOAL" "$GOALS" 2>/dev/null; then
     printf '%s\n' "$GOAL" >> "$GOALS"

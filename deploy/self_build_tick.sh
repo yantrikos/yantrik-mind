@@ -142,10 +142,25 @@ Read the core moat crates (crates/mind-conversation, crates/mind-memory, crates/
 fi
 
 if [ -z "$GOAL" ]; then echo "no goal derived — skip"; exit 0; fi
+
+# GOAL SANITY GATE: the self-review capture is `GOAL="$(claude -p ...)"` — when the CLI fails, its
+# ERROR goes to stdout and becomes "the goal". That is exactly how five auth-failure PRs (#41–#48)
+# got titled "self-improve: Failed to authenticate. API Error: 401 …" and AUTO-MERGED: the (working)
+# codex builder dutifully "implemented" the error message and the gates saw green tests. An error
+# message is not a goal — refuse anything that looks like one, log it where vigilance_scan looks
+# (the signatures now include these), and alert.
+EVLOG=/var/lib/yantrik-mind/evolution.log
+# Match ERROR-MESSAGE SHAPES, not topic words — "add a rate limiter to web_fetch" or "return 401 on
+# bad token" are legitimate goals; "Rate limit exceeded" / "API Error: 401" are not.
+if printf '%s' "$GOAL" | grep -qiE "api error|failed to authenticate|invalid api key|invalid authentication|access token has been revoked|token (has )?expired|error:? ?(40[139]|429|5[0-9][0-9])|http (40[139]|429)|rate limit (exceeded|reached)|credit balance|usage limit|quota exceeded|command not found|no such file or directory"; then
+  echo "$(date -u +%FT%TZ) GOAL REJECTED (CLI/API error captured as goal, not a real goal): $GOAL"
+  echo "$(date -u +%FT%TZ) | build | GOAL-REJECTED-ERRORTEXT | $GOAL" >> "$EVLOG"
+  tg_alert goalerr "self-review 'goal' was an error message ($(printf '%s' "$GOAL" | head -c 120)) — claude auth likely broken; tick skipped, nothing PR'd"
+  exit 0
+fi
 echo "TICK GOAL: $GOAL"
 
 # Run the build with auto-merge enabled (self_improve still gates every merge).
-EVLOG=/var/lib/yantrik-mind/evolution.log
 set +e
 OUT="$(YM_AUTOMERGE=1 bash /root/codes/yantrik-mind/deploy/self_improve.sh "$GOAL" 2>&1)"
 set -e
@@ -153,7 +168,7 @@ echo "$OUT"
 # Builder unavailable (credit/quota/auth) — the goal never got a fair attempt, so DON'T let the pop
 # consume it. Re-queue it (if it came from the human queue) and log a distinct outcome; otherwise a
 # dry builder silently drains the whole queue over successive ticks (4/day) with nothing to show.
-if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded|invalid api key|authentication_error|oauth token.*expired|401 unauthorized"; then
+if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded|invalid api key|authentication_error|oauth token.*expired|401 unauthorized|failed to authenticate|access token has been revoked|invalid authentication credentials"; then
   echo "$(date -u +%FT%TZ) | build | BUILDER-NO-CREDIT | $GOAL" >> "$EVLOG"
   if [ "$FROM_QUEUE" = "1" ] && ! grep -qxF "$GOAL" "$GOALS" 2>/dev/null; then
     printf '%s\n' "$GOAL" >> "$GOALS"

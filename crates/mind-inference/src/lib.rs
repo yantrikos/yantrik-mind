@@ -89,6 +89,15 @@ fn scope_idx(s: PrivacyScope) -> usize {
 }
 
 /// The audit report: lanes config + per-scope served/refused counts since start.
+/// How many private-grounded turns have ESCALATED to the household (cloud) lane. Exposed so other
+/// crates can ASSERT the privacy property structurally: a path carrying private context must route
+/// through `chat_grounded`/`chat_scoped(Private)` — which touch this counter — and never through an
+/// unscoped `chat()`, which silently takes the Household lane and never counts. A test that seeds a
+/// cloud-only pool and watches this move is proving "the private lane was at least ATTEMPTED".
+pub fn privacy_escalated_count() -> u64 {
+    PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn privacy_report(provider: &str) -> String {
     use std::sync::atomic::Ordering;
     let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());

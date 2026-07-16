@@ -39,11 +39,12 @@ impl super::ConversationEngine {
     /// sent to the user; insights are stored as low-certainty hypotheses the moat can surface later.
     /// Returns short log lines (the channel just prints them). Disabled by the caller via YM_DMN=off.
     pub async fn dmn_tick(&self) -> Vec<String> {
-        let phase = {
+        let (phase, tick_no) = {
             let mut p = self.dmn_phase.lock().unwrap();
             let cur = *p % 3;
+            let n = *p;
             *p = p.wrapping_add(1);
-            cur
+            (cur, n)
         };
         let mut log = Vec::new();
         // SELF-VIGILANCE (self-healing rung 1): every idle tick, cheaply scan the mind's OWN health
@@ -119,7 +120,13 @@ impl super::ConversationEngine {
             // observability note and emit a COHERENCE tension. UNRESOLVED leaves scores unchanged.
             1 => {
                 let cs = self.memory.conflicts(&mind_types::AccessContext::Operator).await.unwrap_or_default();
-                if let Some(c) = cs.first() {
+                // ROTATE through the open set rather than always taking `.first()`. An UNRESOLVED
+                // verdict deliberately leaves both scores unchanged, so the same contradiction stays
+                // at the head of the list and `.first()` would re-judge it EVERY cycle, forever —
+                // burning a model call and re-sending the same private beliefs each time. Walking the
+                // set means an unresolvable pair costs one call per full lap, not one per tick.
+                let pick = cs.get((tick_no / 3) as usize % cs.len().max(1));
+                if let Some(c) = pick {
                     let prompt = format!(
                         "Two of my stored beliefs conflict:\nA: {}\nB: {}\nWhich is better supported by general knowledge, or is this genuinely unresolved? Answer in ONE sentence, starting with A, B, or UNRESOLVED.",
                         c.belief_a, c.belief_b
@@ -129,7 +136,12 @@ impl super::ConversationEngine {
                         ChatMessage::system("You weigh conflicting beliefs cautiously. One sentence."),
                         ChatMessage::user(&prompt),
                     ];
-                    if let Ok(r) = self.inference.chat(messages, GenerationConfig::default()).await {
+                    // PRIVATE-GROUNDED: this prompt carries two of the household's stored beliefs
+                    // VERBATIM (read with AccessContext::Operator — every member's private facts), so
+                    // it must PREFER the private (owned-hardware) lane and only escalate to cloud with
+                    // an audit. It was an unscoped `chat()` = a silent Household (cloud) call on every
+                    // reconcile tick — the same leak agent_loop already fixed, missed on this path.
+                    if let Ok(r) = self.inference.chat_grounded(messages, GenerationConfig::default()).await {
                         let verdict = r.text.trim();
                         let verdict_upper = verdict.to_uppercase();
                         let (winner, loser, verdict_label) =
@@ -207,7 +219,10 @@ impl super::ConversationEngine {
                     ChatMessage::system("You free-associate to surface one genuinely useful insight or question. One sentence, no preamble."),
                     ChatMessage::user(&prompt),
                 ];
-                if let Ok(r) = self.inference.chat(messages, GenerationConfig::default()).await {
+                // PRIVATE-GROUNDED (the widest of the two DMN prompts): this dumps the top-10 recalled
+                // facts VERBATIM — arbitrary private household knowledge, read unrestricted — so it
+                // takes the private lane first with an audited escalation, never a silent cloud call.
+                if let Ok(r) = self.inference.chat_grounded(messages, GenerationConfig::default()).await {
                     let insight = r.text.trim();
                     if insight.len() > 8 {
                         let statement: String =

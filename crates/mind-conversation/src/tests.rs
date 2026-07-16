@@ -6,6 +6,54 @@ use mind_tools::{ScriptedMailSender, ToolActionExecutor};
 use mind_types::BeliefAssertion;
 use yantrik_ml::LLMBackend;
 
+/// PRIVACY REGRESSION GUARD (the DMN leak): the default-mode tick reads the household's stored
+/// beliefs with unrestricted Operator access and puts them VERBATIM into the prompt — the associate
+/// phase dumps the top-10 recalled facts. That is private-grounded inference, so it MUST take the
+/// private lane first and only escalate to cloud with an audit. It used to be an unscoped `chat()`,
+/// which silently routes to the Household (cloud) lane forever with no record.
+///
+/// The tell is structural: an unscoped `chat()` NEVER touches the escalation counter; `chat_grounded`
+/// always does (it tries Private, fails on this cloud-only pool, escalates, and counts). So a moving
+/// counter proves the private lane was attempted. Uses `>=` because the counter is process-global and
+/// other tests may run concurrently.
+#[tokio::test]
+async fn dmn_tick_uses_the_private_lane_not_a_silent_cloud_call() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    // The associate phase needs >= 3 stored items to have anything to connect.
+    for s in ["Priya's birthday is in March", "we are saving for a house", "Arjun started school"] {
+        let _ = mem
+            .remember_as_belief(BeliefAssertion {
+                statement: s.into(),
+                polarity: 1.0,
+                weight: 1.5,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            })
+            .await;
+    }
+    // A CLOUD-only pool: no provider is in the private allowlist, so a private-grounded call must
+    // escalate (and be counted). "minimax" mirrors the real cloud chain's labelling.
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("A is better supported.")) as Arc<dyn LLMBackend>,
+        1,
+    )
+    .with_provider("minimax");
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+
+    let before = mind_inference::privacy_escalated_count();
+    // Phase rotates rehearse(0) → reconcile(1) → associate(2). Rehearse makes no model call at all,
+    // so drive all three and assert the LLM-using phases went through the private lane.
+    for _ in 0..3 {
+        let _ = conv.dmn_tick().await;
+    }
+    let after = mind_inference::privacy_escalated_count();
+    assert!(
+        after >= before + 1,
+        "DMN made a model call carrying private beliefs without attempting the private lane \
+         (escalation counter unmoved: {before} -> {after}) — this is the silent cloud leak"
+    );
+}
+
 #[tokio::test]
 async fn judgment_ledger_logs_grades_and_scores_brier() {
     let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());

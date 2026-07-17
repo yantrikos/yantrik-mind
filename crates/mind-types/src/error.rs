@@ -3,6 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MindError {
+    #[error("device not authorized")]
+    DeviceNotAuthorized,
     #[error("memory: {0}")]
     Memory(String),
     #[error("inference: {0}")]
@@ -16,5 +18,8 @@ pub enum MindError {
     #[error("{0}")]
     Other(String),
 }
+
+/// Typed error returned by memory operations.
+pub type MemoryError = MindError;
 
 pub type Result<T> = std::result::Result<T, MindError>;

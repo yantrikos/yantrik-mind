@@ -1212,7 +1212,6 @@ pub struct MemoryHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     /// ARCH-1 slice 2: every principal read is receipted into a hash-chained ledger.
     receipts: std::sync::Arc<receipts::ReadReceiptLedger>,
-    device_authorization: DeviceAuthorization,
 }
 
 impl MemoryHandle {
@@ -1226,6 +1225,9 @@ impl MemoryHandle {
         dim: usize,
         device_authorization: DeviceAuthorization,
     ) -> Result<Self> {
+        if device_authorization == DeviceAuthorization::Unauthorized {
+            return Err(MindError::DeviceNotAuthorized);
+        }
         let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
         let path = db_path.to_string();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
@@ -1631,7 +1633,6 @@ impl MemoryHandle {
             Ok(Ok(())) => Ok(Self {
                 tx,
                 receipts: std::sync::Arc::new(receipts::ReadReceiptLedger::for_db(db_path)),
-                device_authorization,
             }),
             Ok(Err(e)) => Err(MindError::Memory(format!("init YantrikDB: {e}"))),
             Err(_) => Err(MindError::Memory("actor thread died during init".into())),
@@ -1660,9 +1661,6 @@ impl MemoryHandle {
     }
 
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
-        if self.device_authorization == DeviceAuthorization::Unauthorized {
-            return Err(MindError::DeviceNotAuthorized);
-        }
         let (reply, rx) = oneshot::channel();
         self.tx.send(make(reply)).map_err(|_| MindError::Memory("memory actor is gone".into()))?;
         rx.await
@@ -2061,22 +2059,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn unauthorized_device_fails_closed_for_reads_and_writes() {
-        let mem = MemoryHandle::spawn_for_device(
+    async fn unauthorized_device_blocks_startup_until_reauthorized() {
+        let unauthorized = MemoryHandle::spawn_for_device(
             ":memory:",
             64,
             DeviceAuthorization::Unauthorized,
-        )
-        .unwrap();
+        );
 
         assert!(matches!(
-            mem.record("must not be written").await,
+            unauthorized,
             Err(mind_types::MemoryError::DeviceNotAuthorized)
         ));
-        assert!(matches!(
-            mem.get_text("anything").await,
-            Err(mind_types::MemoryError::DeviceNotAuthorized)
-        ));
+
+        let reauthorized = MemoryHandle::spawn_for_device(
+            ":memory:",
+            64,
+            DeviceAuthorization::Authorized,
+        )
+        .expect("reauthorization should allow memory to start");
+        let rid = reauthorized.record("memory is available again").await.unwrap();
+        assert_eq!(
+            reauthorized.get_text(&rid).await.unwrap().as_deref(),
+            Some("memory is available again")
+        );
     }
 
     /// ARCH-1 acceptance test — the authorization-kernel deliverable.

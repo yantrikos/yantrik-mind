@@ -16,7 +16,7 @@ pub mod turn;
 pub mod task;
 pub mod safety;
 
-pub use error::{MemoryError, MindError, Result};
+pub use error::{AuthError, MemoryError, MindError, Result};
 pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
 pub use event::{Event, EventBody, EventSource};
 pub use memory::{

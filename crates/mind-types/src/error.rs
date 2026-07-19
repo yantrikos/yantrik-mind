@@ -1,10 +1,16 @@
 //! Shared error type for the waist. Modules map their internals into this at the boundary.
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum MindError {
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AuthError {
     #[error("device not authorized")]
     DeviceNotAuthorized,
+}
+
+#[derive(Debug, Error)]
+pub enum MindError {
+    #[error(transparent)]
+    Auth(#[from] AuthError),
     #[error("memory: {0}")]
     Memory(String),
     #[error("inference: {0}")]

@@ -6216,13 +6216,17 @@ Open reminders you're carrying for them:");
         // Dispatch (tool-selection) defaults to think:false — the maintainer measured it loses
         // nothing without reasoning (4/4 correct, 3.6× fewer tokens); reasoning quality is restored
         // on the compose step (cited_answer). Config-overridable via YM_THINK_DISPATCH.
-        let cfg = GenerationConfig {
+        let mut cfg = GenerationConfig {
             max_tokens: 8000,
             think: mind_inference::think_for("dispatch", Some(false)),
             ..GenerationConfig::default()
         };
         let mut scratch = String::new();
         let mut last_call = String::new();
+        // Once the fast dispatch model flubs the agentic format, the rest of the turn runs on the
+        // reasoner (think:true routes there). Sticky for the turn — a request hard enough to trip the
+        // small model once will likely need the capable one for the remaining steps too.
+        let mut escalated = false;
         for step in 0..MAX_STEPS {
             // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
             // steps remain either loops or gets truncated mid-thought. Surfacing "N left" makes it
@@ -6318,6 +6322,18 @@ Open reminders you're carrying for them:");
             let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
             if tool.is_empty() {
                 let raw = text.trim();
+                // ESCALATE before giving up: the model produced neither a usable tool call nor an
+                // answer — either nothing, or an unparseable agentic blob (the fast dispatch model
+                // choking on a multi-step request). Retry this turn ONCE on the reasoner: think:true
+                // routes to the capable model in the pool. This is what makes a small dispatch model
+                // safe as the primary — the hard turns fall through to the strong one instead of a
+                // "Sorry, I had trouble" dead end. Sticky for the rest of the turn.
+                if !escalated && (raw.is_empty() || is_tool_call_blob(raw)) {
+                    escalated = true;
+                    cfg.think = Some(true);
+                    eprintln!("[agent] dispatch produced no tool/answer — escalating this turn to the reasoner (think:true)");
+                    continue;
+                }
                 // A broken tool-call blob is NOT a real answer — never echo it or publish it as a page
                 // (recovery above already handled a salvageable publish_page). Ask for a retry instead.
                 let mut a = if raw.is_empty() {

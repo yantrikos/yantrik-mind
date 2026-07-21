@@ -570,6 +570,10 @@ pub struct ChainBackend {
     strategy: ChainStrategy,
     /// Rotation counter for RoundRobin / Weighted (deterministic + reproducible, no RNG).
     route: std::sync::atomic::AtomicUsize,
+    /// Index of the strong "reasoner" link. A think:true (reasoning/compose, or an escalated retry)
+    /// call is routed here FIRST, then failover — so a small dispatch model can own the fast path while
+    /// multi-step reasoning goes to the capable model. None = strategy applies to think:true too.
+    reasoner: Option<usize>,
 }
 
 impl ChainBackend {
@@ -589,6 +593,7 @@ impl ChainBackend {
             local: None,
             strategy: ChainStrategy::Failover,
             route: std::sync::atomic::AtomicUsize::new(0),
+            reasoner: None,
         }
     }
 
@@ -606,19 +611,32 @@ impl ChainBackend {
         self
     }
 
-    /// The order to try links this call: the strategy sets the starting link / distribution, then any
+    /// Designate the strong "reasoner" link (by index). A think:true call is routed there first, then
+    /// failover — so a small dispatch model owns the fast path and multi-step reasoning gets the capable one.
+    pub fn with_reasoner(mut self, idx: usize) -> Self {
+        if idx < self.links.len() {
+            self.reasoner = Some(idx);
+        }
+        self
+    }
+
+    /// The order to try links this call. A reasoning turn (`think == Some(true)`) with a designated
+    /// reasoner starts there; otherwise the strategy sets the starting link / distribution. Then any
     /// hot (quota-burned) link is demoted to last. Always a full permutation, so failover covers all.
-    fn routing_order(&self) -> Vec<usize> {
+    fn routing_order(&self, think: Option<bool>) -> Vec<usize> {
         use std::sync::atomic::Ordering;
         let n = self.links.len();
         let mut order: Vec<usize> = (0..n).collect();
         if n <= 1 {
             return order;
         }
-        let start = match &self.strategy {
-            ChainStrategy::Failover => 0,
-            ChainStrategy::RoundRobin => self.route.fetch_add(1, Ordering::Relaxed) % n,
-            ChainStrategy::Weighted(w) => weighted_index(w, n, self.route.fetch_add(1, Ordering::Relaxed)),
+        let start = match self.reasoner {
+            Some(r) if think == Some(true) => r,
+            _ => match &self.strategy {
+                ChainStrategy::Failover => 0,
+                ChainStrategy::RoundRobin => self.route.fetch_add(1, Ordering::Relaxed) % n,
+                ChainStrategy::Weighted(w) => weighted_index(w, n, self.route.fetch_add(1, Ordering::Relaxed)),
+            },
         };
         if start > 0 {
             order = (0..n).map(|i| (start + i) % n).collect();
@@ -801,9 +819,10 @@ impl LLMBackend for ChainBackend {
     ) -> anyhow::Result<LLMResponse> {
         let mut last_err: Option<anyhow::Error> = None;
         // The strategy (failover / round-robin / weighted) sets which link is tried first + the load
-        // distribution; a quota-burned link is still demoted to last. See `routing_order`. Every order
-        // is a full permutation, so on error/empty we failover through the rest — a backup is always in play.
-        let order = self.routing_order();
+        // distribution — except a think:true call is routed to the reasoner link first. A quota-burned
+        // link is still demoted to last. Every order is a full permutation, so on error/empty we
+        // failover through the rest — a backup is always in play.
+        let order = self.routing_order(config.think);
         for i in order {
             let be = &self.links[i];
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
@@ -1057,8 +1076,26 @@ pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
         ChainStrategy::RoundRobin => "round_robin",
         ChainStrategy::Weighted(_) => "weighted",
     };
+    // The reasoner (strong model for think:true and blob-escalations): YM_BRAIN_REASONER names a
+    // substring to match a link's model; else auto-detect a MoE/large tag; else the LAST link (the
+    // convention is primary = fast dispatch model, reasoner = the capable one).
+    let want = std::env::var("YM_BRAIN_REASONER").unwrap_or_default().trim().to_ascii_lowercase();
+    let reasoner_idx = if !want.is_empty() {
+        labels.iter().position(|l| l.to_ascii_lowercase().contains(&want))
+    } else {
+        labels
+            .iter()
+            .position(|l| {
+                let l = l.to_ascii_lowercase();
+                l.contains("a3b") || l.contains("moe") || l.contains("35b") || l.contains(":31b")
+            })
+            .or(Some(labels.len() - 1))
+    };
     let label = format!("brain-pool/{strat_name}[{}]", labels.join(","));
-    let chain = ChainBackend::new_labeled(links, labels).with_strategy(strategy);
+    let mut chain = ChainBackend::new_labeled(links, labels).with_strategy(strategy);
+    if let Some(idx) = reasoner_idx {
+        chain = chain.with_reasoner(idx);
+    }
     Some((Arc::new(chain) as Arc<dyn LLMBackend>, label))
 }
 
@@ -1360,6 +1397,24 @@ mod tests {
         let wt = ChainBackend::new_labeled(mk(), labels).with_strategy(ChainStrategy::Weighted(vec![2, 0, 1]));
         let got: Vec<String> = (0..3).map(|_| wt.chat(&[], &cfg, None).unwrap().text).collect();
         assert_eq!(got, vec!["A", "A", "C"]);
+    }
+
+    #[test]
+    fn reasoner_routes_think_true_but_dispatch_stays_primary() {
+        let links: Vec<Arc<dyn LLMBackend>> = vec![
+            Arc::new(ScriptedLLM::new("FAST")) as Arc<dyn LLMBackend>,
+            Arc::new(ScriptedLLM::new("REASONER")) as Arc<dyn LLMBackend>,
+        ];
+        let chain = ChainBackend::new_labeled(links, vec!["fast".into(), "reasoner".into()]).with_reasoner(1);
+        let mut cfg = GenerationConfig::default();
+        // Dispatch (think:false / None) stays on the primary (fast) link.
+        cfg.think = Some(false);
+        assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "FAST");
+        cfg.think = None;
+        assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "FAST");
+        // Reasoning (think:true) routes to the reasoner link first.
+        cfg.think = Some(true);
+        assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "REASONER");
     }
 
     #[test]

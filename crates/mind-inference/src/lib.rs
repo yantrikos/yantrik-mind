@@ -527,6 +527,38 @@ impl LLMBackend for SequencedLLM {
 /// answering when the primary provider rate-limits, errors, or returns nothing — the "many LLM
 /// supports, just make them click" property. Links are built from whatever provider keys are present
 /// (NanoGPT, Ollama Cloud, MiniMax, …), all OpenAI-compatible, so adding a provider is config-only.
+/// How a ChainBackend picks which link to try FIRST each call. Every strategy still failover-
+/// iterates the remaining links on error/empty, so a backup is always in play — the strategy only
+/// sets the starting point / load distribution. Config: YM_BRAIN_STRATEGY (+ per-link weights).
+#[derive(Clone, Debug)]
+pub enum ChainStrategy {
+    /// Fixed order: links[0] is primary, the rest are pure failover backups. (Default.)
+    Failover,
+    /// Rotate the starting link each call (even spread), then failover through the remainder.
+    RoundRobin,
+    /// Pick the starting link by weight share (e.g. 70/30), then failover. Weights map to link order.
+    Weighted(Vec<u32>),
+}
+
+/// Deterministic weighted selection: cycles the counter through the summed weight window so that over
+/// many calls each index gets its share (weights [70,30] → 70 of every 100 calls start at link 0).
+/// Reproducible (no RNG) — important because scripts/tests must not depend on wall-clock randomness.
+fn weighted_index(weights: &[u32], n: usize, counter: usize) -> usize {
+    let total: u32 = weights.iter().take(n).sum();
+    if total == 0 {
+        return 0;
+    }
+    let pos = (counter as u32) % total;
+    let mut acc = 0u32;
+    for i in 0..n {
+        acc += weights.get(i).copied().unwrap_or(0);
+        if pos < acc {
+            return i;
+        }
+    }
+    0
+}
+
 pub struct ChainBackend {
     links: Vec<Arc<dyn LLMBackend>>,
     labels: Vec<String>,
@@ -534,6 +566,10 @@ pub struct ChainBackend {
     /// Local survival-tier backend. Tried last, only when all `links` have failed. When it
     /// answers, survival mode activates globally; cleared automatically when a cloud link recovers.
     local: Option<(Arc<dyn LLMBackend>, String)>,
+    /// First-link selection policy (failover / round-robin / weighted). Failover-iterates regardless.
+    strategy: ChainStrategy,
+    /// Rotation counter for RoundRobin / Weighted (deterministic + reproducible, no RNG).
+    route: std::sync::atomic::AtomicUsize,
 }
 
 impl ChainBackend {
@@ -546,7 +582,14 @@ impl ChainBackend {
     /// backend_name ("api"), so `ym providers` says who actually answered.
     pub fn new_labeled(links: Vec<Arc<dyn LLMBackend>>, labels: Vec<String>) -> Self {
         let name = format!("chain[{}]", labels.join(" -> "));
-        Self { links, labels, name, local: None }
+        Self {
+            links,
+            labels,
+            name,
+            local: None,
+            strategy: ChainStrategy::Failover,
+            route: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// Attach a local survival-tier backend (e.g. local Ollama). When all cloud links fail, this
@@ -554,6 +597,48 @@ impl ChainBackend {
     pub fn with_local_fallback(mut self, backend: Arc<dyn LLMBackend>, label: impl Into<String>) -> Self {
         self.local = Some((backend, label.into()));
         self
+    }
+
+    /// Set the first-link selection policy (failover / round-robin / weighted). Failover is always
+    /// the safety net — every strategy tries the remaining links on error/empty.
+    pub fn with_strategy(mut self, strategy: ChainStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// The order to try links this call: the strategy sets the starting link / distribution, then any
+    /// hot (quota-burned) link is demoted to last. Always a full permutation, so failover covers all.
+    fn routing_order(&self) -> Vec<usize> {
+        use std::sync::atomic::Ordering;
+        let n = self.links.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        if n <= 1 {
+            return order;
+        }
+        let start = match &self.strategy {
+            ChainStrategy::Failover => 0,
+            ChainStrategy::RoundRobin => self.route.fetch_add(1, Ordering::Relaxed) % n,
+            ChainStrategy::Weighted(w) => weighted_index(w, n, self.route.fetch_add(1, Ordering::Relaxed)),
+        };
+        if start > 0 {
+            order = (0..n).map(|i| (start + i) % n).collect();
+        }
+        // Hot-link demotion (a nanogpt link near its weekly quota) — a STABLE partition preserves the
+        // strategy order within the kept/demoted groups. Availability beats thrift; unknown never demotes.
+        let demote_at: f64 = std::env::var("YM_DEMOTE_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(90.0);
+        let hot = |i: &usize| -> bool {
+            let l = self.labels.get(*i).map(String::as_str).unwrap_or("");
+            l.starts_with("nanogpt") && nanogpt_weekly_pct().map(|p| p >= demote_at).unwrap_or(false)
+        };
+        let (cold, warm): (Vec<usize>, Vec<usize>) = order.iter().partition(|i| !hot(*i));
+        if !warm.is_empty() {
+            eprintln!(
+                "[chain] demoting hot link(s) to last: {:?}",
+                warm.iter().map(|i| self.labels.get(*i).cloned().unwrap_or_default()).collect::<Vec<_>>()
+            );
+            order = cold.into_iter().chain(warm).collect();
+        }
+        order
     }
 
     fn is_usable(r: &LLMResponse) -> bool {
@@ -715,22 +800,10 @@ impl LLMBackend for ChainBackend {
         tools: Option<&[serde_json::Value]>,
     ) -> anyhow::Result<LLMResponse> {
         let mut last_err: Option<anyhow::Error> = None;
-        // HEADROOM-FIRST ROUTING: a link whose real quota is nearly burned is tried LAST, not
-        // first — it still serves if everything else fails (availability beats thrift), but the
-        // default path drains the provider with room. Unknown quota never demotes.
-        let demote_at: f64 = std::env::var("YM_DEMOTE_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(90.0);
-        let mut order: Vec<usize> = (0..self.links.len()).collect();
-        if self.links.len() > 1 {
-            let hot = |i: &usize| -> bool {
-                let l = self.labels.get(*i).map(String::as_str).unwrap_or("");
-                l.starts_with("nanogpt") && nanogpt_weekly_pct().map(|p| p >= demote_at).unwrap_or(false)
-            };
-            let (cold, warm): (Vec<usize>, Vec<usize>) = order.iter().partition(|i| !hot(*i));
-            if !warm.is_empty() {
-                eprintln!("[chain] demoting hot link(s) to last: {:?}", warm.iter().map(|i| self.labels.get(*i).cloned().unwrap_or_default()).collect::<Vec<_>>());
-                order = cold.into_iter().chain(warm.into_iter()).collect();
-            }
-        }
+        // The strategy (failover / round-robin / weighted) sets which link is tried first + the load
+        // distribution; a quota-burned link is still demoted to last. See `routing_order`. Every order
+        // is a full permutation, so on error/empty we failover through the rest — a backup is always in play.
+        let order = self.routing_order();
         for i in order {
             let be = &self.links[i];
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
@@ -929,7 +1002,72 @@ pub fn think_for(role: &str, default: Option<bool>) -> Option<bool> {
     }
 }
 
+/// A config-defined pool of LOCAL brain backends with a selectable backup strategy. Set:
+///   YM_BRAIN_POOL   = "url|model[@weight] ; url|model[@weight] ; ..."
+///     e.g. "https://aig.mycluster.cyou|gemma4:e4b@70 ; http://192.168.4.180:11434|qwen3.6:35b-a3b-mtp-q4_K_M@30"
+///   YM_BRAIN_STRATEGY = failover | round_robin | weighted   (default: weighted if any @weight, else failover)
+/// Every entry is an Ollama endpoint (provider "ollama", native /api/chat), so the per-call `think`
+/// flag (dual-mode) flows to whichever link is chosen. Because all links are owned/local, the pool is
+/// safe as the PRIVATE lane too: a private turn stays on owned hardware, failover is local-only, and
+/// if every link fails the pool returns an error so the lane still FAILS CLOSED (never cloud).
+pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
+    let raw = std::env::var("YM_BRAIN_POOL").ok().filter(|s| !s.trim().is_empty())?;
+    let mut links: Vec<Arc<dyn LLMBackend>> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    let mut weights: Vec<u32> = Vec::new();
+    for entry in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        // trailing "@<n>" is the weight; anything else is part of the spec (model tags contain ':').
+        let (spec, weight) = match entry.rsplit_once('@') {
+            Some((s, w)) => match w.trim().parse::<u32>() {
+                Ok(n) => (s.trim(), n),
+                Err(_) => (entry, 1u32),
+            },
+            None => (entry, 1u32),
+        };
+        let (url, model) = spec
+            .split_once('|')
+            .map(|(u, m)| (u.trim(), m.trim()))
+            .unwrap_or((spec, "gemma4:e4b"));
+        let be = yantrik_ml::GenericOpenAIBackend::for_provider("ollama", url, Some("ollama".to_string()), model);
+        links.push(Arc::new(be) as Arc<dyn LLMBackend>);
+        labels.push(format!("ollama-local:{model}"));
+        weights.push(weight);
+    }
+    if links.is_empty() {
+        return None;
+    }
+    let strategy = match std::env::var("YM_BRAIN_STRATEGY")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "failover" => ChainStrategy::Failover,
+        "round_robin" | "roundrobin" | "rr" => ChainStrategy::RoundRobin,
+        "weighted" | "percent" | "%" => ChainStrategy::Weighted(weights.clone()),
+        // No explicit strategy but weights were given → weighted; otherwise failover.
+        _ if weights.iter().any(|w| *w != 1) => ChainStrategy::Weighted(weights.clone()),
+        _ => ChainStrategy::Failover,
+    };
+    if links.len() == 1 {
+        return Some((links.pop().unwrap(), labels.pop().unwrap()));
+    }
+    let strat_name = match &strategy {
+        ChainStrategy::Failover => "failover",
+        ChainStrategy::RoundRobin => "round_robin",
+        ChainStrategy::Weighted(_) => "weighted",
+    };
+    let label = format!("brain-pool/{strat_name}[{}]", labels.join(","));
+    let chain = ChainBackend::new_labeled(links, labels).with_strategy(strategy);
+    Some((Arc::new(chain) as Arc<dyn LLMBackend>, label))
+}
+
 pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
+    // A config-defined multi-endpoint brain pool takes precedence: it becomes the local lane (private
+    // + primary) with the chosen failover / round-robin / weighted backup strategy.
+    if let Some(pool) = brain_pool_from_env() {
+        return Some(pool);
+    }
     let url = std::env::var("YM_LOCAL_OLLAMA_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())?;
@@ -1181,6 +1319,47 @@ mod tests {
         std::env::set_var(key_env, "  valid-key\n");
         assert_eq!(configured_api_key(key_env).as_deref(), Some("valid-key"));
         std::env::remove_var(key_env);
+    }
+
+    #[test]
+    fn weighted_index_distributes_by_share() {
+        let w = vec![70u32, 30];
+        let mut counts = [0usize; 2];
+        for c in 0..100 {
+            counts[weighted_index(&w, 2, c)] += 1;
+        }
+        assert_eq!(counts, [70, 30], "70/30 weights → 70/30 split over a full window");
+        // Degenerate weights never panic and fall back to the first link.
+        assert_eq!(weighted_index(&[0, 0], 2, 5), 0);
+        assert_eq!(weighted_index(&[], 3, 9), 0);
+    }
+
+    #[test]
+    fn round_robin_rotates_start_and_weighted_respects_share() {
+        let mk = || -> Vec<Arc<dyn LLMBackend>> {
+            vec![
+                Arc::new(ScriptedLLM::new("A")) as Arc<dyn LLMBackend>,
+                Arc::new(ScriptedLLM::new("B")) as Arc<dyn LLMBackend>,
+                Arc::new(ScriptedLLM::new("C")) as Arc<dyn LLMBackend>,
+            ]
+        };
+        let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let cfg = GenerationConfig::default();
+
+        // Round-robin: the FIRST link tried rotates A→B→C→A across calls.
+        let rr = ChainBackend::new_labeled(mk(), labels.clone()).with_strategy(ChainStrategy::RoundRobin);
+        let got: Vec<String> = (0..4).map(|_| rr.chat(&[], &cfg, None).unwrap().text).collect();
+        assert_eq!(got, vec!["A", "B", "C", "A"]);
+
+        // Failover: always starts at link 0 (each scripted link succeeds, so always "A").
+        let fo = ChainBackend::new_labeled(mk(), labels.clone()).with_strategy(ChainStrategy::Failover);
+        assert_eq!(fo.chat(&[], &cfg, None).unwrap().text, "A");
+        assert_eq!(fo.chat(&[], &cfg, None).unwrap().text, "A");
+
+        // Weighted [2,0,1] over 3 calls: first link twice, then the third — never the zero-weight one.
+        let wt = ChainBackend::new_labeled(mk(), labels).with_strategy(ChainStrategy::Weighted(vec![2, 0, 1]));
+        let got: Vec<String> = (0..3).map(|_| wt.chat(&[], &cfg, None).unwrap().text).collect();
+        assert_eq!(got, vec!["A", "A", "C"]);
     }
 
     #[test]

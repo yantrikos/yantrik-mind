@@ -106,7 +106,17 @@ async fn main() -> anyhow::Result<()> {
 
     let (backend, name) = build_backend();
     let permits = if name.starts_with("nanogpt") { 4 } else { 1 };
-    let pool = InferencePool::new(backend, permits).with_provider(&name);
+    let mut pool = InferencePool::new(backend, permits).with_provider(&name);
+    // ARCH: when an owned-hardware endpoint is configured (YM_LOCAL_OLLAMA_URL), attach it as the
+    // dedicated LOCAL-ONLY PRIVATE lane. A private-grounded turn is then served ONLY here (cloud
+    // unreachable by construction) and FAILS CLOSED on local failure — never escalating private
+    // context to a cloud provider (sol 019f8287). Config-driven: set the URL and it activates.
+    if let Some((local_be, local_label)) = mind_inference::local_backend_from_env() {
+        pool = pool.with_private_backend(local_be, &local_label);
+        println!("brain: LOCAL primary + private lane active ({local_label}) — private turns stay home, fail closed on outage");
+    } else {
+        println!("brain: no local endpoint (YM_LOCAL_OLLAMA_URL unset) — cloud provider '{name}', private turns escalate+audit");
+    }
 
     let db = std::env::var("YM_DB").unwrap_or_else(|_| ":memory:".to_string());
     // dim 64 = yantrikdb 0.9.0's bundled embedder dimension; YantrikDB::new auto-attaches the

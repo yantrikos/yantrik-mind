@@ -238,11 +238,14 @@ impl InferencePool {
         // A PRIVATE call, when a dedicated local-owned lane exists, is served ONLY by that local-only
         // backend — cloud is unreachable for it by construction (sol 019f8287: enforce at dispatch).
         // Everything else (and Private when no local lane is configured) routes on the default backend.
-        let (backend, label) = match (scope, &self.private) {
-            (PrivacyScope::Private, Some((be, lbl))) => (be.clone(), lbl.clone()),
-            _ => (self.backend.clone(), self.provider.clone()),
+        // The explicit local-only lane is SANCTIONED BY CONSTRUCTION (built from the owned endpoint),
+        // which is stronger evidence than the env CSV ("a declaration, not evidence" — sol #5), so it
+        // bypasses the CSV allowlist; the CSV still gates the label-based (non-explicit) paths.
+        let (backend, label, sanctioned) = match (scope, &self.private) {
+            (PrivacyScope::Private, Some((be, lbl))) => (be.clone(), lbl.clone(), true),
+            _ => (self.backend.clone(), self.provider.clone(), false),
         };
-        if !scope_allows(scope, &label, &household, &private) {
+        if !sanctioned && !scope_allows(scope, &label, &household, &private) {
             PRIVACY_REFUSED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "[privacy] REFUSED {} -> provider '{}' not in the {} allowlist",
@@ -853,11 +856,17 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
     }
 }
 
-/// The default resilient chain from whatever provider keys are present, in priority order
-/// (NanoGPT → Ollama Cloud → MiniMax). `None` if no provider key is set. Models can be overridden
-/// per provider via `YM_MODEL` / `YM_OLLAMA_MODEL` / `YM_MINIMAX_MODEL`.
-/// When `YM_LOCAL_OLLAMA_URL` is set, attaches a local survival-tier fallback to the chain.
+/// The default resilient chain from whatever provider keys are present. CONFIG-DRIVEN precedence:
+/// when `YM_LOCAL_OLLAMA_URL` is set, the local model is the PRIMARY brain (owned hardware, fast, and
+/// it backs the private lane), with the cloud providers (NanoGPT → Ollama Cloud → MiniMax) as
+/// fallback for when local is down. Set `YM_LOCAL_ROLE=fallback` to keep the old survival-tier
+/// behavior (cloud primary, local emergency). `None` if neither a local endpoint nor a cloud key is
+/// set. Models via `YM_LOCAL_OLLAMA_MODEL` / `YM_MODEL` / `YM_OLLAMA_MODEL` / `YM_MINIMAX_MODEL`.
 pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
+    let local = local_backend_from_env();
+    let local_primary = local.is_some()
+        && std::env::var("YM_LOCAL_ROLE").map(|r| r.trim() != "fallback").unwrap_or(true);
+
     let order = [
         ("nanogpt", std::env::var("YM_MODEL").ok()),
         ("ollama-cloud", std::env::var("YM_OLLAMA_MODEL").ok()),
@@ -865,6 +874,15 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     ];
     let mut links: Vec<Arc<dyn LLMBackend>> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
+    // LOCAL FIRST when it's the primary brain — every household turn runs on owned hardware; cloud is
+    // only reached when local fails (household lane only — a Private turn never falls through, it
+    // fails closed via the dedicated private lane wired in `main`).
+    if local_primary {
+        if let Some((be, lbl)) = &local {
+            links.push(be.clone());
+            labels.push(lbl.clone());
+        }
+    }
     for (provider, model) in order {
         let spec = match model {
             Some(m) if !m.trim().is_empty() => format!("{provider}:{m}"),
@@ -876,30 +894,30 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
         }
     }
     if links.is_empty() {
-        return None;
+        return None; // no local-primary brain and no cloud keys
     }
-    let local = local_backend_from_env();
-    let label = labels.join(" -> ");
-    // Unwrap single-link chains only when there's no local fallback to attach.
-    if links.len() == 1 && local.is_none() {
-        return Some((links.pop().unwrap(), label));
+    // A local SURVIVAL fallback is attached only when local is NOT the primary (old behavior).
+    let survival = if local_primary { None } else { local };
+    if links.len() == 1 && survival.is_none() {
+        return Some((links.pop().unwrap(), labels[0].clone()));
     }
     let mut chain = ChainBackend::new_labeled(links, labels.clone());
-    if let Some((local_be, local_label)) = local {
+    if let Some((local_be, local_label)) = survival {
         chain = chain.with_local_fallback(local_be, local_label);
     }
-    Some((Arc::new(chain), label))
+    Some((Arc::new(chain), labels.join(" -> ")))
 }
 
-/// Build the local survival-tier backend from env. Returns `None` if `YM_LOCAL_OLLAMA_URL` is not
-/// set (explicit opt-in only — avoids false-positive "local available" signals in environments
-/// without a local Ollama). The model and key are also configurable via env.
+/// Build the local owned-hardware backend from env (the PRIMARY brain + the private lane when set;
+/// see `default_chain_from_env`). Returns `None` if `YM_LOCAL_OLLAMA_URL` is not set (explicit opt-in
+/// — avoids false "local available" signals). Point the URL at the owned endpoint (a TLS gateway like
+/// `https://aig.mycluster.cyou` is preferred over a plaintext-LAN Ollama). Model/key via env.
 pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     let url = std::env::var("YM_LOCAL_OLLAMA_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())?;
     let model = std::env::var("YM_LOCAL_OLLAMA_MODEL")
-        .unwrap_or_else(|_| "qwen3:1.7b".to_string());
+        .unwrap_or_else(|_| "qwen3.6:35b-a3b-mtp-q4_K_M".to_string());
     // Local Ollama doesn't need an API key; send a placeholder so the OpenAI-compat client
     // includes the Authorization header (some Ollama builds check its presence).
     let key = std::env::var("YM_LOCAL_OLLAMA_KEY")

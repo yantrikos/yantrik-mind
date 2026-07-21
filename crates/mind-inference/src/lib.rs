@@ -623,7 +623,7 @@ impl ChainBackend {
     /// The order to try links this call. A reasoning turn (`think == Some(true)`) with a designated
     /// reasoner starts there; otherwise the strategy sets the starting link / distribution. Then any
     /// hot (quota-burned) link is demoted to last. Always a full permutation, so failover covers all.
-    fn routing_order(&self, think: Option<bool>) -> Vec<usize> {
+    fn routing_order(&self, think: Option<bool>, prefer_reasoner: bool) -> Vec<usize> {
         use std::sync::atomic::Ordering;
         let n = self.links.len();
         let mut order: Vec<usize> = (0..n).collect();
@@ -631,7 +631,9 @@ impl ChainBackend {
             return order;
         }
         let start = match self.reasoner {
-            Some(r) if think == Some(true) => r,
+            // Route to the reasoner for a think:true call OR an explicit prefer_reasoner (escalation) —
+            // the latter gets the strong model WITHOUT think:true's GPU-hogging thinking preamble.
+            Some(r) if think == Some(true) || prefer_reasoner => r,
             _ => match &self.strategy {
                 ChainStrategy::Failover => 0,
                 ChainStrategy::RoundRobin => self.route.fetch_add(1, Ordering::Relaxed) % n,
@@ -822,7 +824,7 @@ impl LLMBackend for ChainBackend {
         // distribution — except a think:true call is routed to the reasoner link first. A quota-burned
         // link is still demoted to last. Every order is a full permutation, so on error/empty we
         // failover through the rest — a backup is always in play.
-        let order = self.routing_order(config.think);
+        let order = self.routing_order(config.think, config.prefer_reasoner);
         for i in order {
             let be = &self.links[i];
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
@@ -1414,6 +1416,10 @@ mod tests {
         assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "FAST");
         // Reasoning (think:true) routes to the reasoner link first.
         cfg.think = Some(true);
+        assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "REASONER");
+        // prefer_reasoner routes to the reasoner even with think:false (escalation path).
+        cfg.think = Some(false);
+        cfg.prefer_reasoner = true;
         assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "REASONER");
     }
 

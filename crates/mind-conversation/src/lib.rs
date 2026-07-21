@@ -6330,8 +6330,11 @@ Open reminders you're carrying for them:");
                 // "Sorry, I had trouble" dead end. Sticky for the rest of the turn.
                 if !escalated && (raw.is_empty() || is_tool_call_blob(raw)) {
                     escalated = true;
-                    cfg.think = Some(true);
-                    eprintln!("[agent] dispatch produced no tool/answer — escalating this turn to the reasoner (think:true)");
+                    // Route to the strong reasoner MODEL but keep think:false. The big model handles
+                    // the agentic format the small one flubbed — WITHOUT think:true's thousands of
+                    // thinking tokens that hold the GPU 60-90s/call and pile up a multi-minute queue.
+                    cfg.prefer_reasoner = true;
+                    eprintln!("[agent] dispatch produced no tool/answer — escalating to the reasoner model (think:false)");
                     continue;
                 }
                 // A broken tool-call blob is NOT a real answer — never echo it or publish it as a page

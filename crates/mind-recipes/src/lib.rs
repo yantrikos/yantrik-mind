@@ -309,11 +309,14 @@ impl RecipeEngine {
             ),
             ChatMessage::user(&format!("QUESTION: {question}\n\nSOURCES:\n[source: evidence]\n{evidence}")),
         ];
-        // Reasoning/compose step (grounded answer synthesis) — the maintainer measured it DEGRADES
-        // without thinking (10 → 9), so it defaults to think:true (dispatch runs think:false for
-        // speed; quality is spent here). Config-overridable via YM_THINK_REASONING.
+        // Reasoning/compose step (grounded answer synthesis) → route to the strong reasoner model
+        // (prefer_reasoner) but default think:FALSE. think:true generates thousands of thinking tokens
+        // that hold the single GPU 60-90s/call and pile up a multi-minute queue — impractical for an
+        // interactive companion; the 35B is strong enough to synthesize without it. YM_THINK_REASONING=on
+        // re-enables thinking for anyone who wants the last quality point and can eat the latency.
         let cfg = GenerationConfig {
-            think: mind_inference::think_for("reasoning", Some(true)),
+            think: mind_inference::think_for("reasoning", Some(false)),
+            prefer_reasoner: true,
             ..GenerationConfig::default()
         };
         let raw = self.inference.chat(messages, cfg).await.ok()?.text;
@@ -355,11 +358,13 @@ GOAL: GOAL_HERE"#;
             ChatMessage::system("You are JARVIS's task planner. Output ONLY a JSON array of RecipeStep."),
             ChatMessage::user(&prompt),
         ];
-        // Reasoning models burn tokens on a preamble before the JSON, so give generous headroom.
-        // Recipe planning IS reasoning — defaults to think:true. Config-overridable via YM_THINK_PLAN.
+        // Recipe planning IS reasoning → strong reasoner model (prefer_reasoner), default think:FALSE
+        // (think:true's huge preamble holds the GPU and queues everything; the 35B plans fine without
+        // it). Generous max_tokens headroom retained. YM_THINK_PLAN=on re-enables thinking.
         let cfg = GenerationConfig {
             max_tokens: 8000,
-            think: mind_inference::think_for("plan", Some(true)),
+            think: mind_inference::think_for("plan", Some(false)),
+            prefer_reasoner: true,
             ..GenerationConfig::default()
         };
         let resp = self.inference.chat(messages, cfg).await.ok()?;

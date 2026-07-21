@@ -309,7 +309,14 @@ impl RecipeEngine {
             ),
             ChatMessage::user(&format!("QUESTION: {question}\n\nSOURCES:\n[source: evidence]\n{evidence}")),
         ];
-        let raw = self.inference.chat(messages, GenerationConfig::default()).await.ok()?.text;
+        // Reasoning/compose step (grounded answer synthesis) — the maintainer measured it DEGRADES
+        // without thinking (10 → 9), so it defaults to think:true (dispatch runs think:false for
+        // speed; quality is spent here). Config-overridable via YM_THINK_REASONING.
+        let cfg = GenerationConfig {
+            think: mind_inference::think_for("reasoning", Some(true)),
+            ..GenerationConfig::default()
+        };
+        let raw = self.inference.chat(messages, cfg).await.ok()?.text;
         let cited = parse_cited(&raw);
         let kept = CitedOutput { claims: cited.claims.into_iter().filter(|c| c.is_grounded()).collect() };
         if kept.claims.is_empty() {
@@ -349,7 +356,12 @@ GOAL: GOAL_HERE"#;
             ChatMessage::user(&prompt),
         ];
         // Reasoning models burn tokens on a preamble before the JSON, so give generous headroom.
-        let cfg = GenerationConfig { max_tokens: 8000, ..GenerationConfig::default() };
+        // Recipe planning IS reasoning — defaults to think:true. Config-overridable via YM_THINK_PLAN.
+        let cfg = GenerationConfig {
+            max_tokens: 8000,
+            think: mind_inference::think_for("plan", Some(true)),
+            ..GenerationConfig::default()
+        };
         let resp = self.inference.chat(messages, cfg).await.ok()?;
         let arr = extract_recipe_json(&resp.text);
         match serde_json::from_str::<Vec<RecipeStep>>(&arr) {

@@ -6213,7 +6213,14 @@ Open reminders you're carrying for them:");
         let now = now_str();
         // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.
-        let cfg = GenerationConfig { max_tokens: 8000, ..GenerationConfig::default() };
+        // Dispatch (tool-selection) defaults to think:false — the maintainer measured it loses
+        // nothing without reasoning (4/4 correct, 3.6× fewer tokens); reasoning quality is restored
+        // on the compose step (cited_answer). Config-overridable via YM_THINK_DISPATCH.
+        let cfg = GenerationConfig {
+            max_tokens: 8000,
+            think: mind_inference::think_for("dispatch", Some(false)),
+            ..GenerationConfig::default()
+        };
         let mut scratch = String::new();
         let mut last_call = String::new();
         for step in 0..MAX_STEPS {

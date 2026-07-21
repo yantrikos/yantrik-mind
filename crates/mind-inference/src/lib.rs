@@ -912,6 +912,23 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
 /// see `default_chain_from_env`). Returns `None` if `YM_LOCAL_OLLAMA_URL` is not set (explicit opt-in
 /// — avoids false "local available" signals). Point the URL at the owned endpoint (a TLS gateway like
 /// `https://aig.mycluster.cyou` is preferred over a plaintext-LAN Ollama). Model/key via env.
+/// Per-workload thinking policy, config-overridable — resolves `GenerationConfig.think` for a
+/// named call site. `YM_THINK_<ROLE>` (case-insensitive: on/true/1/yes → ON, off/false/0/no → OFF)
+/// overrides the baked default; unset → `default`. Lets the dual-mode split (dispatch OFF for
+/// fast tool-selection, reasoning ON for quality) be retuned from /etc/yantrik-mind.env without a
+/// rebuild — e.g. `YM_THINK_DISPATCH=on` or `YM_THINK_REASONING=off` while the maintainer iterates.
+pub fn think_for(role: &str, default: Option<bool>) -> Option<bool> {
+    match std::env::var(format!("YM_THINK_{}", role.to_ascii_uppercase()))
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("on" | "true" | "1" | "yes") => Some(true),
+        Some("off" | "false" | "0" | "no") => Some(false),
+        _ => default,
+    }
+}
+
 pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     let url = std::env::var("YM_LOCAL_OLLAMA_URL")
         .ok()

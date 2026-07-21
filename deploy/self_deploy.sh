@@ -28,6 +28,18 @@ git checkout -q main
 git reset -q --hard origin/main
 COMMIT=$(git rev-parse --short HEAD)
 
+# Keep the path-dependency sibling in sync too. yantrik-mind's Cargo.toml points
+# `yantrik-ml` at ../yantrik-companion; if that tree stays stale, companion-side fixes
+# (e.g. inference request shaping) never reach the built binary. Self-healing: clone if
+# missing, hard-reset to origin/main if present (build cache in target/ is untracked, kept).
+COMPANION=/root/codes/yantrik-companion
+if [ ! -d "$COMPANION/.git" ]; then
+  if [ -d "$COMPANION" ]; then git -C "$COMPANION" init -q && git -C "$COMPANION" remote add origin https://github.com/yantrikos/yantrik-companion.git;
+  else git clone -q https://github.com/yantrikos/yantrik-companion.git "$COMPANION"; fi
+fi
+git -C "$COMPANION" fetch -q origin main && git -C "$COMPANION" reset -q --hard origin/main
+echo "==> self-deploy: companion @ $(git -C "$COMPANION" rev-parse --short HEAD)"
+
 echo "==> self-deploy: building main @ $COMMIT"
 if ! cargo build --release -p mind-core 2>&1 | tail -3; then
   echo "$(date -u +%FT%TZ) | deploy | ABORT-BUILD | $COMMIT" >> "$EVLOG"

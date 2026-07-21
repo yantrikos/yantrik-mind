@@ -262,17 +262,37 @@ impl SubAgent {
 
 /// Lenient parse of the decision JSON (extract the first {...}).
 fn parse_decision(raw: &str) -> Decision {
+    // A think:true reasoner emits a <think>…</think> preamble — often containing braces — before the
+    // JSON. Strip it first, else the {…} span extraction grabs the wrong span, the typed parse fails,
+    // and the whole raw blob leaks to the user as the "answer" (observed live: the MoE reasoner's
+    // {"action":"finish","answer":…} dumped verbatim into chat). Mirrors the main loop's </think> handling.
+    let raw = raw.rsplit("</think>").next().unwrap_or(raw).trim();
     if let Ok(d) = serde_json::from_str::<Decision>(raw) {
         return d;
     }
     if let (Some(s), Some(e)) = (raw.find('{'), raw.rfind('}')) {
         if e > s {
-            if let Ok(d) = serde_json::from_str::<Decision>(&raw[s..=e]) {
+            let span = &raw[s..=e];
+            if let Ok(d) = serde_json::from_str::<Decision>(span) {
                 return d;
+            }
+            // Partly-malformed object (truncated / stray field): pull what we can out of a lenient
+            // Value so we NEVER dump raw JSON. An extractable answer or tool wins over the raw fallback.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(span) {
+                let answer = v.get("answer").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                if !answer.is_empty() || !tool.is_empty() {
+                    let action = v
+                        .get("action")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(if tool.is_empty() { "finish" } else { "call_tool" })
+                        .to_string();
+                    return Decision { action, tool, args: v.get("args").cloned().unwrap_or_default(), answer };
+                }
             }
         }
     }
-    // No JSON at all → treat the whole text as a finished answer (graceful).
+    // No usable JSON → treat the whole (think-stripped) text as a finished answer (graceful).
     Decision { action: "finish".into(), answer: raw.trim().to_string(), ..Default::default() }
 }
 
@@ -281,6 +301,20 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[test]
+    fn parse_decision_strips_think_and_never_leaks_raw_json() {
+        // A think:true reasoner's <think> preamble (with braces) must not derail extraction.
+        let raw = "<think>Plan: {weather, things}. I'll finish now.</think>\n\
+                   {\"action\":\"finish\",\"answer\":\"Branson is warm in July.\"}";
+        let d = parse_decision(raw);
+        assert_eq!(d.action, "finish");
+        assert_eq!(d.answer, "Branson is warm in July.");
+        // A stray extra field still yields the clean answer, never the raw JSON blob.
+        let d2 = parse_decision("{\"action\":\"finish\",\"answer\":\"hi\",\"note\":\"x\"}");
+        assert_eq!(d2.answer, "hi");
+        assert!(!d2.answer.contains('{'));
+    }
     use yantrik_ml::{LLMBackend, LLMResponse};
 
     /// An LLM that returns a fixed sequence of responses (for multi-step ReAct tests).

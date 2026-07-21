@@ -156,6 +156,12 @@ pub struct InferencePool {
     sem: Arc<Semaphore>,
     /// Which provider(s) back this pool — e.g. "nanogpt -> minimax", "scripted". Drives the lanes.
     provider: Arc<str>,
+    /// The dedicated PRIVATE lane (ARCH: local-owned inference). When set, a `PrivacyScope::Private`
+    /// call is served ONLY by this backend — which MUST be constructed local-only (no cloud links)
+    /// so a private turn CANNOT reach a third party by construction (sol redteam 019f8287). If it
+    /// fails, the request FAILS CLOSED — it is never re-sent to the cloud/household backend, because
+    /// an outage must reduce capability, never confidentiality. Set only from an owned endpoint.
+    private: Option<(Arc<dyn LLMBackend>, Arc<str>)>,
 }
 
 impl InferencePool {
@@ -166,6 +172,7 @@ impl InferencePool {
             backend,
             sem: Arc::new(Semaphore::new(max_concurrency.max(1))),
             provider: Arc::from("scripted"),
+            private: None,
         }
     }
 
@@ -173,6 +180,20 @@ impl InferencePool {
     pub fn with_provider(mut self, label: &str) -> Self {
         self.provider = Arc::from(label);
         self
+    }
+
+    /// Attach the dedicated LOCAL-ONLY private lane. `backend` MUST be a local/owned endpoint with
+    /// no cloud fallback (the caller — `build_backend` — guarantees this by building it from the
+    /// local URL only). A `Private` call is then served here and FAILS CLOSED on failure.
+    pub fn with_private_backend(mut self, backend: Arc<dyn LLMBackend>, label: &str) -> Self {
+        self.private = Some((backend, Arc::from(label)));
+        self
+    }
+
+    /// True when a dedicated local-owned private lane is configured (private turns stay home + fail
+    /// closed instead of escalating to cloud).
+    pub fn has_private_lane(&self) -> bool {
+        self.private.is_some()
     }
 
     pub fn provider(&self) -> &str {
@@ -214,18 +235,25 @@ impl InferencePool {
         use std::sync::atomic::Ordering;
         let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
         let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
-        if !scope_allows(scope, &self.provider, &household, &private) {
+        // A PRIVATE call, when a dedicated local-owned lane exists, is served ONLY by that local-only
+        // backend — cloud is unreachable for it by construction (sol 019f8287: enforce at dispatch).
+        // Everything else (and Private when no local lane is configured) routes on the default backend.
+        let (backend, label) = match (scope, &self.private) {
+            (PrivacyScope::Private, Some((be, lbl))) => (be.clone(), lbl.clone()),
+            _ => (self.backend.clone(), self.provider.clone()),
+        };
+        if !scope_allows(scope, &label, &household, &private) {
             PRIVACY_REFUSED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "[privacy] REFUSED {} -> provider '{}' not in the {} allowlist",
                 scope.as_str(),
-                self.provider,
+                label,
                 scope.as_str()
             );
             anyhow::bail!(
                 "privacy: {}-scope request refused — provider '{}' is not allowlisted for this lane; use deterministic rendering (scaffold/fill) instead",
                 scope.as_str(),
-                self.provider
+                label
             );
         }
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
@@ -235,7 +263,6 @@ impl InferencePool {
             .acquire_owned()
             .await
             .expect("semaphore never closed");
-        let backend = self.backend.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
             let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
@@ -272,10 +299,24 @@ impl InferencePool {
             .await
         {
             Ok(r) => Ok(r), // served locally — private context stayed home
-            Err(_) => {
+            Err(e) => {
+                // FAIL CLOSED when a dedicated local private lane EXISTS but its backend failed
+                // (outage / OOM / timeout): do NOT re-send the private prompt to a cloud/household
+                // backend — an outage must reduce capability, never confidentiality (sol 019f8287).
+                // The turn's caller degrades to deterministic rendering / an honest "unavailable".
+                if self.private.is_some() {
+                    PRIVACY_REFUSED[scope_idx(PrivacyScope::Private)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {e}");
+                    return Err(anyhow::anyhow!(
+                        "private inference unavailable — refusing to route private context to a cloud provider (local lane down)"
+                    ));
+                }
+                // No local private lane configured (the documented interim gap): escalate to the
+                // household lane so the turn still works, but COUNT + log it — the gap is visible and
+                // auto-closes the moment YM_LOCAL_OLLAMA_URL / YM_PRIVATE_PROVIDERS names a local lane.
                 PRIVACY_ESCALATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
-                    "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — no owned-hardware provider in YM_PRIVATE_PROVIDERS; configure one to keep private context home",
+                    "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — no owned-hardware private lane configured; set YM_LOCAL_OLLAMA_URL to keep private context home",
                     self.provider
                 );
                 self.chat_scoped_tools(messages, config, PrivacyScope::Household, tools).await
@@ -919,6 +960,70 @@ impl Router {
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
+
+    /// A backend that PANICS if any message it receives contains a canary — a mock "cloud" provider
+    /// that fails the test the instant private data reaches it. Counts calls so a test can assert 0.
+    struct CanaryTrap {
+        canary: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl LLMBackend for CanaryTrap {
+        fn chat(&self, messages: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            for m in messages {
+                assert!(!m.content.contains(&self.canary), "PRIVACY LEAK: private canary reached the cloud backend");
+            }
+            Ok(LLMResponse { text: "cloud-ok".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> { Ok(t.len() / 4) }
+        fn backend_name(&self) -> &str { "canary-cloud" }
+    }
+
+    /// A local backend that always fails — simulates the local Ollama being down/OOM/timing out.
+    struct AlwaysDown;
+    impl LLMBackend for AlwaysDown {
+        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            anyhow::bail!("local ollama down")
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> { Ok(t.len() / 4) }
+        fn backend_name(&self) -> &str { "always-down" }
+    }
+
+    /// THE LEAK-PROOF INVARIANT (sol 019f8287): for a Private-grounded turn, ZERO bytes reach a cloud
+    /// provider when the local private lane is down — the turn FAILS CLOSED, never escalates. Proven
+    /// with a canary the cloud mock panics on and a call-counter asserted to stay 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn private_grounded_fails_closed_never_leaks_to_cloud() {
+        let canary = "SECRET-CANARY-alice-oncology-47-12-33";
+        let cloud_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cloud = Arc::new(CanaryTrap { canary: canary.into(), calls: cloud_calls.clone() }) as Arc<dyn LLMBackend>;
+        let local_down = Arc::new(AlwaysDown) as Arc<dyn LLMBackend>;
+        // Default/household backend = the cloud trap; PRIVATE lane = the (failing) local-only backend.
+        let pool = InferencePool::new(cloud, 1)
+            .with_provider("canary-cloud")
+            .with_private_backend(local_down, "ollama-local");
+        assert!(pool.has_private_lane());
+
+        let messages = vec![ChatMessage::user(&format!("remember: {canary}"))];
+        let res = pool
+            .chat_grounded_tools(messages, GenerationConfig::default(), Vec::new())
+            .await;
+
+        // The private lane failed → the turn FAILS CLOSED (Err), and the cloud backend was NEVER called.
+        assert!(res.is_err(), "a down private lane must fail closed, not silently succeed via cloud");
+        assert!(res.unwrap_err().to_string().contains("refusing to route private context"), "explicit fail-closed reason");
+        assert_eq!(cloud_calls.load(std::sync::atomic::Ordering::SeqCst), 0, "PRIVACY LEAK: the cloud backend was called for a private-grounded turn");
+    }
+
+    // (The no-private-lane escalation path — the documented interim gap — is covered by the existing
+    // `chat_grounded_prefers_private_and_audits_escalation` test; not duplicated here because the
+    // process-global PRIVACY_ESCALATED counter makes a second escalating test collide with it.)
 
     /// REAL-MODEL smoke test for the native function-calling path — the one thing the scripted eval
     /// suite structurally cannot prove (SequencedLLM fakes the model). Drives the actual

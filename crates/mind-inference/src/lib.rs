@@ -926,16 +926,20 @@ pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     // the agent loop, and needs no auth. YM_LOCAL_OLLAMA_KEY is accepted but unused (auth "none").
     let key = std::env::var("YM_LOCAL_OLLAMA_KEY")
         .unwrap_or_else(|_| "ollama".to_string());
-    // Thinking ON: yantrik-mind does planning + grounded reasoning, the quality-critical class the
-    // ollama maintainer flagged (2026-07-21) — on qwen3.6 MoE thinking is a BINARY accuracy trade
-    // (reasoning_effort levels don't scale), and the `ollama` preset would otherwise send
-    // think:false. Quality-first here; a per-workload fast path (thinking off for trivial turns)
-    // can come later. with_thinking(true) also overrides the :11434 auto-detect's think:false.
+    // Thinking is a per-workload quality/latency lever on qwen3.6 MoE (binary; reasoning_effort
+    // levels don't scale — ollama maintainer, 2026-07-21). Blanket thinking-ON measured ~96s even
+    // for a trivial turn (the agent loop multiplies the reasoning chain across steps) — unusable
+    // for interactive replies. So default OFF for foreground usability; set YM_LOCAL_THINK=on to
+    // force it globally. The proper split — thinking ON only on background planning paths — is the
+    // follow-up; this env keeps the fast default while the builder plumbing is already in place.
+    let think = std::env::var("YM_LOCAL_THINK")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "1" | "true" | "yes"))
+        .unwrap_or(false);
     let label = format!("ollama-local:{model}");
     Some((
         Arc::new(
             yantrik_ml::GenericOpenAIBackend::for_provider("ollama", &url, Some(key), model)
-                .with_thinking(true),
+                .with_thinking(think),
         ) as Arc<dyn LLMBackend>,
         label,
     ))

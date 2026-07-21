@@ -299,7 +299,7 @@ impl super::ConversationEngine {
             ),
         };
         let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        let insights = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let insights = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => r.text.trim().to_string(),
             Err(e) => return format!("Read {} photos but couldn't distill patterns ({e}).", descs.len()),
         };

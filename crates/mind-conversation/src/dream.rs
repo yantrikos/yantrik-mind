@@ -135,7 +135,7 @@ impl super::ConversationEngine {
             "You know this family through evidence. Find ONE genuinely non-obvious CONNECTION between items from DIFFERENT domains below (H=upcoming, F=traditions, S=style direction, T=trips, E=events, L=their own words, P=dates ahead, G=taste). Surprise them with something true.\n\n{listing}\n{avoid}\n\nOutput ONLY JSON: {{\"connection\":\"<2-3 warm concrete sentences>\",\"cites\":[\"<id>\",\"<id>\"],\"suggestion\":\"<one short optional next step, or empty>\",\"theme\":\"<3-5 word slug>\"}}\nHARD RULES: every claim must be derivable from the cited items alone; cite 2-4 ids from at least 2 different letter-domains; no invented people, dates, or reasons; if nothing is genuinely interesting, output {{\"connection\":\"\"}}."
         );
         let cfg = GenerationConfig { max_tokens: 320, ..GenerationConfig::default() };
-        let resp = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
+        let resp = self.inference.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
         let txt = resp.text;
         let j: serde_json::Value = txt
             .find('{')
@@ -222,7 +222,7 @@ impl super::ConversationEngine {
              imperative buildable sentence naming a real module\",\"why_now\":\"1 sentence\"}}"
         );
         let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
-        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+        let resp = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
             Ok(r) => r.text,
             Err(e) => return format!("(dream failed: {e})"),
         };
@@ -298,7 +298,7 @@ impl super::ConversationEngine {
              {{\"ideas\":[{{\"title\":\"...\",\"evidence\":\"...\",\"goal\":\"one imperative buildable sentence\"}}]}}"
         );
         let cfg = GenerationConfig { max_tokens: 800, ..GenerationConfig::default() };
-        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+        let resp = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
             Ok(r) => r.text,
             Err(e) => return format!("(self-ideation failed: {e})"),
         };

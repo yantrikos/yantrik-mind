@@ -244,7 +244,7 @@ impl super::ConversationEngine {
             if prior.trim().is_empty() { "(none yet)" } else { prior.as_str() },
         );
         let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => {
                 let sum = r.text.trim();
                 if sum.chars().count() < 20 {

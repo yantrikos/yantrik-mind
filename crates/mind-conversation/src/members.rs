@@ -334,7 +334,7 @@ impl super::ConversationEngine {
             "Recent conversation with {name}:\n{convo}\n\n{name}: {user_text}\n\nReply as the companion — warm, natural, concise. No preamble."
         );
         let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
-        match self.inference.chat(vec![ChatMessage::system(&sys), ChatMessage::user(&prompt)], cfg).await {
+        match self.inference.chat_grounded(vec![ChatMessage::system(&sys), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => r.text.trim().to_string(),
             Err(e) => format!("(I hit a snag thinking just now: {e})"),
         }

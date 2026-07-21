@@ -207,7 +207,7 @@ impl super::ConversationEngine {
             .collect();
         let prompt = Self::book_chapter_prompt(year, &ev, &lore_y);
         let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        let Ok(resp) = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await else {
+        let Ok(resp) = self.inference.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await else {
             return "Couldn't redraft the chapter right now.".to_string();
         };
         let txt = resp.text.trim().to_string();

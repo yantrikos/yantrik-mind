@@ -347,7 +347,7 @@ impl super::ConversationEngine {
             "You are a careful financial ANALYST (NOT an advisor) briefing the user on {name} ({ticker}). Use ONLY the multi-source evidence below, and CONSOLIDATE across the sources — note where they agree and where they disagree, don't just relay headlines.\n\n=== EVIDENCE ===\n{evidence}{portfolio_note}\n\n=== WRITE ===\n1. What {name} is/does — one line, from the profile.\n2. Recent price action — cite the live-quote figure.\n3. What the sources collectively say (consolidated; flag any disagreement).\n4. The BULL case and the BEAR case — both, balanced.\n5. Key RISKS / what to watch.\n\nHARD RULES: Do NOT invent any number, price, ratio, or target not present in the evidence. Do NOT say buy/sell/hold and do NOT predict the price. Stay balanced (always include the bear case). Under 230 words. End with exactly this line: 'This is analysis to consider — not financial advice. You decide.'"
         );
         let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
-        match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => format!("📊 {name} ({ticker}) — {qline}\n\n{}", r.text.trim()),
             Err(e) => format!("(couldn't complete the analysis: {e})"),
         }

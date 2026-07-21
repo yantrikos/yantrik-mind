@@ -144,7 +144,7 @@ impl super::ConversationEngine {
                      \"prediction\":{{\"claim\":\"<what will/won't happen next>\",\"threshold\":\"<concrete observable + level, or the yes/no event>\",\"resolve_by\":\"<YYYY-MM-DD>\",\"confidence\":0.0-1.0}}}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
-                let text = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                let text = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
                     Ok(r) => r.text,
                     Err(e) => return format!("(couldn't form an understanding: {e})"),
                 };
@@ -212,7 +212,7 @@ impl super::ConversationEngine {
                      \"prediction\":{{\"claim\":\"<what will/won't happen next>\",\"threshold\":\"<concrete observable + level, or the yes/no event>\",\"resolve_by\":\"<YYYY-MM-DD>\",\"confidence\":0.0-1.0}}}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
-                let text = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                let text = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
                     Ok(r) => r.text,
                     Err(e) => return format!("(couldn't re-check \"{subject}\": {e})"),
                 };
@@ -532,7 +532,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
              \"confidence\":0.0-1.0}}}}\nIf it genuinely can't be made checkable, output {{\"prediction\":null}}."
         );
         let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
-        let r = self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await.ok()?;
+        let r = self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await.ok()?;
         let v = parse_json_obj(&r.text);
         self.maybe_store_prediction(subject, &v, made_ms, "").await
     }
@@ -766,7 +766,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                  Judge the prediction STRICTLY against its threshold. Did it HIT, MISS, or is it genuinely UNCLEAR from what's known? \
                  Output ONLY JSON: {{\"verdict\":\"hit|miss|unclear\",\"why\":\"<one sentence citing the deciding fact>\"}}"
             );
-            let verdict = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], GenerationConfig::default()).await {
+            let verdict = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], GenerationConfig::default()).await {
                 Ok(r) => {
                     let vv = parse_json_obj(&r.text);
                     let verd = vv.get("verdict").and_then(|x| x.as_str()).unwrap_or("unclear").to_lowercase();

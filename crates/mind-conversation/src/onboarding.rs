@@ -90,7 +90,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
 {dims_list}"
                     );
                     let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
-                    if let Ok(r) = self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                    if let Ok(r) = self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
                         let v = parse_json_obj(&r.text);
                         for a in v.get("answered").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
                             let (Some(k2), Some(ans2)) = (a.get("key").and_then(|x| x.as_str()), a.get("answer").and_then(|x| x.as_str())) else { continue };
@@ -488,7 +488,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             ChatMessage::system("Ask exactly one concise, specific question. No preamble, no markdown."),
             ChatMessage::user(&prompt),
         ];
-        let r = self.inference.chat(messages, GenerationConfig::default()).await.ok()?;
+        let r = self.inference.chat_grounded(messages, GenerationConfig::default()).await.ok()?;
         let q = r.text.trim().lines().last().unwrap_or("").trim().to_string();
         if q.ends_with('?') && q.len() > 8 { Some(q) } else { None }
     }
@@ -557,7 +557,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             ChatMessage::system("You route a request to exactly one capability or none. Reply ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
-        let text = self.inference.chat(messages, GenerationConfig::default()).await.ok()?.text;
+        let text = self.inference.chat_grounded(messages, GenerationConfig::default()).await.ok()?.text;
         let body = text.rsplit("</think>").next().unwrap_or(&text);
         let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
         let obj = match (body.find('{'), body.rfind('}')) {

@@ -56,7 +56,7 @@ impl super::ConversationEngine {
                  Output ONLY JSON: {{\"facts\":[\"...\"],\"follow\":[\"https://...\"]}}"
             );
             let cfg = GenerationConfig { max_tokens: 800, ..GenerationConfig::default() };
-            let v = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            let v = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
                 Ok(r) => parse_json_obj(&r.text),
                 Err(_) => continue,
             };
@@ -117,7 +117,7 @@ impl super::ConversationEngine {
              Output ONLY JSON: {{\"profile\":\"<second-person summary>\",\"gaps\":[\"<question>\"]}}"
         );
         let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
-        let (profile, gaps) = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&synth_prompt)], cfg).await {
+        let (profile, gaps) = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&synth_prompt)], cfg).await {
             Ok(r) => {
                 let v = parse_json_obj(&r.text);
                 let p = v.get("profile").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -296,7 +296,7 @@ impl super::ConversationEngine {
             if excerpts.trim().is_empty() { "(none readable — retailer bot-walls; rely on the search results)".to_string() } else { excerpts.trim().to_string() }
         );
         let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
-        let body = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let body = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => r.text.trim().to_string(),
             Err(e) => return format!("(couldn't complete the deal search: {e})"),
         };
@@ -350,7 +350,7 @@ impl super::ConversationEngine {
             if excerpts.trim().is_empty() { "(none readable)".to_string() } else { excerpts.trim().to_string() }
         );
         let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
-        let v = parse_json_obj(&self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await.ok()?.text);
+        let v = parse_json_obj(&self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await.ok()?.text);
         let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         let price = v.get("price_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
         let retailer = v.get("retailer").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();

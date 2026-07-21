@@ -918,13 +918,17 @@ pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
         .filter(|u| !u.trim().is_empty())?;
     let model = std::env::var("YM_LOCAL_OLLAMA_MODEL")
         .unwrap_or_else(|_| "qwen3.6:35b-a3b-mtp-q4_K_M".to_string());
-    // Local Ollama doesn't need an API key; send a placeholder so the OpenAI-compat client
-    // includes the Authorization header (some Ollama builds check its presence).
+    // Provider type "ollama" (NOT "openai"): our endpoint is an Ollama server — self-hosted OR
+    // fronted by a TLS gateway that doesn't carry the :11434 auto-detect port. The "openai" path
+    // POSTs to <url>/chat/completions (missing /v1 → 404, or /v1 → 307 redirect) AND can't turn off
+    // the qwen thinking preamble (OpenAI-compat ignores `think`, burning ~10s/turn). The "ollama"
+    // preset routes to native /api/chat, sends `think:false` (fast, clean content), passes tools for
+    // the agent loop, and needs no auth. YM_LOCAL_OLLAMA_KEY is accepted but unused (auth "none").
     let key = std::env::var("YM_LOCAL_OLLAMA_KEY")
         .unwrap_or_else(|_| "ollama".to_string());
     let label = format!("ollama-local:{model}");
     Some((
-        Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", &url, Some(key), model))
+        Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("ollama", &url, Some(key), model))
             as Arc<dyn LLMBackend>,
         label,
     ))

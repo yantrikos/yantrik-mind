@@ -93,6 +93,7 @@ enum Cmd {
     RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
     DischargeTension { id: String, reply: Reply<bool> },
+    ExpireStaleTensions { curiosity_days: i64, other_days: i64, reply: Reply<usize> },
     RecallDemandFor { about: String, reply: Reply<f64> },
     // retro-dedup: collapse norm_prop/Jaccard near-duplicates written before the write-path dedup existed
     RetroDedupStore { reply: Reply<(usize, usize)> },
@@ -976,13 +977,41 @@ fn record_tension_db(db: &YantrikDB, kind: &str, pressure: f64, about: &str, now
     }
 }
 
+/// Half-life (days) of a tension's URGENCY. An urge nobody acted on for a week is genuinely less
+/// pressing than a fresh one of equal nominal pressure — and, critically, decay is what stops a
+/// fixed-pressure class from owning the digest forever (see `open_tensions_db`).
+pub const TENSION_HALF_LIFE_DAYS: f64 = 7.0;
+
+/// Effective urgency = nominal pressure decayed by age. Pure so the ranking is testable.
+pub fn effective_pressure(pressure: f64, age_ms: i64) -> f64 {
+    let days = (age_ms.max(0) as f64) / 86_400_000.0;
+    pressure * 0.5f64.powf(days / TENSION_HALF_LIFE_DAYS)
+}
+
+/// The open tensions the proactive drive may surface, ranked by AGE-DECAYED pressure.
+///
+/// The previous ordering (`pressure DESC, created_ms DESC`) starved the drive dead. Measured on the
+/// live box 2026-07-25: 2,602 open tensions, 17 discharged EVER (0.6%), and all 12 digest slots
+/// permanently held by `operational` self-build alarms at a fixed 0.85 — so 2,257 curiosity urges
+/// (0.4) and 329 contradictions were structurally unreachable, some for a month. With a fixed
+/// pressure per class, the highest class wins forever and the newest-first tiebreak means an item
+/// that loses once can never win later: not a backlog, a graveyard.
+///
+/// Decaying by age makes the ranking a genuine competition again — a stale 0.85 alarm falls below a
+/// fresh 0.4 curiosity after ~two half-lives — and pairs with `expire_stale_tensions_db` to keep the
+/// live set bounded. Candidates are drawn by recency, then re-ranked, so the scan stays cheap.
 fn open_tensions_db(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<mind_types::Tension>, String> {
+    const CANDIDATES: i64 = 500;
+    let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT id, kind, pressure, about, created_ms FROM mind_tensions WHERE status='open' ORDER BY pressure DESC, created_ms DESC LIMIT ?1")
+        .prepare("SELECT id, kind, pressure, about, created_ms FROM mind_tensions WHERE status='open' ORDER BY created_ms DESC LIMIT ?1")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([limit as i64], |r| {
+        .query_map([CANDIDATES], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -992,17 +1021,51 @@ fn open_tensions_db(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<min
             ))
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows
+    let mut all: Vec<(f64, mind_types::Tension)> = rows
         .filter_map(|r| r.ok())
-        .map(|(id, kind, pressure, about, created_ms)| mind_types::Tension {
-            id: id.to_string(),
-            kind: mind_types::TensionKind::parse(&kind),
-            pressure,
-            about,
-            created_ms: created_ms as u64,
-            status: "open".into(),
+        .map(|(id, kind, pressure, about, created_ms)| {
+            let eff = effective_pressure(pressure, now_ms - created_ms);
+            (
+                eff,
+                mind_types::Tension {
+                    id: id.to_string(),
+                    kind: mind_types::TensionKind::parse(&kind),
+                    pressure,
+                    about,
+                    created_ms: created_ms as u64,
+                    status: "open".into(),
+                },
+            )
         })
-        .collect())
+        .collect();
+    all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(all.into_iter().take(limit).map(|(_, t)| t).collect())
+}
+
+/// Bound the tension ledger: an OPEN urge older than its kind's shelf life is closed as `expired`.
+///
+/// Without this the table only grows (measured: ~90 new curiosity urges/day, 4 weeks, 0.6% ever
+/// discharged). Contradictions get a much longer life than curiosity because unresolved contradictory
+/// beliefs are real epistemic debt the mind should keep chewing on; a hunch nobody pursued in two
+/// weeks is noise. Expiry is a distinct status from `discharged` so "we surfaced it" and "it aged
+/// out unseen" stay distinguishable in the record.
+fn expire_stale_tensions_db(
+    db: &YantrikDB,
+    now_ms: i64,
+    curiosity_days: i64,
+    other_days: i64,
+) -> std::result::Result<usize, String> {
+    let cur_cut = now_ms - curiosity_days * 86_400_000;
+    let oth_cut = now_ms - other_days * 86_400_000;
+    let n = db
+        .conn()
+        .execute(
+            "UPDATE mind_tensions SET status='expired' WHERE status='open' AND \
+             ((kind='curiosity' AND created_ms < ?1) OR (kind<>'curiosity' AND created_ms < ?2))",
+            [cur_cut, oth_cut],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n)
 }
 
 fn discharge_tension_db(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> {
@@ -1607,6 +1670,13 @@ impl MemoryHandle {
                         Cmd::DischargeTension { id, reply } => {
                             let _ = reply.send(discharge_tension_db(&db, &id));
                         }
+                        Cmd::ExpireStaleTensions { curiosity_days, other_days, reply } => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            let _ = reply.send(expire_stale_tensions_db(&db, now, curiosity_days, other_days));
+                        }
                         Cmd::RecallDemandFor { about, reply } => {
                             let _ = reply.send(Ok(recall_demand_for_db(&db, &about)));
                         }
@@ -1866,6 +1936,9 @@ impl MemoryFacade for MemoryHandle {
     async fn discharge_tension(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
         self.call(|reply| Cmd::DischargeTension { id, reply }).await
+    }
+    async fn expire_stale_tensions(&self, curiosity_days: i64, other_days: i64) -> Result<usize> {
+        self.call(|reply| Cmd::ExpireStaleTensions { curiosity_days, other_days, reply }).await
     }
     async fn recall_demand_for(&self, about: &str) -> Result<f64> {
         let about = about.to_string();

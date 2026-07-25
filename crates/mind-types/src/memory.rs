@@ -356,8 +356,13 @@ pub trait MemoryFacade: Send + Sync {
     // ── tension economy (the "urges": drives emit substrate-grounded pressures; proactive arbitrates) ──
     /// Record a typed urge emitted by a drive (deduped on (kind, about) so it accrues, not floods).
     async fn record_tension(&self, kind: TensionKind, pressure: f64, about: &str) -> Result<()>;
-    /// Open tensions, highest pressure first.
+    /// Open tensions, most URGENT first — nominal pressure decayed by age, so no fixed-pressure
+    /// class can occupy the window forever (see `open_tensions_db` for the measured starvation
+    /// this ordering fixes).
     async fn open_tensions(&self, limit: usize) -> Result<Vec<Tension>>;
+    /// Close open urges older than their kind's shelf life as `expired`, bounding the ledger.
+    /// Returns how many were expired. Curiosity ages out fast; contradictions are kept far longer.
+    async fn expire_stale_tensions(&self, curiosity_days: i64, other_days: i64) -> Result<usize>;
     /// Mark a tension discharged (resolved, or surfaced to the user).
     async fn discharge_tension(&self, id: &str) -> Result<bool>;
     /// A belief plus its evidence trail (provenance). A principal gets None for a belief outside

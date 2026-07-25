@@ -1831,3 +1831,63 @@ fn primer_learner_record_tracks_topics_questions_and_misconceptions() {
         vec!["Orbital acceleration is independent of satellite mass."]
     );
 }
+
+/// TENSION LEDGER HYGIENE (measured pathology, 2026-07-25). The proactive drive had gone silent in a
+/// specific, invisible way: 2,602 open urges against 17 ever discharged, and every one of the digest's
+/// 12 slots held by `operational` self-build alarms at a fixed 0.85 pressure. Three bugs compounded —
+/// (a) ranking by raw `pressure DESC, created_ms DESC`, so the highest-pressure CLASS owned the window
+/// permanently and, on ties, a newer item always beat an older one that had already lost; (b) no
+/// expiry, so the table only grew (~90/day); (c) the vigilance `about` embedded a timestamp, so the
+/// (kind, about) dedup could never match and each day minted a fresh alarm. These lock the fixes.
+#[test]
+fn vigilance_key_is_stable_across_days_so_dedup_can_fire() {
+    let day1 = "self-build tick start\n2026-07-22T18:17:01Z ABORT: changes do not compile\n";
+    let day2 = "self-build tick start\n2026-07-23T18:17:04Z ABORT: changes do not compile\n";
+    let a = ConversationEngine::vigilance_scan_text(day1).expect("day 1 alarms");
+    let b = ConversationEngine::vigilance_scan_text(day2).expect("day 2 alarms");
+    assert_eq!(a, b, "the same failure on two days must produce ONE dedup key, not two");
+    assert!(a.contains("ABORT"), "the diagnostic reason must survive stripping: {a}");
+    assert!(!a.contains("2026-07"), "the volatile date must be gone: {a}");
+}
+
+#[test]
+fn timestamp_stripping_keeps_the_diagnosis() {
+    let s = ConversationEngine::strip_timestamps_of("2026-07-22T18:17:01Z tests failed in mind-core at 18:17:01");
+    assert!(s.contains("tests failed in mind-core"), "reason preserved: {s}");
+    assert!(!s.contains("18:17"), "clock time stripped: {s}");
+    // a line with no timestamp is returned intact (modulo whitespace collapse)
+    assert_eq!(ConversationEngine::strip_timestamps_of("MERGE-FAIL 409 conflict"), "MERGE-FAIL 409 conflict");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_urges_expire_and_fresh_ones_are_not_starved_by_old_high_pressure() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    // A fresh, LOW-pressure curiosity — the class that was structurally unreachable in production.
+    mem.record_tension(mind_types::TensionKind::Curiosity, 0.4, "a fresh thread worth pulling").await.unwrap();
+    // The digest must be able to see it at all.
+    let open = mem.open_tensions(12).await.unwrap();
+    assert!(
+        open.iter().any(|t| t.about.contains("fresh thread")),
+        "a fresh low-pressure urge must be reachable: {:?}",
+        open.iter().map(|t| &t.about).collect::<Vec<_>>()
+    );
+    // Expiry is a no-op while everything is fresh — it must not eat live urges.
+    assert_eq!(mem.expire_stale_tensions(14, 90).await.unwrap(), 0, "fresh urges must survive the sweep");
+    assert!(!mem.open_tensions(12).await.unwrap().is_empty(), "the live set is intact");
+}
+
+#[test]
+fn age_decay_lets_a_fresh_low_urge_overtake_a_stale_high_one() {
+    use mind_memory::effective_pressure;
+    const DAY: i64 = 86_400_000;
+    // The exact production shape: a 0.85 operational alarm from three weeks ago vs a fresh 0.4
+    // curiosity. Under the old raw-pressure ordering the alarm won forever.
+    let stale_alarm = effective_pressure(0.85, 21 * DAY);
+    let fresh_hunch = effective_pressure(0.40, 0);
+    assert!(
+        fresh_hunch > stale_alarm,
+        "a fresh urge must eventually outrank a stale louder one (fresh {fresh_hunch:.3} vs stale {stale_alarm:.3})"
+    );
+    // But a RECENT alarm still outranks a fresh hunch — urgency is respected, only staleness decays.
+    assert!(effective_pressure(0.85, 0) > fresh_hunch, "recent high pressure still wins");
+}

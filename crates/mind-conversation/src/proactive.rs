@@ -34,7 +34,54 @@ impl super::ConversationEngine {
         ];
         let hit = SIGS.iter().find(|s| block.contains(**s))?;
         let line = block.lines().find(|l| l.contains(*hit)).unwrap_or(hit).trim();
-        Some(format!("my last self-build run failed — {}", line.chars().take(160).collect::<String>()))
+        // STABLE DEDUP KEY. Tensions dedupe on (kind, about), but the log line carries a timestamp,
+        // so yesterday's failure and today's identical failure produced DIFFERENT `about` strings and
+        // dedup never fired — one fresh 0.85 urge per day, forever (measured: the digest's entire
+        // 12-slot window was self-build alarms). Strip the volatile timestamp so a recurring failure
+        // ACCRUES on one row, which is what the dedup was designed to do.
+        let stable = Self::strip_timestamps_of(&line.chars().take(160).collect::<String>());
+        Some(format!("my last self-build run failed — {stable}"))
+    }
+
+    /// Remove volatile timestamps so a recurring failure keeps a STABLE identity across days.
+    /// Handles ISO-8601 (`2026-07-22T18:17:01Z`), bare dates (`2026-07-22`), and clock times
+    /// (`18:17:01`); everything else — the signature and the human-readable reason — is preserved,
+    /// so the message stays diagnostic while the dedup key stops changing every run.
+    pub(crate) fn strip_timestamps_of(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let b: Vec<char> = s.chars().collect();
+        let mut i = 0usize;
+        let digits = |from: usize, n: usize| -> bool {
+            from + n <= b.len() && (from..from + n).all(|k| b[k].is_ascii_digit())
+        };
+        while i < b.len() {
+            // yyyy-mm-dd (optionally followed by T/space + hh:mm[:ss][Z])
+            if digits(i, 4) && i + 10 <= b.len() && b[i + 4] == '-' && digits(i + 5, 2) && b[i + 7] == '-' && digits(i + 8, 2) {
+                i += 10;
+                if i < b.len() && (b[i] == 'T' || b[i] == ' ') && digits(i + 1, 2) && i + 3 < b.len() && b[i + 3] == ':' {
+                    i += 1;
+                    while i < b.len() && (b[i].is_ascii_digit() || b[i] == ':' || b[i] == '.') {
+                        i += 1;
+                    }
+                    if i < b.len() && b[i] == 'Z' {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            // bare hh:mm:ss
+            if digits(i, 2) && i + 5 <= b.len() && b[i + 2] == ':' && digits(i + 3, 2) {
+                i += 5;
+                if i + 3 <= b.len() && b[i] == ':' && digits(i + 1, 2) {
+                    i += 3;
+                }
+                continue;
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        // collapse the whitespace the removals left behind
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// DEFAULT-MODE ("sleep") TICK — offline cognition over the typed substrate, run by the channel
@@ -53,6 +100,14 @@ impl super::ConversationEngine {
             (cur, n)
         };
         let mut log = Vec::new();
+        // LEDGER HYGIENE: bound the tension table before anything reads it. Measured 2026-07-25 on
+        // the live box: 2,602 open urges, 17 discharged EVER, ~90 new/day — the drive was ranking
+        // over a swamp. Curiosity ages out in 14 days; contradictions (real epistemic debt) get 90.
+        if let Ok(n) = self.memory.expire_stale_tensions(14, 90).await {
+            if n > 0 {
+                log.push(format!("[dmn] expired {n} stale tension(s)"));
+            }
+        }
         // SELF-VIGILANCE (self-healing rung 1): every idle tick, cheaply scan the mind's OWN health
         // (its self-build cron log) for failures and, if found, emit an Operational urge — so a broken
         // autonomous build SURFACES via the proactive digest instead of dying silently in a log.

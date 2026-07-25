@@ -39,6 +39,7 @@ mod people;
 mod photo;
 mod plugins_mod;
 mod judgment_trend;
+mod knock;
 mod privacy_audit;
 mod proactive;
 mod research;
@@ -4098,6 +4099,12 @@ impl ConversationEngine {
                 else { Self::ledger_cmd(r) }
             }
             "ledger" => Self::ledger_cmd(rest.trim()),
+            // Reopen the knock class after a "mute these" — the mute is a standing instruction,
+            // so only an explicit instruction lifts it.
+            "knocks on" | "knocks_on" | "unmute" => {
+                let _ = self.memory.profile_set("knock_muted", "0").await;
+                "Knocks are back on — I'll only use one when I've actually prepared something.".to_string()
+            }
             "judgment" | "brier" | "calibration" => {
                 // The point-in-time score AND the direction — the direction is the actual claim.
                 format!("{}
@@ -6554,6 +6561,15 @@ Open reminders you're carrying for them:");
         // ENGAGED — the world model learns when pings actually land.
         self.resolve_proactive(true).await;
         self.ledger_resolve(true).await;
+        // KNOCK REPLY: "show it" / "later" / "mute these" answer an outstanding calibrated knock.
+        // Intercepted here so the pre-committed engagement prediction gets GRADED (a knock the user
+        // deferred or muted must cost the ledger, not quietly vanish). Parsing is tight, so ordinary
+        // conversation that merely contains "later" flows straight through to the normal path.
+        if let Some(reply) = self.knock_reply(user_text).await {
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
         let onboard = if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
             self.pending_slot().await
         } else {

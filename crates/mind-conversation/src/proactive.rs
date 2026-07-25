@@ -356,6 +356,96 @@ impl super::ConversationEngine {
         Some(s)
     }
 
+    /// THE CALIBRATED KNOCK (sol's #1, day-one rung). At most ONE per day, and only when every part
+    /// of the contract holds: proof-carrying prepared work exists, its trigger was OBSERVED or TOLD,
+    /// the recipient looks receptive, and the predicted engagement clears the bar for a speakable
+    /// band. The engagement probability is committed to the judgment ledger BEFORE delivery, so the
+    /// spoken confidence is falsifiable — and those graded predictions are what give
+    /// `judgment_trend` something to measure. Returns None to stay silent, which is the common case.
+    ///
+    /// Silence here is not a failure mode; it is the design. See `knock` for the full rationale.
+    pub async fn maybe_knock(&self) -> Option<String> {
+        if std::env::var("YM_KNOCK").map(|v| v == "off").unwrap_or(false) {
+            return None;
+        }
+        // Standing instruction: "mute these" closes the class until the user reopens it.
+        if self.memory.profile_get("knock_muted").await.ok().flatten().as_deref() == Some("1") {
+            return None;
+        }
+        // One per day, maximum. A second knock is never more valuable than the trust it costs.
+        let today = local_now().format("%Y-%m-%d").to_string();
+        if self.memory.profile_get("knock_last_date").await.ok().flatten().as_deref() == Some(today.as_str()) {
+            return None;
+        }
+        if !self.proactive_receptivity_ok().await {
+            return None;
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        // WORK FIRST: find prepared, proof-carrying, still-valid work. No packet ⇒ no knock, which is
+        // what separates this from a notification.
+        // AUTHORITY is part of the SEARCH, not a check applied after picking one: an inferred packet
+        // sitting earlier in the store must not mask a legitimately-told one behind it (a bug the
+        // knock tests caught — the mind would go silent because the wrong candidate was chosen
+        // first). Both halves of the contract are required of the SAME packet.
+        let packets = self.load_packets().await;
+        let pkt = packets.iter().find(|p| {
+            crate::knock::packet_is_knockworthy(p, now)
+                && crate::knock::trigger_may_interrupt(
+                    p.get("trigger_provenance")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_else(|| p.get("reason").and_then(|x| x.as_str()).unwrap_or("")),
+                )
+        })?;
+        // CONFIDENCE: the learned receptivity is the predicted engagement; snap it to a coarse band
+        // or stay silent. Never speak a finer number than the record can support.
+        let p_engage = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.6);
+        let band = crate::knock::band_for(p_engage)?;
+        let title = pkt.get("title").and_then(|x| x.as_str()).unwrap_or("a prepared option");
+        let trigger = pkt.get("reason").and_then(|x| x.as_str()).unwrap_or("something you asked me to watch");
+        let pkt_id = pkt.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        // ACCOUNTABILITY: commit the prediction BEFORE the message goes out. `knock:<pkt>` is the
+        // grading ref the reply handler resolves.
+        let sref = format!("knock:{pkt_id}");
+        self.judgment_log(
+            "knock",
+            "engagement",
+            &format!("recipient engages with the {band}% knock within 90m"),
+            p_engage,
+            now + 90 * 60_000,
+            &sref,
+        )
+        .await;
+        let _ = self.memory.profile_set("knock_last_date", &today).await;
+        let _ = self.memory.profile_set("knock_pending", &pkt_id).await;
+        Some(crate::knock::render(band, trigger, title))
+    }
+
+    /// Handle a reply to an outstanding knock: deliver the work, defer, or close the class. Grades
+    /// the pre-committed prediction either way — a knock that went unwanted must cost the ledger.
+    /// Returns None when there is no pending knock or the message isn't one of the three replies,
+    /// so ordinary conversation flows through untouched.
+    pub async fn knock_reply(&self, msg: &str) -> Option<String> {
+        let pending = self.memory.profile_get("knock_pending").await.ok().flatten()?;
+        let reply = crate::knock::KnockReply::parse(msg)?;
+        let sref = format!("knock:{pending}");
+        let _ = self.memory.profile_set("knock_pending", "").await;
+        match reply {
+            crate::knock::KnockReply::ShowIt => {
+                self.judgment_grade(&sref, true).await; // the interruption was earned
+                Some(self.packet_show(&pending).await)
+            }
+            crate::knock::KnockReply::Later => {
+                self.judgment_grade(&sref, false).await; // right thing, wrong moment — still a miss
+                Some("Alright — I'll hold it until you ask.".to_string())
+            }
+            crate::knock::KnockReply::Mute => {
+                self.judgment_grade(&sref, false).await;
+                let _ = self.memory.profile_set("knock_muted", "1").await;
+                Some("Understood — no more of these until you say `knocks on`.".to_string())
+            }
+        }
+    }
+
     /// ASK DRIVE — curiosity turned OUTWARD, as a progressive interview rather than a fixed list. A
     /// companion shouldn't wait to be fed; when it doesn't know you it ASKS, in order: first your NAME,
     /// then your PURPOSE (what you want from it), then purpose-grounded follow-ups one at a time — and

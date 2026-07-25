@@ -1811,7 +1811,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 && !in_quiet_hours_now()
                 && now.saturating_sub(last_activity) >= idle_secs * 1000;
             let mut spoke = false;
-            if idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 && conv.proactive_receptivity_ok().await {
+            // THE CALIBRATED KNOCK goes FIRST — it is the highest-value thing the mind can say
+            // unprompted (prepared work + observed/told authority + a committed prediction), and it
+            // is capped at one per day inside `maybe_knock`. If it speaks, nothing else does this
+            // tick: the whole point is that an interruption is rare and earns itself.
+            if idle_ok {
+                if let Some(msg) = conv.maybe_knock().await {
+                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                        eprintln!("[knock] calibrated knock delivered ({} chars)", msg.len());
+                        conv.note_proactive_sent().await;
+                        spoke = true;
+                    }
+                }
+            }
+            if !spoke && idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 && conv.proactive_receptivity_ok().await {
                 if let Some(msg) = conv.proactive_digest().await {
                     if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                         eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());

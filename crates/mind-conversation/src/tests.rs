@@ -1891,3 +1891,82 @@ fn age_decay_lets_a_fresh_low_urge_overtake_a_stale_high_one() {
     // But a RECENT alarm still outranks a fresh hunch — urgency is respected, only staleness decays.
     assert!(effective_pressure(0.85, 0) > fresh_hunch, "recent high pressure still wins");
 }
+
+/// THE CALIBRATED KNOCK — the safety contract, end to end. The knock is the one path that
+/// interrupts a person's day unprompted, so every gate is a property worth locking: no prepared
+/// work ⇒ silence; an INFERRED trigger ⇒ silence (the anti-surveillance wall); one per day; and the
+/// engagement prediction must be committed BEFORE delivery so the spoken confidence is falsifiable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn knock_stays_silent_without_prepared_work() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+    // Nothing prepared at all — a mind with an opinion but no homework must not knock.
+    assert!(conv.maybe_knock().await.is_none(), "no packet => no knock");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn knock_requires_observed_or_told_authority_then_fires_once_a_day() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+
+    // An INFERRED trigger, with real prepared work and real evidence: still must not interrupt.
+    conv.packet_add(
+        "node-1", None, "plan", "Inferred pattern — weekend plan",
+        "A full three-option plan with concrete numbers and timings.",
+        "inferred from her recent photo activity", vec!["pattern (0.88)".into()], 0.88, false, future,
+    ).await;
+    assert!(
+        conv.maybe_knock().await.is_none(),
+        "an INFERRED trigger must never authorize an interruption, however confident"
+    );
+
+    // Now something she actually TOLD the mind, with prepared work behind it.
+    conv.packet_add(
+        "node-2", None, "draft", "Vendor quote — accept / counter / decline",
+        "Accept at 4,200 / counter at 3,900 / decline with the comparison table attached.",
+        "told me to revisit the vendor quote before Friday", vec!["she said Friday (0.91)".into()], 0.9, false, future,
+    ).await;
+    let first = conv.maybe_knock().await.expect("observed/told + prepared work => a knock is earned");
+    assert!(first.contains("worth interrupting you for"), "{first}");
+    assert!(first.contains("show it") && first.contains("later") && first.contains("mute these"));
+    // The band must be one of the three coarse ones — never a fine-grained number.
+    assert!(
+        ["60%", "75%", "90%"].iter().any(|b| first.contains(b)),
+        "only coarse bands may be spoken: {first}"
+    );
+
+    // ONE PER DAY. A second knock is never worth more than the trust it costs.
+    assert!(conv.maybe_knock().await.is_none(), "at most one knock per day");
+
+    // The prediction was committed BEFORE delivery — it must already be in the ledger, pending.
+    let report = conv.judgment_report().await;
+    assert!(report.contains("pending") || report.contains("graded"), "prediction committed: {report}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn knock_replies_grade_the_prediction_and_mute_is_honoured() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+    conv.packet_add(
+        "node-3", None, "draft", "Renewal — side by side",
+        "Last year 1,180 vs this year 1,340; the three lines you asked for.",
+        "told me to compare the renewal when it arrives", vec!["he said compare (0.93)".into()], 0.9, false, future,
+    ).await;
+    assert!(conv.maybe_knock().await.is_some(), "the knock fires");
+
+    // Ordinary conversation must NOT be swallowed as a knock reply.
+    assert!(
+        conv.knock_reply("can we look at it later this week?").await.is_none(),
+        "a sentence merely containing 'later' is ordinary conversation"
+    );
+
+    // "mute these" closes the class and grades the prediction as a miss.
+    let muted = conv.knock_reply("mute these").await.expect("mute is a recognised reply");
+    assert!(muted.contains("knocks on"), "the mute must say how to reopen: {muted}");
+    assert!(conv.maybe_knock().await.is_none(), "muted => silence even on a fresh day");
+}

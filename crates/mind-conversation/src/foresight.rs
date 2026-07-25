@@ -1086,6 +1086,37 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         )
     }
 
+    /// THE PROOF METRIC, rendered: judgment SKILL bucketed over months. `judgment_report` gives a
+    /// point-in-time Brier; this gives the DIRECTION, which is the actual claim — on frozen weights,
+    /// skill rising over months is "wiser without getting smarter", and it is falsifiable.
+    ///
+    /// Deliberately hard to flatter: it scores skill above a base-rate baseline (so a stretch of
+    /// easier questions cannot masquerade as insight), refuses to name a direction on a thin record,
+    /// and reports degradation as readily as improvement. See `judgment_trend`.
+    pub async fn judgment_trend_report(&self) -> String {
+        let led: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let rows: Vec<crate::judgment_trend::Graded> = led
+            .iter()
+            .filter_map(|r| {
+                Some(crate::judgment_trend::Graded {
+                    t_ms: r.get("t")?.as_i64()?,
+                    p: r.get("p")?.as_f64()?,
+                    hit: r.get("outcome")?.as_i64()? == 1,
+                })
+            })
+            .collect();
+        // 6 × 30d = a half-year view: long enough for a months-scale claim, short enough that the
+        // oldest bucket is still about the same system.
+        crate::judgment_trend::render(&rows, chrono::Utc::now().timestamp_millis(), 30, 6)
+    }
+
     /// The self-immunology report: results of the scheduled seeded-false-belief
     /// trials (immune-trial.timer plants lies in a SNAPSHOT of memory and
     /// scores whether the critic catches them). Reads the root-owned summary

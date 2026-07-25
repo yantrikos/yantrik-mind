@@ -38,6 +38,7 @@ mod pace_ledger;
 mod people;
 mod photo;
 mod plugins_mod;
+mod judgment_trend;
 mod privacy_audit;
 mod proactive;
 mod research;
@@ -4097,7 +4098,12 @@ impl ConversationEngine {
                 else { Self::ledger_cmd(r) }
             }
             "ledger" => Self::ledger_cmd(rest.trim()),
-            "judgment" | "brier" | "calibration" => self.judgment_report().await,
+            "judgment" | "brier" | "calibration" => {
+                // The point-in-time score AND the direction — the direction is the actual claim.
+                format!("{}
+
+{}", self.judgment_report().await, self.judgment_trend_report().await)
+            }
             "immune" => Self::immune_report(),
             "support" => self.support_cmd(rest.trim()).await,
             "prove" => self.prove_claim(rest.trim()).await,

@@ -414,6 +414,8 @@ impl super::ConversationEngine {
         // Self-accountability lines: calibration + immunology. The board is
         // where the family SEES that the mind measures itself.
         out.push_str(&format!("\n{}\n", self.judgment_report().await));
+        // The north-star DIRECTION, not just today's score — surfaced where it is seen daily.
+        out.push_str(&format!("{}\n", self.judgment_trend_report().await));
         out.push_str(&format!("{}\n", Self::immune_board_line()));
         out.push_str("\nDetail: `packets` · `future` · `regrets` · `providers` · `nightshift` · `immune` · `judgment`");
         out

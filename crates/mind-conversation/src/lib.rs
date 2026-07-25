@@ -38,6 +38,7 @@ mod pace_ledger;
 mod people;
 mod photo;
 mod plugins_mod;
+mod privacy_audit;
 mod proactive;
 mod research;
 mod skills;
@@ -1278,7 +1279,9 @@ async fn gift_task(
         "Build GIFT INTELLIGENCE for {disp} from what is VISIBLE in their photos plus known facts. Be concrete and honest — only claim what the observations support.\n\nPHOTO OBSERVATIONS (newest first):\n{joined}\n\nKNOWN FACTS: {known}\nOBJECT INVENTORY (structured pass): {closet_note}\nTASTE DISTRIBUTIONS (statistical, by occasion): {tastes_note}\nSTYLE DIRECTION (how their look is EVOLVING): {style_dir}\n\nOutput EXACTLY these four sections, plain text:\nOWNS: what the photos clearly show they have (never gift duplicates of these)\nSTYLE: their recurring style/colors/materials in one line, each element backed by repeated observations\nCOMPLEMENTS: 2-4 things that would EXTEND their observed style and habits — justify each from OWNS/STYLE evidence (what they demonstrably love and use), NEVER from absence ('not seen' is a sampling artifact, not a gap)\nGIFT IDEAS: 3 concrete, buyable ideas, one line of evidence-backed reasoning each, matched to STYLE and LEANING INTO the STYLE DIRECTION (gift where they're going, not only where they've been), excluding OWNS"
     );
     let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
-    let out = match inference.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+    // PRIVATE-GROUNDED: gift reasoning is built from a named person in the user's life, their
+    // relationship, budget and stored facts. Private lane first, fail closed.
+    let out = match inference.chat_grounded(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
         Ok(r) => r.text.trim().to_string(),
         Err(e) => return Some(format!("Studied {} photos of {disp} but couldn't distill ({e}).", obs.len())),
     };
@@ -3085,7 +3088,9 @@ impl ConversationEngine {
             ChatMessage::system("You distill conversations into durable typed memory + future commitments. Output ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
-        let text = match self.inference.chat(messages, GenerationConfig::default()).await {
+        // PRIVATE-GROUNDED: consolidation distills the RAW CONVERSATION TRANSCRIPT into typed
+        // beliefs — the most private text the system holds. Fail closed (retries next tick).
+        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
             Ok(r) => r.text,
             Err(_) => return 0,
         };
@@ -3231,7 +3236,9 @@ impl ConversationEngine {
             ChatMessage::user(&prompt),
         ];
         let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
-        let text = match self.inference.chat(messages, cfg).await {
+        // PRIVATE-GROUNDED: find_patterns reasons across EVERYTHING stored about the user by
+        // definition. Fail closed.
+        let text = match self.inference.chat_grounded(messages, cfg).await {
             Ok(r) => r.text,
             Err(e) => return format!("Couldn't run the analysis ({e})."),
         };
@@ -6681,7 +6688,10 @@ Open reminders you're carrying for them:");
                 raw.chars().take(3000).collect::<String>()
             );
             let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
-            let reply = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+            // PRIVATE-GROUNDED: this prompt embeds up to 3000 chars of the user's ACTUAL MAILBOX
+            // (hotels, amounts, senders, confirmation numbers). Fail closed -> raw results are
+            // returned to the user instead, which never leaves the house.
+            let reply = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
                 Ok(r) => r.text.trim().to_string(),
                 Err(_) => raw,
             };

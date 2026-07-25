@@ -319,7 +319,12 @@ impl RecipeEngine {
             prefer_reasoner: true,
             ..GenerationConfig::default()
         };
-        let raw = self.inference.chat(messages, cfg).await.ok()?.text;
+        // PRIVATE-GROUNDED: `evidence` is the agent loop's WORK LOG — tool results verbatim, including
+        // `recall` output (the household's stored beliefs). The loop reasons on the private lane and
+        // then handed the SAME private text to an unscoped (cloud) call here, silently undoing its own
+        // guarantee on every factual answer. Fails closed: None ⇒ the caller keeps its un-cited answer
+        // (capability reduced, confidentiality preserved).
+        let raw = self.inference.chat_grounded(messages, cfg).await.ok()?.text;
         let cited = parse_cited(&raw);
         let kept = CitedOutput { claims: cited.claims.into_iter().filter(|c| c.is_grounded()).collect() };
         if kept.claims.is_empty() {
@@ -367,7 +372,9 @@ GOAL: GOAL_HERE"#;
             prefer_reasoner: true,
             ..GenerationConfig::default()
         };
-        let resp = self.inference.chat(messages, cfg).await.ok()?;
+        // PRIVATE-GROUNDED: the plan is generated from the caller's goal, which on a companion turn
+        // is the user's own words about their life. Private lane first, fail closed.
+        let resp = self.inference.chat_grounded(messages, cfg).await.ok()?;
         let arr = extract_recipe_json(&resp.text);
         match serde_json::from_str::<Vec<RecipeStep>>(&arr) {
             Ok(steps) if !steps.is_empty() => Some(steps),
@@ -594,7 +601,9 @@ GOAL: GOAL_HERE"#;
             ChatMessage::system("You are a recipe debugger. Output ONLY a JSON array of replacement steps."),
             ChatMessage::user(&prompt),
         ];
-        let resp = self.inference.chat(messages, GenerationConfig::default()).await.ok()?;
+        // PRIVATE-GROUNDED: replan sees the failing step's params + error, which carry whatever the
+        // recipe was working on (often private). Private lane first, fail closed.
+        let resp = self.inference.chat_grounded(messages, GenerationConfig::default()).await.ok()?;
         let arr = extract_json_array(&resp.text);
         match serde_json::from_str::<Vec<RecipeStep>>(&arr) {
             Ok(new_steps) if !new_steps.is_empty() => Some(new_steps),
@@ -622,7 +631,7 @@ GOAL: GOAL_HERE"#;
                     ),
                     ChatMessage::user(&resolved),
                 ];
-                match self.inference.chat(messages, GenerationConfig::default()).await {
+                match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
                     Ok(r) => {
                         vars.insert(store_as.clone(), Value::String(r.text));
                         StepResult::Continue
@@ -647,7 +656,7 @@ GOAL: GOAL_HERE"#;
                     ),
                     ChatMessage::user(&format!("{resolved}\n\nSOURCES:{sources}")),
                 ];
-                match self.inference.chat(messages, GenerationConfig::default()).await {
+                match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
                     Ok(r) => {
                         vars.insert(store_as.clone(), Value::String(r.text));
                         StepResult::Continue

@@ -55,7 +55,10 @@ impl super::ConversationEngine {
              most active first. Empty array if none."
         );
         let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
-        let resp = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
+        // PRIVATE-GROUNDED: `sample` is up to 40 of the user's OWN recent messages, verbatim, read with
+        // unrestricted Operator access. The "NOT family life" wording constrains what the model may
+        // OUTPUT — it does not stop the raw transcript from being SENT. Private lane first, fail closed.
+        let resp = self.inference.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
         let txt = resp.text;
         let j: serde_json::Value = txt
             .find('{')
@@ -338,7 +341,9 @@ impl super::ConversationEngine {
             if want_learn { " plus the passages below" } else { "" }
         );
         let cfg = GenerationConfig { max_tokens: 550, ..GenerationConfig::default() };
-        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        // PRIVATE-GROUNDED: the prompt interpolates `beliefs_matching_n` output — the household
+        // belief store. Query-scoped to the paper, but the substrate is the private one. Fail closed.
+        let resp = match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
             Ok(r) => r.text,
             Err(e) => return format!("(couldn't compose an answer: {e})"),
         };

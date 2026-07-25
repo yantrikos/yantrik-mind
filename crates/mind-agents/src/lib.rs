@@ -166,7 +166,9 @@ impl SubAgent {
                 ChatMessage::system("You are a focused sub-agent. Output ONLY the decision JSON."),
                 ChatMessage::user(&prompt),
             ];
-            let text = match self.inference.chat(messages, GenerationConfig::default()).await {
+            // PRIVATE-GROUNDED: a sub-agent's task + accumulated trace carry whatever the parent
+            // turn was about — on a companion that is the household's own context. Fail closed.
+            let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
                 Ok(r) => r.text,
                 Err(e) => return AgentResult { task: task.into(), answer: format!("(sub-agent inference error: {e})"), steps: step, trace, pending_actions, sources: sources.clone() },
             };

@@ -243,10 +243,59 @@ impl super::ConversationEngine {
         }
         for (trigger, action, quote, observation) in fired {
             let title = format!("{action} — you asked for this when {trigger}");
-            let body = format!(
-                "You said: \"{quote}\"\n\nThat moment has arrived — I saw: \"{observation}\"\n\n\
-                 What you asked for: {action}."
-            );
+            let mut evidence =
+                vec![format!("you said: {quote}"), format!("observed: {observation}")];
+            // ACTUALLY DO THE WORK. A packet that only restates the promise is a reminder wearing a
+            // butler's coat — and it would make the knock's "I've prepared X" a lie. So the moment a
+            // thread fires, the sub-agent goes and produces the real deliverable (the comparison,
+            // the numbers, the draft), and THAT is what gets held for delivery. This is the night
+            // shift doing homework while the user is idle, which is the whole premise.
+            let prepared = match &self.researcher {
+                Some(r) => {
+                    let task = format!(
+                        "The user asked me, in their own words: \"{quote}\"\n\
+                         That moment has now arrived — I observed: \"{observation}\"\n\n\
+                         DO THE WORK NOW: {action}.\n\
+                         Produce the finished result itself, not a plan to produce it — concrete \
+                         numbers, names, dates and a clear recommendation where one is warranted. \
+                         Keep it under 200 words so it can be read in thirty seconds. If you cannot \
+                         verify something, say so plainly rather than guessing."
+                    );
+                    // BOUNDED: this runs on the idle tick, which shares the poll loop with live
+                    // messages. A sub-agent that wanders must not stall the user's next reply — on
+                    // timeout we degrade to the honest reminder rather than blocking.
+                    let secs: u64 = std::env::var("YM_COURIER_WORK_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(150);
+                    match tokio::time::timeout(std::time::Duration::from_secs(secs), r.run(&task)).await {
+                        Ok(res) => {
+                            for u in res.sources.iter().take(4) {
+                                evidence.push(format!("source: {u}"));
+                            }
+                            (!res.answer.trim().is_empty()).then_some(res.answer)
+                        }
+                        Err(_) => {
+                            out.push("[courier] preparation timed out — holding the reminder only".into());
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            // Honest fallback: with no research capability wired, say plainly that this is the
+            // reminder and not prepared work, rather than letting the knock overclaim.
+            let body = match &prepared {
+                Some(work) => format!(
+                    "You asked: \"{quote}\"\nThat moment arrived — I saw: \"{observation}\"\n\n\
+                     ── what you asked for ──\n{work}"
+                ),
+                None => format!(
+                    "You asked: \"{quote}\"\nThat moment arrived — I saw: \"{observation}\"\n\n\
+                     I haven't been able to do the work itself (no research capability configured), \
+                     so this is the reminder only: {action}."
+                ),
+            };
             let id = self
                 .packet_add_told(
                     "courier",
@@ -255,13 +304,18 @@ impl super::ConversationEngine {
                     &title,
                     &body,
                     &format!("told: {trigger}"),
-                    vec![format!("you said: {quote}"), format!("observed: {observation}")],
-                    0.9,
+                    evidence,
+                    if prepared.is_some() { 0.9 } else { 0.6 },
                     false,
                     now + 14 * 86_400_000,
                 )
                 .await;
-            out.push(format!("[courier] thread fired -> packet {id}"));
+            // Structural honesty: the knock says "I've prepared X" only when this is true.
+            self.packet_mark_prepared(&id, prepared.is_some()).await;
+            out.push(format!(
+                "[courier] thread fired -> packet {id} ({})",
+                if prepared.is_some() { "work prepared" } else { "reminder only" }
+            ));
         }
         out
     }

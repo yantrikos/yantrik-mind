@@ -79,7 +79,11 @@ pub(crate) fn packet_is_knockworthy(p: &Value, now_ms: i64) -> bool {
         .and_then(|x| x.as_array())
         .map(|a| !a.is_empty())
         .unwrap_or(false);
-    status == "proposed" && unexpired && has_body && has_evidence
+    // A packet that merely RESTATES the request is a reminder, and the knock's "I've prepared X"
+    // would be an overclaim. Only genuinely-prepared work earns an interruption. Absent flag ⇒ not
+    // prepared (emissary/night-shift packets never set it), so this fails closed by construction.
+    let prepared = p.get("prepared").and_then(|x| x.as_bool()).unwrap_or(false);
+    status == "proposed" && unexpired && has_body && has_evidence && prepared
 }
 
 /// Does the trigger carry the authority to INTERRUPT? Only what was observed or told does.
@@ -112,6 +116,7 @@ mod tests {
             "expiry_ms": expiry,
             "body": body,
             "evidence": evidence,
+            "prepared": true,
         })
     }
 
@@ -144,6 +149,22 @@ mod tests {
         assert!(!packet_is_knockworthy(&stale, NOW), "expired => no knock");
         let decided = packet(vec!["x (0.9)"], "Accept / counter / decline, with numbers.", "approved", NOW + 1000);
         assert!(!packet_is_knockworthy(&decided, NOW), "already decided => no knock");
+    }
+
+    /// THE ANTI-OVERCLAIM RULE. The knock literally says "I've prepared X". A packet that only
+    /// restates the request is a reminder in a butler's coat, and speaking that sentence about it
+    /// would be a lie in the product's own voice.
+    #[test]
+    fn a_reminder_is_not_prepared_work() {
+        let mut reminder = packet(vec!["he said compare (0.9)"], "You asked me to compare the renewal when it arrived.", "proposed", NOW + 1000);
+        reminder["prepared"] = json!(false);
+        assert!(!packet_is_knockworthy(&reminder, NOW), "a restated request may not claim to be prepared work");
+        // An unstamped packet (every emissary/night-shift one) fails closed the same way.
+        let unstamped = json!({
+            "status": "proposed", "expiry_ms": NOW + 1000,
+            "body": "A full festival checklist with concrete items.", "evidence": ["puja Sunday (0.9)"],
+        });
+        assert!(!packet_is_knockworthy(&unstamped, NOW), "absent flag => not prepared");
     }
 
     #[test]

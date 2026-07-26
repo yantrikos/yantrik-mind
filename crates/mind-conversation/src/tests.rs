@@ -1932,6 +1932,9 @@ async fn knock_requires_observed_or_told_authority_then_fires_once_a_day() {
         "Accept at 4,200 / counter at 3,900 / decline with the comparison table attached.",
         "told me to revisit the vendor quote before Friday", vec!["she said Friday (0.91)".into()], 0.9, false, future,
     ).await;
+    // Real prepared work, as the courier produces after actually doing the job.
+    let pid = conv.load_packets().await.last().and_then(|p| p["id"].as_str().map(str::to_string)).unwrap();
+    conv.packet_mark_prepared(&pid, true).await;
     let first = conv.maybe_knock().await.expect("observed/told + prepared work => a knock is earned");
     assert!(first.contains("worth interrupting you for"), "{first}");
     assert!(first.contains("show it") && first.contains("later") && first.contains("mute these"));
@@ -1960,6 +1963,8 @@ async fn knock_replies_grade_the_prediction_and_mute_is_honoured() {
         "Last year 1,180 vs this year 1,340; the three lines you asked for.",
         "told me to compare the renewal when it arrives", vec!["he said compare (0.93)".into()], 0.9, false, future,
     ).await;
+    let pid = conv.load_packets().await.last().and_then(|p| p["id"].as_str().map(str::to_string)).unwrap();
+    conv.packet_mark_prepared(&pid, true).await;
     assert!(conv.maybe_knock().await.is_some(), "the knock fires");
 
     // Ordinary conversation must NOT be swallowed as a knock reply.
@@ -2003,7 +2008,7 @@ async fn a_promise_becomes_prepared_work_and_earns_a_knock() {
     let fired = conv.courier_scan().await;
     assert!(!fired.is_empty(), "the observed trigger fires the thread: {fired:?}");
 
-    // 4. That produced TOLD-stamped prepared work — the thing the knock was missing.
+    // 4. That produced a TOLD-stamped packet — the authority the knock was missing.
     let packets = conv.load_packets().await;
     let told = packets
         .iter()
@@ -2011,16 +2016,27 @@ async fn a_promise_becomes_prepared_work_and_earns_a_knock() {
         .expect("the courier stamps `told` authority");
     assert!(told.get("body").and_then(|x| x.as_str()).unwrap_or("").contains("insurance renewal"));
 
-    // 5. And now the knock can finally earn itself.
-    let knock = conv.maybe_knock().await.expect("told authority + prepared work => a knock");
+    // 5. THE HONESTY GATE. This engine has no researcher wired, so the courier could not actually DO
+    //    the comparison — it only holds the reminder. The knock says "I've prepared X", so it must
+    //    stay SILENT rather than speak a sentence that isn't true.
+    assert_eq!(told.get("prepared").and_then(|x| x.as_bool()), Some(false), "no researcher => reminder only");
+    assert!(
+        conv.maybe_knock().await.is_none(),
+        "a reminder must never be announced as prepared work — that would be a lie in the product's voice"
+    );
+
+    // 6. With the work actually done (as a configured researcher would), the knock earns itself.
+    let pid = told.get("id").and_then(|x| x.as_str()).unwrap().to_string();
+    conv.packet_mark_prepared(&pid, true).await;
+    let knock = conv.maybe_knock().await.expect("told authority + REAL prepared work => a knock");
     assert!(knock.contains("worth interrupting you for"), "{knock}");
     assert!(knock.contains("show it"));
 
-    // 6. "show it" delivers the prepared work and grades the pre-committed prediction.
+    // 7. "show it" delivers the prepared work and grades the pre-committed prediction.
     let shown = conv.knock_reply("show it").await.expect("show it is handled");
     assert!(shown.len() > 20, "the prepared work is delivered: {shown}");
 
-    // 7. Saying it's done retires the thread so it can never knock again.
+    // 8. Saying it's done retires the thread so it can never knock again.
     conv.courier_retire("done").await;
     assert!(conv.courier_scan().await.is_empty(), "a retired thread stays closed");
 }
@@ -2062,6 +2078,8 @@ async fn silence_is_recorded_reviewable_and_released_only_by_change() {
         "Accept at 4,200 / counter at 3,900, with the comparison attached.",
         "told me to revisit the vendor quote", vec!["he said Friday (0.9)".into()], 0.9, false, future,
     ).await;
+    let pid = conv.load_packets().await.last().and_then(|p| p["id"].as_str().map(str::to_string)).unwrap();
+    conv.packet_mark_prepared(&pid, true).await;
 
     // Nothing held yet, and the report says so honestly rather than looking broken.
     assert!(conv.escrow_report().await.contains("nothing held back"));
@@ -2091,6 +2109,8 @@ async fn silence_is_recorded_reviewable_and_released_only_by_change() {
         "Last year 1,180 vs this year 1,340, with the three lines you asked for.",
         "told me to compare the renewal", vec!["he said compare (0.9)".into()], 0.9, false, future,
     ).await;
+    let pid2 = conv.load_packets().await.last().and_then(|p| p["id"].as_str().map(str::to_string)).unwrap();
+    conv.packet_mark_prepared(&pid2, true).await;
     assert!(
         conv.maybe_knock().await.is_some(),
         "a held candidate must not block an unrelated fresh one"

@@ -55,6 +55,20 @@ impl super::ConversationEngine {
         id
     }
 
+    /// Record whether a packet contains REAL prepared work (the finished comparison/draft) rather
+    /// than a restatement of the request. The calibrated knock says "I've prepared X" — this is what
+    /// makes that claim structurally true instead of a hopeful phrase.
+    pub(crate) async fn packet_mark_prepared(&self, id: &str, prepared: bool) {
+        let mut store = self.load_packets().await;
+        if let Some(p) = store.iter_mut().find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id)) {
+            p["prepared"] = serde_json::json!(prepared);
+        }
+        let _ = self
+            .memory
+            .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
+            .await;
+    }
+
     pub async fn packet_add(
         &self,
         node_id: &str,

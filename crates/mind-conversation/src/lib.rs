@@ -40,6 +40,7 @@ mod photo;
 mod plugins_mod;
 mod judgment_trend;
 mod courier;
+mod escrow;
 mod knock;
 mod privacy_audit;
 mod proactive;
@@ -4102,6 +4103,8 @@ impl ConversationEngine {
             "ledger" => Self::ledger_cmd(rest.trim()),
             // Reopen the knock class after a "mute these" — the mute is a standing instruction,
             // so only an explicit instruction lifts it.
+            // Silence, made reviewable: what I chose NOT to interrupt you with, and why.
+            "silence" | "escrow" | "held" => self.escrow_report().await,
             "knocks on" | "knocks_on" | "unmute" => {
                 let _ = self.memory.profile_set("knock_muted", "0").await;
                 "Knocks are back on — I'll only use one when I've actually prepared something.".to_string()

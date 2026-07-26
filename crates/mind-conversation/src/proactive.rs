@@ -372,19 +372,11 @@ impl super::ConversationEngine {
         if std::env::var("YM_KNOCK").map(|v| v == "off").unwrap_or(false) {
             return None;
         }
-        // Standing instruction: "mute these" closes the class until the user reopens it.
-        if self.memory.profile_get("knock_muted").await.ok().flatten().as_deref() == Some("1") {
-            return None;
-        }
-        // One per day, maximum. A second knock is never more valuable than the trust it costs.
-        let today = local_now().format("%Y-%m-%d").to_string();
-        if self.memory.profile_get("knock_last_date").await.ok().flatten().as_deref() == Some(today.as_str()) {
-            return None;
-        }
-        if !self.proactive_receptivity_ok().await {
-            return None;
-        }
         let now = chrono::Utc::now().timestamp_millis();
+        // ORDER CHANGED for INTERRUPTION ESCROW: find the CANDIDATE first, then evaluate the gates.
+        // A silence is only meaningful — and only worth recording — when there was something real to
+        // say. Checking gates first would discard the candidate and leave no trace of what was held,
+        // which is exactly the unaccountable silence the escrow exists to end.
         // WORK FIRST: find prepared, proof-carrying, still-valid work. No packet ⇒ no knock, which is
         // what separates this from a notification.
         // AUTHORITY is part of the SEARCH, not a check applied after picking one: an inferred packet
@@ -392,20 +384,56 @@ impl super::ConversationEngine {
         // knock tests caught — the mind would go silent because the wrong candidate was chosen
         // first). Both halves of the contract are required of the SAME packet.
         let packets = self.load_packets().await;
-        let pkt = packets.iter().find(|p| {
-            crate::knock::packet_is_knockworthy(p, now)
+        // Held candidates are SKIPPED, not treated as blockers: one thing the mind is rightly quiet
+        // about must never silence an unrelated thing it should speak up on. (Same shape as the
+        // authority bug — a single unsuitable candidate at the front of the list masking a good one
+        // behind it.) The hold is checked inside the search, so the scan finds the first candidate
+        // that is knockworthy, authorized, AND not already held-without-change.
+        let mut candidate: Option<&serde_json::Value> = None;
+        for p in packets.iter() {
+            let eligible = crate::knock::packet_is_knockworthy(p, now)
                 // Read ONLY the explicit stamp. The old fallback to `reason` was reading a
                 // system-written explanation ("festival within 9 days; supplies criterion unmet")
                 // as if it were provenance — every packet classified `inferred` by accident, so the
                 // knock could never fire. Absent stamp ⇒ not eligible, by decision now, not luck.
                 && crate::knock::trigger_may_interrupt(
                     p.get("trigger_provenance").and_then(|x| x.as_str()).unwrap_or(""),
-                )
-        })?;
-        // CONFIDENCE: the learned receptivity is the predicted engagement; snap it to a coarse band
-        // or stay silent. Never speak a finer number than the record can support.
+                );
+            if !eligible {
+                continue;
+            }
+            if self.escrow_still_held(p).await {
+                continue; // rightly quiet about this one; keep looking
+            }
+            candidate = Some(p);
+            break;
+        }
+        let pkt = candidate?;
         let p_engage = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.6);
-        let band = crate::knock::band_for(p_engage)?;
+        // GATES, each recording WHY the mind stayed quiet. Silence is legitimate; unexplained
+        // silence is not.
+        let muted = self.memory.profile_get("knock_muted").await.ok().flatten().as_deref() == Some("1");
+        let today = local_now().format("%Y-%m-%d").to_string();
+        let cap_spent =
+            self.memory.profile_get("knock_last_date").await.ok().flatten().as_deref() == Some(today.as_str());
+        let unreceptive = !self.proactive_receptivity_ok().await;
+        let band_opt = crate::knock::band_for(p_engage);
+        let blocked = if muted {
+            Some(crate::escrow::Silence::Muted)
+        } else if cap_spent {
+            Some(crate::escrow::Silence::DailyCap)
+        } else if unreceptive {
+            Some(crate::escrow::Silence::Unreceptive)
+        } else if band_opt.is_none() {
+            Some(crate::escrow::Silence::BelowBand)
+        } else {
+            None
+        };
+        if let Some(reason) = blocked {
+            self.escrow_hold(pkt, reason, p_engage, now).await;
+            return None;
+        }
+        let band = band_opt?;
         let title = pkt.get("title").and_then(|x| x.as_str()).unwrap_or("a prepared option");
         let trigger = pkt.get("reason").and_then(|x| x.as_str()).unwrap_or("something you asked me to watch");
         let pkt_id = pkt.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();

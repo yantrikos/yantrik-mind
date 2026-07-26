@@ -2045,3 +2045,54 @@ async fn emissary_packets_still_may_not_interrupt() {
     );
     assert!(conv.maybe_knock().await.is_none(), "inferred prepared work must never interrupt");
 }
+
+/// INTERRUPTION ESCROW, end to end. A silence the mind cannot explain is indistinguishable from a
+/// broken feature — so when it holds something back, that decision must be recorded, reviewable, and
+/// released only by evidence. The property that matters most: waiting is NOT new information.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn silence_is_recorded_reviewable_and_released_only_by_change() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+
+    // Real, told-authority prepared work — a genuine candidate to interrupt about.
+    conv.packet_add_told(
+        "node-e", None, "draft", "Vendor quote — accept / counter / decline",
+        "Accept at 4,200 / counter at 3,900, with the comparison attached.",
+        "told me to revisit the vendor quote", vec!["he said Friday (0.9)".into()], 0.9, false, future,
+    ).await;
+
+    // Nothing held yet, and the report says so honestly rather than looking broken.
+    assert!(conv.escrow_report().await.contains("nothing held back"));
+
+    // The user has muted the class — a legitimate reason to stay quiet.
+    let _ = mem.profile_set("knock_muted", "1").await;
+    assert!(conv.maybe_knock().await.is_none(), "muted => silence");
+
+    // ...and that silence is now ACCOUNTABLE: it says what was held and why.
+    let report = conv.escrow_report().await;
+    assert!(report.contains("chose NOT to interrupt"), "{report}");
+    assert!(report.contains("Vendor quote"), "the held candidate is named: {report}");
+    assert!(report.contains("muted"), "the reason is recorded: {report}");
+
+    // Unmuting alone must not release a backlog — nothing about the candidate changed.
+    let _ = mem.profile_set("knock_muted", "0").await;
+    assert!(
+        conv.maybe_knock().await.is_none(),
+        "an unchanged held candidate must not fire just because the gate opened — that is a backlog dump"
+    );
+
+    // A held item must not silence UNRELATED things. A fresh candidate the mind has never held can
+    // still earn its interruption while the muted one stays quiet. (The material-change release
+    // itself is unit-tested in `escrow`; here we lock that one hold does not gag everything.)
+    conv.packet_add_told(
+        "node-e2", None, "draft", "Renewal — side by side",
+        "Last year 1,180 vs this year 1,340, with the three lines you asked for.",
+        "told me to compare the renewal", vec!["he said compare (0.9)".into()], 0.9, false, future,
+    ).await;
+    assert!(
+        conv.maybe_knock().await.is_some(),
+        "a held candidate must not block an unrelated fresh one"
+    );
+}

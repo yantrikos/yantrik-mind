@@ -39,6 +39,7 @@ mod people;
 mod photo;
 mod plugins_mod;
 mod judgment_trend;
+mod courier;
 mod knock;
 mod privacy_audit;
 mod proactive;
@@ -6569,6 +6570,21 @@ Open reminders you're carrying for them:");
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
+        }
+        // FUTURE-SELF COURIER: close any thread the user just finished, and capture an EXPLICIT new
+        // commitment ("when the renewal arrives, compare it with last year"). Capture does not
+        // short-circuit the turn — the promise is recorded and the message still gets a real reply.
+        let _ = self.courier_retire(user_text).await;
+        // A message that IS the delegation gets the acknowledgement as its whole reply — "noted,
+        // I'll do that when X happens" is the complete and correct response to a promise. Bounded by
+        // length so a commitment buried in a longer, multi-part message still flows to the normal
+        // path and gets a real answer instead of being swallowed by the receipt.
+        if user_text.chars().count() <= 200 {
+            if let Some(ack) = self.courier_capture(user_text).await {
+                let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+                let _ = self.memory.append_message_scoped("assistant", &ack, ws).await;
+                return Ok(ack);
+            }
         }
         let onboard = if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
             self.pending_slot().await

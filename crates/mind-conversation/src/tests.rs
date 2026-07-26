@@ -1924,7 +1924,10 @@ async fn knock_requires_observed_or_told_authority_then_fires_once_a_day() {
     );
 
     // Now something she actually TOLD the mind, with prepared work behind it.
-    conv.packet_add(
+    // `packet_add_told` is the one door that stamps `told` authority — the courier's door. (These
+    // tests previously leaned on a fallback that read the system-written `reason` field as if it
+    // were provenance, which is exactly the defect that made every real packet ineligible.)
+    conv.packet_add_told(
         "node-2", None, "draft", "Vendor quote — accept / counter / decline",
         "Accept at 4,200 / counter at 3,900 / decline with the comparison table attached.",
         "told me to revisit the vendor quote before Friday", vec!["she said Friday (0.91)".into()], 0.9, false, future,
@@ -1952,7 +1955,7 @@ async fn knock_replies_grade_the_prediction_and_mute_is_honoured() {
     let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
     let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
-    conv.packet_add(
+    conv.packet_add_told(
         "node-3", None, "draft", "Renewal — side by side",
         "Last year 1,180 vs this year 1,340; the three lines you asked for.",
         "told me to compare the renewal when it arrives", vec!["he said compare (0.93)".into()], 0.9, false, future,
@@ -1969,4 +1972,76 @@ async fn knock_replies_grade_the_prediction_and_mute_is_honoured() {
     let muted = conv.knock_reply("mute these").await.expect("mute is a recognised reply");
     assert!(muted.contains("knocks on"), "the mute must say how to reopen: {muted}");
     assert!(conv.maybe_knock().await.is_none(), "muted => silence even on a fresh day");
+}
+
+/// THE FULL COURIER → KNOCK LOOP. This is the test that matters: a promise made in conversation,
+/// waited on without nagging, fired only when a SEPARATE observation says the moment arrived, turned
+/// into `told`-stamped prepared work, and delivered as a calibrated knock. Before the courier
+/// existed the knock had no eligible supply at all — all 52 packets on the live box classified
+/// `inferred`, so it could never fire. This locks the whole chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_promise_becomes_prepared_work_and_earns_a_knock() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+
+    // 1. He makes an explicit promise. The mind records it and says so.
+    let ack = conv
+        .courier_capture("when the insurance renewal arrives, compare it with last year")
+        .await
+        .expect("an explicit commitment is captured");
+    assert!(ack.to_lowercase().starts_with("noted"), "the promise is acknowledged: {ack}");
+
+    // 2. Nothing has happened yet — the mind waits. No packet, so no knock.
+    assert!(conv.courier_scan().await.is_empty(), "an unmet trigger must not fire");
+    assert!(conv.maybe_knock().await.is_none(), "nothing prepared => silence");
+
+    // 3. Reality arrives, as a SEPARATE observation.
+    let _ = mem
+        .append_message_scoped("user", "the insurance renewal just landed in my inbox", TurnIdentity::primary().write_scope())
+        .await;
+    let fired = conv.courier_scan().await;
+    assert!(!fired.is_empty(), "the observed trigger fires the thread: {fired:?}");
+
+    // 4. That produced TOLD-stamped prepared work — the thing the knock was missing.
+    let packets = conv.load_packets().await;
+    let told = packets
+        .iter()
+        .find(|p| p.get("trigger_provenance").and_then(|x| x.as_str()) == Some("told"))
+        .expect("the courier stamps `told` authority");
+    assert!(told.get("body").and_then(|x| x.as_str()).unwrap_or("").contains("insurance renewal"));
+
+    // 5. And now the knock can finally earn itself.
+    let knock = conv.maybe_knock().await.expect("told authority + prepared work => a knock");
+    assert!(knock.contains("worth interrupting you for"), "{knock}");
+    assert!(knock.contains("show it"));
+
+    // 6. "show it" delivers the prepared work and grades the pre-committed prediction.
+    let shown = conv.knock_reply("show it").await.expect("show it is handled");
+    assert!(shown.len() > 20, "the prepared work is delivered: {shown}");
+
+    // 7. Saying it's done retires the thread so it can never knock again.
+    conv.courier_retire("done").await;
+    assert!(conv.courier_scan().await.is_empty(), "a retired thread stays closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn emissary_packets_still_may_not_interrupt() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+    // Ordinary prepared work from a pattern the mind NOTICED — real, useful, and still not grounds
+    // to interrupt anyone's day. It must be stamped `inferred` and stay knock-ineligible.
+    conv.packet_add(
+        "node-x", None, "plan", "Festival readiness", "A full checklist with concrete items and timings.",
+        "festival within 9 days; supplies criterion unmet", vec!["puja on Sunday (0.9)".into()], 0.9, false, future,
+    ).await;
+    let p = conv.load_packets().await;
+    assert_eq!(
+        p[0].get("trigger_provenance").and_then(|x| x.as_str()),
+        Some("inferred"),
+        "emissary work is honestly inferred, not told"
+    );
+    assert!(conv.maybe_knock().await.is_none(), "inferred prepared work must never interrupt");
 }

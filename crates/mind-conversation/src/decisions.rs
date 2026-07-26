@@ -24,6 +24,37 @@ impl super::ConversationEngine {
     /// readiness criterion on the linked node, the node is ticked immediately — proposed work
     /// counts as readiness; a rejection un-ticks it.
     #[allow(clippy::too_many_arguments)]
+    /// The ONE door that stamps `told` authority — used by the courier, whose threads can only be
+    /// opened by an explicit statement from the user. A packet created here may justify a calibrated
+    /// knock; everything from `packet_add` stays `inferred` and may not interrupt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn packet_add_told(
+        &self,
+        node_id: &str,
+        satisfies: Option<&str>,
+        kind: &str,
+        title: &str,
+        body: &str,
+        reason: &str,
+        evidence: Vec<String>,
+        confidence: f64,
+        confirmation_required: bool,
+        expiry_ms: i64,
+    ) -> String {
+        let id = self
+            .packet_add(node_id, satisfies, kind, title, body, reason, evidence, confidence, confirmation_required, expiry_ms)
+            .await;
+        let mut store = self.load_packets().await;
+        if let Some(p) = store.iter_mut().find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
+            p["trigger_provenance"] = serde_json::json!("told");
+        }
+        let _ = self
+            .memory
+            .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
+            .await;
+        id
+    }
+
     pub async fn packet_add(
         &self,
         node_id: &str,
@@ -46,6 +77,13 @@ impl super::ConversationEngine {
             "confidence": confidence, "confirmation_required": confirmation_required,
             "expiry_ms": expiry_ms, "status": "proposed", "created_ms": now,
             "alternatives_rejected": [],
+            // EXPLICIT AUTHORITY STAMP. A packet may only justify INTERRUPTING the user when its
+            // trigger was observed or told (see `knock`). Everything built by an emissary or the
+            // night shift is derived from patterns the mind noticed, so it is honestly `inferred`
+            // and stays ineligible; `packet_add_told` is the one door that stamps `told`. This was
+            // previously left implicit and fell back to reading `reason` (a system-written string),
+            // which made eligibility an accident rather than a decision.
+            "trigger_provenance": "inferred",
         }));
         // keep the store bounded; drop the oldest terminal packets first
         if store.len() > 200 {

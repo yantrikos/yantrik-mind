@@ -108,6 +108,10 @@ impl super::ConversationEngine {
                 log.push(format!("[dmn] expired {n} stale tension(s)"));
             }
         }
+        // FUTURE-SELF COURIER: expire what aged out, and fire any promise whose trigger a recent
+        // observation has satisfied — this is what produces `told`-stamped prepared work for the
+        // calibrated knock (which, before the courier existed, had no eligible supply at all).
+        log.extend(self.courier_scan().await);
         // SELF-VIGILANCE (self-healing rung 1): every idle tick, cheaply scan the mind's OWN health
         // (its self-build cron log) for failures and, if found, emit an Operational urge — so a broken
         // autonomous build SURFACES via the proactive digest instead of dying silently in a log.
@@ -390,10 +394,12 @@ impl super::ConversationEngine {
         let packets = self.load_packets().await;
         let pkt = packets.iter().find(|p| {
             crate::knock::packet_is_knockworthy(p, now)
+                // Read ONLY the explicit stamp. The old fallback to `reason` was reading a
+                // system-written explanation ("festival within 9 days; supplies criterion unmet")
+                // as if it were provenance — every packet classified `inferred` by accident, so the
+                // knock could never fire. Absent stamp ⇒ not eligible, by decision now, not luck.
                 && crate::knock::trigger_may_interrupt(
-                    p.get("trigger_provenance")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or_else(|| p.get("reason").and_then(|x| x.as_str()).unwrap_or("")),
+                    p.get("trigger_provenance").and_then(|x| x.as_str()).unwrap_or(""),
                 )
         })?;
         // CONFIDENCE: the learned receptivity is the predicted engagement; snap it to a coarse band

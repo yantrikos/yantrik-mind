@@ -42,6 +42,7 @@ mod judgment_trend;
 mod courier;
 mod escrow;
 mod fitness;
+mod handoff;
 mod knock;
 mod privacy_audit;
 mod proactive;
@@ -4108,6 +4109,18 @@ impl ConversationEngine {
             "silence" | "escrow" | "held" => self.escrow_report().await,
             // The real-world scoreboard the self-build loop now optimises against.
             "fitness" | "scoreboard" => self.fitness_report().await,
+            // The thread between self-build ticks: what the last ones did, incl. what never merged.
+            "handoff" | "thread" => self.handoff_report().await,
+            "handoff_prompt" => self.handoff_prompt().await,
+            // Written at the END of every self-build run: `handoff_write <OUTCOME>|<goal>|<note>`
+            v if v.starts_with("handoff_write ") => {
+                let rest = v.trim_start_matches("handoff_write ").trim();
+                let mut p = rest.splitn(3, '|');
+                let outcome = p.next().unwrap_or("?").trim();
+                let goal = p.next().unwrap_or("").trim();
+                let note = p.next().unwrap_or("").trim();
+                self.handoff_write(goal, outcome, note).await
+            }
             // Machine-facing: the OUTCOME block the self-build goal generator reads, so it proposes
             // goals aimed at real performance instead of code aesthetics.
             "fitness_prompt" => self.fitness_snapshot().await.render_for_goal_prompt(),

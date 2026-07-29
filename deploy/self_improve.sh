@@ -20,6 +20,13 @@ set -euo pipefail
 GOAL="${1:?usage: self_improve.sh '<improvement goal>'}"
 KILL=/var/lib/yantrik-mind/SELF_IMPROVE_OFF
 EVLOG=/var/lib/yantrik-mind/evolution.log   # outcome ledger — read by `ym evolution`
+# HANDOFF: leave a note for the NEXT tick on EVERY exit path, especially the failures. The goal
+# generator sees only `git log` (merged commits), so an abort or a draft is invisible to it and gets
+# re-proposed forever — six identical GOAL-REJECTED ticks actually happened. Fail-soft by design:
+# a handoff hiccup must never change the outcome of a build.
+handoff() { # $1 = OUTCOME, $2 = note
+  curl -s -m 15 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"     -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli"     -d "handoff_write $1|${GOAL}|$2" >/dev/null 2>&1 || true
+}
 [ -f "$KILL" ] && { echo "kill-switch present ($KILL) — self-build disabled"; exit 0; }
 
 # Auth: subscription token for Claude, yantrikdb token for the push. (root:600 env.)
@@ -76,11 +83,13 @@ git add -A   # stage everything incl. NEW files (git diff alone ignores untracke
 if git diff --cached --quiet; then
   echo "no changes produced — nothing to PR"
   echo "$(date -u +%FT%TZ) | build | NO-CHANGE | $GOAL" >> "$EVLOG"
+  handoff NO-CHANGE "The builder produced no diff for this goal. Either it is already done, or the goal was too vague to act on - reword it concretely or pick something else."
   exit 0
 fi
 if git diff --cached --name-only | grep -q '^crates/mind-governance/'; then
   echo "ABORT: change touched the harm-gate (crates/mind-governance) — human-only. No PR."
   echo "$(date -u +%FT%TZ) | build | ABORT-HARMGATE | $GOAL" >> "$EVLOG"
+  handoff ABORT-HARMGATE "This goal cannot be done without touching the harm-gate, which is human-only. Do not retry it autonomously - it needs a human."
   exit 1
 fi
 if git diff --cached --name-only | grep -q '\.rs$'; then
@@ -88,6 +97,7 @@ if git diff --cached --name-only | grep -q '\.rs$'; then
   if ! cargo build --release -p mind-core 2>&1 | tail -8; then
     echo "ABORT: changes do not compile — no PR"
     echo "$(date -u +%FT%TZ) | build | ABORT-COMPILE | $GOAL" >> "$EVLOG"
+    handoff ABORT-COMPILE "My change did not compile. If you take this goal again, start by reading the types involved rather than editing straight away."
     exit 1
   fi
 fi
@@ -203,9 +213,11 @@ if echo "$PYOUT" | grep -q "^MERGED:"; then
   # again after CI goes green. Fail-soft — a metrics hiccup must never block a deploy.
   MSHA="$(echo "$PYOUT" | grep -m1 "^MERGED:" | awk "{print \$2}")"
   curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"     -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli"     -d "fitness_record ${MSHA} ${GOAL}" >/dev/null 2>&1 || true
+  handoff MERGED "Landed as ${MSHA} and self-deployed. Fitness was stamped at merge time; it gets graded in ~14 days."
   echo "==> merged on green — self-deploying"
   bash "$WORK/deploy/self_deploy.sh" || echo "==> self-deploy failed or rolled back (see evolution.log)"
 elif echo "$PYOUT" | grep -q "^PR:"; then
   echo "$(date -u +%FT%TZ) | build | DRAFT-FOR-HUMAN | $GOAL" >> "$EVLOG"
+  handoff DRAFT-FOR-HUMAN "Built and opened a PR, but a merge gate held it for human review (diff size / eval-custody / test-presence / sensitive path). It is waiting, not lost - do not rebuild it."
 fi
 echo "==> done"

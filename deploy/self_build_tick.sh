@@ -133,9 +133,14 @@ if [ -z "$GOAL" ]; then
   # work stays cosmetic. Tests are a GATE; these numbers are the TARGET. Fail-soft: no metrics, no block.
   FITNESS="$(curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"       -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli" -d "fitness_prompt" 2>/dev/null || true)"
   [ -n "$FITNESS" ] && echo "self-review: fitness block attached ($(printf %s "$FITNESS" | wc -l) lines)"
+  # HANDOFF: what my previous ticks did, INCLUDING what never merged. `git log` shows only merged
+  # commits, so without this the loop cannot see its own aborts/drafts and re-proposes doomed goals.
+  HANDOFF="$(curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"       -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli" -d "handoff_prompt" 2>/dev/null || true)"
+  [ -n "$HANDOFF" ] && echo "self-review: handoff attached ($(printf %s "$HANDOFF" | wc -l) lines)"
   GOAL="$(timeout 480 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
 $FITNESS
+$HANDOFF
 NORTH STAR: make the typed-memory moat — typed beliefs, confidence scores, contradiction detection, Bayesian revision, consolidation, reflection — more CORRECT, more ROBUST, or more USEFUL in the live chat product. Those are the things a flat-text RAG assistant structurally cannot do; that is where your value compounds. Favor closing a real gap or hardening correctness over adding surface commands or cosmetic cleanup.
 
 Recently done (do NOT repeat or trivially restate these):
@@ -161,6 +166,7 @@ EVLOG=/var/lib/yantrik-mind/evolution.log
 if printf '%s' "$GOAL" | grep -qiE "api error|failed to authenticate|invalid api key|invalid authentication|access token has been revoked|token (has )?expired|error:? ?(40[139]|429|5[0-9][0-9])|http (40[139]|429)|rate limit (exceeded|reached)|credit balance|usage limit|quota exceeded|command not found|no such file or directory"; then
   echo "$(date -u +%FT%TZ) GOAL REJECTED (CLI/API error captured as goal, not a real goal): $GOAL"
   echo "$(date -u +%FT%TZ) | build | GOAL-REJECTED-ERRORTEXT | $GOAL" >> "$EVLOG"
+  curl -s -m 15 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"     -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli"     -d "handoff_write GOAL-REJECTED|(goal generation failed)|The goal generator returned an API/CLI error instead of a goal - builder auth is probably broken. Nothing was attempted." >/dev/null 2>&1 || true
   tg_alert goalerr "self-review 'goal' was an error message ($(printf '%s' "$GOAL" | head -c 120)) — claude auth likely broken; tick skipped, nothing PR'd"
   exit 0
 fi

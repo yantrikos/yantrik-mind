@@ -94,6 +94,7 @@ enum Cmd {
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
     DischargeTension { id: String, reply: Reply<bool> },
     ExpireStaleTensions { curiosity_days: i64, other_days: i64, reply: Reply<usize> },
+    TensionOutcomeCounts { reply: Reply<(usize, usize)> },
     RecallDemandFor { about: String, reply: Reply<f64> },
     // retro-dedup: collapse norm_prop/Jaccard near-duplicates written before the write-path dedup existed
     RetroDedupStore { reply: Reply<(usize, usize)> },
@@ -1670,6 +1671,14 @@ impl MemoryHandle {
                         Cmd::DischargeTension { id, reply } => {
                             let _ = reply.send(discharge_tension_db(&db, &id));
                         }
+                        Cmd::TensionOutcomeCounts { reply } => {
+                            let q = |st: &str| -> usize {
+                                db.conn()
+                                    .query_row("SELECT COUNT(*) FROM mind_tensions WHERE status=?1", [st], |r| r.get::<_, i64>(0))
+                                    .unwrap_or(0) as usize
+                            };
+                            let _ = reply.send(Ok((q("discharged"), q("expired"))));
+                        }
                         Cmd::ExpireStaleTensions { curiosity_days, other_days, reply } => {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -1939,6 +1948,9 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn expire_stale_tensions(&self, curiosity_days: i64, other_days: i64) -> Result<usize> {
         self.call(|reply| Cmd::ExpireStaleTensions { curiosity_days, other_days, reply }).await
+    }
+    async fn tension_outcome_counts(&self) -> Result<(usize, usize)> {
+        self.call(|reply| Cmd::TensionOutcomeCounts { reply }).await
     }
     async fn recall_demand_for(&self, about: &str) -> Result<f64> {
         let about = about.to_string();

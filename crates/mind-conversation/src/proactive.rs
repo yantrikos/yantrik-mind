@@ -108,6 +108,10 @@ impl super::ConversationEngine {
                 log.push(format!("[dmn] expired {n} stale tension(s)"));
             }
         }
+        // TWO-TIER FITNESS: grade self-build changes old enough for reality to have answered. Until
+        // this existed a merged PR was never looked at again after CI went green — the loop could not
+        // tell whether anything it built ever helped.
+        log.extend(self.fitness_grade_due().await);
         // FUTURE-SELF COURIER: expire what aged out, and fire any promise whose trigger a recent
         // observation has satisfied — this is what produces `told`-stamped prepared work for the
         // calibrated knock (which, before the courier existed, had no eligible supply at all).

@@ -363,6 +363,9 @@ pub trait MemoryFacade: Send + Sync {
     /// Close open urges older than their kind's shelf life as `expired`, bounding the ledger.
     /// Returns how many were expired. Curiosity ages out fast; contradictions are kept far longer.
     async fn expire_stale_tensions(&self, curiosity_days: i64, other_days: i64) -> Result<usize>;
+    /// (discharged, expired) tension counts — the outcome ratio that says whether what the drives
+    /// noticed was ever actually SEEN by anyone, or just aged out unread.
+    async fn tension_outcome_counts(&self) -> Result<(usize, usize)>;
     /// Mark a tension discharged (resolved, or surfaced to the user).
     async fn discharge_tension(&self, id: &str) -> Result<bool>;
     /// A belief plus its evidence trail (provenance). A principal gets None for a belief outside

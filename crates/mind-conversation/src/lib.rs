@@ -41,6 +41,7 @@ mod plugins_mod;
 mod judgment_trend;
 mod courier;
 mod escrow;
+mod fitness;
 mod knock;
 mod privacy_audit;
 mod proactive;
@@ -4105,6 +4106,19 @@ impl ConversationEngine {
             // so only an explicit instruction lifts it.
             // Silence, made reviewable: what I chose NOT to interrupt you with, and why.
             "silence" | "escrow" | "held" => self.escrow_report().await,
+            // The real-world scoreboard the self-build loop now optimises against.
+            "fitness" | "scoreboard" => self.fitness_report().await,
+            // Machine-facing: the OUTCOME block the self-build goal generator reads, so it proposes
+            // goals aimed at real performance instead of code aesthetics.
+            "fitness_prompt" => self.fitness_snapshot().await.render_for_goal_prompt(),
+            // Called by self_improve.sh on a green auto-merge: stamps the mind's real-world fitness
+            // at merge time so the change can be graded once reality has answered.
+            v if v.starts_with("fitness_record ") => {
+                let rest = v.trim_start_matches("fitness_record ").trim();
+                let (sha, goal) = rest.split_once(' ').unwrap_or((rest, ""));
+                self.fitness_record_change(sha, goal).await;
+                format!("recorded {sha} at current fitness")
+            }
             "knocks on" | "knocks_on" | "unmute" => {
                 let _ = self.memory.profile_set("knock_muted", "0").await;
                 "Knocks are back on — I'll only use one when I've actually prepared something.".to_string()

@@ -198,6 +198,11 @@ echo "$PYOUT"
 # service updates itself. Uses the script from THIS clone — the deploy logic is itself self-updating.
 if echo "$PYOUT" | grep -q "^MERGED:"; then
   echo "$(date -u +%FT%TZ) | build | MERGED | $GOAL" >> "$EVLOG"
+  # CLOSE THE EVOLUTION LOOP: stamp the mind's real-world fitness AT MERGE TIME so this change can be
+  # looked at again once reality has had weeks to answer. Without this a merged PR is never evaluated
+  # again after CI goes green. Fail-soft — a metrics hiccup must never block a deploy.
+  MSHA="$(echo "$PYOUT" | grep -m1 "^MERGED:" | awk "{print \$2}")"
+  curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"     -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli"     -d "fitness_record ${MSHA} ${GOAL}" >/dev/null 2>&1 || true
   echo "==> merged on green — self-deploying"
   bash "$WORK/deploy/self_deploy.sh" || echo "==> self-deploy failed or rolled back (see evolution.log)"
 elif echo "$PYOUT" | grep -q "^PR:"; then

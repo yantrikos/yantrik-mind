@@ -128,8 +128,14 @@ if [ -z "$GOAL" ]; then
   git clone -q https://github.com/yantrikos/yantrik-mind.git "$W" 2>/dev/null || { echo "self-review: clone failed — skip tick"; rm -rf "$W" "$CH"; exit 0; }
   cd "$W"
   RECENT="$(git log --oneline -20 --pretty='- %s' 2>/dev/null || true)"
+  # TWO-TIER FITNESS: hand the goal generator the mind's REAL outcome numbers. Without these it has
+  # only the north star and a commit list, so it optimises for "made the tests pass" and its merged
+  # work stays cosmetic. Tests are a GATE; these numbers are the TARGET. Fail-soft: no metrics, no block.
+  FITNESS="$(curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"       -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli" -d "fitness_prompt" 2>/dev/null || true)"
+  [ -n "$FITNESS" ] && echo "self-review: fitness block attached ($(printf %s "$FITNESS" | wc -l) lines)"
   GOAL="$(timeout 480 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
+$FITNESS
 NORTH STAR: make the typed-memory moat — typed beliefs, confidence scores, contradiction detection, Bayesian revision, consolidation, reflection — more CORRECT, more ROBUST, or more USEFUL in the live chat product. Those are the things a flat-text RAG assistant structurally cannot do; that is where your value compounds. Favor closing a real gap or hardening correctness over adding surface commands or cosmetic cleanup.
 
 Recently done (do NOT repeat or trivially restate these):

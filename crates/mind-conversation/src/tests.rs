@@ -2116,3 +2116,42 @@ async fn silence_is_recorded_reviewable_and_released_only_by_change() {
         "a held candidate must not block an unrelated fresh one"
     );
 }
+
+/// THE WHOIS TRANSCRIPT BUG (live, 2026-07-28). The bot asked who a face was; the user said they
+/// couldn't tell; the bot took "Don't know" as a NAME, wrote "N/A" into the real photo library, and
+/// announced "I can recognize them across the library now". Three separate misses, and these are the
+/// user's VERBATIM words - the best possible test data.
+#[test]
+fn a_declined_whois_is_never_treated_as_an_answer() {
+    // 1. Uncertainty mid-sentence: the old check used starts_with, so this slipped through.
+    assert!(ConversationEngine::is_non_answer("I am not sure, the picture is not clear"));
+    // 2. Describing the PHOTO as unreadable rather than the person as unknown - no pattern covered it.
+    assert!(ConversationEngine::is_non_answer("The picture is hazy and unrecognizable"));
+    // 3. THE ONE THAT CAUSED THE DAMAGE: a curly apostrophe (U+2019), compared against ASCII "don't".
+    assert!(
+        ConversationEngine::is_non_answer("Don\u{2019}t know"),
+        "a curly apostrophe must not defeat the decline check - this is what wrote N/A to the library"
+    );
+    assert!(ConversationEngine::is_non_answer("don't know"));
+    assert!(ConversationEngine::is_non_answer("skip"));
+
+    // And it must NOT swallow real answers, including ones that mention not knowing something else.
+    assert!(!ConversationEngine::is_non_answer("Ritu"));
+    assert!(!ConversationEngine::is_non_answer("that's my cousin Ritu"));
+    assert!(!ConversationEngine::is_non_answer("Priya, my wife"));
+}
+
+#[test]
+fn placeholder_junk_can_never_become_a_persons_name() {
+    // The exact value that reached the photo library.
+    for junk in ["N/A", "n/a", "NA", "none", "unknown", "null", "-", "?", "  ", "TBD", "anonymous"] {
+        assert!(
+            ConversationEngine::is_placeholder_name(junk),
+            "{junk:?} must never be written as someone's name"
+        );
+    }
+    // Real names still pass.
+    for real in ["Ritu", "Priya", "Aadrisha", "Ana"] {
+        assert!(!ConversationEngine::is_placeholder_name(real), "{real} is a real name");
+    }
+}

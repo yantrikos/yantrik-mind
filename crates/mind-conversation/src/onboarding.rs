@@ -333,11 +333,11 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let (_, source, pid, count) = (it.next(), it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or("?"));
                 let t = text.trim();
                 let low = t.to_lowercase();
-                if ["skip", "pass", "idk", "no idea", "not sure", "dont know", "don't know", "later", "leave it"]
-                    .iter()
-                    .any(|w| low == *w || low.starts_with(w))
-                {
-                    return "No problem — skipping that face; I won't ask about it again.".to_string();
+                if Self::is_non_answer(t) {
+                    // NOTHING is written: no face-name, no profile, no belief, no library write.
+                    // A decline is not an answer, and acting on one is how "N/A" got named in the
+                    // user's photo library.
+                    return "No problem — I'll leave that face unnamed and won't ask again.".to_string();
                 }
                 // Natural replies carry more than a name ("that's my cousin Ritu") — extract both.
                 let prompt = format!(
@@ -370,7 +370,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         || nl.contains(" my ")
                         || nl.ends_with("'s")
                         || nl.ends_with("\u{2019}s");
-                    if !junk && name.len() > 1 {
+                    if !junk && !Self::is_placeholder_name(&name) && name.len() > 1 {
                         name
                     } else {
                         // resolve pure relations via the household registry + profiles
@@ -411,8 +411,12 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                             Some(n) => n,
                             None => {
                                 // can't resolve — re-arm the slot and ask for JUST the name
+                                // HONEST COPY: the old line claimed "Got the relation" even when
+                                // nothing was understood, and repeated verbatim on the next failure,
+                                // so the user saw the same wrong sentence twice. Say what actually
+                                // happened, and always offer the exit.
                                 self.set_pending_slot(Some(s)).await;
-                                return "Got the relation — but to name them right, what's their actual name?".to_string();
+                                return "Sorry - I couldn't pick a name out of that. Just their first name is plenty, or say \"skip\".".to_string();
                             }
                         }
                     }
@@ -494,6 +498,46 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
     }
 
     /// Strip a few common lead-ins ("my name is", "i'm", "call me") so we store the bare name.
+    /// Does this reply DECLINE to answer? The live transcript of 2026-07-28 shows three ways the old
+    /// check missed, and the third caused real damage:
+    ///   * "I am not sure, the picture is not clear" - matched with starts_with, so an uncertainty
+    ///     sitting mid-sentence slipped straight through.
+    ///   * "The picture is hazy and unrecognizable" - no pattern covered describing the PHOTO as
+    ///     unreadable rather than the person as unknown.
+    ///   * "Don't know" typed with a CURLY apostrophe (U+2019) - compared against the ASCII form, so
+    ///     it never matched, fell through to the extractor, became the name "N/A", and was written
+    ///     into the user's real photo library.
+    ///
+    /// "I don't know" is not data. Treating it as an answer is the same failure as treating an
+    /// inference as something the user actually told us.
+    pub(crate) fn is_non_answer(s: &str) -> bool {
+        // Normalise the quote variants phones produce BEFORE any comparison.
+        let low = s.trim().to_lowercase().replace(['\u{2019}', '\u{02BC}', '\u{FF07}'], "'");
+        const DECLINE: &[&str] = &[
+            "skip", "pass", "later", "leave it", "no idea", "not sure", "unsure", "dont know",
+            "don't know", "do not know", "dunno", "idk", "no clue", "cant tell", "can't tell",
+            "cannot tell", "cant see", "can't see", "not clear", "unclear", "hazy", "blurry",
+            "blurred", "unrecognizable", "unrecognisable", "cant recognize", "can't recognize",
+            "not recognizable",
+        ];
+        // `contains`, not `starts_with`: uncertainty usually arrives mid-sentence.
+        DECLINE.iter().any(|w| low == *w || low.contains(w))
+    }
+
+    /// Placeholder junk that must never become a person's name, even if something upstream produced
+    /// it. Belt-and-braces behind `is_non_answer`: this is the last gate before a WRITE to the
+    /// user's real photo library, and "N/A" got through once.
+    pub(crate) fn is_placeholder_name(s: &str) -> bool {
+        let n: String = s.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+        let n = n.trim().to_string();
+        n.is_empty()
+            || matches!(
+                n.as_str(),
+                "na" | "n a" | "none" | "null" | "nil" | "nan" | "unknown" | "unnamed" | "noname"
+                    | "no name" | "idk" | "dunno" | "x" | "tbd" | "anon" | "anonymous"
+            )
+    }
+
     pub(crate) fn clean_name(s: &str) -> String {
         let t = s.trim();
         let low = t.to_lowercase();

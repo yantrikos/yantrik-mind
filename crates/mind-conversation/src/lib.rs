@@ -4113,8 +4113,11 @@ impl ConversationEngine {
             "handoff" | "thread" => self.handoff_report().await,
             "handoff_prompt" => self.handoff_prompt().await,
             // Written at the END of every self-build run: `handoff_write <OUTCOME>|<goal>|<note>`
-            v if v.starts_with("handoff_write ") => {
-                let rest = v.trim_start_matches("handoff_write ").trim();
+            // NOTE: `cmd` is only the FIRST WORD (cli_dispatch splits on whitespace); the args
+            // live in `rest`. An earlier version guarded on `starts_with("handoff_write ")` — with a
+            // trailing space that can never match a single token — so this verb was a silent no-op
+            // from the day it shipped, and the caller's fail-soft `|| true` hid it completely.
+            "handoff_write" => {
                 let mut p = rest.splitn(3, '|');
                 let outcome = p.next().unwrap_or("?").trim();
                 let goal = p.next().unwrap_or("").trim();
@@ -4126,9 +4129,9 @@ impl ConversationEngine {
             "fitness_prompt" => self.fitness_snapshot().await.render_for_goal_prompt(),
             // Called by self_improve.sh on a green auto-merge: stamps the mind's real-world fitness
             // at merge time so the change can be graded once reality has answered.
-            v if v.starts_with("fitness_record ") => {
-                let rest = v.trim_start_matches("fitness_record ").trim();
-                let (sha, goal) = rest.split_once(' ').unwrap_or((rest, ""));
+            // Same first-word-only rule as handoff_write above.
+            "fitness_record" => {
+                let (sha, goal) = rest.split_once(' ').unwrap_or((rest.as_str(), ""));
                 self.fitness_record_change(sha, goal).await;
                 format!("recorded {sha} at current fitness")
             }

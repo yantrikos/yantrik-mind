@@ -2228,3 +2228,36 @@ fn placeholder_junk_can_never_become_a_persons_name() {
         assert!(!ConversationEngine::is_placeholder_name(real), "{real} is a real name");
     }
 }
+
+/// MULTI-WORD CLI VERBS MUST ACTUALLY DISPATCH. `cli_dispatch` splits on the first whitespace and
+/// matches only the FIRST WORD, so a guard like `starts_with("handoff_write ")` — with a trailing
+/// space that a single token can never contain — silently never fires. Both `handoff_write` and
+/// `fitness_record` shipped that way and were no-ops from day one; their callers use fail-soft
+/// `curl ... || true`, so nothing anywhere reported it. The self-build loop merged a change on
+/// 2026-08-03 and recorded neither its handoff nor its fitness stamp, and the only reason we know is
+/// that someone went and looked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multi_word_cli_verbs_reach_their_handlers() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+    let ctx = mind_types::AccessContext::Operator;
+
+    // handoff_write: args arrive pipe-separated after the verb.
+    let r = conv
+        .cli_dispatch("handoff_write MERGED|bound the escrow ledger|note to self: derive the cap", &ctx)
+        .await;
+    assert!(r.contains("handoff recorded"), "handoff_write must reach its handler, got: {r:?}");
+    let thread = conv.cli_dispatch("handoff", &ctx).await;
+    assert!(thread.contains("bound the escrow ledger"), "the entry must be readable back: {thread}");
+    assert!(thread.contains("derive the cap"), "the note must survive: {thread}");
+
+    // fitness_record: "<sha> <goal>".
+    let f = conv.cli_dispatch("fitness_record abc1234 make the tests measure something real", &ctx).await;
+    assert!(f.contains("abc1234"), "fitness_record must reach its handler, got: {f:?}");
+    let board = conv.cli_dispatch("fitness", &ctx).await;
+    assert!(
+        board.contains("changes tracked: 1"),
+        "the merged change must be tracked, not silently dropped: {board}"
+    );
+}

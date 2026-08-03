@@ -2299,3 +2299,34 @@ fn research_about_a_users_project_must_not_absorb_a_same_named_stranger() {
     // A topic with no ownership claim has nothing to mis-attribute.
     assert!(topic_owner("latest developments in vector databases").is_none());
 }
+
+/// THE UNREADABLE WHOIS PHOTO (live, 2026-08-03). The question shipped Immich's tight face crop
+/// (/api/people/{id}/thumbnail) - often a ~100px box off a low-res detection. Pranab, seeing it
+/// repeatedly: "This is impossible to understand the picture." Asking an unanswerable question is
+/// worse than not asking: it burns the day's one whois slot, trains the user to ignore the prompt,
+/// and (before the decline gate) turned "don't know" into a stored name.
+///
+/// The fix sends a REAL photo the person appears in. That is readable but newly AMBIGUOUS when
+/// several people are in frame, so the caption must say WHICH one. These lock the phrasing contract.
+#[test]
+fn whois_caption_disambiguates_when_a_real_photo_is_used() {
+    // Positional hint derived from the normalised face box centre.
+    let where_of = |cx: f32| {
+        if cx < 0.34 { "on the LEFT of this photo" }
+        else if cx > 0.66 { "on the RIGHT of this photo" }
+        else { "in the MIDDLE of this photo" }
+    };
+    assert_eq!(where_of(0.10), "on the LEFT of this photo");
+    assert_eq!(where_of(0.50), "in the MIDDLE of this photo");
+    assert_eq!(where_of(0.90), "on the RIGHT of this photo");
+    // Boundaries resolve to a side, never to nothing.
+    for cx in [0.0, 0.33, 0.35, 0.65, 0.67, 1.0] {
+        assert!(!where_of(cx).is_empty(), "every position yields a hint ({cx})");
+    }
+
+    // The context caption must name a position; the fallback (face crop) must NOT claim one.
+    let ctx = format!("who is the person {}? They appear in ~469 of your photos.", where_of(0.9));
+    assert!(ctx.contains("on the RIGHT of this photo"), "{ctx}");
+    let fallback = "who is this? They're in ~469 of your photos.".to_string();
+    assert!(!fallback.contains("of this photo"), "a face crop must not imply a position: {fallback}");
+}

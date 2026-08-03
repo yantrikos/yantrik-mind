@@ -769,14 +769,74 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 self.save_whois_asked(&asked).await;
                 continue;
             }
-            let Some(jpeg) = src.face_thumbnail(&pid).await else {
+            // ASK WITH A PICTURE A HUMAN CAN ACTUALLY READ. `face_thumbnail` returns Immich's tight
+            // face crop (/api/people/{id}/thumbnail) — often a ~100px box from a low-res detection,
+            // and frequently unrecognisable even to the person's own family. Pranab, 2026-08-03, on
+            // seeing it repeatedly: "This is impossible to understand the picture."
+            //
+            // Asking an unanswerable question is worse than not asking: it burns the one whois slot
+            // for the day, trains the user to ignore the prompts, and (before the decline gate
+            // landed) turned "don't know" into a stored name. So prefer a REAL PHOTO the person
+            // appears in — full frame, in context, at preview size — which is how humans actually
+            // recognise each other. The face crop is the fallback, not the first choice.
+            // A full frame is readable but can be AMBIGUOUS where the face crop was not: if several
+            // people are in the shot, "who is this?" no longer identifies anyone. So carry a
+            // positional hint from the face bounding box, and prefer a photo where they are the
+            // largest face.
+            let (context_photo, mut hint) = {
+                let assets = src
+                    .taken_between("1970-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z", &[pid.clone()], 4)
+                    .await;
+                let mut chosen: (Option<Vec<u8>>, String) = (None, String::new());
+                let mut best_area = 0.0f32;
+                for a in assets.iter() {
+                    let Some((x1, _y1, x2, _y2, _pxw)) = src.face_box(&a.id, &pid).await else { continue };
+                    let cx = (x1 + x2) / 2.0;
+                    let area = x2 - x1;
+                    if area <= best_area {
+                        continue;
+                    }
+                    let Some(bytes) = src.image_bytes(a).await else { continue };
+                    let where_ = if cx < 0.34 {
+                        "on the LEFT of this photo"
+                    } else if cx > 0.66 {
+                        "on the RIGHT of this photo"
+                    } else {
+                        "in the MIDDLE of this photo"
+                    };
+                    best_area = area;
+                    chosen = (Some(bytes), where_.to_string());
+                }
+                // No box anywhere (or a source without face geometry): still prefer a real photo.
+                if chosen.0.is_none() {
+                    for a in assets.iter() {
+                        if let Some(b) = src.image_bytes(a).await {
+                            chosen = (Some(b), "in this photo".to_string());
+                            break;
+                        }
+                    }
+                }
+                chosen
+            };
+            let context_photo = context_photo;
+            let used_context = context_photo.is_some();
+            if !used_context {
+                hint.clear();
+            }
+            let Some(jpeg) = context_photo.or(src.face_thumbnail(&pid).await) else {
                 asked.push(format!("{}:{pid}", src.name()));
                 self.save_whois_asked(&asked).await;
                 continue;
             };
-            let caption = format!(
-                "👀 I'm learning the people in your photo library — who is this? They're in ~{count} of your photos. (A name, plus how they're related to you if you like. \"skip\" is fine too.)"
-            );
+            let caption = if used_context {
+                format!(
+                    "👀 I'm learning the people in your photo library — who is the person {hint}? They appear in ~{count} of your photos. (A name, plus how they're related to you if you like. \"skip\" is fine too.)"
+                )
+            } else {
+                format!(
+                    "👀 I'm learning the people in your photo library — who is this? They're in ~{count} of your photos. (A name, plus how they're related to you if you like. \"skip\" is fine too.)"
+                )
+            };
             let slot = format!("whois:{}:{pid}:{count}", src.name());
             return Some((caption, jpeg, slot));
         }

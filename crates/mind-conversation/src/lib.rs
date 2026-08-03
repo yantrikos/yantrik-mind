@@ -4111,6 +4111,39 @@ impl ConversationEngine {
             "fitness" | "scoreboard" => self.fitness_report().await,
             // The thread between self-build ticks: what the last ones did, incl. what never merged.
             "handoff" | "thread" => self.handoff_report().await,
+            // What the self-build loop actually COSTS. QwenCloud publishes no usage API (every
+            // /usage path 404s), so the builder CLI's own reported spend is the only measurable
+            // source — and the builder is the dominant consumer by a wide margin.
+            "spend" | "tokens" => {
+                let path = std::env::var("YM_TOKEN_LEDGER")
+                    .unwrap_or_else(|_| "/var/lib/yantrik-mind/token_ledger.log".to_string());
+                match std::fs::read_to_string(&path) {
+                    Ok(t) if !t.trim().is_empty() => {
+                        let lines: Vec<&str> = t.lines().filter(|l| !l.trim().is_empty()).collect();
+                        let total: f64 = lines
+                            .iter()
+                            .filter_map(|l| l.rsplit_once("usd=").and_then(|(_, v)| v.trim().parse::<f64>().ok()))
+                            .sum();
+                        let toks: u64 = lines
+                            .iter()
+                            .filter_map(|l| {
+                                l.split("tokens=").nth(1)?.split_whitespace().next()?.parse::<u64>().ok()
+                            })
+                            .sum();
+                        let recent: Vec<&str> = lines.iter().rev().take(8).copied().collect();
+                        format!(
+                            "💸 Self-build spend — {} run(s), {toks} tokens, ${total:.2} total
+{}
+
+Each agentic build reads the codebase, so cost scales with runs, not with diff size.",
+                            lines.len(),
+                            recent.join("
+")
+                        )
+                    }
+                    _ => "💸 Self-build spend: nothing recorded yet — the next builder run writes the first entry.".to_string(),
+                }
+            }
             "handoff_prompt" => self.handoff_prompt().await,
             // Written at the END of every self-build run: `handoff_write <OUTCOME>|<goal>|<note>`
             // NOTE: `cmd` is only the FIRST WORD (cli_dispatch splits on whitespace); the args

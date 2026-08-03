@@ -4114,7 +4114,9 @@ impl ConversationEngine {
             // What the self-build loop actually COSTS. QwenCloud publishes no usage API (every
             // /usage path 404s), so the builder CLI's own reported spend is the only measurable
             // source — and the builder is the dominant consumer by a wide margin.
-            "spend" | "tokens" => {
+            // NOT "spend" — that is already the expense logger at line ~3884 and would shadow this
+            // silently (the arm never fires; you just get the expense usage line).
+            "tokens" | "buildspend" | "llm_spend" => {
                 let path = std::env::var("YM_TOKEN_LEDGER")
                     .unwrap_or_else(|_| "/var/lib/yantrik-mind/token_ledger.log".to_string());
                 match std::fs::read_to_string(&path) {

@@ -353,6 +353,11 @@ impl super::ConversationEngine {
             "status": "open",
         }));
         self.save_predictions(&preds).await;
+        // JUDGMENT LEDGER mirror: a stored forecast IS a falsifiable prediction — pre-register it
+        // at STORE TIME with the calibrated confidence asserted (p at emission; never a post-hoc
+        // p). resolve_predictions grades the same ref hit/miss, so the forecast-skill metric
+        // (fitness_snapshot reads this ledger) measures REAL forecasts, not only engagement pings.
+        self.judgment_log("prediction", &domain, &claim, cal, resolve_by_ms, &format!("prediction:{made_ms}")).await;
         Some(format!("🔮 Prediction (I'll grade myself): {claim} — by {resolve_by}. [{threshold}]"))
     }
 
@@ -631,6 +636,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 }
             }
             self.save_predictions(&preds).await;
+            // Keep the judgment-ledger mirror's domain aligned with the prediction ledger's (the
+            // store path logged it under the subject's coarse domain; receipts grade it here).
+            self.judgment_set_domain(&format!("prediction:{}", made.timestamp_millis()), "family-rhythm").await;
         }
     }
 
@@ -806,6 +814,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             if verd == "hit" || verd == "miss" {
                 let raw = preds[i].get("raw_confidence").or_else(|| preds[i].get("confidence")).and_then(|x| x.as_f64()).unwrap_or(0.6);
                 let _ = self.memory.record_prediction_outcome(&domain, &subject, raw, verd == "hit").await;
+                // Grade the judgment-ledger mirror logged at store time (same ref): hit/miss are
+                // the binary outcomes Brier scores; an "unclear" verdict leaves the entry pending
+                // (it contributes nothing, same as the calibration belief).
+                let jref = format!("prediction:{}", preds[i].get("id").and_then(|x| x.as_i64()).unwrap_or(0));
+                self.judgment_grade(&jref, verd == "hit").await;
             }
             // Feed the verdict back into the subject's living CHARACTER MODEL, so the next forecast
             // reasons over its own graded track record (a MISS corrects the character read — the
@@ -1035,6 +1048,26 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             {
                 r["outcome"] = serde_json::json!(if outcome { 1 } else { 0 });
                 r["outcome_at"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = self.memory.profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap_or_default()).await;
+        }
+    }
+
+    /// Refine the domain of a still-pending ledger entry (metadata only — the asserted p and the
+    /// outcome stay untouched). Used when the caller sharpens the domain after store time, e.g.
+    /// life predictions that grade against the archive ledgers as family-rhythm.
+    pub(crate) async fn judgment_set_domain(&self, subject_ref: &str, domain: &str) {
+        let mut led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut changed = false;
+        for r in led.iter_mut() {
+            if r.get("ref").and_then(|x| x.as_str()) == Some(subject_ref)
+                && r.get("outcome").map(|o| o.is_null()).unwrap_or(false)
+            {
+                r["domain"] = serde_json::json!(domain);
                 changed = true;
             }
         }

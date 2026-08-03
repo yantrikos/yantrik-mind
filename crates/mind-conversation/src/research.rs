@@ -2,6 +2,48 @@
 
 use super::*;
 
+// ── ATTRIBUTION GUARD for research about a subject the USER OWNS ────────────────────────────────
+//
+// `work_radar` labels such topics: "<subject> (this is <Name>'s project — for disambiguation: …) …
+// Ignore unrelated same-named entities." On 2026-08-03 the researcher was handed exactly that for
+// "ContextCache", went and read a DIFFERENT project of the same name (uYanJX/ContextCache, arXiv
+// 2506.22791 — a semantic cache for multi-turn dialogue), and the reconciler stored its architecture
+// as settled belief about the USER'S ContextCache. An instruction in a prompt is a request, not a
+// guarantee: a stranger's design became a fact about the user's project.
+//
+// So the write path CHECKS rather than asks. When the findings never corroborate the owner, the
+// statement is still stored — the research is real information about *a* project of that name — but
+// it is stored SAYING SO, at capped confidence. The rule this system keeps relearning: never assert
+// as known what was merely found nearby.
+
+/// The owner named in a topic's disambiguation marker, if any.
+pub(crate) fn topic_owner(topic: &str) -> Option<String> {
+    let i = topic.find("this is ")? + "this is ".len();
+    let rest = &topic[i..];
+    // Accept both the ASCII apostrophe and the curly one phones produce.
+    let end = rest.find("'s ").or_else(|| rest.find("\u{2019}s "))?;
+    let owner = rest[..end].trim();
+    (owner.len() >= 3 && owner.len() <= 60).then(|| owner.to_string())
+}
+
+/// Do the findings actually tie back to the owner? Any distinctive name token of theirs appearing in
+/// the research text or its source URLs counts as corroboration.
+pub(crate) fn attribution_corroborated(owner: &str, findings: &str) -> bool {
+    let f = findings.to_lowercase();
+    owner
+        .split_whitespace()
+        .filter(|w| w.len() >= 4)
+        .any(|w| f.contains(&w.to_lowercase()))
+}
+
+/// Mark a finding whose attribution the sources never established.
+pub(crate) fn qualify_unattributed(stmt: &str, owner: &str) -> String {
+    format!(
+        "{stmt} [ATTRIBUTION UNVERIFIED: the sources describe a same-named project and never mention \
+         {owner} — do not treat this as a fact about their project]"
+    )
+}
+
 impl super::ConversationEngine {
     /// Turn a recipe RunOutcome into a chat reply, parking any pause (question or action) so the
     /// next message resumes it.
@@ -184,6 +226,12 @@ impl super::ConversationEngine {
         };
         // 2. research live (cited)
         let res = agent.run(topic).await;
+        // ATTRIBUTION: if this topic claims an owner, did the findings ever corroborate them?
+        let owner = topic_owner(topic);
+        let attributed = match &owner {
+            Some(o) => attribution_corroborated(o, &format!("{} {}", res.answer, res.sources.join(" "))),
+            None => true, // no ownership claim in the topic ⇒ nothing to mis-attribute
+        };
         // 3. reconcile priors vs findings
         let prompt = format!(
             "PRIOR BELIEFS:\n{prior_list}\n\nLIVE RESEARCH FINDINGS:\n{}\n\n\
@@ -213,7 +261,16 @@ impl super::ConversationEngine {
             if stmt.len() < 6 {
                 continue;
             }
-            let cert = f.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.7).clamp(0.1, 0.95);
+            let mut cert = f.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.7).clamp(0.1, 0.95);
+            // Uncorroborated attribution: keep the finding, but say plainly it may be a different
+            // project, and cap confidence so it can never out-rank something the user actually told us.
+            let stmt = match (&owner, attributed) {
+                (Some(o), false) => {
+                    cert = cert.min(0.4);
+                    qualify_unattributed(&stmt, o)
+                }
+                _ => stmt,
+            };
             if self
                 .memory
                 .remember_as_belief(BeliefAssertion { statement: stmt.clone(), polarity: 1.0, weight: 0.5 + cert * 1.5, source_event: Some("research".into()), provenance: "extracted".into() })

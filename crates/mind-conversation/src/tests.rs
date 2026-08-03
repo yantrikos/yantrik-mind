@@ -2261,3 +2261,41 @@ async fn multi_word_cli_verbs_reach_their_handlers() {
         "the merged change must be tracked, not silently dropped: {board}"
     );
 }
+
+/// THE CONTEXTCACHE MIS-ATTRIBUTION (live, 2026-08-03). work_radar researched "ContextCache",
+/// explicitly told it was Pranab's project and to "Ignore unrelated same-named entities". The
+/// researcher read a DIFFERENT project of that name (uYanJX/ContextCache, arXiv 2506.22791) and the
+/// reconciler stored its architecture as settled belief about HIS project. A prompt instruction is a
+/// request, not a guarantee - so the write path now checks instead of asking.
+#[test]
+fn research_about_a_users_project_must_not_absorb_a_same_named_stranger() {
+    use crate::research::{attribution_corroborated, qualify_unattributed, topic_owner};
+
+    // The real topic string work_radar builds.
+    let topic = "ContextCache (this is Pranab Sarkar's project — for disambiguation: Pranab is the \
+                 creator of YantrikDB, ContextCache, and ToolFormerMicro) — latest developments in \
+                 this specific space. Ignore unrelated same-named entities.";
+    assert_eq!(topic_owner(topic).as_deref(), Some("Pranab Sarkar"), "the owner claim is detected");
+
+    // The findings that actually came back: a different project, never mentioning him.
+    let stranger = "ContextCache is a context-aware semantic caching system for multi-turn dialogues, \
+                    addressing limitations in GPTCache. https://github.com/uYanJX/ContextCache \
+                    https://arxiv.org/abs/2506.22791";
+    assert!(
+        !attribution_corroborated("Pranab Sarkar", stranger),
+        "sources that never mention the owner must NOT count as corroboration"
+    );
+
+    // Findings that genuinely are about his project do corroborate.
+    let his = "Pranab Sarkar's ContextCache ships in the YantrikDB stack.";
+    assert!(attribution_corroborated("Pranab Sarkar", his));
+
+    // The stored statement must carry the doubt, not hide it.
+    let q = qualify_unattributed("ContextCache is a semantic cache for multi-turn dialogue", "Pranab Sarkar");
+    assert!(q.contains("ATTRIBUTION UNVERIFIED"), "{q}");
+    assert!(q.contains("same-named"), "{q}");
+    assert!(q.contains("do not treat this as a fact about their project"), "{q}");
+
+    // A topic with no ownership claim has nothing to mis-attribute.
+    assert!(topic_owner("latest developments in vector databases").is_none());
+}

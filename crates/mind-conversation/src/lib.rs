@@ -46,7 +46,7 @@ mod handoff;
 mod knock;
 mod privacy_audit;
 mod proactive;
-mod research;
+pub(crate) mod research;
 mod skills;
 mod studio;
 mod timeline;

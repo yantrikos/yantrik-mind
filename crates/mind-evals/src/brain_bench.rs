@@ -152,6 +152,18 @@ impl BenchResult {
 }
 
 /// Score one candidate brain. Any OpenAI-compatible endpoint.
+///
+/// ENDPOINT CAVEAT, learned by getting it wrong. `ApiLLM` decides an endpoint is Ollama-native by
+/// looking for `:11434` / `ollama.com` in the URL; anything else is talked to OpenAI-style at
+/// `<base>/chat/completions`. The live brain pool's primary link is an Ollama gateway on a plain
+/// HTTPS host with no port (`https://aig.mycluster.cyou`), so passing the bare host makes the bench
+/// POST to the wrong path and score a perfectly healthy model 0/6 with "request failed" — which
+/// nearly got reported as "your primary brain is broken".
+///
+/// PASS THE PROTOCOL-CORRECT BASE URL: that gateway also serves OpenAI-compatible routes, so
+/// `https://aig.mycluster.cyou/v1` benches it correctly. An instrument that misreports a healthy
+/// subject is worse than no instrument, so when a candidate scores 0 with request failures, suspect
+/// the URL before the model.
 pub async fn bench(url: &str, key: Option<String>, model: &str) -> BenchResult {
     let backend = yantrik_ml::ApiLLM::new(url, key, model);
     let pool = InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1).with_provider("bench");

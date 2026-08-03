@@ -72,6 +72,79 @@ async fn judgment_ledger_logs_grades_and_scores_brier() {
     assert!(conv.judgment_report().await.contains("2 graded"));
 }
 
+/// Every stored prediction must ALSO be pre-registered in the judgment ledger with the calibrated
+/// confidence asserted at store time, and graded hit/miss when the resolver scores it — otherwise
+/// the forecast-skill metric (which reads that ledger) measures only engagement pings, never the
+/// real forecasts.
+#[tokio::test]
+async fn stored_predictions_mirror_into_the_judgment_ledger_and_grade_on_resolve() {
+    async fn engine(verdict: &str) -> (Arc<dyn MemoryFacade>, ConversationEngine) {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new(verdict)) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+        (mem, conv)
+    }
+    async fn ledger(mem: &Arc<dyn MemoryFacade>) -> Vec<serde_json::Value> {
+        mem.profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    let resolve_by = (chrono::Utc::now() + chrono::Duration::days(30)).format("%Y-%m-%d").to_string();
+    let resolve_by_ms = parse_ymd_ms(&resolve_by).unwrap();
+    let v = serde_json::json!({ "prediction": {
+        "claim": "Acme closes its acquisition of Beta",
+        "threshold": "a closing announcement",
+        "resolve_by": resolve_by,
+        "confidence": 0.7,
+    }});
+    // The resolver grounds its verdict in the subject's held understanding.
+    let understanding = r#"{"summary":"Acme announced it has closed the acquisition of Beta.","as_of":"2026-08-01"}"#;
+    let made_ms = chrono::Utc::now().timestamp_millis();
+
+    // STORE TIME: the forecast is pre-registered with the calibrated confidence it asserted…
+    let (mem, conv) = engine(r#"{"verdict":"hit","why":"the closing was announced"}"#).await;
+    mem.profile_set("understanding:acme", understanding).await.unwrap();
+    assert!(conv.maybe_store_prediction("acme", &v, made_ms, "2026-08-01").await.is_some());
+    // The calibrated confidence the store committed to (raw 0.7 through the engine's calibration
+    // map) — the ledger's p must be EXACTLY this asserted value, not a post-hoc one.
+    let cal = conv.load_predictions().await[0]["confidence"].as_f64().unwrap();
+    let led = ledger(&mem).await;
+    assert_eq!(led.len(), 1, "one ledger entry for the stored forecast: {led:?}");
+    let e = &led[0];
+    assert_eq!(e["source"], serde_json::json!("prediction"), "a real forecast, not an engagement ping: {e}");
+    assert_eq!(e["domain"], serde_json::json!("general"));
+    assert_eq!(e["claim"], v["prediction"]["claim"]);
+    assert!((e["p"].as_f64().unwrap() - cal).abs() < 1e-9, "p is the calibrated confidence asserted at store time: {e}");
+    assert_eq!(e["grade_due"], serde_json::json!(resolve_by_ms), "grading due at the resolve-by date");
+    assert_eq!(e["ref"], serde_json::json!(format!("prediction:{made_ms}")));
+    assert!(e["outcome"].is_null(), "pending until the resolver scores it: {e}");
+
+    // …and the resolver's verdict grades it (hit=1), so the forecast-skill metric can see it.
+    let out = conv.resolve_predictions(true).await;
+    assert!(out.iter().any(|l| l.contains("HELD")), "resolver surfaces the graded call: {out:?}");
+    let led = ledger(&mem).await;
+    assert_eq!(led[0]["outcome"], serde_json::json!(1), "the hit is graded into the judgment ledger: {led:?}");
+    assert!(conv.judgment_report().await.contains("1 graded"));
+    assert!(conv.fitness_snapshot().await.graded >= 1, "forecast skill now sees the real forecast");
+
+    // MISS: the same path grades a 0.
+    let (mem, conv) = engine(r#"{"verdict":"miss","why":"no announcement came"}"#).await;
+    mem.profile_set("understanding:acme", understanding).await.unwrap();
+    assert!(conv.maybe_store_prediction("acme", &v, made_ms + 1, "2026-08-01").await.is_some());
+    conv.resolve_predictions(true).await;
+    assert_eq!(ledger(&mem).await[0]["outcome"], serde_json::json!(0), "the miss is graded into the judgment ledger");
+
+    // UNCLEAR: no binary outcome exists, so the entry stays pending (never fake-graded).
+    let (mem, conv) = engine(r#"{"verdict":"unclear","why":"cannot tell yet"}"#).await;
+    mem.profile_set("understanding:acme", understanding).await.unwrap();
+    assert!(conv.maybe_store_prediction("acme", &v, made_ms + 2, "2026-08-01").await.is_some());
+    conv.resolve_predictions(true).await;
+    assert!(ledger(&mem).await[0]["outcome"].is_null(), "unclear must leave the entry pending");
+}
+
 #[test]
 fn epistemic_gate_only_observed_or_told_may_act() {
     // taxonomy: observed/told = high authority; studied/inferred/reflected/unknown = low

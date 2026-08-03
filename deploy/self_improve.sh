@@ -64,6 +64,8 @@ echo "==> Claude Code (subscription) implementing: $GOAL"
 # build/test/check are allowed; any other shell command is denied by the tool allowlist.
 BUILDER_PROMPT="You are improving the yantrik-mind codebase (you are the companion improving your own code). GOAL: $GOAL
 
+EXISTENCE CHECK FIRST — this is not optional. Before writing anything, SEARCH the codebase for the key identifiers and concepts in this goal (Read/grep the relevant crates). If the capability ALREADY EXISTS, make NO changes at all and reply with exactly: ALREADY-EXISTS: <file:line where it lives>. This loop has re-proposed already-built work repeatedly — it once merged the same belief-normalisation change twice and proposed it a third time, and proposed an UncertaintyReason enum that was already implemented and already wired into the grounding prompt. Rebuilding what exists wastes the run and churns the codebase. If it partially exists, EXTEND it rather than adding a parallel implementation.
+
 Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under crates/mind-governance (the harm-gate is off-limits). Do NOT modify anything under crates/mind-evals (you cannot edit the judge you must pass). If you change Rust, keep it compiling. ADD a #[test] covering your change and RUN it (cargo build / cargo test / cargo check) — verify green before you finish. Do not touch secrets or CI auth."
 # BUILDER FLEET: YM_BUILDER selects the agent. codex = OpenAI Codex CLI (utilizes the ChatGPT Plus
 # quota, self-refreshing auth in ~/.codex); default = Claude Code (Max). Both edit files + run cargo,
@@ -76,19 +78,33 @@ if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   # (our own tool-selection workload) vs 4-5/6 for every local pool member, so it is the strongest
   # candidate to actually drive a build.
   echo "==> builder: Claude Code -> QwenCloud (${YM_QWEN_MODEL:-qwen3.8-max})"
-  ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"   ANTHROPIC_AUTH_TOKEN="${QWEN_API_KEY:?need QWEN_API_KEY for the qwen builder}"   ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"   timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25
+  ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"   ANTHROPIC_AUTH_TOKEN="${QWEN_API_KEY:?need QWEN_API_KEY for the qwen builder}"   ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"   BUILD_OUT="$(timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25)"
+  echo "$BUILD_OUT"
 elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
   echo "==> builder: OpenAI Codex CLI (codex exec)"
-  timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" </dev/null 2>&1 | tail -25
+  BUILD_OUT="$(timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" </dev/null 2>&1 | tail -25)"
+  echo "$BUILD_OUT"
 else
   echo "==> builder: Claude Code"
-  timeout 1500 claude -p "$BUILDER_PROMPT" \
-    --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25
+  BUILD_OUT="$(timeout 1500 claude -p "$BUILDER_PROMPT" \
+    --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25)"
+  echo "$BUILD_OUT"
 fi
 
+BUILD_OUT="${BUILD_OUT:-}"
 echo "==> enforce bounds"
 git add -A   # stage everything incl. NEW files (git diff alone ignores untracked)
 if git diff --cached --quiet; then
+  # ALREADY-EXISTS is a SUCCESSFUL outcome, not a dud run: the builder checked and correctly declined
+  # to rebuild. Record it distinctly so the next tick learns the capability is present rather than
+  # seeing an ambiguous "no changes" and trying again.
+  if printf '%s' "$BUILD_OUT" | grep -q "ALREADY-EXISTS"; then
+    WHERE="$(printf '%s' "$BUILD_OUT" | grep -m1 -oE 'ALREADY-EXISTS:.*' | cut -c1-160)"
+    echo "==> builder reports the capability already exists: $WHERE"
+    echo "$(date -u +%FT%TZ) | build | ALREADY-EXISTS | $GOAL" >> "$EVLOG"
+    handoff ALREADY-EXISTS "This capability is ALREADY IMPLEMENTED ($WHERE). Do not propose it again - extend or fix it instead."
+    exit 0
+  fi
   echo "no changes produced — nothing to PR"
   echo "$(date -u +%FT%TZ) | build | NO-CHANGE | $GOAL" >> "$EVLOG"
   handoff NO-CHANGE "The builder produced no diff for this goal. Either it is already done, or the goal was too vague to act on - reword it concretely or pick something else."

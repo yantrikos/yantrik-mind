@@ -132,7 +132,24 @@ if [ -z "$GOAL" ]; then
   export HOME="$CH"
   git clone -q https://github.com/yantrikos/yantrik-mind.git "$W" 2>/dev/null || { echo "self-review: clone failed — skip tick"; rm -rf "$W" "$CH"; exit 0; }
   cd "$W"
-  RECENT="$(git log --oneline -20 --pretty='- %s' 2>/dev/null || true)"
+  # 40, not 20: self-improve subjects are enormous run-on sentences, so a 20-commit window covers
+  # very little real history and already-built work falls off the end.
+  RECENT="$(git log --oneline -40 --pretty='- %s' 2>/dev/null | cut -c1-160 || true)"
+  # CAPABILITY INVENTORY — the fix for re-proposing what already exists. Measured 2026-08-03: the
+  # loop proposed `UncertaintyReason {Decayed|Contradicted|Sparse|LowPrior}` which was already
+  # implemented AND already threaded into the grounding prompt, and proposed belief-text
+  # normalisation for the THIRD time (it had merged twice already, 349d2ca and 8569220 with
+  # byte-identical subjects). A commit log of paraphrased subjects cannot prevent that; a list of
+  # what the code actually CONTAINS can.
+  INVENTORY="$( { echo "capability modules (crates/mind-conversation/src):";
+      ls crates/mind-conversation/src/*.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//' | tr '
+' ' ';
+      echo; echo "typed vocabulary (public enums/structs in mind-types):";
+      grep -rhoE '^pub (enum|struct) [A-Za-z_]+' crates/mind-types/src/*.rs 2>/dev/null | awk '{print $3}' | sort -u | tr '
+' ' ';
+      echo; echo "operator verbs already wired:";
+      grep -ohE '^\s+"[a-z_]+"( \| "[a-z_]+")* =>' crates/mind-conversation/src/lib.rs 2>/dev/null | grep -oE '"[a-z_]+"' | tr -d '"' | sort -u | tr '
+' ' '; echo; } 2>/dev/null | cut -c1-1400 )"
   # TWO-TIER FITNESS: hand the goal generator the mind's REAL outcome numbers. Without these it has
   # only the north star and a commit list, so it optimises for "made the tests pass" and its merged
   # work stays cosmetic. Tests are a GATE; these numbers are the TARGET. Fail-soft: no metrics, no block.
@@ -154,6 +171,9 @@ if [ -z "$GOAL" ]; then
 
 $FITNESS
 $HANDOFF
+WHAT ALREADY EXISTS (do NOT propose building any of this again — extend or fix it instead):
+$INVENTORY
+
 NORTH STAR: make the typed-memory moat — typed beliefs, confidence scores, contradiction detection, Bayesian revision, consolidation, reflection — more CORRECT, more ROBUST, or more USEFUL in the live chat product. Those are the things a flat-text RAG assistant structurally cannot do; that is where your value compounds. Favor closing a real gap or hardening correctness over adding surface commands or cosmetic cleanup.
 
 Recently done (do NOT repeat or trivially restate these):

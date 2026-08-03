@@ -34,7 +34,12 @@ trap 'rc=$?; [ $rc -ne 0 ] && tg_alert crash "tick crashed (exit $rc) — check 
 # builder authenticates via ~/.codex (self-refreshing), so it does NOT need the Claude OAuth token.
 # The Claude preflight only gates the Claude builder — a dead Claude token must not block a Codex tick.
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
-if [ "${YM_BUILDER:-claude}" = "codex" ]; then
+if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
+  # The qwen builder authenticates with QWEN_API_KEY, not the Claude OAuth token, so a dead Claude
+  # token must not block it. Goal GENERATION below still needs a working CLI, which is why the qwen
+  # builder also overrides the generator - see the self-review block.
+  : "${QWEN_API_KEY:?qwen builder selected but QWEN_API_KEY is unset}"
+elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
   [ -f "$HOME/.codex/auth.json" ] || [ -f /root/.codex/auth.json ] || { echo "$(date -u +%FT%TZ) codex builder selected but no ~/.codex/auth.json — tick skipped"; exit 0; }
 else
   : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
@@ -137,6 +142,14 @@ if [ -z "$GOAL" ]; then
   # commits, so without this the loop cannot see its own aborts/drafts and re-proposes doomed goals.
   HANDOFF="$(curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"       -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli" -d "handoff_prompt" 2>/dev/null || true)"
   [ -n "$HANDOFF" ] && echo "self-review: handoff attached ($(printf %s "$HANDOFF" | wc -l) lines)"
+  # When the builder is qwen, the GOAL GENERATOR runs on qwen too - otherwise a dead Claude token
+  # kills the tick before the (working) builder is ever reached, which is exactly what happened for
+  # six consecutive ticks on 2026-07-27/28.
+  if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
+    export ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+    export ANTHROPIC_AUTH_TOKEN="$QWEN_API_KEY"
+    export ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"
+  fi
   GOAL="$(timeout 480 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
 $FITNESS

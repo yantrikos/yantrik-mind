@@ -928,6 +928,17 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         "nanogpt" => ("https://nano-gpt.com/api/v1", "NANOGPT_KEY", "deepseek/deepseek-v4-pro-cheaper"),
         "ollama-cloud" | "ollama" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY", "glm-4.7"),
         "minimax" => ("https://api.minimax.io/v1", "MINIMAX_API_KEY", "MiniMax-M2.7"),
+        // QwenCloud token-plan. NOTE the host: the public docs point at
+        // dashscope-intl.aliyuncs.com, which REJECTS token-plan keys (sk-sp-…) — the working base is
+        // the token-plan MaaS endpoint below. Benchmarked 2026-08-03 at 6/6 on brain_bench (this
+        // mind's own tool-selection workload) vs 4-5/6 for every local pool member.
+        // HOUSEHOLD LANE ONLY: it is a cloud provider, so it must never serve a private-grounded
+        // turn — the private lane stays on owned hardware via YM_BRAIN_POOL.
+        "qwencloud" | "qwen" => (
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "QWEN_API_KEY",
+            "qwen3.8-max",
+        ),
         "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY", "deepseek/deepseek-chat"),
         "grok" => ("https://api.x.ai/v1", "GROK_API_KEY", "grok-2-latest"),
         // Anthropic direct. Default Sonnet 5 (fast + cheap enough for an

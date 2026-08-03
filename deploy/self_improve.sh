@@ -69,7 +69,15 @@ Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under c
 # quota, self-refreshing auth in ~/.codex); default = Claude Code (Max). Both edit files + run cargo,
 # then the SAME gates below (compile + eval-custody + test-presence + behavioral suite + small-diff)
 # decide auto-merge vs draft — the builder identity doesn't change what's allowed to merge.
-if [ "${YM_BUILDER:-claude}" = "codex" ]; then
+if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
+  # QWEN BUILDER: Claude Code driving QwenCloud over its Anthropic-compatible endpoint. Same CLI,
+  # same tool allowlist, same gates below - only the model behind it changes, which is what makes
+  # this a fair comparison rather than a different pipeline. qwen3.8-max scored 6/6 on brain_bench
+  # (our own tool-selection workload) vs 4-5/6 for every local pool member, so it is the strongest
+  # candidate to actually drive a build.
+  echo "==> builder: Claude Code -> QwenCloud (${YM_QWEN_MODEL:-qwen3.8-max})"
+  ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"   ANTHROPIC_AUTH_TOKEN="${QWEN_API_KEY:?need QWEN_API_KEY for the qwen builder}"   ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"   timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25
+elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
   echo "==> builder: OpenAI Codex CLI (codex exec)"
   timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" </dev/null 2>&1 | tail -25
 else

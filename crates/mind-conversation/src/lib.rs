@@ -4111,6 +4111,91 @@ impl ConversationEngine {
             "fitness" | "scoreboard" => self.fitness_report().await,
             // The thread between self-build ticks: what the last ones did, incl. what never merged.
             "handoff" | "thread" => self.handoff_report().await,
+            // PROMPT AUDIT — where the agent loop's tokens actually go, measured on the LIVE store
+            // rather than estimated. Every optimisation below this line should be argued from these
+            // numbers; the session's repeated lesson is that the guessed bottleneck is rarely the
+            // real one. Sizes are bytes; ~4 bytes/token is the working rule for English prose.
+            "prompt_audit" | "context_audit" => {
+                let ctx2 = mind_types::AccessContext::Principal(mind_types::Scope::Private(
+                    mind_types::PRIMARY.to_string(),
+                ));
+                let probe = if rest.is_empty() { "what is happening this week" } else { rest.as_str() };
+                let ws = self.memory.hydrate_working_set(probe, &ctx2).await.unwrap_or_default();
+                let facts: usize = ws.stable_facts.iter().take(5).map(|b| b.text.len() + 4).sum();
+                let uncertain: usize =
+                    ws.uncertain_beliefs.iter().take(3).map(|b| b.statement.len() + 24).sum();
+                let people = self.load_people_profiles().await;
+                let people_bytes: usize = people
+                    .iter()
+                    .take(8)
+                    .map(|p| serde_json::to_string(p).map(|s| s.len()).unwrap_or(0))
+                    .sum();
+                let recent = self.memory.recent_messages(self.recent_window, &ctx2).await.unwrap_or_default();
+                let recent_bytes: usize = recent.iter().map(|(r, t)| r.len() + t.len() + 2).sum();
+                let spine = self.upcoming_spine(7).await;
+                let spine_bytes: usize = spine.iter().take(5).map(|(_, l)| l.len() + 3).sum();
+                let conflicts = self.memory.conflicts(&ctx2).await.unwrap_or_default();
+                let conflict_bytes: usize =
+                    conflicts.iter().take(4).map(|c| c.belief_a.len() + c.belief_b.len() + 10).sum();
+                let summary = self
+                    .memory
+                    .profile_get("conversation_summary")
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
+                let mcp_line = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
+                let gated_src = format!("{plugin_catalog}
+{}
+{mcp_line}", tool_catalog::LIFE_LINES);
+                let (detailed, tail) = tool_catalog::gate_catalog(probe, &gated_src);
+                let schemas = tool_catalog::tool_schemas(probe, &gated_src);
+                let schema_bytes = serde_json::to_string(&schemas).map(|s| s.len()).unwrap_or(0);
+                let persona = self.persona.len();
+                let rows: Vec<(&str, usize)> = vec![
+                    ("persona (system)", persona),
+                    ("rolling summary", summary),
+                    ("stable facts (5)", facts),
+                    ("uncertain beliefs (3)", uncertain),
+                    ("people profiles (8)", people_bytes),
+                    ("upcoming spine (5)", spine_bytes),
+                    ("contradictions (4)", conflict_bytes),
+                    ("recent messages", recent_bytes),
+                    ("tool catalog (detailed)", detailed.len()),
+                    ("tool catalog (name tail)", tail.len()),
+                    ("native tool schemas", schema_bytes),
+                ];
+                let total: usize = rows.iter().map(|(_, n)| n).sum();
+                let mut out = format!(
+                    "📐 PROMPT AUDIT — one agent-loop step, probe {probe:?}
+                        (the loop runs up to 5 steps per turn, and re-sends all of this each step)
+
+"
+                );
+                let mut sorted = rows.clone();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                for (name, n) in &sorted {
+                    let pct = if total == 0 { 0.0 } else { *n as f64 * 100.0 / total as f64 };
+                    out.push_str(&format!("  {name:<26} {n:>6} B  {pct:>5.1}%
+"));
+                }
+                out.push_str(&format!(
+                    "  {:-<26} {:->6}
+  {:<26} {total:>6} B  (~{} tokens/step, ~{} per 5-step turn)
+",
+                    "", "", "TOTAL", total / 4, total * 5 / 4
+                ));
+                out.push_str(&format!(
+                    "
+  recent_window={} messages · people={} profiles stored
+  Biggest slice is where any saving has to come from.",
+                    self.recent_window,
+                    people.len()
+                ));
+                out
+            }
             // What the self-build loop actually COSTS. QwenCloud publishes no usage API (every
             // /usage path 404s), so the builder CLI's own reported spend is the only measurable
             // source — and the builder is the dominant consumer by a wide margin.

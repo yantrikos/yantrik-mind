@@ -338,6 +338,10 @@ impl super::ConversationEngine {
         // Confidence goes through the engine's isotonic calibration map (learned from graded
         // outcomes) — raw model confidence is stored alongside for the learner.
         let (_, cal) = self.memory.foresight_reliability(subject, conf).await.unwrap_or((0.5, conf));
+        // Regress toward the domain's measured base rate (Bayesian shrinkage). A domain with few
+        // graded samples falls back to the global hit rate — prevents a single early hit from
+        // letting confidence float above what the record supports.
+        let cal = shrink_to_base_rate(cal, &preds, &domain);
         preds.push(serde_json::json!({
             "id": made_ms,
             "subject": subject,
@@ -1276,4 +1280,108 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         )
     }
 
+}
+
+/// Regress `cal` toward the domain's measured hit rate (Bayesian shrinkage, K=5 prior).
+///
+/// When the domain record is thin the centroid is the global hit rate, so a fresh domain does not
+/// inherit an inflated confidence from one or two lucky calls. The credibility weight is
+/// `dom_n / (dom_n + K)` — at 5 samples the issued probability is halfway between the calibrated
+/// value and the base rate; at 20 it contributes 80% of the final number.
+pub(crate) fn shrink_to_base_rate(cal: f64, preds: &[serde_json::Value], domain: &str) -> f64 {
+    const K: f64 = 5.0;
+    let (mut dom_hits, mut dom_n, mut all_hits, mut all_n) = (0usize, 0usize, 0usize, 0usize);
+    for p in preds {
+        let status = p.get("status").and_then(|x| x.as_str()).unwrap_or("open");
+        let hit = status == "hit";
+        if !(hit || status == "miss") {
+            continue;
+        }
+        all_n += 1;
+        if hit { all_hits += 1; }
+        if p.get("domain").and_then(|x| x.as_str()).unwrap_or("") == domain {
+            dom_n += 1;
+            if hit { dom_hits += 1; }
+        }
+    }
+    let global_rate = if all_n > 0 { all_hits as f64 / all_n as f64 } else { 0.5 };
+    let dom_rate = if dom_n > 0 { dom_hits as f64 / dom_n as f64 } else { global_rate };
+    let weight = dom_n as f64 / (dom_n as f64 + K);
+    (weight * cal + (1.0 - weight) * dom_rate).clamp(0.05, 0.95)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pred(domain: &str, status: &str) -> serde_json::Value {
+        serde_json::json!({ "domain": domain, "status": status })
+    }
+
+    #[test]
+    fn no_history_shrinks_fully_to_global_default() {
+        // No graded predictions → global_rate = 0.5, weight = 0 → result = 0.5.
+        let result = shrink_to_base_rate(0.9, &[], "markets");
+        assert!(
+            (result - 0.5).abs() < 1e-9,
+            "empty ledger must collapse confidence to the 0.5 prior, got {result}"
+        );
+    }
+
+    #[test]
+    fn rich_domain_stays_near_calibrated_value() {
+        // 20 domain hits, 0 misses → dom_rate = 1.0, weight = 20/25 = 0.8.
+        let preds: Vec<_> = (0..20).map(|_| pred("markets", "hit")).collect();
+        let result = shrink_to_base_rate(0.75, &preds, "markets");
+        // expected = 0.8 * 0.75 + 0.2 * 1.0 = 0.60 + 0.20 = 0.80
+        assert!(
+            (result - 0.80).abs() < 1e-9,
+            "20-sample domain: expected 0.80, got {result}"
+        );
+    }
+
+    #[test]
+    fn thin_domain_falls_back_to_global_rate() {
+        // 1 domain hit, 9 global hits in "other" domain → global_rate = 10/10 = 1.0
+        // dom_n = 1 → weight = 1/6 ≈ 0.167 → result ≈ 0.167*cal + 0.833*1.0
+        let mut preds: Vec<_> = (0..9).map(|_| pred("other", "hit")).collect();
+        preds.push(pred("markets", "hit")); // 1 domain hit
+        let result = shrink_to_base_rate(0.6, &preds, "markets");
+        let expected = (1.0 / 6.0) * 0.6 + (5.0 / 6.0) * 1.0;
+        assert!(
+            (result - expected).abs() < 1e-9,
+            "thin domain must lean on global rate: expected {expected:.4}, got {result:.4}"
+        );
+    }
+
+    #[test]
+    fn low_hit_rate_pulls_high_confidence_down() {
+        // 10 domain misses → dom_rate = 0.0, weight = 10/15 ≈ 0.667
+        // expected ≈ 0.667 * 0.9 + 0.333 * 0.0 ≈ 0.60
+        let preds: Vec<_> = (0..10).map(|_| pred("geopolitics", "miss")).collect();
+        let cal = 0.9_f64;
+        let result = shrink_to_base_rate(cal, &preds, "geopolitics");
+        let expected = (10.0 / 15.0) * cal + (5.0 / 15.0) * 0.0;
+        assert!(
+            (result - expected).abs() < 1e-9,
+            "poor domain track record must pull confidence down: expected {expected:.4}, got {result:.4}"
+        );
+        assert!(result < cal, "shrinkage must reduce confidence against a domain that keeps missing");
+    }
+
+    #[test]
+    fn open_and_unclear_predictions_are_ignored() {
+        // Only graded (hit/miss) predictions count — open and unclear are noise.
+        let preds = vec![
+            pred("markets", "open"),
+            pred("markets", "unclear"),
+            pred("markets", "open"),
+        ];
+        let result = shrink_to_base_rate(0.8, &preds, "markets");
+        // No graded entries → treats as empty → collapses to 0.5
+        assert!(
+            (result - 0.5).abs() < 1e-9,
+            "ungraded predictions must be ignored: got {result}"
+        );
+    }
 }

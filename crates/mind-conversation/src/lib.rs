@@ -4801,6 +4801,21 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 }
             }
             // Not a plugin command — treat the whole line as chat (full agent loop, live memory).
+            //
+            // BUT NEVER LET A COMMAND-SHAPED LINE ANSWER A PENDING QUESTION. An armed whois/onboard
+            // slot swallows the next message as its answer, so a mistyped or unrecognised verb on
+            // the control plane became a person's NAME. Live, 2026-08-03: `ym self_limits` was eaten
+            // by an armed whois slot and named a face "self_limits" in the real photo library, in
+            // Immich, and in the people profiles — the reply even said "I also named them in your
+            // photo app itself."
+            //
+            // A control-plane command is not a conversational answer. `is_command_shaped` is
+            // deliberately narrow (one token, no spaces, snake_case or a leading slash) so real
+            // one-word names like "Ritu" still answer normally.
+            _ if Self::is_command_shaped(line) && self.has_pending_slot().await => format!(
+                "`{line}` isn't a command I know, and I won't use it as an answer to the question I \
+                 have open. Answer that question, or say `skip` to close it — then try again."
+            ),
             _ => self.handle_turn(line).await.unwrap_or_else(|e| format!("(error: {e})")),
         }
     }

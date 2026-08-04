@@ -2330,3 +2330,28 @@ fn whois_caption_disambiguates_when_a_real_photo_is_used() {
     let fallback = "who is this? They're in ~469 of your photos.".to_string();
     assert!(!fallback.contains("of this photo"), "a face crop must not imply a position: {fallback}");
 }
+
+/// A CONTROL COMMAND IS NOT A CONVERSATIONAL ANSWER. An armed whois/onboard slot swallows the next
+/// message as its answer. Live, 2026-08-03: `ym self_limits` (a diagnostic verb) hit the cli_dispatch
+/// fallthrough, was eaten by an armed whois slot, and named a face "self_limits" in the people
+/// profiles, the local face map, AND the real Immich library - the reply even said "I also named
+/// them in your photo app itself." The is_non_answer and is_placeholder_name gates could not catch
+/// it: it is neither a decline nor placeholder junk, just a command in the wrong place.
+#[test]
+fn command_shaped_lines_are_recognised_but_real_names_are_not() {
+    // The exact strings that caused, or would cause, damage.
+    for cmd in ["self_limits", "self_report", "handoff_prompt", "fitness_prompt", "/status", "knocks-on"] {
+        assert!(ConversationEngine::is_command_shaped(cmd), "{cmd:?} must read as a command");
+    }
+    // Real one-word answers MUST still work - a guard that eats names is worse than the bug.
+    for name in ["Ritu", "Priya", "Aadrisha", "Arjun", "Ana"] {
+        assert!(!ConversationEngine::is_command_shaped(name), "{name:?} is a person's name");
+    }
+    // Multi-word replies are always answers.
+    for ans in ["my wife Priya", "that's my cousin", "Mary-Jane Watson"] {
+        assert!(!ConversationEngine::is_command_shaped(ans), "{ans:?} is an answer");
+    }
+    // Hyphenated single-word names are the ambiguous case; we accept losing them to the guard only
+    // when they ALSO look like a verb. A bare hyphenated name stays an answer.
+    assert!(!ConversationEngine::is_command_shaped("Mary Jane"));
+}

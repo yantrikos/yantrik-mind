@@ -535,6 +535,23 @@ impl super::ConversationEngine {
     /// it, so the user's answer arrived with no question pending, got treated as ordinary chat, and
     /// the drive re-asked later ("I already told you!"). The bug class that keeps biting: state
     /// that gates cross-turn behavior must live in the substrate, not the process.
+    /// Is a question armed to swallow the next message as its answer?
+    pub(crate) async fn has_pending_slot(&self) -> bool {
+        self.pending_slot().await.map(|s| !s.trim().is_empty()).unwrap_or(false)
+    }
+
+    /// Does this line look like a CONTROL COMMAND rather than a human answer? Deliberately narrow:
+    /// one token, no spaces, and either a leading `/` or snake_case/kebab-case. A real one-word
+    /// answer ("Ritu", "Priya") must still answer normally — a guard that swallows real names would
+    /// be worse than the bug it fixes.
+    pub(crate) fn is_command_shaped(line: &str) -> bool {
+        let t = line.trim();
+        if t.is_empty() || t.contains(char::is_whitespace) {
+            return false;
+        }
+        t.starts_with('/') || ((t.contains('_') || t.contains('-')) && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/'))
+    }
+
     pub(crate) async fn pending_slot(&self) -> Option<String> {
         self.memory
             .profile_get("pending_onboard")

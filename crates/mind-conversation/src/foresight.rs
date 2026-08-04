@@ -1029,6 +1029,21 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// send / self-graded forecast / forge pre-registration logs an IMMUTABLE prediction (p at
     /// emission, binary outcome graded later). A domain-level Brier score tracked over months that
     /// FALLS on frozen weights = "wiser without getting smarter" — the falsifiable proof of the bet.
+    /// Shrink an engagement-style probability toward the graded record for its domain before it is
+    /// spoken or logged. Cheap (one profile read); callers use the returned value for BOTH the
+    /// behavioral gate and the ledger entry, so confidence and accountability stay one number.
+    pub(crate) async fn shrunk_judgment_p(&self, domain: &str, p: f64) -> f64 {
+        let ledger: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        shrink_to_judged_rate(p, &ledger, domain)
+    }
+
     pub(crate) async fn judgment_log(&self, source: &str, domain: &str, claim: &str, p: f64, grade_due_ms: i64, subject_ref: &str) {
         let mut led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
             .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -1282,6 +1297,38 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
 
 }
 
+/// Regress a probability toward its domain's measured hit rate in the JUDGMENT LEDGER — the
+/// engagement-side twin of `shrink_to_base_rate` (which reads the forecast ledger). Forecasts have
+/// been shrunk since day one; the knock and proactive-send writers were not, so their p values were
+/// raw receptivity (or a hardcoded 0.5/0.6 on a young box) issued at face value while the measured
+/// skill was NEGATIVE. Same K=5 credibility prior; graded rows only.
+///
+/// Note this is shrinkage, not the inversion the builder consultation proposed: BSS < 0 means
+/// worse than base rate, not anti-correlated — inverting is only guaranteed to help under
+/// direction-flipped miscalibration, which nobody has shown. Shrinkage helps either way.
+pub(crate) fn shrink_to_judged_rate(p: f64, ledger: &[serde_json::Value], domain: &str) -> f64 {
+    const K: f64 = 5.0;
+    let (mut dom_hits, mut dom_n) = (0usize, 0usize);
+    for row in ledger {
+        let Some(outcome) = row.get("outcome").and_then(|x| x.as_bool()) else { continue };
+        if row.get("domain").and_then(|x| x.as_str()).unwrap_or("") == domain {
+            dom_n += 1;
+            if outcome { dom_hits += 1; }
+        }
+    }
+    // COLD-START PASSTHROUGH — deliberately different from `shrink_to_base_rate`'s global fallback.
+    // A knock only gets graded if it FIRES; shrinking an ungraded domain toward 0.5 (or toward the
+    // forecast domain's losing record) pushes p below the band floor, so no knock fires, so no grade
+    // ever lands, so the domain stays ungraded — the shim starves the very ledger it feeds on. The
+    // first graded row turns shrinkage on; until then the raw claim stands and gets tested.
+    if dom_n == 0 {
+        return p.clamp(0.05, 0.95);
+    }
+    let dom_rate = dom_hits as f64 / dom_n as f64;
+    let weight = dom_n as f64 / (dom_n as f64 + K);
+    (weight * p + (1.0 - weight) * dom_rate).clamp(0.05, 0.95)
+}
+
 /// Regress `cal` toward the domain's measured hit rate (Bayesian shrinkage, K=5 prior).
 ///
 /// When the domain record is thin the centroid is the global hit rate, so a fresh domain does not
@@ -1383,5 +1430,52 @@ mod tests {
             (result - 0.5).abs() < 1e-9,
             "ungraded predictions must be ignored: got {result}"
         );
+    }
+}
+
+#[cfg(test)]
+mod shrink_judged_tests {
+    use super::*;
+
+    fn graded(domain: &str, outcome: bool) -> serde_json::Value {
+        serde_json::json!({ "domain": domain, "outcome": outcome })
+    }
+
+    /// The young-box case: an UNGRADED domain passes through raw. Shrinking it toward a prior would
+    /// push p below the band floor → no knock fires → no grade lands → the domain stays ungraded
+    /// forever. The tests caught this deadlock on the first run; the passthrough is the fix.
+    #[test]
+    fn ungraded_domain_passes_the_claim_through() {
+        let p = shrink_to_judged_rate(0.9, &[], "engagement");
+        assert!((p - 0.9).abs() < 1e-9, "cold start must issue the raw claim, got {p}");
+    }
+
+    /// The measured-failure case this shim exists for: engagement grades are mostly misses, so an
+    /// optimistic receptivity must come OUT lower than it went in.
+    #[test]
+    fn a_losing_record_drags_confidence_down() {
+        let led: Vec<_> = (0..10).map(|i| graded("engagement", i < 2)).collect(); // 2/10 hit
+        let p = shrink_to_judged_rate(0.6, &led, "engagement");
+        // K=5 → the 10 grades carry 2/3 weight: 0.667·0.6 + 0.333·0.2 ≈ 0.47. What matters is the
+        // DIRECTION and that a losing record lands below the 0.55 band floor (the knock is gated).
+        assert!(p < 0.5, "a 20% record must drag the claim down, got {p}");
+        assert!(p > 0.2, "the claim still contributes, got {p}");
+    }
+
+    /// Ungraded rows (outcome null) are not evidence in either direction — a ledger full of open
+    /// rows is still a cold start.
+    #[test]
+    fn open_rows_do_not_count() {
+        let led = vec![serde_json::json!({"domain": "engagement", "outcome": null})];
+        let p = shrink_to_judged_rate(0.9, &led, "engagement");
+        assert!((p - 0.9).abs() < 1e-9);
+    }
+
+    /// A strong record EARNS the raw number back — shrinkage is a credibility weight, not a nerf.
+    #[test]
+    fn a_deep_winning_record_restores_the_claim() {
+        let led: Vec<_> = (0..40).map(|_| graded("engagement", true)).collect();
+        let p = shrink_to_judged_rate(0.9, &led, "engagement");
+        assert!(p > 0.85, "40 hits should let the claim stand, got {p}");
     }
 }

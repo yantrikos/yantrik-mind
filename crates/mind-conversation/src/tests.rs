@@ -2355,3 +2355,59 @@ fn command_shaped_lines_are_recognised_but_real_names_are_not() {
     // when they ALSO look like a verb. A bare hyphenated name stays an answer.
     assert!(!ConversationEngine::is_command_shaped("Mary Jane"));
 }
+
+// ── The funnel ledger: silence must name its gate ──────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn funnel_records_which_gate_killed_the_knock() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+
+    // Empty store → the FEED is the killer, and the ledger must say so.
+    assert!(conv.maybe_knock().await.is_none());
+    let report = conv.funnel_report().await;
+    assert!(report.contains("no-packets"), "empty-store kill untagged:\n{report}");
+
+    // An inferred-provenance packet → the AUTHORITY gate is the killer.
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+    conv.packet_add(
+        "node-1", None, "plan", "Inferred pattern — weekend plan",
+        "A full three-option plan with concrete numbers and timings.",
+        "inferred from photo activity", vec!["pattern (0.88)".into()], 0.88, false, future,
+    ).await;
+    let pid = conv.load_packets().await.last().and_then(|p| p["id"].as_str().map(str::to_string)).unwrap();
+    conv.packet_mark_prepared(&pid, true).await;
+    assert!(conv.maybe_knock().await.is_none());
+    let report = conv.funnel_report().await;
+    assert!(report.contains("provenance"), "authority kill untagged:\n{report}");
+
+    // A told packet that FIRES → the sent counter moves too.
+    conv.packet_add_told(
+        "node-2", None, "draft", "Vendor quote — accept / counter / decline",
+        "Accept at 4,200 / counter at 3,900 / decline with comparison attached.",
+        "told me to revisit the quote", vec!["she said Friday (0.91)".into()], 0.9, false, future,
+    ).await;
+    let pid2 = conv.load_packets().await.last().and_then(|p| p["id"].as_str().map(str::to_string)).unwrap();
+    conv.packet_mark_prepared(&pid2, true).await;
+    assert!(conv.maybe_knock().await.is_some(), "told + prepared should knock");
+    let report = conv.funnel_report().await;
+    assert!(report.contains("knocks sent"), "sent counter missing:\n{report}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fast_twitch_debounces_event_storms() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    // No home client wired: evaluation is a no-op, but the DEBOUNCE must still hold — a storm of
+    // events runs one evaluation, not fifty.
+    conv.note_event("ha:binary_sensor");
+    let _ = conv.fast_twitch().await;
+    let _ = conv.fast_twitch().await;
+    let _ = conv.fast_twitch().await;
+    let report = conv.funnel_report().await;
+    let evals = report.lines().find(|l| l.contains("twitch evaluations")).unwrap_or("").to_string();
+    assert!(evals.contains("1"), "storm should collapse to one evaluation: {evals}");
+    assert!(report.contains("binary_sensor"), "event tally missing:\n{report}");
+}

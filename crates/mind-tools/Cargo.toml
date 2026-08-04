@@ -19,5 +19,8 @@ ureq = { version = "2", features = ["json"] }
 html2text = "0.12"
 imap = "2"
 native-tls = "0.2"
+# HA event bus subscription (fast-twitch presence). Blocking client on a dedicated thread — matches
+# the codebase's hand-rolled-TCP idiom; no async websocket stack.
+tungstenite = { version = "0.21", features = ["native-tls"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls", "builder"] }
 mind-types = { workspace = true }

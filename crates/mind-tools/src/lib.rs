@@ -16,6 +16,7 @@ pub use gphotos::{GPhotosClient, GpItem, PickSession};
 pub mod code;
 pub mod paper;
 pub mod mail;
+pub mod ha_events;
 pub use mail::{
     render_inbox_digest, EmailMsg, ImapClient, MailClient, MailSender, ScriptedMailClient,
     ScriptedMailSender, SmtpMailSender,

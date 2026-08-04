@@ -514,7 +514,7 @@ fn ctl_handle(
     }
 
     // Every other route is a data route → authenticate FIRST, before reading a large body or dispatching.
-    if method != "POST" || (path != "/cli" && path != "/chat") {
+    if method != "POST" || (path != "/cli" && path != "/chat" && path != "/event") {
         send(&mut stream, "404 Not Found", "not found");
         return;
     }
@@ -589,6 +589,20 @@ fn ctl_handle(
             .unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
         }
+        // External event ingress (operator-only): counts the event and runs one debounced
+        // fast-twitch evaluation — the same path an HA event takes, so any future source (a script,
+        // a CI hook, an email watcher) can wake the mind without new wiring. Body = a short source
+        // tag ("test", "ci", ...). Quiet-hours: same skip rule as the HA listener.
+        "/event" => {
+            if !authed.is_operator() {
+                ("403 Forbidden", "event ingress requires an operator device".to_string())
+            } else {
+                let tag: String = body.chars().take(24).filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+                conv.note_event(if tag.is_empty() { "ingress" } else { &tag });
+                let n = if in_quiet_hours_now() { 0 } else { rt.block_on(conv.fast_twitch()) };
+                ("200 OK", format!("event noted; twitch evaluation → {n} alert(s) queued"))
+            }
+        }
         _ => ("404 Not Found", "not found".to_string()),
     };
     send(&mut stream, status, &reply);
@@ -647,6 +661,39 @@ fn spawn_control_server(
             }
         }
         Err(e) => eprintln!("[ctl] could not bind 127.0.0.1:{port}: {e}"),
+    });
+}
+
+/// FAST-TWITCH EAR: subscribe to Home Assistant's websocket event bus and evaluate the moment the
+/// house changes, instead of on the 120 s poll beat. OUTBOUND connection with the token we already
+/// hold — no new inbound ports, no HA-side config. Domains that can flip a home-alert rule trigger
+/// a debounced `fast_twitch()`; everything else only feeds the funnel's event tally. Quiet hours
+/// are honored by SKIPPING evaluation (not by evaluating-and-discarding, which would mark fresh
+/// alerts seen and swallow them — see the `fast_twitch` caller contract). Disable: YM_HA_EVENTS=off.
+fn spawn_ha_event_listener(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle) {
+    if std::env::var("YM_HA_EVENTS").map(|v| v == "off").unwrap_or(false) {
+        return;
+    }
+    let (Ok(url), Ok(token)) = (std::env::var("YM_HA_URL"), std::env::var("YM_HA_TOKEN")) else {
+        return;
+    };
+    if url.trim().is_empty() || token.trim().is_empty() {
+        return;
+    }
+    // The domains the home-alert rules actually read (tv/climate/lock/net/ink) plus presence, whose
+    // transitions flip the away-rules. Other domains still count, but never wake the evaluator.
+    const TWITCH_DOMAINS: [&str; 6] =
+        ["person", "device_tracker", "lock", "media_player", "climate", "binary_sensor"];
+    std::thread::spawn(move || {
+        mind_tools::ha_events::ha_event_loop(&url, &token, move |ev| {
+            conv.note_event(&format!("ha:{}", ev.domain()));
+            if TWITCH_DOMAINS.contains(&ev.domain()) && !in_quiet_hours_now() {
+                let n = rt.block_on(conv.fast_twitch());
+                if n > 0 {
+                    eprintln!("[ha-events] {} → {} alert(s) queued", ev.entity_id, n);
+                }
+            }
+        });
     });
 }
 
@@ -966,6 +1013,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         None => eprintln!("[ctl] control + chat endpoints DISABLED — device store unavailable (fail-closed). Fix the store, then restart."),
     }
     spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
+    spawn_ha_event_listener(conv.clone(), tokio::runtime::Handle::current());
 
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT").ok().and_then(|s| s.trim().parse().ok());
 

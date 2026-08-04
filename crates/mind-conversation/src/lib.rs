@@ -44,6 +44,7 @@ mod escrow;
 mod fitness;
 mod handoff;
 mod knock;
+mod funnel;
 mod privacy_audit;
 mod proactive;
 pub(crate) mod research;
@@ -2700,6 +2701,12 @@ pub struct ConversationEngine {
     studies: Arc<Mutex<std::collections::HashSet<String>>>,
     /// How many delegated background jobs are in flight (a soft cap stops runaway fan-out).
     bg_jobs: Arc<AtomicUsize>,
+    /// In-memory tally of raw external events (HA state changes etc.) since the last flush. Events
+    /// arrive in storms; counting in memory and flushing on the next debounced evaluation keeps the
+    /// DB out of the hot path. See `funnel`.
+    event_tally: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    /// Last fast-twitch evaluation, epoch ms — debounce so an event storm runs ONE evaluation.
+    twitch_last: Arc<Mutex<i64>>,
 }
 
 impl ConversationEngine {
@@ -2751,6 +2758,8 @@ impl ConversationEngine {
             photo_session: Arc::new(Mutex::new(Vec::new())),
             studies: Arc::new(Mutex::new(std::collections::HashSet::new())),
             bg_jobs: Arc::new(AtomicUsize::new(0)),
+            event_tally: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            twitch_last: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -2967,6 +2976,51 @@ impl ConversationEngine {
     /// this each tick and delivers each to the active chat. Empty when nothing has completed.
     pub fn take_notifications(&self) -> Vec<String> {
         std::mem::take(&mut *self.notify_queue.lock().unwrap())
+    }
+
+    /// Queue a message for the user's chat from outside the poll loop (event listeners, webhook
+    /// handlers). Delivered by the next poll-loop drain — worst case one long-poll cycle (~25 s).
+    pub fn push_notification(&self, msg: String) {
+        self.notify_queue.lock().unwrap().push(msg);
+    }
+
+    /// FAST-TWITCH evaluation — the event-driven path. Called the moment an external event arrives
+    /// (HA state change, `/event` ingress) instead of waiting for the next 120 s poll beat.
+    ///
+    /// Debounced: an event storm (an attribute flapping, a burst of sensor updates) runs ONE
+    /// evaluation, at most every `YM_TWITCH_DEBOUNCE_SECS` (default 5). The evaluation itself is the
+    /// SAME `home_watch` rules + dedup the poll path uses — this changes WHEN the mind looks, never
+    /// WHAT it concludes, so the two paths cannot disagree about what is alert-worthy.
+    ///
+    /// Alerts are pushed to the notify queue, not sent directly: delivery order and chat routing
+    /// stay owned by one place (the poll loop). Latency budget: event → evaluated in <2 s,
+    /// delivered within one poll cycle.
+    ///
+    /// CALLER CONTRACT: do not invoke during quiet hours (the tz-aware check lives in mind-core).
+    /// Running `home_watch` during quiet would mark fresh alerts as seen and SWALLOW them — the
+    /// morning poll would find nothing new to announce. Skipping the evaluation entirely leaves
+    /// them undiscovered until the first post-quiet beat, which is the correct behavior.
+    pub async fn fast_twitch(&self) -> usize {
+        let debounce_ms: i64 = std::env::var("YM_TWITCH_DEBOUNCE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(5)
+            .saturating_mul(1000);
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let mut last = self.twitch_last.lock().unwrap();
+            if now - *last < debounce_ms {
+                return 0; // a storm is one look, not many
+            }
+            *last = now;
+        }
+        self.funnel_bump("twitch:eval").await;
+        let alerts = self.home_watch().await;
+        for msg in &alerts {
+            self.funnel_bump("twitch:alert").await;
+            self.push_notification(format!("⚡ {msg}"));
+        }
+        alerts.len()
     }
 
     /// Reserve a background-job slot (soft cap). Returns false when too many jobs are already running,
@@ -4107,6 +4161,9 @@ impl ConversationEngine {
             // so only an explicit instruction lifts it.
             // Silence, made reviewable: what I chose NOT to interrupt you with, and why.
             "silence" | "escrow" | "held" => self.escrow_report().await,
+            // Where proactive candidates DIE, per gate per day — the number "urges surfaced: 2%"
+            // could never explain. The builder's nightly tick reads this to aim its own fixes.
+            "funnel" => self.funnel_report().await,
             // The real-world scoreboard the self-build loop now optimises against.
             "fitness" | "scoreboard" => self.fitness_report().await,
             // The thread between self-build ticks: what the last ones did, incl. what never merged.

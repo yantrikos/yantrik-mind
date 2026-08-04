@@ -388,32 +388,60 @@ impl super::ConversationEngine {
         // knock tests caught — the mind would go silent because the wrong candidate was chosen
         // first). Both halves of the contract are required of the SAME packet.
         let packets = self.load_packets().await;
+        if packets.is_empty() {
+            // The feed, not a gate, is empty — historically THE most common killer and the least
+            // visible one. Count it: "no packets" and "below-band" need different fixes.
+            self.funnel_bump("knock:no-packets").await;
+            return None;
+        }
         // Held candidates are SKIPPED, not treated as blockers: one thing the mind is rightly quiet
         // about must never silence an unrelated thing it should speak up on. (Same shape as the
         // authority bug — a single unsuitable candidate at the front of the list masking a good one
         // behind it.) The hold is checked inside the search, so the scan finds the first candidate
         // that is knockworthy, authorized, AND not already held-without-change.
         let mut candidate: Option<&serde_json::Value> = None;
+        // Why the search came up empty, per packet class — only reported when NO candidate survives,
+        // so a store where one good packet stands behind ten stale ones still reads as healthy.
+        let (mut n_unworthy, mut n_provenance, mut n_held) = (0u32, 0u32, 0u32);
         for p in packets.iter() {
-            let eligible = crate::knock::packet_is_knockworthy(p, now)
-                // Read ONLY the explicit stamp. The old fallback to `reason` was reading a
-                // system-written explanation ("festival within 9 days; supplies criterion unmet")
-                // as if it were provenance — every packet classified `inferred` by accident, so the
-                // knock could never fire. Absent stamp ⇒ not eligible, by decision now, not luck.
-                && crate::knock::trigger_may_interrupt(
-                    p.get("trigger_provenance").and_then(|x| x.as_str()).unwrap_or(""),
-                );
-            if !eligible {
+            if !crate::knock::packet_is_knockworthy(p, now) {
+                n_unworthy += 1;
+                continue;
+            }
+            // Read ONLY the explicit stamp. The old fallback to `reason` was reading a
+            // system-written explanation ("festival within 9 days; supplies criterion unmet")
+            // as if it were provenance — every packet classified `inferred` by accident, so the
+            // knock could never fire. Absent stamp ⇒ not eligible, by decision now, not luck.
+            if !crate::knock::trigger_may_interrupt(
+                p.get("trigger_provenance").and_then(|x| x.as_str()).unwrap_or(""),
+            ) {
+                n_provenance += 1;
                 continue;
             }
             if self.escrow_still_held(p).await {
+                n_held += 1;
                 continue; // rightly quiet about this one; keep looking
             }
             candidate = Some(p);
             break;
         }
-        let pkt = candidate?;
-        let p_engage = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.6);
+        let Some(pkt) = candidate else {
+            let reason = if n_unworthy >= n_provenance && n_unworthy >= n_held {
+                "knock:not-knockworthy"
+            } else if n_provenance >= n_held {
+                "knock:provenance"
+            } else {
+                "knock:escrow-held"
+            };
+            self.funnel_bump(reason).await;
+            return None;
+        };
+        // Raw receptivity, shrunk toward the GRADED engagement record before it drives anything.
+        // With a young ledger the hardcoded 0.6 dominates; once knocks have real grades, the issued
+        // probability earns its way back toward the world model. One number feeds both the band
+        // choice and the ledger — the spoken confidence must be the accountable one.
+        let p_raw = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.6);
+        let p_engage = self.shrunk_judgment_p("engagement", p_raw).await;
         // GATES, each recording WHY the mind stayed quiet. Silence is legitimate; unexplained
         // silence is not.
         let muted = self.memory.profile_get("knock_muted").await.ok().flatten().as_deref() == Some("1");
@@ -434,9 +462,11 @@ impl super::ConversationEngine {
             None
         };
         if let Some(reason) = blocked {
+            self.funnel_bump(&format!("knock:{}", reason.as_str())).await;
             self.escrow_hold(pkt, reason, p_engage, now).await;
             return None;
         }
+        self.funnel_bump("knock:sent").await;
         let band = band_opt?;
         let title = pkt.get("title").and_then(|x| x.as_str()).unwrap_or("a prepared option");
         let trigger = pkt.get("reason").and_then(|x| x.as_str()).unwrap_or("something you asked me to watch");
@@ -624,7 +654,8 @@ impl super::ConversationEngine {
         // JUDGMENT LEDGER: a proactive send IS a falsifiable prediction — "the recipient engages
         // within the window". p = the learned engagement rate (improvable). Graded on resolve. This
         // is the mandatory-eligibility auto-log (Terra's anti-gaming rule): no opt-in, no post-hoc p.
-        let p = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.5);
+        let p_raw = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.5);
+        let p = self.shrunk_judgment_p("engagement", p_raw).await;
         self.judgment_log("proactive", "engagement", "recipient engages within 90m", p, now + 90 * 60_000, &now.to_string()).await;
     }
 

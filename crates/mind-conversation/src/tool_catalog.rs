@@ -298,6 +298,49 @@ pub(crate) fn tool_schemas(user_text: &str, gated_src: &str) -> Vec<Value> {
     out
 }
 
+// ── RECENT-CONTEXT COMPACTION ──────────────────────────────────────────────────────────────────
+//
+// Measured on the live box 2026-08-04 (`ym prompt_audit`): the recent-message block was 16,899 B =
+// 53.3% of every agent-loop prompt, dwarfing the tool catalog (5.6%) and the schemas (13.5%). And
+// the split was 14 assistant messages at 15,650 B against 6 user messages at 735 B — the mind's OWN
+// long outputs (briefings, research reports, photo captions; the largest single one 6,253 B) were
+// eating its context, re-read on all five steps of every turn.
+//
+// The asymmetry is the whole insight: what the USER said is the signal and is tiny; what the MIND
+// said is bulk it already knows it produced. So user turns are never touched, the latest assistant
+// turn keeps enough to answer a follow-up about it, and older assistant turns keep their opening —
+// which carries the point — plus an explicit elision marker so the model knows text was removed
+// rather than silently inventing what filled the gap.
+
+/// Bytes kept from the MOST RECENT assistant message (a follow-up usually refers to this one).
+pub(crate) const KEEP_LATEST: usize = 1200;
+/// Bytes kept from older assistant messages — enough for the gist, not the whole briefing.
+pub(crate) const KEEP_OLDER: usize = 360;
+
+/// Compact a recent-conversation window for the prompt. `msgs` is oldest-first `(role, text)`.
+pub(crate) fn compact_recent(msgs: &[(String, String)]) -> String {
+    let last_assistant = msgs.iter().rposition(|(r, _)| r == "assistant");
+    msgs.iter()
+        .enumerate()
+        .map(|(i, (role, text))| {
+            // The user's own words are never abridged: they are the smallest slice and the most
+            // load-bearing one.
+            if role != "assistant" {
+                return format!("{role}: {text}");
+            }
+            let keep = if Some(i) == last_assistant { KEEP_LATEST } else { KEEP_OLDER };
+            if text.chars().count() <= keep {
+                return format!("{role}: {text}");
+            }
+            let head: String = text.chars().take(keep).collect();
+            let dropped = text.chars().count() - keep;
+            format!("{role}: {head}… [{dropped} chars of my earlier reply elided]")
+        })
+        .collect::<Vec<_>>()
+        .join("
+")
+}
+
 /// Top catalog lines matching a discover_tools query — the escape hatch that turns a name-only
 /// (or forgotten) tool back into a fully-described one on demand.
 pub(crate) fn search_lines(query: &str, catalog: &str, top_n: usize) -> Vec<String> {
@@ -427,6 +470,69 @@ mod tests {
         assert!(
             hits.iter().any(|l| l.contains("watch_price")),
             "discover_tools must surface watch_price for a price-drop ask: {hits:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    fn m(role: &str, n: usize) -> (String, String) {
+        (role.to_string(), "x".repeat(n))
+    }
+
+    /// The measured shape: the user's words are tiny and load-bearing; the mind's own replies are
+    /// bulk. Compaction must therefore be ASYMMETRIC — never touch the user.
+    #[test]
+    fn user_messages_are_never_abridged() {
+        let msgs = vec![m("user", 4000), m("assistant", 100)];
+        let out = compact_recent(&msgs);
+        assert!(out.contains(&"x".repeat(4000)), "a long USER message must survive intact");
+        assert!(!out.contains("elided"), "nothing of the user's is elided");
+    }
+
+    #[test]
+    fn old_assistant_replies_shrink_but_the_latest_keeps_more() {
+        let msgs = vec![m("assistant", 6253), m("user", 50), m("assistant", 6253)];
+        let out = compact_recent(&msgs);
+        // Both are abridged, but the LATEST keeps materially more — a follow-up usually refers to it.
+        assert_eq!(out.matches("elided").count(), 2, "both long replies abridged: {}", out.len());
+        assert!(out.len() < 2 * KEEP_LATEST + 500, "total is bounded, not 12.5k: {}", out.len());
+        assert!(KEEP_LATEST > KEEP_OLDER * 3, "the latest reply is deliberately far more generous");
+    }
+
+    #[test]
+    fn elision_is_announced_so_the_model_never_invents_the_gap() {
+        let out = compact_recent(&[m("assistant", 5000)]);
+        assert!(out.contains("chars of my earlier reply elided"), "{out:.120}");
+        assert!(out.contains('…'), "the cut point is visible");
+    }
+
+    #[test]
+    fn short_conversations_are_untouched() {
+        let msgs = vec![m("user", 30), m("assistant", 200)];
+        let out = compact_recent(&msgs);
+        assert!(!out.contains("elided"), "nothing under the cap is abridged: {out:.80}");
+    }
+
+    /// The whole point, in numbers: the live window measured 16,899 B.
+    #[test]
+    fn the_live_window_shape_shrinks_substantially() {
+        // 14 assistant / 6 user, assistant bytes dominated by a few long replies (the real profile).
+        let mut msgs: Vec<(String, String)> = Vec::new();
+        for _ in 0..6 {
+            msgs.push(m("user", 122));
+        }
+        for n in [6253, 3603, 2072, 849, 701, 462, 350, 300, 250, 200, 180, 150, 140, 140] {
+            msgs.push(m("assistant", n));
+        }
+        let before: usize = msgs.iter().map(|(r, t)| r.len() + t.len() + 2).sum();
+        let after = compact_recent(&msgs).len();
+        assert!(before > 16_000, "setup mirrors the measured window: {before}");
+        assert!(
+            after < before / 2,
+            "compaction must at least halve the biggest slice of the prompt ({before} -> {after})"
         );
     }
 }

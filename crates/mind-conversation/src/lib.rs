@@ -6365,11 +6365,14 @@ Open reminders you're carrying for them:");
             .memory
             .recent_messages(self.recent_window, &ctx)
             .await
-            .unwrap_or_default()
-            .iter()
-            .map(|(r, t)| format!("{r}: {t}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .unwrap_or_default();
+        // MEASURED 2026-08-04 (`ym prompt_audit`): this block was 53.3% of every loop prompt —
+        // 16,899 B, of which 15,650 was the mind's OWN long replies (14 assistant messages vs 6 user
+        // messages totalling 735 B; the largest single reply 6,253 B). All of it was re-sent on each
+        // of up to five steps per turn. Compaction abridges only the assistant side, keeps the
+        // latest reply long enough to answer a follow-up, and marks every elision so the model never
+        // has to guess what was removed. See `tool_catalog::compact_recent`.
+        let recent = tool_catalog::compact_recent(&recent);
         let skills = self.memory.recall_skills(user_text, 5).await.unwrap_or_default();
         let skill_line = if skills.is_empty() {
             "\n(no saved skills surfaced for this — use discover_tools to search, or build_capability)".to_string()

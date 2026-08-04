@@ -599,8 +599,14 @@ fn ctl_handle(
             } else {
                 let tag: String = body.chars().take(24).filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
                 conv.note_event(if tag.is_empty() { "ingress" } else { &tag });
-                let n = if in_quiet_hours_now() { 0 } else { rt.block_on(conv.fast_twitch()) };
-                ("200 OK", format!("event noted; twitch evaluation → {n} alert(s) queued"))
+                // A deferred evaluation must SAY it deferred — "0 alerts" and "didn't look" are
+                // different facts, and conflating them cost two diagnostic round-trips on day one.
+                let reply = if in_quiet_hours_now() {
+                    "event noted; quiet hours — evaluation deferred to the first post-quiet beat".to_string()
+                } else {
+                    format!("event noted; twitch evaluation → {} alert(s) queued", rt.block_on(conv.fast_twitch()))
+                };
+                ("200 OK", reply)
             }
         }
         _ => ("404 Not Found", "not found".to_string()),

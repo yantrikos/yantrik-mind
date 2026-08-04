@@ -4131,7 +4131,12 @@ impl ConversationEngine {
                     .map(|p| serde_json::to_string(p).map(|s| s.len()).unwrap_or(0))
                     .sum();
                 let recent = self.memory.recent_messages(self.recent_window, &ctx2).await.unwrap_or_default();
-                let recent_bytes: usize = recent.iter().map(|(r, t)| r.len() + t.len() + 2).sum();
+                // Measure what the loop ACTUALLY SENDS, not the raw rows. Auditing the pre-compaction
+                // bytes would report a number the model never sees — an instrument that does not
+                // measure the real path is worse than none (cf. brain_bench scoring a healthy model
+                // 0/6 because it hit the wrong endpoint).
+                let raw_bytes: usize = recent.iter().map(|(r, t)| r.len() + t.len() + 2).sum();
+                let recent_bytes = tool_catalog::compact_recent(&recent).len();
                 let spine = self.upcoming_spine(7).await;
                 let spine_bytes: usize = spine.iter().take(5).map(|(_, l)| l.len() + 3).sum();
                 let conflicts = self.memory.conflicts(&ctx2).await.unwrap_or_default();
@@ -4162,7 +4167,7 @@ impl ConversationEngine {
                     ("people profiles (8)", people_bytes),
                     ("upcoming spine (5)", spine_bytes),
                     ("contradictions (4)", conflict_bytes),
-                    ("recent messages", recent_bytes),
+                    ("recent messages (compacted)", recent_bytes),
                     ("tool catalog (detailed)", detailed.len()),
                     ("tool catalog (name tail)", tail.len()),
                     ("native tool schemas", schema_bytes),
@@ -4187,12 +4192,16 @@ impl ConversationEngine {
 ",
                     "", "", "TOTAL", total / 4, total * 5 / 4
                 ));
+                let saved = raw_bytes.saturating_sub(recent_bytes);
                 out.push_str(&format!(
                     "
   recent_window={} messages · people={} profiles stored
-  Biggest slice is where any saving has to come from.",
+                       compaction saved {saved} B/step ({} B raw → {recent_bytes} B sent) = {} B per 5-step turn.
+                       Biggest slice is where any further saving has to come from.",
                     self.recent_window,
-                    people.len()
+                    people.len(),
+                    raw_bytes,
+                    saved * 5
                 ));
                 out
             }

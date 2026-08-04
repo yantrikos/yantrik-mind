@@ -2,6 +2,132 @@
 
 use super::*;
 
+/// How many NON-household people get their fact tail injected. The household is never counted
+/// against this — see `is_core_relation`.
+pub(crate) const PEOPLE_DETAILED: usize = 3;
+
+/// Relationships that are context for every turn, not a topic you must name to summon. You don't
+/// stop having a wife because this message is about disk space.
+fn is_core_relation(rel: &str) -> bool {
+    let r = rel.trim().to_lowercase();
+    [
+        "wife", "husband", "spouse", "partner", "son", "daughter", "child", "kid",
+        "mother", "father", "mom", "dad", "mum",
+    ]
+    .iter()
+    .any(|c| r == *c || r.starts_with(&format!("{c} ")) || r.ends_with(&format!(" {c}")))
+}
+
+/// Words worth matching on — short ones ("the", "her", "and") match everything and would make every
+/// profile look relevant, which is the same as no gate at all.
+fn topical_words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 5)
+        .map(String::from)
+        .collect()
+}
+
+/// Rank the people by relevance to THIS turn and render the grounding block.
+///
+/// The gate touches the fact tail ONLY. Every person keeps their name, their relationship, and any
+/// imminent date — because the bug that put this block in the prompt in the first place was a
+/// spouse's NAME going missing behind top-k ranking, and a relevance filter is exactly how that
+/// would come back. An imminent birthday is time-critical regardless of what the turn is about, so
+/// it outranks topicality too. What a gated person loses is their fact list, and `recall` (a core
+/// tool, never gated) fetches it back the way `discover_tools` fetches a gated tool.
+pub(crate) fn gate_people(
+    people: &[serde_json::Value],
+    user_text: &str,
+    today: &chrono::DateTime<chrono::FixedOffset>,
+) -> String {
+    gate_people_inner(people, user_text, today, false)
+}
+
+/// Everyone detailed — the pre-gate volume, so `ym prompt_audit` can state the saving instead of
+/// asserting one.
+pub(crate) fn people_block_ungated(
+    people: &[serde_json::Value],
+    today: &chrono::DateTime<chrono::FixedOffset>,
+) -> String {
+    gate_people_inner(people, "", today, true)
+}
+
+fn gate_people_inner(
+    people: &[serde_json::Value],
+    user_text: &str,
+    today: &chrono::DateTime<chrono::FixedOffset>,
+    all_detailed: bool,
+) -> String {
+    let people: Vec<&serde_json::Value> = people.iter().take(8).collect();
+    if people.is_empty() {
+        return String::new();
+    }
+    let hay = user_text.to_lowercase();
+    let turn_words = topical_words(user_text);
+
+    let mut core: Vec<usize> = Vec::new();
+    let mut scored: Vec<(i64, usize)> = Vec::new();
+    for (i, p) in people.iter().enumerate() {
+        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+        if is_core_relation(rel) {
+            core.push(i);
+            continue;
+        }
+        let mut s = 0i64;
+        // Named outright is the strongest possible signal that this turn is about them.
+        if !name.is_empty() && hay.contains(&name.to_lowercase()) {
+            s += 500;
+        }
+        if !rel.is_empty() && rel.len() >= 3 && hay.contains(&rel.to_lowercase()) {
+            s += 400;
+        }
+        if let Some(facts) = p.get("facts").and_then(|x| x.as_array()) {
+            for f in facts.iter().filter_map(|x| x.as_str()) {
+                let fw = topical_words(f);
+                s += turn_words.iter().filter(|w| fw.contains(w)).count() as i64;
+            }
+        }
+        if s > 0 {
+            scored.push((s, i));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut detailed: Vec<usize> = core;
+    detailed.extend(scored.iter().take(PEOPLE_DETAILED).map(|(_, i)| *i));
+
+    let mut out = String::from("\nPeople in your life:");
+    let mut gated = 0usize;
+    // Original store order, so a person's position never shifts with the topic — a reordering reads
+    // as a change in who matters.
+    for (i, p) in people.iter().enumerate() {
+        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+        let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
+        let rels = if rel.is_empty() { String::new() } else { format!(" (your {rel})") };
+        let nd = next_date_line(p, today).map(|s| format!("; {s}")).unwrap_or_default();
+        if !all_detailed && !detailed.contains(&i) {
+            gated += 1;
+            out.push_str(&format!("\n- {name}{rels}{nd}"));
+            continue;
+        }
+        let facts: Vec<&str> = p
+            .get("facts")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).take(4).collect())
+            .unwrap_or_default();
+        let fs = if facts.is_empty() { String::new() } else { format!(" — {}", facts.join("; ")) };
+        out.push_str(&format!("\n- {name}{rels}{nd}{fs}"));
+    }
+    if gated > 0 {
+        out.push_str(&format!(
+            "\n({gated} of these are listed by name only — I know more about them; `recall <name>` \
+             loads it. Not knowing a detail here is a reason to look, never to guess.)"
+        ));
+    }
+    out
+}
+
 impl super::ConversationEngine {
     pub(crate) async fn load_people(&self) -> Vec<serde_json::Value> {
         self.memory.profile_get("people").await.ok().flatten()
@@ -599,4 +725,97 @@ impl super::ConversationEngine {
         format!("🗑 Removed {n} \"{}\" date(s) from {who}'s profile.", label.trim())
     }
 
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn store() -> Vec<serde_json::Value> {
+        vec![
+            json!({"name":"Priya","relationship":"wife","facts":["teaches kathak","allergic to peanuts"]}),
+            json!({"name":"Arjun","relationship":"son","facts":["plays chess"]}),
+            json!({"name":"Rakesh","relationship":"colleague","facts":["runs the kubernetes migration","based in Pune"]}),
+            json!({"name":"Meera","relationship":"neighbour","facts":["breeds golden retrievers"]}),
+            json!({"name":"Sanjay","relationship":"dentist","facts":["clinic shuts on wednesdays"]}),
+            json!({"name":"Tara","relationship":"cousin","facts":["moved to Berlin last winter"]}),
+        ]
+    }
+
+    fn today() -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-04T10:00:00+05:30").unwrap()
+    }
+
+    /// THE invariant. This block exists because a spouse's name once vanished behind top-k ranking;
+    /// a relevance gate that can drop a name would reintroduce exactly that bug.
+    #[test]
+    fn every_person_keeps_name_and_relationship_whatever_the_topic() {
+        let out = gate_people(&store(), "the proxmox node1 root disk is full again", &today());
+        for who in ["Priya", "Arjun", "Rakesh", "Meera", "Sanjay", "Tara"] {
+            assert!(out.contains(who), "{who} disappeared from an off-topic turn:\n{out}");
+        }
+        assert!(out.contains("your wife") && out.contains("your dentist"));
+    }
+
+    #[test]
+    fn household_keeps_facts_on_an_unrelated_turn() {
+        let out = gate_people(&store(), "the proxmox node1 root disk is full again", &today());
+        assert!(out.contains("allergic to peanuts"), "wife's facts were gated:\n{out}");
+        assert!(out.contains("plays chess"), "son's facts were gated:\n{out}");
+        // ...while the unrelated acquaintances arrive name-only.
+        assert!(!out.contains("golden retrievers"), "off-topic facts survived:\n{out}");
+        assert!(!out.contains("shuts on wednesdays"));
+    }
+
+    #[test]
+    fn naming_someone_pulls_their_facts_in() {
+        let out = gate_people(&store(), "what did Rakesh say about the rollout?", &today());
+        assert!(out.contains("kubernetes migration"), "named person stayed gated:\n{out}");
+    }
+
+    #[test]
+    fn a_fact_word_in_the_turn_pulls_that_person_in() {
+        let out = gate_people(&store(), "anyone I know living in Berlin these days?", &today());
+        assert!(out.contains("moved to Berlin"), "fact-word match missed:\n{out}");
+    }
+
+    /// A gate that silently omits invites the model to fill the hole from imagination. It has to say
+    /// it withheld, and say how to get it back.
+    #[test]
+    fn gating_is_announced_with_the_way_to_undo_it() {
+        let out = gate_people(&store(), "the proxmox node1 root disk is full again", &today());
+        assert!(out.contains("name only") && out.contains("recall"), "silent gate:\n{out}");
+        assert!(out.contains("never to guess"));
+    }
+
+    #[test]
+    fn an_imminent_date_survives_an_unrelated_turn() {
+        let mut s = store();
+        // the dentist, two days out, on a turn about disks
+        s[4]["dates"] = json!([{"label": "birthday", "mmdd": "08-06"}]);
+        let out = gate_people(&s, "the proxmox node1 root disk is full again", &today());
+        let line = out.lines().find(|l| l.contains("Sanjay")).unwrap();
+        assert!(line.contains("birthday"), "time-critical date got gated away: {line}");
+    }
+
+    #[test]
+    fn the_gate_actually_shrinks_the_block() {
+        let full = gate_people(&store(), "Rakesh Meera Sanjay Tara kubernetes retrievers", &today());
+        let gated = gate_people(&store(), "disk is full", &today());
+        assert!(gated.len() < full.len(), "no saving: {} vs {}", gated.len(), full.len());
+    }
+
+    #[test]
+    fn empty_store_emits_nothing() {
+        assert_eq!(gate_people(&[], "hello", &today()), "");
+    }
+
+    /// Short words match everything; if they counted, every profile would look relevant and the gate
+    /// would be decorative.
+    #[test]
+    fn common_short_words_do_not_make_everyone_relevant() {
+        let out = gate_people(&store(), "can you tell me the one for her and the dog?", &today());
+        assert!(!out.contains("golden retrievers"), "stopword-grade match leaked:\n{out}");
+    }
 }

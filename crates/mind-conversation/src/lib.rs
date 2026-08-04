@@ -4125,11 +4125,10 @@ impl ConversationEngine {
                 let uncertain: usize =
                     ws.uncertain_beliefs.iter().take(3).map(|b| b.statement.len() + 24).sum();
                 let people = self.load_people_profiles().await;
-                let people_bytes: usize = people
-                    .iter()
-                    .take(8)
-                    .map(|p| serde_json::to_string(p).map(|s| s.len()).unwrap_or(0))
-                    .sum();
+                // The RENDERED, relevance-gated block — what the model receives. The earlier version
+                // summed the raw profile JSON, which is neither the format nor the volume that ships.
+                let people_bytes = crate::people::gate_people(&people, probe, &local_now()).len();
+                let people_raw = crate::people::people_block_ungated(&people, &local_now()).len();
                 let recent = self.memory.recent_messages(self.recent_window, &ctx2).await.unwrap_or_default();
                 // Measure what the loop ACTUALLY SENDS, not the raw rows. Auditing the pre-compaction
                 // bytes would report a number the model never sees — an instrument that does not
@@ -4164,7 +4163,7 @@ impl ConversationEngine {
                     ("rolling summary", summary),
                     ("stable facts (5)", facts),
                     ("uncertain beliefs (3)", uncertain),
-                    ("people profiles (8)", people_bytes),
+                    ("people profiles (gated)", people_bytes),
                     ("upcoming spine (5)", spine_bytes),
                     ("contradictions (4)", conflict_bytes),
                     ("recent messages (compacted)", recent_bytes),
@@ -4193,15 +4192,18 @@ impl ConversationEngine {
                     "", "", "TOTAL", total / 4, total * 5 / 4
                 ));
                 let saved = raw_bytes.saturating_sub(recent_bytes);
+                let people_saved = people_raw.saturating_sub(people_bytes);
                 out.push_str(&format!(
                     "
   recent_window={} messages · people={} profiles stored
                        compaction saved {saved} B/step ({} B raw → {recent_bytes} B sent) = {} B per 5-step turn.
-                       Biggest slice is where any further saving has to come from.",
+                       people gate saved {people_saved} B/step ({people_raw} B → {people_bytes} B; names + imminent dates never gated).
+                       Total saved {} B per 5-step turn. Biggest slice above is where the next one has to come from.",
                     self.recent_window,
                     people.len(),
                     raw_bytes,
-                    saved * 5
+                    saved * 5,
+                    (saved + people_saved) * 5
                 ));
                 out
             }
@@ -6318,24 +6320,9 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
         // deduped, unlike the belief store whose top-k ranking can bury a high-confidence identity fact
         // (e.g. a spouse's NAME lost behind their birthday). This is why "what's my wife's name" dropped
         // the name even though it was stored at 0.91: the name never made the injected working set.
+        // Every profile still appears; only the FACT TAIL is relevance-gated (see `gate_people`).
         let people = self.load_people_profiles().await;
-        if !people.is_empty() {
-            grounding.push_str("\nPeople in your life:");
-            let today = local_now();
-            for p in people.iter().take(8) {
-                let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-                let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-                let facts: Vec<&str> = p
-                    .get("facts")
-                    .and_then(|x| x.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str()).take(4).collect())
-                    .unwrap_or_default();
-                let rels = if rel.is_empty() { String::new() } else { format!(" (your {rel})") };
-                let nd = next_date_line(p, &today).map(|s| format!("; {s}")).unwrap_or_default();
-                let fs = if facts.is_empty() { String::new() } else { format!(" — {}", facts.join("; ")) };
-                grounding.push_str(&format!("\n- {name}{rels}{nd}{fs}"));
-            }
-        }
+        grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
         // The time-spine + open threads — so answers CONNECT to what's coming, not just what's stored
         // (a birthday answer should carry the gift plan + its deadline without being asked).
         let spine = self.upcoming_spine(7).await;

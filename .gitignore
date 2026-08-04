@@ -13,3 +13,6 @@ id_rsa*
 *secret*
 *.key
 clients/voice/
+
+# holds live provider keys — never commit
+.mcp.json

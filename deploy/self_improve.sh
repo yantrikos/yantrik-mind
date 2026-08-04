@@ -79,30 +79,12 @@ if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   # candidate to actually drive a build.
   echo "==> builder: Claude Code -> QwenCloud (${YM_QWEN_MODEL:-qwen3.8-max})"
   ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"   ANTHROPIC_AUTH_TOKEN="${QWEN_API_KEY:?need QWEN_API_KEY for the qwen builder}"   ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"   BUILD_JSON="$(timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format json 2>&1)"
-  # --output-format json so the run's TOKEN COST is measurable. QwenCloud exposes no usage endpoint
-  # (every /usage path 404s; the console is the only view), and the builder is by far the largest
-  # consumer - one agentic build ran ~6.9M tokens = ~8% of the plan, so at 4 ticks/day it exhausts in
-  # ~3 days and the service PAUSES rather than degrading. An invisible cost is one nobody can pace.
-  BUILD_OUT="$(printf '%s' "$BUILD_JSON" | python3 -c 'import json,sys
-raw = sys.stdin.read()
-try:
-    print(str(json.loads(raw).get("result", ""))[-4000:])
-except Exception:
-    print(raw[-4000:])' 2>/dev/null || printf '%s' "$BUILD_JSON" | tail -25)"
-  printf '%s' "$BUILD_JSON" | python3 -c 'import json, sys, datetime
-try:
-    d = json.loads(sys.stdin.read()); u = d.get("usage", {}) or {}
-    tot = (u.get("input_tokens",0) + u.get("cache_creation_input_tokens",0)
-           + u.get("cache_read_input_tokens",0) + u.get("output_tokens",0))
-    line = "%s | builder | %s | tokens=%d (in=%d cache_w=%d cache_r=%d out=%d) | usd=%.4f" % (
-        datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "qwen3.8-max", tot,
-        u.get("input_tokens",0), u.get("cache_creation_input_tokens",0),
-        u.get("cache_read_input_tokens",0), u.get("output_tokens",0), d.get("total_cost_usd", 0.0))
-    print("==> BUILD SPEND: " + line)
-    open("/var/lib/yantrik-mind/token_ledger.log", "a").write(line + "
-")
-except Exception as e:
-    print("==> build spend unmeasured: %s" % str(e)[:70])' 2>/dev/null || true
+  # Recover the prose for the gates (ALREADY-EXISTS detection) and RECORD THE SPEND.
+  # Both delegate to real scripts on the box: inline python inside a shell inside ssh does not
+  # survive the quoting - the first attempt died silently behind `2>/dev/null || true`, leaving no
+  # ledger and no error, which is exactly the invisible-failure shape the ledger exists to end.
+  BUILD_OUT="$(printf '%s' "$BUILD_JSON" | ym-json-result 2>/dev/null || printf '%s' "$BUILD_JSON" | tail -25)"
+  printf '%s' "$BUILD_JSON" | ym-record-spend || echo "==> build spend UNMEASURED (recorder failed)"
   echo "$BUILD_OUT"
 elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
   echo "==> builder: OpenAI Codex CLI (codex exec)"

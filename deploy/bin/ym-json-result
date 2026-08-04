@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Extract `.result` (the builder's prose) from a `claude --output-format json` blob on stdin.
+
+Separate from the spend recorder so a failure in one cannot silence the other: the gates need the
+prose to detect ALREADY-EXISTS, and the ledger needs the usage. Coupling them once meant a single
+quoting bug lost both.
+"""
+import json, sys
+raw = sys.stdin.read()
+try:
+    print(str(json.loads(raw).get("result", ""))[-4000:])
+except Exception:
+    print(raw[-4000:])

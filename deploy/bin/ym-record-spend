@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Record a builder run's token spend.
+
+Reads the `claude --output-format json` blob on stdin, appends one ledger line, prints it.
+
+A REAL FILE, not inline python inside a shell inside ssh: the first attempt was an inline heredoc
+and died silently behind `2>/dev/null || true`, producing no ledger and no error — which is exactly
+the invisible-failure shape this ledger exists to end. Measurement code that can fail quietly is
+worse than none, because it reports zero and looks like "nothing happened yet".
+"""
+import datetime
+import json
+import sys
+
+LEDGER = "/var/lib/yantrik-mind/token_ledger.log"
+
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception as e:
+    # Loud on purpose. A parse failure means the CLI changed its output shape and the spend is
+    # going unrecorded — that must be visible in the tick log, not swallowed.
+    print("==> build spend UNMEASURED (stdin was not json): %s" % str(e)[:100])
+    sys.exit(0)
+
+u = d.get("usage") or {}
+total = (
+    u.get("input_tokens", 0)
+    + u.get("cache_creation_input_tokens", 0)
+    + u.get("cache_read_input_tokens", 0)
+    + u.get("output_tokens", 0)
+)
+models = list((d.get("modelUsage") or {}).keys())
+model = models[0] if models else "unknown"
+line = (
+    "%s | builder | %s | tokens=%d (in=%d cache_w=%d cache_r=%d out=%d) | usd=%.4f"
+    % (
+        datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        model,
+        total,
+        u.get("input_tokens", 0),
+        u.get("cache_creation_input_tokens", 0),
+        u.get("cache_read_input_tokens", 0),
+        u.get("output_tokens", 0),
+        d.get("total_cost_usd", 0.0),
+    )
+)
+print("==> BUILD SPEND: " + line)
+with open(LEDGER, "a") as fh:
+    fh.write(line + "\n")

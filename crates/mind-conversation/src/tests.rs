@@ -2496,3 +2496,21 @@ async fn dropped_scratch_never_touches_memory() {
         "dropped scratch leaked into the working set"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_json_carries_full_thread_for_the_channel_view() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let m: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+    // Seed a row + scratch the way a running delegation does.
+    let _ = mem.profile_set("delegations", r#"[{"id":"c1","name":"Weather","task":"tennis at 6?","kind":"research","status":"done","started_ms":1,"finished_ms":2,"result":"full answer, untruncated"}]"#).await;
+    crate::delegate::scratch_note(&m, "c1", "task: tennis at 6?").await;
+    crate::delegate::scratch_note(&m, "c1", "source: https://wx.example").await;
+    let out = conv.jobs_report_cmd("json").await;
+    let v: serde_json::Value = serde_json::from_str(&out).expect("jobs json must parse");
+    let job = &v["jobs"][0];
+    assert_eq!(job["name"], "Weather");
+    assert_eq!(job["result"], "full answer, untruncated");
+    assert_eq!(job["notes"].as_array().map(|a| a.len()), Some(2), "thread notes missing: {out}");
+}

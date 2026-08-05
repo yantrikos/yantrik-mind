@@ -14,9 +14,11 @@ use super::*;
 
 const LEDGER_KEY: &str = "delegations";
 const LEDGER_CAP: usize = 50;
-/// Head of the result stored in the ledger row (the full result still goes to chat). Enough to
-/// read the outcome on the board without re-opening the conversation.
-const RESULT_HEAD: usize = 1200;
+/// Result stored in the ledger row. Was 1200 — enough for a board glance, but the desktop's
+/// channel view renders the WHOLE result as the agent's message, and a truncated answer in a
+/// channel reads as a broken agent (it did, live: "…/ / Several sea"). 8000 chars × 50-row cap
+/// keeps the blob bounded.
+const RESULT_HEAD: usize = 8000;
 
 /// `<name>: <task>` (explicit) or just `<task>` (name derived from its first words). Kind is
 /// routed by verb keywords — code-shaped work goes to the sandboxed coder, everything else to the
@@ -218,9 +220,37 @@ impl super::ConversationEngine {
         format!("🧰 Delegated [{id}] \"{name}\" ({kind}). It's on the board — `ym jobs` — and the result lands in chat.")
     }
 
-    /// `ym jobs [keep <id> | drop <id>]` — the board, plus the two ends of a job's scratch memory.
+    /// `ym jobs [json | keep <id> | drop <id>]` — the board, its machine-readable form (the
+    /// desktop's channel view), and the two ends of a job's scratch memory.
     pub async fn jobs_report_cmd(&self, rest: &str) -> String {
         let rest = rest.trim();
+        if rest == "json" {
+            let rows: Vec<serde_json::Value> = self
+                .memory
+                .profile_get(LEDGER_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            // Attach each job's scratch notes — the thread timeline between task and result.
+            let mut out = Vec::with_capacity(rows.len());
+            for mut r in rows {
+                if let Some(id) = r.get("id").and_then(|x| x.as_str()).map(String::from) {
+                    let notes: Vec<serde_json::Value> = self
+                        .memory
+                        .profile_get(&scratch_key(&id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    r["notes"] = serde_json::Value::Array(notes);
+                }
+                out.push(r);
+            }
+            return serde_json::json!({ "jobs": out }).to_string();
+        }
         if let Some(id) = rest.strip_prefix("keep ") {
             return self.job_promote(id.trim()).await;
         }

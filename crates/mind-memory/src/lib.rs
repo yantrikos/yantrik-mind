@@ -1304,6 +1304,16 @@ impl MemoryHandle {
                     Ok(d) => { let _ = ready_tx.send(Ok(())); d }
                     Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
                 };
+                // yantrikdb 0.12: records longer than the embedder's input window used to be
+                // embedded head-only — a long briefing was findable by its opening lines and
+                // invisible from everything after (silent retrieval loss). The backfill chunks
+                // pre-0.12 records; it is idempotent and skips already-chunked rows, so running it
+                // at every boot costs one scan and converges to a no-op.
+                match db.rechunk_long_records() {
+                    Ok((0, _)) => {}
+                    Ok((n, v)) => eprintln!("[memory] chunk backfill: {n} long record(s) → {v} chunk vector(s) now findable past their head"),
+                    Err(e) => eprintln!("[memory] chunk backfill skipped: {e}"),
+                }
                 ensure_transcript_table(&db);
                 ensure_skills_table(&db);
                 ensure_goals_prefs_table(&db);

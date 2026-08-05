@@ -45,6 +45,7 @@ mod fitness;
 mod handoff;
 mod knock;
 mod funnel;
+mod delegate;
 mod privacy_audit;
 mod proactive;
 pub(crate) mod research;
@@ -4182,6 +4183,9 @@ impl ConversationEngine {
             // Where proactive candidates DIE, per gate per day — the number "urges surfaced: 2%"
             // could never explain. The builder's nightly tick reads this to aim its own fixes.
             "funnel" => self.funnel_report().await,
+            // The job board: named background delegations, visible while running, findable after.
+            "delegate" | "assign" => self.delegate_cmd(&rest).await,
+            "jobs" | "board" | "delegations" => self.jobs_report().await,
             // The real-world scoreboard the self-build loop now optimises against.
             "fitness" | "scoreboard" => self.fitness_report().await,
             // The thread between self-build ticks: what the last ones did, incl. what never merged.

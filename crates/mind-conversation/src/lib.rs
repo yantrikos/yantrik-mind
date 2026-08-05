@@ -46,6 +46,7 @@ mod handoff;
 mod knock;
 mod funnel;
 mod delegate;
+mod config_panel;
 mod privacy_audit;
 mod proactive;
 pub(crate) mod research;
@@ -4185,6 +4186,9 @@ impl ConversationEngine {
             "funnel" => self.funnel_report().await,
             // The job board: named background delegations, visible while running, findable after.
             "delegate" | "assign" => self.delegate_cmd(&rest).await,
+            // Typed settings view — the desktop renders forms from `config schema`. Read-only from
+            // in here by design: the process can't rewrite its own environment.
+            "config" | "settings" => self.config_panel(&rest).await,
             "jobs" | "board" | "delegations" => self.jobs_report_cmd(&rest).await,
             // The real-world scoreboard the self-build loop now optimises against.
             "fitness" | "scoreboard" => self.fitness_report().await,

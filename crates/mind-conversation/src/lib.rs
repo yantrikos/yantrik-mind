@@ -4189,6 +4189,9 @@ impl ConversationEngine {
             // Typed settings view — the desktop renders forms from `config schema`. Read-only from
             // in here by design: the process can't rewrite its own environment.
             "config" | "settings" => self.config_panel(&rest).await,
+            "packets" if rest.trim() == "prune" => {
+                format!("🧹 Pruned {} terminal packet(s) from the store.", self.packets_prune().await)
+            }
             "jobs" | "board" | "delegations" => self.jobs_report_cmd(&rest).await,
             // The real-world scoreboard the self-build loop now optimises against.
             "fitness" | "scoreboard" => self.fitness_report().await,

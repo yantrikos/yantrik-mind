@@ -2514,3 +2514,45 @@ async fn jobs_json_carries_full_thread_for_the_channel_view() {
     assert_eq!(job["result"], "full answer, untruncated");
     assert_eq!(job["notes"].as_array().map(|a| a.len()), Some(2), "thread notes missing: {out}");
 }
+
+// ── The feed fix: the calendar may knock; patterns still may not (2026-08-06) ──────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_calendar_triggered_prepared_packet_earns_a_knock() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+    // The exact shape the birthday emissary now produces: observed trigger (family-layer date
+    // arriving), real prepared artifact, evidence naming the date's provenance.
+    let pid = conv.packet_add_observed(
+        "node-b", Some("gift"), "plan", "Priya's birthday — gift status & next action",
+        "Decided: the Rosefield watch. Unordered. Order TODAY for delivery by the 14th; budget already agreed.",
+        "birthday within 14 days; gift criterion unmet",
+        vec!["date 08-14 from the family layer (told)".into()], 0.8, false, future,
+    ).await;
+    conv.packet_mark_prepared(&pid, true).await;
+    let knock = conv.maybe_knock().await;
+    assert!(knock.is_some(), "observed + prepared calendar work must be allowed to interrupt");
+    let k = knock.unwrap();
+    assert!(k.contains("%"), "the knock carries its confidence band: {k}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prune_clears_old_corpses_but_keeps_live_work() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let now = chrono::Utc::now().timestamp_millis();
+    let _ = mem.profile_set("action_packets", &serde_json::json!([
+        {"id":"dead1","status":"expired","expiry_ms": now - 40*86_400_000, "title":"june corpse"},
+        {"id":"dead2","status":"rejected","expiry_ms": now - 35*86_400_000, "title":"july corpse"},
+        {"id":"fresh","status":"proposed","expiry_ms": now + 86_400_000, "title":"live work"},
+        // Recently expired: terminal but inside the 30d window — kept (the user may still ask).
+        {"id":"recent","status":"expired","expiry_ms": now - 86_400_000, "title":"yesterday's expiry"},
+    ]).to_string()).await;
+    assert_eq!(conv.packets_prune().await, 2, "exactly the two old corpses go");
+    let left = conv.load_packets().await;
+    assert_eq!(left.len(), 2);
+    assert!(left.iter().any(|p| p["id"] == "fresh") && left.iter().any(|p| p["id"] == "recent"));
+}

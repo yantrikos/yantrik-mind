@@ -55,6 +55,69 @@ impl super::ConversationEngine {
         id
     }
 
+    /// The door that stamps `observed` authority — for packets whose TRIGGER is a deterministic
+    /// observation of a human-curated fact: a birthday or festival arriving on the calendar, where
+    /// the date itself came from the family layer (entered by the user through `family_set`, the
+    /// human-authoritative editor). Date arithmetic over a told fact contains zero inference; the
+    /// inference lives only in the PREP CONTENT, whose uncertainty is what the knock band prices.
+    ///
+    /// Why this door exists (2026-08-06): the funnel showed 3,221/3,221 knock kills — the ONLY
+    /// knock-eligible producer was the courier (user-uttered promises), so the mind's own initiative
+    /// could never interrupt even when it had genuinely prepared a birthday gift plan triggered by a
+    /// date the user personally entered. The authority rule (sol) bans PATTERN-NOTICED triggers from
+    /// interrupting; it was never meant to ban the calendar. `packet_add` stays `inferred`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn packet_add_observed(
+        &self,
+        node_id: &str,
+        satisfies: Option<&str>,
+        kind: &str,
+        title: &str,
+        body: &str,
+        reason: &str,
+        evidence: Vec<String>,
+        confidence: f64,
+        confirmation_required: bool,
+        expiry_ms: i64,
+    ) -> String {
+        let id = self
+            .packet_add(node_id, satisfies, kind, title, body, reason, evidence, confidence, confirmation_required, expiry_ms)
+            .await;
+        let mut store = self.load_packets().await;
+        if let Some(p) = store.iter_mut().find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
+            p["trigger_provenance"] = serde_json::json!("observed");
+        }
+        let _ = self
+            .memory
+            .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
+            .await;
+        id
+    }
+
+    /// Drop terminal packets (expired/rejected, or past expiry) older than 30 days — the store had
+    /// accumulated 62 corpses that the knock search re-read 2,000+ times a day. Returns how many
+    /// were removed. Called on every `packet_add` and by `ym packets prune`.
+    pub async fn packets_prune(&self) -> usize {
+        let now = chrono::Utc::now().timestamp_millis();
+        let cutoff = now - 30 * 24 * 3600 * 1000;
+        let mut store = self.load_packets().await;
+        let before = store.len();
+        store.retain(|p| {
+            let status = p.get("status").and_then(|x| x.as_str()).unwrap_or("proposed");
+            let expiry = p.get("expiry_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+            let terminal = status == "expired" || status == "rejected" || expiry < now;
+            !(terminal && expiry < cutoff)
+        });
+        let removed = before - store.len();
+        if removed > 0 {
+            let _ = self
+                .memory
+                .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
+                .await;
+        }
+        removed
+    }
+
     /// Record whether a packet contains REAL prepared work (the finished comparison/draft) rather
     /// than a restatement of the request. The calibrated knock says "I've prepared X" — this is what
     /// makes that claim structurally true instead of a hopeful phrase.
@@ -84,6 +147,9 @@ impl super::ConversationEngine {
     ) -> String {
         let now = chrono::Utc::now().timestamp_millis();
         let id = format!("pkt:{:x}", now);
+        // Hygiene rides the write path: without it, terminal packets only left the store past the
+        // 200 cap — 62 corpses sat being re-scanned 2,000+ times a day for five weeks.
+        let _ = self.packets_prune().await;
         let mut store = self.load_packets().await;
         store.push(serde_json::json!({
             "id": id, "node_id": node_id, "satisfies": satisfies, "kind": kind,

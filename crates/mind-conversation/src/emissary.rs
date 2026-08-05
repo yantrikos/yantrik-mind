@@ -233,7 +233,11 @@ impl super::ConversationEngine {
                     hits.iter().map(|h| format!("  • {h}")).collect::<Vec<_>>().join("\n")
                 )
             };
-            self.packet_add(&node_id, Some("collision-check"), "info", &format!("{who}'s birthday — collision check"), &body, "deterministic cross-event scan (±3 days)", vec![], 0.95, false, expiry).await;
+            // OBSERVED + PREPARED: the trigger is a family-layer date (user-entered) arriving on
+            // the calendar; the scan result IS the finished work. This class of packet may earn a
+            // calibrated knock — which is the entire point of preparing it ahead of the day.
+            let pid = self.packet_add_observed(&node_id, Some("collision-check"), "info", &format!("{who}'s birthday — collision check"), &body, "deterministic cross-event scan (±3 days)", vec![format!("date {date_str} from the family layer (told)")], 0.95, false, expiry).await;
+            self.packet_mark_prepared(&pid, true).await;
             built.push("collision-check".into());
         }
 
@@ -244,7 +248,11 @@ impl super::ConversationEngine {
                  Write a GIFT STATUS packet: what's already decided, what still needs an action (order dates, budget), and ONE concrete recommendation for what to do in the next 48h. Use ONLY the facts above — never invent products, prices, or preferences. 6-9 lines, no preamble."
             );
             if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Household).await {
-                self.packet_add(&node_id, Some("gift"), "plan", &format!("{who}'s birthday — gift status & next action"), r.text.trim(), "birthday within 14 days; gift criterion unmet", evidence.clone(), 0.8, false, expiry).await;
+                let mut ev = evidence.clone();
+                ev.push(format!("date {date_str} from the family layer (told)"));
+                let pid = self.packet_add_observed(&node_id, Some("gift"), "plan", &format!("{who}'s birthday — gift status & next action"), r.text.trim(), "birthday within 14 days; gift criterion unmet", ev, 0.8, false, expiry).await;
+                // Prepared only when the model produced substance, not an apology-shaped stub.
+                self.packet_mark_prepared(&pid, r.text.trim().len() > 80).await;
                 built.push("gift".into());
             }
         }
@@ -253,7 +261,8 @@ impl super::ConversationEngine {
             let prompt = "Write a warm, personal 4-sentence birthday card message a husband writes to his wife. Heartfelt, specific to a shared life (home, laughter, growing together), no clichés about age. Use 'dear' as the only name placeholder. No preamble.".to_string();
             if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Public).await {
                 let filled = r.text.trim().replace("dear", &who).replace("Dear", &who);
-                self.packet_add(&node_id, Some("card"), "draft", &format!("{who}'s birthday — card draft"), &format!("{filled}\n\n(Composed on the public lane with no names; name filled locally.)"), "birthday within 14 days; card criterion unmet", vec![], 0.75, false, expiry).await;
+                let pid = self.packet_add_observed(&node_id, Some("card"), "draft", &format!("{who}'s birthday — card draft"), &format!("{filled}\n\n(Composed on the public lane with no names; name filled locally.)"), "birthday within 14 days; card criterion unmet", vec![format!("date {date_str} from the family layer (told)")], 0.75, false, expiry).await;
+                self.packet_mark_prepared(&pid, filled.len() > 60).await;
                 built.push("card".into());
             }
         }
@@ -277,7 +286,8 @@ impl super::ConversationEngine {
                  Give TWO options — one quiet/at-home, one out-but-low-logistics — each 3 lines (what, prep needed, why it fits the constraints). No preamble."
             );
             if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg, mind_inference::PrivacyScope::Household).await {
-                self.packet_add(&node_id, Some("plan"), "plan", &format!("{who}'s birthday — two celebration options"), r.text.trim(), "birthday within 14 days; plan criterion unmet", vec![], 0.75, false, expiry).await;
+                let pid = self.packet_add_observed(&node_id, Some("plan"), "plan", &format!("{who}'s birthday — two celebration options"), r.text.trim(), "birthday within 14 days; plan criterion unmet", vec![format!("date {date_str} from the family layer (told)")], 0.75, false, expiry).await;
+                self.packet_mark_prepared(&pid, r.text.trim().len() > 80).await;
                 built.push("plan".into());
             }
         }

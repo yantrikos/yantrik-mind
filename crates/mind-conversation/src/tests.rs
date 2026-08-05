@@ -2411,3 +2411,50 @@ async fn fast_twitch_debounces_event_storms() {
     assert!(evals.contains("1"), "storm should collapse to one evaluation: {evals}");
     assert!(report.contains("binary_sensor"), "event tally missing:\n{report}");
 }
+
+// ── A greeting is never an answer (the "Hi" incident, 2026-08-05) ──────────────────────────────
+
+#[test]
+fn a_bare_greeting_never_answers_a_pending_question() {
+    for g in ["Hi", "hi", "  HELLO  ", "hey there", "Good morning", "namaste", "Hi!", "yo"] {
+        assert!(looks_like_non_answer(g), "{g:?} must not be captured as an answer");
+    }
+}
+
+#[test]
+fn a_greeting_that_carries_content_still_answers() {
+    for real in ["Hi, that's my cousin Ritu", "hello that is Priya", "Heyansh", "Hina"] {
+        assert!(!looks_like_non_answer(real), "{real:?} is a real answer and must flow through");
+    }
+}
+
+#[test]
+fn greetings_can_never_become_a_person_name() {
+    for g in ["Hi", "hello", "Hey", "ok", "Thanks", "test"] {
+        assert!(ConversationEngine::is_placeholder_name(g), "{g:?} slipped the last gate");
+    }
+    // ...while real short names still pass.
+    for n in ["Ritu", "Aavya", "Om"] {
+        assert!(!ConversationEngine::is_placeholder_name(n), "{n:?} wrongly rejected");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forget_person_unlinks_their_face_clusters() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let mut store = conv.load_people_profiles().await;
+    store.push(serde_json::json!({"name": "Hi", "relationship": "", "facts": [], "dates": []}));
+    conv.save_people_profiles(&store).await;
+    let mut fm = conv.face_names().await;
+    fm.insert("immich:abc123".into(), "Hi".into());
+    fm.insert("immich:def456".into(), "Priya".into());
+    conv.save_face_names(&fm).await;
+
+    let out = conv.forget_person("Hi").await;
+    assert!(out.contains("Forgotten"), "{out}");
+    let fm = conv.face_names().await;
+    assert!(!fm.values().any(|v| v == "Hi"), "face mapping for the forgotten person survived");
+    assert!(fm.values().any(|v| v == "Priya"), "unrelated face mapping must survive");
+}

@@ -595,7 +595,19 @@ impl super::ConversationEngine {
             return format!("I don't have anyone matching \"{}\" in your family layer.", name.trim());
         }
         self.save_people_profiles(&store).await;
-        format!("Forgotten: {}. (Removed from the people I track.)", removed.join(", "))
+        // Forgetting a person must forget their FACE too — a stale face-name map entry keeps
+        // resolving `ym photos <name>` to a cluster the user just said isn't (or was never) that
+        // person. This is what let a mistaken whois answer live on after `forget`.
+        let mut fm = self.face_names().await;
+        let before_faces = fm.len();
+        fm.retain(|_, v| !removed.iter().any(|r| v.eq_ignore_ascii_case(r)));
+        let faces_dropped = before_faces - fm.len();
+        if faces_dropped > 0 {
+            self.save_face_names(&fm).await;
+        }
+        let face_note =
+            if faces_dropped > 0 { format!(" Unlinked {faces_dropped} face cluster(s) as well.") } else { String::new() };
+        format!("Forgotten: {}. (Removed from the people I track.){face_note}", removed.join(", "))
     }
 
     /// `ym rename <old> to <new>` — correct a person's canonical name. The new name becomes canonical

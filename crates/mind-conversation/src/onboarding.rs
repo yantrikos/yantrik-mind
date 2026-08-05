@@ -535,6 +535,12 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 n.as_str(),
                 "na" | "n a" | "none" | "null" | "nil" | "nan" | "unknown" | "unnamed" | "noname"
                     | "no name" | "idk" | "dunno" | "x" | "tbd" | "anon" | "anonymous"
+                    // Greetings are caught upstream by `looks_like_greeting`, but this is the LAST
+                    // gate before a write to the user's real photo library, and each of "N/A",
+                    // "self_limits", and "Hi" got past a different upstream guard once. Nobody is
+                    // named Hi.
+                    | "hi" | "hii" | "hello" | "hey" | "yo" | "hola" | "namaste" | "sup"
+                    | "ok" | "okay" | "thanks" | "thank you" | "test" | "testing"
             )
     }
 

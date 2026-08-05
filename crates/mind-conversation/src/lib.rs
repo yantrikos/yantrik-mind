@@ -602,7 +602,25 @@ fn looks_like_non_answer(text: &str) -> bool {
     if t.ends_with('?') || t.starts_with('/') || t.starts_with("http://") || t.starts_with("https://") {
         return true;
     }
-    looks_like_command_word(t)
+    looks_like_greeting(t) || looks_like_command_word(t)
+}
+
+/// A bare salutation is never the answer to a pending question. Live, 2026-08-05: the user opened
+/// the new desktop app and typed "Hi" — an armed whois slot swallowed it and a face in the photo
+/// library was named "Hi". Same failure shape as `self_limits` (command-shaped, 08-03) and "N/A"
+/// (decline-shaped, earlier): each guard only covered the shapes already seen. EXACT match against
+/// the whole message, so "Hi, this is Ritu" still answers normally.
+fn looks_like_greeting(text: &str) -> bool {
+    let cleaned: String =
+        text.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let s = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    const GREET: &[&str] = &[
+        "hi", "hii", "hiii", "hello", "helo", "hey", "heya", "hai", "yo", "hola", "namaste",
+        "namaskar", "gm", "gn", "morning", "evening", "sup", "whats up", "wassup", "hi there",
+        "hello there", "hey there", "good morning", "good afternoon", "good evening", "good night",
+        "hi bro", "hello bro", "hey bro", "hi buddy", "hey buddy",
+    ];
+    GREET.contains(&s.as_str())
 }
 
 /// The shared command-verb table: does the first word match a `ym` CLI verb?

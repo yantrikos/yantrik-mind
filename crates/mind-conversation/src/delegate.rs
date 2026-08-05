@@ -71,6 +71,37 @@ pub(crate) async fn ledger_update(
     let _ = memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
 }
 
+/// Scratch memory for one job — Pranab's design (2026-08-05): a long job gets its own quarantined
+/// workspace; at completion what's worth keeping is PROMOTED into real memory and the scratch is
+/// destroyed. Nothing a job writes touches the mind's memory without passing the promotion gate,
+/// so a delegation can think freely without becoming a second source of truth.
+///
+/// Substrate note: stored as a per-job profile blob today (the engine controls purge completely);
+/// the surface (note → promote → purge) is shaped so it can move onto real yantrikdb namespaces
+/// once the core grows delete-by-namespace — the caller-visible lifecycle won't change.
+fn scratch_key(id: &str) -> String {
+    format!("job_scratch:{id}")
+}
+const SCRATCH_NOTE_CAP: usize = 200;
+/// Un-promoted scratch older than this is junk by definition — purged by the board on render.
+const SCRATCH_STALE_MS: i64 = 7 * 24 * 3600 * 1000;
+
+pub(crate) async fn scratch_note(memory: &Arc<dyn MemoryFacade>, id: &str, text: &str) {
+    let key = scratch_key(id);
+    let mut notes: Vec<serde_json::Value> = memory
+        .profile_get(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if notes.len() >= SCRATCH_NOTE_CAP {
+        return; // a runaway job must not grow an unbounded blob
+    }
+    notes.push(serde_json::json!({ "t": chrono::Utc::now().timestamp_millis(), "note": text }));
+    let _ = memory.profile_set(&key, &serde_json::to_string(&notes).unwrap_or_default()).await;
+}
+
 pub(crate) fn render_board(rows: &[serde_json::Value], now_ms: i64) -> String {
     if rows.is_empty() {
         return "🧰 No delegations yet. `ym delegate <name>: <task>` starts one — research by default, \
@@ -104,6 +135,10 @@ pub(crate) fn render_board(rows: &[serde_json::Value], now_ms: i64) -> String {
             }
         }
     }
+    out.push_str(
+        "\nA finished job's scratch waits 7 days: `ym jobs keep <id>` promotes it into memory \
+         (as a sub-agent observation), `ym jobs drop <id>` destroys it unkept.",
+    );
     out
 }
 
@@ -160,7 +195,14 @@ impl super::ConversationEngine {
         } else {
             let r = self.researcher.clone().unwrap();
             tokio::spawn(async move {
+                scratch_note(&mem, &id2, &format!("task: {task2}")).await;
                 let res = r.run(&task2).await;
+                // Findings land in SCRATCH, not memory — the promotion gate (`jobs keep`) is the
+                // only door from a job's output into the mind's real memory.
+                for u in res.sources.iter().take(10) {
+                    scratch_note(&mem, &id2, &format!("source: {u}")).await;
+                }
+                scratch_note(&mem, &id2, &res.answer).await;
                 let mut msg = format!("🔎 [{name2}] {}", res.answer);
                 if !res.sources.is_empty() {
                     msg.push_str("\n\nSources:\n");
@@ -176,8 +218,16 @@ impl super::ConversationEngine {
         format!("🧰 Delegated [{id}] \"{name}\" ({kind}). It's on the board — `ym jobs` — and the result lands in chat.")
     }
 
-    /// `ym jobs` — the board.
-    pub async fn jobs_report(&self) -> String {
+    /// `ym jobs [keep <id> | drop <id>]` — the board, plus the two ends of a job's scratch memory.
+    pub async fn jobs_report_cmd(&self, rest: &str) -> String {
+        let rest = rest.trim();
+        if let Some(id) = rest.strip_prefix("keep ") {
+            return self.job_promote(id.trim()).await;
+        }
+        if let Some(id) = rest.strip_prefix("drop ") {
+            let n = self.job_purge_scratch(id.trim()).await;
+            return format!("🗑 Dropped [{}] scratch ({n} note(s)) — nothing entered memory.", id.trim());
+        }
         let rows: Vec<serde_json::Value> = self
             .memory
             .profile_get(LEDGER_KEY)
@@ -186,7 +236,60 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        render_board(&rows, chrono::Utc::now().timestamp_millis())
+        // Stale-scratch hygiene rides board renders: un-promoted scratch of long-finished jobs is
+        // junk by definition (the promotion window has clearly passed).
+        let now = chrono::Utc::now().timestamp_millis();
+        for r in rows.iter() {
+            let finished = r.get("finished_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+            if now - finished > SCRATCH_STALE_MS {
+                if let Some(id) = r.get("id").and_then(|x| x.as_str()) {
+                    let _ = self.job_purge_scratch(id).await;
+                }
+            }
+        }
+        render_board(&rows, now)
+    }
+
+    /// PROMOTION GATE — the one door from a job's scratch into the mind's real memory. Writes an
+    /// OBSERVATION with sub-agent provenance, never a belief: the belief path keeps its stricter
+    /// gates (wrong beliefs are recalled confidently forever). Scratch is destroyed after.
+    async fn job_promote(&self, id: &str) -> String {
+        let notes: Vec<serde_json::Value> = self
+            .memory
+            .profile_get(&scratch_key(id))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return format!("[{id}] has no scratch to keep (already promoted, dropped, or never noted).");
+        }
+        let body: Vec<&str> = notes.iter().filter_map(|n| n.get("note").and_then(|x| x.as_str())).collect();
+        let text = format!("Delegated job [{id}] findings: {}", body.join(" | "));
+        let text: String = text.chars().take(4000).collect();
+        match self.memory.remember_observation(&text, mind_types::safety::ProvenanceCategory::SubAgent).await {
+            Ok(_) => {
+                let n = self.job_purge_scratch(id).await;
+                format!("📥 Kept [{id}] — {n} note(s) promoted into memory as a sub-agent observation; scratch destroyed.")
+            }
+            Err(e) => format!("(couldn't promote [{id}]: {e} — scratch left intact)"),
+        }
+    }
+
+    async fn job_purge_scratch(&self, id: &str) -> usize {
+        let key = scratch_key(id);
+        let n = self
+            .memory
+            .profile_get(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let _ = self.memory.profile_set(&key, "[]").await;
+        n
     }
 }
 

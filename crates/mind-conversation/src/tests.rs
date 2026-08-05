@@ -2458,3 +2458,41 @@ async fn forget_person_unlinks_their_face_clusters() {
     assert!(!fm.values().any(|v| v == "Hi"), "face mapping for the forgotten person survived");
     assert!(fm.values().any(|v| v == "Priya"), "unrelated face mapping must survive");
 }
+
+// ── Job scratch memory: quarantine → promote or purge (Pranab's design, 2026-08-05) ────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn job_scratch_promotes_once_then_is_destroyed() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let m: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+    crate::delegate::scratch_note(&m, "j1", "task: compare quants").await;
+    crate::delegate::scratch_note(&m, "j1", "source: https://example.com").await;
+    crate::delegate::scratch_note(&m, "j1", "IQ2_M is the sweet spot").await;
+
+    let out = conv.jobs_report_cmd("keep j1").await;
+    assert!(out.contains("promoted into memory"), "{out}");
+    // Second keep finds nothing — the scratch is gone, not re-promotable.
+    let again = conv.jobs_report_cmd("keep j1").await;
+    assert!(again.contains("no scratch"), "double-promotion must be impossible: {again}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_scratch_never_touches_memory() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, "JARVIS");
+    let m: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+    crate::delegate::scratch_note(&m, "j2", "half-finished junk").await;
+    let out = conv.jobs_report_cmd("drop j2").await;
+    assert!(out.contains("nothing entered memory"), "{out}");
+    let ws = mem
+        .hydrate_working_set("junk", &mind_types::AccessContext::Operator)
+        .await
+        .expect("working set");
+    assert!(
+        !format!("{ws:?}").contains("half-finished junk"),
+        "dropped scratch leaked into the working set"
+    );
+}

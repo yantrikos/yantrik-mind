@@ -131,7 +131,13 @@ impl Coder {
     /// Run an agentic coding task. The agent works in a fresh isolated scratch dir and reports back.
     pub async fn run(&self, task: &str) -> anyhow::Result<CoderResult> {
         let wd = self.fresh_workdir()?;
+        self.run_in(task, wd).await
+    }
 
+    /// Run in an EXISTING workdir — the iterate-until-good loop's primitive. Round N+1 continues
+    /// where round N left its files, so a critique can say "fix the contrast on index.html" and the
+    /// builder actually has an index.html to fix.
+    pub async fn run_in(&self, task: &str, wd: String) -> anyhow::Result<CoderResult> {
         let use_oauth = self.oauth_token.is_some();
         let child = self.command(&wd, task, use_oauth).spawn()?;
         let out = match tokio::time::timeout(

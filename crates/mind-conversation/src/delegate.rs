@@ -73,6 +73,13 @@ pub(crate) async fn ledger_update(
     let _ = memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
 }
 
+/// Does a critique verdict mean "good enough, stop iterating"? Tolerant of critics that dress the
+/// word up ("SHIP.", "ship — looks solid"), strict about critics that merely MENTION shipping
+/// mid-critique ("fix X before you ship").
+pub(crate) fn verdict_ships(v: &str) -> bool {
+    v.trim().to_uppercase().starts_with("SHIP")
+}
+
 /// Scratch memory for one job — Pranab's design (2026-08-05): a long job gets its own quarantined
 /// workspace; at completion what's worth keeping is PROMOTED into real memory and the scratch is
 /// destroyed. Nothing a job writes touches the mind's memory without passing the promotion gate,
@@ -184,13 +191,70 @@ impl super::ConversationEngine {
         let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
         let (id2, name2, task2) = (id.clone(), name.clone(), task.clone());
         if kind == "code" {
+            // ITERATE-UNTIL-GOOD (the Hermes pattern, 2026-08-06): one coder pass produces a first
+            // draft; real artifacts need build → critique → improve until a bar is met. Same shape
+            // as the nightly self-improve loop, generalized from "the mind's codebase" to "whatever
+            // was delegated". Every round narrates into scratch, so the channel thread shows the
+            // loop working — and the critique trail survives for the promotion gate to keep.
             let c = self.coder.clone().unwrap();
+            let critic = self.inference.clone();
+            let rounds: usize = std::env::var("YM_DELEGATE_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
             tokio::spawn(async move {
-                let (status, msg) = match c.run(&task2).await {
-                    Ok(r) => ("done", format!("🛠️ [{name2}] done:\n\n{}", mind_tools::render_coder(&r))),
-                    Err(e) => ("failed", format!("🛠️ [{name2}] failed: {e}")),
-                };
-                ledger_update(&mem, &id2, status, Some(msg.clone())).await;
+                let mut wd: Option<String> = None;
+                let mut last: Option<mind_tools::coder::CoderResult> = None;
+                let mut verdict = String::new();
+                let mut brief = task2.clone();
+                for round in 1..=rounds {
+                    scratch_note(&mem, &id2, &format!("round {round}: building — {}", brief.chars().take(160).collect::<String>())).await;
+                    let res = match &wd {
+                        Some(w) => c.run_in(&brief, w.clone()).await,
+                        None => c.run(&task2).await,
+                    };
+                    let r = match res {
+                        Ok(r) => r,
+                        Err(e) => {
+                            scratch_note(&mem, &id2, &format!("round {round}: build error — {e}")).await;
+                            let msg = format!("🛠️ [{name2}] failed in round {round}: {e}");
+                            ledger_update(&mem, &id2, "failed", Some(msg.clone())).await;
+                            q.lock().unwrap().push(msg);
+                            jobs.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+                    wd = Some(r.workdir.clone());
+                    scratch_note(&mem, &id2, &format!("round {round}: built {} file(s) — {}", r.files.len(), r.summary.chars().take(200).collect::<String>())).await;
+                    // CRITIQUE — a separate set of eyes on the artifact, judging against the ORIGINAL
+                    // task (not the round brief, which narrows every iteration). "SHIP" ends the loop.
+                    let listing = r.files.join(", ");
+                    let critique_prompt = format!(
+                        "You are reviewing a delegated build.\nTASK: {task2}\nFILES PRODUCED: {listing}\nBUILDER'S SUMMARY: {}\n\n\
+                         Judge the ARTIFACT against the TASK. If it plausibly satisfies the task and has no obvious defects, reply exactly SHIP. \
+                         Otherwise list up to 4 CONCRETE defects to fix (one line each, imperative, specific).",
+                        r.summary.chars().take(1200).collect::<String>()
+                    );
+                    let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+                    verdict = critic
+                        .chat_scoped(vec![ChatMessage::user(&critique_prompt)], cfg, mind_inference::PrivacyScope::Household)
+                        .await
+                        .map(|x| x.text.trim().to_string())
+                        .unwrap_or_else(|_| "SHIP".to_string()); // a dead critic must not wedge the loop open
+                    last = Some(r);
+                    if verdict_ships(&verdict) {
+                        scratch_note(&mem, &id2, &format!("round {round}: critique — SHIP")).await;
+                        break;
+                    }
+                    scratch_note(&mem, &id2, &format!("round {round}: critique — {}", verdict.chars().take(400).collect::<String>())).await;
+                    brief = format!("Improve the existing build in this directory. Fix these review findings:\n{verdict}\nDo not start over; edit in place.");
+                }
+                let r = last.expect("at least one round ran");
+                let shipped = verdict_ships(&verdict);
+                let msg = format!(
+                    "🛠️ [{name2}] {}:\n\n{}{}",
+                    if shipped { "done (passed review)" } else { "done (round limit — last review below)" },
+                    mind_tools::render_coder(&r),
+                    if shipped { String::new() } else { format!("\n\nOutstanding review notes:\n{verdict}") }
+                );
+                ledger_update(&mem, &id2, "done", Some(msg.clone())).await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             });
@@ -364,5 +428,20 @@ mod tests {
     #[test]
     fn empty_board_teaches_the_verb() {
         assert!(render_board(&[], 0).contains("ym delegate"));
+    }
+}
+
+#[cfg(test)]
+mod iterate_tests {
+    use super::*;
+
+    #[test]
+    fn ship_verdicts_end_the_loop_and_critiques_do_not() {
+        for v in ["SHIP", "ship", "  Ship.  ", "SHIP — looks solid"] {
+            assert!(verdict_ships(v), "{v:?} should ship");
+        }
+        for v in ["Fix the contrast before you ship", "1. broken nav\n2. SHIP the fixed css", "needs work"] {
+            assert!(!verdict_ships(v), "{v:?} must keep iterating");
+        }
     }
 }

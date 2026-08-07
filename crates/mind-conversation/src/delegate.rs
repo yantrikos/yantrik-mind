@@ -50,6 +50,29 @@ pub(crate) fn parse_delegation(rest: &str) -> Option<(String, String, &'static s
 
 /// Read-modify-write one ledger row. Free function on the memory handle so the detached task can
 /// update the board without holding the engine.
+/// Record where a code job's artifacts live, so a reader can OPEN them. "Done, at
+/// /opt/.../run-178.../index.html" is a dead end for anyone not sitting on the box; the desktop
+/// reads these fields to preview the actual file.
+pub(crate) async fn ledger_artifacts(
+    memory: &Arc<dyn MemoryFacade>,
+    id: &str,
+    workdir: &str,
+    files: &[String],
+) {
+    let mut rows: Vec<serde_json::Value> = memory
+        .profile_get(LEDGER_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if let Some(r) = rows.iter_mut().find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id)) {
+        r["workdir"] = serde_json::json!(workdir);
+        r["files"] = serde_json::json!(files);
+    }
+    let _ = memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
+}
+
 pub(crate) async fn ledger_update(
     memory: &Arc<dyn MemoryFacade>,
     id: &str,
@@ -247,6 +270,7 @@ impl super::ConversationEngine {
                     brief = format!("Improve the existing build in this directory. Fix these review findings:\n{verdict}\nDo not start over; edit in place.");
                 }
                 let r = last.expect("at least one round ran");
+                ledger_artifacts(&mem, &id2, &r.workdir, &r.files).await;
                 let shipped = verdict_ships(&verdict);
                 let msg = format!(
                     "🛠️ [{name2}] {}:\n\n{}{}",

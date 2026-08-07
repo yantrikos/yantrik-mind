@@ -120,35 +120,52 @@ async fn tg_voice_to_text(api: &str, file_id: &str) -> Option<String> {
             .take(20_000_000)
             .read_to_end(&mut bytes)
             .ok()?;
-        let tag = format!("{}_{}", std::process::id(), now_ms());
-        let dir = std::env::temp_dir();
-        let oga = dir.join(format!("ym_v_{tag}.oga"));
-        let wav = dir.join(format!("ym_v_{tag}.wav"));
-        std::fs::write(&oga, &bytes).ok()?;
-        let ff = std::process::Command::new("ffmpeg")
-            .args(["-y", "-loglevel", "error", "-i", oga.to_str()?, "-ar", "16000", "-ac", "1", wav.to_str()?])
-            .status()
-            .ok()?;
-        let _ = std::fs::remove_file(&oga);
-        if !ff.success() {
-            return None;
-        }
-        let whisper = std::env::var("YM_WHISPER_BIN").unwrap_or_else(|_| "/opt/voice/whisper.cpp/build/bin/whisper-cli".into());
-        let model = std::env::var("YM_WHISPER_MODEL").unwrap_or_else(|_| "/opt/voice/models/ggml-base.en.bin".into());
-        let out = std::process::Command::new(whisper)
-            .args(["-m", &model, "-f", wav.to_str()?, "-nt", "-np"])
-            .output()
-            .ok()?;
-        let _ = std::fs::remove_file(&wav);
-        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if text.len() < 2 {
-            None
-        } else {
-            Some(text)
-        }
+        transcribe_bytes_blocking(&bytes)
     })
     .await
     .ok()?
+}
+
+/// Any compressed audio -> 16 kHz mono wav -> whisper.cpp -> text. Blocking; call from
+/// `spawn_blocking`. Shared by the Telegram voice-note path and the desktop's `/transcribe`, so
+/// there is ONE transcription implementation to keep working.
+///
+/// Loud on a missing model: whisper's binary shipped without `ggml-base.en.bin` for over a month
+/// and every voice note failed SILENTLY (returned None, indistinguishable from "I couldn't make
+/// that out"). A missing dependency must never look like a bad recording.
+fn transcribe_bytes_blocking(bytes: &[u8]) -> Option<String> {
+    let tag = format!("{}_{}", std::process::id(), now_ms());
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("ym_v_{tag}.audio"));
+    let wav = dir.join(format!("ym_v_{tag}.wav"));
+    std::fs::write(&src, bytes).ok()?;
+    let ff = std::process::Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-i", src.to_str()?, "-ar", "16000", "-ac", "1", wav.to_str()?])
+        .status()
+        .ok()?;
+    let _ = std::fs::remove_file(&src);
+    if !ff.success() {
+        eprintln!("[voice] ffmpeg could not decode the audio");
+        return None;
+    }
+    let whisper = std::env::var("YM_WHISPER_BIN").unwrap_or_else(|_| "/opt/voice/whisper.cpp/build/bin/whisper-cli".into());
+    let model = std::env::var("YM_WHISPER_MODEL").unwrap_or_else(|_| "/opt/voice/models/ggml-base.en.bin".into());
+    if !std::path::Path::new(&model).exists() {
+        eprintln!("[voice] STT MODEL MISSING at {model} — transcription cannot work until it is installed");
+        let _ = std::fs::remove_file(&wav);
+        return None;
+    }
+    let out = std::process::Command::new(whisper)
+        .args(["-m", &model, "-f", wav.to_str()?, "-nt", "-np"])
+        .output()
+        .ok()?;
+    let _ = std::fs::remove_file(&wav);
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.len() < 2 {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Voice reply: Piper TTS -> wav -> ffmpeg to OGG/Opus -> Telegram sendVoice (curl multipart - ureq
@@ -514,7 +531,7 @@ fn ctl_handle(
     }
 
     // Every other route is a data route → authenticate FIRST, before reading a large body or dispatching.
-    if method != "POST" || (path != "/cli" && path != "/chat" && path != "/event") {
+    if method != "POST" || (path != "/cli" && path != "/chat" && path != "/event" && path != "/transcribe") {
         send(&mut stream, "404 Not Found", "not found");
         return;
     }
@@ -548,8 +565,11 @@ fn ctl_handle(
             Err(_) => break,
         }
     }
-    let body = String::from_utf8_lossy(&body).trim().to_string();
-    if body.is_empty() {
+    // Keep the RAW bytes: `/transcribe` carries compressed audio, and utf8-lossy would corrupt it
+    // into mojibake before ffmpeg ever saw it. Text routes take the lossy view as before.
+    let body_raw = body;
+    let body = String::from_utf8_lossy(&body_raw).trim().to_string();
+    if body_raw.is_empty() {
         send(&mut stream, "400 Bad Request", "(empty message)");
         return;
     }
@@ -588,6 +608,17 @@ fn ctl_handle(
             }
             .unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
+        }
+        // Speech to text for the desktop's voice mode: raw audio in, transcript out. Runs the SAME
+        // whisper path as Telegram voice notes. Kept out of the chat route on purpose — the caller
+        // sees the transcript and decides whether to send it, so a misheard sentence is corrected
+        // before it becomes a turn (and before it enters memory as something "said").
+        "/transcribe" => {
+            let bytes = body_raw.clone();
+            match rt.block_on(async move { tokio::task::spawn_blocking(move || transcribe_bytes_blocking(&bytes)).await.ok().flatten() }) {
+                Some(text) => ("200 OK", text),
+                None => ("422 Unprocessable Entity", "(nothing transcribable)".to_string()),
+            }
         }
         // External event ingress (operator-only): counts the event and runs one debounced
         // fast-twitch evaluation — the same path an HA event takes, so any future source (a script,

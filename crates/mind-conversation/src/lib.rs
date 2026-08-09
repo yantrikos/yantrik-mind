@@ -47,6 +47,7 @@ mod knock;
 mod funnel;
 mod delegate;
 mod config_panel;
+mod import_skill;
 mod privacy_audit;
 mod proactive;
 pub(crate) mod research;
@@ -4210,6 +4211,9 @@ impl ConversationEngine {
             }
             // Standing-order VISIBILITY: a scheduled run that exists only as a DB row is
             // indistinguishable from one that was never registered. List + cancel.
+            // Import an agent from a document (SKILL.md-style; rtf/txt tolerated). The whole file
+            // rides as the argument; `schedule:` frontmatter arms a standing order.
+            "import" if !rest.trim().is_empty() => self.import_agent(&rest).await,
             "orders" => {
                 let Some(recipes) = &self.recipes else { return "(recipe engine unavailable)".to_string() };
                 if let Some(id) = rest.trim().strip_prefix("cancel ") {

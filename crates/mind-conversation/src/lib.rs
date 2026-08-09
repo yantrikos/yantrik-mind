@@ -599,6 +599,22 @@ fn is_cli_verb(text: &str) -> bool {
 }
 
 /// so genuine answers (which rarely look like commands) always capture.
+tokio::task_local! {
+    /// Progress sink for the CURRENT turn, when a streaming caller set one. Task-local on purpose:
+    /// concurrent turns each carry their own (or none) with zero engine-field collision, and the
+    /// non-streaming paths (telegram, console) pay nothing — `emit_progress` is a no-op outside a
+    /// streaming scope.
+    pub static TURN_PROGRESS: tokio::sync::mpsc::UnboundedSender<String>;
+}
+
+/// Emit a progress marker to the streaming caller, if any. Never blocks, never fails the turn:
+/// progress is decoration on the work, not a dependency of it.
+pub(crate) fn emit_progress(msg: &str) {
+    let _ = TURN_PROGRESS.try_with(|tx| {
+        let _ = tx.send(msg.to_string());
+    });
+}
+
 fn looks_like_non_answer(text: &str) -> bool {
     let t = text.trim();
     if t.ends_with('?') || t.starts_with('/') || t.starts_with("http://") || t.starts_with("https://") {
@@ -6390,6 +6406,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
     /// handler behind the two stateful interceptors (onboarding answer-capture + pending confirmation).
     async fn agent_loop(&self, user_text: &str, id: &TurnIdentity) -> Result<String> {
         const MAX_STEPS: usize = 5;
+        emit_progress("grounding from memory…");
         self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
         // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
         // private fact from another household member never reaches the model (the surprise-gift wall).
@@ -6555,6 +6572,7 @@ Open reminders you're carrying for them:");
         // small model once will likely need the capable one for the remaining steps too.
         let mut escalated = false;
         for step in 0..MAX_STEPS {
+            emit_progress(if step == 0 { "thinking…" } else { "thinking (continuing)…" });
             // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
             // steps remain either loops or gets truncated mid-thought. Surfacing "N left" makes it
             // commit to an answer before the hard cutoff. `MAX_STEPS - step` counts THIS step.
@@ -6647,6 +6665,9 @@ Open reminders you're carrying for them:");
                 }
             }
             let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if !tool.is_empty() {
+                emit_progress(&format!("using {tool}…"));
+            }
             if tool.is_empty() {
                 let raw = text.trim();
                 // ESCALATE before giving up: the model produced neither a usable tool call nor an

@@ -531,7 +531,9 @@ fn ctl_handle(
     }
 
     // Every other route is a data route → authenticate FIRST, before reading a large body or dispatching.
-    if method != "POST" || (path != "/cli" && path != "/chat" && path != "/event" && path != "/transcribe") {
+    if method != "POST"
+        || (path != "/cli" && path != "/chat" && path != "/event" && path != "/transcribe" && path != "/chat-stream")
+    {
         send(&mut stream, "404 Not Found", "not found");
         return;
     }
@@ -608,6 +610,48 @@ fn ctl_handle(
             }
             .unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
+        }
+        // STREAMING conversation turn: same auth/identity rules as /chat, but the response is
+        // chunked — one "p:<progress>" line per agent-loop event as it happens, then "f:" followed
+        // by the final reply verbatim. Kills the 10-40s dead air that made the loop feel hung: the
+        // caller SEES "using weather…" while it works. Token streaming needs provider surgery;
+        // step streaming needs none.
+        "/chat-stream" => {
+            if !authed.is_operator() {
+                ("403 Forbidden", "streaming chat is operator-only for now".to_string())
+            } else {
+                let ident = mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                // Headers + manual chunked framing on the raw socket; ureq on the client side
+                // decodes chunking transparently, so the reader just sees the line protocol.
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\n\r\n",
+                );
+                let mut chunk = |s: &str| {
+                    let _ = stream.write_all(format!("{:x}\r\n{s}\r\n", s.len()).as_bytes());
+                    let _ = stream.flush();
+                };
+                let msg = body.clone();
+                let conv2 = conv.clone();
+                let turn = rt.spawn(async move {
+                    mind_conversation::TURN_PROGRESS
+                        .scope(tx, async move { conv2.handle_turn_as(&msg, ident).await })
+                        .await
+                });
+                // Drain progress until the turn completes; rx closes when the scope drops its tx.
+                rt.block_on(async {
+                    while let Some(p) = rx.recv().await {
+                        chunk(&format!("p:{}\n", p.replace('\n', " ")));
+                    }
+                });
+                let final_text = rt
+                    .block_on(turn)
+                    .map(|r| r.unwrap_or_else(|e| format!("(error: {e})")))
+                    .unwrap_or_else(|e| format!("(turn crashed: {e})"));
+                chunk(&format!("f:{final_text}"));
+                let _ = stream.write_all(b"0\r\n\r\n");
+                return;
+            }
         }
         // Speech to text for the desktop's voice mode: raw audio in, transcript out. Runs the SAME
         // whisper path as Telegram voice notes. Kept out of the chat route on purpose — the caller

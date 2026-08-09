@@ -6197,6 +6197,48 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                     None => "(the coder isn't configured)".to_string(),
                 }
             }
+            // THE HOME HAND: one service on one entity, through the SAME harm-gate + confirm
+            // handshake as every outward act. The model resolves the friendly name to an exact
+            // entity_id from the states it can already read; POLICY it cannot touch lives in the
+            // executor — security domains hard-denied, entity must be on the operator's allowlist
+            // (unset = nothing), so a hallucinated or injected entity dies at execution, not here.
+            "home_control" => {
+                let (service, entity) = (s("service"), s("entity_id"));
+                if !service.contains('.') || !entity.contains('.') {
+                    return "(home_control needs service like light.turn_off and entity_id like light.porch)".to_string();
+                }
+                match &self.runtime {
+                    Some(runtime) => {
+                        let intent = ActionIntent {
+                            kind: "ha_call".into(),
+                            target: format!("{service} {entity}"),
+                            summary: format!("home: {service} on {entity}"),
+                            payload: None,
+                            capabilities: vec![Capability::Network],
+                            risk: RiskLevel::Medium,
+                            // Lights/switches toggle back; the DENY-listed irreversibles never
+                            // reach here at all (executor policy).
+                            reversible: true,
+                        };
+                        let req = self.new_request(intent);
+                        let ctx = Self::dummy_ctx(&req, "");
+                        match runtime.decide(&req, &ctx).await {
+                            ActionDecision::Deny { reason } => format!("(I can't do that — {reason})"),
+                            ActionDecision::Execute => match runtime.execute(req).await {
+                                Ok(r) if r.ok => format!("🏠 {}", r.output),
+                                Ok(r) => format!("(that didn't go through: {})", r.output),
+                                Err(e) => format!("(that didn't go through: {e})"),
+                            },
+                            ActionDecision::RequireConfirmation { .. } => {
+                                let summary = req.intent.summary.clone();
+                                *self.pending.lock().unwrap() = Some(req);
+                                format!("Ready — {summary}. Confirm with \"yes\".")
+                            }
+                        }
+                    }
+                    None => "(no harm-gated action runtime is configured — the home hand stays off)".to_string(),
+                }
+            }
             "set_monitor" => {
                 let recipes = match &self.recipes {
                     Some(r) => r,

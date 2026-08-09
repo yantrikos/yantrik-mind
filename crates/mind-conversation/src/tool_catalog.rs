@@ -258,6 +258,11 @@ fn arg_schema(name: &str, desc: &str, args: &[(&str, bool)]) -> Value {
 fn core_meta_schemas() -> Vec<Value> {
     vec![
         arg_schema("recall", "search your typed memory", &[("query", true)]),
+        arg_schema(
+            "home_control",
+            "operate an allowlisted home device: service like light.turn_off / switch.turn_on / media_player.media_pause, entity_id the EXACT id (resolve the friendly name via the `home` tool first). Security devices (locks, covers, alarms, cameras) are never operable.",
+            &[("service", true), ("entity_id", true)],
+        ),
         arg_schema("remember", "store a durable fact about the user or the world", &[("text", true)]),
         arg_schema(
             "add_reminder",

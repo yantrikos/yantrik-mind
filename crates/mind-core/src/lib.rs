@@ -465,6 +465,20 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         executor = executor.with_mcp_hub(hub.clone());
         granted.push(mind_types::Capability::Network);
     }
+    // The HOME HAND — granted only when BOTH the HA connection and an explicit entity allowlist
+    // exist. No allowlist, no hand: the writer isn't even constructed, and the executor would
+    // fail-closed anyway. Two layers, same policy.
+    if let (Ok(url), Ok(tok), Ok(allow)) =
+        (std::env::var("YM_HA_URL"), std::env::var("YM_HA_TOKEN"), std::env::var("YM_HA_ACTIONS_ALLOW"))
+    {
+        if !url.is_empty() && !tok.is_empty() && !allow.trim().is_empty() {
+            executor = executor.with_home_writer(Arc::new(mind_tools::ApiHomeAssistantClient::new(url, tok)));
+            if !granted.contains(&mind_types::Capability::Network) {
+                granted.push(mind_types::Capability::Network);
+            }
+            eprintln!("[home] hand granted for allowlist: {allow}");
+        }
+    }
     let runtime: Option<Arc<dyn mind_types::ActionRuntime>> = if granted.is_empty() {
         None
     } else {

@@ -154,7 +154,41 @@ impl HomeAssistantClient for ScriptedHomeAssistantClient {
     }
 }
 
-/// Real Home Assistant REST client (long-lived-token auth, read-only here).
+/// The mind's first HAND in the house: call one Home Assistant service on one entity. Kept as its
+/// own trait (not on the read client) so read-only deployments stay read-only by construction —
+/// a `HomeWriter` is granted, never assumed.
+#[async_trait]
+pub trait HomeWriter: Send + Sync {
+    /// e.g. ("light", "turn_off", "light.porch"). Returns a short human receipt.
+    async fn call_service(&self, domain: &str, service: &str, entity_id: &str) -> anyhow::Result<String>;
+}
+
+#[async_trait]
+impl HomeWriter for ApiHomeAssistantClient {
+    async fn call_service(&self, domain: &str, service: &str, entity_id: &str) -> anyhow::Result<String> {
+        // Belt-and-braces syntax gate. POLICY lives in the executor (deny-list + allowlist); this
+        // only refuses inputs that could smuggle a path or a second call.
+        let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        if !ok(domain) || !ok(service) || !ok(entity_id) || !entity_id.contains('.') {
+            anyhow::bail!("malformed service call");
+        }
+        let (base, token) = (self.base_url.trim_end_matches('/').to_string(), self.token.clone());
+        let (d, s, e) = (domain.to_string(), service.to_string(), entity_id.to_string());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let url = format!("{base}/api/services/{d}/{s}");
+            ureq::post(&url)
+                .timeout(std::time::Duration::from_secs(15))
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("Content-Type", "application/json")
+                .send_json(serde_json::json!({ "entity_id": e }))?;
+            Ok(format!("{d}.{s} → {e}"))
+        })
+        .await?
+    }
+}
+
+/// Real Home Assistant REST client (long-lived-token auth; reads via `HomeAssistantClient`, writes
+/// only through the separately-granted `HomeWriter`).
 pub struct ApiHomeAssistantClient {
     base_url: String,
     token: String,

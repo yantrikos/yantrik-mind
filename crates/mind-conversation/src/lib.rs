@@ -4192,6 +4192,59 @@ impl ConversationEngine {
             "packets" if rest.trim() == "prune" => {
                 format!("🧹 Pruned {} terminal packet(s) from the store.", self.packets_prune().await)
             }
+            // STANDING ORDER, deterministically: `ym schedule weekly mon 09:00 :: <goal>` (or
+            // `daily 07:30 :: <goal>`). The LLM planner authors the work steps from the goal; the
+            // cadence is parsed HERE, never left to the model — a misparsed weekday firing at the
+            // wrong time is exactly the class of error a deterministic door exists to prevent.
+            "schedule" => {
+                let Some((spec, goal)) = rest.split_once("::") else {
+                    return "Usage: `ym schedule weekly mon 09:00 :: <goal>` or `ym schedule daily 07:30 :: <goal>`.".to_string();
+                };
+                let goal = goal.trim();
+                let toks: Vec<&str> = spec.split_whitespace().collect();
+                let (every, weekday, timepos) = match toks.first().copied() {
+                    Some("weekly") => {
+                        let wd = match toks.get(1).copied().unwrap_or("") {
+                            "mon" => 0u8, "tue" => 1, "wed" => 2, "thu" => 3, "fri" => 4, "sat" => 5, "sun" => 6,
+                            other => return format!("Unknown weekday \"{other}\" — mon..sun."),
+                        };
+                        ("weekly", wd, 2)
+                    }
+                    Some("daily") => ("daily", 0u8, 1),
+                    _ => return "Cadence must be `weekly <day>` or `daily`.".to_string(),
+                };
+                let (hour, minute) = match toks.get(timepos).and_then(|t| t.split_once(':')) {
+                    Some((h, m)) => match (h.parse::<u8>(), m.parse::<u8>()) {
+                        (Ok(h), Ok(m)) if h < 24 && m < 60 => (h, m),
+                        _ => return "Time must be HH:MM (24h).".to_string(),
+                    },
+                    None => return "Time must be HH:MM (24h).".to_string(),
+                };
+                let Some(recipes) = &self.recipes else { return "(recipe engine unavailable)".to_string() };
+                if goal.len() < 8 {
+                    return "Give the standing order a real goal after `::`.".to_string();
+                }
+                let now = chrono::Utc::now().timestamp_millis() as u64;
+                match recipes.plan(goal, now).await {
+                    Some(mut steps) => {
+                        // The cadence is authoritative from the PARSED args; drop any model-authored
+                        // Schedule and install ours at the head.
+                        steps.retain(|s| !matches!(s, RecipeStep::Schedule { .. }));
+                        steps.insert(0, RecipeStep::Schedule { every: every.into(), weekday, hour, minute });
+                        let rec = Recipe { id: format!("sched:{:x}", now & 0xffffff), name: format!("standing: {goal}"), steps };
+                        let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                        match out.sleeping_until {
+                            Some(wake) => {
+                                let mins = (wake.saturating_sub(now)) / 60_000;
+                                format!("📅 Standing order set — {every}{} at {hour:02}:{minute:02} (first run in ~{mins} min): {goal}",
+                                    if every == "weekly" { format!(" {}", ["mon","tue","wed","thu","fri","sat","sun"][weekday as usize]) } else { String::new() })
+                            }
+                            None => format!("(the plan ran but didn't park on the schedule: {})", out.error.unwrap_or_else(|| "unknown".into())),
+                        }
+                    }
+                    None => "I couldn't turn that goal into steps — rephrase it as concrete actions (read X, fetch Y, compose Z, notify me).".to_string(),
+                }
+            }
             "jobs" | "board" | "delegations" => self.jobs_report_cmd(&rest).await,
             // The real-world scoreboard the self-build loop now optimises against.
             "fitness" | "scoreboard" => self.fitness_report().await,

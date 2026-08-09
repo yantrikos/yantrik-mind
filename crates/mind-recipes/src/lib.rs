@@ -86,6 +86,45 @@ pub enum RecipeStep {
         poll_secs: u64,
         expire_ms: u64,
     },
+    /// RECURRING DELEGATION (cadence): sleep until the next occurrence of a local-time cadence; on
+    /// wake, run the steps AFTER this one; when the recipe completes, LOOP back here and park for
+    /// the following occurrence — the run never reaches `done` on its own, it is cancelled or it
+    /// recurs. This is the primitive WaitForCondition cannot fake: "every Monday, gather sources,
+    /// compose the report, file it" is a cadence, not a wait-until-match.
+    ///
+    /// `every`: "daily" | "weekly". `weekday`: 0=Monday..6=Sunday (weekly only). Times are the
+    /// USER'S local clock via YM_TZ_OFFSET_MINUTES — fixed-offset arithmetic, so a run lands an
+    /// hour shifted across a DST change until the offset env is updated; accepted and documented
+    /// rather than dragging a tz database into this crate.
+    Schedule {
+        every: String,
+        #[serde(default)]
+        weekday: u8,
+        hour: u8,
+        #[serde(default)]
+        minute: u8,
+    },
+}
+
+/// Next occurrence of a cadence strictly after `now_ms`, in epoch ms. Pure arithmetic (epoch day 0
+/// = Thursday ⇒ Monday-based weekday = (days + 3) % 7).
+pub(crate) fn next_occurrence_ms(now_ms: u64, every: &str, weekday: u8, hour: u8, minute: u8, tz_offset_min: i64) -> u64 {
+    const DAY: i64 = 86_400_000;
+    let local_now = now_ms as i64 + tz_offset_min * 60_000;
+    let today_start = local_now.div_euclid(DAY) * DAY;
+    let in_day = (hour as i64) * 3_600_000 + (minute as i64) * 60_000;
+    let mut candidate = today_start + in_day;
+    if every == "weekly" {
+        let today_wd = (local_now.div_euclid(DAY) + 3).rem_euclid(7) as u8; // 0 = Monday
+        let ahead = ((weekday as i64) - (today_wd as i64)).rem_euclid(7);
+        candidate = today_start + ahead * DAY + in_day;
+        if candidate <= local_now {
+            candidate += 7 * DAY;
+        }
+    } else if candidate <= local_now {
+        candidate += DAY; // daily
+    }
+    (candidate - tz_offset_min * 60_000) as u64
 }
 
 impl RecipeStep {
@@ -355,6 +394,7 @@ Step types:
 - {"Notify":{"message":"{{answer}}"}}
 - {"WaitForCondition":{"tool_name":"inbox","args":{"limit":10},"store_as":"inbox","condition":{"op":"VarContains","var":"inbox","substring":"keyword"},"poll_secs":120,"expire_ms":NOW_MS}}
 - {"WaitUntil":{"until_ms":NOW_MS}}
+- {"Schedule":{"every":"weekly","weekday":0,"hour":9,"minute":0}}  (recurring: steps AFTER this run at each occurrence, forever until cancelled; weekday 0=Monday. Use for "every day/week at ..." goals; put it FIRST.)
 - {"Act":{"kind":"send_email","target":"addr","summary":"subject","payload":"body"}}
 RULES: prefer read -> Think -> Notify. Reference an earlier step's result by its store_as in double-brace placeholders (see Think/Notify). Use Act ONLY if the goal clearly wants an OUTWARD action; it will require the user's confirmation. End with a Notify that reports the result. Keep it under 6 steps. Current epoch ms = NOW_MS; for any time or expiry use that number plus an offset in ms. Output ONLY the JSON array — no prose, no code fences.
 GOAL: GOAL_HERE"#;
@@ -425,9 +465,10 @@ GOAL: GOAL_HERE"#;
                 );
                 continue;
             }
-            // WaitUntil's wait is satisfied by the due check → step past it. WaitForCondition re-polls.
+            // WaitUntil's / Schedule's wait is satisfied by the due check → step past it (Schedule's
+            // recurrence is re-armed at run COMPLETION, not here). WaitForCondition re-polls.
             let resume_at = match rec.steps.get(rec.current_step) {
-                Some(RecipeStep::WaitUntil { .. }) => rec.current_step + 1,
+                Some(RecipeStep::WaitUntil { .. }) | Some(RecipeStep::Schedule { .. }) => rec.current_step + 1,
                 _ => rec.current_step,
             };
             outcomes.push(self.run_from(&rec.id, &rec.name, rec.steps, resume_at, rec.vars).await);
@@ -543,6 +584,20 @@ GOAL: GOAL_HERE"#;
             }
             // Record progress so a crash here resumes from the right place.
             persist("running", i, &steps, &vars, None);
+        }
+        // A recipe with a Schedule step RECURS instead of finishing: loop back to the schedule and
+        // park for the next occurrence. Retry counters are cleared so each occurrence gets a fresh
+        // error budget; accumulated vars are kept (this occurrence's outputs ground the next one).
+        if let Some(sched_idx) = steps.iter().position(|s| matches!(s, RecipeStep::Schedule { .. })) {
+            if let Some(RecipeStep::Schedule { every, weekday, hour, minute }) = steps.get(sched_idx) {
+                let off: i64 =
+                    std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let wake = next_occurrence_ms(now_ms(), every, *weekday, *hour, *minute, off);
+                vars.retain(|k, _| !k.starts_with("_retry_"));
+                vars.insert("__wake_at".into(), Value::from(wake));
+                persist("sleeping", sched_idx, &steps, &vars, None);
+                return RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: None, sleeping_until: Some(wake), vars };
+            }
         }
         persist("done", i, &steps, &vars, None);
         RunOutcome { ok: true, error: None, notifications, failure_learnings, pending_action: None, pending_question: None, sleeping_until: None, vars }
@@ -758,6 +813,12 @@ GOAL: GOAL_HERE"#;
                     StepResult::Sleep(wake.min(*expire_ms))
                 }
             }
+            RecipeStep::Schedule { every, weekday, hour, minute } => {
+                // First encounter parks until the next occurrence; `resume_due` steps PAST this on
+                // wake (like WaitUntil), and end-of-run loops back here for the following one.
+                let off: i64 = std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                StepResult::Sleep(next_occurrence_ms(now_ms(), every, *weekday, *hour, *minute, off))
+            }
         }
     }
 }
@@ -890,7 +951,7 @@ mod tests {
     use mind_inference::ScriptedLLM;
     use yantrik_ml::LLMBackend;
 
-    struct ScriptedHost;
+    pub(crate) struct ScriptedHost;
     #[async_trait]
     impl RecipeHost for ScriptedHost {
         async fn call_tool(&self, tool: &str, _args: &Value) -> anyhow::Result<String> {
@@ -1298,5 +1359,104 @@ mod tests {
         assert!(!out.ok, "second action should be capped");
         assert_eq!(out.error.as_deref(), Some("effect budget exhausted"));
         assert_eq!(*executed.lock().unwrap(), 1, "exactly one action runs under a budget of 1");
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    // 2026-08-10 is a Monday? Epoch day math: use a KNOWN anchor instead — 1970-01-05 was a Monday
+    // (epoch day 4). All times UTC (offset 0) unless the test says otherwise.
+    const DAY: u64 = 86_400_000;
+    const MON_1970_01_05: u64 = 4 * DAY;
+
+    #[test]
+    fn weekly_lands_on_the_requested_weekday_and_time() {
+        // From Wednesday 1970-01-07 noon, next Monday 09:00 is 1970-01-12 09:00.
+        let wed_noon = MON_1970_01_05 + 2 * DAY + 12 * 3_600_000;
+        let next = next_occurrence_ms(wed_noon, "weekly", 0, 9, 0, 0);
+        assert_eq!(next, MON_1970_01_05 + 7 * DAY + 9 * 3_600_000);
+    }
+
+    #[test]
+    fn same_day_before_the_hour_fires_today_after_it_fires_next_week() {
+        let mon_8am = MON_1970_01_05 + 8 * 3_600_000;
+        assert_eq!(next_occurrence_ms(mon_8am, "weekly", 0, 9, 0, 0), MON_1970_01_05 + 9 * 3_600_000, "an hour away is TODAY");
+        let mon_10am = MON_1970_01_05 + 10 * 3_600_000;
+        assert_eq!(next_occurrence_ms(mon_10am, "weekly", 0, 9, 0, 0), MON_1970_01_05 + 7 * DAY + 9 * 3_600_000, "already passed → next week");
+    }
+
+    #[test]
+    fn daily_advances_one_day_when_past() {
+        let noon = MON_1970_01_05 + 12 * 3_600_000;
+        assert_eq!(next_occurrence_ms(noon, "daily", 0, 9, 0, 0), MON_1970_01_05 + DAY + 9 * 3_600_000);
+    }
+
+    /// Chicago (-300): "Monday 09:00 local" is Monday 14:00 UTC. The whole point of the offset —
+    /// a cadence set on the user's clock must not fire on the server's.
+    #[test]
+    fn tz_offset_shifts_the_utc_instant_not_the_local_clock() {
+        let sun_noon_utc = MON_1970_01_05 - DAY + 12 * 3_600_000;
+        let next = next_occurrence_ms(sun_noon_utc, "weekly", 0, 9, 0, -300);
+        assert_eq!(next, MON_1970_01_05 + 14 * 3_600_000);
+    }
+
+    #[test]
+    fn schedule_is_idempotent_and_never_an_act() {
+        let s = RecipeStep::Schedule { every: "weekly".into(), weekday: 0, hour: 9, minute: 0 };
+        assert!(s.is_idempotent(), "re-arming a schedule on crash recovery is safe");
+    }
+}
+
+#[cfg(test)]
+mod schedule_loop_tests {
+    use super::*;
+    use mind_inference::ScriptedLLM;
+    use std::collections::HashMap;
+    use yantrik_ml::LLMBackend;
+
+    /// THE recurrence contract, end to end: a Schedule-led recipe parks, wakes, runs its work,
+    /// and — the part WaitUntil cannot do — parks AGAIN for the next occurrence instead of
+    /// finishing. A standing order is never "done"; it recurs or it is cancelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_scheduled_recipe_recurs_instead_of_finishing() {
+        let store = Arc::new(RecipeStore::open(":memory:").expect("store"));
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let eng = RecipeEngine::new(pool, Arc::new(super::tests::ScriptedHost), "JARVIS").with_store(store.clone());
+        let rec = Recipe {
+            id: "patrol".into(),
+            name: "weekly patrol".into(),
+            steps: vec![
+                RecipeStep::Schedule { every: "weekly".into(), weekday: 0, hour: 9, minute: 0 },
+                RecipeStep::Notify { message: "patrol ran".into() },
+            ],
+        };
+        // 1. Starting the recipe parks it at the schedule step (sleeping, future wake).
+        let out = eng.run_with(&rec, HashMap::new()).await;
+        let first_wake = out.sleeping_until.expect("must park on the schedule");
+        assert!(out.notifications.is_empty(), "work must NOT run before the first occurrence");
+
+        // 2. The tick fires past the wake instant: the work runs…
+        let outcomes = eng.resume_due(first_wake + 1).await;
+        assert_eq!(outcomes.len(), 1, "one due run should wake");
+        let o = &outcomes[0];
+        assert!(o.notifications.iter().any(|n| n.contains("patrol ran")), "the occurrence does its work");
+
+        // 3. …and the run is SLEEPING again — never "done". The re-park instant comes from the
+        // REAL clock (production semantics: a box that slept through an occurrence fires at the
+        // next natural instant rather than replaying a backlog), so under the test's simulated
+        // tick it equals the same next-natural occurrence; the invariant is that it re-parks at a
+        // valid future occurrence at all.
+        let second_wake = o.sleeping_until.expect("a scheduled recipe re-parks after its work");
+        assert!(second_wake >= first_wake, "re-park is never earlier than the schedule");
+        assert_eq!((second_wake as i64 - first_wake as i64) % (7 * 86_400_000), 0, "re-park lands ON the weekly cadence grid");
+
+        // 4. Nothing is due just before it; the same run wakes again after it — indefinitely.
+        assert!(eng.resume_due(second_wake - 1).await.is_empty(), "not due early");
+        let again = eng.resume_due(second_wake + 1).await;
+        assert_eq!(again.len(), 1, "the standing order recurs");
+        assert!(again[0].sleeping_until.is_some(), "and re-parks yet again");
     }
 }

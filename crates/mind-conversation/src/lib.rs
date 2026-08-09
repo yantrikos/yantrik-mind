@@ -4208,6 +4208,29 @@ impl ConversationEngine {
             "packets" if rest.trim() == "prune" => {
                 format!("🧹 Pruned {} terminal packet(s) from the store.", self.packets_prune().await)
             }
+            // Standing-order VISIBILITY: a scheduled run that exists only as a DB row is
+            // indistinguishable from one that was never registered. List + cancel.
+            "orders" => {
+                let Some(recipes) = &self.recipes else { return "(recipe engine unavailable)".to_string() };
+                if let Some(id) = rest.trim().strip_prefix("cancel ") {
+                    return if recipes.cancel_run(id.trim()) {
+                        format!("🗑 Standing order [{}] cancelled.", id.trim())
+                    } else {
+                        format!("No sleeping run named [{}] — `ym orders` lists them.", id.trim())
+                    };
+                }
+                let rows = recipes.list_sleeping();
+                if rows.is_empty() {
+                    return "No standing orders or sleeping delegations. `ym schedule weekly mon 09:00 :: <goal>` starts one.".to_string();
+                }
+                let now = chrono::Utc::now().timestamp_millis() as u64;
+                let mut out = String::from("📅 STANDING ORDERS & SLEEPING RUNS\n");
+                for (id, name, wake) in rows {
+                    let mins = wake.saturating_sub(now) / 60_000;
+                    out.push_str(&format!("\n[{id}] {name}\n    next: in {}h {}m · `ym orders cancel {id}`\n", mins / 60, mins % 60));
+                }
+                out
+            }
             // STANDING ORDER, deterministically: `ym schedule weekly mon 09:00 :: <goal>` (or
             // `daily 07:30 :: <goal>`). The LLM planner authors the work steps from the goal; the
             // cadence is parsed HERE, never left to the model — a misparsed weekday firing at the

@@ -1460,3 +1460,31 @@ mod schedule_loop_tests {
         assert!(again[0].sleeping_until.is_some(), "and re-parks yet again");
     }
 }
+
+impl RecipeEngine {
+    /// Every sleeping run: (id, name, wake_at_ms). The visibility half of standing orders — a
+    /// scheduled run that exists only as a DB row is indistinguishable from one never registered.
+    pub fn list_sleeping(&self) -> Vec<(String, String, u64)> {
+        let Some(store) = &self.store else { return Vec::new() };
+        store
+            .due_sleeping(u64::MAX)
+            .into_iter()
+            .map(|r| {
+                let wake = r.vars.get("__wake_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                (r.id, r.name, wake)
+            })
+            .collect()
+    }
+
+    /// Cancel a sleeping run by id. True if one was cancelled. Terminal status "cancelled" — the
+    /// tick never wakes it again, and the row remains as the audit record of the order having
+    /// existed.
+    pub fn cancel_run(&self, id: &str) -> bool {
+        let Some(store) = &self.store else { return false };
+        let exists = store.due_sleeping(u64::MAX).iter().any(|r| r.id == id);
+        if exists {
+            store.set_status(id, "cancelled", Some("cancelled by operator"), 0);
+        }
+        exists
+    }
+}

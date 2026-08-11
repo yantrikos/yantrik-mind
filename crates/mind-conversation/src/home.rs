@@ -6,7 +6,7 @@ pub struct HomeCapability;
 
 #[async_trait::async_trait]
 impl crate::plugins::CapabilityHandler for HomeCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "home"
     }
 

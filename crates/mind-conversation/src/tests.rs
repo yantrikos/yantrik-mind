@@ -2583,3 +2583,50 @@ async fn capability_registry_routes_finance_and_gates_disabled() {
     let back = conv.cli_dispatch("money", &ctx).await;
     assert!(back.contains("15.99"), "re-enabled plugin must dispatch again: {back}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pack_lifecycle_install_certify_demote_draft() {
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+    let ctx = mind_types::AccessContext::Operator;
+
+    // 1. INSTALL: a pack with an existence eval + a core-tool eval certifies and turns ON.
+    let good = r#"{"pack":"tripwatch","title":"Trip watcher","skills":[{"name":"fare check","summary":"check a fare","instructions":"Given a fare, say if it is a deal."}],"evals":[{"kind":"skill_exists","name":"fare check"},{"kind":"tool_contains","tool":"calc","args":{"expression":"2+2"},"expect":"4"}]}"#;
+    let receipt = conv.pack_install(good).await;
+    assert!(receipt.contains("certified") && receipt.contains("ON"), "good pack must certify: {receipt}");
+    let listing = conv.cli_dispatch("packs", &ctx).await;
+    assert!(listing.contains("tripwatch") && listing.contains("on "), "certified pack listed ON: {listing}");
+    // imported skills bank NAMESPACED — the foreign doc can't overwrite an existing bank entry
+    assert!(memarc.get_skill("tripwatch.fare check").await.unwrap().is_some(), "imported skill banks namespaced");
+
+    // 2. UNFALSIFIABLE / FAILING: a pack whose evals can't pass installs but stays OFF.
+    let bad = r#"{"pack":"vapor","title":"Vaporware","skills":[{"name":"x","instructions":"y"}],"evals":[{"kind":"skill_reliable","name":"x","min_runs":5,"min_rate":0.9}]}"#;
+    let receipt = conv.pack_install(bad).await;
+    assert!(receipt.contains("NOT certified"), "unearned reliability must fail: {receipt}");
+    let off = conv.run_agent_tool("vapor.x", &serde_json::json!({})).await;
+    assert!(off.contains("turned off"), "uncertified pack's tools must be gated: {off}");
+
+    // 3. COLLISION: a pack claiming a builtin's tool is refused outright.
+    let clash = r#"{"pack":"weather","title":"Fake weather","skills":[{"name":"a","instructions":"b"}],"evals":[{"kind":"skill_exists","name":"a"}]}"#;
+    let refused = conv.pack_install(clash).await;
+    assert!(refused.contains("refused") || refused.contains("builtin"), "builtin shadowing must be refused: {refused}");
+
+    // 4. DRAFT: a proven banked skill self-authors into a certified pack.
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    memarc
+        .save_skill(mind_types::Skill { name: "csv summer".into(), lang: "md".into(), code: "Sum the csv.".into(), summary: "sums csv numbers".into(), tags: vec![], status: "active".into(), runs: 0, successes: 0, created_ms: now })
+        .await
+        .unwrap();
+    memarc.record_skill_outcome("csv summer", true).await.unwrap();
+    let draft = conv.cli_dispatch("pack draft csv", &ctx).await;
+    assert!(draft.contains("self_authored") && draft.contains("certified"), "proven skill must draft into a certified pack: {draft}");
+
+    // 5. DEMOTION: quarantine-grade failure — break the reliability the draft's eval requires.
+    memarc.record_skill_outcome("csv summer", false).await.unwrap();
+    memarc.record_skill_outcome("csv summer", false).await.unwrap();
+    let recert = conv.pack_certify("csv_pack").await;
+    assert!(recert.contains("NOT certified"), "regressed reliability must demote: {recert}");
+    let listing = conv.cli_dispatch("packs", &ctx).await;
+    assert!(listing.contains("csv_pack") && listing.contains("OFF"), "demoted pack listed OFF: {listing}");
+}

@@ -37,6 +37,7 @@ mod members;
 mod news;
 mod onboarding;
 mod pace_ledger;
+pub mod pack;
 mod people;
 mod photo;
 mod plugins_mod;
@@ -2666,6 +2667,9 @@ pub struct ConversationEngine {
     plugins: Mutex<PluginRegistry>,
     /// Where to persist plugin-manifest changes (so `ym plugin disable X` survives a restart).
     plugins_path: Option<String>,
+    /// Installed capability packs + their certification state (see pack.rs).
+    packs: Mutex<Vec<pack::InstalledPack>>,
+    packs_path: Option<String>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -2770,6 +2774,8 @@ impl ConversationEngine {
             mcp: None,
             plugins: Mutex::new(PluginRegistry::builtin()),
             plugins_path: None,
+            packs: Mutex::new(Vec::new()),
+            packs_path: None,
             scan_mail: Vec::new(),
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -4970,6 +4976,20 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                     "Usage: ym as <person-slug> <message>  (e.g. ym as wife what's my birthday gift?)".to_string()
                 } else {
                     self.handle_turn_as(msg, TurnIdentity::new(slug, false)).await.unwrap_or_else(|e| format!("(error: {e})"))
+                }
+            }
+            "packs" => self.pack_list().await,
+            "pack" => {
+                let mut p = rest.splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                let parg = p.next().unwrap_or("").trim().to_string();
+                match action.as_str() {
+                    "install" | "add" if !parg.is_empty() => self.pack_install(&parg).await,
+                    "certify" | "evals" | "check" if !parg.is_empty() => self.pack_certify(&parg).await,
+                    "rm" | "remove" | "uninstall" if !parg.is_empty() => self.pack_rm(&parg).await,
+                    "draft" | "author" if !parg.is_empty() => self.pack_draft(&parg).await,
+                    "" | "list" | "ls" => self.pack_list().await,
+                    _ => "Usage: ym pack install <json> · ym pack certify <name> · ym pack draft <topic> · ym pack rm <name> · ym packs".to_string(),
                 }
             }
             "plugins" => self.plugins.lock().unwrap().render_list(),

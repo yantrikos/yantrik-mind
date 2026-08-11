@@ -708,7 +708,7 @@ pub struct FinanceCapability;
 
 #[async_trait::async_trait]
 impl crate::plugins::CapabilityHandler for FinanceCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "finance"
     }
 
@@ -745,7 +745,7 @@ pub struct PortfolioCapability;
 
 #[async_trait::async_trait]
 impl crate::plugins::CapabilityHandler for PortfolioCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "portfolio"
     }
 

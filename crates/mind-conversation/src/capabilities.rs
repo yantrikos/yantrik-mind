@@ -17,7 +17,7 @@ pub struct WebSearchCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for WebSearchCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "web_search"
     }
 
@@ -53,7 +53,7 @@ pub struct WebFetchCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for WebFetchCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "web_fetch"
     }
 
@@ -86,7 +86,7 @@ pub struct WeatherCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for WeatherCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "weather"
     }
 
@@ -113,7 +113,7 @@ pub struct WikipediaCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for WikipediaCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "wikipedia"
     }
 
@@ -140,7 +140,7 @@ pub struct CalculatorCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for CalculatorCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "calculator"
     }
 
@@ -164,7 +164,7 @@ pub struct MarketsCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for MarketsCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "markets"
     }
 
@@ -196,7 +196,7 @@ pub struct TranslateCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for TranslateCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "translate"
     }
 
@@ -233,7 +233,7 @@ pub struct GithubCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for GithubCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "github"
     }
 
@@ -277,7 +277,7 @@ pub struct ResearchCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for ResearchCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "research"
     }
 
@@ -327,7 +327,7 @@ pub struct CoderCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for CoderCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "coder"
     }
 
@@ -373,7 +373,7 @@ pub struct MonitorsCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for MonitorsCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "monitors"
     }
 
@@ -428,7 +428,7 @@ pub struct DashboardsCapability;
 
 #[async_trait::async_trait]
 impl CapabilityHandler for DashboardsCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "dashboards"
     }
 

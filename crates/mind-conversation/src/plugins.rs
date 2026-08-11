@@ -78,7 +78,7 @@ impl Provenance {
 #[async_trait]
 pub trait CapabilityHandler: Send + Sync {
     /// The PluginSpec id this handler implements.
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
     /// Does this capability serve `ym` commands at all? Tool-only capabilities return false so a
     /// shared alias word (e.g. coder's "code" vs the repo browser's `ym code`) never gets
     /// short-circuited by the disabled-plugin gate on the CLI path.
@@ -134,6 +134,32 @@ impl PluginSpec {
     fn matches(&self, name: &str) -> bool {
         let n = name.trim().to_lowercase();
         self.id == n || self.aliases.iter().any(|a| a == &n)
+    }
+
+    /// A dynamically-declared plugin (installed pack, imported capability) — same shape as a
+    /// builtin, but with caller-chosen provenance. Dynamic specs start DISABLED: certification
+    /// (their evals passing) is what turns them on.
+    pub fn dynamic(
+        id: &str,
+        title: &str,
+        category: &str,
+        security: SecurityLevel,
+        tools: &[String],
+        aliases: &[String],
+        catalog: &str,
+        provenance: Provenance,
+    ) -> Self {
+        Self {
+            id: id.trim().to_lowercase(),
+            title: title.into(),
+            category: category.into(),
+            security,
+            enabled: false,
+            tools: tools.to_vec(),
+            aliases: aliases.to_vec(),
+            catalog: catalog.into(),
+            provenance,
+        }
     }
 }
 
@@ -289,6 +315,50 @@ impl PluginRegistry {
     pub fn register_handler(&mut self, h: Arc<dyn CapabilityHandler>) {
         self.handlers.retain(|x| x.id() != h.id());
         self.handlers.push(h);
+    }
+
+    /// Register a DYNAMIC spec (installed pack). Refuses to shadow a builtin id, and refuses tool
+    /// names another plugin already owns — a pack must not silently capture builtin dispatch.
+    /// Replacing a previous dynamic spec with the same id is fine (reinstall/upgrade).
+    pub fn register_spec(&mut self, spec: PluginSpec) -> Result<(), String> {
+        if let Some(existing) = self.plugins.iter().find(|p| p.id == spec.id) {
+            if existing.provenance == Provenance::Builtin {
+                return Err(format!("'{}' is a builtin plugin — a pack can't replace it", spec.id));
+            }
+        }
+        for t in &spec.tools {
+            if let Some(owner) = self.plugin_for_tool(t) {
+                if owner.id != spec.id {
+                    return Err(format!("tool '{t}' already belongs to plugin '{}'", owner.id));
+                }
+            }
+        }
+        self.plugins.retain(|p| p.id != spec.id);
+        self.plugins.push(spec);
+        Ok(())
+    }
+
+    /// Remove a DYNAMIC spec + its handler. Builtins are untouchable.
+    pub fn remove_spec(&mut self, id: &str) -> Result<(), String> {
+        match self.plugins.iter().find(|p| p.id == id) {
+            None => Err(format!("no plugin '{id}'")),
+            Some(p) if p.provenance == Provenance::Builtin => Err(format!("'{id}' is builtin — it can't be removed")),
+            Some(_) => {
+                self.plugins.retain(|p| p.id != id);
+                self.handlers.retain(|h| h.id() != id);
+                Ok(())
+            }
+        }
+    }
+
+    /// The spec for an id, if present.
+    pub fn spec(&self, id: &str) -> Option<&PluginSpec> {
+        self.plugins.iter().find(|p| p.id == id)
+    }
+
+    /// All non-builtin specs (installed packs) — for listing + persistence.
+    pub fn dynamic_specs(&self) -> Vec<&PluginSpec> {
+        self.plugins.iter().filter(|p| p.provenance != Provenance::Builtin).collect()
     }
 
     /// Is this tool runnable? Core tools (owned by no plugin) are always on; a plugin-owned tool is

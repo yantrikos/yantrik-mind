@@ -282,7 +282,7 @@ pub struct NewsCapability;
 
 #[async_trait::async_trait]
 impl crate::plugins::CapabilityHandler for NewsCapability {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "news"
     }
 

@@ -168,7 +168,9 @@ impl PluginRegistry {
             PluginSpec::new("markets", "Market quotes", "Finance", ReadOnly, &["crypto", "coin", "stock", "ticker"], &["crypto", "coin", "stock", "ticker"],
                 "- crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)\n\
                  - stock {symbol}: a stock quote (US ticker, e.g. AAPL)"),
-            PluginSpec::new("portfolio", "Portfolio & analysis", "Finance", Personal, &["portfolio", "holdings", "my_stocks", "analyze", "analyze_stock", "stock_analysis", "add_holding", "track_holding"], &["portfolio", "holding", "holdings", "analyze"],
+            PluginSpec::new("portfolio", "Portfolio & analysis", "Finance", Personal,
+                &["portfolio", "holdings", "my_stocks", "analyze", "analyze_stock", "stock_analysis", "add_holding", "track_holding"],
+                &["portfolio", "holding", "holdings", "analyze", "stocks", "position", "analyse", "analysis"],
                 "- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation)\n\
                  - analyze {ticker}: a DEEP multi-source analysis of a stock/crypto (quote+profile+news+web → balanced briefing w/ risks). ANALYSIS, never a buy/sell tip\n\
                  - add_holding {ticker, shares, cost?}: record a position the user says they own"),
@@ -194,9 +196,13 @@ impl PluginRegistry {
             PluginSpec::new("monitors", "Monitors", "Utility", ReadOnly, &["set_monitor"], &["monitor"],
                 "- set_monitor {source, target, url?}: watch a source (github|web|inbox) + ping on a match"),
         ];
-        // Builtin handlers — dispatchable behavior paired to the specs above. Finance is the first
-        // domain routed through the registry instead of a hardcoded match arm.
-        let handlers: Vec<Arc<dyn CapabilityHandler>> = vec![Arc::new(crate::finance::FinanceCapability)];
+        // Builtin handlers — dispatchable behavior paired to the specs above. Domains leave the
+        // lib.rs match tables one at a time and land here.
+        let handlers: Vec<Arc<dyn CapabilityHandler>> = vec![
+            Arc::new(crate::finance::FinanceCapability),
+            Arc::new(crate::finance::PortfolioCapability),
+            Arc::new(crate::home::HomeCapability),
+        ];
         Self { plugins, handlers }
     }
 
@@ -369,5 +375,11 @@ mod tests {
         // disabling the plugin severs tool dispatch (commands are gated in cli_dispatch)
         r.set_enabled("finance", false);
         assert!(r.handler_for_tool("bills").is_none(), "disabled plugin must not dispatch");
+        // the other ported domains resolve too
+        assert!(r.handler_for_id("portfolio").is_some(), "portfolio handler must be registered");
+        assert_eq!(r.plugin_for_command("stocks").map(|p| p.id.clone()), Some("portfolio".into()));
+        assert!(r.handler_for_tool("add_holding").is_some(), "portfolio owns add_holding");
+        assert!(r.handler_for_id("home").is_some(), "home handler must be registered");
+        assert!(r.handler_for_tool("smart_home").is_some(), "home owns smart_home");
     }
 }

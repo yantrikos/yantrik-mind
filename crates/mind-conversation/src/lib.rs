@@ -29,6 +29,7 @@ mod code;
 mod festivals;
 mod finance;
 mod foresight;
+mod home;
 mod horizon;
 mod mail;
 mod members;
@@ -62,7 +63,7 @@ mod treasury;
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{render_home_digest, render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, MarketsClient, NewsClient, Sandbox, Translator, WeatherClient, WebSearch, WikiClient, WorkerPool};
+use mind_tools::{render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, MarketsClient, NewsClient, Sandbox, Translator, WeatherClient, WebSearch, WikiClient, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -3985,14 +3986,7 @@ impl ConversationEngine {
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // finance (money/subs/bills/budget/spent) now dispatches via the capability registry
             // above — see plugins::CapabilityHandler + finance::FinanceCapability.
-            // --- investing: portfolio tracking (live P&L) + deep multi-source analysis (not advice) ---
-            "portfolio" | "holdings" | "stocks" => self.portfolio_overview().await,
-            "holding" | "position" => {
-                let mut p = rest.trim().splitn(2, char::is_whitespace);
-                let action = p.next().unwrap_or("").to_lowercase();
-                self.holding_cmd(&action, p.next().unwrap_or("").trim()).await
-            }
-            "analyze" | "analyse" | "analysis" if !rest.is_empty() => self.analyze_ticker(&rest).await,
+            // investing (portfolio/holding/analyze) dispatches via the capability registry above.
             // --- tasks/reminders: list + complete (clears stale ones) ---
             "tasks" | "todos" | "todo" | "reminders" => {
                 let (reminders, internal) = self.split_tasks().await;
@@ -4020,7 +4014,7 @@ impl ConversationEngine {
                 Err(e) => format!("(error: {e})"),
             },
             // --- plugins/tools: each owns a namespace, present only when wired ---
-            "home" | "house" if self.home.is_some() => self.run_agent_tool("home", &serde_json::json!({})).await,
+            // "home"/"house" dispatch via the capability registry above (when configured).
             "github" | "gh" if self.github.is_some() => {
                 if rest.contains('/') {
                     self.run_agent_tool("github_repo_items", &serde_json::json!({ "repo": rest })).await
@@ -5897,13 +5891,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 Some(g) => match g.notifications(15).await { Ok(n) => mind_tools::render_github_digest(&n), Err(e) => format!("(error: {e})") },
                 None => "(github not configured)".to_string(),
             },
-            "home" | "home_status" | "house" | "smart_home" => match &self.home {
-                Some(h) => match h.states().await {
-                    Ok(ents) => render_home_digest(&ents),
-                    Err(e) => format!("(couldn't reach Home Assistant: {e})"),
-                },
-                None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
-            },
+            // home/home_status/house/smart_home tools dispatch via the capability registry above.
             // "money"/"subscriptions"/"finance" tools dispatch via the capability registry above.
             // NATIVE life/shopping tools — reachable from chat, not just the `ym` CLI.
             "deals" | "shop" | "shopping" | "find_deals" | "deal" => {
@@ -6121,20 +6109,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 Some(m) => match m.stock(&{ let t = s("symbol"); if t.is_empty() { s("ticker") } else { t } }).await { Ok(r) => r, Err(e) => format!("(stock: {e})") },
                 None => "(markets aren't configured)".to_string(),
             },
-            "portfolio" | "holdings" | "my_stocks" => self.portfolio_overview().await,
-            "analyze" | "analyze_stock" | "stock_analysis" => {
-                let t = { let a = s("ticker"); if a.is_empty() { s("symbol") } else { a } };
-                if t.is_empty() { "(which stock/crypto should I analyze? give a ticker)".to_string() } else { self.analyze_ticker(&t).await }
-            }
-            "add_holding" | "track_holding" => {
-                let ticker = s("ticker");
-                let shares = s("shares");
-                if ticker.is_empty() || shares.is_empty() {
-                    "(to track a holding I need a ticker + number of shares)".to_string()
-                } else {
-                    self.holding_add(format!("{ticker} {shares} {}", s("cost")).trim()).await
-                }
-            }
+            // portfolio/analyze/add_holding tools dispatch via the capability registry above.
             "translate" => match &self.translator {
                 Some(tr) => match tr.translate(&{ let l = s("to"); if l.is_empty() { s("language") } else { l } }, &s("text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
                 None => "(translator isn't configured)".to_string(),

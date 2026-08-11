@@ -738,3 +738,49 @@ impl crate::plugins::CapabilityHandler for FinanceCapability {
         })
     }
 }
+
+/// Investing as a dispatchable capability — portfolio tracking (live P&L) + deep multi-source
+/// ticker analysis (never advice). Same porting shape as finance: routing here, behavior above.
+pub struct PortfolioCapability;
+
+#[async_trait::async_trait]
+impl crate::plugins::CapabilityHandler for PortfolioCapability {
+    fn id(&self) -> &'static str {
+        "portfolio"
+    }
+
+    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, rest: &str) -> Option<String> {
+        Some(match cmd {
+            "portfolio" | "holdings" | "stocks" => host.portfolio_overview().await,
+            "holding" | "position" => {
+                let mut p = rest.trim().splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                host.holding_cmd(&action, p.next().unwrap_or("").trim()).await
+            }
+            // same guard the old arm had: a bare `ym analyze` falls through to the legacy help
+            "analyze" | "analyse" | "analysis" if !rest.is_empty() => host.analyze_ticker(rest).await,
+            _ => return None,
+        })
+    }
+
+    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, args: &serde_json::Value) -> Option<String> {
+        let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        Some(match tool {
+            "portfolio" | "holdings" | "my_stocks" => host.portfolio_overview().await,
+            "analyze" | "analyze_stock" | "stock_analysis" => {
+                let t = { let a = s("ticker"); if a.is_empty() { s("symbol") } else { a } };
+                if t.is_empty() { "(which stock/crypto should I analyze? give a ticker)".to_string() } else { host.analyze_ticker(&t).await }
+            }
+            "add_holding" | "track_holding" => {
+                let ticker = s("ticker");
+                let shares = s("shares");
+                if ticker.is_empty() || shares.is_empty() {
+                    "(to track a holding I need a ticker + number of shares)".to_string()
+                } else {
+                    host.holding_add(format!("{ticker} {shares} {}", s("cost")).trim()).await
+                }
+            }
+            _ => return None,
+        })
+    }
+}

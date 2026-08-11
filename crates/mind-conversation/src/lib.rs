@@ -49,7 +49,7 @@ mod handoff;
 mod knock;
 mod funnel;
 mod delegate;
-mod config_panel;
+pub mod config_panel;
 mod import_skill;
 mod privacy_audit;
 mod proactive;
@@ -6354,10 +6354,16 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
 
     /// THE AGENTIC LOOP — the mind AS an agent (mimicking Claude Code): reason → select ONE tool → act →
     /// observe → iterate → answer. Tools = primitives + the build_capability self-extension hook, so
-    /// "I can't" becomes "I didn't have that, so I built it." Bounded to MAX_STEPS. This is the PRIMARY
-    /// handler behind the two stateful interceptors (onboarding answer-capture + pending confirmation).
+    /// "I can't" becomes "I didn't have that, so I built it." This is the PRIMARY handler behind the
+    /// two stateful interceptors (onboarding answer-capture + pending confirmation).
+    ///
+    /// The iteration cap is CONFIGURED (`YM_MAX_STEPS`), not a constant — it was 5 for every turn
+    /// regardless of whether the question was "what time is it" or "audit this repository", and five
+    /// is a strange number to have chosen for both. Clamped in `mind_spec::Budget`, which also stops
+    /// a raised step limit from being silently overridden by an unchanged model-call ceiling.
     async fn agent_loop(&self, user_text: &str, id: &TurnIdentity) -> Result<String> {
-        const MAX_STEPS: usize = 5;
+        let budget = crate::config_panel::agent_budget();
+        let max_steps = budget.max_steps as usize;
         emit_progress("grounding from memory…");
         self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
         // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
@@ -6523,12 +6529,12 @@ Open reminders you're carrying for them:");
         // reasoner (think:true routes there). Sticky for the turn — a request hard enough to trip the
         // small model once will likely need the capable one for the remaining steps too.
         let mut escalated = false;
-        for step in 0..MAX_STEPS {
+        for step in 0..max_steps {
             emit_progress(if step == 0 { "thinking…" } else { "thinking (continuing)…" });
             // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
             // steps remain either loops or gets truncated mid-thought. Surfacing "N left" makes it
-            // commit to an answer before the hard cutoff. `MAX_STEPS - step` counts THIS step.
-            let steps_left = MAX_STEPS - step;
+            // commit to an answer before the hard cutoff. `max_steps - step` counts THIS step.
+            let steps_left = max_steps - step;
             let budget_note = if steps_left <= 1 {
                 "This is your LAST step — you MUST give the final answer now (no more tools).".to_string()
             } else {

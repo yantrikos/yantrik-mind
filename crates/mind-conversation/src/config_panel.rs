@@ -27,6 +27,44 @@ pub(crate) struct Setting {
     pub restart: bool,
 }
 
+/// A positive integer setting, or None when unset/blank/garbage.
+///
+/// A malformed value is treated as absent rather than as zero. `YM_MAX_STEPS=five` should leave the
+/// default in place, not silently configure a mind that cannot take a single step.
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok()?.trim().parse::<u32>().ok().filter(|n| *n > 0)
+}
+
+fn env_f64(key: &str) -> Option<f64> {
+    std::env::var(key).ok()?.trim().parse::<f64>().ok()
+}
+
+/// The budget for one INTERACTIVE turn, from config.
+///
+/// This is the "max iteration count" setting made real: the loop's cap comes from here, so changing
+/// `YM_MAX_STEPS` changes behaviour. Clamping lives in `mind_spec::Budget` — this layer only reads.
+pub fn agent_budget() -> mind_spec::Budget {
+    // The interactive default is 5 to match what the loop has always done, so turning the setting on
+    // is an explicit choice rather than a silent change in how hard the mind works.
+    let base = mind_spec::Budget { max_steps: 5, max_model_calls: 5, ..mind_spec::Budget::interactive() };
+    base.with_overrides(
+        env_u32("YM_MAX_STEPS"),
+        env_u32("YM_MAX_MODEL_CALLS"),
+        env_u32("YM_MAX_WALL_SECS").map(|s| s as u64 * 1000),
+        env_f64("YM_MAX_USD"),
+    )
+}
+
+/// The budget for DELEGATED or SCHEDULED work, where nobody is waiting on the answer.
+pub fn background_budget() -> mind_spec::Budget {
+    mind_spec::Budget::background().with_overrides(
+        env_u32("YM_BG_MAX_STEPS"),
+        env_u32("YM_MAX_MODEL_CALLS"),
+        None,
+        env_f64("YM_MAX_USD"),
+    )
+}
+
 pub(crate) const SCHEMA: &[Setting] = &[
     // ── Brain ────────────────────────────────────────────────────────────
     Setting { key: "YM_MODEL", label: "Cloud model", group: "Brain", kind: "string", desc: "Model id for the cloud provider lane.", restart: true },
@@ -44,6 +82,14 @@ pub(crate) const SCHEMA: &[Setting] = &[
     Setting { key: "YM_MAILSWEEP_SECS", label: "Mail sweep (s)", group: "Rhythm", kind: "int", desc: "Personal-inbox scan period (default daily).", restart: true },
     Setting { key: "YM_TWITCH_DEBOUNCE_SECS", label: "Twitch debounce (s)", group: "Rhythm", kind: "int", desc: "Minimum gap between fast-twitch evaluations in an event storm (default 5).", restart: true },
     Setting { key: "YM_ESCROW_STALE_DAYS", label: "Escrow expiry (d)", group: "Rhythm", kind: "int", desc: "Held interruptions older than this are dropped (default 14).", restart: true },
+    // ── Agent loop ───────────────────────────────────────────────────────
+    // How hard the mind is allowed to work on one thing. These bind: `agent_budget()` reads them,
+    // and the loop's iteration cap comes from that rather than from a constant.
+    Setting { key: "YM_MAX_STEPS", label: "Max iterations", group: "Agent loop", kind: "int", desc: "Tool steps one interactive turn may take before it must answer (default 5, allowed 2–200). Higher = more thorough and slower.", restart: true },
+    Setting { key: "YM_MAX_MODEL_CALLS", label: "Max reasoning calls", group: "Agent loop", kind: "int", desc: "Model calls per turn — the cost that actually matters. Capped at the iteration limit, since a step is what makes a call.", restart: true },
+    Setting { key: "YM_MAX_WALL_SECS", label: "Turn time limit (s)", group: "Agent loop", kind: "int", desc: "Wall-clock ceiling for one turn (default 90). Reached = answer with what it has, and say so.", restart: true },
+    Setting { key: "YM_MAX_USD", label: "Spend per turn ($)", group: "Agent loop", kind: "string", desc: "Optional cost ceiling for one turn. Empty or 0 = ungoverned.", restart: true },
+    Setting { key: "YM_BG_MAX_STEPS", label: "Max iterations (delegated)", group: "Agent loop", kind: "int", desc: "Iteration cap for delegated/scheduled work, where nobody is waiting (default 40). Depth is worth more here.", restart: true },
     // ── Switches ─────────────────────────────────────────────────────────
     Setting { key: "YM_PROACTIVE", label: "Proactive layer", group: "Switches", kind: "toggle", desc: "Digests, asks, patterns — the unprompted voice.", restart: true },
     Setting { key: "YM_KNOCK", label: "Calibrated knock", group: "Switches", kind: "toggle", desc: "Prepared-work interruptions with a confidence band.", restart: true },
@@ -142,6 +188,48 @@ mod tests {
         for s in SCHEMA {
             assert!(haystack.contains(s.key), "schema key {} is read nowhere in crates/ or deploy/ — dead form field", s.key);
         }
+    }
+
+    /// The setting must actually move the loop's cap, and its default must be what the loop always
+    /// did — so turning it on is a deliberate change rather than a silent one.
+    ///
+    /// Uses a key no other test touches, and restores it, because env is process-global.
+    #[test]
+    fn the_iteration_setting_binds_and_defaults_to_the_historical_five() {
+        let prev = std::env::var("YM_MAX_STEPS").ok();
+        std::env::remove_var("YM_MAX_STEPS");
+        let default = agent_budget();
+        assert_eq!(default.max_steps, 5, "unset must mean the 5 the loop has always used");
+        assert_eq!(default.max_model_calls, 5);
+
+        std::env::set_var("YM_MAX_STEPS", "18");
+        let raised = agent_budget();
+        assert_eq!(raised.max_steps, 18);
+        assert_eq!(raised.max_model_calls, 18, "the reasoning ceiling must rise too or nothing changes");
+
+        // Garbage leaves the default in place rather than configuring a mind that cannot move.
+        std::env::set_var("YM_MAX_STEPS", "five");
+        assert_eq!(agent_budget().max_steps, 5, "an unparseable value is absent, not zero");
+        std::env::set_var("YM_MAX_STEPS", "0");
+        assert_eq!(agent_budget().max_steps, 5, "zero is absent too \u{2014} a 0-step mind is not a configuration");
+
+        // Absurd is clamped, and reported rather than silently ignored.
+        std::env::set_var("YM_MAX_STEPS", "99999");
+        let clamped = agent_budget();
+        assert_eq!(clamped.max_steps, mind_spec::goal::MAX_STEPS_CEILING);
+        assert!(clamped.clamp_note(Some(99999)).is_some());
+
+        match prev {
+            Some(v) => std::env::set_var("YM_MAX_STEPS", v),
+            None => std::env::remove_var("YM_MAX_STEPS"),
+        }
+    }
+
+    /// Delegated work gets its own, larger cap: nobody is waiting, so depth is worth more.
+    #[test]
+    fn delegated_work_has_a_separate_larger_cap() {
+        assert!(background_budget().max_steps > 5, "delegated runs should not be held to an interactive cap");
+        assert!(background_budget().max_wall_ms > agent_budget().max_wall_ms);
     }
 
     #[test]

@@ -307,6 +307,15 @@ pub struct Budget {
     pub max_usd: Option<f64>,
 }
 
+/// Bounds on what an operator may configure.
+///
+/// A ceiling because an unbounded step count is a runaway loop with a config blessing, and a floor
+/// because a one-step budget cannot complete any goal that needs a tool — it would look like the
+/// mind had become useless rather than like a setting being wrong.
+pub const MIN_STEPS: u32 = 2;
+pub const MAX_STEPS_CEILING: u32 = 200;
+pub const MAX_WALL_MS_CEILING: u64 = 2 * 60 * 60 * 1000;
+
 impl Budget {
     /// An interactive turn: the user is waiting, so keep it tight.
     pub fn interactive() -> Self {
@@ -315,6 +324,56 @@ impl Budget {
     /// A delegated or scheduled run: nobody is watching the clock, so depth is worth more.
     pub fn background() -> Self {
         Self { max_steps: 40, max_model_calls: 24, max_wall_ms: 20 * 60_000, max_usd: None }
+    }
+
+    /// Apply operator overrides, clamped.
+    ///
+    /// Takes `Option`s rather than reading the environment itself: this crate stays a pure function
+    /// of its inputs, so the wiring layer owns config and a test can construct any budget directly.
+    ///
+    /// Clamping is silent on purpose at this layer — it returns a valid budget rather than an error,
+    /// because a mistyped setting must not stop the mind from answering. The caller reports what it
+    /// adjusted (see `clamp_note`).
+    pub fn with_overrides(
+        mut self,
+        max_steps: Option<u32>,
+        max_model_calls: Option<u32>,
+        max_wall_ms: Option<u64>,
+        max_usd: Option<f64>,
+    ) -> Self {
+        if let Some(s) = max_steps {
+            self.max_steps = s.clamp(MIN_STEPS, MAX_STEPS_CEILING);
+        }
+        match max_model_calls {
+            // Model calls cannot exceed steps: a step is what makes a call, so a higher figure is
+            // not a bigger budget, it is a number that can never bind.
+            Some(m) => self.max_model_calls = m.clamp(1, self.max_steps),
+            // No explicit call budget: track the step budget.
+            //
+            // This is the whole reason the two are coupled here. Nearly every step makes a model
+            // call, so raising the iteration limit to 20 while leaving the call ceiling at 5 means
+            // the call ceiling binds first and the new setting does nothing — the operator changes
+            // the number, restarts, and sees no difference. My first version only ever LOWERED the
+            // ceiling here, which had exactly that effect; the test that was supposed to catch it
+            // asserted `calls <= steps`, which a stuck 5 satisfies.
+            None => self.max_model_calls = self.max_steps,
+        }
+        if let Some(w) = max_wall_ms {
+            self.max_wall_ms = w.clamp(5_000, MAX_WALL_MS_CEILING);
+        }
+        if let Some(u) = max_usd {
+            self.max_usd = (u > 0.0).then_some(u);
+        }
+        self
+    }
+
+    /// What was adjusted, for the operator. `None` when the request was honoured exactly — so a
+    /// clamped setting is visible rather than mysteriously ignored.
+    pub fn clamp_note(&self, requested_steps: Option<u32>) -> Option<String> {
+        let r = requested_steps?;
+        (r != self.max_steps).then(|| {
+            format!("step limit {r} was adjusted to {} (allowed {MIN_STEPS}\u{2013}{MAX_STEPS_CEILING})", self.max_steps)
+        })
     }
 }
 
@@ -482,5 +541,58 @@ mod tests {
         assert!(Budget::interactive().max_steps < Budget::background().max_steps);
         assert!(Budget::interactive().max_wall_ms < Budget::background().max_wall_ms);
         assert!(Budget::interactive().max_usd.is_none(), "an absent ceiling is None, not a fake number");
+    }
+
+    #[test]
+    fn an_operator_can_raise_the_step_limit() {
+        let b = Budget::interactive().with_overrides(Some(20), None, None, None);
+        assert_eq!(b.max_steps, 20);
+        assert!(b.clamp_note(Some(20)).is_none(), "an honoured setting needs no note");
+    }
+
+    /// A nonsense setting must not stop the mind answering, and must not be silently ignored either.
+    #[test]
+    fn an_absurd_step_limit_is_clamped_and_reported() {
+        let b = Budget::interactive().with_overrides(Some(100_000), None, None, None);
+        assert_eq!(b.max_steps, MAX_STEPS_CEILING, "an unbounded loop is not a valid configuration");
+        let note = b.clamp_note(Some(100_000)).expect("a clamped setting must be reported");
+        assert!(note.contains("100000") && note.contains("200"), "{note}");
+
+        // And the floor: one step cannot complete any goal needing a tool, so it would look like the
+        // mind had broken rather than like a setting being wrong.
+        let low = Budget::interactive().with_overrides(Some(0), None, None, None);
+        assert_eq!(low.max_steps, MIN_STEPS);
+    }
+
+    /// The trap this guards: nearly every step makes a model call, so raising the iteration limit
+    /// while the call ceiling stays put means the call ceiling binds first and the setting does
+    /// nothing visible.
+    ///
+    /// Asserted as EQUALITY, not `<=`. The first version of this test used `<=`, which a call ceiling
+    /// stuck at its old value satisfies perfectly — so it passed while the setting was broken.
+    #[test]
+    fn raising_the_iteration_limit_actually_raises_what_binds() {
+        let b = Budget { max_steps: 5, max_model_calls: 5, ..Budget::interactive() }
+            .with_overrides(Some(30), None, None, None);
+        assert_eq!(b.max_steps, 30);
+        assert_eq!(b.max_model_calls, 30, "an unraised call ceiling would silently cap the run at 5");
+
+        // An explicit call budget is respected, and is what binds when it is the lower of the two.
+        let explicit = Budget::interactive().with_overrides(Some(30), Some(4), None, None);
+        assert_eq!(explicit.max_steps, 30);
+        assert_eq!(explicit.max_model_calls, 4, "an explicit call budget is the operator's choice");
+
+        // Lowering steps pulls the ceiling down with it: a call ceiling above the step ceiling can
+        // never bind, so it is not a bigger budget, just a misleading number.
+        let tight = Budget::background().with_overrides(Some(3), None, None, None);
+        assert_eq!((tight.max_steps, tight.max_model_calls), (3, 3));
+    }
+
+    #[test]
+    fn a_zero_spend_ceiling_means_ungoverned_not_zero_dollars() {
+        let b = Budget::interactive().with_overrides(None, None, None, Some(0.0));
+        assert!(b.max_usd.is_none(), "0 is how an operator clears a limit, not a $0 budget");
+        let set = Budget::interactive().with_overrides(None, None, None, Some(2.5));
+        assert_eq!(set.max_usd, Some(2.5));
     }
 }

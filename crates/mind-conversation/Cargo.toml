@@ -8,6 +8,7 @@ mind-types = { workspace = true }
 mind-inference = { workspace = true }
 mind-tools = { workspace = true }
 mind-recipes = { workspace = true }
+mind-spec = { workspace = true }
 mind-agents = { workspace = true }
 mind-governance = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false }

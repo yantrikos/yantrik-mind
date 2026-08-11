@@ -699,3 +699,42 @@ impl super::ConversationEngine {
     }
 
 }
+
+/// Finance as a DISPATCHABLE capability: the registry-owned surface for the `ym` money/subs/bills/
+/// budget commands and the finance agent tools. Pure routing — behavior stays in the engine
+/// methods above. This struct is the shape a pack's manifest entry will eventually compile to:
+/// (spec in the registry) + (a handler like this) + (provenance).
+pub struct FinanceCapability;
+
+#[async_trait::async_trait]
+impl crate::plugins::CapabilityHandler for FinanceCapability {
+    fn id(&self) -> &'static str {
+        "finance"
+    }
+
+    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, rest: &str) -> Option<String> {
+        Some(match cmd {
+            "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => host.finance_cmd(cmd, rest).await,
+            "discover" | "scan" => host.discover_subscriptions().await,
+            "bills" => host.bill_cmd("list", "").await,
+            "bill" => {
+                let mut p = rest.trim().splitn(2, char::is_whitespace);
+                let action = p.next().unwrap_or("").to_lowercase();
+                host.bill_cmd(&action, p.next().unwrap_or("").trim()).await
+            }
+            "budget" | "budgets" => host.budget_set(rest).await,
+            "spent" | "spend" | "expense" => host.expense_log(rest).await,
+            _ => return None,
+        })
+    }
+
+    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, _args: &serde_json::Value) -> Option<String> {
+        Some(match tool {
+            "money" | "subscriptions" | "finance" => host.money_overview().await,
+            "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => host.discover_subscriptions().await,
+            "bills" => host.bills_list().await,
+            "budget" | "budget_overview" => host.budget_overview().await,
+            _ => return None,
+        })
+    }
+}

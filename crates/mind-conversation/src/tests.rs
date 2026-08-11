@@ -2556,3 +2556,30 @@ async fn prune_clears_old_corpses_but_keeps_live_work() {
     assert_eq!(left.len(), 2);
     assert!(left.iter().any(|p| p["id"] == "fresh") && left.iter().any(|p| p["id"] == "recent"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capability_registry_routes_finance_and_gates_disabled() {
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+    let ctx = mind_types::AccessContext::Operator;
+    // the ym command surface routes through the registry into the same finance behavior
+    conv.cli_dispatch("sub add Netflix 15.99 monthly", &ctx).await;
+    let money = conv.cli_dispatch("money", &ctx).await;
+    assert!(money.contains("15.99"), "registry-dispatched money overview: {money}");
+    let subs = conv.cli_dispatch("subs", &ctx).await;
+    assert!(subs.contains("Netflix"), "registry-dispatched subs list: {subs}");
+    // the agent-tool surface routes through the registry too
+    let tool = conv.run_agent_tool("money", &serde_json::json!({})).await;
+    assert!(tool.contains("15.99"), "registry-dispatched money tool: {tool}");
+    // disabling the plugin now turns off the COMMAND surface, matching the tool gate's message
+    conv.cli_dispatch("plugin disable finance", &ctx).await;
+    let off = conv.cli_dispatch("money", &ctx).await;
+    assert!(off.contains("turned off"), "disabled plugin must gate its commands: {off}");
+    let tool_off = conv.run_agent_tool("money", &serde_json::json!({})).await;
+    assert!(tool_off.contains("turned off"), "disabled plugin must gate its tools: {tool_off}");
+    // re-enable restores dispatch
+    conv.cli_dispatch("plugin enable finance", &ctx).await;
+    let back = conv.cli_dispatch("money", &ctx).await;
+    assert!(back.contains("15.99"), "re-enabled plugin must dispatch again: {back}");
+}

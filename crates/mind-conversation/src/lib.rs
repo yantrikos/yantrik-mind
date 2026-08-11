@@ -14,7 +14,7 @@ use std::{io::Write, path::Path};
 use serde::{Deserialize, Serialize};
 
 pub mod plugins;
-pub use plugins::{PluginRegistry, PluginSpec, SecurityLevel};
+pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, SecurityLevel};
 mod book;
 mod briefing;
 mod calendar;
@@ -3936,6 +3936,27 @@ impl ConversationEngine {
         let mut it = line.splitn(2, char::is_whitespace);
         let cmd = it.next().unwrap_or("").to_lowercase();
         let rest = it.next().unwrap_or("").trim().to_string();
+        // Capability dispatch — a command owned by a plugin with a registered handler routes
+        // through the registry, so enable/disable actually governs the COMMAND surface too (a
+        // disabled plugin's commands answer with the same off-message its tools already do).
+        // Domains leave the giant match below one at a time through this seam; finance is first.
+        let routed = {
+            let reg = self.plugins.lock().unwrap();
+            match reg.plugin_for_command(&cmd) {
+                Some(p) if !p.enabled && reg.handler_for_id(&p.id).is_some() => Err(p.id.clone()),
+                Some(p) => Ok(reg.handler_for_id(&p.id)),
+                None => Ok(None),
+            }
+        };
+        match routed {
+            Err(id) => return format!("(the {id} plugin is turned off — `ym plugin enable {id}` to use it)"),
+            Ok(Some(cap)) => {
+                if let Some(out) = cap.handle_command(self, &cmd, &rest).await {
+                    return out;
+                }
+            }
+            Ok(None) => {}
+        }
         match cmd.as_str() {
             "" => "ym — say something, or `ym commands` to see the plugins you have.".to_string(),
             "commands" | "cmds" | "?" => self.cli_commands(),
@@ -3962,17 +3983,8 @@ impl ConversationEngine {
             }
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
-            // --- finance plugin: subscriptions + money overview (no bank data needed) ---
-            "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => self.finance_cmd(&cmd, &rest).await,
-            "discover" | "scan" => self.discover_subscriptions().await,
-            "bills" => self.bill_cmd("list", "").await,
-            "bill" => {
-                let mut p = rest.trim().splitn(2, char::is_whitespace);
-                let action = p.next().unwrap_or("").to_lowercase();
-                self.bill_cmd(&action, p.next().unwrap_or("").trim()).await
-            }
-            "budget" | "budgets" => self.budget_set(&rest).await,
-            "spent" | "spend" | "expense" => self.expense_log(&rest).await,
+            // finance (money/subs/bills/budget/spent) now dispatches via the capability registry
+            // above — see plugins::CapabilityHandler + finance::FinanceCapability.
             // --- investing: portfolio tracking (live P&L) + deep multi-source analysis (not advice) ---
             "portfolio" | "holdings" | "stocks" => self.portfolio_overview().await,
             "holding" | "position" => {
@@ -5790,6 +5802,14 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 }
             }
         }
+        // Capability dispatch — a tool owned by a plugin with a registered handler routes through
+        // the registry (the disabled-plugin gate + egress mediation above have already run).
+        let cap = { self.plugins.lock().unwrap().handler_for_tool(tool) };
+        if let Some(cap) = cap {
+            if let Some(out) = cap.handle_tool(self, tool, args).await {
+                return out;
+            }
+        }
         match tool {
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
             // READ-ISOLATED: the recall tool sees only what THIS speaker may (so the agent can't read
@@ -5884,7 +5904,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 },
                 None => "(smart home not configured — set YM_HA_URL + YM_HA_TOKEN)".to_string(),
             },
-            "money" | "subscriptions" | "finance" => self.money_overview().await,
+            // "money"/"subscriptions"/"finance" tools dispatch via the capability registry above.
             // NATIVE life/shopping tools — reachable from chat, not just the `ym` CLI.
             "deals" | "shop" | "shopping" | "find_deals" | "deal" => {
                 let q = { let a = s("query"); if !a.is_empty() { a } else { let b = s("item"); if !b.is_empty() { b } else { s("text") } } };
@@ -6119,9 +6139,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 Some(tr) => match tr.translate(&{ let l = s("to"); if l.is_empty() { s("language") } else { l } }, &s("text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
                 None => "(translator isn't configured)".to_string(),
             },
-            "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => self.discover_subscriptions().await,
-            "bills" => self.bills_list().await,
-            "budget" | "budget_overview" => self.budget_overview().await,
+            // discover_subscriptions/bills/budget tools dispatch via the capability registry above.
             "web_fetch" => match &self.web {
                 Some(w) => {
                     // A weak model often passes a messy url ("https://x.com and tell me…"); extract the

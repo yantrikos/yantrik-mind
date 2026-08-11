@@ -7,7 +7,12 @@
 //! from JSON). What the manifest controls is registration/enable/security/presentation. For a
 //! genuinely-new capability with no code at all, add an MCP server — which is itself a manifest.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use serde_json::{json, Value};
+
+use crate::ConversationEngine;
 
 /// How risky a plugin is — drives presentation and (for writes) gating.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +50,41 @@ impl SecurityLevel {
     }
 }
 
+/// Where a capability's behavior came from — the seed of pack provenance. Builtin = compiled into
+/// this crate; Imported = brought in from a document/manifest (SKILL.md, MCP); SelfAuthored = the
+/// mind wrote it for itself. Only Builtin ships today; this field is the hook the pack ladder
+/// hangs promotion + certification on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provenance {
+    Builtin,
+    Imported,
+    SelfAuthored,
+}
+
+impl Provenance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Imported => "imported",
+            Self::SelfAuthored => "self_authored",
+        }
+    }
+}
+
+/// The BEHAVIOR half of a plugin. PluginSpec DECLARES a capability (identity, security, enabled,
+/// catalog); a CapabilityHandler IMPLEMENTS it, and the registry — not a hardcoded match arm —
+/// routes to it. A handler returns None for a name it doesn't own, which falls through to the
+/// legacy match in lib.rs: the strangler seam that lets domains leave that match one at a time.
+#[async_trait]
+pub trait CapabilityHandler: Send + Sync {
+    /// The PluginSpec id this handler implements.
+    fn id(&self) -> &'static str;
+    /// Answer a `ym` command word this plugin's aliases own. None = not mine, fall through.
+    async fn handle_command(&self, host: &ConversationEngine, cmd: &str, rest: &str) -> Option<String>;
+    /// Answer a run_agent_tool name this plugin's tools own. None = not mine, fall through.
+    async fn handle_tool(&self, host: &ConversationEngine, tool: &str, args: &Value) -> Option<String>;
+}
+
 /// One declared plugin.
 #[derive(Clone, Debug)]
 pub struct PluginSpec {
@@ -59,6 +99,8 @@ pub struct PluginSpec {
     pub aliases: Vec<String>,
     /// The catalog line(s) shown to the agent when the plugin is enabled.
     pub catalog: String,
+    /// Where this capability's behavior came from (builtin / imported / self-authored).
+    pub provenance: Provenance,
 }
 
 impl PluginSpec {
@@ -80,6 +122,7 @@ impl PluginSpec {
             tools: tools.iter().map(|s| s.to_string()).collect(),
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
             catalog: catalog.into(),
+            provenance: Provenance::Builtin,
         }
     }
     fn matches(&self, name: &str) -> bool {
@@ -88,9 +131,11 @@ impl PluginSpec {
     }
 }
 
-/// The single source of truth for which capabilities exist, are on, and how risky they are.
+/// The single source of truth for which capabilities exist, are on, and how risky they are —
+/// and, for plugins with a registered CapabilityHandler, HOW they dispatch.
 pub struct PluginRegistry {
     plugins: Vec<PluginSpec>,
+    handlers: Vec<Arc<dyn CapabilityHandler>>,
 }
 
 impl Default for PluginRegistry {
@@ -127,7 +172,9 @@ impl PluginRegistry {
                 "- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation)\n\
                  - analyze {ticker}: a DEEP multi-source analysis of a stock/crypto (quote+profile+news+web → balanced briefing w/ risks). ANALYSIS, never a buy/sell tip\n\
                  - add_holding {ticker, shares, cost?}: record a position the user says they own"),
-            PluginSpec::new("finance", "Finance (subs/bills/budget)", "Finance", Personal, &["money", "subscriptions", "finance", "discover_subscriptions", "find_subscriptions", "bills", "budget", "budget_overview"], &["money", "finance", "subs", "sub", "bills", "bill", "budget", "spent", "discover"],
+            PluginSpec::new("finance", "Finance (subs/bills/budget)", "Finance", Personal,
+                &["money", "subscriptions", "finance", "discover_subscriptions", "find_subscriptions", "scan_email_subscriptions", "bills", "budget", "budget_overview"],
+                &["money", "finance", "subs", "sub", "subscriptions", "subscription", "bills", "bill", "budget", "budgets", "spent", "spend", "expense", "discover", "scan"],
                 "- money {}: the user's finances overview — subscriptions + monthly total\n\
                  - bills {}: tracked recurring bills + when they're due\n\
                  - budget {}: budget vs spend this month, by category\n\
@@ -147,7 +194,10 @@ impl PluginRegistry {
             PluginSpec::new("monitors", "Monitors", "Utility", ReadOnly, &["set_monitor"], &["monitor"],
                 "- set_monitor {source, target, url?}: watch a source (github|web|inbox) + ping on a match"),
         ];
-        Self { plugins }
+        // Builtin handlers — dispatchable behavior paired to the specs above. Finance is the first
+        // domain routed through the registry instead of a hardcoded match arm.
+        let handlers: Vec<Arc<dyn CapabilityHandler>> = vec![Arc::new(crate::finance::FinanceCapability)];
+        Self { plugins, handlers }
     }
 
     /// Overlay a JSON manifest: `{ "plugins": { "<id>": { "enabled": bool, "security": "..." } } }`.
@@ -190,6 +240,32 @@ impl PluginRegistry {
         self.plugins.iter().find(|p| p.tools.iter().any(|t| t == tool))
     }
 
+    /// The plugin (enabled or not) whose id/aliases own a `ym` command word, if any.
+    pub fn plugin_for_command(&self, cmd: &str) -> Option<&PluginSpec> {
+        self.plugins.iter().find(|p| p.matches(cmd))
+    }
+
+    /// The registered handler for a plugin id, if one exists.
+    pub fn handler_for_id(&self, id: &str) -> Option<Arc<dyn CapabilityHandler>> {
+        self.handlers.iter().find(|h| h.id() == id).cloned()
+    }
+
+    /// The handler for a run_agent_tool name — only if the owning plugin is ENABLED.
+    pub fn handler_for_tool(&self, tool: &str) -> Option<Arc<dyn CapabilityHandler>> {
+        let p = self.plugin_for_tool(tool)?;
+        if !p.enabled {
+            return None;
+        }
+        self.handler_for_id(&p.id)
+    }
+
+    /// Register (or replace) a capability handler — the door imported/self-authored capabilities
+    /// enter by. Pair with a PluginSpec entry so enable/security governance covers the new arrival.
+    pub fn register_handler(&mut self, h: Arc<dyn CapabilityHandler>) {
+        self.handlers.retain(|x| x.id() != h.id());
+        self.handlers.push(h);
+    }
+
     /// Is this tool runnable? Core tools (owned by no plugin) are always on; a plugin-owned tool is
     /// on only if its plugin is enabled.
     pub fn is_tool_enabled(&self, tool: &str) -> bool {
@@ -222,7 +298,11 @@ impl PluginRegistry {
             out.push_str(&format!("\n{cat}\n"));
             for p in self.plugins.iter().filter(|p| p.category == cat) {
                 let state = if p.enabled { "on " } else { "OFF" };
-                out.push_str(&format!("  [{state}] {:<12} {}  — {}\n", p.id, p.security.badge(), p.title));
+                let prov = match p.provenance {
+                    Provenance::Builtin => String::new(),
+                    other => format!(" · {}", other.as_str()),
+                };
+                out.push_str(&format!("  [{state}] {:<12} {}  — {}{}\n", p.id, p.security.badge(), p.title, prov));
             }
         }
         out.push_str("\nNew capability with zero code → add an MCP server (`ym mcp list`).");
@@ -275,5 +355,19 @@ mod tests {
     fn unknown_plugin_toggle_returns_none() {
         let mut r = PluginRegistry::builtin();
         assert_eq!(r.set_enabled("nonsense", false), None);
+    }
+
+    #[test]
+    fn finance_dispatches_through_registry_and_respects_enable() {
+        let mut r = PluginRegistry::builtin();
+        // spec + handler pair up: commands and tools resolve to the finance capability
+        assert!(r.handler_for_id("finance").is_some(), "finance handler must be registered");
+        assert_eq!(r.plugin_for_command("money").map(|p| p.id.clone()), Some("finance".into()));
+        assert_eq!(r.plugin_for_command("spent").map(|p| p.id.clone()), Some("finance".into()));
+        assert!(r.handler_for_tool("bills").is_some(), "finance owns the bills tool");
+        assert_eq!(r.plugin_for_command("money").unwrap().provenance, Provenance::Builtin);
+        // disabling the plugin severs tool dispatch (commands are gated in cli_dispatch)
+        r.set_enabled("finance", false);
+        assert!(r.handler_for_tool("bills").is_none(), "disabled plugin must not dispatch");
     }
 }

@@ -130,10 +130,85 @@ pub fn plain_prose(raw: &str) -> String {
     // Peel at most twice: an envelope inside an envelope happens, three deep does not.
     let mut cur = t.to_string();
     for _ in 0..2 {
-        let Some(inner) = unwrap_envelope(&cur) else { break };
+        let inner = unwrap_envelope(&cur).or_else(|| salvage_answer(&cur));
+        let Some(inner) = inner else { break };
         cur = inner;
     }
     cur
+}
+
+/// Extract the `answer` value from an envelope that is NOT valid JSON.
+///
+/// This is the case that matters, and the first fix missed it. The models emit answers containing
+/// UNESCAPED double quotes — `definitive "best" list`, `(e.g., "List the top 3 sources")` — which makes
+/// the envelope malformed, so `serde_json` correctly refuses it and a JSON-based peel can never fire.
+/// The raw envelope then sailed through to the user's screen a second time, after a deploy that was
+/// supposed to have fixed it.
+///
+/// So this works on the text: find the `answer` key, take its quoted value, and undo the escapes by
+/// hand. It is deliberately narrow — the text must look like an envelope (leading brace, an `answer`
+/// key) before a single character is touched.
+fn salvage_answer(s: &str) -> Option<String> {
+    let t = s.trim();
+    if !t.starts_with('{') {
+        return None;
+    }
+    let key = t.find("\"answer\"")?;
+    let colon = t[key..].find(':')? + key;
+    let open = t[colon..].find('"')? + colon + 1;
+
+    // Candidate ends: every quote not preceded by a backslash. The right one is the LAST candidate
+    // that closes the object — anything earlier is an unescaped quote inside the prose.
+    let bytes = t.as_bytes();
+    let mut end = None;
+    for (i, _) in t[open..].char_indices().map(|(i, c)| (i + open, c)).filter(|(_, c)| *c == '"') {
+        if i > 0 && bytes[i - 1] == b'\\' {
+            continue;
+        }
+        let rest = t[i + 1..].trim_start();
+        // `"}`, `"} `, or `", "next_key"` — a real delimiter, not prose punctuation.
+        if rest.starts_with('}') || rest.starts_with(',') {
+            end = Some(i);
+        }
+    }
+    let end = end?;
+    if end <= open {
+        return None;
+    }
+    let out = unescape(&t[open..end]);
+    let out = out.trim();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.to_string())
+    }
+}
+
+/// Undo JSON string escapes by hand, for text that never parsed.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            // An unknown escape keeps both characters rather than silently eating one.
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// One layer: if the text is (or contains) an object carrying an `answer`/`text`/`response` string,
@@ -224,7 +299,13 @@ impl SubAgent {
                  Decide the next action. Respond with STRICT JSON and nothing else:\n\
                  {{\"action\":\"call_tool\"|\"finish\",\"tool\":\"<name>\",\"args\":{{}},\"answer\":\"...\"}}\n\
                  Call a tool to gather what you still need. When you have enough, action=finish with a \
-                 concise answer grounded ONLY in the observations — never invent. Prefer to finish early.",
+                 concise answer grounded ONLY in the observations — never invent. Prefer to finish early.\n\
+                 ESCAPE the answer properly: every \" inside it must be \\\", every newline \\n. \
+                 Unescaped quotes make the whole decision unreadable.\n\
+                 This is a BACKGROUND JOB, not a conversation. Nobody is waiting to reply, so `answer` \
+                 must never ask the user to clarify, choose between options, or specify anything — that \
+                 delivers nothing. Give the most useful grounded result the observations support. If they \
+                 fall short, state plainly WHAT IS MISSING; that is a finding, not a question.",
                 obs = if observations.is_empty() { "(none yet)" } else { &observations },
             );
             let messages = vec![
@@ -579,6 +660,66 @@ mod tests {
         assert!(!out.contains(&escaped_nl), "escaped newlines survived, so nothing parsed: {out:?}");
         assert!(out.contains('\n'), "the paragraph breaks were lost: {out:?}");
         assert!(out.starts_with("I cannot provide"));
+    }
+
+    // THE SECOND LEAK. After the first fix was deployed, the same envelope reached the screen again.
+    // The reason is visible in the payload: the answers carry UNESCAPED double quotes — `definitive
+    // "best" list`, `(e.g., "List the top 3 sources")` — so the envelope is not valid JSON, serde_json
+    // correctly refuses it, and no JSON-based peel can ever fire. Both strings below are verbatim from
+    // the live job board, which is the point: I wrote the first fix against a well-formed sample I had
+    // typed myself, and the real payloads were not well-formed.
+
+    const MALFORMED_A: &str = concat!(
+        r#"{"action": "finish", "tool": null, "answer": "I cannot provide specific stock trading "#,
+        r#"recommendations for today.\n\n**Next Action:** please clarify if you want me to summarize "#,
+        r#"the *types* of actionable data (e.g., "List the top 3 sources that focus on movers"), or "#,
+        r#"if you have a specific sector in mind."}"#
+    );
+
+    const MALFORMED_B: &str = concat!(
+        r#"{"action":"finish","answer":"The search results provide several *categories* of stock "#,
+        r#"recommendations but do not give a single, definitive "best" list for today without knowing "#,
+        r#"your risk tolerance.\n\n**Recommendation:** Specify a timeframe and I can narrow it down."}"#
+    );
+
+    #[test]
+    fn a_malformed_envelope_is_salvaged_by_text() {
+        let escaped_nl: String = ['\\', 'n'].iter().collect();
+        for (name, raw) in [("A", MALFORMED_A), ("B", MALFORMED_B)] {
+            // Confirm the premise first: these really are invalid JSON, so no JSON path can help.
+            assert!(
+                serde_json::from_str::<serde_json::Value>(raw).is_err(),
+                "sample {name} was supposed to be malformed JSON — if it parses, this test is not \
+                 exercising the salvage path at all"
+            );
+            let out = plain_prose(raw);
+            assert!(!out.contains("\"action\""), "sample {name} still carries the envelope: {out}");
+            assert!(!out.starts_with('{'), "sample {name} still starts with a brace: {out}");
+            assert!(!out.contains(&escaped_nl), "sample {name} kept escaped newlines: {out:?}");
+            assert!(out.contains('\n'), "sample {name} lost its paragraph breaks: {out:?}");
+            assert!(out.contains('"'), "sample {name} lost the quoted text inside the prose: {out:?}");
+        }
+        assert!(plain_prose(MALFORMED_A).starts_with("I cannot provide"));
+        assert!(plain_prose(MALFORMED_B).starts_with("The search results provide"));
+        assert!(plain_prose(MALFORMED_B).ends_with("narrow it down."));
+    }
+
+    #[test]
+    fn the_salvage_refuses_anything_that_is_not_an_envelope() {
+        // It rewrites text by hand, so it must be certain before touching a character.
+        assert_eq!(salvage_answer("The \"answer\" is 42."), None, "no leading brace");
+        assert_eq!(salvage_answer("{\"tool\":\"now\",\"args\":{}}"), None, "no answer key");
+        assert_eq!(salvage_answer("{\"answer\":\"\"}"), None, "an empty answer is not a salvage");
+        assert_eq!(salvage_answer(""), None);
+    }
+
+    #[test]
+    fn unescape_keeps_an_unknown_escape_intact() {
+        // Eating the backslash of an escape we do not know would silently corrupt a Windows path or a
+        // regex in the prose.
+        assert_eq!(unescape("C:\\\\Users\\\\sync"), "C:\\Users\\sync");
+        assert_eq!(unescape("a\\qb"), "a\\qb");
+        assert_eq!(unescape("trailing\\"), "trailing\\");
     }
 
     #[test]

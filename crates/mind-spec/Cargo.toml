@@ -1,0 +1,14 @@
+[package]
+name = "mind-spec"
+version.workspace = true
+edition.workspace = true
+description = "The model-free half of the cognitive loop: goal contracts, the state capsule, and the deterministic controller."
+
+# NO inference dependency, deliberately and permanently. See the crate docs: this boundary is what
+# makes "the LLM is only invoked when semantic judgment is needed" a property the compiler enforces
+# rather than a discipline someone has to remember.
+[dependencies]
+mind-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid7 = { workspace = true }

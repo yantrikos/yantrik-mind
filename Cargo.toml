@@ -47,6 +47,9 @@ mind-recipes = { path = "crates/mind-recipes" }
 mind-agents = { path = "crates/mind-agents" }
 mind-evolution = { path = "crates/mind-evolution" }
 mind-identity = { path = "crates/mind-identity" }
+# The model-free half of the cognitive loop. Depends on mind-types and nothing else that reasons —
+# see the crate docs for why that boundary is load-bearing.
+mind-spec = { path = "crates/mind-spec" }
 
 # yantrikdb-core git-deps yantrik-ml; redirect both git URLs to the local crates
 # (mirrors the yantrik-companion workspace patch set).

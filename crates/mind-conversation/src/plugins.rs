@@ -97,6 +97,8 @@ pub enum Requirement {
     HomeAssistant,
     Github,
     Coder,
+    /// Any readable mailbox — the bot's own or one of the personal scan inboxes.
+    Mailbox,
     /// The bounded research sub-agent.
     Researcher,
 }
@@ -117,6 +119,7 @@ impl Requirement {
             Self::Coder => {
                 "the agentic coder needs the claude CLI plus MINIMAX_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
             }
+            Self::Mailbox => "no mailbox is connected — set YM_EMAIL with an app password (or a YM_SCAN_EMAIL account)",
             Self::Researcher => "the research sub-agent is not wired",
         }
     }
@@ -256,7 +259,8 @@ impl PluginRegistry {
                 "- web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)")
                 .requiring(&[Requirement::WebFetch]),
             PluginSpec::new("news", "News", "Web", ReadOnly, &["news", "headlines", "track_news", "follow_news"], &["news", "headlines"],
-                "- news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything\n\
+                "- news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything
+\
                  - track_news {topic}: TRACK a topic + proactively surface fresh headlines")
                 .requiring(&[Requirement::News]),
             PluginSpec::new("weather", "Weather", "Web", ReadOnly, &["weather"], &["weather", "wx"],
@@ -271,29 +275,36 @@ impl PluginRegistry {
                 "- translate {to, text}: translate text into a language ('to' like french/hi/es; source auto-detected)")
                 .requiring(&[Requirement::Translator]),
             PluginSpec::new("markets", "Market quotes", "Finance", ReadOnly, &["crypto", "coin", "stock", "ticker"], &["crypto", "coin", "stock", "ticker"],
-                "- crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)\n\
+                "- crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)
+\
                  - stock {symbol}: a stock quote (US ticker, e.g. AAPL)")
                 .requiring(&[Requirement::Markets]),
             PluginSpec::new("portfolio", "Portfolio & analysis", "Finance", Personal,
                 &["portfolio", "holdings", "my_stocks", "analyze", "analyze_stock", "stock_analysis", "add_holding", "track_holding"],
                 &["portfolio", "holding", "holdings", "analyze", "stocks", "position", "analyse", "analysis"],
-                "- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation)\n\
-                 - analyze {ticker}: a DEEP multi-source analysis of a stock/crypto (quote+profile+news+web → balanced briefing w/ risks). ANALYSIS, never a buy/sell tip\n\
+                "- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation)
+\
+                 - analyze {ticker}: a DEEP multi-source analysis of a stock/crypto (quote+profile+news+web → balanced briefing w/ risks). ANALYSIS, never a buy/sell tip
+\
                  - add_holding {ticker, shares, cost?}: record a position the user says they own")
                 // Holdings are valued LIVE, so without market data the portfolio cannot be shown.
                 .requiring(&[Requirement::Markets]),
             PluginSpec::new("finance", "Finance (subs/bills/budget)", "Finance", Personal,
                 &["money", "subscriptions", "finance", "discover_subscriptions", "find_subscriptions", "scan_email_subscriptions", "bills", "budget", "budget_overview"],
                 &["money", "finance", "subs", "sub", "subscriptions", "subscription", "bills", "bill", "budget", "budgets", "spent", "spend", "expense", "discover", "scan"],
-                "- money {}: the user's finances overview — subscriptions + monthly total\n\
-                 - bills {}: tracked recurring bills + when they're due\n\
-                 - budget {}: budget vs spend this month, by category\n\
+                "- money {}: the user's finances overview — subscriptions + monthly total
+\
+                 - bills {}: tracked recurring bills + when they're due
+\
+                 - budget {}: budget vs spend this month, by category
+\
                  - discover_subscriptions {}: scan the user's EMAIL to find recurring subscriptions"),
             PluginSpec::new("home", "Smart home", "Home", Personal, &["home", "home_status", "house", "smart_home"], &["home", "house"],
                 "- home {}: check the smart home (Home Assistant) — who's home, climate, what's on")
                 .requiring(&[Requirement::HomeAssistant]),
             PluginSpec::new("github", "GitHub", "Dev", Personal, &["github_repo_items", "github_notifications"], &["github", "gh"],
-                "- github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
+                "- github_repo_items {repo}: list open issues+PRs on \"owner/name\"
+\
                  - github_notifications {}: your GitHub notifications")
                 .requiring(&[Requirement::Github]),
             PluginSpec::new("research", "Deep research", "Web", ReadOnly, &["research"], &["research"],
@@ -304,10 +315,91 @@ impl PluginRegistry {
                 "- code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox)")
                 .requiring(&[Requirement::Coder]),
             PluginSpec::new("dashboards", "Dashboards & pages", "Utility", ReadOnly, &["make_dashboard", "publish_page"], &["dashboard"],
-                "- make_dashboard {title, sections}: render + host a styled dashboard/list/comparison page, return a URL\n\
+                "- make_dashboard {title, sections}: render + host a styled dashboard/list/comparison page, return a URL
+\
                  - publish_page {name, html}: host a raw HTML page you wrote + return a URL"),
+
             PluginSpec::new("monitors", "Monitors", "Utility", ReadOnly, &["set_monitor"], &["monitor"],
                 "- set_monitor {source, target, url?}: watch a source (github|web|inbox) + ping on a match"),
+            // ── The household surface ─────────────────────────────────────────────────────────
+            // These were ~44 lines of hand-written English in a `const LIFE_LINES: &str`, appended
+            // to the generated catalog at prompt time. Moving them here makes the registry the ONE
+            // place that knows what this mind can do: the catalog is generated, the toggle governs
+            // them like everything else, and the agent compiler can resolve a required capability
+            // against them instead of grepping prose.
+            //
+            // The catalog text is moved VERBATIM — those descriptions are what the model reads to
+            // choose a tool, so a paraphrase would be a behaviour change dressed as a refactor.
+            //
+            // No aliases and no handlers, deliberately. Aliases would re-route `ym` command words
+            // that the legacy match already answers; a handler is what MOVES behaviour, and this
+            // commit moves declarations only. Dispatch still falls through to the match in lib.rs,
+            // which is exactly what the strangler seam is for.
+            PluginSpec::new("shopping", "Shopping & deals", "Shopping", Personal, &["deals", "watch_price", "watches"], &[],
+                "- deals {query, budget?}: find + compare REAL deals on something (great for gifts — I factor in who it's for + budget)\n\
+                 - watch_price {query, target?}: start tracking an item's price and ping on a real drop / when it hits a target\n\
+                 - watches {}: list what I'm currently price-watching")
+                .requiring(&[Requirement::WebSearch]),
+            PluginSpec::new("gifting", "Gift intelligence", "Shopping", Personal, &["gift_intel"], &[],
+                "- gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings"),
+            PluginSpec::new("people", "People", "People", Personal, &["learn_about", "family", "about_person"], &[],
+                "- learn_about {url}: follow a link and learn about a person/thing (recursive: their profiles too)\n\
+                 - family {}: the people I keep track of + their upcoming key dates\n\
+                 - about_person {name}: what I know about someone in the user's life")
+                .requiring(&[Requirement::WebFetch]),
+            PluginSpec::new("subject_tracking", "Subject tracking", "Research", ReadOnly, &["track_subject"], &[],
+                "- track_subject {subject}: keep a living, evolving understanding of an ongoing topic (re-run → what changed)")
+                .requiring(&[Requirement::WebSearch]),
+            PluginSpec::new("memory_patterns", "Memory patterns", "Memory", Personal, &["patterns"], &[],
+                "- patterns {}: surface non-obvious patterns across what I know about the user"),
+            PluginSpec::new("calendar_tools", "Calendar", "Calendar", Personal, &["calendar", "calendar_add", "calendar_remove", "forget_date"], &[],
+                "- calendar {}: the unified upcoming view · calendar_add {text}: add an event (Dinner on July 4 at 7pm)\n\
+                 - calendar_remove {title}: remove a calendar event by (partial) title — USE THIS when the user says an event/date is wrong or should go\n\
+                 - forget_date {name, label}: remove one dated entry (e.g. open house) from a person's profile — the other place a wrong date can live"),
+            PluginSpec::new("browser", "Real browser", "Web", ReadOnly, &["see_page"], &[],
+                "- see_page {url, question?}: render a page in the real browser, screenshot it, and ANALYZE the image — use when text extraction fails or layout/visuals matter"),
+            PluginSpec::new("photo_library", "Photo library", "Photos", Personal, &["photo_send", "photo_patterns", "ask_whois", "on_this_day", "then_and_now", "find_younger_self", "style_timeline", "family_frame", "photo_cleanup", "person_items", "taste_profile"], &[],
+                "- photo_send {query}: find a REAL photo in the user's own libraries (face-matched people + semantic search over the whole archive) and SEND it to the chat — use for ANY 'show/send me a photo/pic of X', including events like 'our wedding'\n\
+                 - photo_patterns {name?}: read someone's photos and learn their style/preferences (no name = recent across libraries)\n\
+                 - ask_whois {}: send the next unknown-face 'who is this?' question to the chat\n\
+                 - on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
+                 - then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
+                 - find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
+                 - style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
+                 - family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
+                 - photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
+                 - person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
+                 - taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions"),
+            PluginSpec::new("photo_studio", "Photo studio", "Photos", Personal, &["growup_reel", "enhance_photo", "photo_create"], &[],
+                "- growup_reel {name}: build a time-lapse FILM of a person growing up (best face per month across the whole photo archive) and send it — pure magic for family\n\
+                 - enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
+                 - photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim"),
+            PluginSpec::new("photo_sharing", "Photo sharing", "Photos", GatedWrite, &["share_with_member"], &[],
+                "- share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back"),
+            PluginSpec::new("cloud_photos", "Cloud photo archive", "Photos", Personal, &["onedrive"], &[],
+                "- onedrive {action}: read the family's OLDER photo years from OneDrive (pre-Immich) — status/auth/find <date-range>/onthisday. Read-only"),
+            PluginSpec::new("mail_intel", "Mail intelligence", "Mail", Personal, &["inbox_analytics", "mail_rule", "mail_report", "mail_search"], &[],
+                "- inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action / from-people / money-in-motion / purchases / noise, with body-peek state verification (read-only)\n\
+                 - mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
+                 - mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
+                 - mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders. Results ARE the answer — never fetch links or sign-in pages from email bodies")
+                .requiring(&[Requirement::Mailbox]),
+            PluginSpec::new("life_ledger", "Life chapters", "Life", Personal, &["trip_ledger", "event_ledger", "family_book"], &[],
+                "- trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
+                 - event_ledger {query?}: heavily-photographed DAYS related to family dates and occasions (birthday parties, pujas, ceremonies) — list or look one up; unknown days get asked about\n\
+                 - family_book {year?}: the family's living biography compiled from the archive — chapters per year, open questions, exportable volume"),
+            PluginSpec::new("life_rhythms", "Life rhythms", "Life", Personal, &["life_horizon", "festival_calendar", "traditions"], &[],
+                "- life_horizon {}: the PROJECTED life — annual patterns from the family's own rhythms (festivals, recurring visits) with next dates and evidence\n\
+                 - festival_calendar {}: the Bengali Hindu festival year — per-year resolved dates (lunar calendar) + what each festival is\n\
+                 - traditions {}: the family's per-festival traditions (photoshoots, feasts) — weather-dependent ones get forecast-planned day suggestions"),
+            PluginSpec::new("introspection", "Self-assessment", "Self", ReadOnly, &["self_report", "nightly_dream", "self_limits"], &[],
+                "- self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
+                 - nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
+                 - self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)"),
+            PluginSpec::new("bills", "Bill tracking", "Finance", Personal, &["bill_autopay"], &[],
+                "- bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop"),
+            PluginSpec::new("plugin_store", "Plugin store", "System", ReadOnly, &["plugin_registry"], &[],
+                "- plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all"),
         ];
         // Builtin handlers — dispatchable behavior paired to the specs above. Domains leave the
         // lib.rs match tables one at a time and land here.
@@ -449,6 +541,12 @@ impl PluginRegistry {
         &self.plugins
     }
 
+    /// The ids of every registered handler. Pairs with `all_specs` to check the two halves agree —
+    /// a handler without a spec is behaviour the agent is never told about.
+    pub fn handler_ids(&self) -> Vec<&str> {
+        self.handlers.iter().map(|h| h.id()).collect()
+    }
+
     /// Is this tool runnable? Core tools (owned by no plugin) are always on; a plugin-owned tool is
     /// on only if its plugin is enabled.
     pub fn is_tool_enabled(&self, tool: &str) -> bool {
@@ -461,7 +559,8 @@ impl PluginRegistry {
 
     /// The catalog lines for the ENABLED plugins (what the agent is told it can use).
     pub fn enabled_catalog(&self) -> String {
-        self.plugins.iter().filter(|p| p.enabled).map(|p| p.catalog.as_str()).collect::<Vec<_>>().join("\n")
+        self.plugins.iter().filter(|p| p.enabled).map(|p| p.catalog.as_str()).collect::<Vec<_>>().join("
+")
     }
 
     /// Flip a plugin (by id or alias) on/off; returns the resolved id, or None if not found.
@@ -476,19 +575,24 @@ impl PluginRegistry {
         let mut cats: Vec<&str> = self.plugins.iter().map(|p| p.category.as_str()).collect();
         cats.sort();
         cats.dedup();
-        let mut out = String::from("🔌 Plugins (toggle: `ym plugin enable|disable <name>`):\n");
+        let mut out = String::from("🔌 Plugins (toggle: `ym plugin enable|disable <name>`):
+");
         for cat in cats {
-            out.push_str(&format!("\n{cat}\n"));
+            out.push_str(&format!("
+{cat}
+"));
             for p in self.plugins.iter().filter(|p| p.category == cat) {
                 let state = if p.enabled { "on " } else { "OFF" };
                 let prov = match p.provenance {
                     Provenance::Builtin => String::new(),
                     other => format!(" · {}", other.as_str()),
                 };
-                out.push_str(&format!("  [{state}] {:<12} {}  — {}{}\n", p.id, p.security.badge(), p.title, prov));
+                out.push_str(&format!("  [{state}] {:<12} {}  — {}{}
+", p.id, p.security.badge(), p.title, prov));
             }
         }
-        out.push_str("\nNew capability with zero code → add an MCP server (`ym mcp list`).");
+        out.push_str("
+New capability with zero code → add an MCP server (`ym mcp list`).");
         out
     }
 }

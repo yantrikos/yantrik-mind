@@ -4386,11 +4386,7 @@ impl ConversationEngine {
                     .flatten()
                     .map(|s| s.len())
                     .unwrap_or(0);
-                let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
-                let mcp_line = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
-                let gated_src = format!("{plugin_catalog}
-{}
-{mcp_line}", tool_catalog::LIFE_LINES);
+                let gated_src = self.catalog_source();
                 let (detailed, tail) = tool_catalog::gate_catalog(probe, &gated_src);
                 let schemas = tool_catalog::tool_schemas(probe, &gated_src);
                 let schema_bytes = serde_json::to_string(&schemas).map(|s| s.len()).unwrap_or(0);
@@ -6263,13 +6259,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 // tool set (not just the skill library), so a tool abbreviated to name-only in the
                 // loop prompt gets its full description back on demand.
                 let native = {
-                    let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
-                    let mcp = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
-                    let src = format!(
-                        "{}\n{plugin_catalog}\n{}\n{mcp}",
-                        tool_catalog::CORE_HEAD,
-                        tool_catalog::LIFE_LINES
-                    );
+                    let src = format!("{}\n{}", tool_catalog::CORE_HEAD, self.catalog_source());
                     tool_catalog::search_lines(&q, &src, 6)
                 };
                 let mut out = String::new();
@@ -6493,16 +6483,16 @@ Open reminders you're carrying for them:");
         } else {
             format!("\nMost-relevant saved skills (run via run_skill; discover_tools finds more): {}", skills.iter().take(3).map(|s| format!("{} — {}", s.name, s.summary)).collect::<Vec<_>>().join("; "))
         };
-        // The MCP force-multiplier: whatever integrations have connected expose their tools here,
-        // appended live to the catalog so the model can select `mcp.<server>.<tool>` directly.
-        let mcp_line = self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default();
         // HYBRID RETRIEVAL-GATED CATALOG (Tier's design; see tool_catalog.rs): core + pinned +
         // top-K relevant tools rendered in full, everything else abbreviated to a NAME-ONLY tail —
         // never removed (an absent tool made the model confabulate the capability: the deal-tracker
-        // scar). The plugin lines come from the registry's ENABLED entries (a disabled plugin isn't
-        // offered at all); dispatch below accepts any enabled tool however it was rendered here.
-        let plugin_catalog = self.plugins.lock().unwrap().enabled_catalog();
-        let gated_src = format!("{plugin_catalog}\n{}\n{mcp_line}", tool_catalog::LIFE_LINES);
+        // scar). Dispatch below accepts any enabled tool however it was rendered here.
+        //
+        // The source is now ENTIRELY generated: every line comes from a registry spec that is
+        // enabled, plus whatever MCP servers have connected. The household tools used to arrive as a
+        // hand-written const appended here, which meant the registry did not actually know the whole
+        // surface — so disabling one of them removed it from nothing.
+        let gated_src = self.catalog_source();
         let (detailed, name_tail) = tool_catalog::gate_catalog(user_text, &gated_src);
         let tools = format!(
             "{}\n{detailed}\n{}\n{}\n{name_tail}",

@@ -473,6 +473,22 @@ impl ConversationEngine {
         funnel_from_counters(&counters)
     }
 
+    /// THE agent-visible tool source: every enabled capability's catalog lines, plus whatever MCP
+    /// servers have connected.
+    ///
+    /// One method because there were three: the agent loop, `discover_tools`, and the prompt audit
+    /// each composed this by hand, and each had to remember to include the hand-written household
+    /// blob. Three copies of "what tools exist" is three chances to disagree — and they did, since
+    /// the audit's copy was the one nobody updated. Now the registry is the single source and this is
+    /// its single reader.
+    pub(crate) fn catalog_source(&self) -> String {
+        let plugins = self.plugins.lock().unwrap().enabled_catalog();
+        match self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default() {
+            m if m.trim().is_empty() => plugins,
+            m => format!("{plugins}\n{m}"),
+        }
+    }
+
     /// Standing orders, typed. Reads the same recipe store the waking tick reads, so the list is
     /// what will actually happen — not a separate registry that can drift from it.
     pub fn orders_report(&self) -> OrdersReport {
@@ -561,6 +577,8 @@ impl ConversationEngine {
                     R::HomeAssistant => self.home.is_none(),
                     R::Github => self.github.is_none(),
                     R::Coder => self.coder.is_none(),
+                    // Either the bot's own mailbox or any personal scan inbox will do.
+                    R::Mailbox => self.mail.is_none() && self.scan_mail.is_empty(),
                     R::Researcher => self.researcher.is_none(),
                 }
             })

@@ -23,51 +23,6 @@ pub(crate) const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per st
 - now {}: the current date and time\n\
 MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a skill for a task they cover):";
 
-/// The native life/shopping tool lines (one tool per line; no header — gated by relevance).
-pub(crate) const LIFE_LINES: &str = "- deals {query, budget?}: find + compare REAL deals on something (great for gifts — I factor in who it's for + budget)\n\
-- watch_price {query, target?}: start tracking an item's price and ping on a real drop / when it hits a target\n\
-- watches {}: list what I'm currently price-watching\n\
-- learn_about {url}: follow a link and learn about a person/thing (recursive: their profiles too)\n\
-- track_subject {subject}: keep a living, evolving understanding of an ongoing topic (re-run → what changed)\n\
-- patterns {}: surface non-obvious patterns across what I know about the user\n\
-- family {}: the people I keep track of + their upcoming key dates\n\
-- about_person {name}: what I know about someone in the user's life\n\
-- calendar {}: the unified upcoming view · calendar_add {text}: add an event (Dinner on July 4 at 7pm)\n\
-- calendar_remove {title}: remove a calendar event by (partial) title — USE THIS when the user says an event/date is wrong or should go\n\
-- forget_date {name, label}: remove one dated entry (e.g. open house) from a person's profile — the other place a wrong date can live\n\
-- see_page {url, question?}: render a page in the real browser, screenshot it, and ANALYZE the image — use when text extraction fails or layout/visuals matter\n\
-- photo_send {query}: find a REAL photo in the user's own libraries (face-matched people + semantic search over the whole archive) and SEND it to the chat — use for ANY 'show/send me a photo/pic of X', including events like 'our wedding'\n\
-- photo_patterns {name?}: read someone's photos and learn their style/preferences (no name = recent across libraries)\n\
-- ask_whois {}: send the next unknown-face 'who is this?' question to the chat\n\
-- growup_reel {name}: build a time-lapse FILM of a person growing up (best face per month across the whole photo archive) and send it — pure magic for family\n\
-- on_this_day {}: send a real photo memory from this exact day in a past year (who + where captioned)\n\
-- enhance_photo {}: enhance the last photo the user sent (light/color/sharpen) and send it back — for photo-editing asks\n\
-- gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings\n\
-- inbox_analytics {}: cross-account email digest over ALL connected inboxes — needs-action / from-people / money-in-motion / purchases / noise, with body-peek state verification (read-only)\n\
-- mail_rule {rule}: permanently teach a mail categorization rule when the user corrects the digest ('amazon receipts are noise')\n\
-- mail_report {}: DEEP mail analysis over hundreds of emails — recurring charges w/ est monthly total, bills, shopping volume, real humans, account surface, renewal radar; auto-tracks found subscriptions\n\
-- self_report {}: my weekly self-review — per-domain scoreboard of my proactive predictions vs your reactions, corrections I absorbed, what I'm changing\n\
-- bill_autopay {name}: when the user says a bill is on autopay, mark it so reminders stop\n\
-- trip_ledger {query?}: LIFE CHAPTERS mined from the photo archive (where+when+who) — list trips, or brief one ('kolkata', '2019'); trip collages available\n\
-- event_ledger {query?}: heavily-photographed DAYS related to family dates and occasions (birthday parties, pujas, ceremonies) — list or look one up; unknown days get asked about\n\
-- life_horizon {}: the PROJECTED life — annual patterns from the family's own rhythms (festivals, recurring visits) with next dates and evidence\n\
-- festival_calendar {}: the Bengali Hindu festival year — per-year resolved dates (lunar calendar) + what each festival is\n\
-- traditions {}: the family's per-festival traditions (photoshoots, feasts) — weather-dependent ones get forecast-planned day suggestions\n\
-- family_book {year?}: the family's living biography compiled from the archive — chapters per year, open questions, exportable volume\n\
-- then_and_now {person}: side-by-side of the same person years apart (earliest good frame vs latest) with the years labeled\n\
-- find_younger_self {person}: hunt the unnamed clusters for a person's earlier years (babies get split by face clustering) — evidence + confirm + merge\n\
-- share_with_member {member, note?}: send the LAST photo I delivered to a household member (wife/kids) with a note — their reply gets relayed back\n\
-- style_timeline {person}: how a person's style is EVOLVING year over year from their own photos, and where it's heading\n\
-- family_frame {}: today's wall-frame photo pick (anniversary-aware daily photo for the home tablet) — returns the caption + URL\n\
-- nightly_dream {}: one verified cross-domain connection from everything known about the family (or honest silence)\n\
-- self_limits {}: my honest capabilities/limitations/frustrations analysis, grounded in my own telemetry (tool reliability, tensions, ledger traction, failure log)\n\
-- plugin_registry {query?}: the plugin store in the substrate — search connectors (live/gated/parked/planned) or browse all\n\
-- mail_search {query}: search the FULL mailboxes of every configured account (all folders incl. archive) — bookings, receipts, confirmation numbers, senders. Results ARE the answer — never fetch links or sign-in pages from email bodies\n\
-- onedrive {action}: read the family's OLDER photo years from OneDrive (pre-Immich) — status/auth/find <date-range>/onthisday. Read-only\n\
-- photo_cleanup {}: organize the photo LIBRARY itself — classify screenshots + WhatsApp forwards across the whole archive into auto-albums (archive step available on request)\n\
-- person_items {name}: structured OBJECT INVENTORY from their photos — every watch/bag/dress/jewelry item seen (counts + variants) and what was NEVER seen (gift gaps); use for 'does she have a…' questions\n\
-- taste_profile {name}: preference PROBABILITIES from studying many photos — outfit/color/jewelry/setting/vibe distributions with confidence that grows per batch; use for 'what does she like' questions\n\
-- photo_create {request}: CREATIVE studio — collages (a person across occasions/outfits, 'us' across years) and mood/vibe pictures, composed from the library with a unique grounded caption; pass the user's ask verbatim";
 
 /// Standing rule appended after the detailed section, never gated.
 pub(crate) const NEVER_RULE: &str = "- NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly\n\
@@ -95,6 +50,20 @@ pub(crate) fn tool_name_of_line(line: &str) -> Option<&str> {
     let rest = line.trim_start().strip_prefix("- ")?;
     let name = rest.split([' ', '{', ':']).next().unwrap_or("");
     // A rule line ("NEVER claim…") isn't a tool; neither is an empty remainder.
+    if name.is_empty() || name.chars().all(|c| !c.is_lowercase()) {
+        return None;
+    }
+    Some(name)
+}
+
+/// The tool name of one `·`-separated FRAGMENT of a catalog line.
+///
+/// `tool_name_of_line` requires the leading "- " and so only ever sees the first tool on a line;
+/// a fragment after a `·` has no dash. Both readings are needed: the gate scores whole lines, while
+/// schema generation and any "is this tool advertised?" question must see every name.
+pub(crate) fn tool_name_of_line_in_fragment(fragment: &str) -> Option<&str> {
+    let body = fragment.trim().strip_prefix("- ").unwrap_or(fragment.trim());
+    let name = body.split([' ', '{', ':']).next().unwrap_or("");
     if name.is_empty() || name.chars().all(|c| !c.is_lowercase()) {
         return None;
     }
@@ -366,6 +335,133 @@ pub(crate) fn search_lines(query: &str, catalog: &str, top_n: usize) -> Vec<Stri
 mod tests {
     use super::*;
 
+    /// The real agent-visible catalog: every enabled builtin capability's lines.
+    ///
+    /// These tests used to run against a hand-written `LIFE_LINES` const. Now that the household
+    /// tools are registry specs like everything else, the tests read the same generated source the
+    /// loop does — so a spec whose catalog line is malformed fails here instead of silently
+    /// degrading tool selection in production.
+    fn catalog() -> String {
+        crate::plugins::PluginRegistry::builtin().enabled_catalog()
+    }
+
+    /// MIGRATION PARITY. The ~44 household tool lines used to live in a hand-written
+    /// `const LIFE_LINES: &str` appended to the generated catalog. They are now registry specs, and
+    /// this asserts nothing was lost in the move — because a tool silently missing from the catalog
+    /// is the failure this codebase already has a scar from: an absent tool makes the model
+    /// confabulate the capability in chat rather than say it cannot do the thing.
+    ///
+    /// The list is the tool names extracted from the deleted const, frozen here. It is deliberately
+    /// literal rather than derived: a test that regenerated its own expectation from the registry
+    /// would pass no matter what the registry said.
+    #[test]
+    fn every_migrated_household_tool_is_still_in_the_catalog() {
+        const MIGRATED: &[&str] = &[
+            "about_person", "ask_whois", "bill_autopay", "calendar", "calendar_add",
+            "calendar_remove", "deals", "enhance_photo", "event_ledger", "family", "family_book",
+            "family_frame", "festival_calendar", "find_younger_self", "forget_date", "gift_intel",
+            "growup_reel", "inbox_analytics", "learn_about", "life_horizon", "mail_report",
+            "mail_rule", "mail_search", "nightly_dream", "on_this_day", "onedrive", "patterns",
+            "person_items", "photo_cleanup", "photo_create", "photo_patterns", "photo_send",
+            "plugin_registry", "see_page", "self_limits", "self_report", "share_with_member",
+            "style_timeline", "taste_profile", "then_and_now", "track_subject", "traditions",
+            "trip_ledger", "watch_price", "watches",
+        ];
+        let src = catalog();
+        // A line may pack two tools with a `·` separator ("- calendar {}: … · calendar_add {…}: …"),
+        // which is why this splits the way the schema generator does rather than using
+        // `tool_name_of_line` — that returns only the first name, and the second tool is real and
+        // callable. (Getting this wrong is how the first run of this test reported `calendar_add`
+        // missing when it was present in both the spec and the catalog.)
+        let present: HashSet<&str> = src
+            .lines()
+            .flat_map(|l| l.split('·'))
+            .filter_map(tool_name_of_line_in_fragment)
+            .collect();
+        let missing: Vec<&&str> = MIGRATED.iter().filter(|t| !present.contains(**t)).collect();
+        assert!(missing.is_empty(), "these tools vanished in the registry migration: {missing:?}");
+
+        // Cross-check against the registry's own declarations: a tool advertised in the catalog but
+        // not listed on its spec would be ungoverned by the toggle.
+        let reg = crate::plugins::PluginRegistry::builtin();
+        let declared: HashSet<&str> = reg.all_specs().iter().flat_map(|s| s.tools.iter().map(|t| t.as_str())).collect();
+        let undeclared: Vec<&&str> = MIGRATED.iter().filter(|t| !declared.contains(**t)).collect();
+        assert!(undeclared.is_empty(), "advertised but not declared on any spec: {undeclared:?}");
+    }
+
+    /// Every catalog line must carry exactly one tool and be parseable — the whole surface is
+    /// generated now, so a malformed `catalog:` on one spec would quietly drop that tool from both
+    /// the prose catalog and the function schemas.
+    #[test]
+    fn every_generated_catalog_line_is_well_formed() {
+        let src = catalog();
+        for line in src.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(line.starts_with("- "), "catalog lines start with '- ': {line:?}");
+            assert!(tool_name_of_line(line).is_some(), "unparseable tool line: {line:?}");
+            assert!(line.contains(':'), "a tool line needs a description after ':': {line:?}");
+            // A `\n` that survived as text means a spec's catalog string was escaped wrong — the
+            // lines would concatenate and every tool but the first would disappear.
+            assert!(!line.contains("\\n"), "literal \\n in a catalog line: {line:?}");
+        }
+    }
+
+    /// Every registered HANDLER must have a spec.
+    ///
+    /// A handler without one is a capability whose behaviour is compiled in but which the registry
+    /// does not know about: its tools get no catalog line, so the agent never learns they exist —
+    /// and an absent tool is the case where the model confabulates the capability instead of saying
+    /// it cannot. This caught a real regression: refactoring the spec table dropped `monitors` while
+    /// leaving `MonitorsCapability` registered, which would have silently removed `set_monitor` from
+    /// the agent's world.
+    #[test]
+    fn every_registered_handler_has_a_spec() {
+        let reg = crate::plugins::PluginRegistry::builtin();
+        let ids: HashSet<&str> = reg.all_specs().iter().map(|s| s.id.as_str()).collect();
+        let orphans: Vec<&str> = reg.handler_ids().into_iter().filter(|h| !ids.contains(h)).collect();
+        assert!(orphans.is_empty(), "handlers with no PluginSpec (their tools would be invisible): {orphans:?}");
+    }
+
+    /// Every spec must contribute at least one catalog line, or its tools are undiscoverable.
+    #[test]
+    fn every_enabled_spec_contributes_a_catalog_line() {
+        let reg = crate::plugins::PluginRegistry::builtin();
+        let src = reg.enabled_catalog();
+        let advertised: HashSet<&str> = src
+            .lines()
+            .flat_map(|l| l.split('·'))
+            .filter_map(tool_name_of_line_in_fragment)
+            .collect();
+        for spec in reg.all_specs().iter().filter(|s| s.enabled) {
+            assert!(!spec.catalog.trim().is_empty(), "spec `{}` has no catalog line", spec.id);
+            // At least one — not every — declared tool must be advertised. A spec may list ALIASES
+            // the dispatch accepts (`web_search` alongside the canonical `search`) while the catalog
+            // names only the canonical one, which is right: offering the model two names for one
+            // tool wastes prompt and invites it to think they differ. What must never happen is a
+            // spec advertising NOTHING, which is how a refactor silently removed `set_monitor`.
+            assert!(
+                spec.tools.iter().any(|t| advertised.contains(t.as_str())),
+                "`{}` declares {:?} but advertises none of them — the agent cannot discover this capability",
+                spec.id,
+                spec.tools
+            );
+        }
+    }
+
+    /// No two capabilities may claim the same tool name: `plugin_for_tool` returns the FIRST match,
+    /// so a duplicate would make one capability's toggle silently govern another's tool.
+    #[test]
+    fn no_tool_is_claimed_by_two_capabilities() {
+        let reg = crate::plugins::PluginRegistry::builtin();
+        let mut owner: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for spec in reg.all_specs() {
+            for tool in &spec.tools {
+                if let Some(prev) = owner.insert(tool, &spec.id) {
+                    panic!("tool `{tool}` is claimed by both `{prev}` and `{}`", spec.id);
+                }
+            }
+        }
+    }
+
     #[test]
     fn name_extraction_skips_rules_and_headers() {
         assert_eq!(tool_name_of_line("- deals {query, budget?}: find deals"), Some("deals"));
@@ -376,7 +472,7 @@ mod tests {
 
     #[test]
     fn relevant_tool_is_detailed_and_irrelevant_moves_to_tail() {
-        let (detailed, tail) = gate_catalog("what's the weather in pune?", LIFE_LINES);
+        let (detailed, tail) = gate_catalog("what's the weather in pune?", &catalog());
         // zero-overlap tools lose their detail line but keep their name in the tail
         assert!(!detailed.contains("growup_reel {name}"), "irrelevant tool should not be detailed");
         assert!(tail.contains("growup_reel"), "gated tool must stay visible by name");
@@ -386,9 +482,10 @@ mod tests {
 
     #[test]
     fn every_tool_appears_exactly_once() {
-        let (detailed, tail) = gate_catalog("show me a photo of the wedding", LIFE_LINES);
-        for line in LIFE_LINES.lines() {
-            let name = tool_name_of_line(line).unwrap();
+        let (detailed, tail) = gate_catalog("show me a photo of the wedding", &catalog());
+        let src = catalog();
+        for line in src.lines() {
+            let Some(name) = tool_name_of_line(line) else { continue };
             let in_detail = detailed.lines().any(|l| tool_name_of_line(l) == Some(name));
             let in_tail = tail.contains(name);
             assert!(in_detail || in_tail, "{name} vanished from the catalog");
@@ -399,9 +496,8 @@ mod tests {
 
     #[test]
     fn gating_cuts_the_catalog_substantially() {
-        // Measure over the REAL gated surface: every enabled plugin line + every life line.
-        let plugin_catalog = crate::plugins::PluginRegistry::builtin().enabled_catalog();
-        let full = format!("{plugin_catalog}\n{LIFE_LINES}");
+        // Measured over the REAL gated surface — every enabled capability's catalog lines.
+        let full = catalog();
         for turn in ["hey, good morning!", "what's the weather in pune?", "find me a gift for my wife"] {
             let (detailed, tail) = gate_catalog(turn, &full);
             let gated_len = detailed.len() + tail.len();
@@ -440,7 +536,7 @@ mod tests {
 
     #[test]
     fn tool_schemas_always_include_core_and_exclude_answer() {
-        let schemas = tool_schemas("what's the weather in pune?", LIFE_LINES);
+        let schemas = tool_schemas("what's the weather in pune?", &catalog());
         let names: HashSet<&str> = schemas.iter().map(|s| s["function"]["name"].as_str().unwrap()).collect();
         for core in ["recall", "remember", "add_reminder", "now", "discover_tools", "run_skill", "build_capability"] {
             assert!(names.contains(core), "core/meta schema '{core}' must always be present");
@@ -457,8 +553,7 @@ mod tests {
 
     #[test]
     fn schema_set_stays_compact_and_relevant() {
-        let plugin_catalog = crate::plugins::PluginRegistry::builtin().enabled_catalog();
-        let full = format!("{plugin_catalog}\n{LIFE_LINES}");
+        let full = catalog();
         for turn in ["what's the weather in pune?", "find me a gift for my wife", "hey, good morning!"] {
             let schemas = tool_schemas(turn, &full);
             let json = serde_json::to_string(&schemas).unwrap();
@@ -471,7 +566,7 @@ mod tests {
 
     #[test]
     fn search_finds_a_gated_tool_by_description() {
-        let hits = search_lines("track a price drop", LIFE_LINES, 6);
+        let hits = search_lines("track a price drop", &catalog(), 6);
         assert!(
             hits.iter().any(|l| l.contains("watch_price")),
             "discover_tools must surface watch_price for a price-drop ask: {hits:?}"
@@ -541,3 +636,4 @@ mod compaction_tests {
         );
     }
 }
+

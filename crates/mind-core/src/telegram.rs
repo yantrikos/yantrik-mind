@@ -606,7 +606,7 @@ fn ctl_handle(
             let r = if fast {
                 rt.block_on(conv.fast_reply(&body, ident))
             } else {
-                rt.block_on(conv.handle_turn_as(&body, ident))
+                rt.block_on(conv.turn(&body, ident))
             }
             .unwrap_or_else(|e| format!("(error: {e})"));
             ("200 OK", r)
@@ -635,7 +635,7 @@ fn ctl_handle(
                 let conv2 = conv.clone();
                 let turn = rt.spawn(async move {
                     mind_conversation::TURN_PROGRESS
-                        .scope(tx, async move { conv2.handle_turn_as(&msg, ident).await })
+                        .scope(tx, async move { conv2.turn(&msg, ident).await })
                         .await
                 });
                 // Drain progress until the turn completes; rx closes when the scope drops its tx.
@@ -979,7 +979,7 @@ fn chat_handle(
     }
     // Principal-scoped turn as the device's bound person (never Operator).
     let ident = mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false);
-    let reply = rt.block_on(conv.handle_turn_as(&body, ident)).unwrap_or_else(|e| format!("(error: {e})"));
+    let reply = rt.block_on(conv.turn(&body, ident)).unwrap_or_else(|e| format!("(error: {e})"));
     send(&mut stream, "200 OK", &reply);
 }
 
@@ -1281,7 +1281,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 // Even the primary over Telegram reads resource-filtered (their own + shared;
                 // other members' private facts stay invisible), and every read is receipted.
                 let ctx = mind_types::AccessContext::Principal(identity.viewer());
-                let work = handle_line_as(&text, &mem2, conv2.as_ref(), identity, &ctx);
+                let work = handle_line_as(&text, &mem2, &conv2, identity, &ctx);
                 tokio::pin!(work);
                 let outcome = loop {
                     tokio::select! {

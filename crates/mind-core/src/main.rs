@@ -145,6 +145,11 @@ async fn main() -> anyhow::Result<()> {
     println!("yantrik-mind — backend: {name} · db: {db}");
     println!("type :help for a list of commands  (else = chat)\n");
 
+    // The REPL needs a SHARED handle: the turn entry point hands one to the capability bus so the
+    // bounded loop can reach the tool surface. Wrapped here rather than at construction because the
+    // Telegram path must consume the engine to attach its device store, and builds its own Arc after.
+    let conv = std::sync::Arc::new(conv);
+
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     loop {

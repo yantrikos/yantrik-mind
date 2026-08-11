@@ -18,6 +18,7 @@ pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, Sec
 mod book;
 mod briefing;
 mod capabilities;
+pub mod cognitive;
 mod calendar;
 mod cloud_photos;
 mod deals;

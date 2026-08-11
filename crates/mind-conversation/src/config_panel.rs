@@ -87,6 +87,7 @@ pub(crate) const SCHEMA: &[Setting] = &[
     Setting { key: "YM_MAX_WALL_SECS", label: "Turn time limit (s)", group: "Agent loop", kind: "int", desc: "Wall-clock ceiling for one turn (default 600). At ~10s a reasoning call this is what binds first on a long turn — raise it before raising the iteration limit.", restart: true },
     Setting { key: "YM_MAX_USD", label: "Spend per turn ($)", group: "Agent loop", kind: "string", desc: "Optional cost ceiling for one turn. Empty or 0 = ungoverned.", restart: true },
     Setting { key: "YM_BG_MAX_STEPS", label: "Max iterations (delegated)", group: "Agent loop", kind: "int", desc: "Iteration cap for delegated/scheduled work, where nobody is waiting (default 150). Depth is worth more here.", restart: true },
+    Setting { key: "YM_COGNITION", label: "Bounded control loop", group: "Agent loop", kind: "toggle", desc: "Use the state-capsule runtime instead of the classic think→tool→think loop: the runtime keeps the execution state, so a long turn costs what a short one does. Off = the loop that has always run.", restart: true },
     // ── Switches ─────────────────────────────────────────────────────────
     Setting { key: "YM_PROACTIVE", label: "Proactive layer", group: "Switches", kind: "toggle", desc: "Digests, asks, patterns — the unprompted voice.", restart: true },
     Setting { key: "YM_KNOCK", label: "Calibrated knock", group: "Switches", kind: "toggle", desc: "Prepared-work interruptions with a confidence band.", restart: true },

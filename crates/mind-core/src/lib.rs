@@ -65,7 +65,7 @@ const HELP_TEXT: &str = "\
 ///   `:explain <statement>`                                  show a belief + its evidence count
 ///   `:help` / `:commands`                                   print every command with a one-line description
 ///   `:quit`
-pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngine) -> Outcome {
+pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &Arc<ConversationEngine>) -> Outcome {
     // The local `ym` REPL is the trusted owner console — the ONE place the explicit
     // operator capability is minted for interactive commands (ARCH-1).
     handle_line_as(
@@ -85,7 +85,7 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &ConversationEngi
 pub async fn handle_line_as(
     line: &str,
     mem: &MemoryHandle,
-    conv: &ConversationEngine,
+    conv: &Arc<ConversationEngine>,
     identity: mind_conversation::TurnIdentity,
     ctx: &mind_types::AccessContext,
 ) -> Outcome {
@@ -316,7 +316,8 @@ pub async fn handle_line_as(
         };
     }
     // plain chat turn — attributed to the speaker (group-chat read-isolation)
-    match conv.handle_turn_as(t, identity).await {
+    // `turn`, not `handle_turn_as`: one seam decides which loop runs, for every channel.
+    match conv.turn(t, identity).await {
         Ok(r) => Outcome::Said(r),
         Err(e) => Outcome::Said(format!("(error: {e})")),
     }
@@ -596,7 +597,7 @@ mod tests {
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
         // This test asserts the LEGACY grounded-chat path (belief reaches the system prompt); the
         // agentic loop grounds in the user prompt instead, so drive the legacy chain explicitly.
-        let conv = engine(&mem, pool).with_agent_primary(false);
+        let conv = Arc::new(engine(&mem, pool).with_agent_primary(false));
 
         // assert two contradicting beliefs + a link via the REPL
         assert!(matches!(handle_line(":remember + Pranab likes coffee", &mem, &conv).await, Outcome::Said(s) if s.contains("confidence")));
@@ -631,7 +632,7 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        let conv = Arc::new(engine(&mem, pool));
 
         let secret = "The safe combination is 47-12-33";
         mem.remember_as_belief_scoped(
@@ -692,7 +693,7 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        let conv = Arc::new(engine(&mem, pool));
 
         // no beliefs yet
         assert!(matches!(handle_line(":beliefs", &mem, &conv).await, Outcome::Said(s) if s.contains("no beliefs")));
@@ -716,7 +717,7 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        let conv = Arc::new(engine(&mem, pool));
 
         // empty memory → four sections, nothing in beliefs
         match handle_line(":reflect", &mem, &conv).await {
@@ -764,7 +765,7 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        let conv = Arc::new(engine(&mem, pool));
         handle_line("/task@th_ym_c1_bot buy milk", &mem, &conv).await;
         match handle_line("/tasks", &mem, &conv).await {
             Outcome::Said(s) => assert!(s.contains("buy milk"), "slash command should work: {s}"),
@@ -778,7 +779,7 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        let conv = Arc::new(engine(&mem, pool));
 
         // Seed two beliefs that will form a contradiction.
         handle_line(":remember + sky is blue", &mem, &conv).await;
@@ -818,7 +819,7 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let scripted = Arc::new(ScriptedLLM::new("ok"));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
-        let conv = engine(&mem, pool);
+        let conv = Arc::new(engine(&mem, pool));
 
         for cmd in [":help", ":commands"] {
             match handle_line(cmd, &mem, &conv).await {

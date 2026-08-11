@@ -1489,6 +1489,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                             conv.note_proactive_sent().await;
                         }
                     }
+                    // CLOSE THE LOOP. Threads whose occasion is long past get one question about what
+                    // happened and are then dropped, instead of sitting in the grounding forever while
+                    // the mind offers to help with something already done. Abandoned ones close here
+                    // silently — announcing the closure would be a second interruption about something
+                    // the user has already shown they do not care about.
+                    for ask in conv.close_stale_threads().await {
+                        if tg_send_mirrored(&conv, &api, chat, &ask).await.is_ok() {
+                            conv.note_proactive_sent().await;
+                        }
+                    }
                 }
                 last_followup = now;
             }

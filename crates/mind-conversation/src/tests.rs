@@ -2812,3 +2812,84 @@ fn an_empty_answer_call_yields_nothing_to_send() {
         assert!(super::args_text(&v).is_empty(), "{raw}");
     }
 }
+
+/// THE FULL LIFECYCLE, against real memory.
+///
+/// Pranab's report: "the birthday and other events are gone but I am still getting messages asking for
+/// the status or offering help." Reproduced live — three weeks after the birthday the mind offered to
+/// finalise the gift order. The cause was not the nudges (those fire once); it was that an overdue task
+/// stayed OPEN, so it sat in the grounding as live work and the model volunteered it every turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_commitment_is_asked_about_once_then_dropped() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let scripted = Arc::new(ScriptedLLM::new("ok"));
+    let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+
+    // A gift commitment whose occasion passed three weeks ago.
+    let three_weeks_ago = (chrono::Utc::now().timestamp_millis() - 21 * 86_400_000) as u64;
+    let t = mem
+        .add_task("buy Brishti a Rosefield watch for her birthday", "high", Some(three_weeks_ago))
+        .await
+        .unwrap();
+
+    // It must NOT be carried as live work — that is what stops the model offering help with it.
+    let (carried, _) = conv.split_tasks().await;
+    assert!(
+        !carried.iter().any(|x| x.id == t.id),
+        "a three-week-old commitment must not read as outstanding: {:?}",
+        carried.iter().map(|x| &x.description).collect::<Vec<_>>()
+    );
+
+    // It earns exactly ONE question, and the question asks what happened.
+    let asks = conv.close_stale_threads().await;
+    assert_eq!(asks.len(), 1, "one question, not a list");
+    assert!(asks[0].contains("Rosefield"), "{}", asks[0]);
+    assert!(asks[0].contains("drop it"), "it must offer a way out: {}", asks[0]);
+
+    // Asking again immediately produces nothing — this is the anti-nag property.
+    assert!(conv.close_stale_threads().await.is_empty(), "it must not ask twice");
+
+    // The task is still open (we are waiting on an answer), just not carried.
+    assert!(mem.list_tasks(false).await.unwrap().iter().any(|x| x.id == t.id && x.is_open()));
+}
+
+/// Saying "I'm not tracking that anymore" closes it, and says which one — so a wrong match is visible
+/// now rather than discovered as a missing commitment weeks later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_tracking_closes_the_named_thread_and_reports_it() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let scripted = Arc::new(ScriptedLLM::new("ok"));
+    let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+
+    mem.add_task("buy Brishti a Rosefield watch", "high", None).await.unwrap();
+    mem.add_task("renew the car insurance", "high", None).await.unwrap();
+
+    let out = conv.stop_tracking("rosefield").await;
+    assert!(out.contains("Dropped") && out.contains("Rosefield"), "{out}");
+    assert!(out.contains("stop bringing it up"), "{out}");
+
+    let open: Vec<String> = mem.list_tasks(false).await.unwrap().iter().filter(|t| t.is_open()).map(|t| t.description.clone()).collect();
+    assert!(!open.iter().any(|d| d.contains("Rosefield")), "the watch is closed: {open:?}");
+    assert!(open.iter().any(|d| d.contains("insurance")), "the OTHER commitment survives: {open:?}");
+
+    // A miss says so rather than closing something arbitrary.
+    let miss = conv.stop_tracking("nonexistent thing").await;
+    assert!(miss.contains("Nothing open matches"), "{miss}");
+}
+
+/// A commitment with no deadline is never stale. Closing standing intentions ("read more") because time
+/// passed would delete the user's own goals — a far worse failure than carrying one too long.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_ended_intention_is_never_dropped() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let scripted = Arc::new(ScriptedLLM::new("ok"));
+    let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+
+    mem.add_task("call mum more often", "medium", None).await.unwrap();
+    assert!(conv.close_stale_threads().await.is_empty(), "an intention with no date is not overdue");
+    let (carried, _) = conv.split_tasks().await;
+    assert!(carried.iter().any(|t| t.description.contains("mum")), "and it stays carried");
+}

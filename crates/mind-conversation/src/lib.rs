@@ -30,6 +30,7 @@ mod emotion;
 mod code;
 mod festivals;
 mod finance;
+pub mod followthrough;
 mod foresight;
 mod home;
 mod horizon;
@@ -4088,6 +4089,9 @@ impl ConversationEngine {
             // finance (money/subs/bills/budget/spent) now dispatches via the capability registry
             // above — see plugins::CapabilityHandler + finance::FinanceCapability.
             // investing (portfolio/holding/analyze) dispatches via the capability registry above.
+            // Drop a commitment outright. The conversational path (`is_stop_tracking`) routes here too,
+            // so "I'm not tracking that anymore" and `ym drop <words>` do the same thing.
+            "drop" | "untrack" | "stop_tracking" if !rest.trim().is_empty() => self.stop_tracking(&rest).await,
             // --- tasks/reminders: list + complete (clears stale ones) ---
             "tasks" | "todos" | "todo" | "reminders" => {
                 let (reminders, internal) = self.split_tasks().await;

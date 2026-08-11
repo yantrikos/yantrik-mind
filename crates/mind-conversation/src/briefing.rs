@@ -7,6 +7,14 @@ impl super::ConversationEngine {
     /// work. The store accrues both; the briefing must only ever show the former, deduped — so ten
     /// near-identical "buy the gift" entries collapse to one and "implement X" never surfaces.
     pub(crate) async fn split_tasks(&self) -> (Vec<Task>, Vec<Task>) {
+        // STALE THREADS LEAVE. A commitment whose occasion is long past is not outstanding work, and
+        // while it stays here the model sees it every turn and offers to help with something that
+        // already happened — three weeks after the birthday, still asking about the gift order. This
+        // is where that stops: past its grace window a thread is no longer carried, so the model
+        // cannot volunteer it. Closing it out is `close_stale_threads`, on the tick.
+        let asked = self.closure_asks().await;
+        let today = local_now();
+        let now = today.timestamp_millis();
         let open: Vec<Task> = self
             .memory
             .list_tasks(false)
@@ -14,6 +22,11 @@ impl super::ConversationEngine {
             .unwrap_or_default()
             .into_iter()
             .filter(|t| t.is_open())
+            .filter(|t| {
+                let dl = crate::parse_text_date_ms(&t.description, &today);
+                let a = asked.get(&t.id).and_then(|v| v.as_i64());
+                crate::followthrough::classify(t, now, dl, a).is_carried()
+            })
             .collect();
         let (mut personal, internal): (Vec<Task>, Vec<Task>) =
             open.into_iter().partition(|t| is_personal_reminder(&t.description));

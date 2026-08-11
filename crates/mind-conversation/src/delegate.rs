@@ -103,6 +103,52 @@ pub(crate) fn verdict_ships(v: &str) -> bool {
     v.trim().to_uppercase().starts_with("SHIP")
 }
 
+/// One delegation, TYPED.
+///
+/// The ledger is stored as loose JSON (it predates any consumer that needed shape), and every
+/// reader so far has re-derived the fields with `get("status").and_then(as_str)` chains. That is
+/// fine for a text renderer and wrong for anything that has to make a decision — a typo in a key
+/// silently becomes `None`, which reads as "not running" rather than as a bug. The typed view is
+/// lenient on the way in (any missing field takes its default) and exact from then on.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub(crate) struct JobRow {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub kind: String,
+    /// "running" | "done" | "failed". Defaulted rather than optional so callers can match on it.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub started_ms: i64,
+    #[serde(default)]
+    pub finished_ms: Option<i64>,
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
+impl super::ConversationEngine {
+    /// The delegation ledger as typed rows, newest activity last. Shares the ledger with
+    /// `jobs_report_cmd` so the board, the desktop channel view, and the pulse can never disagree
+    /// about what is running.
+    pub(crate) async fn job_rows(&self) -> Vec<JobRow> {
+        let raw: Vec<serde_json::Value> = self
+            .memory
+            .profile_get(LEDGER_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        // A single malformed row must not blank the whole board — skip it and keep the rest.
+        raw.into_iter().filter_map(|v| serde_json::from_value::<JobRow>(v).ok()).collect()
+    }
+}
+
 /// Scratch memory for one job — Pranab's design (2026-08-05): a long job gets its own quarantined
 /// workspace; at completion what's worth keeping is PROMOTED into real memory and the scratch is
 /// destroyed. Nothing a job writes touches the mind's memory without passing the promotion gate,

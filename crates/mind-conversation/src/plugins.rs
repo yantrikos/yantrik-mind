@@ -361,6 +361,13 @@ impl PluginRegistry {
         self.plugins.iter().filter(|p| p.provenance != Provenance::Builtin).collect()
     }
 
+    /// Every registered spec, builtin and dynamic alike. The registry is the single source of truth
+    /// for what capabilities EXIST; whether one is currently usable is a separate question answered
+    /// by probing its backing client (see `ConversationEngine::capability_report`).
+    pub fn all_specs(&self) -> &[PluginSpec] {
+        &self.plugins
+    }
+
     /// Is this tool runnable? Core tools (owned by no plugin) are always on; a plugin-owned tool is
     /// on only if its plugin is enabled.
     pub fn is_tool_enabled(&self, tool: &str) -> bool {

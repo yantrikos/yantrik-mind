@@ -59,6 +59,7 @@ mod studio;
 mod timeline;
 mod support;
 pub mod support_nudge;
+pub mod surface;
 mod tool_catalog;
 mod treasury;
 
@@ -3989,6 +3990,20 @@ impl ConversationEngine {
         match cmd.as_str() {
             "" => "ym — say something, or `ym commands` to see the plugins you have.".to_string(),
             "commands" | "cmds" | "?" => self.cli_commands(),
+            // ── The TYPED SURFACE (see surface.rs) ──────────────────────────────────────────
+            // These return JSON, not prose, for the desktop cockpit's continuously-watched
+            // panels. They are deliberately separate verbs rather than a `--json` flag on the
+            // existing ones: the text reports are a product surface in their own right (Telegram
+            // reads them aloud, `ym` prints them), and making them dual-mode would couple two
+            // consumers with opposite needs. A serialization failure returns a JSON error object,
+            // never prose — a client parsing this must never receive something unparseable.
+            // The handshake: which typed surfaces does THIS build serve? A client asks once on
+            // connect and only requests what is listed, so a newer app against an older box
+            // degrades to the text verbs instead of parsing prose as JSON.
+            "surfaces" => serde_json::json!({ "surfaces": surface::TYPED_VERBS }).to_string(),
+            "pulse" => surface::json_or_error(&self.pulse(ctx).await),
+            "funnel_json" => surface::json_or_error(&self.funnel_json().await),
+            "capabilities_json" => surface::json_or_error(&self.capability_report()),
             "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
@@ -5114,6 +5129,20 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
             // A control-plane command is not a conversational answer. `is_command_shaped` is
             // deliberately narrow (one token, no spaces, snake_case or a leading slash) so real
             // one-word names like "Ritu" still answer normally.
+            // A TYPED-SURFACE request that reached here is an unimplemented surface, not a question.
+            // It must NEVER fall through to `handle_turn` below.
+            //
+            // This was found the hard way: a client built against a newer server asked the running
+            // (older) box for `pulse`, the verb hit the chat fall-through, and the mind answered with
+            // a confident invented "pulse check" — burning a model call to fabricate a report that
+            // does not exist. Version skew between the desktop app and the box is normal (they
+            // deploy separately), so the machine-readable namespace has to fail machine-readably.
+            _ if surface::is_typed_verb(&cmd) => serde_json::json!({
+                "error": format!("this build does not implement the `{cmd}` surface"),
+                "surface": cmd,
+                "supported": surface::TYPED_VERBS,
+            })
+            .to_string(),
             _ if Self::is_command_shaped(line) && self.has_pending_slot().await => format!(
                 "`{line}` isn't a command I know, and I won't use it as an answer to the question I \
                  have open. Answer that question, or say `skip` to close it — then try again."

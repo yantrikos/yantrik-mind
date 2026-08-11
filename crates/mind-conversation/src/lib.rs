@@ -1962,6 +1962,30 @@ fn rename_in_people(store: &mut [serde_json::Value], old_q: &str, new_name: &str
 }
 
 /// The soonest upcoming key date for a person, as a short "label in Nd" line. None if they have none.
+/// The reply text out of an `answer` call, whichever field the model used.
+///
+/// Models spell this at least four ways depending on how the catalog line was read, and none of them
+/// is wrong enough to justify discarding a finished answer over. Checked in order of how the catalog
+/// actually documents it.
+fn args_text(v: &serde_json::Value) -> String {
+    for path in [("args", "text"), ("args", "answer"), ("args", "reply")] {
+        if let Some(s) = v.get(path.0).and_then(|a| a.get(path.1)).and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
+            }
+        }
+    }
+    // Some models put the prose in `args` as a bare string, or alongside the tool at the top level.
+    for key in ["args", "text", "answer"] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 fn next_date_line(p: &serde_json::Value, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<String> {
     let mut best: Option<(i64, String)> = None;
     for d in p.get("dates").and_then(|x| x.as_array())? {
@@ -6672,6 +6696,33 @@ Open reminders you're carrying for them:");
                 }
             }
             let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
+
+            // `answer` IS TERMINAL, however the model spells it.
+            //
+            // The catalog advertises "- answer {text}: give the user your final reply", and the NATIVE
+            // tool-calling path above honours it. The FREE-TEXT path did not: a model emitting
+            // {"tool":"answer","args":{"text":"..."}} fell through to the dispatch table, which has no
+            // such arm, and got back "(unknown tool: answer)". The loop treated that as a failed step
+            // and asked again — so the model kept choosing the one action the catalog promised and the
+            // runtime refused.
+            //
+            // At the old 5-step cap this wasted a step or two and the compose step covered for it. At
+            // 100 it is a hang: observed live on 2026-08-11, a turn spent steps 2, 3, 5 and 6 calling
+            // `answer`, was still looping past step 8 four minutes in, and the request died on the
+            // clock with an empty reply. Raising the iteration limit did not cause this bug; it
+            // removed the thing that was hiding it.
+            if tool == "answer" {
+                let ans = args_text(&v);
+                if !ans.trim().is_empty() {
+                    let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                    let _ = self.memory.append_message_scoped("assistant", &ans, id.write_scope()).await;
+                    return Ok(ans);
+                }
+                // An `answer` with nothing in it is not an answer. Fall through to compose from the
+                // work log rather than returning an empty message.
+                break;
+            }
+
             if !tool.is_empty() {
                 emit_progress(&format!("using {tool}…"));
             }

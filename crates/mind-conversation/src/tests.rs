@@ -2769,3 +2769,46 @@ async fn the_voice_path_grounds_in_the_people_layer() {
     assert!(prompt.contains("wife"), "the relationship must come through too:
 {prompt}");
 }
+
+/// `answer` must TERMINATE the loop, however the model spells it.
+///
+/// The catalog advertises "- answer {text}: give the user your final reply". The native tool-calling
+/// path honoured it; the free-text JSON path did not, so `{"tool":"answer","args":{"text":"..."}}`
+/// hit the dispatch table, found no such arm, and came back "(unknown tool: answer)". The loop
+/// counted that as a failed step and asked again — the model kept choosing the one action the catalog
+/// promised and the runtime refused.
+///
+/// Observed live 2026-08-11 after the iteration cap went from 5 to 100: a turn spent steps 2, 3, 5
+/// and 6 on `answer`, was still looping past step 8 four minutes later, and died on the clock with an
+/// empty reply. Raising the cap did not cause it; it removed what was hiding it.
+#[test]
+fn an_answer_call_yields_its_text_however_it_is_spelled() {
+    for raw in [
+        r#"{"tool":"answer","args":{"text":"Her anniversary is 10 March."}}"#,
+        r#"{"tool":"answer","args":{"answer":"Her anniversary is 10 March."}}"#,
+        r#"{"tool":"answer","args":{"reply":"Her anniversary is 10 March."}}"#,
+        r#"{"tool":"answer","args":"Her anniversary is 10 March."}"#,
+        r#"{"tool":"answer","text":"Her anniversary is 10 March."}"#,
+    ] {
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            super::args_text(&v),
+            "Her anniversary is 10 March.",
+            "an answer must not be discarded over which field it arrived in: {raw}"
+        );
+    }
+}
+
+/// An empty `answer` is not an answer — it must fall through to composing from the work log rather
+/// than returning a blank message to the user.
+#[test]
+fn an_empty_answer_call_yields_nothing_to_send() {
+    for raw in [
+        r#"{"tool":"answer","args":{"text":"   "}}"#,
+        r#"{"tool":"answer","args":{}}"#,
+        r#"{"tool":"answer"}"#,
+    ] {
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(super::args_text(&v).is_empty(), "{raw}");
+    }
+}

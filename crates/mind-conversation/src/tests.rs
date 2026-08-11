@@ -2934,3 +2934,53 @@ fn rendering_rich_does_not_disturb_read_isolation() {
     assert_eq!(format!("{:?}", plain.viewer()), format!("{:?}", rich.viewer()));
     assert_eq!(format!("{:?}", plain.write_scope()), format!("{:?}", rich.write_scope()));
 }
+
+// ── THE BARREN-STEP GUARD ────────────────────────────────────────────────────────────────────────
+//
+// Reproduces a failure seen live on 2026-08-11: the loop called `remember` twenty-one consecutive
+// times, exhausted its 100-step budget, and returned "Sorry — I had trouble putting that together."
+//
+// The existing guard compared each call to the IMMEDIATELY PREVIOUS one, and every `remember` carried
+// different text — so each signature was new while each call was equally useless. The test scripts
+// exactly that: the same tool, never the same arguments twice. It fails against the old guard (which
+// would run all 30 scripted steps) and passes against the observation-based one.
+
+#[tokio::test]
+async fn a_tool_that_keeps_returning_the_same_thing_stops_the_loop() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    // Thirty `remember` calls, each with DIFFERENT text — the shape that defeated the old guard.
+    let script: Vec<String> = (0..30)
+        .map(|i| format!(r#"{{"thought":"noting this","tool":"remember","args":{{"text":"fact number {i}"}}}}"#))
+        .collect();
+    let llm = Arc::new(mind_inference::SequencedLLM::new(script));
+    let pool = mind_inference::InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+
+    let _ = conv.agent_loop_for_eval("tell me about my reply paths", &TurnIdentity::primary()).await;
+
+    // `remember` returns the same acknowledgement every time, so the second repeat is the second
+    // barren step and the loop must stop there. A handful of calls is fine; twenty-one is the bug.
+    let calls = llm.call_count();
+    assert!(
+        calls <= 6,
+        "the loop made {calls} model calls on a tool that never returned anything new — the barren-step guard is not firing"
+    );
+}
+
+#[tokio::test]
+async fn an_identical_call_is_not_paid_for_twice() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    // A, B, A, B — never two identical calls in a ROW, so the last-call guard cannot see it.
+    let a = r#"{"thought":"checking","tool":"now","args":{}}"#;
+    let b = r#"{"thought":"checking","tool":"recall","args":{"query":"reply paths"}}"#;
+    let script: Vec<String> =
+        (0..20).map(|i| if i % 2 == 0 { a.to_string() } else { b.to_string() }).collect();
+    let llm = Arc::new(mind_inference::SequencedLLM::new(script));
+    let pool = mind_inference::InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+
+    let _ = conv.agent_loop_for_eval("what are my reply paths", &TurnIdentity::primary()).await;
+
+    let calls = llm.call_count();
+    assert!(calls <= 6, "an A,B,A,B cycle ran for {calls} model calls — the full-history guard is not firing");
+}

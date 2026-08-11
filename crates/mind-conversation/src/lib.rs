@@ -6648,8 +6648,17 @@ Open reminders you're carrying for them:");
             think: mind_inference::think_for("dispatch", Some(false)),
             ..GenerationConfig::default()
         };
+        // Consecutive steps that may return nothing new before the loop stops asking and composes.
+        // Two, not one: a single repeat can be a legitimate re-check, three in a row cannot.
+        const MAX_BARREN_STEPS: usize = 2;
         let mut scratch = String::new();
         let mut last_call = String::new();
+        // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
+        // seen. Both exist because comparing against `last_call` alone was not enough — see the
+        // barren-step guard below for the live failure that proved it.
+        let mut done_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_obs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut barren = 0usize;
         // Once the fast dispatch model flubs the agentic format, the rest of the turn runs on the
         // reasoner (think:true routes there). Sticky for the turn — a request hard enough to trip the
         // small model once will likely need the capable one for the remaining steps too.
@@ -6850,7 +6859,23 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 eprintln!("[agent] step {step}: repeated {tool} call — answering from the work log");
                 break;
             }
-            last_call = call_sig;
+            // …and if it is identical to ANY earlier call this turn, not just the last one. A model
+            // that alternates A, B, A, B never trips the last-call check but learns nothing after the
+            // second pass. Re-serve the earlier result from the log rather than paying for it twice.
+            if done_calls.contains(&call_sig) {
+                eprintln!("[agent] step {step}: {tool} already called with these args — reusing the work log");
+                scratch.push_str(&format!(
+                    "
+[{step}] {tool} -> (already called with exactly these arguments earlier this turn;                      its result is above — do not call it again, use it or answer)"
+                ));
+                barren += 1;
+                if barren >= MAX_BARREN_STEPS {
+                    break;
+                }
+                continue;
+            }
+            last_call = call_sig.clone();
+            done_calls.insert(call_sig);
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
@@ -6866,6 +6891,39 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 .any(|m| obs_lc.contains(m));
             let tool_ok = obs.chars().count() > 10 && !(obs.trim_start().starts_with('(') && failure_marker);
             let _ = self.memory.record_tool_outcome(&tool, tool_ok).await;
+
+            // ── BARREN-STEP GUARD ────────────────────────────────────────────────────────────────
+            //
+            // Observed live on 2026-08-11: a turn called `remember` TWENTY-ONE consecutive times, ran
+            // out its whole 100-step budget, and returned "Sorry — I had trouble putting that
+            // together." The signature guard above could not see it, because each call carried
+            // DIFFERENT text — so every signature was new while every call was equally useless.
+            //
+            // What they had in common was the OBSERVATION: `remember` answers "(remembered)" every
+            // time. That is the general test, and it needs no curated list of which tools are
+            // side-effects: a call whose tool returns an observation this turn has already seen
+            // produced no new information, whatever its arguments were. A `web_fetch` of a second URL
+            // returns different text and is not barren; a `recall` that keeps returning the same rows
+            // is, and correctly so.
+            //
+            // The bound is on CONSECUTIVE barren steps, not the total, so a genuinely long research
+            // turn that hits one repeat mid-way is not punished for it.
+            let obs_sig = format!("{tool}|{}", obs.trim());
+            if seen_obs.contains(&obs_sig) {
+                barren += 1;
+                eprintln!("[agent] step {step}: {tool} returned nothing new ({barren}/{MAX_BARREN_STEPS} barren)");
+                if barren >= MAX_BARREN_STEPS {
+                    eprintln!("[agent] step {step}: barren limit reached — composing from the work log");
+                    scratch.push_str(&format!(
+                        "
+[{step}] {tool} -> (no new information; stop calling tools and answer from the log above)"
+                    ));
+                    break;
+                }
+            } else {
+                barren = 0;
+                seen_obs.insert(obs_sig);
+            }
             // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
             // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
             // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).

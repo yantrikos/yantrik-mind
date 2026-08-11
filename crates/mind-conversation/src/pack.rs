@@ -43,13 +43,25 @@ pub enum PackEval {
         #[serde(default = "d_min_rate")]
         min_rate: f32,
     },
-    /// A tool call answers with the expected substring. Certification runs while the pack is
-    /// DISABLED, so the target must be a core or already-enabled tool — not one of the pack's own.
+    /// A tool call answers with the expected substring. This is an ENVIRONMENT PRECONDITION check
+    /// (is calc alive, is weather configured) — it targets core or already-enabled tools, never the
+    /// pack's own (those aren't dispatchable while the pack is disabled; use skill_answers).
     ToolContains {
         tool: String,
         #[serde(default)]
         args: serde_json::Value,
         expect: String,
+    },
+    /// RUNTIME verification of the pack's own behavior, pre-enable: execute the named pack skill
+    /// directly (legitimate — it doesn't route through the disabled-plugin tool gate) and require
+    /// a non-empty answer, optionally containing a substring. Costs a model call — certification
+    /// is allowed to cost.
+    SkillAnswers {
+        name: String,
+        #[serde(default)]
+        input: String,
+        #[serde(default)]
+        expect: Option<String>,
     },
 }
 
@@ -140,14 +152,17 @@ impl PackDoc {
         }
     }
 
+    /// Catalog lines are ALWAYS auto-derived for packs — a pack document's free-text `catalog`
+    /// field is ignored, because those lines land in the agent prompt and a foreign document must
+    /// not get to write arbitrary prompt text (injection surface). Summaries are truncated too.
     fn catalog_lines(&self) -> String {
-        if !self.catalog.trim().is_empty() {
-            return self.catalog.clone();
-        }
         self.tool_map()
             .iter()
             .zip(self.skills.iter())
-            .map(|((tool, _), s)| format!("- {tool} {{input}}: {}", if s.summary.is_empty() { &s.name } else { &s.summary }))
+            .map(|((tool, _), s)| {
+                let desc: String = (if s.summary.trim().is_empty() { &s.name } else { &s.summary }).chars().take(100).collect();
+                format!("- {tool} {{input}}: {}", desc.replace(['\n', '\r'], " "))
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -198,14 +213,15 @@ impl CapabilityHandler for PackCapability {
 impl ConversationEngine {
     /// Execute a pack skill: instructions + the caller's input through a Think step. Success or
     /// failure lands in the skill's reliability record — the same signal certification reads.
-    pub(crate) async fn pack_run_skill(&self, bank_name: &str, args: &serde_json::Value) -> String {
+    /// Returns (ok, answer-or-diagnostic).
+    pub(crate) async fn pack_run_skill_exec(&self, bank_name: &str, args: &serde_json::Value) -> (bool, String) {
         let sk = match self.memory.get_skill(bank_name).await {
             Ok(Some(s)) => s,
-            _ => return format!("(pack skill '{bank_name}' is missing from the bank)"),
+            _ => return (false, format!("(pack skill '{bank_name}' is missing from the bank)")),
         };
         let recipes = match &self.recipes {
             Some(r) => r,
-            None => return "(recipe engine unavailable — pack skills need it to run)".to_string(),
+            None => return (false, "(recipe engine unavailable — pack skills need it to run)".to_string()),
         };
         let input = if args.is_null() { String::new() } else { format!("\n\nINPUT:\n{}", args) };
         let rec = mind_recipes::Recipe {
@@ -222,9 +238,13 @@ impl ConversationEngine {
         let ok = out.error.is_none() && result.as_deref().map(|r| !r.trim().is_empty()).unwrap_or(false);
         let _ = self.memory.record_skill_outcome(bank_name, ok).await;
         match result {
-            Some(r) if ok => r,
-            _ => format!("(pack skill '{bank_name}' produced nothing{})", out.error.map(|e| format!(": {e}")).unwrap_or_default()),
+            Some(r) if ok => (true, r),
+            _ => (false, format!("(pack skill '{bank_name}' produced nothing{})", out.error.map(|e| format!(": {e}")).unwrap_or_default())),
         }
+    }
+
+    pub(crate) async fn pack_run_skill(&self, bank_name: &str, args: &serde_json::Value) -> String {
+        self.pack_run_skill_exec(bank_name, args).await.1
     }
 
     /// Run a pack's evals. Returns (all_passed, one receipt line per eval).
@@ -258,6 +278,12 @@ impl ConversationEngine {
                     let ok = out.contains(expect.as_str());
                     (ok, format!("tool_contains({tool} ⊇ \"{expect}\")"))
                 }
+                PackEval::SkillAnswers { name, input, expect } => {
+                    let bank = resolve(name);
+                    let (ran, out) = self.pack_run_skill_exec(&bank, &serde_json::json!({ "input": input })).await;
+                    let ok = ran && expect.as_deref().map(|e| out.contains(e)).unwrap_or(true);
+                    (ok, format!("skill_answers({bank})"))
+                }
             };
             all &= ok;
             lines.push(format!("   {} {line}", if ok { "✓" } else { "✗" }));
@@ -286,6 +312,17 @@ impl ConversationEngine {
         if doc.provenance != "self_authored" {
             doc.provenance = "imported".to_string();
         }
+        // Register FIRST (disabled) — builtin shadowing and tool collisions are refused by the
+        // registry itself, and a refused install must leave ZERO residue (no orphaned bank
+        // entries). If banking fails after registration, the pack exists in a DEFINED state:
+        // installed, uncertified, off, with skill_exists evals naming exactly what's missing.
+        {
+            let mut reg = self.plugins.lock().unwrap();
+            if let Err(e) = reg.register_spec(doc.to_spec()) {
+                return format!("(pack refused: {e})");
+            }
+            reg.register_handler(Arc::new(PackCapability { id: id.clone(), tools: doc.tool_map() }));
+        }
         // Bank the skills (namespaced for imported packs — a foreign doc can't overwrite the bank).
         if bank_skills {
             let now = chrono::Utc::now().timestamp_millis() as u64;
@@ -302,18 +339,9 @@ impl ConversationEngine {
                     created_ms: now,
                 };
                 if let Err(e) = self.memory.save_skill(s).await {
-                    return format!("(couldn't bank pack skill: {e})");
+                    return format!("(couldn't bank pack skill: {e} — '{id}' is installed but uncertified; fix and `ym pack certify {id}`)");
                 }
             }
-        }
-        // Register the spec (disabled) + the generic handler. Builtin shadowing and tool
-        // collisions are refused by the registry itself.
-        {
-            let mut reg = self.plugins.lock().unwrap();
-            if let Err(e) = reg.register_spec(doc.to_spec()) {
-                return format!("(pack refused: {e})");
-            }
-            reg.register_handler(Arc::new(PackCapability { id: id.clone(), tools: doc.tool_map() }));
         }
         {
             let mut packs = self.packs.lock().unwrap();
@@ -425,6 +453,8 @@ impl ConversationEngine {
                     vec![
                         PackEval::SkillExists { name: s.name.clone() },
                         PackEval::SkillReliable { name: s.name.clone(), min_runs: 1, min_rate: 0.5 },
+                        // runtime smoke: the skill must actually ANSWER, not just exist on paper
+                        PackEval::SkillAnswers { name: s.name.clone(), input: String::new(), expect: None },
                     ]
                 })
                 .collect(),

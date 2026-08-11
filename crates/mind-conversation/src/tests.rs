@@ -2586,9 +2586,20 @@ async fn capability_registry_routes_finance_and_gates_disabled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pack_lifecycle_install_certify_demote_draft() {
+    use mind_recipes::RecipeEngine;
     let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
-    let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
+    // The draft's runtime smoke eval (skill_answers) runs skills through a Think step — wire a
+    // recipe engine so certification can actually execute them.
+    struct NoHost;
+    #[async_trait::async_trait]
+    impl RecipeHost for NoHost {
+        async fn call_tool(&self, _t: &str, _a: &serde_json::Value) -> anyhow::Result<String> {
+            anyhow::bail!("no tools")
+        }
+    }
+    let engine = Arc::new(RecipeEngine::new(pool.clone(), Arc::new(NoHost), "JARVIS"));
+    let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS").with_recipes(engine);
     let ctx = mind_types::AccessContext::Operator;
 
     // 1. INSTALL: a pack with an existence eval + a core-tool eval certifies and turns ON.
@@ -2623,6 +2634,8 @@ async fn pack_lifecycle_install_certify_demote_draft() {
     assert!(draft.contains("self_authored") && draft.contains("certified"), "proven skill must draft into a certified pack: {draft}");
 
     // 5. DEMOTION: quarantine-grade failure — break the reliability the draft's eval requires.
+    // (The draft's smoke eval recorded one success, so: 2 ok + 3 fail = 40% < 50%.)
+    memarc.record_skill_outcome("csv summer", false).await.unwrap();
     memarc.record_skill_outcome("csv summer", false).await.unwrap();
     memarc.record_skill_outcome("csv summer", false).await.unwrap();
     let recert = conv.pack_certify("csv_pack").await;

@@ -296,7 +296,10 @@ impl super::ConversationEngine {
         let Some(idx) = idx else {
             return format!("No profile named exactly \"{name}\" — `ym family` lists them.");
         };
-        for p in store.iter_mut().skip(idx).take(1) {
+        // `idx` came from a `position()` above, so the element exists; the `let Some` keeps that
+        // fact local rather than indexing and relying on it. (Was a `for … .take(1) { … break }`,
+        // which clippy rightly denies as a loop that never loops.)
+        if let Some(p) = store.get_mut(idx) {
             match field.as_str() {
                 "relationship" => {
                     p["relationship"] = serde_json::json!(value.trim());
@@ -323,7 +326,6 @@ impl super::ConversationEngine {
                 }
                 _ => return format!("Unknown field \"{field}\" — birthday | anniversary | relationship."),
             }
-            break;
         }
         if !touched {
             return format!("No profile named \"{name}\".");

@@ -82,9 +82,9 @@ pub(crate) const SCHEMA: &[Setting] = &[
     // ── Agent loop ───────────────────────────────────────────────────────
     // How hard the mind is allowed to work on one thing. These bind: `agent_budget()` reads them,
     // and the loop's iteration cap comes from that rather than from a constant.
-    Setting { key: "YM_MAX_STEPS", label: "Max iterations", group: "Agent loop", kind: "int", desc: "Tool steps one turn may take before it must answer (default 100, allowed 2–200). The cap exists to stop a runaway, not to limit thinking — lower it only to make turns cheaper.", restart: true },
+    Setting { key: "YM_MAX_STEPS", label: "Max iterations", group: "Agent loop", kind: "int", desc: "Tool steps one turn may take before it must answer (default 100, allowed 2–500). The cap exists to stop a runaway, not to limit thinking — lower it only to make turns cheaper.", restart: true },
     Setting { key: "YM_MAX_MODEL_CALLS", label: "Max reasoning calls", group: "Agent loop", kind: "int", desc: "Model calls per turn — the cost that actually matters. Capped at the iteration limit, since a step is what makes a call.", restart: true },
-    Setting { key: "YM_MAX_WALL_SECS", label: "Turn time limit (s)", group: "Agent loop", kind: "int", desc: "Wall-clock ceiling for one turn (default 600). At ~10s a reasoning call this is what binds first on a long turn — raise it before raising the iteration limit.", restart: true },
+    Setting { key: "YM_MAX_WALL_SECS", label: "Turn time limit (s)", group: "Agent loop", kind: "int", desc: "Wall-clock ceiling for one turn (default 180). Independent of the iteration limit: a turn of cheap steps reaches 100 well inside it, while one that reasons every step hits the clock after ~20. Whichever binds is reported distinctly.", restart: true },
     Setting { key: "YM_MAX_USD", label: "Spend per turn ($)", group: "Agent loop", kind: "string", desc: "Optional cost ceiling for one turn. Empty or 0 = ungoverned.", restart: true },
     Setting { key: "YM_BG_MAX_STEPS", label: "Max iterations (delegated)", group: "Agent loop", kind: "int", desc: "Iteration cap for delegated/scheduled work, where nobody is waiting (default 150). Depth is worth more here.", restart: true },
     Setting { key: "YM_COGNITION", label: "Bounded control loop", group: "Agent loop", kind: "toggle", desc: "Use the state-capsule runtime instead of the classic think→tool→think loop: the runtime keeps the execution state, so a long turn costs what a short one does. Off = the loop that has always run.", restart: true },
@@ -258,13 +258,18 @@ mod tests {
     }
 
     /// Delegated work gets its own, larger cap: nobody is waiting, so depth is worth more.
+    ///
+    /// Compares the DEFAULTS rather than the env-reading functions, deliberately. `cargo test` runs a
+    /// binary's tests concurrently, and the iteration test above mutates process-global env — so a
+    /// version of this that called `agent_budget()` raced with it and failed intermittently once in
+    /// the workspace run. A test that reads shared mutable state it does not own is a flake waiting
+    /// for a busy machine.
     #[test]
     fn delegated_work_has_a_separate_larger_cap() {
-        assert!(
-            background_budget().max_steps > agent_budget().max_steps,
-            "delegated runs should not be held to an interactive cap"
-        );
-        assert!(background_budget().max_wall_ms > agent_budget().max_wall_ms);
+        let interactive = mind_spec::Budget::interactive();
+        let delegated = mind_spec::Budget::background();
+        assert!(delegated.max_steps > interactive.max_steps, "delegated runs are not held to an interactive cap");
+        assert!(delegated.max_wall_ms > interactive.max_wall_ms);
     }
 
     #[test]

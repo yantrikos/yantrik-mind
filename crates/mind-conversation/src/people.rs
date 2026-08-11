@@ -59,7 +59,17 @@ fn gate_people_inner(
     today: &chrono::DateTime<chrono::FixedOffset>,
     all_detailed: bool,
 ) -> String {
-    let people: Vec<&serde_json::Value> = people.iter().take(8).collect();
+    // EVERY profile is considered. The truncation that used to live here — `.take(8)` before any
+    // scoring — silently removed everyone past the eighth person from the prompt entirely, so the
+    // "named outright" +500 boost below could never fire for them. On the live box that meant 10 of
+    // 18 people were unreachable on BOTH the agent loop and the voice path: asked "when is Brishti's
+    // anniversary" the mind said it did not have the date, while `ym family` printed it on the same
+    // store. And the doc comment above asserted the opposite — "every profile still appears".
+    //
+    // The prompt budget was the real intent, and it is preserved: the DETAIL is gated below, and the
+    // name-only tail is one short line per person. Scoring first and gating detail second costs a few
+    // bytes and makes everyone findable.
+    let people: Vec<&serde_json::Value> = people.iter().collect();
     if people.is_empty() {
         return String::new();
     }
@@ -831,5 +841,61 @@ mod gate_tests {
     fn common_short_words_do_not_make_everyone_relevant() {
         let out = gate_people(&store(), "can you tell me the one for her and the dog?", &today());
         assert!(!out.contains("golden retrievers"), "stopword-grade match leaked:\n{out}");
+    }
+
+    fn mk(name: &str, rel: &str, fact: &str) -> serde_json::Value {
+        serde_json::json!({ "name": name, "relationship": rel, "facts": [fact], "dates": [] })
+    }
+    fn day() -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-11T10:00:00-05:00").unwrap()
+    }
+    /// THE BUG THIS GUARDS. `gate_people` used to `.take(8)` before scoring, so on a household with
+    /// 18 people the eleventh was removed from the prompt before the "named outright" boost could
+    /// fire — the mind denied knowing someone whose details `ym family` printed from the same store.
+    /// Found live 2026-08-11 asking about Brishti, who is eleventh.
+    #[test]
+    fn a_person_past_the_eighth_is_still_reachable_when_named() {
+        let mut store: Vec<serde_json::Value> = (0..10)
+            .map(|i| mk(&format!("Filler{i}"), "friend", "likes things"))
+            .collect();
+        store.push(mk("Brishti", "wife", "wedding anniversary in March"));
+        store.push(mk("Later", "friend", "irrelevant"));
+
+        let out = gate_people(&store, "when is Brishti's anniversary?", &day());
+        assert!(out.contains("Brishti"), "the named person must appear at all:\n{out}");
+        assert!(
+            out.contains("wedding anniversary in March"),
+            "and NAMING someone must earn their details, wherever they sit in the store:\n{out}"
+        );
+    }
+
+    /// The prompt budget was the real intent of the truncation, so it must still hold: everyone
+    /// appears, but only a few get their fact tails.
+    #[test]
+    fn everyone_appears_but_only_a_few_are_detailed() {
+        let store: Vec<serde_json::Value> = (0..20)
+            .map(|i| mk(&format!("Person{i}"), "friend", &format!("a distinctive fact about number {i}")))
+            .collect();
+        let out = gate_people(&store, "tell me about Person17", &day());
+
+        for i in 0..20 {
+            assert!(out.contains(&format!("Person{i}")), "Person{i} vanished from the prompt:\n{out}");
+        }
+        assert!(out.contains("a distinctive fact about number 17"), "the named one is detailed:\n{out}");
+        // Most fact tails are withheld, and the prompt says so rather than implying ignorance.
+        let detailed = (0..20).filter(|i| out.contains(&format!("a distinctive fact about number {i}"))).count();
+        assert!(detailed <= PEOPLE_DETAILED + 2, "{detailed} people detailed — the budget is gone");
+        assert!(out.contains("listed by name only"), "the withholding must be stated:\n{out}");
+    }
+
+    /// A core relation keeps its details unprompted — you should not have to name your own spouse.
+    #[test]
+    fn a_core_relation_is_detailed_without_being_named() {
+        let mut store: Vec<serde_json::Value> = (0..12)
+            .map(|i| mk(&format!("Filler{i}"), "acquaintance", "nothing much"))
+            .collect();
+        store.push(mk("Priya", "wife", "allergic to shellfish"));
+        let out = gate_people(&store, "what should we cook tonight?", &day());
+        assert!(out.contains("allergic to shellfish"), "a spouse's facts should not need summoning:\n{out}");
     }
 }

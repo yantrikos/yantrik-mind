@@ -11,6 +11,8 @@ pub enum AuthError {
 pub enum MindError {
     #[error(transparent)]
     Auth(#[from] AuthError),
+    #[error("not authorized")]
+    NotAuthorized,
     #[error("memory: {0}")]
     Memory(String),
     #[error("inference: {0}")]

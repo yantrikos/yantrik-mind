@@ -79,6 +79,12 @@ impl Provenance {
 pub trait CapabilityHandler: Send + Sync {
     /// The PluginSpec id this handler implements.
     fn id(&self) -> &'static str;
+    /// Does this capability serve `ym` commands at all? Tool-only capabilities return false so a
+    /// shared alias word (e.g. coder's "code" vs the repo browser's `ym code`) never gets
+    /// short-circuited by the disabled-plugin gate on the CLI path.
+    fn handles_commands(&self) -> bool {
+        true
+    }
     /// Answer a `ym` command word this plugin's aliases own. None = not mine, fall through.
     async fn handle_command(&self, host: &ConversationEngine, cmd: &str, rest: &str) -> Option<String>;
     /// Answer a run_agent_tool name this plugin's tools own. None = not mine, fall through.
@@ -211,6 +217,10 @@ impl PluginRegistry {
             Arc::new(crate::capabilities::MarketsCapability),
             Arc::new(crate::capabilities::TranslateCapability),
             Arc::new(crate::capabilities::GithubCapability),
+            Arc::new(crate::capabilities::ResearchCapability),
+            Arc::new(crate::capabilities::CoderCapability),
+            Arc::new(crate::capabilities::MonitorsCapability),
+            Arc::new(crate::capabilities::DashboardsCapability),
         ];
         Self { plugins, handlers }
     }

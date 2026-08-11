@@ -3945,8 +3945,11 @@ impl ConversationEngine {
         let routed = {
             let reg = self.plugins.lock().unwrap();
             match reg.plugin_for_command(&cmd) {
-                Some(p) if !p.enabled && reg.handler_for_id(&p.id).is_some() => Err(p.id.clone()),
-                Some(p) => Ok(reg.handler_for_id(&p.id)),
+                Some(p) => match reg.handler_for_id(&p.id) {
+                    Some(h) if !p.enabled && h.handles_commands() => Err(p.id.clone()),
+                    Some(h) if p.enabled => Ok(Some(h)),
+                    _ => Ok(None),
+                },
                 None => Ok(None),
             }
         };
@@ -6053,58 +6056,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
             // immediately, do the work in a detached task, and deliver the result to the chat via the
             // poll-loop notify drain. Best-effort (a process restart loses an in-flight job; the recipe
             // engine is the durable path). A soft cap stops runaway fan-out.
-            "research" => {
-                let topic = { let q = s("query"); if q.is_empty() { s("topic") } else { q } };
-                if topic.len() < 3 {
-                    return "(what should I research? give me a topic)".to_string();
-                }
-                match &self.researcher {
-                    Some(r) => {
-                        if !self.try_acquire_bg(2) {
-                            return "(I've got a couple of background jobs running already — let those finish and ask again.)".to_string();
-                        }
-                        let (r, q, jobs, topic2) = (r.clone(), self.notify_queue.clone(), self.bg_jobs.clone(), topic.clone());
-                        tokio::spawn(async move {
-                            let res = r.run(&topic2).await;
-                            let mut msg = format!("🔎 Research — {topic2}:\n\n{}", res.answer);
-                            if !res.sources.is_empty() {
-                                msg.push_str("\n\nSources:\n");
-                                for u in res.sources.iter().take(6) {
-                                    msg.push_str(&format!("- {u}\n"));
-                                }
-                            }
-                            q.lock().unwrap().push(msg);
-                            jobs.fetch_sub(1, Ordering::Relaxed);
-                        });
-                        format!("On it — researching \"{topic}\" in the background. I'll send what I find here when it's done.")
-                    }
-                    None => "(research isn't configured)".to_string(),
-                }
-            }
-            "code" => {
-                let task = { let t = s("task"); if t.is_empty() { s("query") } else { t } };
-                if task.len() < 3 {
-                    return "(what should I build? describe the script/task)".to_string();
-                }
-                match &self.coder {
-                    Some(c) => {
-                        if !self.try_acquire_bg(2) {
-                            return "(I've got a couple of background jobs running already — let those finish and ask again.)".to_string();
-                        }
-                        let (c, q, jobs, task2) = (c.clone(), self.notify_queue.clone(), self.bg_jobs.clone(), task.clone());
-                        tokio::spawn(async move {
-                            let out = match c.run(&task2).await {
-                                Ok(r) => format!("🛠️ Code — {task2}:\n\n{}", mind_tools::render_coder(&r)),
-                                Err(e) => format!("🛠️ Code — \"{task2}\" failed: {e}"),
-                            };
-                            q.lock().unwrap().push(out);
-                            jobs.fetch_sub(1, Ordering::Relaxed);
-                        });
-                        format!("On it — building \"{task}\" in the background (isolated sandbox; can take a few minutes). I'll send the result here when it's done.")
-                    }
-                    None => "(the coder isn't configured)".to_string(),
-                }
-            }
+            // research + code (delegated background jobs) dispatch via the capability registry above.
             // THE HOME HAND: one service on one entity, through the SAME harm-gate + confirm
             // handshake as every outward act. The model resolves the friendly name to an exact
             // entity_id from the states it can already read; POLICY it cannot touch lives in the
@@ -6147,38 +6099,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                     None => "(no harm-gated action runtime is configured — the home hand stays off)".to_string(),
                 }
             }
-            "set_monitor" => {
-                let recipes = match &self.recipes {
-                    Some(r) => r,
-                    None => return "(monitor engine unavailable)".to_string(),
-                };
-                let (source, target) = (s("source"), s("target"));
-                if target.len() < 2 {
-                    return "(need a target to watch for)".to_string();
-                }
-                let (tool_name, var, targs, label): (&str, &str, serde_json::Value, &str) = match source.as_str() {
-                    "web" => ("fetch", "page", serde_json::json!({ "url": s("url") }), "web page"),
-                    "inbox" | "email" => ("inbox", "inbox", serde_json::json!({ "limit": 10 }), "inbox"),
-                    _ => ("github", "github", serde_json::json!({ "limit": 15 }), "GitHub"),
-                };
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                let rec = Recipe {
-                    id: "watch".into(),
-                    name: format!("watch {label}: {target}"),
-                    steps: vec![
-                        RecipeStep::WaitForCondition { tool_name: tool_name.into(), args: targs, store_as: var.into(), condition: Condition::VarContains { var: var.into(), substring: target.clone() }, poll_secs: 120, expire_ms: now + 24 * 3600 * 1000 },
-                        RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
-                    ],
-                };
-                let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
-                if out.sleeping_until.is_some() {
-                    format!("Watching the {label} for \"{target}\" — I'll ping you when it matches.")
-                } else if !out.notifications.is_empty() {
-                    out.notifications.join("\n")
-                } else {
-                    format!("(couldn't start watching: {})", out.error.unwrap_or_else(|| "tool unavailable".into()))
-                }
-            }
+            // set_monitor dispatches via the capability registry above.
             "add_reminder" => {
                 let text = s("text");
                 if text.len() < 3 {
@@ -6236,38 +6157,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                     format!("(skill '{}' ran but produced nothing)", sk.name)
                 }
             }
-            "publish_page" => {
-                let (name, html) = (s("name"), s("html"));
-                if html.len() < 10 {
-                    return "(need html content to publish)".to_string();
-                }
-                match publish_html(if name.is_empty() { "page" } else { &name }, &html) {
-                    Some(url) => match verify_served(&url, &html).await {
-                        PageServe::Ok => format!("Published & verified live — the page loads with the right content (works on your home network):\n{url}"),
-                        PageServe::Mismatch => format!("Published, and the server responds, but the content served back didn't match what I generated (possibly a stale file) — worth a look:\n{url}"),
-                        PageServe::Down => format!("I saved the page but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check the server."),
-                    },
-                    None => "(couldn't publish the page)".to_string(),
-                }
-            }
-            "make_dashboard" => {
-                // The robust dashboard path: the model gives small STRUCTURED data, Rust renders the
-                // (guaranteed-valid, escaped) HTML — no giant inline HTML string to truncate.
-                let title = s("title");
-                if title.is_empty() && args.get("sections").is_none() && args.get("items").is_none() {
-                    return "(need at least a title and some sections/items for the dashboard)".to_string();
-                }
-                let html = render_dashboard(args);
-                let name = if title.is_empty() { "dashboard".to_string() } else { title };
-                match publish_html(&name, &html) {
-                    Some(url) => match verify_served(&url, &html).await {
-                        PageServe::Ok => format!("Done & verified live — the dashboard loads with the right content (works on your home network):\n{url}"),
-                        PageServe::Mismatch => format!("Built it, and the server responds, but the content served back didn't match what I generated (possibly a stale file) — worth a look:\n{url}"),
-                        PageServe::Down => format!("I built the dashboard but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check the server."),
-                    },
-                    None => "(couldn't publish the dashboard)".to_string(),
-                }
-            }
+            // publish_page + make_dashboard dispatch via the capability registry above.
             "discover_tools" | "search_skills" => {
                 let q = s("query");
                 // The escape hatch of the retrieval-gated catalog: search the FULL native/plugin/MCP

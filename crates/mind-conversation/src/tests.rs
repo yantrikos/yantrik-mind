@@ -2893,3 +2893,44 @@ async fn an_open_ended_intention_is_never_dropped() {
     let (carried, _) = conv.split_tasks().await;
     assert!(carried.iter().any(|t| t.description.contains("mum")), "and it stays carried");
 }
+
+// ── The rendering licence is CHANNEL-GATED ───────────────────────────────────────────────────────
+// The failure this guards against is not a crash: it is a mermaid block arriving in a Telegram
+// message as raw source, or a markdown table printed into a terminal as pipes and dashes. The
+// default has to be "plain", and only a client that declares itself may opt in.
+
+#[test]
+fn a_plain_channel_gets_no_formatting_licence() {
+    assert!(TurnIdentity::primary().format_note().is_none(), "the ym terminal must not be told to draw tables");
+    assert!(
+        TurnIdentity::new("asha", false).format_note().is_none(),
+        "a Telegram member must not be told to draw tables"
+    );
+    assert!(
+        TurnIdentity::new("asha", true).format_note().is_none(),
+        "a shared group channel must not be told to draw tables either"
+    );
+}
+
+#[test]
+fn a_declared_rich_client_gets_the_licence() {
+    let note = TurnIdentity::primary().rendering_rich(true).format_note().expect("rich client gets a note");
+    // It must name what the renderer actually supports, and nothing it does not — an unsupported
+    // diagram type renders as source, so promising one would produce exactly the mess this avoids.
+    assert!(note.contains("graph TD"));
+    assert!(note.contains("sequenceDiagram"));
+    assert!(!note.to_lowercase().contains("gantt"), "gantt is not supported and must not be advertised");
+    assert!(!note.to_lowercase().contains("pie"), "pie is not supported and must not be advertised");
+    // And it must hold structure back on short answers, or every reply grows a heading.
+    assert!(note.contains("Do NOT add structure to a short answer"));
+}
+
+#[test]
+fn rendering_rich_does_not_disturb_read_isolation() {
+    // The flag is about presentation only. If it ever changed scope, a rich client would see another
+    // member's private facts — so this pins the two apart.
+    let plain = TurnIdentity::new("asha", false);
+    let rich = TurnIdentity::new("asha", false).rendering_rich(true);
+    assert_eq!(format!("{:?}", plain.viewer()), format!("{:?}", rich.viewer()));
+    assert_eq!(format!("{:?}", plain.write_scope()), format!("{:?}", rich.write_scope()));
+}

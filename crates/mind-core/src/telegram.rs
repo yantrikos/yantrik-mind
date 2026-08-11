@@ -576,6 +576,15 @@ fn ctl_handle(
         return;
     }
 
+    // The CLIENT declares whether it renders markup. Telegram and the terminal do not send this header
+    // and so keep getting plain prose; the desktop cockpit sends it and gets tables, tagged code blocks
+    // and diagrams. Read ONCE here rather than per-arm: /chat and /chat-stream are the same
+    // conversation seen through two transports, and a per-arm copy is how one of them silently misses
+    // out. Inferring it from the endpoint would be wrong anyway — every channel lands on this handler.
+    let rich = head
+        .lines()
+        .any(|l| l.to_ascii_lowercase().starts_with("x-ym-render:") && l.to_ascii_lowercase().contains("rich"));
+
     let (status, reply) = match path {
         // `ym <name> <args>` — the operator console. Requires an OPERATOR device (a member token
         // authenticates but is refused here); the memory ctx is Operator only after that check.
@@ -602,7 +611,7 @@ fn ctl_handle(
                 _ => authed.chat_person().to_string(),              // bound person (member, or operator-self)
             };
             let fast = head.lines().any(|l| l.to_ascii_lowercase().starts_with("x-ym-fast:") && l.contains('1'));
-            let ident = mind_conversation::TurnIdentity::new(effective_person, false);
+            let ident = mind_conversation::TurnIdentity::new(effective_person, false).rendering_rich(rich);
             let r = if fast {
                 rt.block_on(conv.fast_reply(&body, ident))
             } else {
@@ -620,7 +629,8 @@ fn ctl_handle(
             if !authed.is_operator() {
                 ("403 Forbidden", "streaming chat is operator-only for now".to_string())
             } else {
-                let ident = mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false);
+                let ident =
+                    mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false).rendering_rich(rich);
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 // Headers + manual chunked framing on the raw socket; ureq on the client side
                 // decodes chunking transparently, so the reader just sees the line protocol.

@@ -11,6 +11,16 @@
 //! `fan_out` runs many sub-agent tasks concurrently; real parallelism comes from the InferencePool's
 //! blocking pool (permits>1 for API backends).
 
+pub mod bus;
+pub mod cognition;
+pub mod compile;
+pub mod nba;
+
+pub use bus::{signature, Bus};
+pub use cognition::{Cognition, Outcome, Step};
+pub use compile::{compile, Compilation, Origin};
+pub use nba::{Action, Verb, Why};
+
 use std::sync::Arc;
 
 use futures::future::join_all;

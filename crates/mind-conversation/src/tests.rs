@@ -3009,3 +3009,138 @@ fn prose_is_never_mistaken_for_a_control_blob() {
     // A code fence is prose too — it does not start with a brace.
     assert!(!is_tool_call_blob("```json\n{\"action\":\"finish\",\"answer\":\"x\"}\n```"));
 }
+
+// ── DELEGATION ROUTING ───────────────────────────────────────────────────────────────────────────
+// "create a stunning portfolio website for me" was routed to the RESEARCH agent, which has read tools
+// only. It came back with six links to portfolio inspiration and said it could not build a website.
+// The old classifier was seven substrings — build, write a script, code, implement, fix the,
+// refactor, patch — and that request matched none of them.
+
+#[test]
+fn the_request_that_was_misrouted_now_routes_to_a_page() {
+    assert_eq!(crate::delegate::classify("create a stunning portfolio website for me"), "page");
+}
+
+#[test]
+fn asking_for_an_artifact_routes_to_a_builder() {
+    for t in [
+        "create a stunning portfolio website for me",
+        "make me a landing page for the launch",
+        "design a one-pager for the product",
+        "build a portfolio site",
+        "put together a dashboard showing my repos",
+        "please can you create a resume page",
+        "I want you to write a blog site",
+    ] {
+        assert_eq!(crate::delegate::classify(t), "page", "should build a page: {t}");
+    }
+    for t in [
+        "write a script to rotate the logs",
+        "build a CLI that tails the ledger",
+        "implement a retry wrapper",
+        "fix the flaky timezone test",
+        "refactor the egress broker",
+    ] {
+        assert_eq!(crate::delegate::classify(t), "code", "should go to the coder: {t}");
+    }
+}
+
+#[test]
+fn asking_a_question_still_routes_to_research() {
+    // The failure mode of a wider classifier is the opposite mistake: sending a reading task to a
+    // builder. A leading find-verb wins even when an artifact noun appears later in the sentence.
+    for t in [
+        "research the best portfolio websites of 2026",
+        "compare the top three dashboard tools",
+        "find out what a good landing page needs",
+        "summarize the arguments for local inference",
+        "look up when the next release lands",
+        "what are the best stocks to trade today",
+        "check whether the deploy finished",
+    ] {
+        assert_eq!(crate::delegate::classify(t), "research", "should stay research: {t}");
+    }
+}
+
+#[test]
+fn the_page_chain_reaches_a_published_url() {
+    // The point of the chain is that a later step consumes an earlier one's output. This asserts the
+    // wiring: research feeds the author step, the author's document feeds publish, and the URL that
+    // comes back is what gets announced.
+    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website");
+    let kinds: Vec<&str> = r
+        .steps
+        .iter()
+        .map(|s| match s {
+            mind_recipes::RecipeStep::Tool { tool_name, .. } => tool_name.as_str(),
+            mind_recipes::RecipeStep::Think { .. } => "think",
+            mind_recipes::RecipeStep::Notify { .. } => "notify",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["research", "think", "publish_page", "notify"], "the chain lost a link");
+
+    // Each link must actually reference the one before it, or the steps merely run in sequence.
+    let think_reads_refs = matches!(&r.steps[1], mind_recipes::RecipeStep::Think { prompt, .. } if prompt.contains("{{refs}}"));
+    assert!(think_reads_refs, "the author step ignores the research");
+    let publish_reads_page = matches!(&r.steps[2],
+        mind_recipes::RecipeStep::Tool { args, .. } if args.get("html").and_then(|v| v.as_str()) == Some("{{page}}"));
+    assert!(publish_reads_page, "the publish step ignores the authored document");
+    let notify_reads_url = matches!(&r.steps[3], mind_recipes::RecipeStep::Notify { message } if message.contains("{{url}}"));
+    assert!(notify_reads_url, "the announcement does not carry the URL");
+
+    // Losing the network must not lose the page.
+    assert!(matches!(&r.steps[0], mind_recipes::RecipeStep::Tool { on_error, .. } if matches!(on_error, mind_recipes::ErrorAction::Skip)));
+}
+
+// ── THE ROUTER IS NOT A KEYWORD TABLE ────────────────────────────────────────────────────────────
+// A table is what caused the original misroute: seven substrings that did not include "create". A
+// longer table has the same shape and would miss the next phrasing instead of this one, so the model
+// decides and the table is only the floor. These tests cover the part that must be right regardless
+// of what the model says: never route to an executor this box does not have.
+
+#[test]
+fn the_router_only_ever_returns_a_runnable_kind() {
+    use crate::delegate::parse_route;
+    // The model naming a kind that is not configured here must be rejected, not obeyed.
+    assert_eq!(parse_route("page", &["research"]), None);
+    assert_eq!(parse_route("code", &["research", "page"]), None);
+    assert_eq!(parse_route("page", &["research", "page"]), Some("page"));
+}
+
+#[test]
+fn the_router_reads_a_chatty_reply() {
+    use crate::delegate::parse_route;
+    let all = ["page", "code", "research"];
+    assert_eq!(parse_route("page", &all), Some("page"));
+    assert_eq!(parse_route("  PAGE\n", &all), Some("page"));
+    assert_eq!(parse_route("page — they want a site they can open", &all), Some("page"));
+    assert_eq!(parse_route("The answer is: research.", &all), Some("research"));
+    // First mention wins, so a reply that names the choice then explains the alternatives is read
+    // the way it was meant.
+    assert_eq!(parse_route("page, not research", &all), Some("page"));
+}
+
+#[test]
+fn an_unusable_reply_falls_through_to_the_floor() {
+    use crate::delegate::parse_route;
+    // None here means the caller uses `classify`, so the delegation still runs. Routing must never be
+    // the reason nothing happens.
+    assert_eq!(parse_route("", &["page", "code", "research"]), None);
+    assert_eq!(parse_route("I'm not sure what you mean", &["page", "code", "research"]), None);
+    assert_eq!(parse_route("{\"error\":\"timeout\"}", &["page", "code", "research"]), None);
+}
+
+#[test]
+fn every_dispatchable_kind_is_offered_to_the_router() {
+    // The model's menu is generated from KINDS, and the runtime dispatches on the same strings. If a
+    // fourth executor is added and this list is not updated, the router can never choose it — the
+    // failure would look like the model being stupid rather than the menu being short.
+    let names: Vec<&str> = crate::delegate::KINDS.iter().map(|(k, _)| *k).collect();
+    assert!(names.contains(&"page"));
+    assert!(names.contains(&"code"));
+    assert!(names.contains(&"research"));
+    for (_, desc) in crate::delegate::KINDS {
+        assert!(desc.len() > 30, "a router menu entry needs a real description, not a label");
+    }
+}

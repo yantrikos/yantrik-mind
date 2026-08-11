@@ -41,11 +41,160 @@ pub(crate) fn parse_delegation(rest: &str) -> Option<(String, String, &'static s
             (name, rest.to_string())
         }
     };
+    Some((name, task.clone(), classify(&task)))
+}
+
+/// Verbs that ask for something to be PRODUCED.
+const MAKE_VERBS: &[&str] = &[
+    "build", "create", "make", "write", "design", "generate", "draft", "produce", "implement",
+    "code", "develop", "set up", "put together", "publish", "prototype", "mock up", "scaffold",
+    "refactor", "patch", "fix", "add", "port", "convert", "rewrite",
+];
+
+/// Things that are produced as a FILE or a PAGE — the artifact nouns.
+const ARTIFACT_NOUNS: &[&str] = &[
+    "website", "web site", "site", "page", "landing", "portfolio", "resume", "cv", "app",
+    "application", "dashboard", "script", "program", "tool", "cli", "api", "server", "bot",
+    "component", "form", "game", "chart", "diagram", "slide", "deck", "template", "prototype",
+    "mockup", "readme", "doc site", "blog",
+];
+
+/// Verbs that ask for INFORMATION, which beat an artifact noun when they lead the sentence —
+/// "research portfolio websites" wants reading, not a website.
+const FIND_VERBS: &[&str] =
+    &["research", "find", "look up", "search", "compare", "review", "summarize", "check", "list", "investigate", "explain", "analyze"];
+
+/// The DETERMINISTIC FLOOR of routing — not the routing itself.
+///
+/// A keyword table is what caused the bug this replaces: the old one held seven substrings (`build`,
+/// `write a script`, `code`, `implement`, `fix the`, `refactor`, `patch`) and "create a stunning
+/// portfolio website for me" matched none of them, so it went to the research agent, which has read
+/// tools only, and came back with six links.
+///
+/// A LONGER table is the same defect with a further-away boundary — it would miss the next phrasing
+/// instead of this one. So this function is no longer the decision: [`route`] asks the model, which
+/// has no vocabulary limit, and falls back here only when there is no model or its answer is
+/// unusable. What a table CAN do well is be instant, free, and predictable, which is exactly what a
+/// fallback should be.
+pub fn classify(task: &str) -> &'static str {
     let tl = task.to_lowercase();
-    let code_shaped = ["build", "write a script", "code", "implement", "fix the", "refactor", "patch"]
-        .iter()
-        .any(|k| tl.contains(k));
-    Some((name, task, if code_shaped { "code" } else { "research" }))
+    // Strip the polite wrapper so the leading verb is the real one.
+    let head = tl
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim_start_matches("please ")
+        .trim_start_matches("can you ")
+        .trim_start_matches("could you ")
+        .trim_start_matches("i want you to ")
+        .trim_start_matches("i need you to ")
+        .trim_start_matches("i'd like you to ")
+        .trim_start_matches("help me ")
+        .trim_start_matches("please ");
+
+    let leads_with = |set: &[&str]| set.iter().any(|v| head.starts_with(v));
+    let mentions = |set: &[&str]| set.iter().any(|v| tl.contains(v));
+
+    // A find-verb in the lead position is decisive: "compare the best portfolio sites" is reading.
+    if leads_with(FIND_VERBS) && !leads_with(MAKE_VERBS) {
+        return "research";
+    }
+    if leads_with(MAKE_VERBS) || (mentions(MAKE_VERBS) && mentions(ARTIFACT_NOUNS)) {
+        // A PAGE is its own kind. The coder builds it in a sandbox workdir, which is right for a
+        // script or a CLI but wrong for a web page: what the person wants is a URL they can open, and
+        // the recipe chain (research → author → publish) delivers exactly that in one pass.
+        return if mentions(PAGE_NOUNS) { "page" } else { "code" };
+    }
+    "research"
+}
+
+/// The kinds a delegation can be routed to, with the one-line description the router shows the model.
+/// Adding an executor means adding a row here — the router's vocabulary comes from this list, not
+/// from anything written into a prompt by hand.
+pub const KINDS: &[(&str, &str)] = &[
+    ("page", "produce a web page or site and publish it at a URL the user can open (portfolio, landing page, resume, dashboard, one-pager)"),
+    ("code", "write or change software in a sandbox — a script, CLI, program, library, or a fix/refactor of existing code"),
+    ("research", "find things out and report: search, read sources, compare, summarize, answer a question"),
+];
+
+/// Parse the router's reply into a kind that is ACTUALLY RUNNABLE on this box.
+///
+/// Separate from the model call so it can be tested without inference — this is where a hallucinated
+/// kind, a wrapped answer, or a kind whose executor is not configured gets rejected.
+pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
+    let low = reply.to_lowercase();
+    // Longest name first, so "research" is not shadowed by a substring of another kind.
+    let mut names: Vec<&(&str, &str)> = KINDS.iter().collect();
+    names.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+    // First mention wins: a model that says "page — because …" means page.
+    let mut best: Option<(usize, &'static str)> = None;
+    for (k, _) in names {
+        if let Some(at) = low.find(k) {
+            let kind: &'static str = KINDS.iter().find(|(n, _)| n == k).map(|(n, _)| *n)?;
+            if available.contains(&kind) && best.map(|(b, _)| at < b).unwrap_or(true) {
+                best = Some((at, kind));
+            }
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
+/// Artifact nouns that are a hosted PAGE rather than a codebase.
+const PAGE_NOUNS: &[&str] = &[
+    "website", "web site", "site", "page", "landing", "portfolio", "resume", "cv", "dashboard",
+    "blog", "deck", "slides", "one-pager", "onepager",
+];
+
+/// The chain that turns "make me a portfolio site" into a URL.
+///
+/// This is the recipe engine doing what it was built for, and delegation was not using it — it picked
+/// ONE executor up front with no handoff, so a research job that discovered it needed to build
+/// something just reported that it couldn't. Four steps, each feeding the next:
+///
+///   research (references) → author a complete document → publish it → hand back the link
+///
+/// The research step is `Skip`-on-error on purpose: no network is a reason to design from first
+/// principles, not a reason to produce nothing.
+pub fn page_recipe(name: &str, task: &str) -> Recipe {
+    Recipe {
+        id: "delegate-page".into(),
+        name: format!("page: {name}"),
+        steps: vec![
+            RecipeStep::Tool {
+                tool_name: "research".into(),
+                args: serde_json::json!({ "query": format!("{task} — layout, structure and visual design references") }),
+                store_as: "refs".into(),
+                on_error: ErrorAction::Skip,
+            },
+            RecipeStep::Think {
+                prompt: format!(
+                    "Build this page: {task}\n\n\
+                     REFERENCES (inspiration only — never copy text or claim their content as ours):\n{{{{refs}}}}\n\n\
+                     Output ONE complete, self-contained HTML document and NOTHING else — no commentary \
+                     before or after, no markdown fence. Requirements:\n\
+                     - Everything inline: one <style> block, one <script> if needed. It must load with \
+                     no network access, so no CDN links, no external fonts, no remote images. Use CSS \
+                     gradients, shapes or inline SVG instead of photographs.\n\
+                     - A real type scale and spacing system, a considered palette of 4-6 colours, and a \
+                     responsive layout (CSS grid/flex) that works from 360px to desktop.\n\
+                     - Support light and dark via prefers-color-scheme, with an explicit background on \
+                     body in both.\n\
+                     - Semantic HTML, a <title>, and visible keyboard focus states.\n\
+                     - Real, specific placeholder content that fits the brief — never lorem ipsum, and \
+                     never invent facts about a real person. Where a detail is unknown, use an obvious \
+                     placeholder like [Your Name].\n\
+                     Start your reply with <!doctype html>."
+                ),
+                store_as: "page".into(),
+                on_error: ErrorAction::Fail,
+            },
+            RecipeStep::Tool {
+                tool_name: "publish_page".into(),
+                args: serde_json::json!({ "name": name, "html": "{{page}}" }),
+                store_as: "url".into(),
+                on_error: ErrorAction::Fail,
+            },
+            RecipeStep::Notify { message: format!("🌐 [{name}] it's live — {{{{url}}}}\n\nOpen it, and tell me what to change.") },
+        ],
+    }
 }
 
 /// Read-modify-write one ledger row. Free function on the memory handle so the detached task can
@@ -221,14 +370,68 @@ pub(crate) fn render_board(rows: &[serde_json::Value], now_ms: i64) -> String {
 }
 
 impl super::ConversationEngine {
+    /// Which executors this box can actually run right now.
+    fn available_kinds(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.recipes.is_some() {
+            v.push("page");
+        }
+        if self.coder.is_some() {
+            v.push("code");
+        }
+        if self.researcher.is_some() {
+            v.push("research");
+        }
+        v
+    }
+
+    /// Pick the executor for a task — model first, keyword table only as a floor.
+    ///
+    /// The model gets the SAME list of kinds the runtime dispatches on, filtered to what is
+    /// configured, so it cannot route to something that does not exist here. One short call; if it
+    /// fails, times out, or answers with something unusable, [`classify`] decides and the delegation
+    /// still runs. Routing must never be the reason nothing happens.
+    async fn route(&self, task: &str) -> &'static str {
+        let available = self.available_kinds();
+        let floor = classify(task);
+        if available.len() < 2 {
+            return available.first().copied().unwrap_or(floor);
+        }
+        let menu: String = KINDS
+            .iter()
+            .filter(|(k, _)| available.contains(k))
+            .map(|(k, d)| format!("- {k}: {d}\n"))
+            .collect();
+        let prompt = format!(
+            "A user asked for this to be done:\n\n{task}\n\nWhich ONE of these does it need?\n\n{menu}\n\
+             Answer with the single word only. If they want something MADE, pick the kind that makes \
+             it — never `research` merely because making it well would involve looking things up."
+        );
+        let cfg = GenerationConfig { max_tokens: 12, think: mind_inference::think_for("dispatch", Some(false)), ..GenerationConfig::default() };
+        // GROUNDED, not a bare chat(): the prompt carries the user's own words verbatim, which is
+        // household content, so it takes the private lane first and any escalation is audited. The
+        // privacy audit caught this as an unscoped call — correctly; a one-word routing answer is not
+        // a reason to send someone's request to a cloud provider unrecorded.
+        let reply = match self.inference.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await {
+            Ok(r) => r.text,
+            Err(_) => return floor,
+        };
+        match parse_route(&reply, &available) {
+            Some(k) => k,
+            None => floor,
+        }
+    }
+
     /// `ym delegate <name>: <task>` — ledger row + background execution + chat delivery.
     pub async fn delegate_cmd(&self, rest: &str) -> String {
-        let Some((name, task, kind)) = parse_delegation(rest) else {
+        let Some((name, task, _floor)) = parse_delegation(rest) else {
             return "Usage: `ym delegate <name>: <task>` (e.g. `ym delegate quant-check: compare DeepSeek IQ2 vs Q3 quality claims`).".to_string();
         };
+        let kind = self.route(&task).await;
         // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
         let runnable = match kind {
             "code" => self.coder.is_some(),
+            "page" => self.recipes.is_some(),
             _ => self.researcher.is_some(),
         };
         if !runnable {
@@ -259,7 +462,31 @@ impl super::ConversationEngine {
 
         let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
         let (id2, name2, task2) = (id.clone(), name.clone(), task.clone());
-        if kind == "code" {
+        if kind == "page" {
+            let engine = self.recipes.clone().unwrap();
+            tokio::spawn(async move {
+                scratch_note(&mem, &id2, &format!("task: {task2}")).await;
+                scratch_note(&mem, &id2, "chain: research → author → publish").await;
+                let out = engine.run_with(&page_recipe(&name2, &task2), std::collections::HashMap::new()).await;
+                // The URL is the deliverable. A chain that "succeeded" without one has not built
+                // anything, so that is reported as a failure rather than as a cheerful empty result.
+                let url = out.vars.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let msg = if out.ok && !url.is_empty() {
+                    scratch_note(&mem, &id2, &format!("published: {url}")).await;
+                    out.notifications
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| format!("🌐 [{name2}] it's live — {url}"))
+                } else {
+                    let why = out.error.unwrap_or_else(|| "the page step produced no document".into());
+                    scratch_note(&mem, &id2, &format!("failed: {why}")).await;
+                    format!("🌐 [{name2}] I couldn't finish the page: {why}")
+                };
+                ledger_update(&mem, &id2, if out.ok && !url.is_empty() { "done" } else { "failed" }, Some(msg.clone())).await;
+                q.lock().unwrap().push(msg);
+                jobs.fetch_sub(1, Ordering::Relaxed);
+            });
+        } else if kind == "code" {
             // ITERATE-UNTIL-GOOD (the Hermes pattern, 2026-08-06): one coder pass produces a first
             // draft; real artifacts need build → critique → improve until a bar is met. Same shape
             // as the nightly self-improve loop, generalized from "the mind's codebase" to "whatever

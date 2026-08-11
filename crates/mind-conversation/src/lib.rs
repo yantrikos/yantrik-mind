@@ -50,7 +50,7 @@ mod fitness;
 mod handoff;
 mod knock;
 mod funnel;
-mod delegate;
+pub mod delegate;
 pub mod config_panel;
 mod import_skill;
 mod privacy_audit;
@@ -2152,6 +2152,18 @@ fn now_str() -> String {
 
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
 /// AND the defensive auto-publish (so a raw-HTML reply becomes a link, never a wall of HTML in chat).
+/// Unwrap a ```fence around a document, if there is one. Returns the input untouched otherwise.
+fn strip_code_fence(s: &str) -> &str {
+    let t = s.trim();
+    let Some(rest) = t.strip_prefix("```") else { return t };
+    // Drop the language tag on the opening line, then the closing fence.
+    let body = match rest.find('\n') {
+        Some(i) => &rest[i + 1..],
+        None => return t,
+    };
+    body.rsplit_once("```").map(|(before, _)| before).unwrap_or(body).trim()
+}
+
 fn publish_html(name_hint: &str, html: &str) -> Option<String> {
     let safe: String = name_hint.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let safe: String = safe.trim_matches('-').to_lowercase().chars().take(40).collect();
@@ -7819,6 +7831,26 @@ impl RecipeHost for MindRecipeHost {
             }
             // ResearchOps: multi-angle web search over one query → a consolidated, URL-carrying
             // findings blob for the ThinkCited reviewer/related-work steps to cite.
+            // The chain's OUTPUT step. Without it a recipe could research, think and render, but had
+            // no way to leave anything behind — which is why "build me a portfolio site" came back as
+            // a list of links: the only steps available all ended in text.
+            "publish_page" => {
+                let raw = _args.get("html").and_then(|v| v.as_str()).unwrap_or_default();
+                // A model asked for "only the HTML" still wraps it in a ```html fence about half the
+                // time. Refusing that would fail the chain on a formatting habit, so unwrap it here —
+                // the alternative is a prompt that has to win every time.
+                let html = strip_code_fence(raw);
+                if !looks_like_html(html) {
+                    anyhow::bail!(
+                        "publish_page needs a real HTML document in 'html' (got {} chars, no <html>/<body>)",
+                        html.len()
+                    );
+                }
+                let name = title_from_html(html)
+                    .or_else(|| _args.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "page".to_string());
+                publish_html(&name, html).ok_or_else(|| anyhow::anyhow!("could not write the page"))
+            }
             "research" => {
                 let s = self.search.as_ref().ok_or_else(|| anyhow::anyhow!("no web search configured"))?;
                 let q = _args.get("query").and_then(|v| v.as_str()).unwrap_or("");

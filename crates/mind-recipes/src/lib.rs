@@ -279,6 +279,21 @@ enum ErrorResolution {
 }
 
 /// Substitute {{var}} occurrences with the string form of recipe vars.
+/// `resolve_vars` over every string in a JSON value, recursively — for tool arguments.
+///
+/// Strings only. A `{{var}}` standing alone in a number or bool position is not a thing anyone
+/// writes, and reinterpreting types here would make an arg's shape depend on its content.
+pub fn resolve_args(args: &Value, vars: &HashMap<String, Value>) -> Value {
+    match args {
+        Value::String(s) => Value::String(resolve_vars(s, vars)),
+        Value::Array(a) => Value::Array(a.iter().map(|v| resolve_args(v, vars)).collect()),
+        Value::Object(o) => {
+            Value::Object(o.iter().map(|(k, v)| (k.clone(), resolve_args(v, vars))).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 pub fn resolve_vars(template: &str, vars: &HashMap<String, Value>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
@@ -669,7 +684,15 @@ GOAL: GOAL_HERE"#;
     async fn execute_step(&self, step: &RecipeStep, vars: &mut HashMap<String, Value>) -> StepResult {
         match step {
             RecipeStep::Tool { tool_name, args, store_as, .. } => {
-                match self.host.call_tool(tool_name, args).await {
+                // Tool args are {{var}}-resolved like every other step's fields.
+                //
+                // They were NOT, and that quietly capped what a recipe could be: a tool could only
+                // ever receive constants, so no step could feed its output into a tool. Every chain
+                // therefore had to END at a Think/Notify — "research it, then PUBLISH it" was not
+                // expressible. Notify and Think had resolution; Tool was the one that needed it to
+                // make a chain actually do something.
+                let resolved = resolve_args(args, vars);
+                match self.host.call_tool(tool_name, &resolved).await {
                     Ok(out) => {
                         vars.insert(store_as.clone(), Value::String(out));
                         StepResult::Continue
@@ -1698,5 +1721,73 @@ impl RecipeEngine {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod chaining_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records the args each tool call actually received.
+    struct SpyHost {
+        seen: Mutex<Vec<(String, Value)>>,
+    }
+    #[async_trait::async_trait]
+    impl RecipeHost for SpyHost {
+        async fn call_tool(&self, tool: &str, args: &Value) -> anyhow::Result<String> {
+            self.seen.lock().unwrap().push((tool.to_string(), args.clone()));
+            Ok(format!("{tool} ran"))
+        }
+    }
+
+    #[test]
+    fn resolve_args_reaches_nested_strings() {
+        let mut vars = HashMap::new();
+        vars.insert("page".to_string(), Value::String("<!doctype html>…".into()));
+        vars.insert("who".to_string(), Value::String("Pranab".into()));
+        let out = resolve_args(
+            &serde_json::json!({"html": "{{page}}", "meta": {"author": "{{who}}"}, "tags": ["{{who}}"], "n": 3}),
+            &vars,
+        );
+        assert_eq!(out["html"], "<!doctype html>…");
+        assert_eq!(out["meta"]["author"], "Pranab");
+        assert_eq!(out["tags"][0], "Pranab");
+        assert_eq!(out["n"], 3, "non-strings are untouched");
+    }
+
+    #[tokio::test]
+    async fn a_tool_step_receives_the_previous_step_s_output() {
+        // THE CHAINING GAP. Tool args were passed to the host verbatim, so a tool could only ever be
+        // given constants — no step could feed its result into one. Every chain had to end at a
+        // Think/Notify, which is why "research it, then PUBLISH it" was not expressible and a
+        // delegated "build me a site" could only ever come back as text.
+        let host = Arc::new(SpyHost { seen: Mutex::new(Vec::new()) });
+        let llm = Arc::new(mind_inference::ScriptedLLM::new("<!doctype html><title>Made</title>"));
+        let pool = InferencePool::new(llm as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let engine = RecipeEngine::new(pool, host.clone(), "JARVIS");
+        let recipe = Recipe {
+            id: "t".into(),
+            name: "chain".into(),
+            steps: vec![
+                RecipeStep::Think { prompt: "write it".into(), store_as: "page".into(), on_error: ErrorAction::Fail },
+                RecipeStep::Tool {
+                    tool_name: "publish_page".into(),
+                    args: serde_json::json!({"html": "{{page}}"}),
+                    store_as: "url".into(),
+                    on_error: ErrorAction::Fail,
+                },
+            ],
+        };
+        let out = engine.run_with(&recipe, HashMap::new()).await;
+        assert!(out.ok, "chain failed: {:?}", out.error);
+        let seen = host.seen.lock().unwrap();
+        let (tool, args) = seen.first().expect("the tool step never ran");
+        assert_eq!(tool, "publish_page");
+        assert_eq!(
+            args.get("html").and_then(|v| v.as_str()),
+            Some("<!doctype html><title>Made</title>"),
+            "the tool got the placeholder instead of the authored document — args are not resolved"
+        );
     }
 }

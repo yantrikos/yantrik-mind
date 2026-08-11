@@ -2584,6 +2584,54 @@ fn calc(expr: &str) -> String {
     }
 }
 
+/// A spoken arithmetic question, answered by arithmetic. `None` for anything else.
+///
+/// Deliberately CONSERVATIVE. It fires only when the sentence is recognisably a sum and nothing else:
+/// it must ask (what/how much/calculate), it must contain an operator or a spoken operator word, and
+/// once the question framing is stripped what remains must parse as a complete expression. Anything
+/// with other words left over — "what is 17 times 23 in the budget spreadsheet" — falls through to
+/// the model, because that is a conversation about a sum, not a sum.
+///
+/// The failure mode this guards against is worse than the one it fixes: hijacking a real question to
+/// answer a number nobody asked for. So when in doubt it declines.
+fn spoken_arithmetic(text: &str) -> Option<String> {
+    let t = text.trim().trim_end_matches(['?', '.', '!']).to_lowercase();
+    // Must be a question about a value, and short enough to be only that.
+    let asks = ["what is", "what's", "whats", "how much is", "calculate", "compute", "work out"]
+        .iter()
+        .find(|p| t.starts_with(**p))?;
+    let mut expr = t[asks.len()..].trim().to_string();
+    if expr.len() > 60 {
+        return None; // a long sentence is prose that happens to contain numbers
+    }
+    // Spoken operators to symbols. Word-boundary replacement, so "extract" does not become "ex-x-act".
+    for (word, sym) in [
+        (" times ", "*"), (" multiplied by ", "*"), (" divided by ", "/"), (" plus ", "+"),
+        (" minus ", "-"), (" over ", "/"), (" x ", "*"),
+    ] {
+        expr = expr.replace(word, sym);
+    }
+    // What remains must be arithmetic and nothing else: digits, operators, parens, decimal points.
+    if !expr.chars().any(|c| "+-*/".contains(c)) {
+        return None; // no operation asked for
+    }
+    if !expr.chars().all(|c| c.is_ascii_digit() || "+-*/().% ".contains(c)) {
+        return None; // leftover words mean this is a conversation, not a calculation
+    }
+    match calc_eval(&expr) {
+        Some(v) if v.is_finite() => {
+            // Spoken, because this path exists for voice.
+            let n = if v.fract().abs() < 1e-9 && v.abs() < 1e15 {
+                format!("{}", v.round() as i64)
+            } else {
+                format!("{:.4}", v).trim_end_matches('0').trim_end_matches('.').to_string()
+            };
+            Some(format!("{n}."))
+        }
+        _ => None,
+    }
+}
+
 /// Normalize a subscription's cost (charged per `cycle`) to a per-MONTH figure so totals across
 /// monthly/yearly/weekly subscriptions are comparable. The finance plugin's one bit of math.
 fn sub_monthly(amount: f64, cycle: &str) -> f64 {
@@ -6806,6 +6854,24 @@ Open reminders you're carrying for them:");
     /// memory and appends the transcript (background consolidation catches it later). Short, spoken,
     /// no markdown. Falls back to a graceful line rather than erroring mid-conversation.
     pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        // ── TIER 0: arithmetic, before any model call. ──────────────────────────────────────────
+        //
+        // Found live on 2026-08-11: asked "what is 17 times 23?" over the fast path, the mind
+        // answered "one hundred and one". It is 391. The fast path exists for VOICE, so this was a
+        // spoken wrong answer, delivered confidently — and the mind has had a correct `calc` tool the
+        // whole time. The full agent loop gets it right because it can reach that tool; the fast path
+        // cannot reach any tool by construction, so it did the sum in its head.
+        //
+        // A language model is the wrong instrument for arithmetic and the right one for conversation.
+        // This routes the first to code and leaves the second alone: no model call, no latency, and it
+        // cannot be wrong. Everything not recognisably a sum falls straight through.
+        if let Some(answer) = spoken_arithmetic(user_text) {
+            let scope = id.write_scope();
+            let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &answer, scope).await;
+            return Ok(answer);
+        }
+
         let scope = id.write_scope();
         let ctx = mind_types::AccessContext::Principal(id.viewer());
         let recent = self.memory.recent_messages(8, &ctx).await.unwrap_or_default();

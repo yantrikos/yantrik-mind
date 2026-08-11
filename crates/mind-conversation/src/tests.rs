@@ -2700,3 +2700,40 @@ async fn pack_lifecycle_install_certify_demote_draft() {
     let listing = conv.cli_dispatch("packs", &ctx).await;
     assert!(listing.contains("csv_pack") && listing.contains("OFF"), "demoted pack listed OFF: {listing}");
 }
+
+/// TIER 0: arithmetic is answered by arithmetic, before any model call.
+///
+/// Found live on 2026-08-11: the fast path (which voice uses) answered "what is 17 times 23?" with
+/// "one hundred and one". It is 391. The mind has had a correct `calc` tool the whole time; the fast
+/// path cannot reach any tool by construction, so it did the sum in its head and was confidently
+/// wrong out loud.
+#[test]
+fn spoken_arithmetic_is_computed_not_guessed() {
+    for (q, want) in [
+        ("what is 17 times 23?", "391."),
+        ("What's 17 times 23", "391."),
+        ("how much is 1500 * 0.18", "270."),
+        ("calculate 12*7+3", "87."),
+        ("what is 100 divided by 8", "12.5."),
+        ("what is 45 plus 55", "100."),
+    ] {
+        assert_eq!(super::spoken_arithmetic(q).as_deref(), Some(want), "{q}");
+    }
+}
+
+/// The failure mode this guards against is worse than the one it fixes: hijacking a real question to
+/// answer a number nobody asked for. When in doubt it must decline and let the model handle it.
+#[test]
+fn only_a_bare_sum_is_hijacked() {
+    for q in [
+        "what is 17 times 23 in the budget spreadsheet",  // a conversation about a sum
+        "what is my wife's name",                          // no operator
+        "what times should I call the doctor",              // 'times' as a noun, no numbers
+        "how much is my electricity bill",                  // a question for a tool, not a calculator
+        "what is 391",                                      // a value, not an operation
+        "tell me 2 plus 2",                                 // not a recognised question form
+        "what is the difference between 17 and 23 in terms of the quarterly revenue projections", // prose
+    ] {
+        assert!(super::spoken_arithmetic(q).is_none(), "must NOT hijack: {q}");
+    }
+}

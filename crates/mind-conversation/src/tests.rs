@@ -3187,3 +3187,31 @@ fn the_brief_demands_a_finished_page() {
     assert!(prompt.to_lowercase().contains("three more real sections"), "a hero alone is not a page");
     assert!(prompt.to_lowercase().contains("no cdn"), "it must render with no network");
 }
+
+#[test]
+fn a_chatty_preamble_never_reaches_the_page() {
+    // Verbatim from the live build: asked for "the HTML and nothing else", the model opened with a
+    // paragraph of advice. It was published with the document and rendered as loose text floating
+    // above the header — the one thing on the page that was obviously not designed.
+    let reply = "The best approach is to use a platform like Framer or Figma for initial mockups. \
+                 Here is the complete, self-contained HTML document:\n\
+                 <!doctype html><html><body><h1>Hi</h1></body></html>\n\
+                 Let me know if you want changes!";
+    let doc = extract_document(reply);
+    assert!(doc.starts_with("<!doctype html>"), "the preamble survived: {doc}");
+    assert!(doc.ends_with("</html>"), "the trailing chat survived: {doc}");
+    assert!(!doc.contains("Framer"));
+    assert!(!doc.contains("Let me know"));
+    assert!(is_complete_html(doc));
+}
+
+#[test]
+fn extraction_leaves_a_clean_document_alone() {
+    let clean = "<!doctype html><html><body><p>hi</p></body></html>";
+    assert_eq!(extract_document(clean), clean);
+    // A fenced document still unwraps.
+    assert_eq!(extract_document("```html\n<!doctype html><html><body>x</body></html>\n```"),
+               "<!doctype html><html><body>x</body></html>");
+    // Something with no document at all is returned as-is, for the caller's error to describe.
+    assert_eq!(extract_document("I could not build that."), "I could not build that.");
+}

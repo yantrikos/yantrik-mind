@@ -2173,6 +2173,26 @@ fn strip_code_fence(s: &str) -> &str {
     body.rsplit_once("```").map(|(before, _)| before).unwrap_or(body).trim()
 }
 
+/// The DOCUMENT out of a reply that also contains chat around it.
+///
+/// Asked for "the HTML and nothing else", the model still opened with "The best approach is to use a
+/// platform like Framer or Figma… Here is the complete document:". That sentence was published with
+/// the page and rendered as loose text floating above the header — the one thing on the site that was
+/// obviously not designed. Prompting harder is not a fix, because it only has to fail once.
+///
+/// So: keep from the first `<!doctype`/`<html` to the last `</html>`, and drop whatever surrounds it.
+fn extract_document(s: &str) -> &str {
+    let t = strip_code_fence(s);
+    let low = t.to_lowercase();
+    let start = low.find("<!doctype").or_else(|| low.find("<html")).unwrap_or(0);
+    let end = low.rfind("</html>").map(|i| i + "</html>".len()).unwrap_or(t.len());
+    if end > start {
+        t[start..end].trim()
+    } else {
+        t
+    }
+}
+
 fn publish_html(name_hint: &str, html: &str) -> Option<String> {
     let safe: String = name_hint.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
     let safe: String = safe.trim_matches('-').to_lowercase().chars().take(40).collect();
@@ -7848,7 +7868,7 @@ impl RecipeHost for MindRecipeHost {
                 // A model asked for "only the HTML" still wraps it in a ```html fence about half the
                 // time. Refusing that would fail the chain on a formatting habit, so unwrap it here —
                 // the alternative is a prompt that has to win every time.
-                let html = strip_code_fence(raw);
+                let html = extract_document(raw);
                 if !looks_like_html(html) {
                     anyhow::bail!(
                         "publish_page needs a real HTML document in 'html' (got {} chars, no <html>/<body>)",

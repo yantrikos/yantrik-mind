@@ -375,7 +375,11 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_markets(Arc::new(mind_tools::LiveMarkets::new())) // keyless crypto + stock quotes
         .with_translator(Arc::new(mind_tools::GoogleTranslate::new())) // keyless translation
         // Declarative plugin manifest: enable/disable + security level, no code edits. Toggles persist.
-        .with_plugins_manifest(std::env::var("YM_PLUGINS_CONFIG").unwrap_or_else(|_| "/var/lib/yantrik-mind/plugins.json".to_string()));
+        .with_plugins_manifest(std::env::var("YM_PLUGINS_CONFIG").unwrap_or_else(|_| "/var/lib/yantrik-mind/plugins.json".to_string()))
+        // Installed capability packs survive restarts (certified ones come back enabled), and
+        // certification verdicts land on the trust ledger when YM_WEFT_URL/KEY are set.
+        .with_packs_path(std::env::var("YM_PACKS_CONFIG").unwrap_or_else(|_| "/var/lib/yantrik-mind/packs.json".to_string()))
+        .with_weft_from_env();
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
     }

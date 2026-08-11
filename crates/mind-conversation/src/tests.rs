@@ -2737,3 +2737,35 @@ fn only_a_bare_sum_is_hijacked() {
         assert!(super::spoken_arithmetic(q).is_none(), "must NOT hijack: {q}");
     }
 }
+
+/// The VOICE path must ground in the people layer, exactly as the agent loop does.
+///
+/// The agent loop carries a comment about this scar: the belief store's top-k ranking can bury a
+/// high-confidence identity fact (a spouse's NAME lost behind their birthday), so the canonical people
+/// layer is grounded unconditionally. That fix landed on the agent loop only — leaving VOICE, the
+/// surface most likely to be asked "what's my wife's name", as the one place that answered "I don't
+/// have that stored" about someone the mind knows. Verified live 2026-08-11.
+///
+/// Seeds `people_profiles` directly: that is the store `gate_people` reads, and it is a DIFFERENT
+/// store from `people` (household membership, which `person add` writes). Conflating the two is how
+/// the first version of this test passed a fixture that recorded nothing the grounding could see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_voice_path_grounds_in_the_people_layer() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let scripted = Arc::new(ScriptedLLM::new("Her name is Priya."));
+    let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+
+    let profiles = serde_json::json!([{ "name": "Priya", "relationship": "wife", "dates": [] }]);
+    mem.profile_set("people_profiles", &profiles.to_string()).await.unwrap();
+
+    let _ = conv.fast_reply("what is my wife's name", TurnIdentity::primary()).await;
+    let prompt = scripted.last_user_prompt();
+    assert!(
+        prompt.contains("Priya"),
+        "the voice path must ground in the people layer, or it will deny knowing someone it knows:
+{prompt}"
+    );
+    assert!(prompt.contains("wife"), "the relationship must come through too:
+{prompt}");
+}

@@ -6876,7 +6876,17 @@ Open reminders you're carrying for them:");
         let ctx = mind_types::AccessContext::Principal(id.viewer());
         let recent = self.memory.recent_messages(8, &ctx).await.unwrap_or_default();
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
-        let grounding = Self::render_grounding(&ws);
+        let mut grounding = Self::render_grounding(&ws);
+        // THE PEOPLE LAYER — the same block the agent loop adds, for the same reason recorded there:
+        // the belief store's top-k ranking can bury a high-confidence identity fact (a spouse's NAME
+        // lost behind their birthday), so the canonical people layer is always grounded rather than
+        // left to similarity search.
+        //
+        // The agent loop got this fix; the fast path did not, so VOICE — the surface where being asked
+        // "what's my wife's name" is most likely — was the one place still answering "I don't have
+        // that stored" about someone the mind knows. Verified live on 2026-08-11.
+        let people = self.load_people_profiles().await;
+        grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
         let recent_text: String = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
         let prompt = format!(
             "{grounding}\n\nRecent conversation:\n{recent_text}\n\nUser (speaking aloud): {user_text}\n\n\

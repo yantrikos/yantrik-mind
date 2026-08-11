@@ -88,17 +88,71 @@ fn extract_urls(text: &str) -> Vec<String> {
     out
 }
 
+/// `null` where a string was expected reads as absent, not as a type error.
+///
+/// The schema we hand the model is `{"action":…,"tool":"<name>","args":{},"answer":…}`, and the
+/// natural thing to write when finishing is `"tool": null` — there is no tool. Serde rejected that
+/// outright ("invalid type: null, expected a string"), so a perfectly well-formed finish decision
+/// failed the typed parse and fell through to the lenient recovery path. Observed live 2026-08-11.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 /// The LLM's decision each step.
 #[derive(Debug, Deserialize, Default)]
 struct Decision {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     action: String, // "call_tool" | "finish"
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     tool: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     args: serde_json::Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     answer: String,
+}
+
+/// Model text that is meant to be PROSE, with any control envelope peeled off.
+///
+/// The budget-exhausted synthesis call at the end of `run` used its reply verbatim. A small model
+/// that has spent the whole task emitting decision JSON keeps doing so on the last call too, so the
+/// sub-agent's "answer" became the literal string
+/// `{"action": "finish", "tool": null, "answer": "I cannot provide…\n\nNext Action: …"}` — which
+/// reached the cockpit and was displayed to the user, `\n` escapes and all. The escapes are the tell:
+/// real parsing would have turned them into newlines, so nothing had parsed it.
+///
+/// Everywhere a model's text is treated as prose, it goes through here.
+pub fn plain_prose(raw: &str) -> String {
+    let t = raw.rsplit("</think>").next().unwrap_or(raw).trim();
+    // Peel at most twice: an envelope inside an envelope happens, three deep does not.
+    let mut cur = t.to_string();
+    for _ in 0..2 {
+        let Some(inner) = unwrap_envelope(&cur) else { break };
+        cur = inner;
+    }
+    cur
+}
+
+/// One layer: if the text is (or contains) an object carrying an `answer`/`text`/`response` string,
+/// return that string. None when there is no envelope to peel — which must leave the text untouched,
+/// or ordinary prose that merely mentions braces would be mangled.
+fn unwrap_envelope(s: &str) -> Option<String> {
+    let (a, b) = (s.find('{')?, s.rfind('}')?);
+    if b <= a {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&s[a..=b]).ok()?;
+    let inner = ["answer", "text", "response", "final", "content"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(|x| x.as_str()))?;
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.to_string())
 }
 
 pub struct SubAgent {
@@ -187,12 +241,14 @@ impl SubAgent {
             let decision = parse_decision(&text);
 
             if decision.action == "finish" || (decision.action.is_empty() && !decision.answer.is_empty()) {
-                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
+                let answer = plain_prose(&decision.answer);
+                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
             }
             // call_tool
             let tool = decision.tool.trim().to_string();
             if tool.is_empty() {
-                return AgentResult { task: task.into(), answer: decision.answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
+                let answer = plain_prose(&decision.answer);
+                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
             }
             // OUTWARD action tool → through the harm-gate. The agent can never self-confirm.
             if self.act_tools.iter().any(|t| t == &tool) {
@@ -252,18 +308,33 @@ impl SubAgent {
         }
 
         // Budget exhausted — synthesize a best-effort answer from observations (no new tools).
+        //
+        // Two things this prompt has to say that the first version did not. It must ask for PROSE:
+        // the model has spent every prior call emitting decision JSON and will happily emit one more
+        // (see `plain_prose`). And it must say NO ONE IS LISTENING — a background job that answers
+        // "please clarify what you'd like" has produced nothing, because the person who asked is not
+        // in a conversation with it. Observed live: a stock-research job spent 11 steps, fetched six
+        // sources, then asked the user to clarify.
         let messages = vec![
             ChatMessage::system(&self.persona),
+            ChatMessage::system(
+                "You are writing the FINAL DELIVERABLE of a background job. Plain prose — no JSON, no \
+                 envelope, no `action` field. This is not a conversation: the person who asked is not \
+                 here to answer a question, so never end by asking them to clarify or choose. Give \
+                 them the most useful grounded result the observations support. If the observations \
+                 genuinely do not answer the task, say exactly WHAT IS MISSING and what you would \
+                 need to get it — that is a finding, not a question.",
+            ),
             ChatMessage::user(&format!(
-                "Answer this task from the observations below; if they're insufficient, say so plainly. \
-                 Do not invent.\nTask: {task}\nObservations:\n{observations}"
+                "Task: {task}\nObservations:\n{observations}\n\nWrite the deliverable. Ground every \
+                 claim in the observations above; never invent."
             )),
         ];
         let answer = self
             .inference
             .chat(messages, GenerationConfig::default())
             .await
-            .map(|r| r.text)
+            .map(|r| plain_prose(&r.text))
             .unwrap_or_else(|e| format!("(sub-agent synthesis error: {e})"));
         AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions, sources: sources.clone() }
     }
@@ -468,5 +539,85 @@ mod tests {
         let out = a.fan_out(vec!["q1".into(), "q2".into(), "q3".into()]).await;
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].task, "q1");
+    }
+
+    // ── THE ENVELOPE LEAK ────────────────────────────────────────────────────────────────────────
+    //
+    // Reported by the user from the cockpit on 2026-08-11: a delegated "Stock finder" job displayed
+    // its own control JSON as the answer, `\n` escapes intact. The escapes were the diagnosis — real
+    // parsing turns them into newlines, so nothing had parsed it. The string below is the live one.
+
+    const LIVE_LEAK: &str = r#"{"action": "finish", "tool": null, "answer": "I cannot provide specific stock trading recommendations for today.\n\nThe search results provide tools and lists from various sources.\n\nNext Action: To proceed, please clarify if you want me to summarize the *types* of actionable data (e.g., \"List the top 3 sources\")."}"#;
+
+    #[test]
+    fn tool_null_does_not_break_the_typed_parse() {
+        // `"tool": null` is the natural thing a model writes when it is finishing rather than calling
+        // a tool, and serde rejected it outright: "invalid type: null, expected a string".
+        //
+        // This asserts on the TYPED deserialize, not on `parse_decision`. Going through
+        // `parse_decision` would pass either way, because its lenient recovery path rescues the answer
+        // — so that version of this test could not fail and did not cover the fix at all. The typed
+        // parse succeeding is the actual property: it keeps the common case off the recovery path.
+        let d: Decision = serde_json::from_str(LIVE_LEAK).expect("null must deserialize as absent");
+        assert_eq!(d.action, "finish");
+        assert_eq!(d.tool, "");
+        assert!(d.answer.starts_with("I cannot provide"), "answer was not extracted: {:?}", d.answer);
+        // And the whole-decision path still agrees.
+        assert_eq!(parse_decision(LIVE_LEAK).action, "finish");
+    }
+
+    #[test]
+    fn the_control_envelope_never_reaches_the_reader() {
+        let out = plain_prose(LIVE_LEAK);
+        assert!(!out.contains("\"action\""), "the envelope is still there: {out}");
+        assert!(!out.contains("finish"), "the envelope is still there: {out}");
+        // And the escapes must have become REAL newlines — that is what proves it parsed. The needle
+        // is a backslash followed by 'n', built from chars so no amount of escaping confusion can turn
+        // it into an actual newline (which is what an earlier version of this line accidentally
+        // asserted, making the test fail against correct output).
+        let escaped_nl: String = ['\\', 'n'].iter().collect();
+        assert!(!out.contains(&escaped_nl), "escaped newlines survived, so nothing parsed: {out:?}");
+        assert!(out.contains('\n'), "the paragraph breaks were lost: {out:?}");
+        assert!(out.starts_with("I cannot provide"));
+    }
+
+    #[test]
+    fn prose_that_merely_mentions_braces_is_left_alone() {
+        // The peel must be conservative. Real prose about JSON must survive untouched, or fixing the
+        // leak would corrupt every reply that discusses code.
+        let p = "Set {\"retries\": 3} in the config and restart.";
+        assert_eq!(plain_prose(p), p);
+        let q = "No braces here at all.";
+        assert_eq!(plain_prose(q), q);
+    }
+
+    #[test]
+    fn a_think_preamble_is_stripped_before_peeling() {
+        let out = plain_prose("<think>weighing it up {maybe}</think>\n{\"answer\":\"Six sources agree.\"}");
+        assert_eq!(out, "Six sources agree.");
+    }
+
+    #[test]
+    fn a_doubly_wrapped_answer_is_peeled() {
+        let out = plain_prose(r#"{"answer":"{\"text\":\"Done.\"}"}"#);
+        assert_eq!(out, "Done.");
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_budget_delivers_prose_not_json() {
+        // Every step emits a tool call so the budget runs out, and the final synthesis call answers
+        // with an envelope — exactly the live shape. The sub-agent's answer must be the prose.
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(SeqLLM::new(vec![
+                r#"{"action":"call_tool","tool":"recall","args":{"query":"a"}}"#,
+                r#"{"action":"call_tool","tool":"recall","args":{"query":"b"}}"#,
+                LIVE_LEAK,
+            ])) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let a = SubAgent::new(pool, Arc::new(FakeHost), "JARVIS", vec!["recall".into()], 2);
+        let r = a.run("find the best stocks to trade today").await;
+        assert!(!r.answer.contains("\"action\""), "the envelope reached the caller: {}", r.answer);
+        assert!(r.answer.starts_with("I cannot provide"), "got: {}", r.answer);
     }
 }

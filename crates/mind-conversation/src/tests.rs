@@ -2984,3 +2984,28 @@ async fn an_identical_call_is_not_paid_for_twice() {
     let calls = llm.call_count();
     assert!(calls <= 6, "an A,B,A,B cycle ran for {calls} model calls — the full-history guard is not firing");
 }
+
+// ── THE ENVELOPE THE BLOB DETECTOR MISSED ────────────────────────────────────────────────────────
+// The sub-agent schema is {"action":"finish","tool":null,"answer":…}. It has `tool` but no `args`, and
+// no `thought`, so both original clauses of `is_tool_call_blob` returned false and this exact string
+// reached a user's screen from the cockpit on 2026-08-11.
+
+#[test]
+fn the_sub_agent_finish_envelope_is_recognised_as_a_blob() {
+    let live = r#"{"action": "finish", "tool": null, "answer": "I cannot provide specific stock trading recommendations for today."}"#;
+    assert!(is_tool_call_blob(live), "the leaked envelope must be recognised as a control blob");
+    // The other envelope spellings, so a near-miss variant does not slip through the same gap.
+    assert!(is_tool_call_blob(r#"{"thought":"hmm","tool":"now","args":{}}"#));
+    assert!(is_tool_call_blob(r#"{"tool":"answer","answer":"hi"}"#));
+}
+
+#[test]
+fn prose_is_never_mistaken_for_a_control_blob() {
+    // The leading-brace requirement is what makes the widened clauses safe. A reply that talks about
+    // the schema must still be delivered as a reply.
+    assert!(!is_tool_call_blob("Set the \"action\" field to \"finish\" and put your \"answer\" there."));
+    assert!(!is_tool_call_blob("Here are three stocks worth watching today."));
+    assert!(!is_tool_call_blob(""));
+    // A code fence is prose too — it does not start with a brace.
+    assert!(!is_tool_call_blob("```json\n{\"action\":\"finish\",\"answer\":\"x\"}\n```"));
+}

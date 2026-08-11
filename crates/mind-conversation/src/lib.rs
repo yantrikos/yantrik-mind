@@ -2243,7 +2243,16 @@ async fn verify_served(url: &str, expected: &str) -> PageServe {
 /// fool `looks_like_html`; we must never host the JSON wrapper as a "page". Guards that path.
 fn is_tool_call_blob(s: &str) -> bool {
     let t = s.trim_start();
-    t.starts_with('{') && (t.contains("\"thought\"") || (t.contains("\"tool\"") && t.contains("\"args\"")))
+    // The `action`/`answer` shape had to be added: the sub-agent schema is
+    // {"action":"finish","tool":null,"answer":…}, which has `tool` but NO `args` and no `thought` — so
+    // the original two clauses both missed it, and that exact string reached a user's screen on
+    // 2026-08-11. Requiring a leading `{` is what keeps this from matching prose that merely quotes
+    // JSON, so the added clauses are safe.
+    t.starts_with('{')
+        && (t.contains("\"thought\"")
+            || (t.contains("\"tool\"") && t.contains("\"args\""))
+            || (t.contains("\"action\"") && t.contains("\"answer\""))
+            || (t.contains("\"answer\"") && t.contains("\"tool\"")))
 }
 
 /// A meaningful page slug source: the HTML's `<title>` (else first `<h1>`). Beats naming a page after

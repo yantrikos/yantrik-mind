@@ -432,7 +432,12 @@ impl Cognition {
         self.reason_pool
             .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
-            .map(|r| r.text.trim().to_string())
+            // Through `plain_prose` for the same reason the sub-agent's synthesis is: a model that has
+            // spent the whole run emitting control JSON emits one more on the final call, and this
+            // string is what the user reads. The sub-agent leaked exactly that into the cockpit on
+            // 2026-08-11; this path is behind YM_COGNITION and would have leaked it the day the flag
+            // flipped.
+            .map(|r| crate::plain_prose(&r.text))
             .unwrap_or_else(|_| "I did the work but could not put the answer together.".to_string())
     }
 }

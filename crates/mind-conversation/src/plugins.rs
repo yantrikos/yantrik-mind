@@ -71,6 +71,57 @@ impl Provenance {
     }
 }
 
+/// A runtime dependency a capability cannot work without.
+///
+/// This exists because the first version of the availability probe was a hand-written `match` on
+/// capability ids — and it was wrong in exactly the way such a thing always goes wrong. It checked
+/// `"wiki"` while the registry's id is `wikipedia`, so that capability was never probed at all; and
+/// five ids matched nothing, so they reported READY unconditionally. Everything looked green,
+/// including things that could not have worked.
+///
+/// The fix is to make the dependency part of the DECLARATION rather than a lookup table that has to
+/// be kept in sync by hand. A new capability now states what it needs, and the probe is a loop over
+/// that list — so the failure mode becomes "someone forgot to declare a requirement" (visible in one
+/// place, next to the spec) instead of "the id in the match arm has a typo" (invisible, and silently
+/// green). Each variant maps to one concrete `Option<Arc<dyn …>>` on the engine, so a variant cannot
+/// exist without something real to check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Requirement {
+    WebSearch,
+    WebFetch,
+    News,
+    Weather,
+    Wiki,
+    Markets,
+    Translator,
+    HomeAssistant,
+    Github,
+    Coder,
+    /// The bounded research sub-agent.
+    Researcher,
+}
+
+impl Requirement {
+    /// What the operator has to do about it, in their terms — not the field name that is missing.
+    pub fn unmet_reason(self) -> &'static str {
+        match self {
+            Self::WebSearch => "no web search backend is configured",
+            Self::WebFetch => "no web fetcher is configured",
+            Self::News => "no news client is configured",
+            Self::Weather => "no weather client is configured",
+            Self::Wiki => "no Wikipedia client is configured",
+            Self::Markets => "no market-data client is configured",
+            Self::Translator => "no translator is configured",
+            Self::HomeAssistant => "Home Assistant is not connected — set YM_HA_URL and YM_HA_TOKEN",
+            Self::Github => "no GitHub token — set YM_GITHUB_TOKEN",
+            Self::Coder => {
+                "the agentic coder needs the claude CLI plus MINIMAX_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+            }
+            Self::Researcher => "the research sub-agent is not wired",
+        }
+    }
+}
+
 /// The BEHAVIOR half of a plugin. PluginSpec DECLARES a capability (identity, security, enabled,
 /// catalog); a CapabilityHandler IMPLEMENTS it, and the registry — not a hardcoded match arm —
 /// routes to it. A handler returns None for a name it doesn't own, which falls through to the
@@ -107,6 +158,9 @@ pub struct PluginSpec {
     pub catalog: String,
     /// Where this capability's behavior came from (builtin / imported / self-authored).
     pub provenance: Provenance,
+    /// What this capability cannot work without. Empty means pure compute (a calculator needs
+    /// nothing) or that its dependencies are internal — either way, always available when enabled.
+    pub requires: Vec<Requirement>,
 }
 
 impl PluginSpec {
@@ -129,8 +183,17 @@ impl PluginSpec {
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
             catalog: catalog.into(),
             provenance: Provenance::Builtin,
+            requires: Vec::new(),
         }
     }
+
+    /// Declare what this capability needs at runtime. Builder form so the builtin table below stays
+    /// one readable line per capability with its requirements right beside it.
+    fn requiring(mut self, reqs: &[Requirement]) -> Self {
+        self.requires = reqs.to_vec();
+        self
+    }
+
     fn matches(&self, name: &str) -> bool {
         let n = name.trim().to_lowercase();
         self.id == n || self.aliases.iter().any(|a| a == &n)
@@ -159,6 +222,10 @@ impl PluginSpec {
             aliases: aliases.to_vec(),
             catalog: catalog.into(),
             provenance,
+            // A dynamically-installed capability declares no native requirement: its behaviour is a
+            // skill/pack recipe, so what it needs is whatever tools that recipe calls — checked when
+            // it runs, not here. Certification is the gate that decides whether it may run at all.
+            requires: Vec::new(),
         }
     }
 }
@@ -183,29 +250,38 @@ impl PluginRegistry {
         use SecurityLevel::*;
         let plugins = vec![
             PluginSpec::new("web_search", "Web search", "Web", ReadOnly, &["search", "web_search"], &["search", "google", "ddg"],
-                "- search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one"),
+                "- search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one")
+                .requiring(&[Requirement::WebSearch]),
             PluginSpec::new("web_fetch", "Web fetch", "Web", ReadOnly, &["web_fetch"], &["web", "fetch"],
-                "- web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)"),
+                "- web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)")
+                .requiring(&[Requirement::WebFetch]),
             PluginSpec::new("news", "News", "Web", ReadOnly, &["news", "headlines", "track_news", "follow_news"], &["news", "headlines"],
                 "- news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything\n\
-                 - track_news {topic}: TRACK a topic + proactively surface fresh headlines"),
+                 - track_news {topic}: TRACK a topic + proactively surface fresh headlines")
+                .requiring(&[Requirement::News]),
             PluginSpec::new("weather", "Weather", "Web", ReadOnly, &["weather"], &["weather", "wx"],
-                "- weather {place}: current conditions + today's forecast for a city/town"),
+                "- weather {place}: current conditions + today's forecast for a city/town")
+                .requiring(&[Requirement::Weather]),
             PluginSpec::new("wikipedia", "Wikipedia", "Web", ReadOnly, &["wikipedia", "wiki"], &["wiki", "wikipedia"],
-                "- wikipedia {query}: a factual summary from Wikipedia (what/who is X)"),
+                "- wikipedia {query}: a factual summary from Wikipedia (what/who is X)")
+                .requiring(&[Requirement::Wiki]),
             PluginSpec::new("calculator", "Calculator", "Utility", ReadOnly, &["calc", "calculate", "math"], &["calc", "calculate", "math"],
                 "- calc {expression}: do arithmetic locally (e.g. 12*7+3, (1500*0.18))"),
             PluginSpec::new("translate", "Translate", "Web", ReadOnly, &["translate"], &["translate", "tr"],
-                "- translate {to, text}: translate text into a language ('to' like french/hi/es; source auto-detected)"),
+                "- translate {to, text}: translate text into a language ('to' like french/hi/es; source auto-detected)")
+                .requiring(&[Requirement::Translator]),
             PluginSpec::new("markets", "Market quotes", "Finance", ReadOnly, &["crypto", "coin", "stock", "ticker"], &["crypto", "coin", "stock", "ticker"],
                 "- crypto {coin}: a cryptocurrency price + 24h change (e.g. btc, ethereum)\n\
-                 - stock {symbol}: a stock quote (US ticker, e.g. AAPL)"),
+                 - stock {symbol}: a stock quote (US ticker, e.g. AAPL)")
+                .requiring(&[Requirement::Markets]),
             PluginSpec::new("portfolio", "Portfolio & analysis", "Finance", Personal,
                 &["portfolio", "holdings", "my_stocks", "analyze", "analyze_stock", "stock_analysis", "add_holding", "track_holding"],
                 &["portfolio", "holding", "holdings", "analyze", "stocks", "position", "analyse", "analysis"],
                 "- portfolio {}: the user's investment portfolio — their holdings valued LIVE (price, P&L, allocation)\n\
                  - analyze {ticker}: a DEEP multi-source analysis of a stock/crypto (quote+profile+news+web → balanced briefing w/ risks). ANALYSIS, never a buy/sell tip\n\
-                 - add_holding {ticker, shares, cost?}: record a position the user says they own"),
+                 - add_holding {ticker, shares, cost?}: record a position the user says they own")
+                // Holdings are valued LIVE, so without market data the portfolio cannot be shown.
+                .requiring(&[Requirement::Markets]),
             PluginSpec::new("finance", "Finance (subs/bills/budget)", "Finance", Personal,
                 &["money", "subscriptions", "finance", "discover_subscriptions", "find_subscriptions", "scan_email_subscriptions", "bills", "budget", "budget_overview"],
                 &["money", "finance", "subs", "sub", "subscriptions", "subscription", "bills", "bill", "budget", "budgets", "spent", "spend", "expense", "discover", "scan"],
@@ -214,14 +290,19 @@ impl PluginRegistry {
                  - budget {}: budget vs spend this month, by category\n\
                  - discover_subscriptions {}: scan the user's EMAIL to find recurring subscriptions"),
             PluginSpec::new("home", "Smart home", "Home", Personal, &["home", "home_status", "house", "smart_home"], &["home", "house"],
-                "- home {}: check the smart home (Home Assistant) — who's home, climate, what's on"),
+                "- home {}: check the smart home (Home Assistant) — who's home, climate, what's on")
+                .requiring(&[Requirement::HomeAssistant]),
             PluginSpec::new("github", "GitHub", "Dev", Personal, &["github_repo_items", "github_notifications"], &["github", "gh"],
                 "- github_repo_items {repo}: list open issues+PRs on \"owner/name\"\n\
-                 - github_notifications {}: your GitHub notifications"),
+                 - github_notifications {}: your GitHub notifications")
+                .requiring(&[Requirement::Github]),
             PluginSpec::new("research", "Deep research", "Web", ReadOnly, &["research"], &["research"],
-                "- research {query}: kick off a DEEP background research job (multi-source) — for big questions, delivers when done"),
+                "- research {query}: kick off a DEEP background research job (multi-source) — for big questions, delivers when done")
+                // The sub-agent reaches for search and fetch; without either it has nothing to research WITH.
+                .requiring(&[Requirement::Researcher, Requirement::WebSearch, Requirement::WebFetch]),
             PluginSpec::new("coder", "Code sandbox", "Dev", GatedWrite, &["code"], &["code"],
-                "- code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox)"),
+                "- code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox)")
+                .requiring(&[Requirement::Coder]),
             PluginSpec::new("dashboards", "Dashboards & pages", "Utility", ReadOnly, &["make_dashboard", "publish_page"], &["dashboard"],
                 "- make_dashboard {title, sections}: render + host a styled dashboard/list/comparison page, return a URL\n\
                  - publish_page {name, html}: host a raw HTML page you wrote + return a URL"),

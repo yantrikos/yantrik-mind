@@ -514,7 +514,7 @@ impl ConversationEngine {
             let (availability, blocked_by) = if !spec.enabled {
                 (Availability::Disabled, None)
             } else {
-                match self.capability_block(&spec.id) {
+                match self.first_unmet(&spec.requires) {
                     Some(why) => (Availability::Unavailable, Some(why)),
                     None => (Availability::Ready, None),
                 }
@@ -537,46 +537,34 @@ impl ConversationEngine {
         CapabilityReport { capabilities, connected, unavailable, disabled }
     }
 
-    /// What, if anything, stops this capability from working right now — phrased for the operator.
+    /// The first DECLARED requirement this engine cannot satisfy, phrased for the operator.
     ///
-    /// Only capabilities with an external dependency can be blocked; a pure-compute one (patterns,
-    /// calendar arithmetic) is always ready. Returning `None` for an id we don't recognise is the
-    /// deliberate choice: an unknown capability is assumed workable rather than reported broken,
-    /// because a false "unavailable" would make the compiler refuse work the mind can actually do.
-    fn capability_block(&self, id: &str) -> Option<String> {
-        let missing = |what: &str| Some(what.to_string());
-        match id {
-            "mail" | "inbox" | "mail_report" => {
-                if self.mail.is_none() && self.scan_mail.is_empty() {
-                    return missing("no mailbox connected — set YM_EMAIL and an app password");
+    /// One `match` from requirement to the concrete field that backs it. That is the whole probe —
+    /// there is no id lookup, so a capability cannot be silently un-probed by a typo, and adding a
+    /// requirement variant without wiring it here is a compile error rather than a false green.
+    ///
+    /// Reports only the FIRST unmet requirement: telling someone research needs a searcher, a
+    /// fetcher, and a sub-agent is three problems where they have one thing to go fix.
+    fn first_unmet(&self, requires: &[crate::plugins::Requirement]) -> Option<String> {
+        use crate::plugins::Requirement as R;
+        requires
+            .iter()
+            .find(|r| {
+                match r {
+                    R::WebSearch => self.searcher.is_none(),
+                    R::WebFetch => self.web.is_none(),
+                    R::News => self.news.is_none(),
+                    R::Weather => self.weather.is_none(),
+                    R::Wiki => self.wiki.is_none(),
+                    R::Markets => self.markets.is_none(),
+                    R::Translator => self.translator.is_none(),
+                    R::HomeAssistant => self.home.is_none(),
+                    R::Github => self.github.is_none(),
+                    R::Coder => self.coder.is_none(),
+                    R::Researcher => self.researcher.is_none(),
                 }
-                None
-            }
-            "github" => self.github.is_none().then(|| "no GitHub token — set YM_GITHUB_TOKEN".to_string()),
-            "home" => self
-                .home
-                .is_none()
-                .then(|| "Home Assistant not connected — set YM_HA_URL and YM_HA_TOKEN".to_string()),
-            "web_search" | "research" => self.searcher.is_none().then(|| "no web search backend".to_string()),
-            "web_fetch" => self.web.is_none().then(|| "no web fetcher".to_string()),
-            "news" => self.news.is_none().then(|| "no news client".to_string()),
-            "weather" => self.weather.is_none().then(|| "no weather client".to_string()),
-            "wiki" => self.wiki.is_none().then(|| "no Wikipedia client".to_string()),
-            "markets" | "portfolio" => self.markets.is_none().then(|| "no market data client".to_string()),
-            "translate" => self.translator.is_none().then(|| "no translator".to_string()),
-            "coder" => self.coder.is_none().then(|| {
-                "the agentic coder needs the claude CLI plus MINIMAX_API_KEY or CLAUDE_CODE_OAUTH_TOKEN".to_string()
-            }),
-            "sandbox" | "run_code" => self.sandbox.is_none().then(|| "no code sandbox".to_string()),
-            "workers" => self.workers.is_none().then(|| "no remote worker pool — set YM_WORKERS".to_string()),
-            "mcp" => self.mcp.is_none().then(|| "no MCP servers configured".to_string()),
-            // Outward action tools need a granted runtime, not just a client.
-            "send_email" | "act" => self
-                .runtime
-                .is_none()
-                .then(|| "no outward-action runtime — no transport is configured to act through".to_string()),
-            _ => None,
-        }
+            })
+            .map(|r| r.unmet_reason().to_string())
     }
 }
 
@@ -971,23 +959,81 @@ mod tests {
     /// A capability whose backing client is absent must report UNAVAILABLE with a reason a person
     /// can act on. This is the field the agent compiler reads to say "you asked for GitHub and it
     /// isn't connected" instead of letting an agent run and confabulate a result.
+    /// THE FALSE-GREEN GUARD, and the reason it exists.
+    ///
+    /// The first probe was a `match` on capability ids. Against the live box it reported 17 of 17
+    /// READY — which looked like a healthy mind and was actually a broken probe: it matched `"wiki"`
+    /// while the registry's id is `wikipedia`, and five arms matched ids that do not exist, so those
+    /// capabilities were never checked at all. An availability report that cannot say "no" is worse
+    /// than none, because the agent compiler is meant to trust it.
+    ///
+    /// So this asserts the probe can FAIL. A bare engine has no search, no fetch, no GitHub, no
+    /// weather, no wiki — every capability declaring one of those must be blocked, with a reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn unconfigured_capabilities_say_what_is_missing() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
         let report = eng.capability_report();
         assert!(!report.capabilities.is_empty(), "the registry must expose its specs");
-        // This engine has no github client wired, so if the registry declares that capability it
-        // must be reported blocked — with a reason naming the actual missing config.
-        if let Some(gh) = report.capabilities.iter().find(|c| c.id == "github") {
-            assert_eq!(gh.availability, Availability::Unavailable);
-            let why = gh.blocked_by.as_deref().unwrap_or_default();
-            assert!(why.contains("YM_GITHUB_TOKEN"), "the reason must be actionable, got: {why}");
+
+        // A bare engine has NO external clients, so a green report here means the probe is broken.
+        assert!(
+            report.unavailable > 0,
+            "an engine with no clients wired must report SOME capability unavailable — all-ready is \
+             the exact false-green this test exists to catch (ready={}, unavailable={})",
+            report.connected,
+            report.unavailable
+        );
+
+        for id in ["github", "wikipedia", "web_search", "web_fetch", "weather", "home", "coder"] {
+            let c = report.capabilities.iter().find(|c| c.id == id);
+            let Some(c) = c else { continue };
+            assert_eq!(c.availability, Availability::Unavailable, "`{id}` has no backing client here");
+            let why = c.blocked_by.as_deref().unwrap_or_default();
+            assert!(!why.is_empty(), "`{id}` must say WHAT is missing, not just that it is unavailable");
         }
+        // The reason must be actionable — a config key or a concrete thing to install.
+        let gh = report.capabilities.iter().find(|c| c.id == "github").expect("github is declared");
+        assert!(
+            gh.blocked_by.as_deref().unwrap_or_default().contains("YM_GITHUB_TOKEN"),
+            "got: {:?}",
+            gh.blocked_by
+        );
+
         assert_eq!(
             report.connected + report.unavailable + report.disabled,
             report.capabilities.len(),
             "every capability must fall in exactly one availability bucket"
         );
+    }
+
+    /// A capability that declares no requirement is genuinely always available — a calculator needs
+    /// nothing external. This pins the other side of the guard above, so "report unavailable" never
+    /// degenerates into "report everything unavailable to be safe".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pure_compute_capabilities_are_ready_with_nothing_configured() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = test_engine(&mem);
+        let report = eng.capability_report();
+        let calc = report.capabilities.iter().find(|c| c.id == "calculator").expect("calculator is declared");
+        assert_eq!(calc.availability, Availability::Ready, "arithmetic needs no client");
+        assert!(calc.blocked_by.is_none());
+    }
+
+    /// Wiring a client must flip its capability to ready — the probe reads the SAME field the tool
+    /// dispatch uses, so "ready" means the call would really work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wiring_a_client_flips_its_capability_to_ready() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let before = test_engine(&mem).capability_report();
+        let wiki_before = before.capabilities.iter().find(|c| c.id == "wikipedia").unwrap();
+        assert_eq!(wiki_before.availability, Availability::Unavailable);
+
+        let eng = test_engine(&mem).with_wiki(Arc::new(mind_tools::Wikipedia::new()));
+        let after = eng.capability_report();
+        let wiki_after = after.capabilities.iter().find(|c| c.id == "wikipedia").unwrap();
+        assert_eq!(wiki_after.availability, Availability::Ready, "a wired client means ready");
+        assert!(wiki_after.blocked_by.is_none());
+        assert_eq!(after.connected, before.connected + 1, "exactly one capability changed");
     }
 }

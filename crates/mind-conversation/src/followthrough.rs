@@ -116,6 +116,57 @@ pub fn closure_question(description: &str, days_over: i64) -> String {
     )
 }
 
+/// A DEADLINE in a task description, resolved without rolling forward a year.
+///
+/// `parse_text_date_ms` rolls a past date to next year, which is exactly right for a recurring
+/// occasion: a birthday on 23 July, read in August, means next July. It is exactly wrong for a
+/// deadline. "Order the watch before July 17th", read in August, resolved to July of NEXT year — so
+/// the task sat 340 days in the future, never became overdue, never triggered a nudge, and was carried
+/// as live work indefinitely. That single line is why the nagging survived the first fix.
+///
+/// So a deadline resolves to THIS year, past or not. The one exception is a wrap-around: a date more
+/// than six months behind is more likely the coming one ("January 5th" read in December), because
+/// `Task` carries no creation timestamp to disambiguate with. Six months is the only threshold that
+/// splits those two readings without a third piece of information.
+pub fn parse_deadline_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
+    use chrono::Datelike;
+    const MONTHS: [(&str, u32); 12] = [
+        ("january", 1), ("february", 2), ("march", 3), ("april", 4), ("may", 5), ("june", 6),
+        ("july", 7), ("august", 8), ("september", 9), ("october", 10), ("november", 11), ("december", 12),
+    ];
+    let low = text.to_lowercase();
+    for (name, m) in MONTHS {
+        for pat in [name, &name[..3]] {
+            let mut start = 0;
+            while let Some(pos) = low[start..].find(pat) {
+                let at = start + pos;
+                let end = at + pat.len();
+                let before_ok = at == 0 || !low.as_bytes()[at - 1].is_ascii_alphabetic();
+                let after_ok = low[end..].chars().next().map(|c| !c.is_ascii_alphabetic()).unwrap_or(false);
+                if before_ok && after_ok {
+                    let digits: String =
+                        low[end..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if let Ok(d) = digits.parse::<u32>() {
+                        if (1..=31).contains(&d) {
+                            let this_year = chrono::NaiveDate::from_ymd_opt(today.year(), m, d)?;
+                            let behind = (today.date_naive() - this_year).num_days();
+                            let nd = if behind > 183 {
+                                chrono::NaiveDate::from_ymd_opt(today.year() + 1, m, d)?
+                            } else {
+                                this_year
+                            };
+                            let ts = nd.and_hms_opt(12, 0, 0)?.and_local_timezone(*today.offset()).single()?;
+                            return Some(ts.timestamp_millis());
+                        }
+                    }
+                }
+                start = end;
+            }
+        }
+    }
+    None
+}
+
 /// Did the user just tell us to stop tracking something?
 ///
 /// Deliberately narrow. "I'm not doing that any more" must close a thread, but an ordinary sentence
@@ -313,7 +364,7 @@ impl super::ConversationEngine {
         let mut changed = false;
 
         for t in &open {
-            let dl = super::parse_text_date_ms(&t.description, &today);
+            let dl = parse_deadline_ms(&t.description, &today);
             let prior = asked.get(&t.id).and_then(|v| v.as_i64());
             match classify(t, now, dl, prior) {
                 ThreadState::NeedsClosure { days_over } if out.len() < MAX_ASKS_PER_TICK => {
@@ -387,5 +438,77 @@ impl super::ConversationEngine {
             .filter(|t| t.is_open())
             .collect();
         open.into_iter().partition(|t| super::is_personal_reminder(&t.description))
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    fn aug11() -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-11T10:00:00-05:00").unwrap()
+    }
+
+    /// THE LINE THAT KEPT THE NAGGING ALIVE. `parse_text_date_ms` rolls a past date forward a year, so
+    /// "before July 17th" read in August resolved to July 2027 — 340 days in the FUTURE. The task never
+    /// became overdue, never triggered a nudge, and was carried as live work indefinitely.
+    #[test]
+    fn a_deadline_that_has_passed_reads_as_passed() {
+        let today = aug11();
+        let dl = parse_deadline_ms("Order Brishti's Rosefield watch before July 17th", &today).unwrap();
+        assert!(dl < today.timestamp_millis(), "17 July is BEHIND 11 August, not ahead of it");
+        // 24, not 25: the deadline resolves to NOON on 17 July and "today" is 10am on 11 August, so the
+        // final partial day floors away. Worth pinning exactly — an off-by-one here is the difference
+        // between a thread closing on time and lingering one more day.
+        let days_over = (today.timestamp_millis() - dl) / 86_400_000;
+        assert_eq!(days_over, 24, "17 July noon to 11 August 10am is 24 whole days");
+
+        // And the classifier now sees it, which is the whole point.
+        let t = mind_types::Task {
+            id: "t1".into(),
+            description: "Order Brishti's Rosefield watch before July 17th".into(),
+            status: "pending".into(),
+            priority: "high".into(),
+            due_ms: None,
+        };
+        let s = classify(&t, today.timestamp_millis(), parse_deadline_ms(&t.description, &today), None);
+        assert!(matches!(s, ThreadState::NeedsClosure { .. }), "got {s:?}");
+        assert!(!s.is_carried());
+    }
+
+    /// A deadline still ahead stays ahead.
+    #[test]
+    fn a_future_deadline_is_still_future() {
+        let today = aug11();
+        let dl = parse_deadline_ms("file the return by October 3", &today).unwrap();
+        assert!(dl > today.timestamp_millis());
+    }
+
+    /// The wrap-around case: read in December, "January 5th" means the coming January, not eleven
+    /// months ago. Six months is the only threshold that splits the two readings, since `Task` carries
+    /// no creation timestamp to disambiguate with.
+    #[test]
+    fn a_date_far_behind_is_read_as_the_coming_one() {
+        let december = chrono::DateTime::parse_from_rfc3339("2026-12-20T10:00:00-05:00").unwrap();
+        let dl = parse_deadline_ms("renew it by January 5", &december).unwrap();
+        assert!(dl > december.timestamp_millis(), "January means NEXT January when read in December");
+
+        // But a date only weeks behind is genuinely behind.
+        let dl2 = parse_deadline_ms("renew it by November 5", &december).unwrap();
+        assert!(dl2 < december.timestamp_millis(), "5 November is behind 20 December");
+    }
+
+    /// A recurring occasion must KEEP rolling forward — the birthday parser is right for birthdays, and
+    /// this change must not have altered it.
+    #[test]
+    fn the_recurring_parser_is_untouched() {
+        let today = aug11();
+        let birthday = crate::parse_text_date_ms("Brishti's birthday is July 23", &today).unwrap();
+        assert!(birthday > today.timestamp_millis(), "a birthday in July means NEXT July");
+    }
+
+    #[test]
+    fn text_with_no_date_yields_none() {
+        assert!(parse_deadline_ms("call mum more often", &aug11()).is_none());
     }
 }

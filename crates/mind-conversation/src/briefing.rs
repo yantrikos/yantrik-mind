@@ -23,7 +23,7 @@ impl super::ConversationEngine {
             .into_iter()
             .filter(|t| t.is_open())
             .filter(|t| {
-                let dl = crate::parse_text_date_ms(&t.description, &today);
+                let dl = crate::followthrough::parse_deadline_ms(&t.description, &today);
                 let a = asked.get(&t.id).and_then(|v| v.as_i64());
                 crate::followthrough::classify(t, now, dl, a).is_carried()
             })

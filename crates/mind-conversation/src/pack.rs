@@ -105,6 +105,10 @@ fn d_category() -> String {
 pub struct InstalledPack {
     pub doc: PackDoc,
     pub certified: bool,
+    /// Ledger reference for the last landed verdict (a Weft note oid), when a ledger witnessed it.
+    /// None = the claim is local-only, and the mind says so rather than implying it was proved.
+    #[serde(default)]
+    pub attestation: Option<String>,
 }
 
 /// Normalize a name into a tool-safe token.
@@ -346,7 +350,7 @@ impl ConversationEngine {
         {
             let mut packs = self.packs.lock().unwrap();
             packs.retain(|p: &InstalledPack| normalize(&p.doc.pack) != id);
-            packs.push(InstalledPack { doc: doc.clone(), certified: false });
+            packs.push(InstalledPack { doc: doc.clone(), certified: false, attestation: None });
         }
         self.save_packs();
         let verdict = self.pack_certify(&id).await;
@@ -361,6 +365,10 @@ impl ConversationEngine {
             None => return format!("(no installed pack '{id}' — `ym packs` lists them)"),
         };
         let (passed, lines) = self.pack_eval(&doc).await;
+        // Land the verdict on the trust ledger BEFORE flipping local state, so what the mind
+        // believes about itself is backed by what an external witness recorded. A demotion lands
+        // too — trust history is append-only, not a boolean that quietly flips back.
+        let (att, att_note) = self.attest_verdict(&doc, passed, &lines).await;
         {
             let mut reg = self.plugins.lock().unwrap();
             let _ = reg.set_enabled(&id, passed);
@@ -369,14 +377,43 @@ impl ConversationEngine {
             let mut packs = self.packs.lock().unwrap();
             if let Some(p) = packs.iter_mut().find(|p| normalize(&p.doc.pack) == id) {
                 p.certified = passed;
+                if att.is_some() {
+                    p.attestation = att;
+                }
             }
         }
         self.save_packs();
         self.save_plugins();
         if passed {
-            format!("🎖 '{id}' certified — every eval passed, pack is ON.\n{}", lines.join("\n"))
+            format!("🎖 '{id}' certified — every eval passed, pack is ON.\n{}\n{att_note}", lines.join("\n"))
         } else {
-            format!("🚫 '{id}' NOT certified — pack stays off until its evals pass.\n{}\n   Fix or earn the misses, then `ym pack certify {id}`.", lines.join("\n"))
+            format!("🚫 '{id}' NOT certified — pack stays off until its evals pass.\n{}\n{att_note}\n   Fix or earn the misses, then `ym pack certify {id}`.", lines.join("\n"))
+        }
+    }
+
+    /// Witness a certification verdict on the trust ledger. Returns (ledger ref, receipt line).
+    /// No ledger configured, or a ledger that can't be reached, is NOT a certification failure —
+    /// the verdict stands locally and is reported as unattested. Degrading loudly beats either
+    /// blocking the mind on a daemon or pretending a claim was proved when nothing witnessed it.
+    async fn attest_verdict(&self, doc: &PackDoc, passed: bool, lines: &[String]) -> (Option<String>, String) {
+        let Some(attestor) = self.attestor.clone() else {
+            return (None, "   (unattested — no trust ledger configured)".to_string());
+        };
+        let canonical = serde_json::to_vec(doc).unwrap_or_default();
+        let att = mind_governance::weft::Attestation {
+            subject: format!("pack:{}", normalize(&doc.pack)),
+            verdict: passed,
+            digest: mind_governance::weft::Attestation::digest_of(&canonical),
+            evidence: lines.to_vec(),
+        };
+        let ledger = attestor.ledger().to_string();
+        match tokio::task::spawn_blocking(move || attestor.attest(&att)).await {
+            Ok(Ok(oid)) => {
+                let short: String = oid.chars().take(12).collect();
+                (Some(oid.clone()), format!("   ⛓ landed on {ledger}: {short}… ({}) ", if passed { "certification" } else { "demotion" }))
+            }
+            Ok(Err(e)) => (None, format!("   (unattested — {ledger} refused: {e})")),
+            Err(e) => (None, format!("   (unattested — {ledger} join error: {e})")),
         }
     }
 
@@ -404,11 +441,16 @@ impl ConversationEngine {
         for p in &packs {
             let id = normalize(&p.doc.pack);
             let on = reg.spec(&id).map(|s| s.enabled).unwrap_or(false);
+            let proof = match &p.attestation {
+                Some(oid) => format!("⛓ {}…", oid.chars().take(10).collect::<String>()),
+                None => "unattested".to_string(),
+            };
             out.push_str(&format!(
-                "  [{}] {:<16} {}  — {} skill(s), {}, {}\n",
+                "  [{}] {:<16} {}  {}  — {} skill(s), {}, {}\n",
                 if on { "on " } else { "OFF" },
                 id,
                 if p.certified { "🎖 certified" } else { "· uncertified" },
+                proof,
                 p.doc.skills.len(),
                 p.doc.provenance,
                 p.doc.title,
@@ -461,6 +503,29 @@ impl ConversationEngine {
         };
         let receipt = self.pack_install_doc(doc, false).await;
         format!("🖋 Drafted '{id}' from {} proven skill(s) about \"{topic}\".\n{receipt}", proven.len())
+    }
+
+    /// `ym weft` — is a trust ledger wired, and what has it witnessed? Answers honestly when
+    /// nothing is configured instead of implying the mind's self-assessment was proved.
+    pub async fn weft_status(&self) -> String {
+        let Some(a) = &self.attestor else {
+            return "⛓ No trust ledger configured — capability certifications are LOCAL claims only.\n   Set YM_WEFT_URL + YM_WEFT_KEY to land them on Weft (`did + proved`, not just `certified: true`).".to_string();
+        };
+        let packs = self.packs.lock().unwrap().clone();
+        let (attested, total) = (packs.iter().filter(|p| p.attestation.is_some()).count(), packs.len());
+        let mut out = format!("⛓ Trust ledger: {} — {attested}/{total} pack verdict(s) witnessed.\n", a.ledger());
+        for p in &packs {
+            match &p.attestation {
+                Some(oid) => out.push_str(&format!(
+                    "  {:<16} {} — {oid}\n",
+                    normalize(&p.doc.pack),
+                    if p.certified { "certified" } else { "demoted  " }
+                )),
+                None => out.push_str(&format!("  {:<16} unattested\n", normalize(&p.doc.pack))),
+            }
+        }
+        out.push_str("   Each ref is a signed note on the Weft repo: verdict, content digest, and every eval line.");
+        out
     }
 
     /// Persist installed packs (best-effort, like save_plugins).

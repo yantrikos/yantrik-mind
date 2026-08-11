@@ -2670,6 +2670,8 @@ pub struct ConversationEngine {
     /// Installed capability packs + their certification state (see pack.rs).
     packs: Mutex<Vec<pack::InstalledPack>>,
     packs_path: Option<String>,
+    /// Where trust claims get witnessed (Weft). None = the mind certifies unattested and says so.
+    attestor: Option<Arc<dyn mind_governance::weft::Attestor>>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -2776,6 +2778,7 @@ impl ConversationEngine {
             plugins_path: None,
             packs: Mutex::new(Vec::new()),
             packs_path: None,
+            attestor: None,
             scan_mail: Vec::new(),
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -3504,6 +3507,21 @@ impl ConversationEngine {
         }
         self.plugins_path = Some(path);
         self
+    }
+
+    /// Give the mind a trust ledger to witness its capability claims (see pack.rs certification).
+    pub fn with_attestor(mut self, a: Arc<dyn mind_governance::weft::Attestor>) -> Self {
+        self.attestor = Some(a);
+        self
+    }
+
+    /// Wire the Weft attestor from the environment (`YM_WEFT_URL` + `YM_WEFT_KEY`), if both are
+    /// set. Unset → the mind runs unattested, which it reports rather than hides.
+    pub fn with_weft_from_env(self) -> Self {
+        match mind_governance::weft::WeftAttestor::from_env() {
+            Some(a) => self.with_attestor(Arc::new(a)),
+            None => self,
+        }
     }
 
     /// Persist the current plugin states back to the manifest (best-effort).
@@ -4979,6 +4997,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 }
             }
             "packs" => self.pack_list().await,
+            "weft" | "trust" | "attest" => self.weft_status().await,
             "pack" => {
                 let mut p = rest.splitn(2, char::is_whitespace);
                 let action = p.next().unwrap_or("").to_lowercase();

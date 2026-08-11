@@ -18,6 +18,7 @@ use async_trait::async_trait;
 
 pub mod devices;
 pub mod egress;
+pub mod weft;
 use mind_types::{
     ActionDecision, ActionExecutor, ActionIntent, ActionReceipt, ActionRequest, ActionRuntime,
     Capability, Decision, HarmGate, MindError, Result, RiskLevel, TurnContext,

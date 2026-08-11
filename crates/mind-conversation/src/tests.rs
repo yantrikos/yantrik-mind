@@ -2585,6 +2585,63 @@ async fn capability_registry_routes_finance_and_gates_disabled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn certification_verdicts_land_on_the_trust_ledger() {
+    use mind_governance::weft::{Attestation, Attestor};
+    // A ledger that records what it witnessed — and can be made to fail on demand.
+    struct ScriptedLedger {
+        landed: Mutex<Vec<(String, bool, String)>>,
+        down: std::sync::atomic::AtomicBool,
+    }
+    impl Attestor for ScriptedLedger {
+        fn ledger(&self) -> &str {
+            "scripted"
+        }
+        fn attest(&self, a: &Attestation) -> std::result::Result<String, String> {
+            if self.down.load(Ordering::Relaxed) {
+                return Err("ledger unreachable".to_string());
+            }
+            self.landed.lock().unwrap().push((a.subject.clone(), a.verdict, a.digest.clone()));
+            Ok(format!("oid{}", self.landed.lock().unwrap().len()))
+        }
+    }
+    let ledger = Arc::new(ScriptedLedger { landed: Mutex::new(Vec::new()), down: false.into() });
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS").with_attestor(ledger.clone());
+    let ctx = mind_types::AccessContext::Operator;
+
+    // A certification lands as a witnessed claim, and the receipt says so.
+    let good = r#"{"pack":"ledgered","title":"L","skills":[{"name":"a","instructions":"do a"}],"evals":[{"kind":"skill_exists","name":"a"}]}"#;
+    let receipt = conv.pack_install(good).await;
+    assert!(receipt.contains("landed on scripted"), "certification must land on the ledger: {receipt}");
+    {
+        let landed = ledger.landed.lock().unwrap();
+        assert_eq!(landed.len(), 1, "exactly one verdict landed");
+        assert_eq!(landed[0].0, "pack:ledgered");
+        assert!(landed[0].1, "verdict recorded as a pass");
+        assert_eq!(landed[0].2.len(), 64, "digest binds the claim to the document bytes");
+    }
+    let status = conv.cli_dispatch("weft", &ctx).await;
+    assert!(status.contains("1/1 pack verdict(s) witnessed"), "status reports what was witnessed: {status}");
+
+    // A DEMOTION lands too — trust history is append-only, not a boolean that quietly flips back.
+    let mut doc: crate::pack::PackDoc = serde_json::from_str(good).unwrap();
+    doc.evals = vec![crate::pack::PackEval::SkillReliable { name: "a".into(), min_runs: 99, min_rate: 0.9 }];
+    conv.pack_install_doc(doc, false).await;
+    {
+        let landed = ledger.landed.lock().unwrap();
+        assert_eq!(landed.len(), 2, "the demotion landed as its own claim");
+        assert!(!landed[1].1, "second verdict recorded as a failure");
+    }
+
+    // A ledger outage must NOT break certification — it degrades loudly to unattested.
+    ledger.down.store(true, Ordering::Relaxed);
+    let out = conv.pack_certify("ledgered").await;
+    assert!(out.contains("unattested") && out.contains("refused"), "outage degrades loudly: {out}");
+    assert_eq!(ledger.landed.lock().unwrap().len(), 2, "nothing new landed while down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pack_lifecycle_install_certify_demote_draft() {
     use mind_recipes::RecipeEngine;
     let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());

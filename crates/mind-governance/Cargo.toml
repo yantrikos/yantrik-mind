@@ -10,6 +10,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 getrandom = "0.2"
+ed25519-dalek = "2"
+ureq = { version = "2", features = ["json"] }
+chrono = { version = "0.4", features = ["clock"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

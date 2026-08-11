@@ -44,10 +44,7 @@ fn env_f64(key: &str) -> Option<f64> {
 /// This is the "max iteration count" setting made real: the loop's cap comes from here, so changing
 /// `YM_MAX_STEPS` changes behaviour. Clamping lives in `mind_spec::Budget` — this layer only reads.
 pub fn agent_budget() -> mind_spec::Budget {
-    // The interactive default is 5 to match what the loop has always done, so turning the setting on
-    // is an explicit choice rather than a silent change in how hard the mind works.
-    let base = mind_spec::Budget { max_steps: 5, max_model_calls: 5, ..mind_spec::Budget::interactive() };
-    base.with_overrides(
+    mind_spec::Budget::interactive().with_overrides(
         env_u32("YM_MAX_STEPS"),
         env_u32("YM_MAX_MODEL_CALLS"),
         env_u32("YM_MAX_WALL_SECS").map(|s| s as u64 * 1000),
@@ -85,11 +82,11 @@ pub(crate) const SCHEMA: &[Setting] = &[
     // ── Agent loop ───────────────────────────────────────────────────────
     // How hard the mind is allowed to work on one thing. These bind: `agent_budget()` reads them,
     // and the loop's iteration cap comes from that rather than from a constant.
-    Setting { key: "YM_MAX_STEPS", label: "Max iterations", group: "Agent loop", kind: "int", desc: "Tool steps one interactive turn may take before it must answer (default 5, allowed 2–200). Higher = more thorough and slower.", restart: true },
+    Setting { key: "YM_MAX_STEPS", label: "Max iterations", group: "Agent loop", kind: "int", desc: "Tool steps one turn may take before it must answer (default 100, allowed 2–200). The cap exists to stop a runaway, not to limit thinking — lower it only to make turns cheaper.", restart: true },
     Setting { key: "YM_MAX_MODEL_CALLS", label: "Max reasoning calls", group: "Agent loop", kind: "int", desc: "Model calls per turn — the cost that actually matters. Capped at the iteration limit, since a step is what makes a call.", restart: true },
-    Setting { key: "YM_MAX_WALL_SECS", label: "Turn time limit (s)", group: "Agent loop", kind: "int", desc: "Wall-clock ceiling for one turn (default 90). Reached = answer with what it has, and say so.", restart: true },
+    Setting { key: "YM_MAX_WALL_SECS", label: "Turn time limit (s)", group: "Agent loop", kind: "int", desc: "Wall-clock ceiling for one turn (default 600). At ~10s a reasoning call this is what binds first on a long turn — raise it before raising the iteration limit.", restart: true },
     Setting { key: "YM_MAX_USD", label: "Spend per turn ($)", group: "Agent loop", kind: "string", desc: "Optional cost ceiling for one turn. Empty or 0 = ungoverned.", restart: true },
-    Setting { key: "YM_BG_MAX_STEPS", label: "Max iterations (delegated)", group: "Agent loop", kind: "int", desc: "Iteration cap for delegated/scheduled work, where nobody is waiting (default 40). Depth is worth more here.", restart: true },
+    Setting { key: "YM_BG_MAX_STEPS", label: "Max iterations (delegated)", group: "Agent loop", kind: "int", desc: "Iteration cap for delegated/scheduled work, where nobody is waiting (default 150). Depth is worth more here.", restart: true },
     // ── Switches ─────────────────────────────────────────────────────────
     Setting { key: "YM_PROACTIVE", label: "Proactive layer", group: "Switches", kind: "toggle", desc: "Digests, asks, patterns — the unprompted voice.", restart: true },
     Setting { key: "YM_KNOCK", label: "Calibrated knock", group: "Switches", kind: "toggle", desc: "Prepared-work interruptions with a confidence band.", restart: true },
@@ -190,17 +187,17 @@ mod tests {
         }
     }
 
-    /// The setting must actually move the loop's cap, and its default must be what the loop always
-    /// did — so turning it on is a deliberate change rather than a silent one.
+    /// The setting must move the loop's cap, and the default must be high enough to do real work.
+    /// Five steps could not finish a research question or open a repository.
     ///
     /// Uses a key no other test touches, and restores it, because env is process-global.
     #[test]
-    fn the_iteration_setting_binds_and_defaults_to_the_historical_five() {
+    fn the_iteration_setting_binds_and_defaults_high_enough_to_be_useful() {
         let prev = std::env::var("YM_MAX_STEPS").ok();
         std::env::remove_var("YM_MAX_STEPS");
         let default = agent_budget();
-        assert_eq!(default.max_steps, 5, "unset must mean the 5 the loop has always used");
-        assert_eq!(default.max_model_calls, 5);
+        assert_eq!(default.max_steps, 100, "the default must allow real work, not a token gesture");
+        assert_eq!(default.max_model_calls, 100, "the reasoning ceiling must not shadow it");
 
         std::env::set_var("YM_MAX_STEPS", "18");
         let raised = agent_budget();
@@ -209,9 +206,9 @@ mod tests {
 
         // Garbage leaves the default in place rather than configuring a mind that cannot move.
         std::env::set_var("YM_MAX_STEPS", "five");
-        assert_eq!(agent_budget().max_steps, 5, "an unparseable value is absent, not zero");
+        assert_eq!(agent_budget().max_steps, 100, "an unparseable value is absent, not zero");
         std::env::set_var("YM_MAX_STEPS", "0");
-        assert_eq!(agent_budget().max_steps, 5, "zero is absent too \u{2014} a 0-step mind is not a configuration");
+        assert_eq!(agent_budget().max_steps, 100, "zero is absent too \u{2014} a 0-step mind is not a configuration");
 
         // Absurd is clamped, and reported rather than silently ignored.
         std::env::set_var("YM_MAX_STEPS", "99999");
@@ -225,10 +222,47 @@ mod tests {
         }
     }
 
+    /// The clock and the step count are INDEPENDENT bounds, and either may bind first: a turn made of
+    /// cache hits and deterministic tools can reach 100 steps inside the clock, while a turn that
+    /// reasons at every step will hit the time limit after twenty or so. Both are safety bounds, not
+    /// targets — so what must hold is that they are DISTINGUISHABLE when they bind, because "ran out
+    /// of time" and "ran out of ideas" are different things to tell an operator.
+    #[test]
+    fn the_clock_and_the_step_count_bind_independently_and_distinguishably() {
+        let b = agent_budget();
+        assert!(b.max_wall_ms >= 120_000, "an interactive turn needs at least a couple of minutes");
+        assert!(b.max_wall_ms <= 600_000, "and it is still a promise to whoever is waiting");
+
+        // Each limit reports its own reason, so neither is mistaken for the other.
+        use mind_spec::{Capsule, Controller, ReasonCode, StepOutcome};
+        let ctl = Controller::default();
+        let contract = mind_spec::Contract {
+            requirements: vec![],
+            completion: mind_spec::CompletionCriteria { min_findings: 99, require_full_coverage: false, ..Default::default() },
+            output: Default::default(),
+        };
+
+        let mut out_of_steps = Capsule::new("g", "goal");
+        out_of_steps.progress.steps = b.max_steps;
+        assert_eq!(
+            ctl.decide(&out_of_steps, &contract, &b, 0, StepOutcome::default()).reason(),
+            Some(ReasonCode::StepBudget)
+        );
+
+        let fresh = Capsule::new("g", "goal");
+        assert_eq!(
+            ctl.decide(&fresh, &contract, &b, b.max_wall_ms, StepOutcome::default()).reason(),
+            Some(ReasonCode::Timeout)
+        );
+    }
+
     /// Delegated work gets its own, larger cap: nobody is waiting, so depth is worth more.
     #[test]
     fn delegated_work_has_a_separate_larger_cap() {
-        assert!(background_budget().max_steps > 5, "delegated runs should not be held to an interactive cap");
+        assert!(
+            background_budget().max_steps > agent_budget().max_steps,
+            "delegated runs should not be held to an interactive cap"
+        );
         assert!(background_budget().max_wall_ms > agent_budget().max_wall_ms);
     }
 

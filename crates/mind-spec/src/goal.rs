@@ -313,17 +313,32 @@ pub struct Budget {
 /// because a one-step budget cannot complete any goal that needs a tool — it would look like the
 /// mind had become useless rather than like a setting being wrong.
 pub const MIN_STEPS: u32 = 2;
-pub const MAX_STEPS_CEILING: u32 = 200;
+pub const MAX_STEPS_CEILING: u32 = 500;
 pub const MAX_WALL_MS_CEILING: u64 = 2 * 60 * 60 * 1000;
 
 impl Budget {
-    /// An interactive turn: the user is waiting, so keep it tight.
+    /// An interactive turn.
+    ///
+    /// 100 steps, not the 5 the loop shipped with. Five steps cannot do real work: a research
+    /// question spends two of them discovering it needs to search, and a repository audit has barely
+    /// opened a file. The cap exists to stop a runaway, not to define how hard the mind may think.
+    ///
+    /// The two limits are INDEPENDENT bounds, not a matched pair, and which one binds depends
+    /// entirely on the work. A step that hits a cache, dedups, or runs a deterministic tool costs
+    /// milliseconds; a reasoning call costs seconds. So a turn made of cheap steps can reach 100
+    /// inside the clock, while a turn that reasons at every step will hit 180 seconds after twenty or
+    /// so — and that is the intended behaviour, because the clock is a promise to whoever is waiting
+    /// and the step count is a guard against a runaway. Neither is a target.
+    ///
+    /// What matters is that the operator is always TOLD which one stopped the run: the controller
+    /// reports `Timeout` and `StepBudget` as distinct reasons precisely so "it ran out of time" is
+    /// never mistaken for "it ran out of ideas".
     pub fn interactive() -> Self {
-        Self { max_steps: 8, max_model_calls: 6, max_wall_ms: 90_000, max_usd: None }
+        Self { max_steps: 100, max_model_calls: 100, max_wall_ms: 180_000, max_usd: None }
     }
     /// A delegated or scheduled run: nobody is watching the clock, so depth is worth more.
     pub fn background() -> Self {
-        Self { max_steps: 40, max_model_calls: 24, max_wall_ms: 20 * 60_000, max_usd: None }
+        Self { max_steps: 150, max_model_calls: 150, max_wall_ms: 45 * 60_000, max_usd: None }
     }
 
     /// Apply operator overrides, clamped.
@@ -556,7 +571,7 @@ mod tests {
         let b = Budget::interactive().with_overrides(Some(100_000), None, None, None);
         assert_eq!(b.max_steps, MAX_STEPS_CEILING, "an unbounded loop is not a valid configuration");
         let note = b.clamp_note(Some(100_000)).expect("a clamped setting must be reported");
-        assert!(note.contains("100000") && note.contains("200"), "{note}");
+        assert!(note.contains("100000") && note.contains("500"), "{note}");
 
         // And the floor: one step cannot complete any goal needing a tool, so it would look like the
         // mind had broken rather than like a setting being wrong.

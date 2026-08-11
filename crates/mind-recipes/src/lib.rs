@@ -54,7 +54,20 @@ pub enum RecipeStep {
     /// Direct tool call — no LLM. Result stored under `store_as`.
     Tool { tool_name: String, args: Value, store_as: String, #[serde(default)] on_error: ErrorAction },
     /// LLM over resolved context, result stored under `store_as`.
-    Think { prompt: String, store_as: String, #[serde(default)] on_error: ErrorAction },
+    /// LLM over resolved context, result stored under `store_as`.
+    ///
+    /// `max_tokens` exists because the default (2048) is a REPLY budget, and a step that authors a
+    /// document needs a document budget. A page-building chain silently produced 6.7 KB of HTML that
+    /// stopped mid-tag — no `</body>`, no `</html>` — and the chain published the fragment and
+    /// announced it was live. `None` keeps the old default for every step that just writes a summary.
+    Think {
+        prompt: String,
+        store_as: String,
+        #[serde(default)]
+        on_error: ErrorAction,
+        #[serde(default)]
+        max_tokens: Option<usize>,
+    },
     /// LLM synthesis with per-claim citations from `source_vars`. Stores CitedOutput JSON.
     ThinkCited { prompt: String, store_as: String, source_vars: Vec<String>, #[serde(default)] on_error: ErrorAction },
     /// Deterministic: strip uncited claims from a CitedOutput, keep the grounded ones.
@@ -700,7 +713,7 @@ GOAL: GOAL_HERE"#;
                     Err(e) => StepResult::Failed(format!("tool '{tool_name}' failed: {e}")),
                 }
             }
-            RecipeStep::Think { prompt, store_as, .. } => {
+            RecipeStep::Think { prompt, store_as, max_tokens, .. } => {
                 let resolved = resolve_vars(prompt, vars);
                 let messages = vec![
                     ChatMessage::system(&self.persona),
@@ -709,7 +722,11 @@ GOAL: GOAL_HERE"#;
                     ),
                     ChatMessage::user(&resolved),
                 ];
-                match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+                let cfg = match max_tokens {
+                    Some(n) => GenerationConfig { max_tokens: *n, ..GenerationConfig::default() },
+                    None => GenerationConfig::default(),
+                };
+                match self.inference.chat_grounded(messages, cfg).await {
                     Ok(r) => {
                         vars.insert(store_as.clone(), Value::String(r.text));
                         StepResult::Continue
@@ -1770,7 +1787,7 @@ mod chaining_tests {
             id: "t".into(),
             name: "chain".into(),
             steps: vec![
-                RecipeStep::Think { prompt: "write it".into(), store_as: "page".into(), on_error: ErrorAction::Fail },
+                RecipeStep::Think { prompt: "write it".into(), store_as: "page".into(), on_error: ErrorAction::Fail, max_tokens: None },
                 RecipeStep::Tool {
                     tool_name: "publish_page".into(),
                     args: serde_json::json!({"html": "{{page}}"}),

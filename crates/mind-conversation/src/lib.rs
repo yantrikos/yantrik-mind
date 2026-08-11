@@ -2152,6 +2152,15 @@ fn now_str() -> String {
 
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
 /// AND the defensive auto-publish (so a raw-HTML reply becomes a link, never a wall of HTML in chat).
+/// Did the model finish writing this document, or did it run out of budget mid-tag?
+///
+/// `looks_like_html` asks whether the text STARTS like HTML, which a truncated document also does.
+/// This asks whether it ENDS — the only cheap signal that generation completed.
+fn is_complete_html(s: &str) -> bool {
+    let l = s.trim_end().to_lowercase();
+    l.ends_with("</html>") || l.ends_with("</body>")
+}
+
 /// Unwrap a ```fence around a document, if there is one. Returns the input untouched otherwise.
 fn strip_code_fence(s: &str) -> &str {
     let t = s.trim();
@@ -5664,7 +5673,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                          Output ONLY the body text — no 'Subject:' line, no bracketed placeholders, no signature block."
                     )
                 };
-                steps.push(RecipeStep::Think { prompt: draft_prompt, store_as: "draft".into(), on_error: ErrorAction::Fail });
+                steps.push(RecipeStep::Think { prompt: draft_prompt, store_as: "draft".into(), on_error: ErrorAction::Fail, max_tokens: None });
                 steps.push(RecipeStep::Act {
                     kind: "send_email".into(),
                     target: to.clone(),
@@ -7843,6 +7852,18 @@ impl RecipeHost for MindRecipeHost {
                 if !looks_like_html(html) {
                     anyhow::bail!(
                         "publish_page needs a real HTML document in 'html' (got {} chars, no <html>/<body>)",
+                        html.len()
+                    );
+                }
+                // A document that never CLOSES was cut off mid-generation, and publishing it produces
+                // the worst outcome available: a live URL, an announcement that it is ready, and a page
+                // that is a hero followed by nothing. `looks_like_html` cannot catch this — it only
+                // asks whether the text STARTS like HTML. Refusing here turns a silent broken page
+                // into a visible step failure the chain reports.
+                if !is_complete_html(html) {
+                    anyhow::bail!(
+                        "the document is truncated ({} chars, no closing </html>) — it was cut off mid-generation, \
+                         so there is nothing worth publishing",
                         html.len()
                     );
                 }

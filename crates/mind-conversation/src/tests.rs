@@ -3144,3 +3144,46 @@ fn every_dispatchable_kind_is_offered_to_the_router() {
         assert!(desc.len() > 30, "a router menu entry needs a real description, not a label");
     }
 }
+
+// ── A TRUNCATED DOCUMENT IS NOT A PAGE ───────────────────────────────────────────────────────────
+// The first page the chain built was 6.7 KB that stopped mid-tag — no </body>, no </html> — because
+// the author step ran on the default 2048-token REPLY budget. It was published anyway and announced
+// as live, so the user opened a hero with nothing under it. `looks_like_html` could not catch it: it
+// only asks whether the text STARTS like HTML, which a truncated document also does.
+
+#[test]
+fn a_document_that_never_closes_is_recognised_as_truncated() {
+    let cut = "<!doctype html><html><head><title>x</title></head><body><h1>[Your Name]</h1><nav><a href=\"#about\">";
+    assert!(looks_like_html(cut), "it does start like HTML — which is why the old check passed it");
+    assert!(!is_complete_html(cut), "but it never closes, so it must not be publishable");
+
+    assert!(is_complete_html("<!doctype html><html><body><p>hi</p></body></html>"));
+    assert!(is_complete_html("<html><body><p>hi</p></body></html>\n\n  "), "trailing whitespace is fine");
+    assert!(is_complete_html("<div>fragment</div></body>"), "a closing body is enough");
+    assert!(!is_complete_html(""));
+}
+
+#[test]
+fn the_author_step_gets_a_document_budget_not_a_reply_budget() {
+    // 2048 tokens cannot hold a styled page. This pins the setting to the failure it fixes, so a
+    // future edit that drops it fails here rather than in production as a half-page.
+    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website");
+    let budget = match &r.steps[1] {
+        mind_recipes::RecipeStep::Think { max_tokens, .. } => *max_tokens,
+        _ => None,
+    };
+    assert!(budget.unwrap_or(0) >= 8000, "the author step needs room for a whole document, got {budget:?}");
+}
+
+#[test]
+fn the_brief_demands_a_finished_page() {
+    // The first attempt produced a hero and nothing else, which technically satisfied "build a page".
+    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website");
+    let prompt = match &r.steps[1] {
+        mind_recipes::RecipeStep::Think { prompt, .. } => prompt.clone(),
+        _ => String::new(),
+    };
+    assert!(prompt.contains("</html>"), "the brief must say where the document ends");
+    assert!(prompt.to_lowercase().contains("three more real sections"), "a hero alone is not a page");
+    assert!(prompt.to_lowercase().contains("no cdn"), "it must render with no network");
+}

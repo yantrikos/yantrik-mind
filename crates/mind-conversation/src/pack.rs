@@ -235,6 +235,7 @@ impl ConversationEngine {
                 prompt: format!("Follow these instructions exactly and return only the deliverable they describe:\n\n{}{input}", sk.code),
                 store_as: "result".into(),
                 on_error: mind_recipes::ErrorAction::Fail,
+                max_tokens: None,
             }],
         };
         let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;

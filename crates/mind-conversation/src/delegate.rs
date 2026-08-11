@@ -167,24 +167,37 @@ pub fn page_recipe(name: &str, task: &str) -> Recipe {
             RecipeStep::Think {
                 prompt: format!(
                     "Build this page: {task}\n\n\
-                     REFERENCES (inspiration only — never copy text or claim their content as ours):\n{{{{refs}}}}\n\n\
+                     REFERENCES (inspiration only — never copy their text or claim their content as ours):\n{{{{refs}}}}\n\n\
                      Output ONE complete, self-contained HTML document and NOTHING else — no commentary \
-                     before or after, no markdown fence. Requirements:\n\
-                     - Everything inline: one <style> block, one <script> if needed. It must load with \
-                     no network access, so no CDN links, no external fonts, no remote images. Use CSS \
-                     gradients, shapes or inline SVG instead of photographs.\n\
-                     - A real type scale and spacing system, a considered palette of 4-6 colours, and a \
-                     responsive layout (CSS grid/flex) that works from 360px to desktop.\n\
-                     - Support light and dark via prefers-color-scheme, with an explicit background on \
-                     body in both.\n\
-                     - Semantic HTML, a <title>, and visible keyboard focus states.\n\
-                     - Real, specific placeholder content that fits the brief — never lorem ipsum, and \
-                     never invent facts about a real person. Where a detail is unknown, use an obvious \
-                     placeholder like [Your Name].\n\
-                     Start your reply with <!doctype html>."
+                     before or after, no markdown fence. Start with <!doctype html> and END with \
+                     </html>; a document that stops early is worthless, so if you are running long, \
+                     write fewer sections rather than leaving the last one unfinished.\n\n\
+                     SUBSTANCE — the page must be FINISHED, not a hero with nothing under it:\n\
+                     - A hero, then at least three more real sections with real content in them \
+                     (selected work as cards, an about paragraph with actual sentences, and contact).\n\
+                     - 4-6 project cards, each with a title, a one-line description, and 2-3 tags. \
+                     Invent plausible project names and descriptions that fit the brief; never lorem \
+                     ipsum, and never invent facts about a real person. Use [Your Name] for the person.\n\
+                     - A footer. Nothing may be an empty placeholder box.\n\n\
+                     CRAFT:\n\
+                     - Everything inline: one <style> block, one <script> only if it does something. \
+                     It must render with NO network access — no CDN, no webfont links, no remote \
+                     images. Use CSS gradients, shapes or inline SVG instead of photographs.\n\
+                     - A deliberate palette of 4-6 colours and one accent, a real type scale, and \
+                     generous whitespace. System font stack, styled well.\n\
+                     - Responsive from 360px to desktop with CSS grid/flex.\n\
+                     - Light and dark via prefers-color-scheme, with an explicit background on body in \
+                     both — never a transparent body.\n\
+                     - Semantic HTML, a real <title>, visible keyboard focus states, and hover states \
+                     on anything interactive.\n\
+                     - Avoid the generic AI look: no purple-to-blue gradient hero on white, no emoji \
+                     as section markers, no everything-centered. Commit to one clear visual idea."
                 ),
                 store_as: "page".into(),
                 on_error: ErrorAction::Fail,
+                // A DOCUMENT budget, not a reply budget. The default 2048 produced a page that stopped
+                // mid-tag, and the chain published the fragment and announced it was live.
+                max_tokens: Some(16_000usize),
             },
             RecipeStep::Tool {
                 tool_name: "publish_page".into(),

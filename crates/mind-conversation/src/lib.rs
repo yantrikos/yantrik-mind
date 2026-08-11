@@ -4079,6 +4079,8 @@ impl ConversationEngine {
             "funnel_json" => surface::json_or_error(&self.funnel_json().await),
             "capabilities_json" => surface::json_or_error(&self.capability_report()),
             "orders_json" => surface::json_or_error(&self.orders_report()),
+            "threads_json" => surface::json_or_error(&self.thread_report().await),
+            "skills_json" => surface::json_or_error(&self.skill_report().await),
             "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,

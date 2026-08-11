@@ -237,6 +237,84 @@ pub enum OrderState {
     Paused,
 }
 
+// ── Threads: what the mind is carrying, and where each one is in its life ──────────────────────
+
+/// Open commitments with their lifecycle state.
+///
+/// This surface exists because the thread lifecycle was invisible. The runtime now drops stale threads
+/// out of its own grounding and asks one closure question — all correct, and all happening where the
+/// operator could not see it. A lifecycle you cannot inspect is one you have to trust; a list with a
+/// Drop button next to each row is one you can correct.
+#[derive(Serialize, Default)]
+pub struct ThreadReport {
+    /// Live and just-due work — what the mind is actively carrying.
+    pub carrying: Vec<Thread>,
+    /// Past their window: waiting on a closure answer, or about to be dropped.
+    pub closing: Vec<Thread>,
+}
+
+#[derive(Serialize)]
+pub struct Thread {
+    pub id: String,
+    pub description: String,
+    pub state: ThreadStateTag,
+    /// Days past the deadline. Negative means still ahead of it.
+    pub days_over: Option<i64>,
+    /// `None` when the commitment has no deadline at all — an open-ended intention, which is never
+    /// stale and must not be shown as if it were overdue.
+    pub deadline_ms: Option<i64>,
+    pub priority: String,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadStateTag {
+    /// Ahead of its deadline, or has none.
+    Live,
+    /// Just missed — still worth a nudge.
+    JustDue,
+    /// Long past; the mind has asked, or will ask, what happened.
+    AwaitingClosure,
+    /// Asked and unanswered. The next tick drops it.
+    Dropping,
+}
+
+// ── Skills: the procedure library ─────────────────────────────────────────────────────────────
+
+/// The banked skills, with the track record that decides whether they get used.
+///
+/// Surfaced because "search skill, select skill, execute" is only trustworthy if the library is
+/// legible: which skills exist, which are earning their place, and which the runtime has quarantined.
+/// A success rate the operator cannot see is a number the operator cannot correct.
+#[derive(Serialize, Default)]
+pub struct SkillReport {
+    pub skills: Vec<SkillRow>,
+    pub active: usize,
+    pub quarantined: usize,
+    /// Never run, so unproven rather than good — the distinction `success_rate()` alone would hide,
+    /// since it returns 1.0 for zero runs.
+    pub untested: usize,
+}
+
+#[derive(Serialize)]
+pub struct SkillRow {
+    pub name: String,
+    pub summary: String,
+    pub lang: String,
+    pub tags: Vec<String>,
+    /// "candidate" | "active" | "quarantined".
+    pub status: String,
+    pub runs: u64,
+    pub successes: u64,
+    /// `None` when never run. NOT 1.0 — an untested skill has no rate, and showing one would present
+    /// an assumption as a measurement.
+    pub success_rate: Option<f64>,
+    /// Below half over four or more runs: the store's own quarantine rule, surfaced so the operator
+    /// can see a skill on its way out rather than discovering it gone.
+    pub failing: bool,
+    pub created_ms: u64,
+}
+
 // ── Capabilities: the inventory ───────────────────────────────────────────────────────────────
 
 /// What this mind can actually do right now — the honest answer to "which capabilities exist,
@@ -287,7 +365,7 @@ pub enum Availability {
 /// list once and only asks for surfaces the box actually has, instead of discovering the gap by
 /// getting prose where it expected JSON.
 pub const TYPED_VERBS: &[&str] =
-    &["surfaces", "pulse", "funnel_json", "capabilities_json", "orders_json"];
+    &["surfaces", "pulse", "funnel_json", "capabilities_json", "orders_json", "threads_json", "skills_json"];
 
 /// Is this verb a request for machine-readable state?
 ///
@@ -518,6 +596,85 @@ impl ConversationEngine {
         // `store` is true iff durable scheduling exists. `list_sleeping` returns empty both when
         // there is no store and when there is nothing parked, so ask the engine directly.
         OrdersReport { store: recipes.has_store(), orders }
+    }
+
+    /// Open commitments and where each sits in its life.
+    ///
+    /// Reads through the SAME classifier and the SAME deadline parser the runtime uses, so the list
+    /// cannot disagree with what the mind is actually carrying — a separate query would drift, and a
+    /// lifecycle view that drifts is worse than none.
+    pub async fn thread_report(&self) -> ThreadReport {
+        use crate::followthrough::{classify, parse_deadline_ms, ThreadState};
+        let (open, _) = self.open_and_internal_tasks().await;
+        let asked = self.closure_asks().await;
+        let today = local_now();
+        let now = today.timestamp_millis();
+        let mut rep = ThreadReport::default();
+
+        for t in open {
+            let deadline = parse_deadline_ms(&t.description, &today).or_else(|| t.due_ms.map(|m| m as i64));
+            let prior = asked.get(&t.id).and_then(|v| v.as_i64());
+            let state = classify(&t, now, deadline, prior);
+            let row = Thread {
+                id: t.id.clone(),
+                description: t.description.clone(),
+                state: match state {
+                    ThreadState::Live if prior.is_some() => ThreadStateTag::AwaitingClosure,
+                    ThreadState::Live => ThreadStateTag::Live,
+                    ThreadState::JustDue { .. } => ThreadStateTag::JustDue,
+                    ThreadState::NeedsClosure { .. } => ThreadStateTag::AwaitingClosure,
+                    ThreadState::Abandoned { .. } => ThreadStateTag::Dropping,
+                },
+                days_over: deadline.map(|d| (now - d) / 86_400_000),
+                deadline_ms: deadline,
+                priority: t.priority.clone(),
+            };
+            // The split mirrors what the runtime does: carried threads reach the prompt, the rest do
+            // not. Showing them in one undifferentiated list would hide the whole point.
+            if state.is_carried() && prior.is_none() {
+                rep.carrying.push(row);
+            } else {
+                rep.closing.push(row);
+            }
+        }
+        // Soonest deadline first; undated last, since an open-ended intention has no urgency.
+        rep.carrying.sort_by_key(|t| t.deadline_ms.unwrap_or(i64::MAX));
+        rep.closing.sort_by_key(|t| std::cmp::Reverse(t.days_over.unwrap_or(0)));
+        rep
+    }
+
+    /// The skill library with its track record.
+    pub async fn skill_report(&self) -> SkillReport {
+        let mut rep = SkillReport::default();
+        for s in self.memory.list_skills().await.unwrap_or_default() {
+            let failing = s.runs >= 4 && s.successes * 2 < s.runs;
+            match s.status.as_str() {
+                "quarantined" => rep.quarantined += 1,
+                _ if s.runs == 0 => rep.untested += 1,
+                _ => rep.active += 1,
+            }
+            rep.skills.push(SkillRow {
+                name: s.name,
+                summary: s.summary,
+                lang: s.lang,
+                tags: s.tags,
+                status: s.status,
+                runs: s.runs,
+                successes: s.successes,
+                // An untested skill has NO rate. `Skill::success_rate()` returns 1.0 for zero runs,
+                // which is a sensible ranking default and a lie as a displayed measurement.
+                success_rate: (s.runs > 0).then(|| s.successes as f64 / s.runs as f64),
+                failing,
+                created_ms: s.created_ms,
+            });
+        }
+        // Worst first: a failing skill is the one worth looking at, and burying it under the healthy
+        // ones is how a quarantine goes unnoticed until something depends on it.
+        rep.skills.sort_by(|a, b| {
+            let key = |s: &SkillRow| (s.status != "quarantined", !s.failing, s.success_rate.unwrap_or(2.0));
+            key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        rep
     }
 
     /// The capability inventory. Availability is probed against the SAME `Option<Arc<dyn …>>`
@@ -972,6 +1129,73 @@ mod tests {
         assert!(sleeping.in_seconds > 3000, "an hour out should read ~3600s, got {}", sleeping.in_seconds);
         assert!(!sleeping.name.is_empty(), "an order must be nameable in a list");
         let _ = std::fs::remove_file(&db);
+    }
+
+    /// The thread surface must SPLIT the way the runtime does — carried threads reach the prompt, the
+    /// rest do not. One undifferentiated list would hide the whole point of the lifecycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn threads_split_into_carried_and_closing() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = test_engine(&mem);
+        let day = 86_400_000u64;
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+
+        mem.add_task("file the return", "high", Some(now + 5 * day)).await.unwrap();
+        mem.add_task("call mum more often", "low", None).await.unwrap();
+        mem.add_task("order the watch", "high", Some(now - 21 * day)).await.unwrap();
+
+        let r = eng.thread_report().await;
+        let carried: Vec<&str> = r.carrying.iter().map(|t| t.description.as_str()).collect();
+        let closing: Vec<&str> = r.closing.iter().map(|t| t.description.as_str()).collect();
+
+        assert!(carried.contains(&"file the return"), "a future deadline is carried: {carried:?}");
+        assert!(carried.contains(&"call mum more often"), "an undated intention is carried: {carried:?}");
+        assert!(closing.contains(&"order the watch"), "a three-week-old commitment is closing: {closing:?}");
+
+        // An undated intention must not be shown as if it were overdue.
+        let mum = r.carrying.iter().find(|t| t.description.contains("mum")).unwrap();
+        assert!(mum.deadline_ms.is_none() && mum.days_over.is_none(), "no deadline means no overdue count");
+        assert_eq!(mum.state, ThreadStateTag::Live);
+
+        let watch = r.closing.iter().find(|t| t.description.contains("watch")).unwrap();
+        assert_eq!(watch.state, ThreadStateTag::AwaitingClosure);
+        assert!(watch.days_over.unwrap() >= 20);
+    }
+
+    /// An UNTESTED skill has no success rate. `Skill::success_rate()` returns 1.0 for zero runs — a
+    /// sensible ranking default and a lie once it is rendered as a measurement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_untested_skill_has_no_rate_and_a_failing_one_is_flagged() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = test_engine(&mem);
+
+        let skill = |name: &str, runs: u64, ok: u64| mind_types::Skill {
+            name: name.into(),
+            lang: "python".into(),
+            code: "print(1)".into(),
+            summary: format!("does {name}"),
+            tags: vec![],
+            status: "active".into(),
+            runs,
+            successes: ok,
+            created_ms: 0,
+        };
+        mem.save_skill(skill("fresh", 0, 0)).await.unwrap();
+        mem.save_skill(skill("solid", 10, 9)).await.unwrap();
+        mem.save_skill(skill("flaky", 8, 2)).await.unwrap();
+
+        let r = eng.skill_report().await;
+        let fresh = r.skills.iter().find(|s| s.name == "fresh").expect("fresh present");
+        assert!(fresh.success_rate.is_none(), "never run means NO rate, not 100%");
+        assert!(!fresh.failing);
+        assert_eq!(r.untested, 1);
+
+        let flaky = r.skills.iter().find(|s| s.name == "flaky").expect("flaky present");
+        assert!(flaky.failing, "2 of 8 is below the store's own quarantine line");
+        assert!((flaky.success_rate.unwrap() - 0.25).abs() < 1e-9);
+
+        // Worst first: a failing skill is the one worth looking at.
+        assert_eq!(r.skills[0].name, "flaky", "order was {:?}", r.skills.iter().map(|s| &s.name).collect::<Vec<_>>());
     }
 
     /// A capability whose backing client is absent must report UNAVAILABLE with a reason a person

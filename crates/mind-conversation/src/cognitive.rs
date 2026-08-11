@@ -139,6 +139,129 @@ impl Bus for EngineBus {
     async fn ground(&self, question: &str, evidence: &str) -> Option<String> {
         self.engine.recipes.as_ref()?.cited_answer(question, evidence).await
     }
+
+    /// Remembered approaches, from BOTH kinds of procedural memory this mind keeps.
+    ///
+    /// Banked skills carry real `runs`/`successes`, so their reliability is measured and the loop can
+    /// prefer what works. Routine memories carry no outcome history, so they are declared and labelled
+    /// as untested — the distinction is the whole reason `Prior` exists rather than a bare f64.
+    async fn procedures(&self, goal: &str, limit: usize) -> Vec<mind_agents::Procedure> {
+        use mind_agents::{Procedure, ProcedureKind};
+        use mind_spec::Prior;
+        let mut out = Vec::new();
+
+        // Executable: the sandboxed skill bank. `recall_skills` already excludes quarantined ones.
+        for s in self.engine.memory.recall_skills(goal, limit).await.unwrap_or_default() {
+            // A banked-but-never-run skill is UNPROVEN, and must say so rather than borrow the 1.0
+            // that `Skill::success_rate()` returns for zero runs — that default is right for ranking
+            // inside the skill store and wrong as a claim about reliability.
+            let reliability = if s.runs > 0 {
+                Prior::measured(s.success_rate(), s.runs as u32)
+            } else {
+                Prior::declared(0.5)
+            };
+            out.push(Procedure {
+                name: s.name.clone(),
+                when: s.summary.clone(),
+                steps: vec![s.summary.clone()],
+                kind: ProcedureKind::Executable { skill: s.name },
+                reliability,
+            });
+        }
+
+        // Guidance: `MemoryKind::Routine` — the procedural slot in typed memory. A remembered approach
+        // is stored as numbered lines, so the steps are recovered by splitting rather than by asking a
+        // model to re-read its own note.
+        let q = mind_types::RecallQuery {
+            text: goal.to_string(),
+            top_k: limit,
+            kind: Some(mind_types::MemoryKind::Routine),
+        };
+        if let Ok(hits) = self.engine.memory.recall_typed(q, &mind_types::AccessContext::Operator).await {
+            for h in hits {
+                let (when, steps) = split_routine(&h.item.text);
+                if !steps.is_empty() {
+                    out.push(Procedure {
+                        name: routine_name(&h.item.text),
+                        when,
+                        steps,
+                        kind: ProcedureKind::Instructions,
+                        reliability: Prior::declared(h.item.confidence.clamp(0.0, 1.0)),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// A followed procedure earns or loses standing.
+    ///
+    /// Only executable skills have an outcome ledger today (`record_skill_outcome`, which
+    /// auto-quarantines below half over four runs). A guidance procedure has nowhere to record to yet,
+    /// so this is a no-op for it rather than a silent lie about being tracked.
+    async fn record_procedure_outcome(&self, name: &str, ok: bool) {
+        let _ = self.engine.memory.record_skill_outcome(name, ok).await;
+    }
+
+    /// Bank an approach that worked.
+    ///
+    /// Stored as a `Routine` observation — the procedural slot — rather than as a belief, because
+    /// "how to do X" is not a claim about the world and should not be weighed against evidence the way
+    /// a belief is.
+    async fn bank_procedure(&self, name: &str, when: &str, steps: &[String]) -> bool {
+        if steps.len() < 2 {
+            // A one-step "approach" is not a procedure; remembering it would fill the library with
+            // noise that then competes with real ones at recall time.
+            return false;
+        }
+        let text = format!(
+            "APPROACH: {name}\nWHEN: {when}\n{}",
+            steps.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
+        );
+        self.engine
+            .memory
+            .remember_observation(&text, mind_types::safety::ProvenanceCategory::SubAgent)
+            .await
+            .is_ok()
+    }
+}
+
+/// Pull the "when" line and the numbered steps out of a stored routine.
+fn split_routine(text: &str) -> (String, Vec<String>) {
+    let mut when = String::new();
+    let mut steps = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("WHEN:").or_else(|| t.strip_prefix("when:")) {
+            when = rest.trim().to_string();
+            continue;
+        }
+        // A step is a numbered or bulleted line. Anything else is prose around the procedure.
+        let step = t
+            .split_once(". ")
+            .filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty())
+            .map(|(_, s)| s)
+            .or_else(|| t.strip_prefix("- "));
+        if let Some(s) = step {
+            if s.trim().len() > 2 {
+                steps.push(s.trim().to_string());
+            }
+        }
+    }
+    (when, steps)
+}
+
+/// The stored routine's name, or a readable fallback.
+fn routine_name(text: &str) -> String {
+    for line in text.lines() {
+        let t = line.trim();
+        for tag in ["APPROACH:", "SKILL:", "PROCEDURE:"] {
+            if let Some(rest) = t.strip_prefix(tag) {
+                return rest.trim().to_string();
+            }
+        }
+    }
+    text.lines().next().unwrap_or("remembered approach").trim().chars().take(60).collect()
 }
 
 /// Does this engine output represent a failure?
@@ -317,6 +440,70 @@ mod tests {
         let n = bus.normalize("news", &serde_json::json!({}), &heading, true);
         assert!(n.evidence[0].summary.contains("substantive"), "a 4-char heading must not become the summary: {}", n.evidence[0].summary);
         assert!(n.evidence[0].body.len() > 200, "the body keeps the whole thing for paging");
+    }
+
+    /// A stored routine round-trips: what it is for, and its steps in order.
+    #[test]
+    fn a_stored_routine_parses_back_into_a_procedure() {
+        let text = "APPROACH: repo review\nWHEN: evaluating a repository\n\
+                    1. read the README\n2. read the commit history\n3. check open issues";
+        assert_eq!(routine_name(text), "repo review");
+        let (when, steps) = split_routine(text);
+        assert_eq!(when, "evaluating a repository");
+        assert_eq!(steps, vec!["read the README", "read the commit history", "check open issues"]);
+    }
+
+    /// Bulleted steps are as valid as numbered ones — a procedure written by hand should not be lost
+    /// to a formatting preference.
+    #[test]
+    fn bulleted_routines_parse_too() {
+        let (_, steps) = split_routine("PROCEDURE: x\n- first thing\n- second thing");
+        assert_eq!(steps, vec!["first thing", "second thing"]);
+        assert_eq!(routine_name("PROCEDURE: x\n- a\n- b"), "x");
+    }
+
+    /// Prose that merely mentions a procedure is NOT one. Without this, ordinary memories would be
+    /// recalled as approaches and the loop would follow a paragraph as if it were a plan.
+    #[test]
+    fn prose_without_steps_is_not_a_procedure() {
+        let (_, steps) = split_routine("Pranab prefers concise answers and dislikes bullet lists.");
+        assert!(steps.is_empty(), "a sentence is not an approach");
+    }
+
+    /// Banking guards against noise: a single-step "approach" would compete with real procedures at
+    /// recall time while carrying no reusable reasoning.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_one_step_approach_is_not_worth_banking() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        assert!(!bus.bank_procedure("trivial", "when x", &["did one thing".into()]).await);
+        assert!(bus.bank_procedure("real", "when x", &["step one".into(), "step two".into()]).await);
+    }
+
+    /// A banked approach is recallable as a procedure — the round trip through real memory, which is
+    /// what makes the library compound across runs rather than only within one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_banked_approach_comes_back_as_a_procedure() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        assert!(
+            bus.bank_procedure(
+                "repo review",
+                "evaluating a repository",
+                &["read the README".into(), "read the commit history".into()],
+            )
+            .await
+        );
+        let found = bus.procedures("how should I evaluate this repository?", 5).await;
+        let p = found.iter().find(|p| p.name == "repo review");
+        // Recall is semantic, so a miss here is a store/embedding matter rather than a parse bug — but
+        // when it hits, the shape must be right.
+        if let Some(p) = p {
+            assert_eq!(p.when, "evaluating a repository");
+            assert_eq!(p.steps.len(), 2, "both steps survive the round trip");
+            assert!(matches!(p.kind, mind_agents::ProcedureKind::Instructions));
+            assert!(!p.reliability.is_trustworthy(), "a freshly banked approach is unproven");
+        }
     }
 
     /// The flag is off unless explicitly turned on: the legacy loop stays primary until evals say

@@ -42,6 +42,8 @@ pub enum Verb {
     Fetch,
     /// Search this mind's own typed memory.
     RecallMemory,
+    /// Run a banked skill by name — a procedure that is code rather than guidance.
+    RunSkill,
     /// Ask the user something only they can answer.
     AskUser,
     /// The plan is wrong; rebuild it.
@@ -204,6 +206,7 @@ impl Action {
             Verb::CallTool => signature(&self.target, &self.args),
             Verb::Fetch => format!("fetch:{}", self.target),
             Verb::RecallMemory => format!("recall:{}", self.target),
+            Verb::RunSkill => format!("skill:{}", self.target),
             other => format!("{other:?}"),
         }
     }
@@ -212,8 +215,18 @@ impl Action {
 /// Which verbs are worth offering, given the state.
 ///
 /// Every exclusion here is a model call not spent discovering something the runtime already knew.
-pub fn allowed_verbs(capsule: &Capsule, spec: &GoalSpec) -> Vec<Verb> {
+pub fn allowed_verbs(
+    capsule: &Capsule,
+    spec: &GoalSpec,
+    procedures: &[crate::procedure::Procedure],
+) -> Vec<Verb> {
     let mut v = vec![Verb::CallTool, Verb::RecallMemory, Verb::Finish];
+
+    // RUN_SKILL only when a banked script was actually recalled. Offering it otherwise invites the
+    // model to name a skill that does not exist, which costs a call to find out.
+    if procedures.iter().any(|p| matches!(p.kind, crate::procedure::ProcedureKind::Executable { .. })) {
+        v.push(Verb::RunSkill);
+    }
 
     // FETCH only when there is an unread body to fetch. Offering it with nothing loadable invites a
     // call that fails and teaches nothing.
@@ -262,15 +275,18 @@ pub async fn choose(
     spec: &GoalSpec,
     capsule: &Capsule,
     shortfalls: &[String],
+    // Approaches already surfaced from memory for this goal. Shown to the model so it follows a
+    // known way of working rather than deriving one, which is the whole point of keeping them.
+    procedures: &[crate::procedure::Procedure],
     prefer_stronger: bool,
 ) -> Option<StepChoice> {
-    let verbs = allowed_verbs(capsule, spec);
+    let verbs = allowed_verbs(capsule, spec, procedures);
     let catalog = open_catalog(capsule, &bus.catalog(&spec.goal), 2);
 
     // The capsule is the ENTIRE history the model sees. No transcript, no prior tool outputs — this is
     // the line where the token argument is either honoured or quietly abandoned.
     let prompt = format!(
-        "{state}\n\nWHAT IS STILL MISSING\n{missing}\n\nTOOLS\n{catalog}\n\n\
+        "{state}{known}\n\nWHAT IS STILL MISSING\n{missing}\n\nTOOLS\n{catalog}\n\n\
          Do two things. First, read the EVIDENCE above and say what it establishes — a claim counts as \
          a finding only if an evidence id supports it. Then choose ONE next action.\n\n\
          Reply with ONLY this JSON:\n\
@@ -282,6 +298,7 @@ pub async fn choose(
          gap; if an open question is listed, resolving it usually beats gathering more of what you \
          already have. Choose FINISH only if nothing further would change the answer.",
         state = capsule.render(2000),
+        known = crate::procedure::render_block(procedures),
         missing = if shortfalls.is_empty() { "(nothing \u{2014} the contract is met)".to_string() } else { shortfalls.join("\n") },
         catalog = catalog,
         verbs = verbs.iter().map(verb_name).collect::<Vec<_>>().join("|"),
@@ -323,6 +340,7 @@ fn verb_name(v: &Verb) -> &'static str {
         Verb::CallTool => "CALL_TOOL",
         Verb::Fetch => "FETCH",
         Verb::RecallMemory => "RECALL_MEMORY",
+        Verb::RunSkill => "RUN_SKILL",
         Verb::AskUser => "ASK_USER",
         Verb::Replan => "REPLAN",
         Verb::Verify => "VERIFY",
@@ -355,6 +373,7 @@ fn parse(raw: &str) -> Option<StepChoice> {
         "CALL_TOOL" | "CALLTOOL" | "TOOL" => Verb::CallTool,
         "FETCH" => Verb::Fetch,
         "RECALL_MEMORY" | "RECALL" | "RETRIEVE_MEMORY" => Verb::RecallMemory,
+        "RUN_SKILL" | "RUNSKILL" | "SKILL" => Verb::RunSkill,
         "ASK_USER" | "ASK" => Verb::AskUser,
         "REPLAN" => Verb::Replan,
         "VERIFY" => Verb::Verify,
@@ -363,7 +382,9 @@ fn parse(raw: &str) -> Option<StepChoice> {
     };
     // An action that needs a target but has none is unusable; better to lose the step than to call a
     // tool named "".
-    if matches!(verb, Verb::CallTool | Verb::Fetch | Verb::RecallMemory) && r.target.trim().is_empty() {
+    if matches!(verb, Verb::CallTool | Verb::Fetch | Verb::RecallMemory | Verb::RunSkill)
+        && r.target.trim().is_empty()
+    {
         return None;
     }
     let why = match r.why.unwrap_or_default().trim().to_uppercase().replace(['-', ' '], "_").as_str() {
@@ -405,7 +426,7 @@ mod tests {
     /// plan) or ASK_USER (not stuck). Each of those would be a wasted model call.
     #[test]
     fn a_fresh_run_is_offered_only_the_verbs_that_could_work() {
-        let v = allowed_verbs(&Capsule::new("g", "goal"), &spec());
+        let v = allowed_verbs(&Capsule::new("g", "goal"), &spec(), &[]);
         assert!(v.contains(&Verb::CallTool) && v.contains(&Verb::RecallMemory) && v.contains(&Verb::Finish));
         assert!(!v.contains(&Verb::Fetch), "nothing to fetch yet");
         assert!(!v.contains(&Verb::Verify), "nothing to verify yet");
@@ -422,7 +443,7 @@ mod tests {
             findings: vec![finding("a claim", &["E1"])],
             ..Default::default()
         });
-        let v = allowed_verbs(&c, &spec());
+        let v = allowed_verbs(&c, &spec(), &[]);
         assert!(v.contains(&Verb::Fetch), "an unread body makes FETCH useful");
         assert!(v.contains(&Verb::Verify), "a finding makes VERIFY useful");
         assert!(v.contains(&Verb::Replan));
@@ -430,7 +451,7 @@ mod tests {
         // Stalling unlocks ASK_USER — the run has earned the right to interrupt.
         c = c.reduce(Observation { action: "x".into(), ok: true, ..Default::default() });
         c = c.reduce(Observation { action: "y".into(), ok: true, ..Default::default() });
-        assert!(allowed_verbs(&c, &spec()).contains(&Verb::AskUser));
+        assert!(allowed_verbs(&c, &spec(), &[]).contains(&Verb::AskUser));
     }
 
     /// A missing capability unlocks ASK_USER immediately: only the user can fix it, and grinding is
@@ -439,7 +460,7 @@ mod tests {
     fn a_missing_capability_unlocks_asking_at_once() {
         let mut s = spec();
         s.missing_capabilities = vec!["github".into()];
-        assert!(allowed_verbs(&Capsule::new("g", "goal"), &s).contains(&Verb::AskUser));
+        assert!(allowed_verbs(&Capsule::new("g", "goal"), &s, &[]).contains(&Verb::AskUser));
     }
 
     /// An exhausted tool leaves the menu, so the run cannot spend its budget re-reading one page.
@@ -458,7 +479,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_well_formed_choice_parses() {
         let reply = r#"{"verb":"CALL_TOOL","target":"web_search","args":{"query":"xyz catalyst"},"why":"RESOLVE_UNCERTAINTY"}"#;
-        let c = choose(&pool(reply), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &["1 of 3 findings".into()], false)
+        let c = choose(&pool(reply), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &["1 of 3 findings".into()], &[], false)
             .await
             .expect("a valid action");
         assert_eq!(c.action.verb, Verb::CallTool);
@@ -474,7 +495,7 @@ mod tests {
     async fn a_verb_that_was_not_offered_is_refused() {
         // VERIFY is not on a fresh run's menu.
         let reply = r#"{"verb":"VERIFY","target":"","why":"SUFFICIENT"}"#;
-        let got = choose(&pool(reply), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], false).await;
+        let got = choose(&pool(reply), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], &[], false).await;
         assert!(got.is_none(), "an un-offered verb must not execute");
     }
 
@@ -482,7 +503,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn junk_yields_no_action_rather_than_a_guess() {
         for junk in ["I think we should search the web!", "", "{}", r#"{"verb":"TELEPORT"}"#, r#"{"verb":"CALL_TOOL","target":"  "}"#] {
-            let got = choose(&pool(junk), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], false).await;
+            let got = choose(&pool(junk), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], &[], false).await;
             assert!(got.is_none(), "junk {junk:?} produced an action");
         }
     }
@@ -506,7 +527,7 @@ mod tests {
             uncertainties: vec![Uncertainty { question: "is the move news-driven?".into(), importance: 0.9, confidence: 0.2, resolved: false }],
             ..Default::default()
         });
-        choose(&p, &FakeBus::new(&["markets"]), &spec(), &c, &["2 of 3 findings so far".into()], false).await;
+        choose(&p, &FakeBus::new(&["markets"]), &spec(), &c, &["2 of 3 findings so far".into()], &[], false).await;
 
         let seen = backend.prompt_at(0);
         assert!(seen.contains("identify strong equities"), "the goal is present");
@@ -523,7 +544,7 @@ mod tests {
     async fn the_prompt_offers_exactly_the_allowed_verbs() {
         let backend = Arc::new(mind_inference::SequencedLLM::new(vec![r#"{"verb":"FINISH","why":"SUFFICIENT"}"#]));
         let p = InferencePool::new(backend.clone() as Arc<dyn LLMBackend>, 1);
-        choose(&p, &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], false).await;
+        choose(&p, &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], &[], false).await;
         let seen = backend.prompt_at(0);
         assert!(seen.contains("CALL_TOOL|RECALL_MEMORY|FINISH"), "{seen}");
         assert!(!seen.contains("VERIFY"), "an un-offered verb must not appear in the menu");

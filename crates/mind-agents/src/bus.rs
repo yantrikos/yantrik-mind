@@ -70,6 +70,32 @@ pub trait Bus: Send + Sync {
         }
     }
 
+    /// Remembered approaches for this kind of task, best-known first.
+    ///
+    /// Called once per run BEFORE the first decision, because looking for a known way to do something
+    /// should always happen — a model asked whether it would like to check will sometimes say no and
+    /// then improvise an approach it already had. Default is empty, so a bus without procedural memory
+    /// simply has none rather than failing.
+    async fn procedures(&self, _goal: &str, _limit: usize) -> Vec<crate::procedure::Procedure> {
+        Vec::new()
+    }
+
+    /// Record whether following a procedure worked.
+    ///
+    /// This is what turns a procedure library into a ranked one. Without it every approach stays
+    /// equally plausible forever, and the loop cannot prefer the one that actually works — the
+    /// difference between a memory and a filing cabinet.
+    async fn record_procedure_outcome(&self, _name: &str, _ok: bool) {}
+
+    /// Bank a new approach the run discovered.
+    ///
+    /// Called only when a run SUCCEEDED with no procedure to guide it — that is precisely the case
+    /// worth remembering, and the case where the next run would otherwise re-derive the same
+    /// reasoning. Returns whether it was stored.
+    async fn bank_procedure(&self, _name: &str, _when: &str, _steps: &[String]) -> bool {
+        false
+    }
+
     /// Strip uncited claims from a synthesized answer, returning the grounded text.
     ///
     /// `None` means the seam is unavailable, which the caller must treat as "unverified" rather than
@@ -107,6 +133,9 @@ pub(crate) mod tests_support {
     use std::sync::Mutex;
 
     pub struct FakeBus {
+        pub known: Vec<crate::procedure::Procedure>,
+        pub outcomes: Mutex<Vec<(String, bool)>>,
+        pub banked: Mutex<Vec<String>>,
         pub ready: Vec<String>,
         /// Tool name -> what it returns. A tool not listed here fails, which is how a scenario tests
         /// the failure path without any plumbing.
@@ -119,6 +148,9 @@ pub(crate) mod tests_support {
     impl FakeBus {
         pub fn new(ready: &[&str]) -> Self {
             Self {
+                known: Vec::new(),
+                outcomes: Mutex::new(Vec::new()),
+                banked: Mutex::new(Vec::new()),
                 ready: ready.iter().map(|s| s.to_string()).collect(),
                 replies: Mutex::new(std::collections::HashMap::new()),
                 outward: Vec::new(),
@@ -140,6 +172,16 @@ pub(crate) mod tests_support {
         }
         pub fn called(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+        pub fn knowing(mut self, procedures: Vec<crate::procedure::Procedure>) -> Self {
+            self.known = procedures;
+            self
+        }
+        pub fn recorded(&self) -> Vec<(String, bool)> {
+            self.outcomes.lock().unwrap().clone()
+        }
+        pub fn banked_names(&self) -> Vec<String> {
+            self.banked.lock().unwrap().clone()
         }
     }
 
@@ -163,6 +205,16 @@ pub(crate) mod tests_support {
         }
         async fn ground(&self, _q: &str, _e: &str) -> Option<String> {
             self.grounded.clone()
+        }
+        async fn procedures(&self, _goal: &str, _limit: usize) -> Vec<crate::procedure::Procedure> {
+            self.known.clone()
+        }
+        async fn record_procedure_outcome(&self, name: &str, ok: bool) {
+            self.outcomes.lock().unwrap().push((name.to_string(), ok));
+        }
+        async fn bank_procedure(&self, name: &str, _when: &str, _steps: &[String]) -> bool {
+            self.banked.lock().unwrap().push(name.to_string());
+            true
         }
     }
 }

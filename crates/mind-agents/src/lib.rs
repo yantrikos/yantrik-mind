@@ -15,11 +15,13 @@ pub mod bus;
 pub mod cognition;
 pub mod compile;
 pub mod nba;
+pub mod procedure;
 
 pub use bus::{signature, Bus};
 pub use cognition::{Cognition, Outcome, Step};
 pub use compile::{compile, Compilation, Origin};
 pub use nba::{Action, Verb, Why};
+pub use procedure::{Procedure, ProcedureKind};
 
 use std::sync::Arc;
 

@@ -110,6 +110,28 @@ impl Cognition {
         let mut stopped_because = None;
         let mut question = None;
 
+        // ── SURFACE WHAT WE ALREADY KNOW HOW TO DO. No model call. ─────────────────────────────
+        //
+        // This is the step that pays for itself. Looking for a remembered approach is cheap semantic
+        // recall, and finding one means the plan comes from memory rather than from asking a model to
+        // invent it — the planning call simply does not happen. A loop that re-derives its approach
+        // every run pays for that reasoning every run; recalling it pays once, ever.
+        //
+        // It is a RUNTIME step rather than an action the model may choose, because it should always
+        // happen and because a model asked "would you like to check for a known approach?" will
+        // sometimes decline and then improvise one it already had.
+        let procedures = crate::procedure::select(self.bus.procedures(&spec.goal, 5).await, 2);
+        capsule.plan = crate::procedure::as_plan(&procedures, spec.horizon);
+        if !capsule.plan.is_empty() {
+            trace.push(Step {
+                n: 0,
+                action: format!("recalled approach: {}", procedures.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")),
+                ok: true,
+                decision: None,
+                elapsed_ms: 0,
+            });
+        }
+
         loop {
             let elapsed = clock.now_ms().saturating_sub(started);
             let confidence_before = capsule.confidence;
@@ -150,7 +172,8 @@ impl Cognition {
             let verdict = spec.contract.completion.evaluate(&capsule, &spec.contract.requirements);
             let shortfalls: Vec<String> = verdict.shortfalls.iter().map(|s| s.describe()).collect();
             let pool = if escalated { &self.reason_pool } else { &self.step_pool };
-            let choice = nba::choose(pool, self.bus.as_ref(), spec, &capsule, &shortfalls, escalated).await;
+            let choice =
+                nba::choose(pool, self.bus.as_ref(), spec, &capsule, &shortfalls, &procedures, escalated).await;
             capsule.progress.model_calls += 1;
             escalated = false; // escalation is per-decision, not sticky for the rest of the run
 
@@ -303,6 +326,23 @@ impl Cognition {
             }
         }
 
+        // ── The procedure ledger. ──────────────────────────────────────────────────────────────
+        //
+        // Without this the library stays a filing cabinet: every approach equally plausible forever,
+        // and no way to prefer the one that works. Recorded against the CONTRACT's verdict rather than
+        // against "did it finish", because a run that finished without meeting its criteria did not
+        // vindicate the approach it followed.
+        for p in &procedures {
+            self.bus.record_procedure_outcome(&p.name, verdict.met).await;
+        }
+        // A run that SUCCEEDED with nothing to guide it is exactly the one worth remembering — next
+        // time this shape of goal appears, the reasoning is already done. Only banked on success, and
+        // only when there was no procedure, so the library grows from what worked rather than from
+        // everything that was attempted.
+        if procedures.is_empty() && verdict.met && !capsule.completed.is_empty() {
+            self.bus.bank_procedure(&spec.goal, &spec.goal, &capsule.completed).await;
+        }
+
         Outcome { answer, capsule, verdict, stopped_because, verified, question, trace }
     }
 
@@ -313,6 +353,9 @@ impl Cognition {
             Verb::RecallMemory => ("recall".to_string(), serde_json::json!({ "query": action.target })),
             // Paging in an evidence body is the bus's `fetch`, addressed by id.
             Verb::Fetch => ("fetch".to_string(), serde_json::json!({ "id": action.target })),
+            // A banked skill runs through the engine's own sandboxed skill path — reuse never grants
+            // unsandboxed power, which is the invariant the skill store was built on.
+            Verb::RunSkill => ("run_skill".to_string(), serde_json::json!({ "name": action.target })),
             _ => return Observation { action: action.signature(), ok: false, error: Some("not an executable action".into()), ..Default::default() },
         };
         match self.bus.call(&tool, &args).await {
@@ -635,6 +678,67 @@ mod tests {
                 "step {i} leaked a raw tool body into the prompt"
             );
         }
+    }
+
+    /// SEARCH SKILL → SELECT SKILL → EXECUTE → MOVE ON.
+    ///
+    /// A remembered approach becomes the plan without a model call, is shown to the decision step as
+    /// the known way of working, and earns or loses standing on the way out. That last part is what
+    /// makes the library a memory rather than a filing cabinet.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_recalled_procedure_becomes_the_plan_and_earns_its_standing() {
+        use crate::procedure::{Procedure, ProcedureKind};
+        use mind_spec::Prior;
+
+        let known = Procedure {
+            name: "repo review".into(),
+            when: "evaluating a repository".into(),
+            steps: vec!["read the README".into(), "read the commit history".into()],
+            kind: ProcedureKind::Instructions,
+            reliability: Prior::measured(0.9, 8),
+        };
+        let f = learned_then_finish("the repo is well maintained", "E1");
+        let (step, reason, backend) = pools(vec![&call("search", "the repo"), &f, "answer"]);
+        let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "found").knowing(vec![known]));
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+
+        // The plan came from MEMORY — no planning call was made, and the trace says where it came from.
+        assert_eq!(out.capsule.plan, vec!["read the README", "read the commit history"]);
+        assert!(out.trace[0].action.contains("recalled approach: repo review"), "{:?}", out.trace[0]);
+
+        // The decision step was shown the approach, with its track record.
+        let prompt = backend.prompt_at(0);
+        assert!(prompt.contains("KNOWN APPROACH"), "{prompt}");
+        assert!(prompt.contains("read the commit history"), "the steps must reach the model:\n{prompt}");
+        assert!(prompt.contains("worked 90% of 8 time(s)"), "and its standing, so deviation is informed");
+
+        // And the outcome was recorded against it.
+        assert_eq!(bus.recorded(), vec![("repo review".to_string(), true)]);
+        assert!(bus.banked_names().is_empty(), "a run that FOLLOWED an approach must not bank a rival");
+    }
+
+    /// A run that succeeded with nothing to guide it is exactly the one worth remembering — otherwise
+    /// the next identical goal re-derives the same reasoning from scratch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_successful_unguided_run_banks_what_it_learned() {
+        let f = learned_then_finish("the answer is X", "E1");
+        let (step, reason, _) = pools(vec![&call("search", "x"), &f, "answer"]);
+        let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "found"));
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+
+        assert!(out.complete());
+        assert_eq!(bus.banked_names(), vec!["find the thing"], "the approach is kept for next time");
+    }
+
+    /// A FAILED run must not be banked. The library has to grow from what worked, or it fills with
+    /// approaches that do not — and a procedure library nobody can trust is worse than none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_run_banks_nothing() {
+        let (step, reason, _) = pools(vec!["unusable", "partial answer"]);
+        let bus = Arc::new(FakeBus::new(&["search"]));
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(3), &TestClock::new(0)).await;
+        assert!(!out.complete());
+        assert!(bus.banked_names().is_empty(), "failure must not become a remembered approach");
     }
 
     /// A contradiction must reach the capsule field the CONTROLLER reads, not just the notes — the

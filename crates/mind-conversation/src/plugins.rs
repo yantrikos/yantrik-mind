@@ -154,7 +154,7 @@ impl PluginRegistry {
                 "- search {query}: web SEARCH (find pages/answers) — use to DISCOVER URLs/facts, then web_fetch to read one"),
             PluginSpec::new("web_fetch", "Web fetch", "Web", ReadOnly, &["web_fetch"], &["web", "fetch"],
                 "- web_fetch {url}: read a web page (fast — use for real, current info instead of guessing)"),
-            PluginSpec::new("news", "News", "Web", ReadOnly, &["news", "track_news"], &["news", "headlines"],
+            PluginSpec::new("news", "News", "Web", ReadOnly, &["news", "headlines", "track_news", "follow_news"], &["news", "headlines"],
                 "- news {topic}: latest news headlines on a topic (or top stories) — keyless, works for geopolitics/anything\n\
                  - track_news {topic}: TRACK a topic + proactively surface fresh headlines"),
             PluginSpec::new("weather", "Weather", "Web", ReadOnly, &["weather"], &["weather", "wx"],
@@ -202,6 +202,15 @@ impl PluginRegistry {
             Arc::new(crate::finance::FinanceCapability),
             Arc::new(crate::finance::PortfolioCapability),
             Arc::new(crate::home::HomeCapability),
+            Arc::new(crate::news::NewsCapability),
+            Arc::new(crate::capabilities::WebSearchCapability),
+            Arc::new(crate::capabilities::WebFetchCapability),
+            Arc::new(crate::capabilities::WeatherCapability),
+            Arc::new(crate::capabilities::WikipediaCapability),
+            Arc::new(crate::capabilities::CalculatorCapability),
+            Arc::new(crate::capabilities::MarketsCapability),
+            Arc::new(crate::capabilities::TranslateCapability),
+            Arc::new(crate::capabilities::GithubCapability),
         ];
         Self { plugins, handlers }
     }

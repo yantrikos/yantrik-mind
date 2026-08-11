@@ -17,6 +17,7 @@ pub mod plugins;
 pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, SecurityLevel};
 mod book;
 mod briefing;
+mod capabilities;
 mod calendar;
 mod cloud_photos;
 mod deals;
@@ -63,7 +64,7 @@ mod treasury;
 use mind_agents::SubAgent;
 use mind_inference::InferencePool;
 use mind_recipes::{Condition, ErrorAction, Recipe, RecipeEngine, RecipeHost, RecipeStep};
-use mind_tools::{render_news, render_search, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, MarketsClient, NewsClient, Sandbox, Translator, WeatherClient, WebSearch, WikiClient, WorkerPool};
+use mind_tools::{render_news, Coder, Fetcher, GithubClient, HomeAssistantClient, MailClient, MarketsClient, NewsClient, Sandbox, Translator, WeatherClient, WebSearch, WikiClient, WorkerPool};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CodeLang {
@@ -3964,24 +3965,8 @@ impl ConversationEngine {
             "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
-            "search" | "google" | "ddg" if !rest.is_empty() => self.run_agent_tool("search", &serde_json::json!({ "query": rest })).await,
-            "news" | "headlines" => self.news_cmd(&rest).await,
-            "weather" | "wx" if !rest.is_empty() => self.run_agent_tool("weather", &serde_json::json!({ "place": rest })).await,
-            "wiki" | "wikipedia" if !rest.is_empty() => self.run_agent_tool("wikipedia", &serde_json::json!({ "query": rest })).await,
-            "calc" | "calculate" | "math" if !rest.is_empty() => calc(&rest),
-            "crypto" | "coin" if !rest.is_empty() => self.run_agent_tool("crypto", &serde_json::json!({ "coin": rest })).await,
-            "stock" | "ticker" if !rest.is_empty() => self.run_agent_tool("stock", &serde_json::json!({ "symbol": rest })).await,
-            "translate" | "tr" if !rest.is_empty() => {
-                // `ym translate <lang> <text…>` — first token is the target language.
-                let mut p = rest.splitn(2, char::is_whitespace);
-                let lang = p.next().unwrap_or("");
-                let text = p.next().unwrap_or("").trim();
-                if text.is_empty() {
-                    "Usage: ym translate <language> <text>  (e.g. ym translate french good morning)".to_string()
-                } else {
-                    self.run_agent_tool("translate", &serde_json::json!({ "to": lang, "text": text })).await
-                }
-            }
+            // search/news/weather/wiki/calc/crypto/stock/translate dispatch via the capability
+            // registry above — see capabilities.rs + news::NewsCapability.
             "recall" if !rest.is_empty() => self.run_agent_tool("recall", &serde_json::json!({ "query": rest })).await,
             "remember" if !rest.is_empty() => self.run_agent_tool("remember", &serde_json::json!({ "text": rest })).await,
             // finance (money/subs/bills/budget/spent) now dispatches via the capability registry
@@ -4015,16 +4000,7 @@ impl ConversationEngine {
             },
             // --- plugins/tools: each owns a namespace, present only when wired ---
             // "home"/"house" dispatch via the capability registry above (when configured).
-            "github" | "gh" if self.github.is_some() => {
-                if rest.contains('/') {
-                    self.run_agent_tool("github_repo_items", &serde_json::json!({ "repo": rest })).await
-                } else {
-                    self.run_agent_tool("github_notifications", &serde_json::json!({})).await
-                }
-            }
-            "web" | "fetch" if self.web.is_some() && !rest.is_empty() => {
-                self.run_agent_tool("web_fetch", &serde_json::json!({ "url": rest })).await
-            }
+            // "github"/"gh" and "web"/"fetch" dispatch via the capability registry above.
             // --- plugins: the declarative registry — list + enable/disable (persisted to manifest) ---
             // --- household: people registry + speak-as (group-chat read-isolation) ---
             "people" | "household" => self.people_list().await,
@@ -5875,22 +5851,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 let _ = self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await;
                 "(remembered)".to_string()
             }
-            "github_repo_items" => match &self.github {
-                Some(g) => {
-                    let repo = s("repo");
-                    match g.repo_open_items(&repo, 15).await {
-                        Ok(items) if !items.is_empty() => format!("{repo} — {} open:\n", items.len())
-                            + &items.iter().map(|i| format!("#{} [{}] {} (by {})", i.number, i.kind, i.title, i.author)).collect::<Vec<_>>().join("\n"),
-                        Ok(_) => format!("{repo}: no open issues/PRs"),
-                        Err(e) => format!("(github error for {repo}: {e})"),
-                    }
-                }
-                None => "(github not configured)".to_string(),
-            },
-            "github_notifications" => match &self.github {
-                Some(g) => match g.notifications(15).await { Ok(n) => mind_tools::render_github_digest(&n), Err(e) => format!("(error: {e})") },
-                None => "(github not configured)".to_string(),
-            },
+            // github_repo_items/github_notifications dispatch via the capability registry above.
             // home/home_status/house/smart_home tools dispatch via the capability registry above.
             // "money"/"subscriptions"/"finance" tools dispatch via the capability registry above.
             // NATIVE life/shopping tools — reachable from chat, not just the `ym` CLI.
@@ -5926,13 +5887,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 let n = { let a = s("name"); if !a.is_empty() { a } else { s("query") } };
                 if n.is_empty() { self.family_view().await } else { self.person_about(&n).await }
             }
-            "news" => {
-                // `news {topic}` → the in-depth multi-source brief; no topic → quick top headlines.
-                let t = { let a = s("topic"); if a.is_empty() { s("query") } else { a } };
-                if t.is_empty() { self.news_headlines(None).await } else { self.news_brief(&t).await }
-            }
-            "headlines" => self.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
-            "track_news" | "follow_news" => self.news_track(&s("topic")).await,
+            // news/headlines/track_news tools dispatch via the capability registry above.
             "see_page" | "screenshot_page" | "look_at_page" => self.see_page(&s("url"), &s("question")).await,
             "photo_send" | "send_photo" | "find_photo" => {
                 let q = { let a = s("query"); if a.is_empty() { s("text") } else { a } };
@@ -6092,52 +6047,8 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
             "forget_date" | "remove_date" => self.forget_person_date(&s("name"), &s("label")).await,
             "calendar_add" | "add_event" => self.calendar_add(&s("text")).await,
             "calendar_view" | "calendar" => self.calendar_view().await,
-            "weather" => match &self.weather {
-                Some(w) => match w.report(&{ let p = s("place"); if p.is_empty() { s("city") } else { p } }).await { Ok(r) => r, Err(e) => format!("(weather: {e})") },
-                None => "(weather isn't configured)".to_string(),
-            },
-            "wikipedia" | "wiki" => match &self.wiki {
-                Some(w) => match w.lookup(&{ let q = s("query"); if q.is_empty() { s("topic") } else { q } }).await { Ok(r) => r, Err(e) => format!("(wikipedia: {e})") },
-                None => "(wikipedia isn't configured)".to_string(),
-            },
-            "calc" | "calculate" | "math" => calc(&{ let e = s("expression"); if e.is_empty() { s("expr") } else { e } }),
-            "crypto" | "coin" => match &self.markets {
-                Some(m) => match m.crypto(&{ let c = s("coin"); if c.is_empty() { s("query") } else { c } }).await { Ok(r) => r, Err(e) => format!("(crypto: {e})") },
-                None => "(markets aren't configured)".to_string(),
-            },
-            "stock" | "ticker" => match &self.markets {
-                Some(m) => match m.stock(&{ let t = s("symbol"); if t.is_empty() { s("ticker") } else { t } }).await { Ok(r) => r, Err(e) => format!("(stock: {e})") },
-                None => "(markets aren't configured)".to_string(),
-            },
-            // portfolio/analyze/add_holding tools dispatch via the capability registry above.
-            "translate" => match &self.translator {
-                Some(tr) => match tr.translate(&{ let l = s("to"); if l.is_empty() { s("language") } else { l } }, &s("text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
-                None => "(translator isn't configured)".to_string(),
-            },
-            // discover_subscriptions/bills/budget tools dispatch via the capability registry above.
-            "web_fetch" => match &self.web {
-                Some(w) => {
-                    // A weak model often passes a messy url ("https://x.com and tell me…"); extract the
-                    // first real http(s) url from whatever it gave so ureq doesn't choke (IdnaError).
-                    let raw = s("url");
-                    let url = mind_tools::first_url(&raw).unwrap_or(raw);
-                    match w.fetch(&url).await { Ok(t) => t.chars().take(6000).collect(), Err(e) => format!("(fetch error: {e})") }
-                }
-                None => "(web not configured)".to_string(),
-            },
-            "search" | "web_search" => match &self.searcher {
-                Some(se) => {
-                    let q = { let a = s("query"); if a.is_empty() { s("q") } else { a } };
-                    if q.len() < 2 {
-                        return "(what should I search for?)".to_string();
-                    }
-                    match se.search(&q, 6).await {
-                        Ok(hits) => render_search(&hits),
-                        Err(e) => format!("(search error: {e})"),
-                    }
-                }
-                None => "(search not configured)".to_string(),
-            },
+            // weather/wikipedia/calc/crypto/stock/translate/web_fetch/search tools dispatch via the
+            // capability registry above (capabilities.rs); portfolio + finance tools likewise.
             // Heavyweight ops (deep research, the ~5min coder) run as DELEGATED background jobs: ack
             // immediately, do the work in a detached task, and deliver the result to the chat via the
             // poll-loop notify drain. Best-effort (a process restart loses an in-flight job; the recipe

@@ -276,3 +276,34 @@ impl super::ConversationEngine {
     }
 
 }
+
+/// News as a dispatchable capability — headlines, deep briefs, and topic tracking via the registry.
+pub struct NewsCapability;
+
+#[async_trait::async_trait]
+impl crate::plugins::CapabilityHandler for NewsCapability {
+    fn id(&self) -> &'static str {
+        "news"
+    }
+
+    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, rest: &str) -> Option<String> {
+        match cmd {
+            "news" | "headlines" => Some(host.news_cmd(rest).await),
+            _ => None,
+        }
+    }
+
+    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, args: &serde_json::Value) -> Option<String> {
+        let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        Some(match tool {
+            "news" => {
+                // `news {topic}` → the in-depth multi-source brief; no topic → quick top headlines.
+                let t = { let a = s("topic"); if a.is_empty() { s("query") } else { a } };
+                if t.is_empty() { host.news_headlines(None).await } else { host.news_brief(&t).await }
+            }
+            "headlines" => host.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
+            "track_news" | "follow_news" => host.news_track(&s("topic")).await,
+            _ => return None,
+        })
+    }
+}

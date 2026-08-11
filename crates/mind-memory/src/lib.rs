@@ -42,6 +42,10 @@ type Reply<T> = oneshot::Sender<std::result::Result<T, String>>;
 pub enum DeviceAuthorization {
     Authorized,
     Unauthorized,
+    /// Authorization state could not be determined (e.g. the auth check itself failed).
+    /// The handle can be constructed, but restricted operations (e.g. retro-dedup) will
+    /// return `MindError::NotAuthorized` rather than proceeding with unusable state.
+    Unknown,
 }
 
 enum Cmd {
@@ -1276,6 +1280,8 @@ pub struct MemoryHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     /// ARCH-1 slice 2: every principal read is receipted into a hash-chained ledger.
     receipts: std::sync::Arc<receipts::ReadReceiptLedger>,
+    /// Authorization state recorded at spawn time; checked by restricted operations.
+    device_auth: DeviceAuthorization,
 }
 
 impl MemoryHandle {
@@ -1723,6 +1729,7 @@ impl MemoryHandle {
             Ok(Ok(())) => Ok(Self {
                 tx,
                 receipts: std::sync::Arc::new(receipts::ReadReceiptLedger::for_db(db_path)),
+                device_auth: device_authorization,
             }),
             Ok(Err(e)) => Err(MindError::Memory(format!("init YantrikDB: {e}"))),
             Err(_) => Err(MindError::Memory("actor thread died during init".into())),
@@ -1796,7 +1803,14 @@ impl MemoryHandle {
     /// goals/prefs table that existed before the write-path dedup was introduced (PR #19).
     /// Safe to call repeatedly — idempotent on an already-clean store.
     /// Returns `(beliefs_tombstoned, goals_prefs_deleted)`.
+    ///
+    /// Precondition: the handle must have been opened with `DeviceAuthorization::Authorized`.
+    /// Returns `MemoryError::NotAuthorized` when the authorization state is unavailable or
+    /// invalid, short-circuiting before touching the store.
     pub async fn retro_dedup_store(&self) -> Result<(usize, usize)> {
+        if self.device_auth != DeviceAuthorization::Authorized {
+            return Err(MindError::NotAuthorized);
+        }
         self.call(|reply| Cmd::RetroDedupStore { reply }).await
     }
 
@@ -2166,6 +2180,17 @@ mod tests {
             result,
             Err(MindError::Auth(AuthError::DeviceNotAuthorized))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_auth_state_short_circuits_retro_dedup() {
+        let mem = MemoryHandle::spawn_for_device(":memory:", 64, DeviceAuthorization::Unknown)
+            .expect("Unknown auth should construct the handle");
+        let result = mem.retro_dedup_store().await;
+        assert!(
+            matches!(result, Err(MindError::NotAuthorized)),
+            "retro_dedup_store must return NotAuthorized for non-Authorized handles, got: {result:?}"
+        );
     }
 
     /// ARCH-1 acceptance test — the authorization-kernel deliverable.

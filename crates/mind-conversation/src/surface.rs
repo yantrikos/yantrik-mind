@@ -197,6 +197,46 @@ pub struct Count {
     pub n: u64,
 }
 
+// ── Standing orders: the scheduler surface ────────────────────────────────────────────────────
+
+/// Recurring and sleeping work, typed.
+///
+/// The distinction that matters here: `store: false` means this mind has NO recipe store (a
+/// `:memory:` DB), so scheduling is impossible — which is a completely different thing from having a
+/// store with nothing in it. A UI that cannot tell them apart shows an empty schedule list and an
+/// invitingly enabled "create" button on a mind that will silently drop the order.
+#[derive(Serialize, Default)]
+pub struct OrdersReport {
+    /// Is durable scheduling available at all?
+    pub store: bool,
+    pub orders: Vec<StandingOrder>,
+}
+
+#[derive(Serialize)]
+pub struct StandingOrder {
+    pub id: String,
+    /// The order's name, which for a planned order is its goal.
+    pub name: String,
+    pub state: OrderState,
+    /// When it next fires, epoch ms. 0 when the record carries no wake stamp.
+    pub next_ms: u64,
+    /// Seconds until it fires. Negative means it is overdue — which is real and worth showing: a
+    /// paused order's time keeps passing, and a resumed one fires immediately.
+    pub in_seconds: i64,
+    /// Which actions apply in this state, so the client renders exactly the buttons that will work
+    /// instead of offering all four and failing three of them.
+    pub actions: Vec<&'static str>,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderState {
+    /// Armed and waiting for its time.
+    Sleeping,
+    /// Deliberately held. Its next time is preserved, not reset.
+    Paused,
+}
+
 // ── Capabilities: the inventory ───────────────────────────────────────────────────────────────
 
 /// What this mind can actually do right now — the honest answer to "which capabilities exist,
@@ -246,7 +286,8 @@ pub enum Availability {
 /// Every typed surface this build serves. Doubles as the version handshake: a client fetches this
 /// list once and only asks for surfaces the box actually has, instead of discovering the gap by
 /// getting prose where it expected JSON.
-pub const TYPED_VERBS: &[&str] = &["surfaces", "pulse", "funnel_json", "capabilities_json"];
+pub const TYPED_VERBS: &[&str] =
+    &["surfaces", "pulse", "funnel_json", "capabilities_json", "orders_json"];
 
 /// Is this verb a request for machine-readable state?
 ///
@@ -430,6 +471,37 @@ impl ConversationEngine {
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
         funnel_from_counters(&counters)
+    }
+
+    /// Standing orders, typed. Reads the same recipe store the waking tick reads, so the list is
+    /// what will actually happen — not a separate registry that can drift from it.
+    pub fn orders_report(&self) -> OrdersReport {
+        let Some(recipes) = &self.recipes else { return OrdersReport::default() };
+        let now = local_now().timestamp_millis();
+        let mut orders: Vec<StandingOrder> = Vec::new();
+        for (state, rows) in [
+            (OrderState::Sleeping, recipes.list_sleeping()),
+            (OrderState::Paused, recipes.list_paused()),
+        ] {
+            for (id, name, next_ms) in rows {
+                orders.push(StandingOrder {
+                    id,
+                    name,
+                    state,
+                    next_ms,
+                    in_seconds: (next_ms as i64 - now) / 1000,
+                    actions: match state {
+                        OrderState::Sleeping => vec!["run", "pause", "cancel"],
+                        OrderState::Paused => vec!["resume", "cancel"],
+                    },
+                });
+            }
+        }
+        // Soonest first; a paused order sorts by the time it would have fired.
+        orders.sort_by_key(|o| o.next_ms);
+        // `store` is true iff durable scheduling exists. `list_sleeping` returns empty both when
+        // there is no store and when there is nothing parked, so ask the engine directly.
+        OrdersReport { store: recipes.has_store(), orders }
     }
 
     /// The capability inventory. Availability is probed against the SAME `Option<Arc<dyn …>>`
@@ -832,6 +904,68 @@ mod tests {
         assert!((240..=260).contains(&audit.elapsed_s), "elapsed should be ~245s, got {}", audit.elapsed_s);
         let unstamped = p.work.running.iter().find(|j| j.name == "unstamped").unwrap();
         assert_eq!(unstamped.elapsed_s, 0, "a missing start stamp reports 0, not epoch arithmetic");
+    }
+
+    /// With no recipe store, scheduling cannot persist — and the surface must SAY so rather than
+    /// present an empty list, which a client would render as "no orders yet" beside a create button
+    /// that silently drops the order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn orders_distinguishes_no_store_from_no_orders() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = test_engine(&mem);
+        let r = eng.orders_report();
+        assert!(!r.store, "an engine with no recipe engine has no durable scheduling");
+        assert!(r.orders.is_empty());
+    }
+
+    /// A standing order carries the actions that will actually work in its current state, so the
+    /// client renders three buttons that succeed rather than four where one fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn orders_report_lists_state_and_applicable_actions() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memory: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let db = std::env::temp_dir().join(format!("ym_surface_orders_{}.db", std::process::id()));
+        let store = Arc::new(mind_recipes::RecipeStore::open(db.to_str().unwrap()).unwrap());
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let host: Arc<dyn mind_recipes::RecipeHost> =
+            Arc::new(crate::MindRecipeHost::new(None, None, memory.clone()));
+        let recipes = mind_recipes::RecipeEngine::new(pool.clone(), host, "JARVIS").with_store(store);
+
+        // Park two orders, then pause one.
+        for tag in ["alpha", "beta"] {
+            let rec = mind_recipes::Recipe {
+                id: tag.into(),
+                name: format!("{tag} report"),
+                steps: vec![
+                    mind_recipes::RecipeStep::WaitUntil {
+                        until_ms: chrono::Utc::now().timestamp_millis() as u64 + 3_600_000,
+                    },
+                    mind_recipes::RecipeStep::Notify { message: "done".into() },
+                ],
+            };
+            recipes.run(&rec).await;
+        }
+        let paused_id = recipes.list_sleeping()[0].0.clone();
+        assert!(recipes.pause_run(&paused_id));
+
+        let eng = ConversationEngine::new(memory, pool, "JARVIS").with_recipes(Arc::new(recipes));
+        let r = eng.orders_report();
+        assert!(r.store, "a wired store means scheduling is available");
+        assert_eq!(r.orders.len(), 2, "both the sleeping and the paused order are listed");
+
+        let paused = r.orders.iter().find(|o| o.id == paused_id).expect("paused order present");
+        assert_eq!(paused.state, OrderState::Paused);
+        assert_eq!(paused.actions, vec!["resume", "cancel"], "a paused order cannot be run or re-paused");
+
+        let sleeping = r.orders.iter().find(|o| o.id != paused_id).expect("sleeping order present");
+        assert_eq!(sleeping.state, OrderState::Sleeping);
+        assert_eq!(sleeping.actions, vec!["run", "pause", "cancel"]);
+        assert!(sleeping.in_seconds > 3000, "an hour out should read ~3600s, got {}", sleeping.in_seconds);
+        assert!(!sleeping.name.is_empty(), "an order must be nameable in a list");
+        let _ = std::fs::remove_file(&db);
     }
 
     /// A capability whose backing client is absent must report UNAVAILABLE with a reason a person

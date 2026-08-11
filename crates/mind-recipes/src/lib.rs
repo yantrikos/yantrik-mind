@@ -1245,6 +1245,127 @@ mod tests {
         assert!(woke[0].notifications.iter().any(|n| n == "awake"), "runs the step after the wait");
     }
 
+    /// PAUSE must hold an order without losing its place in the cadence.
+    ///
+    /// The mechanism is a status the waking tick does not select for, so the important properties to
+    /// pin are: a paused order is never woken however far past its time the tick runs, and resuming
+    /// restores the ORIGINAL wake time rather than restarting the clock. If resume reset the timer,
+    /// pausing a Monday-09:00 order on Tuesday and resuming on Wednesday would silently move it to
+    /// Wednesday forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pause_holds_an_order_and_resume_keeps_its_original_time() {
+        let store = Arc::new(RecipeStore::open(&temp_db("pause")).unwrap());
+        let eng = plain_engine_with_store(store.clone());
+        let future = now_ms() + 60_000;
+        let rec = Recipe {
+            id: "po".into(),
+            name: "weekly report".into(),
+            steps: vec![
+                RecipeStep::WaitUntil { until_ms: future },
+                RecipeStep::Notify { message: "fired".into() },
+            ],
+        };
+        eng.run(&rec).await;
+        assert_eq!(eng.list_sleeping().len(), 1);
+        // The run id is `{recipe.id}-{timestamp}`, not the recipe id — read it from the store.
+        let id = eng.list_sleeping()[0].0.clone();
+
+        assert!(eng.pause_run(&id), "a sleeping order can be paused");
+        assert!(eng.list_sleeping().is_empty(), "paused orders leave the sleeping list");
+        assert_eq!(eng.list_paused().len(), 1, "and appear as paused");
+        assert_eq!(eng.list_paused()[0].2, future, "its next time is preserved, not cleared");
+
+        // The whole point: the tick must not fire it, even long past its time.
+        assert!(
+            eng.resume_due(future + 10_000_000).await.is_empty(),
+            "a paused order must never be woken by the tick"
+        );
+
+        assert!(eng.resume_run(&id), "and it can be resumed");
+        assert_eq!(eng.list_sleeping()[0].2, future, "resume restores the ORIGINAL time");
+        let woke = eng.resume_due(future + 1).await;
+        assert_eq!(woke.len(), 1, "once resumed and due, it fires");
+        assert!(woke[0].notifications.iter().any(|n| n == "fired"));
+    }
+
+    /// RUN NOW fires an order early without touching its schedule, and refuses a paused one rather
+    /// than un-pausing it behind the operator's back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_now_fires_early_and_refuses_a_paused_order() {
+        let store = Arc::new(RecipeStore::open(&temp_db("runnow")).unwrap());
+        let eng = plain_engine_with_store(store.clone());
+        let far_future = now_ms() + 7 * 24 * 3600 * 1000;
+        let rec = Recipe {
+            id: "rn".into(),
+            name: "weekly".into(),
+            steps: vec![
+                RecipeStep::WaitUntil { until_ms: far_future },
+                RecipeStep::Notify { message: "ran".into() },
+            ],
+        };
+        eng.run(&rec).await;
+        let id = eng.list_sleeping()[0].0.clone();
+        // Not due for a week, so a tick now does nothing.
+        assert!(eng.resume_due(now_ms()).await.is_empty());
+
+        assert!(eng.run_now(&id, now_ms()), "run_now makes it due");
+        let woke = eng.resume_due(now_ms()).await;
+        assert_eq!(woke.len(), 1, "the very next tick fires it");
+        assert!(woke[0].notifications.iter().any(|n| n == "ran"));
+
+        // A paused order is refused — making it due would require un-pausing it, and the pause
+        // would then vanish when the run re-armed.
+        let rec2 = Recipe {
+            id: "rn2".into(),
+            name: "held".into(),
+            steps: vec![RecipeStep::WaitUntil { until_ms: far_future }, RecipeStep::Notify { message: "no".into() }],
+        };
+        eng.run(&rec2).await;
+        let id2 = eng.list_sleeping()[0].0.clone();
+        assert!(eng.pause_run(&id2));
+        assert!(!eng.run_now(&id2, now_ms()), "run_now must refuse a paused order");
+        assert_eq!(eng.run_status(&id2).as_deref(), Some("paused"), "and leave it paused");
+    }
+
+    /// A paused order must stay cancellable — otherwise pausing would trap it, since cancel used to
+    /// look only at the sleeping list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_paused_order_can_still_be_cancelled() {
+        let store = Arc::new(RecipeStore::open(&temp_db("pcancel")).unwrap());
+        let eng = plain_engine_with_store(store.clone());
+        let rec = Recipe {
+            id: "pc".into(),
+            name: "held".into(),
+            steps: vec![
+                RecipeStep::WaitUntil { until_ms: now_ms() + 60_000 },
+                RecipeStep::Notify { message: "x".into() },
+            ],
+        };
+        eng.run(&rec).await;
+        let id = eng.list_sleeping()[0].0.clone();
+        assert!(eng.pause_run(&id));
+        assert!(eng.cancel_run(&id), "a paused order must be cancellable");
+        assert!(eng.list_paused().is_empty());
+        assert!(eng.list_sleeping().is_empty());
+        assert_eq!(eng.run_status(&id).as_deref(), Some("cancelled"));
+    }
+
+    /// Without a store, scheduling cannot survive a restart — so the engine must SAY it has none
+    /// rather than accepting orders that will be silently lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_store_means_no_scheduling_and_it_says_so() {
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let eng = RecipeEngine::new(pool, Arc::new(ScriptedHost), "JARVIS");
+        assert!(!eng.has_store());
+        assert!(eng.list_sleeping().is_empty());
+        assert!(eng.list_paused().is_empty());
+        assert!(!eng.pause_run("anything"));
+        assert!(!eng.resume_run("anything"));
+        assert!(!eng.run_now("anything", now_ms()));
+        assert_eq!(eng.run_status("anything"), None);
+    }
+
     /// WaitForCondition re-polls each tick; stays asleep while false, continues once true.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn wait_for_condition_polls_until_true() {
@@ -1481,10 +1602,101 @@ impl RecipeEngine {
     /// existed.
     pub fn cancel_run(&self, id: &str) -> bool {
         let Some(store) = &self.store else { return false };
-        let exists = store.due_sleeping(u64::MAX).iter().any(|r| r.id == id);
+        // A PAUSED order is cancellable too — otherwise pausing something would trap it, since the
+        // sleeping list no longer contains it.
+        let exists = store
+            .by_status("sleeping")
+            .iter()
+            .chain(store.by_status("paused").iter())
+            .any(|r| r.id == id);
         if exists {
             store.set_status(id, "cancelled", Some("cancelled by operator"), 0);
         }
         exists
+    }
+
+    /// Every PAUSED standing order: (id, name, wake_at_ms).
+    ///
+    /// Pause is expressed as a status the waking tick does not select for, which is why it needs no
+    /// changes to `resume_due`: `due_sleeping` queries `status='sleeping'`, so a paused row is
+    /// simply never a candidate. Its `__wake_at` is left untouched, so resuming restores the
+    /// original cadence rather than restarting the clock — pausing a Monday-09:00 order on Tuesday
+    /// and resuming Wednesday must still fire the following Monday.
+    pub fn list_paused(&self) -> Vec<(String, String, u64)> {
+        let Some(store) = &self.store else { return Vec::new() };
+        store
+            .by_status("paused")
+            .into_iter()
+            .map(|r| {
+                let wake = r.vars.get("__wake_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                (r.id, r.name, wake)
+            })
+            .collect()
+    }
+
+    /// Pause a sleeping standing order. True if one was paused.
+    pub fn pause_run(&self, id: &str) -> bool {
+        let Some(store) = &self.store else { return false };
+        let exists = store.by_status("sleeping").iter().any(|r| r.id == id);
+        if exists {
+            store.set_status(id, "paused", Some("paused by operator"), 0);
+        }
+        exists
+    }
+
+    /// Resume a paused standing order at its original wake time. True if one was resumed.
+    ///
+    /// If that time has already passed while paused, the next tick fires it immediately — which is
+    /// the honest behaviour: the order was due and is now un-paused. It does not silently skip to
+    /// the following occurrence, because that would drop work the operator asked for.
+    pub fn resume_run(&self, id: &str) -> bool {
+        let Some(store) = &self.store else { return false };
+        let exists = store.by_status("paused").iter().any(|r| r.id == id);
+        if exists {
+            store.set_status(id, "sleeping", None, 0);
+        }
+        exists
+    }
+
+    /// Fire a standing order NOW without disturbing its cadence.
+    ///
+    /// Implemented by moving `__wake_at` into the past so the next tick treats it as due. The steps
+    /// and the `Schedule` step itself are untouched, so when the run completes it re-arms for its
+    /// normal next occurrence — a manual run is an extra execution, not a reschedule.
+    ///
+    /// Deliberately does NOT execute inline: the tick owns run execution (it holds the recovery and
+    /// intent-hash checks), and running the same steps from two places would be two code paths to
+    /// keep honest instead of one.
+    ///
+    /// Only a SLEEPING order can be fired. A paused one is refused rather than quietly un-paused:
+    /// making it due requires setting status back to `sleeping`, and the `Schedule` step re-arms as
+    /// sleeping when the run completes, so the pause would vanish without anyone being told. Better
+    /// to make the operator resume it deliberately.
+    pub fn run_now(&self, id: &str, now_ms: u64) -> bool {
+        let Some(store) = &self.store else { return false };
+        let Some(mut rec) = store.by_status("sleeping").into_iter().find(|r| r.id == id) else {
+            return false;
+        };
+        rec.vars.insert("__wake_at".to_string(), serde_json::json!(now_ms.saturating_sub(1)));
+        store.save(&rec, now_ms).is_ok()
+    }
+
+    /// Is durable scheduling available? Without a store, a scheduled run cannot survive a restart,
+    /// so an order registered here would be silently lost — callers surface this rather than
+    /// offering scheduling that will not hold.
+    pub fn has_store(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Is there a run with this id in any of these statuses? Lets a caller distinguish "no such
+    /// order" from "that order is in the wrong state for this action".
+    pub fn run_status(&self, id: &str) -> Option<String> {
+        let store = self.store.as_ref()?;
+        for st in ["sleeping", "paused", "running", "waiting", "needs_confirmation", "done", "failed", "cancelled"] {
+            if store.by_status(st).iter().any(|r| r.id == id) {
+                return Some(st.to_string());
+            }
+        }
+        None
     }
 }

@@ -4004,6 +4004,7 @@ impl ConversationEngine {
             "pulse" => surface::json_or_error(&self.pulse(ctx).await),
             "funnel_json" => surface::json_or_error(&self.funnel_json().await),
             "capabilities_json" => surface::json_or_error(&self.capability_report()),
+            "orders_json" => surface::json_or_error(&self.orders_report()),
             "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
@@ -4240,22 +4241,52 @@ impl ConversationEngine {
             "import" if !rest.trim().is_empty() => self.import_agent(&rest).await,
             "orders" => {
                 let Some(recipes) = &self.recipes else { return "(recipe engine unavailable)".to_string() };
-                if let Some(id) = rest.trim().strip_prefix("cancel ") {
-                    return if recipes.cancel_run(id.trim()) {
-                        format!("🗑 Standing order [{}] cancelled.", id.trim())
-                    } else {
-                        format!("No sleeping run named [{}] — `ym orders` lists them.", id.trim())
+                let rest = rest.trim();
+                // A standing order you can only create and destroy is a list, not a scheduler.
+                // pause/resume/run act on the SAME store the tick reads, so every one of them is a
+                // real state change, not a UI affordance over nothing.
+                for (word, verb) in [("cancel ", "cancel"), ("pause ", "pause"), ("resume ", "resume"), ("run ", "run")] {
+                    let Some(id) = rest.strip_prefix(word) else { continue };
+                    let id = id.trim();
+                    let now = chrono::Utc::now().timestamp_millis() as u64;
+                    let ok = match verb {
+                        "cancel" => recipes.cancel_run(id),
+                        "pause" => recipes.pause_run(id),
+                        "resume" => recipes.resume_run(id),
+                        _ => recipes.run_now(id, now),
+                    };
+                    if ok {
+                        return match verb {
+                            "cancel" => format!("Standing order [{id}] cancelled."),
+                            "pause" => format!("Standing order [{id}] paused — it will not fire until you resume it."),
+                            "resume" => format!("Standing order [{id}] resumed at its original next time."),
+                            _ => format!("Standing order [{id}] queued to run on the next tick; its schedule is unchanged."),
+                        };
+                    }
+                    // Say WHY, not just "no". "That order is paused" is actionable; "not found" when
+                    // the operator can plainly see it in the list is not.
+                    return match recipes.run_status(id).as_deref() {
+                        None => format!("No standing order [{id}] — `ym orders` lists them."),
+                        Some(st) => format!("Standing order [{id}] is {st}; `{verb}` doesn't apply. Sleeping orders can be paused or run; paused ones can be resumed or cancelled."),
                     };
                 }
-                let rows = recipes.list_sleeping();
-                if rows.is_empty() {
+                let sleeping = recipes.list_sleeping();
+                let paused = recipes.list_paused();
+                if sleeping.is_empty() && paused.is_empty() {
                     return "No standing orders or sleeping delegations. `ym schedule weekly mon 09:00 :: <goal>` starts one.".to_string();
                 }
                 let now = chrono::Utc::now().timestamp_millis() as u64;
-                let mut out = String::from("📅 STANDING ORDERS & SLEEPING RUNS\n");
-                for (id, name, wake) in rows {
+                let mut out = String::from("STANDING ORDERS & SLEEPING RUNS\n");
+                for (id, name, wake) in sleeping {
                     let mins = wake.saturating_sub(now) / 60_000;
-                    out.push_str(&format!("\n[{id}] {name}\n    next: in {}h {}m · `ym orders cancel {id}`\n", mins / 60, mins % 60));
+                    out.push_str(&format!(
+                        "\n[{id}] {name}\n    next: in {}h {}m · `ym orders pause|run|cancel {id}`\n",
+                        mins / 60,
+                        mins % 60
+                    ));
+                }
+                for (id, name, _) in paused {
+                    out.push_str(&format!("\n[{id}] {name}\n    PAUSED · `ym orders resume|cancel {id}`\n"));
                 }
                 out
             }

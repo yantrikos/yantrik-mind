@@ -133,14 +133,20 @@ impl RecipeStore {
 
     /// Runs that were `running` when the process stopped — candidates for recovery.
     pub fn resumable(&self) -> Vec<RunRecord> {
+        self.by_status("running")
+    }
+
+    /// Every run in one status. The single place the row→RunRecord mapping lives, so a schema change
+    /// touches one query instead of three near-identical ones.
+    pub fn by_status(&self, status: &str) -> Vec<RunRecord> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
-            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE status='running'",
+            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE status=?1",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([status], |row| {
             let steps_json: String = row.get(4)?;
             let vars_json: String = row.get(5)?;
             Ok(RunRecord {

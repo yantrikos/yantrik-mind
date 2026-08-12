@@ -285,6 +285,21 @@ impl Skill {
     }
 }
 
+/// One mounted knowledge pack, as the operator needs to see it.
+///
+/// `trust` is carried verbatim from the engine rather than reduced to a boolean: "Signed" and
+/// "Unsigned" mean integrity-proven-and-identity-known versus integrity-proven-only, and collapsing
+/// that distinction is what would let a re-signed pack borrow someone else's reputation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackBrief {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub origin: String,
+    pub trust: String,
+    pub rows: u64,
+}
+
 #[async_trait]
 pub trait MemoryFacade: Send + Sync {
     // ── ARCH-1 (slice 2): EVERY personal-data read carries an AccessContext ──
@@ -401,6 +416,39 @@ pub trait MemoryFacade: Send + Sync {
     async fn recall_skills(&self, query: &str, limit: usize) -> Result<Vec<Skill>>;
     /// Record a run outcome → updates runs/successes; auto-quarantines a flaky skill.
     async fn record_skill_outcome(&self, name: &str, success: bool) -> Result<()>;
+
+    // ── attachable expertise: YantrikDB knowledge packs ────────────────────────────────────────
+    //
+    // Distinct from the mind's own capability packs (`ym pack install <json>`, which bundle banked
+    // SKILLS and their evals). A `.ydbpack` is a sealed corpus plus a constitution: mounting one
+    // gives the mind knowledge it can recall and rules it must follow, and unmounting gives them
+    // back leaving the host byte-for-byte unchanged.
+    //
+    // Defaulted so a memory implementation without pack support — and every test double — keeps
+    // compiling and honestly reports "no packs" rather than pretending.
+
+    /// Mount a sealed pack for this process. Returns the pack id.
+    async fn mount_pack(&self, _path: &str) -> Result<String> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// Copy a pack beside the database and mount it on every open from now on.
+    async fn install_pack(&self, _path: &str) -> Result<String> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// Unmount by pack id or name.
+    async fn unmount_pack(&self, _id_or_name: &str) -> Result<()> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// What is mounted right now: (name, version, origin, trust, rows).
+    async fn mounted_packs(&self) -> Result<Vec<PackBrief>> {
+        Ok(Vec::new())
+    }
+    /// The constitution + coverage block the engine assembles for the system prompt, or None when
+    /// nothing is mounted. The ENGINE owns this text so every consumer injects an identical block
+    /// rather than five divergent hand-written versions.
+    async fn pack_context(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 
     // ── cheap raw transcript (immediate conversational context; NOT knowledge) ──
     /// Append a raw chat line (role = "user" | "assistant").

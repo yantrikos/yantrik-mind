@@ -3215,3 +3215,53 @@ fn extraction_leaves_a_clean_document_alone() {
     // Something with no document at all is returned as-is, for the caller's error to describe.
     assert_eq!(extract_document("I could not build that."), "I could not build that.");
 }
+
+#[test]
+fn a_reply_about_html_is_not_published_as_a_page() {
+    // Observed live 2026-08-11: asked to CRITIQUE a set of HTML rules, the mind's answer contained
+    // enough markup to satisfy `looks_like_html`, so it was hosted at /page.html and the user got a
+    // link instead of the critique. The publish path must require a whole DOCUMENT.
+    // The ACTUAL sentence that triggered it. Merely NAMING the tags in prose is enough — my invented
+    // fixture used `<div>` without a closing tag and did not fire at all, so it would have "passed"
+    // while testing nothing.
+    let critique = "### 2. Document Termination\nThe HTML5 spec defines document end at </html>. \
+                    Correction: rely on well-formed closing tags (`<head>`, `<body>`, `<html>`). \
+                    No trailing comment marker is required.";
+    assert!(looks_like_html(critique), "it does contain markup — that is why the old guard fired");
+    assert!(!is_complete_html(critique), "but it is prose about markup, not a page");
+
+    let real_page = "<!doctype html><html><body><h1>Hi</h1></body></html>";
+    assert!(looks_like_html(real_page) && is_complete_html(real_page), "a real dumped page still publishes");
+}
+
+// ── Knowledge packs (.ydbpack), distinct from the mind's capability packs ────────────────────────
+
+#[tokio::test]
+async fn with_nothing_mounted_the_mind_says_so_rather_than_implying_knowledge() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+    let out = conv.packs_mounted().await;
+    assert!(out.contains("No knowledge packs mounted"), "got: {out}");
+    // And it must name the way in, or the honest answer is a dead end.
+    assert!(out.contains("pack mount"));
+}
+
+#[tokio::test]
+async fn an_unmounted_mind_injects_no_pack_block() {
+    // The prompt must not carry an empty or placeholder pack section when nothing is mounted —
+    // a heading with nothing under it reads to the model as "the pack said nothing", which is a
+    // different claim from "there is no pack".
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    assert_eq!(mem.pack_context().await.unwrap(), None);
+    assert!(mem.mounted_packs().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mounting_a_pack_that_does_not_exist_fails_loudly() {
+    // A mount that silently no-ops is the worst outcome: `pack mounted` would say nothing is
+    // attached while the operator believes the knowledge is in.
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let err = mem.mount_pack("/nonexistent/nope.ydbpack").await;
+    assert!(err.is_err(), "a missing pack file must be an error, not a quiet success");
+}

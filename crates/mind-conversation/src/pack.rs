@@ -598,3 +598,32 @@ mod tests {
         assert_eq!(doc2.security_enum(), SecurityLevel::GatedWrite);
     }
 }
+
+impl super::ConversationEngine {
+    /// `ym pack mounted` — the knowledge packs attached right now.
+    ///
+    /// Reports trust verbatim rather than as a tick: "Signed" means the signature verified AND the
+    /// publisher key is one this host trusts; "Unsigned" can still mean integrity was proven and only
+    /// the identity is unknown. Collapsing those into one symbol is how a re-signed pack borrows
+    /// someone else's reputation.
+    pub async fn packs_mounted(&self) -> String {
+        match self.memory.mounted_packs().await {
+            Err(e) => format!("(couldn't read mounted packs: {e})"),
+            Ok(p) if p.is_empty() => {
+                "No knowledge packs mounted. `ym pack mount <file.ydbpack>` for this run, or `ym pack adopt <file>` to keep it."
+                    .to_string()
+            }
+            Ok(packs) => {
+                let mut out = format!("📦 {} knowledge pack(s) mounted\n", packs.len());
+                for p in &packs {
+                    out.push_str(&format!(
+                        "  {} {}@{} · {} · {} rows · trust: {}\n",
+                        if p.trust.contains("Signed") { "🔏" } else { "•" },
+                        p.name, p.version, p.origin, p.rows, p.trust
+                    ));
+                }
+                out
+            }
+        }
+    }
+}

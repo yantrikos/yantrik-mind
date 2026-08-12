@@ -85,6 +85,13 @@ enum Cmd {
     ListSkills { reply: Reply<Vec<Skill>> },
     RecallSkills { query: String, limit: usize, reply: Reply<Vec<Skill>> },
     RecordSkillOutcome { name: String, success: bool, reply: Reply<()> },
+    // Attachable expertise. Mount/unmount are process-local; install copies the pack beside the db
+    // so it comes back on every open.
+    MountPack { path: String, reply: Reply<String> },
+    InstallPack { path: String, reply: Reply<String> },
+    UnmountPack { id: String, reply: Reply<()> },
+    MountedPacks { reply: Reply<Vec<mind_types::memory::PackBrief>> },
+    PackContext { reply: Reply<Option<String>> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
@@ -1470,6 +1477,44 @@ impl MemoryHandle {
                         Cmd::RecordSkillOutcome { name, success, reply } => {
                             let _ = reply.send(record_skill_outcome(&db, &name, success));
                         }
+                        Cmd::MountPack { path, reply } => {
+                            // The engine REFUSES a pack built against a different embedder
+                            // (PackEmbedderMismatch), because the query is encoded once and searched
+                            // against both indexes — mounting across embedding spaces returns
+                            // plausible-looking, meaningless results. That refusal is surfaced, never
+                            // forced: `allow_unverified_embedder` is deliberately not exposed here.
+                            let _ = reply.send(
+                                db.mount_pack(&path).map_err(|e| e.to_string()),
+                            );
+                        }
+                        Cmd::InstallPack { path, reply } => {
+                            let _ = reply.send(
+                                db.install_pack(&path).map_err(|e| e.to_string()),
+                            );
+                        }
+                        Cmd::UnmountPack { id, reply } => {
+                            let _ = reply.send(
+                                db.unmount_pack(&id).map(|_| ()).map_err(|e| e.to_string()),
+                            );
+                        }
+                        Cmd::MountedPacks { reply } => {
+                            let packs = db
+                                .mounted_packs()
+                                .into_iter()
+                                .map(|p| mind_types::memory::PackBrief {
+                                    id: p.pack_id,
+                                    name: p.name,
+                                    version: p.version,
+                                    origin: p.origin,
+                                    trust: format!("{:?}", p.trust),
+                                    rows: p.rows as u64,
+                                })
+                                .collect();
+                            let _ = reply.send(Ok(packs));
+                        }
+                        Cmd::PackContext { reply } => {
+                            let _ = reply.send(Ok(db.pack_context()));
+                        }
                         Cmd::StoreGoalPref { kind, text, reply } => {
                             let _ = reply.send(store_goal_pref(&db, &kind, &text));
                         }
@@ -2106,6 +2151,24 @@ impl MemoryFacade for MemoryHandle {
     async fn record_skill_outcome(&self, name: &str, success: bool) -> Result<()> {
         let name = name.to_string();
         self.call(|reply| Cmd::RecordSkillOutcome { name, success, reply }).await
+    }
+    async fn mount_pack(&self, path: &str) -> Result<String> {
+        let path = path.to_string();
+        self.call(|reply| Cmd::MountPack { path, reply }).await
+    }
+    async fn install_pack(&self, path: &str) -> Result<String> {
+        let path = path.to_string();
+        self.call(|reply| Cmd::InstallPack { path, reply }).await
+    }
+    async fn unmount_pack(&self, id_or_name: &str) -> Result<()> {
+        let id = id_or_name.to_string();
+        self.call(|reply| Cmd::UnmountPack { id, reply }).await
+    }
+    async fn mounted_packs(&self) -> Result<Vec<mind_types::memory::PackBrief>> {
+        self.call(|reply| Cmd::MountedPacks { reply }).await
+    }
+    async fn pack_context(&self) -> Result<Option<String>> {
+        self.call(|reply| Cmd::PackContext { reply }).await
     }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {

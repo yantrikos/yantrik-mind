@@ -5218,8 +5218,24 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                     "certify" | "evals" | "check" if !parg.is_empty() => self.pack_certify(&parg).await,
                     "rm" | "remove" | "uninstall" if !parg.is_empty() => self.pack_rm(&parg).await,
                     "draft" | "author" if !parg.is_empty() => self.pack_draft(&parg).await,
+                    // ── YantrikDB knowledge packs (a .ydbpack file), distinct from the capability
+                    // packs above. `mount` is for this process; `adopt` copies the pack beside the
+                    // database so it returns on every open.
+                    "mount" if !parg.is_empty() => match self.memory.mount_pack(&parg).await {
+                        Ok(id) => format!("📦 Mounted [{id}]. Its rules are in my prompt from the next turn, and its knowledge is recallable now."),
+                        Err(e) => format!("(couldn't mount that pack: {e})"),
+                    },
+                    "adopt" | "keep" if !parg.is_empty() => match self.memory.install_pack(&parg).await {
+                        Ok(id) => format!("📦 Installed [{id}] beside my database — it comes back every time I start."),
+                        Err(e) => format!("(couldn't install that pack: {e})"),
+                    },
+                    "unmount" | "drop" if !parg.is_empty() => match self.memory.unmount_pack(&parg).await {
+                        Ok(()) => format!("📦 Unmounted {parg}. Its rules and knowledge are gone; nothing of mine changed."),
+                        Err(e) => format!("(couldn't unmount that: {e})"),
+                    },
+                    "mounted" | "knowledge" => self.packs_mounted().await,
                     "" | "list" | "ls" => self.pack_list().await,
-                    _ => "Usage: ym pack install <json> · ym pack certify <name> · ym pack draft <topic> · ym pack rm <name> · ym packs".to_string(),
+                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · mounted".to_string(),
                 }
             }
             "plugins" => self.plugins.lock().unwrap().render_list(),
@@ -5874,12 +5890,21 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
         recent: &[(String, String)],
         user_text: &str,
         format_note: Option<&str>,
+        pack_context: Option<&str>,
     ) -> Vec<ChatMessage> {
         let mut messages = vec![ChatMessage::system(&self.persona)];
         // Straight after the persona, before any untrusted block: this is OUR instruction, and it must
         // not sit downstream of memory or web text that the model is told never to obey.
         if let Some(note) = format_note {
             messages.push(ChatMessage::system(note));
+        }
+        // MOUNTED PACK RULES. Assembled by the ENGINE (`pack_context`) rather than composed here, so
+        // every consumer injects an identical block — and because the engine is what sanitizes pack
+        // prose, labels each pack third-party with its origin@version, and appends the authority
+        // ceiling saying pack rules are DATA, not authority. Reproducing any of that by hand is how
+        // one consumer ends up without the containment the others have.
+        if let Some(pack_block) = pack_context {
+            messages.push(ChatMessage::system(pack_block));
         }
         if !grounding.is_empty() {
             messages.push(ChatMessage::system(format!(
@@ -6699,6 +6724,9 @@ Open reminders you're carrying for them:");
             think: mind_inference::think_for("dispatch", Some(false)),
             ..GenerationConfig::default()
         };
+        // Fetched once per turn, not once per step: the mounted set cannot change mid-loop and a
+        // per-step call would hit the memory actor `max_steps` times for an identical answer.
+        let pack_block = self.memory.pack_context().await.ok().flatten();
         // Consecutive steps that may return nothing new before the loop stops asking and composes.
         // Two, not one: a single repeat can be a legitimate re-check, three in a row cannot.
         const MAX_BARREN_STEPS: usize = 2;
@@ -6734,6 +6762,12 @@ Open reminders you're carrying for them:");
                 ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build. Output ONLY the JSON object."),
                 ChatMessage::user(&prompt),
             ];
+            // Mounted pack rules apply to the TOOL-USING path too. Injecting them only into the
+            // chat prompt would mean a pack changes how the mind answers but not how it builds —
+            // which is backwards, since building is where its rules do the most work.
+            if let Some(pb) = pack_block.as_deref() {
+                messages.insert(1, ChatMessage::system(pb));
+            }
             // The final answer of this loop lands in the cockpit, so it gets the same formatting
             // licence as a direct reply. Inserted at index 1 — after the persona, ahead of the work
             // log and any tool output, which are reference data the model is told not to obey.
@@ -6795,7 +6829,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
                 let mut a = ans.trim().to_string();
                 if !a.is_empty() {
-                    if looks_like_html(&a) {
+                    // A WHOLE DOCUMENT, not merely text containing markup. `looks_like_html` alone
+                    // asks whether the reply CONTAINS `<div>`/`<table>`/`<body>`, which a reply ABOUT
+                    // html satisfies — so asking the mind to critique a set of HTML rules got the
+                    // critique hosted as a web page instead of answered (observed live 2026-08-11,
+                    // the answer went to /page.html and the chat got a link). Requiring a closing
+                    // `</html>` keeps the intended case — a model that dumped a real page — and
+                    // excludes every reply that merely discusses markup.
+                    if looks_like_html(&a) && is_complete_html(&a) {
                         // The model dumped a raw HTML page instead of using publish_page — HOST it and
                         // send the link, never a wall of HTML in the chat.
                         let name = title_from_html(&a).unwrap_or_else(|| "page".to_string());
@@ -7716,6 +7757,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             &recent,
             user_text,
             id.format_note(),
+            self.memory.pack_context().await.ok().flatten().as_deref(),
         );
         let resp = self
             .inference

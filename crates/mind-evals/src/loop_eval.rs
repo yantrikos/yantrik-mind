@@ -223,8 +223,13 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 Grade::AnswerContains("Composed answer".into()),
             ],
         },
-        // 4. Failed-tool recovery: an unconfigured tool returns a failure observation, and the next
-        //    prompt must carry the explicit "FAILED … do NOT repeat" guidance (not a verbatim retry).
+        // 4. Unconfigured-tool recovery: the next prompt must tell the model not to re-issue the
+        //    call. This used to assert the literal token "FAILED", which was the old implementation's
+        //    WORDING rather than the property — and that wording was wrong: an unconfigured tool has
+        //    not failed, it is absent, and calling it a failure taught the reliability bandit that a
+        //    tool which never ran is flaky. So the grade now asserts the PROPERTY (don't retry) and
+        //    additionally asserts the prompt does NOT call it a failure, which pins the fix instead
+        //    of merely tolerating it.
         LoopScenario {
             name: "failed tool result changes the next action".into(),
             seeds: vec![],
@@ -235,7 +240,8 @@ pub fn loop_suite() -> Vec<LoopScenario> {
             native: vec![],
             turn:"what are my open PRs?".into(),
             grades: vec![
-                Grade::PromptAtContains(1, "FAILED".into()), // failure guidance injected
+                Grade::PromptAtContains(1, "do not retry".into()), // don't re-issue the call
+                Grade::PromptAtOmits(1, "FAILED".into()),           // …and it is not a failure
                 Grade::AnswerContains("couldn't reach GitHub".into()),
             ],
         },

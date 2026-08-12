@@ -62,6 +62,7 @@ mod timeline;
 mod support;
 pub mod support_nudge;
 pub mod surface;
+pub mod tool_outcome;
 mod tool_catalog;
 mod treasury;
 
@@ -6929,18 +6930,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
-            // reliability becomes measured self-knowledge instead of a blind spot. A short parenthetical
-            // carrying a negative marker is a failure (an empty/unconfigured/errored tool) — the marker
-            // set is broad so "(github not configured)" / "(couldn't reach …)" all register (the
-            // agent-loop eval caught the earlier gap where "not configured" slipped through).
-            let obs_lc = obs.to_lowercase();
-            let failure_marker = ["error", "couldn't", "could not", "failed", "not configured",
-                "isn't configured", "no mailbox", "not set", "unavailable", "unable", "no such",
-                "nothing", "no results", "not found"]
-                .iter()
-                .any(|m| obs_lc.contains(m));
-            let tool_ok = obs.chars().count() > 10 && !(obs.trim_start().starts_with('(') && failure_marker);
-            let _ = self.memory.record_tool_outcome(&tool, tool_ok).await;
+            // reliability becomes measured self-knowledge instead of a blind spot — which is exactly
+            // why this must not be one boolean off a substring list. `no results` is a search WORKING,
+            // `not configured` is a capability gap, and a gate refusal is the safety machinery doing
+            // its job; none of the three is the tool being unreliable, and averaging them together
+            // taught the mind false beliefs about itself. See `tool_outcome` for the four defects.
+            let outcome = crate::tool_outcome::Outcome::classify(&tool, &obs);
+            if let Some(ok) = outcome.counts_toward_reliability() {
+                let _ = self.memory.record_tool_outcome(&tool, ok).await;
+            }
 
             // ── BARREN-STEP GUARD ────────────────────────────────────────────────────────────────
             //
@@ -7000,17 +6998,20 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
                 return Ok(obs);
             }
-            // SOTA finding: a failed/empty tool result must CHANGE the next action — feeding it back
-            // for a verbatim retry is the dominant loop trigger. Mark failures explicitly so the model
-            // switches tool or answers, rather than re-issuing the same call.
-            if tool_ok {
-                scratch.push_str(&format!("\n[{step}] {tool} -> {}", obs.chars().take(900).collect::<String>()));
-            } else {
-                scratch.push_str(&format!(
-                    "\n[{step}] {tool} FAILED/empty ({}) — do NOT repeat this exact call; try a DIFFERENT tool or answer with what you already have.",
-                    obs.chars().take(300).collect::<String>()
-                ));
-            }
+            // SOTA finding: a result that did not advance the goal must CHANGE the next action —
+            // feeding it back for a verbatim retry is the dominant loop trigger.
+            //
+            // This used to say "FAILED/empty" for every non-success, which merges four situations
+            // that call for four different moves: an empty search wants a DIFFERENT QUERY, an
+            // unconfigured tool must never be retried at all, a gate refusal should be reported to
+            // the person rather than worked around, and only a real break is worth one retry. The
+            // model was left to re-derive that from the same words the classifier had just read.
+            let head = if outcome == crate::tool_outcome::Outcome::Ok { 900 } else { 300 };
+            scratch.push_str(&format!(
+                "\n[{step}] {tool} -> {}{}",
+                obs.chars().take(head).collect::<String>(),
+                outcome.note()
+            ));
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model
         // literally cannot weave in the gift deadline sitting next to the birthday it's reporting.

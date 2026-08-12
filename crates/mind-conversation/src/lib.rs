@@ -6584,6 +6584,26 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                 }
             }
         }
+        // MOUNTED-PACK KNOWLEDGE. The mind's own recall scores its typed BELIEF GRAPH and never
+        // touches the engine's vector index, so a mounted pack's corpus was unreachable: the
+        // constitution arrived and none of the 15 facts did, while every surface looked healthy.
+        // Scoped to the packs' own namespaces — see `recall_from_packs`, which must never widen to
+        // an unscoped recall.
+        //
+        // Labelled third-party and kept OUT of the memory block on purpose: these are a publisher's
+        // claims, not things the household told the mind, and the two must not read alike.
+        if let Ok(hits) = self.memory.recall_from_packs(user_text, 5).await {
+            if !hits.is_empty() {
+                grounding.push_str("
+
+FROM A MOUNTED KNOWLEDGE PACK (third-party reference, not the household's own facts):
+");
+                for (text, _score) in hits {
+                    grounding.push_str(&format!("- {}
+", text.chars().take(400).collect::<String>()));
+                }
+            }
+        }
         // Self-referential turn -> the instrument panel (fixes introspection myopia).
         if is_self_referential(user_text) {
             grounding.push_str(&self.self_model_block().await);

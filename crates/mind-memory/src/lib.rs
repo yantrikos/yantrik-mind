@@ -92,6 +92,7 @@ enum Cmd {
     UnmountPack { id: String, reply: Reply<()> },
     MountedPacks { reply: Reply<Vec<mind_types::memory::PackBrief>> },
     PackContext { reply: Reply<Option<String>> },
+    RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<(String, f64)>> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
@@ -1508,12 +1509,39 @@ impl MemoryHandle {
                                     origin: p.origin,
                                     trust: format!("{:?}", p.trust),
                                     rows: p.rows as u64,
+                                    namespace: p.namespace.clone(),
                                 })
                                 .collect();
                             let _ = reply.send(Ok(packs));
                         }
                         Cmd::PackContext { reply } => {
                             let _ = reply.send(Ok(db.pack_context()));
+                        }
+                        Cmd::RecallFromPacks { query, top_k, reply } => {
+                            // The engine's text recall spans EVERY namespace, so the results are
+                            // filtered down to the mounted packs' own namespaces before anything is
+                            // returned. Recalling unscoped would have worked for packs and exposed
+                            // every private household namespace at the same time.
+                            let ns: std::collections::HashSet<String> = db
+                                .mounted_packs()
+                                .into_iter()
+                                .filter_map(|p| p.namespace)
+                                .collect();
+                            if ns.is_empty() {
+                                let _ = reply.send(Ok(Vec::new()));
+                                continue;
+                            }
+                            let hits = db
+                                .recall_text(&query, top_k.max(1) * 4)
+                                .map(|rs| {
+                                    rs.into_iter()
+                                        .filter(|r| ns.contains(&r.namespace))
+                                        .take(top_k.max(1))
+                                        .map(|r| (r.text, r.score))
+                                        .collect::<Vec<_>>()
+                                })
+                                .map_err(|e| e.to_string());
+                            let _ = reply.send(hits);
                         }
                         Cmd::StoreGoalPref { kind, text, reply } => {
                             let _ = reply.send(store_goal_pref(&db, &kind, &text));
@@ -2169,6 +2197,10 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn pack_context(&self) -> Result<Option<String>> {
         self.call(|reply| Cmd::PackContext { reply }).await
+    }
+    async fn recall_from_packs(&self, query: &str, top_k: usize) -> Result<Vec<(String, f64)>> {
+        let query = query.to_string();
+        self.call(|reply| Cmd::RecallFromPacks { query, top_k, reply }).await
     }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {

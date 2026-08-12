@@ -298,6 +298,8 @@ pub struct PackBrief {
     pub origin: String,
     pub trust: String,
     pub rows: u64,
+    /// The namespace the pack's rows live under — what scoped recall needs to reach them.
+    pub namespace: Option<String>,
 }
 
 #[async_trait]
@@ -441,6 +443,14 @@ pub trait MemoryFacade: Send + Sync {
     }
     /// What is mounted right now: (name, version, origin, trust, rows).
     async fn mounted_packs(&self) -> Result<Vec<PackBrief>> {
+        Ok(Vec::new())
+    }
+    /// Recall from MOUNTED PACKS ONLY — never the host's own memories.
+    ///
+    /// Scoped deliberately. The engine's text recall is unscoped and would return every namespace in
+    /// the database, including other household members' private facts; it would "work" for packs
+    /// while quietly defeating read-isolation. This returns `(text, score)` for pack rows alone.
+    async fn recall_from_packs(&self, _query: &str, _top_k: usize) -> Result<Vec<(String, f64)>> {
         Ok(Vec::new())
     }
     /// The constitution + coverage block the engine assembles for the system prompt, or None when

@@ -3265,3 +3265,23 @@ async fn mounting_a_pack_that_does_not_exist_fails_loudly() {
     let err = mem.mount_pack("/nonexistent/nope.ydbpack").await;
     assert!(err.is_err(), "a missing pack file must be an error, not a quiet success");
 }
+
+#[tokio::test]
+async fn pack_recall_is_scoped_and_returns_nothing_when_no_pack_is_mounted() {
+    // The safety property, pinned. `recall_from_packs` must never widen into an unscoped recall:
+    // the engine's text recall spans EVERY namespace, so an unfiltered version would surface other
+    // household members' private facts while appearing to "work" for packs. With nothing mounted the
+    // only correct answer is an empty list — never the host's own memories.
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    mem.remember_as_belief(BeliefAssertion {
+        statement: "Brishti's birthday is in July".into(),
+        polarity: 1.0,
+        weight: 1.5,
+        source_event: Some("test".into()),
+        provenance: "told".into(),
+    })
+    .await
+    .ok();
+    let hits = mem.recall_from_packs("when is the birthday", 5).await.unwrap();
+    assert!(hits.is_empty(), "with no pack mounted this must return nothing, got: {hits:?}");
+}

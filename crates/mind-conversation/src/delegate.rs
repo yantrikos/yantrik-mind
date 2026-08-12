@@ -209,6 +209,12 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
                 // A DOCUMENT budget, not a reply budget. The default 2048 produced a page that stopped
                 // mid-tag, and the chain published the fragment and announced it was live.
                 max_tokens: Some(16_000usize),
+                // Thinking OFF. On a thinking model the budget is shared between the reasoning
+                // preamble and the answer, and this step needs OUTPUT tokens: measured, the same
+                // prompt gave a complete 9-10k-character page with thinking off and ~900 characters
+                // of non-document with it left to the backend default. The bigger the rule block, the
+                // longer it reasons and the less document survives.
+                think: Some(false),
             },
             RecipeStep::Tool {
                 tool_name: "publish_page".into(),

@@ -3311,3 +3311,21 @@ fn the_page_recipe_carries_mounted_pack_rules_into_the_author_step() {
     assert!(!bare.contains("HOUSE RULES"));
     assert!(bare.starts_with("Build this page"));
 }
+
+#[test]
+fn the_page_author_step_disables_thinking() {
+    // THE ACTUAL CAUSE of the v0.3.0 pack "regression". On a thinking model the token budget is
+    // shared between the reasoning preamble and the answer, and GenerationConfig::default() leaves
+    // `think: None`, which means the backend default — thinking ON for qwen3.6. A step that authors a
+    // whole document then spends its budget reasoning and stops mid-way: measured at ~944 and ~900
+    // characters of non-document, twice, while the identical prompt with thinking off produced a
+    // complete 9-10k-character page. It looked like a constitution size cliff and was not.
+    let r = crate::delegate::page_recipe("P", "a portfolio", None);
+    match &r.steps[1] {
+        mind_recipes::RecipeStep::Think { think, max_tokens, .. } => {
+            assert_eq!(*think, Some(false), "the author step must not spend its budget thinking");
+            assert!(max_tokens.unwrap_or(0) >= 8000);
+        }
+        _ => panic!("step 1 is not the author step"),
+    }
+}

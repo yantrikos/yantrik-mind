@@ -166,6 +166,7 @@ impl super::ConversationEngine {
                             store_as: "result".into(),
                             on_error: ErrorAction::Fail,
                             max_tokens: None,
+                            think: None,
                         },
                         RecipeStep::Notify { message: format!("📥 [{}] {{{{result}}}}", agent.name) },
                     ],

@@ -236,6 +236,7 @@ impl ConversationEngine {
                 store_as: "result".into(),
                 on_error: mind_recipes::ErrorAction::Fail,
                 max_tokens: None,
+                think: None,
             }],
         };
         let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;

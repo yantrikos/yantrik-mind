@@ -67,6 +67,16 @@ pub enum RecipeStep {
         on_error: ErrorAction,
         #[serde(default)]
         max_tokens: Option<usize>,
+        /// Force the reasoning preamble off (or on) for this step.
+        ///
+        /// `None` leaves it to the backend, and on a THINKING model that means thinking is ON and the
+        /// token budget is shared between the preamble and the answer. For a step that authors a
+        /// DOCUMENT that is the wrong trade: the model spends its budget reasoning about the brief and
+        /// runs out before the document is finished. Measured: the same prompt produced a complete
+        /// 9-10k-character page with thinking off, and ~900 characters of non-document through the
+        /// recipe path with it left to the default.
+        #[serde(default)]
+        think: Option<bool>,
     },
     /// LLM synthesis with per-claim citations from `source_vars`. Stores CitedOutput JSON.
     ThinkCited { prompt: String, store_as: String, source_vars: Vec<String>, #[serde(default)] on_error: ErrorAction },
@@ -713,7 +723,7 @@ GOAL: GOAL_HERE"#;
                     Err(e) => StepResult::Failed(format!("tool '{tool_name}' failed: {e}")),
                 }
             }
-            RecipeStep::Think { prompt, store_as, max_tokens, .. } => {
+            RecipeStep::Think { prompt, store_as, max_tokens, think, .. } => {
                 let resolved = resolve_vars(prompt, vars);
                 let messages = vec![
                     ChatMessage::system(&self.persona),
@@ -722,9 +732,10 @@ GOAL: GOAL_HERE"#;
                     ),
                     ChatMessage::user(&resolved),
                 ];
-                let cfg = match max_tokens {
-                    Some(n) => GenerationConfig { max_tokens: *n, ..GenerationConfig::default() },
-                    None => GenerationConfig::default(),
+                let cfg = GenerationConfig {
+                    max_tokens: max_tokens.unwrap_or(GenerationConfig::default().max_tokens),
+                    think: *think,
+                    ..GenerationConfig::default()
                 };
                 match self.inference.chat_grounded(messages, cfg).await {
                     Ok(r) => {
@@ -1787,7 +1798,7 @@ mod chaining_tests {
             id: "t".into(),
             name: "chain".into(),
             steps: vec![
-                RecipeStep::Think { prompt: "write it".into(), store_as: "page".into(), on_error: ErrorAction::Fail, max_tokens: None },
+                RecipeStep::Think { prompt: "write it".into(), store_as: "page".into(), on_error: ErrorAction::Fail, max_tokens: None, think: None },
                 RecipeStep::Tool {
                     tool_name: "publish_page".into(),
                     args: serde_json::json!({"html": "{{page}}"}),

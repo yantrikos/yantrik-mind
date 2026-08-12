@@ -5710,7 +5710,7 @@ Each agentic build reads the codebase, so cost scales with runs, not with diff s
                          Output ONLY the body text — no 'Subject:' line, no bracketed placeholders, no signature block."
                     )
                 };
-                steps.push(RecipeStep::Think { prompt: draft_prompt, store_as: "draft".into(), on_error: ErrorAction::Fail, max_tokens: None });
+                steps.push(RecipeStep::Think { prompt: draft_prompt, store_as: "draft".into(), on_error: ErrorAction::Fail, max_tokens: None, think: None });
                 steps.push(RecipeStep::Act {
                     kind: "send_email".into(),
                     target: to.clone(),

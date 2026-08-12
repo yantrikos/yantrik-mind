@@ -153,7 +153,18 @@ const PAGE_NOUNS: &[&str] = &[
 ///
 /// The research step is `Skip`-on-error on purpose: no network is a reason to design from first
 /// principles, not a reason to produce nothing.
-pub fn page_recipe(name: &str, task: &str) -> Recipe {
+pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
+    // Mounted-pack rules have to be threaded in HERE. The page chain runs on the RecipeEngine, which
+    // builds its own messages and never sees the ConversationEngine's prompt — so injecting the pack
+    // block into build_prompt and the agent loop covered two of the three paths, and the one that
+    // actually writes pages was the one left out. Verified live: a page built with web-craft mounted
+    // contained none of its markers.
+    let rules = pack_rules
+        .map(|r| format!("HOUSE RULES from a mounted knowledge pack — follow them:
+{r}
+
+"))
+        .unwrap_or_default();
     Recipe {
         id: "delegate-page".into(),
         name: format!("page: {name}"),
@@ -166,7 +177,7 @@ pub fn page_recipe(name: &str, task: &str) -> Recipe {
             },
             RecipeStep::Think {
                 prompt: format!(
-                    "Build this page: {task}\n\n\
+                    "{rules}Build this page: {task}\n\n\
                      REFERENCES (inspiration only — never copy their text or claim their content as ours):\n{{{{refs}}}}\n\n\
                      Output ONE complete, self-contained HTML document and NOTHING else — no commentary \
                      before or after, no markdown fence. Start with <!doctype html> and END with \
@@ -477,10 +488,11 @@ impl super::ConversationEngine {
         let (id2, name2, task2) = (id.clone(), name.clone(), task.clone());
         if kind == "page" {
             let engine = self.recipes.clone().unwrap();
+            let pack_rules = self.memory.pack_context().await.ok().flatten();
             tokio::spawn(async move {
                 scratch_note(&mem, &id2, &format!("task: {task2}")).await;
                 scratch_note(&mem, &id2, "chain: research → author → publish").await;
-                let out = engine.run_with(&page_recipe(&name2, &task2), std::collections::HashMap::new()).await;
+                let out = engine.run_with(&page_recipe(&name2, &task2, pack_rules.as_deref()), std::collections::HashMap::new()).await;
                 // The URL is the deliverable. A chain that "succeeded" without one has not built
                 // anything, so that is reported as a failure rather than as a cheerful empty result.
                 let url = out.vars.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string();

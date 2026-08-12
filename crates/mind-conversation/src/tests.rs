@@ -3067,7 +3067,7 @@ fn the_page_chain_reaches_a_published_url() {
     // The point of the chain is that a later step consumes an earlier one's output. This asserts the
     // wiring: research feeds the author step, the author's document feeds publish, and the URL that
     // comes back is what gets announced.
-    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website");
+    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website", None);
     let kinds: Vec<&str> = r
         .steps
         .iter()
@@ -3167,7 +3167,7 @@ fn a_document_that_never_closes_is_recognised_as_truncated() {
 fn the_author_step_gets_a_document_budget_not_a_reply_budget() {
     // 2048 tokens cannot hold a styled page. This pins the setting to the failure it fixes, so a
     // future edit that drops it fails here rather than in production as a half-page.
-    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website");
+    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website", None);
     let budget = match &r.steps[1] {
         mind_recipes::RecipeStep::Think { max_tokens, .. } => *max_tokens,
         _ => None,
@@ -3178,7 +3178,7 @@ fn the_author_step_gets_a_document_budget_not_a_reply_budget() {
 #[test]
 fn the_brief_demands_a_finished_page() {
     // The first attempt produced a hero and nothing else, which technically satisfied "build a page".
-    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website");
+    let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website", None);
     let prompt = match &r.steps[1] {
         mind_recipes::RecipeStep::Think { prompt, .. } => prompt.clone(),
         _ => String::new(),
@@ -3284,4 +3284,30 @@ async fn pack_recall_is_scoped_and_returns_nothing_when_no_pack_is_mounted() {
     .ok();
     let hits = mem.recall_from_packs("when is the birthday", 5).await.unwrap();
     assert!(hits.is_empty(), "with no pack mounted this must return nothing, got: {hits:?}");
+}
+
+#[test]
+fn the_page_recipe_carries_mounted_pack_rules_into_the_author_step() {
+    // The page chain runs on the RecipeEngine, which builds its OWN messages and never sees the
+    // ConversationEngine's prompt. Injecting the pack block into build_prompt and the agent loop
+    // therefore covered two of three paths and missed the one that writes pages — verified live: a
+    // page built with web-craft mounted contained none of its markers.
+    let with = crate::delegate::page_recipe("P", "a portfolio", Some("Spend boldness once."));
+    let prompt = match &with.steps[1] {
+        mind_recipes::RecipeStep::Think { prompt, .. } => prompt.clone(),
+        _ => String::new(),
+    };
+    assert!(prompt.contains("Spend boldness once."), "pack rules never reached the author step");
+    assert!(prompt.contains("HOUSE RULES"), "and they must be labelled as the pack's, not ours");
+    // Rules precede the brief, so they frame it rather than trailing it.
+    assert!(prompt.find("HOUSE RULES").unwrap() < prompt.find("Build this page").unwrap());
+
+    // With nothing mounted the prompt is unchanged — no empty heading implying a silent pack.
+    let without = crate::delegate::page_recipe("P", "a portfolio", None);
+    let bare = match &without.steps[1] {
+        mind_recipes::RecipeStep::Think { prompt, .. } => prompt.clone(),
+        _ => String::new(),
+    };
+    assert!(!bare.contains("HOUSE RULES"));
+    assert!(bare.starts_with("Build this page"));
 }

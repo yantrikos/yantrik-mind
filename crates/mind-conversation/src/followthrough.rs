@@ -326,6 +326,33 @@ mod tests {
 }
 
 impl super::ConversationEngine {
+    /// Pairs the operator has ruled are NOT duplicates of each other (`consolidate … except <id>`).
+    pub(crate) async fn not_duplicate_pairs(&self) -> std::collections::HashSet<String> {
+        self.memory
+            .profile_get(super::NOT_DUPLICATE_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .map(|v| v.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Record a standing veto so the matcher stops re-proposing a pair the operator rejected.
+    pub(crate) async fn remember_not_duplicate(&self, pairs: &[String]) {
+        if pairs.is_empty() {
+            return;
+        }
+        let mut all = self.not_duplicate_pairs().await;
+        all.extend(pairs.iter().cloned());
+        let mut list: Vec<String> = all.into_iter().collect();
+        list.sort(); // stable on disk, so a diff of the profile is readable
+        let _ = self
+            .memory
+            .profile_set(super::NOT_DUPLICATE_KEY, &serde_json::to_string(&list).unwrap_or_default())
+            .await;
+    }
+
     /// When each thread's closure question was asked. Keyed by task id.
     pub(crate) async fn closure_asks(&self) -> serde_json::Map<String, serde_json::Value> {
         self.memory

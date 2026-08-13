@@ -3329,3 +3329,80 @@ fn the_page_author_step_disables_thinking() {
         _ => panic!("step 1 is not the author step"),
     }
 }
+
+/// Consolidation closes the user's real commitments, so the grouping has to be right about BOTH
+/// halves: the four rows that were really one watch errand collapse, and unrelated errands do not.
+/// These descriptions are verbatim from the live store on 2026-08-13.
+#[test]
+fn clustering_collapses_one_errand_and_leaves_unrelated_ones_alone() {
+    fn t(id: &str, desc: &str, due: Option<u64>) -> mind_types::Task {
+        mind_types::Task {
+            id: id.into(),
+            description: desc.into(),
+            status: "pending".into(),
+            priority: "medium".into(),
+            due_ms: due,
+        }
+    }
+    let tasks = vec![
+        t("83", "Order Brishti's Rosefield watch before July 17th", Some(1_784_247_319_743)),
+        t("100", "place online order for Brishti's birthday gift (Rosefield watch)", None),
+        t("103", "Buy Rosefield watch for Brishti", None),
+        t("72", "order Rosefield Octagon XS Gold watch ($149) for Brishti's birthday", None),
+        t("90", "Create a packing list for the Branson trip", None),
+        t("157", "Hunt for papers on 'memory consolidation language models' research again", None),
+    ];
+    let no_vetoes = std::collections::HashSet::new();
+    let clusters = crate::cluster_tasks(&tasks, &no_vetoes);
+    let watch = clusters
+        .iter()
+        .find(|c| c.iter().any(|x| x.id == "103"))
+        .expect("the watch cluster exists");
+    assert!(watch.len() >= 3, "the watch errand should collapse, got {} rows", watch.len());
+    // The due-dated row is canonical, so consolidating keeps the one carrying the deadline.
+    assert_eq!(watch[0].id, "83", "canonical must be the due-dated, most informative row");
+    // Unrelated errands must never be swept in.
+    for c in &clusters {
+        let ids: Vec<&str> = c.iter().map(|x| x.id.as_str()).collect();
+        if ids.contains(&"90") || ids.contains(&"157") {
+            assert_eq!(c.len(), 1, "unrelated errand was clustered: {ids:?}");
+        }
+    }
+    // A completed row is not a duplicate to close.
+    let mut done = tasks.clone();
+    done[2].status = "completed".into();
+    let after = crate::cluster_tasks(&done, &no_vetoes);
+    assert!(
+        after.iter().flatten().all(|x| x.id != "103"),
+        "closed tasks must not appear in any cluster"
+    );
+
+    // A recorded veto outranks the matcher: the pair the operator rejected stays split.
+    let mut vetoed = std::collections::HashSet::new();
+    vetoed.insert(crate::pair_key("83", "103"));
+    let split = crate::cluster_tasks(&tasks, &vetoed);
+    let c83 = split.iter().find(|c| c[0].id == "83").expect("83 heads a cluster");
+    assert!(
+        !c83.iter().any(|x| x.id == "103"),
+        "a vetoed pair must never be clustered again"
+    );
+}
+
+/// One occasion must occupy one row in the panel. These are the exact strings the live box emitted
+/// on 2026-08-13, where a birthday arrived twice — once from the people registry ("08-13: …") and
+/// once as the reminder attached to it ("Thu Aug 13: ⏰ …").
+#[test]
+fn one_occasion_collapses_to_one_panel_row() {
+    fn subject(line: &str) -> String {
+        line.split_once(": ").map(|(_, r)| r).unwrap_or(line).trim().trim_start_matches('⏰').trim().to_string()
+    }
+    let a = subject("08-13: Pranab's Mom's birthday");
+    let b = subject("Thu Aug 13: ⏰ Pranab's Mom's birthday");
+    assert_eq!(a, "Pranab's Mom's birthday");
+    assert!(crate::task_similar(&a, &b), "the same birthday from two sources must collapse");
+
+    // The OCCASION and an ERRAND about it are different rows and must both survive.
+    let occasion = subject("08-13: Maa Durga's birthday");
+    let errand = subject("Thu Aug 13: ⏰ Coordinate plans for Maa Durga's birthday celebration");
+    println!("occasion={occasion:?} errand={errand:?} similar={}", crate::task_similar(&occasion, &errand));
+}

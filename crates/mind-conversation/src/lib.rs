@@ -515,9 +515,61 @@ fn is_personal_reminder(desc: &str) -> bool {
     !INTERNAL.iter().any(|k| d.contains(k))
 }
 
+/// The operator's standing "these two are NOT the same thing" rulings.
+///
+/// Sparing a row with `except` used to last exactly one command: the matcher re-proposed it on the
+/// next preview, forever, because nothing recorded the judgement. A veto the tool forgets is a veto
+/// the operator has to keep re-issuing, so it is stored — keyed by the PAIR, since the ruling is
+/// about a relationship ("Brishti's birthday is not the watch errand"), not about either row alone.
+const NOT_DUPLICATE_KEY: &str = "task_not_duplicate";
+
+/// Stable key for an unordered pair, so the ruling holds whichever row ends up canonical.
+fn pair_key(a: &str, b: &str) -> String {
+    if a <= b {
+        format!("{a}|{b}")
+    } else {
+        format!("{b}|{a}")
+    }
+}
+
+/// Group open tasks into clusters of the same underlying commitment, canonical first.
+///
+/// The store accrues a NEW task every time a commitment is mentioned again, so one errand becomes
+/// four rows — live on 2026-08-13 the same watch appeared as "Order Brishti's Rosefield watch
+/// before July 17th", "place online order for Brishti's birthday gift (Rosefield watch)", "Buy
+/// Rosefield watch for Brishti" and "order Rosefield Octagon XS Gold watch ($149)". The briefing
+/// already hid the duplicates behind one representative, which is why they went unnoticed while
+/// staying open forever: hiding a duplicate is not resolving it.
+///
+/// Canonical = the most informative row (due-dated first, then longest), matching the
+/// representative the briefing already shows, so consolidating never changes what the user reads.
+/// Singletons are returned too; callers filter for `len() > 1` when they only want duplicates.
+pub(crate) fn cluster_tasks(tasks: &[Task], vetoed: &std::collections::HashSet<String>) -> Vec<Vec<Task>> {
+    let mut ordered: Vec<Task> = tasks.iter().filter(|t| t.is_open()).cloned().collect();
+    ordered.sort_by(|a, b| {
+        (a.due_ms.is_none(), std::cmp::Reverse(a.description.len()))
+            .cmp(&(b.due_ms.is_none(), std::cmp::Reverse(b.description.len())))
+    });
+    let mut clusters: Vec<Vec<Task>> = Vec::new();
+    for t in ordered {
+        // Compare against the CANONICAL of each cluster, not every member: chaining off later
+        // members would let A~B and B~C drag together an A and C that share nothing.
+        //
+        // A standing veto beats similarity outright. The operator has already looked at this exact
+        // pair and said no; re-proposing it is the tool arguing with a decision it was told.
+        match clusters.iter_mut().find(|c| {
+            task_similar(&c[0].description, &t.description) && !vetoed.contains(&pair_key(&c[0].id, &t.id))
+        }) {
+            Some(c) => c.push(t),
+            None => clusters.push(vec![t]),
+        }
+    }
+    clusters
+}
+
 /// Cheap fuzzy match for reminder dedup: Jaccard over content words. Catches the many near-identical
 /// "buy Brishti a watch/gift" entries the store accrues, without merging genuinely different to-dos.
-fn task_similar(a: &str, b: &str) -> bool {
+pub(crate) fn task_similar(a: &str, b: &str) -> bool {
     fn words(s: &str) -> std::collections::HashSet<String> {
         s.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
@@ -529,9 +581,59 @@ fn task_similar(a: &str, b: &str) -> bool {
     if wa.is_empty() || wb.is_empty() {
         return a.eq_ignore_ascii_case(b);
     }
-    let inter = wa.intersection(&wb).count() as f64;
-    let uni = wa.union(&wb).count() as f64;
-    inter / uni >= 0.5
+    // MUTUALLY EXCLUSIVE TOKENS VETO A MERGE, however well the rest overlaps. Word-overlap alone
+    // says "Pranab's Mom's birthday" and "Pranab's Dad's birthday" are 0.67 the same thing, and
+    // closing one because the other was done would silently delete a real commitment about a
+    // different person. The distinguishing word is the whole meaning of the row, so it outranks
+    // every word they share. Same shape for the two ends of a stay: checking IN and checking OUT
+    // of one hotel are one trip and two errands.
+    const EXCLUSIVE: [&[&str]; 6] = [
+        &["mom", "mother", "mum", "maa"],
+        &["dad", "father", "papa"],
+        &["checkin", "check-in", "arrive", "arrival"],
+        &["checkout", "check-out", "depart", "departure"],
+        &["son", "brother"],
+        &["daughter", "sister"],
+    ];
+    // Phrase-level first: "check in" / "check out" tokenize into a dropped 2-letter word, so the
+    // distinction is invisible by the time we have word sets.
+    let (la, lb) = (a.to_lowercase(), b.to_lowercase());
+    let phrase = |s: &str, p: &[&str]| p.iter().any(|x| s.contains(x));
+    let in_words: &[&str] = &["check in ", "checking in", "check-in", "arrive"];
+    let out_words: &[&str] = &["check out", "checking out", "check-out", "depart"];
+    if (phrase(&la, in_words) && phrase(&lb, out_words)) || (phrase(&la, out_words) && phrase(&lb, in_words)) {
+        return false;
+    }
+    for (i, group) in EXCLUSIVE.iter().enumerate() {
+        let a_has = group.iter().any(|g| wa.contains(*g));
+        if !a_has {
+            continue;
+        }
+        for (j, other) in EXCLUSIVE.iter().enumerate() {
+            if i != j && other.iter().any(|g| wb.contains(*g)) {
+                return false;
+            }
+        }
+    }
+    let inter = wa.intersection(&wb).count();
+    // OVERLAP, not Jaccard. The same commitment gets re-recorded at very different lengths — "Buy
+    // Rosefield watch for Brishti" against "Order Brishti's Rosefield watch before July 17th" —
+    // and Jaccard punishes exactly that: every extra word in the longer row grows the union and
+    // drives the score down. Those two share EVERY content word of the shorter row and still
+    // scored 3/7 = 0.43, under the old 0.5 bar, which is why four rows for one errand sat open for
+    // a month while the briefing quietly showed one of them.
+    //
+    // Dividing by the SMALLER side asks the right question: is one row wholly about the other?
+    // The floor of two shared words is what keeps that from over-merging — a single word in common
+    // ("venture" in "resume venture" and "work on the venture tomorrow") is a topic, not a
+    // duplicate, and closing those together would silently delete a real commitment.
+    // 0.55, measured against the live store rather than picked: the four rows of the one watch
+    // errand score 1.00, 1.00, 0.62 and — the pair that sets the bar — 0.57 between "Order
+    // Brishti's Rosefield watch before July 17th" and "place online order for Brishti's birthday
+    // gift (Rosefield watch)". At 0.6 that pair splits one errand into two clusters, which is the
+    // same failure in a smaller size.
+    let overlap = inter as f64 / wa.len().min(wb.len()) as f64;
+    inter >= 2 && overlap >= 0.55
 }
 
 /// The dimensions the ask-drive proactively mines to learn the user's world — hobbies + recreation
@@ -1587,7 +1689,7 @@ async fn studio_task(
         "Write ONE unique {caption_mood} caption for a {kind} of {people_desc}. Theme: {theme}. Grounded details you may weave in (never invent others): dates {span}{}. Max 18 words. No hashtags. Not generic — make it feel written for THEM.",
         if place_note.is_empty() { String::new() } else { format!("; places {place_note}") }
     );
-    let cfg = GenerationConfig { max_tokens: 80, ..GenerationConfig::default() };
+    let cfg = GenerationConfig { max_tokens: 80, think: mind_inference::think_for("photo_caption", Some(false)), ..GenerationConfig::default() };
     let caption = inference
         .chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg)
         .await
@@ -4185,6 +4287,13 @@ impl ConversationEngine {
             // so "I'm not tracking that anymore" and `ym drop <words>` do the same thing.
             "drop" | "untrack" | "stop_tracking" if !rest.trim().is_empty() => self.stop_tracking(&rest).await,
             // --- tasks/reminders: list + complete (clears stale ones) ---
+            // `ym tasks consolidate [apply]` is the same handler as the bare verb — the tasks list
+            // is where you SEE the duplicates, so it has to be where you can act on them.
+            "tasks" | "todos" | "todo" | "reminders" if rest.trim_start().starts_with("consolidate") || rest.trim_start().starts_with("dedupe") => {
+                let sub = rest.trim_start();
+                let arg = sub.split_once(' ').map(|(_, a)| a.trim()).unwrap_or("");
+                Box::pin(self.cli_dispatch(&format!("consolidate {arg}"), ctx)).await
+            }
             "tasks" | "todos" | "todo" | "reminders" => {
                 let (reminders, internal) = self.split_tasks().await;
                 if reminders.is_empty() && internal.is_empty() {
@@ -4205,11 +4314,137 @@ impl ConversationEngine {
                     out
                 }
             }
-            "done" | "complete" if !rest.is_empty() => match self.memory.complete_task(rest.trim()).await {
-                Ok(true) => format!("Marked {} done.", rest.trim()),
-                Ok(false) => format!("No open task '{}'.", rest.trim()),
-                Err(e) => format!("(error: {e})"),
-            },
+            // Finishing a commitment finishes EVERY row that recorded it. One errand accrues four
+            // reminders as it gets mentioned again; closing one and leaving three is why the list
+            // never shrinks and why done work keeps resurfacing. The siblings are named in the
+            // reply rather than closed silently — a batch close the user cannot see is a batch
+            // close they cannot correct.
+            "done" | "complete" if !rest.is_empty() => {
+                let id = rest.trim();
+                match self.memory.complete_task(id).await {
+                    Ok(true) => {
+                        let open = self.memory.list_tasks(false).await.unwrap_or_default();
+                        let target = open.iter().find(|t| t.id == id).map(|t| t.description.clone());
+                        let mut also: Vec<String> = Vec::new();
+                        if let Some(desc) = target {
+                            for t in open.iter().filter(|t| t.id != id && t.is_open()) {
+                                if task_similar(&desc, &t.description)
+                                    && self.memory.complete_task(&t.id).await.unwrap_or(false)
+                                {
+                                    also.push(format!("  • {} — {}", t.id, t.description));
+                                }
+                            }
+                        }
+                        if also.is_empty() {
+                            format!("Marked {id} done.")
+                        } else {
+                            format!(
+                                "Marked {id} done, and closed {} duplicate(s) of the same thing:\n{}",
+                                also.len(),
+                                also.join("\n")
+                            )
+                        }
+                    }
+                    Ok(false) => format!("No open task '{}'.", id),
+                    Err(e) => format!("(error: {e})"),
+                }
+            }
+            // DISMISS is not DONE. "I finished the errand" and "stop carrying this, I am never
+            // doing it" are different facts about the world, and the mind reasons from its task
+            // list — recording an abandoned intention as completed would teach it the gift was
+            // bought. Both close the row; only one claims the work happened.
+            "dismiss" | "forget-task" | "drop-task" if !rest.trim().is_empty() => {
+                let id = rest.trim();
+                let open = self.memory.list_tasks(false).await.unwrap_or_default();
+                let Some(t) = open.iter().find(|t| t.id == id && t.is_open()) else {
+                    return format!("No open reminder '{id}'.");
+                };
+                let desc = t.description.clone();
+                match self.memory.complete_task(id).await {
+                    Ok(true) => {
+                        // Say what was dropped, not just that something was: an id alone is not a
+                        // record the user can check a week later.
+                        format!("Dismissed {id} — \"{}\". Not carried any more, and not recorded as done.", desc.chars().take(90).collect::<String>())
+                    }
+                    Ok(false) => format!("No open reminder '{id}'."),
+                    Err(e) => format!("(error: {e})"),
+                }
+            }
+            // `ym tasks consolidate` (preview) / `… apply` — collapse the duplicate rows that one
+            // commitment accrued. Preview by default: this edits the user's own commitments, and a
+            // fuzzy matcher deserves eyes before it closes anything.
+            "consolidate" | "dedupe" => {
+                // `apply except task:70 task:102` — the matcher PROPOSES, the operator DISPOSES.
+                // No word-similarity heuristic is ever going to be right enough to close someone's
+                // commitments unsupervised (the first live preview offered to close "Pranab's Dad's
+                // birthday" as a duplicate of his Mom's), so the veto is part of the feature rather
+                // than an admission that it is broken.
+                let raw = rest.trim();
+                let (verb, except_part) = match raw.split_once("except") {
+                    Some((v, e)) => (v.trim(), e.trim()),
+                    None => (raw, ""),
+                };
+                let spared: std::collections::HashSet<String> = except_part
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let apply = matches!(verb, "apply" | "yes" | "do it" | "confirm");
+                let open = self.memory.list_tasks(false).await.unwrap_or_default();
+                let vetoed = self.not_duplicate_pairs().await;
+                let dupes: Vec<Vec<Task>> = crate::cluster_tasks(&open, &vetoed)
+                    .into_iter()
+                    .filter(|c| c.len() > 1)
+                    .collect();
+                if dupes.is_empty() {
+                    return "Nothing to consolidate — no reminder looks like a duplicate of another.".to_string();
+                }
+                let total: usize = dupes.iter().map(|c| c.len() - 1).sum();
+                let mut out = if apply {
+                    String::new()
+                } else {
+                    format!(
+                        "🧹 {} commitment(s) are recorded more than once — {total} row(s) would close.\nThe KEPT row is the most informative one (the one the briefing already shows):\n\n",
+                        dupes.len()
+                    )
+                };
+                let mut closed = 0usize;
+                let mut kept_back = 0usize;
+                // Vetoes recorded only on APPLY. A preview is a question, and answering a question
+                // you did not ask is how a tool ends up with rules the operator never set.
+                let mut new_vetoes: Vec<String> = Vec::new();
+                for c in &dupes {
+                    out.push_str(&format!("KEEP  {} — {}\n", c[0].id, c[0].description));
+                    for t in &c[1..] {
+                        if spared.contains(&t.id) {
+                            kept_back += 1;
+                            if apply {
+                                new_vetoes.push(crate::pair_key(&c[0].id, &t.id));
+                            }
+                            out.push_str(&format!("SPARE {} — {}\n", t.id, t.description));
+                            continue;
+                        }
+                        if apply && self.memory.complete_task(&t.id).await.unwrap_or(false) {
+                            closed += 1;
+                        }
+                        out.push_str(&format!("close {} — {}\n", t.id, t.description));
+                    }
+                    out.push('\n');
+                }
+                if kept_back > 0 {
+                    self.remember_not_duplicate(&new_vetoes).await;
+                    out.push_str(&format!(
+                        "({kept_back} row(s) spared by `except`{}.)\n",
+                        if apply { " — remembered, so they will not be proposed again" } else { "" }
+                    ));
+                }
+                if apply {
+                    format!("🧹 Consolidated: closed {closed} duplicate row(s), kept {}.\n\n{out}", dupes.len())
+                } else {
+                    out.push_str("Run `ym tasks consolidate apply` to close them, or spare any row: `ym tasks consolidate apply except task:70 task:102`. Nothing has changed yet.");
+                    out
+                }
+            }
             // --- plugins/tools: each owns a namespace, present only when wired ---
             // "home"/"house" dispatch via the capability registry above (when configured).
             // "github"/"gh" and "web"/"fetch" dispatch via the capability registry above.

@@ -511,7 +511,7 @@ impl super::ConversationEngine {
             let prompt = format!(
                 "One warm line (max 14 words) for a side-by-side photo pair of {display}: left from {y_then}, right from {y_now} ({gap} years apart). Use only these facts. No hashtags, no quotes."
             );
-            let cfg = GenerationConfig { max_tokens: 50, ..GenerationConfig::default() };
+            let cfg = GenerationConfig { max_tokens: 50, think: mind_inference::think_for("studio_title", Some(false)), ..GenerationConfig::default() };
             if let Ok(r) = inf.chat(vec![ChatMessage::user(&prompt)], cfg).await {
                 let line = r.text.trim().trim_matches('"').to_string();
                 if line.len() > 8 && line.len() < 120 {
@@ -684,7 +684,7 @@ impl super::ConversationEngine {
             if place.is_empty() { String::new() } else { format!(" in {place}") },
             if who.is_empty() { "not identified".to_string() } else { who.join(", ") },
         );
-        let cfg = GenerationConfig { max_tokens: 90, ..GenerationConfig::default() };
+        let cfg = GenerationConfig { max_tokens: 90, think: mind_inference::think_for("studio_blurb", Some(false)), ..GenerationConfig::default() };
         self.inference
             .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await

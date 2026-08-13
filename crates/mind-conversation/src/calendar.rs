@@ -108,7 +108,13 @@ impl super::ConversationEngine {
         let (reminders, _) = self.split_tasks().await;
         for t in &reminders {
             if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
-                if ms <= horizon {
+                // A reminder whose date has PASSED is not upcoming. This branch had only the upper
+                // bound while the calendar branch above had both, so reminders from any distance in
+                // the past sat under "Next 7 days" — live on 2026-08-13 the panel showed six items
+                // dated 8–17 July, in_days -36 to -28. The client compounded it by rendering every
+                // non-positive in_days as "today", so month-old commitments read as due now. Same
+                // half-day floor as events: something due this morning is still worth seeing tonight.
+                if ms >= now - 86_400_000 / 2 && ms <= horizon {
                     let mut short: String = t.description.chars().take(90).collect();
                     if t.description.chars().count() > 90 {
                         short.push('…'); // a silent mid-phrase cut ("…by July 1") reads as wrong data
@@ -121,7 +127,46 @@ impl super::ConversationEngine {
             }
         }
         out.sort_by_key(|(ms, _)| *ms);
-        out
+        // ONE OCCASION, ONE ROW. The three sources overlap by design — a birthday is in the people
+        // registry AND usually has a reminder attached — so the panel showed "Pranab's Mom's
+        // birthday" twice, once as "08-13: …" and once as "Thu Aug 13: ⏰ …". Two rows for one fact
+        // is the panel disagreeing with itself, which costs more trust than the row is worth.
+        //
+        // Same day + same subject = same occasion. The date prefix differs by source, so it is
+        // stripped before comparing, and the remainder is matched on content words rather than
+        // exactly — the two spellings of one birthday are never character-identical.
+        // Every source writes "<date>: <subject>", so the subject is whatever follows the first
+        // colon, minus the reminder bell.
+        fn subject(line: &str) -> String {
+            line.split_once(": ")
+                .map(|(_, rest)| rest)
+                .unwrap_or(line)
+                .trim()
+                .trim_start_matches('⏰')
+                .trim()
+                .to_string()
+        }
+        // Bucket by the LOCAL calendar date, not by UTC milliseconds. Dividing epoch ms by a day
+        // splits the evening from the morning of the same local date: these two rows for one
+        // birthday sat at 22:25 and 00:32 UTC — both local 13 August — and a UTC bucket called them
+        // different days, so the duplicate survived. Same trap as `in_days` in surface.rs, made
+        // again an hour after fixing it there; "which day is this" is never a division.
+        let local_day = |ms: i64| -> Option<chrono::NaiveDate> {
+            chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(today.offset()).date_naive())
+        };
+        let mut deduped: Vec<(i64, String)> = Vec::new();
+        for (ms, line) in out {
+            let day = local_day(ms);
+            let subj = subject(&line);
+            if deduped
+                .iter()
+                .any(|(m, l)| local_day(*m) == day && crate::task_similar(&subject(l), &subj))
+            {
+                continue;
+            }
+            deduped.push((ms, line));
+        }
+        deduped
     }
 
     /// `ym calendar` — the unified 14-day view.

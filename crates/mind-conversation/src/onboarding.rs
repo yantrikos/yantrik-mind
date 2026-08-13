@@ -296,7 +296,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let prompt = format!(
                     "The user was shown photos from one day and asked what the occasion was. They replied: \"{t}\". Output ONLY a short event label (3-8 words, properly capitalized), e.g. 'Aadrisha's Annaprashan ceremony' or 'Housewarming party'."
                 );
-                let cfg = GenerationConfig { max_tokens: 60, ..GenerationConfig::default() };
+                let cfg = GenerationConfig { max_tokens: 60, think: mind_inference::think_for("onboarding_ask", Some(false)), ..GenerationConfig::default() };
                 let label = self
                     .inference
                     .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
@@ -343,7 +343,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let prompt = format!(
                     "The user was shown a face photo and asked who it is. They replied: \"{t}\". Output ONLY JSON {{\"name\":\"<the person's name, properly capitalized>\",\"relationship\":\"<their relation to the user (wife/son/cousin/friend/colleague/...), or empty if not stated>\"}}."
                 );
-                let cfg = GenerationConfig { max_tokens: 120, ..GenerationConfig::default() };
+                let cfg = GenerationConfig { max_tokens: 120, think: mind_inference::think_for("onboarding_reply", Some(false)), ..GenerationConfig::default() };
                 let v = self
                     .inference
                     .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)

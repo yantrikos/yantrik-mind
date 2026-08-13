@@ -525,7 +525,14 @@ impl ConversationEngine {
                 .take(6)
                 .map(|(at_ms, label)| UpcomingItem {
                     at_ms,
-                    in_days: (at_ms - now_ms).div_euclid(86_400_000),
+                    // CALENDAR days, not elapsed milliseconds. `(at_ms - now_ms).div_euclid(day)`
+                    // floors toward negative infinity, so anything earlier TODAY came back as -1 —
+                    // a birthday at 00:00 read as "1d ago" by mid-morning, and the client rendered
+                    // any negative as overdue. What the panel means by "today" is the local date,
+                    // so compare dates.
+                    in_days: chrono::DateTime::from_timestamp_millis(at_ms)
+                        .map(|t| (t.with_timezone(now.offset()).date_naive() - now.date_naive()).num_days())
+                        .unwrap_or(0),
                     label,
                 })
                 .collect(),

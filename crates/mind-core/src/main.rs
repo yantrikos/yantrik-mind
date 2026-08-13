@@ -134,6 +134,15 @@ async fn main() -> anyhow::Result<()> {
         println!("recovered {resumed} interrupted recipe run(s)");
     }
 
+    // Delegations are in-process tasks, so anything the ledger still calls "running" died with the
+    // last process. Unlike a recipe there is nothing to resume — the work is gone — so the honest
+    // move is to close the row. Left alone the cockpit draws a live spinner and a climbing elapsed
+    // against a job that ended yesterday; one sat at 1070m after a redeploy.
+    let orphans = conv.reconcile_orphaned_jobs().await;
+    if orphans > 0 {
+        println!("closed {orphans} delegation(s) that were interrupted by the last shutdown");
+    }
+
     // If a telegram token is configured, run the phone channel instead of the stdin REPL.
     if let Ok(tok) = std::env::var("YM_TELEGRAM_TOKEN") {
         if !tok.trim().is_empty() {

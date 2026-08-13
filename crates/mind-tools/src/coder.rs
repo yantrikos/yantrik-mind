@@ -42,6 +42,11 @@ pub struct CoderResult {
     pub workdir: String,
     /// Non-hidden files the agent created/left in the workdir.
     pub files: Vec<String>,
+    /// The wall clock expired before the agent finished. The workdir still holds everything it
+    /// wrote up to the cutoff — a timed-out run once turned out to be a COMPLETE, gate-passing
+    /// redesign that was thrown away as "failed", so callers must treat this as a partial result
+    /// to salvage, never as an absence of work.
+    pub timed_out: bool,
 }
 
 impl Coder {
@@ -98,13 +103,18 @@ impl Coder {
         Ok(wd)
     }
 
-    fn command(&self, wd: &str, task: &str, use_oauth: bool) -> Command {
+    fn command(&self, wd: &str, task: &str, use_oauth: bool, resume: bool) -> Command {
         let mut cmd = Command::new("claude");
         cmd.current_dir(wd)
             .env_clear()
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("HOME", wd)
-            .env("USER", "yantrikmind");
+            .env("USER", "yantrikmind")
+            // Timeout must KILL, not abandon: dropping the wait future without this leaves the
+            // agent editing files with no supervisor — one kept working for six minutes after the
+            // mind had already reported the run failed. Containment requires the wall clock to end
+            // the process, not just our interest in it.
+            .kill_on_drop(true);
         if use_oauth {
             cmd.env(
                 "CLAUDE_CODE_OAUTH_TOKEN",
@@ -114,6 +124,12 @@ impl Coder {
             cmd.env("ANTHROPIC_BASE_URL", &self.base_url)
                 .env("ANTHROPIC_AUTH_TOKEN", &self.token)
                 .env("ANTHROPIC_MODEL", &self.model);
+        }
+        // Round N+1 resumes round N's session (HOME is the workdir, so the transcript lives
+        // there): a warm builder remembers WHY it made its earlier choices instead of re-reading
+        // the whole tree cold and re-deriving — or undoing — its own intent every round.
+        if resume {
+            cmd.arg("--continue");
         }
         cmd.arg("-p")
             .arg(task)
@@ -131,23 +147,34 @@ impl Coder {
     /// Run an agentic coding task. The agent works in a fresh isolated scratch dir and reports back.
     pub async fn run(&self, task: &str) -> anyhow::Result<CoderResult> {
         let wd = self.fresh_workdir()?;
-        self.run_in(task, wd).await
+        self.run_round(task, wd, false).await
     }
 
     /// Run in an EXISTING workdir — the iterate-until-good loop's primitive. Round N+1 continues
     /// where round N left its files, so a critique can say "fix the contrast on index.html" and the
     /// builder actually has an index.html to fix.
     pub async fn run_in(&self, task: &str, wd: String) -> anyhow::Result<CoderResult> {
+        self.run_round(task, wd, false).await
+    }
+
+    /// Like `run_in`, but RESUMES the previous round's session in this workdir instead of starting
+    /// a cold one. The files alone carry WHAT was done; only the transcript carries WHY, and a
+    /// critic's "fix X" lands very differently on a builder that remembers choosing X.
+    pub async fn continue_in(&self, task: &str, wd: String) -> anyhow::Result<CoderResult> {
+        self.run_round(task, wd, true).await
+    }
+
+    async fn run_round(&self, task: &str, wd: String, resume: bool) -> anyhow::Result<CoderResult> {
         let use_oauth = self.oauth_token.is_some();
-        let child = self.command(&wd, task, use_oauth).spawn()?;
-        let out = match tokio::time::timeout(
-            std::time::Duration::from_secs(self.timeout_secs),
-            child.wait_with_output(),
-        )
-        .await
-        {
+        let child = self.command(&wd, task, use_oauth, resume).spawn()?;
+        let timeout = std::time::Duration::from_secs(self.timeout_secs);
+        // A timeout is NOT an error: kill_on_drop reaps the child, and whatever it wrote up to the
+        // cutoff is real work sitting in the workdir. Bailing here once discarded a complete,
+        // gate-passing redesign; instead the caller gets the partial with `timed_out` set and
+        // decides whether it is worth critiquing.
+        let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(r) => r?,
-            Err(_) => anyhow::bail!("coder timed out after {}s", self.timeout_secs),
+            Err(_) => return Ok(self.salvage(wd, "", resume)),
         };
 
         let auth_error = format!(
@@ -156,15 +183,10 @@ impl Coder {
             String::from_utf8_lossy(&out.stderr)
         );
         let out = if use_oauth && !self.token.is_empty() && is_revoked_oauth_error(&auth_error) {
-            let fallback = self.command(&wd, task, false).spawn()?;
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(self.timeout_secs),
-                fallback.wait_with_output(),
-            )
-            .await
-            {
+            let fallback = self.command(&wd, task, false, resume).spawn()?;
+            match tokio::time::timeout(timeout, fallback.wait_with_output()).await {
                 Ok(r) => r?,
-                Err(_) => anyhow::bail!("coder fallback timed out after {}s", self.timeout_secs),
+                Err(_) => return Ok(self.salvage(wd, " (during the provider fallback)", resume)),
             }
         } else {
             out
@@ -174,22 +196,42 @@ impl Coder {
         if summary.is_empty() {
             summary = String::from_utf8_lossy(&out.stderr).trim().to_string();
         }
-        let files = std::fs::read_dir(&wd)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .filter(|n| !n.starts_with('.'))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
         Ok(CoderResult {
             ok: out.status.success(),
             summary,
+            files: list_files(&wd),
             workdir: wd,
-            files,
+            timed_out: false,
         })
     }
+
+    /// What a timed-out round yields: the on-disk state, honestly labelled. `ok` stays false —
+    /// the agent never got to confirm its own work — but the files are there to judge.
+    fn salvage(&self, wd: String, ctx: &str, resumed: bool) -> CoderResult {
+        CoderResult {
+            ok: false,
+            summary: format!(
+                "(wall clock expired after {}s{ctx} — the agent was stopped mid-run{}; the files listed are its work up to the cutoff)",
+                self.timeout_secs,
+                if resumed { " while refining an earlier round" } else { "" },
+            ),
+            files: list_files(&wd),
+            workdir: wd,
+            timed_out: true,
+        }
+    }
+}
+
+/// Non-hidden files currently in a workdir.
+fn list_files(wd: &str) -> Vec<String> {
+    std::fs::read_dir(wd)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| !n.starts_with('.'))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn is_revoked_oauth_error(output: &str) -> bool {

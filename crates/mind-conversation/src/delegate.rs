@@ -44,12 +44,46 @@ pub(crate) fn parse_delegation(rest: &str) -> Option<(String, String, &'static s
     Some((name, task.clone(), classify(&task)))
 }
 
-/// Verbs that ask for something to be PRODUCED.
+/// Verbs that ask for something to be PRODUCED — including produced by CHANGING what exists.
+/// The improvement verbs were missing at first, so "improve the dashboard" routed to research:
+/// a delegation asking for work was answered with reading.
 const MAKE_VERBS: &[&str] = &[
     "build", "create", "make", "write", "design", "generate", "draft", "produce", "implement",
     "code", "develop", "set up", "put together", "publish", "prototype", "mock up", "scaffold",
-    "refactor", "patch", "fix", "add", "port", "convert", "rewrite",
+    "refactor", "patch", "fix", "add", "port", "convert", "rewrite", "improve", "redesign",
+    "restyle", "rework", "revamp", "polish", "modernize", "enhance", "extend", "upgrade",
 ];
+
+/// Signals that the task points at an EXISTING body of source, which makes it code work no matter
+/// what the artifact looks like. "Redesign the dashboard in /srv/app" is editing files, not
+/// publishing a page — the page/code boundary is where routing kept going wrong, because page
+/// nouns appear constantly in descriptions of code to change. A brief once had to be worded to
+/// AVOID the words "site", "page" and "dashboard" to reach the coder; the router should never
+/// make the caller do that.
+fn mentions_codebase(tl: &str) -> bool {
+    // Location phrasings only. A bare "repo" is NOT a marker: "a dashboard showing my repos" is a
+    // page ABOUT repositories, not an edit to one — the noun has to be where the work happens
+    // ("in the repo"), not what the artifact displays.
+    const MARKERS: &[&str] = &[
+        "codebase", "source tree", "source files", "the source", "existing code", "our code",
+        "crates/", "in the repo", "in our repo", "in this repo", "in my repo",
+    ];
+    if MARKERS.iter().any(|m| tl.contains(m)) {
+        return true;
+    }
+    // A concrete source-file extension is as decisive as naming the repo. Word-boundary on the
+    // right so ".jsx" or ".rsync" can't false-positive off a shorter suffix.
+    const EXTS: &[&str] = &[".rs", ".js", ".ts", ".py", ".css", ".html", ".go", ".c", ".cpp", ".java", ".sh", ".toml", ".yaml", ".yml"];
+    EXTS.iter().any(|e| {
+        tl.match_indices(e).any(|(at, _)| {
+            tl[at + e.len()..]
+                .chars()
+                .next()
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true)
+        })
+    })
+}
 
 /// Things that are produced as a FILE or a PAGE — the artifact nouns.
 const ARTIFACT_NOUNS: &[&str] = &[
@@ -101,7 +135,9 @@ pub fn classify(task: &str) -> &'static str {
         // A PAGE is its own kind. The coder builds it in a sandbox workdir, which is right for a
         // script or a CLI but wrong for a web page: what the person wants is a URL they can open, and
         // the recipe chain (research → author → publish) delivers exactly that in one pass.
-        return if mentions(PAGE_NOUNS) { "page" } else { "code" };
+        // UNLESS the task points at existing source: then the page noun is describing the thing
+        // being edited, not the deliverable, and the coder is the right executor.
+        return if mentions(PAGE_NOUNS) && !mentions_codebase(&tl) { "page" } else { "code" };
     }
     "research"
 }
@@ -110,8 +146,8 @@ pub fn classify(task: &str) -> &'static str {
 /// Adding an executor means adding a row here — the router's vocabulary comes from this list, not
 /// from anything written into a prompt by hand.
 pub const KINDS: &[(&str, &str)] = &[
-    ("page", "produce a web page or site and publish it at a URL the user can open (portfolio, landing page, resume, dashboard, one-pager)"),
-    ("code", "write or change software in a sandbox — a script, CLI, program, library, or a fix/refactor of existing code"),
+    ("page", "produce a NEW standalone web page and publish it at a URL the user can open (portfolio, landing page, resume, one-pager) — the deliverable is the link"),
+    ("code", "write or change software — a script, CLI, program, library, or improving EXISTING source files; if the task points at existing code, a repo, or files to modify, it is code even when the thing being changed looks like a page or dashboard"),
     ("research", "find things out and report: search, read sources, compare, summarize, answer a question"),
 ];
 
@@ -282,6 +318,131 @@ pub(crate) fn verdict_ships(v: &str) -> bool {
     v.trim().to_uppercase().starts_with("SHIP")
 }
 
+/// A peer-strength judge for the iterate loop, when one is named.
+///
+/// THE CRITIC IS THE QUALITY CEILING, and by default it ran on the mind's own household route —
+/// which starts at the local brain pool, so a small local model was grading a frontier builder's
+/// work and rubber-stamped it: three consecutive cockpit runs shipped on ROUND 1, and raising the
+/// round cap 3 → 50 changed nothing, because the cap was never the binding constraint. A judge
+/// weaker than the builder cannot drive iteration.
+///
+/// `YM_CRITIC_MODEL` names the judge as a `provider:model` spec — e.g.
+/// `nanogpt:deepseek/deepseek-v4-pro`. Unset keeps the previous behaviour exactly. Household lane:
+/// a delegated build is household work, so a cloud judge is in bounds here (a Private turn never
+/// reaches this code path).
+pub(crate) fn critic_from_env() -> Option<(InferencePool, String)> {
+    let spec = std::env::var("YM_CRITIC_MODEL").ok()?.trim().to_string();
+    if spec.is_empty() {
+        return None;
+    }
+    let backend = mind_inference::backend_from_spec(&spec)?;
+    Some((InferencePool::new(backend, 2).with_provider(&spec), spec))
+}
+
+/// Fingerprint of a workdir's visible files: name → (size, mtime-seconds). Two equal snapshots
+/// mean a round changed NOTHING — which, for a round that also reported failure, is the signature
+/// of a provider-level outage (an exhausted quota once burned four rounds in under a minute, the
+/// critic re-reviewing the same artifact each time). Content hashing would be sturdier but costs
+/// a full tree read per round; size+mtime is enough to tell "did work happen" from "did nothing".
+pub(crate) fn workdir_snapshot(wd: &str) -> std::collections::BTreeMap<String, (u64, i64)> {
+    let mut snap = std::collections::BTreeMap::new();
+    if let Ok(rd) = std::fs::read_dir(wd) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if let Ok(md) = e.metadata() {
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                snap.insert(name, (md.len(), mtime));
+            }
+        }
+    }
+    snap
+}
+
+/// Is this text actually a REVIEW, or did the judge answer in the wrong voice?
+///
+/// An empty verdict was the first failure; this is the second, and it is worse because it looks
+/// like content. In job bf77af the critic (thinking off) replied *"I'll start by reading the
+/// current state of the files and understanding what we're working with, then write IDEAS.md
+/// before making any changes."* — the BUILDER's opening line, not a review. It is not SHIP, so it
+/// was fed forward as findings, and round 4 dutifully built against it.
+///
+/// Usable = SHIP, or something shaped like findings. Deliberately shape-based rather than
+/// semantic: the loop cannot judge the judge, but it can insist a review look like one.
+pub(crate) fn verdict_is_usable(v: &str) -> bool {
+    let t = v.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if verdict_ships(t) {
+        return true;
+    }
+    // First-person agent voice at the START = role confusion. Only the opening is checked, so a
+    // legitimate finding that happens to say "I would tighten this" still passes.
+    let low = t.to_lowercase();
+    const AGENT_VOICE: &[&str] = &[
+        "i'll start", "i will start", "i'll begin", "i will begin", "let me start", "let me begin",
+        "let me first", "let me read", "i'll read", "i will read", "i need to read", "i'll look",
+        "first, let me", "first i'll", "i'll examine",
+    ];
+    if AGENT_VOICE.iter().any(|p| low.starts_with(p)) {
+        return false;
+    }
+    // At least one enumerated or bulleted line — the format the prompt asks for.
+    t.lines().any(|line| {
+        let l = line.trim_start();
+        l.starts_with("- ")
+            || l.starts_with("* ")
+            || l.starts_with("• ")
+            || l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+    })
+}
+
+/// What the critic gets to SEE. A critic that receives only file names and the builder's own
+/// summary is grading a self-report — the first real run shipped on exactly that. So: excerpts of
+/// the actual text files, newest thinking included, bounded so a big tree can't blow the context.
+/// Binary and oversized files are named but not quoted; that they exist is still signal.
+pub(crate) fn artifact_excerpt(workdir: &str, files: &[String], budget: usize) -> String {
+    const PER_FILE: usize = 3_000;
+    let mut out = String::new();
+    for name in files {
+        if out.len() >= budget {
+            out.push_str("(further files omitted — excerpt budget reached)\n");
+            break;
+        }
+        let path = format!("{}/{}", workdir.trim_end_matches('/'), name);
+        match std::fs::read(&path) {
+            Ok(bytes) if bytes.iter().take(512).any(|b| *b == 0) => {
+                out.push_str(&format!("=== {name} ({} bytes, binary — not shown)\n", bytes.len()));
+            }
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let take = PER_FILE.min(budget.saturating_sub(out.len()));
+                let mut cut = take.min(text.len());
+                // Cut on a char boundary; a split UTF-8 sequence would corrupt the prompt.
+                while cut > 0 && !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                out.push_str(&format!(
+                    "=== {name} ({} bytes{})\n{}\n",
+                    bytes.len(),
+                    if cut < text.len() { ", excerpt" } else { "" },
+                    &text[..cut]
+                ));
+            }
+            Err(_) => out.push_str(&format!("=== {name} (unreadable)\n")),
+        }
+    }
+    out
+}
+
 /// One delegation, TYPED.
 ///
 /// The ledger is stored as loose JSON (it predates any consumer that needed shape), and every
@@ -325,6 +486,38 @@ impl super::ConversationEngine {
             .unwrap_or_default();
         // A single malformed row must not blank the whole board — skip it and keep the rest.
         raw.into_iter().filter_map(|v| serde_json::from_value::<JobRow>(v).ok()).collect()
+    }
+
+    /// Close out jobs that were running when the service last stopped. Call ONCE at startup.
+    ///
+    /// A delegation is an in-process task, so a restart kills every one of them — but the ledger
+    /// row keeps saying "running", and the panel keeps drawing a live spinner with a growing
+    /// elapsed. Observed at 1070m against a job a redeploy had killed the day before: seventeen
+    /// hours of the cockpit insisting work was in flight when nothing was executing.
+    ///
+    /// Startup is the honest place for this. Doing it inside `job_rows` looked tempting — one
+    /// accessor, every reader fixed — but that makes a read silently write, and it cannot tell a
+    /// genuinely-running job from a stale one without a process-start timestamp that is only
+    /// accurate if something forces it early. At startup the answer needs no timestamp at all:
+    /// nothing is running yet, so every row claiming otherwise is stale by definition.
+    pub async fn reconcile_orphaned_jobs(&self) -> usize {
+        let orphans: Vec<String> = self
+            .job_rows()
+            .await
+            .into_iter()
+            .filter(|r| r.status == "running")
+            .map(|r| r.id)
+            .collect();
+        for id in &orphans {
+            ledger_update(
+                &self.memory,
+                id,
+                "failed",
+                Some("(interrupted — the service restarted while this was running, so it never finished)".to_string()),
+            )
+            .await;
+        }
+        orphans.len()
     }
 }
 
@@ -435,7 +628,10 @@ impl super::ConversationEngine {
         let prompt = format!(
             "A user asked for this to be done:\n\n{task}\n\nWhich ONE of these does it need?\n\n{menu}\n\
              Answer with the single word only. If they want something MADE, pick the kind that makes \
-             it — never `research` merely because making it well would involve looking things up."
+             it — never `research` merely because making it well would involve looking things up. \
+             The page/code tie-break: what matters is whether the task starts from EXISTING files or \
+             a codebase (code) or wants a new standalone page whose deliverable is a link (page) — \
+             not whether words like site, page or dashboard appear in it."
         );
         let cfg = GenerationConfig { max_tokens: 12, think: mind_inference::think_for("dispatch", Some(false)), ..GenerationConfig::default() };
         // GROUNDED, not a bare chat(): the prompt carries the user's own words verbatim, which is
@@ -524,23 +720,65 @@ impl super::ConversationEngine {
             // was delegated". Every round narrates into scratch, so the channel thread shows the
             // loop working — and the critique trail survives for the promotion gate to keep.
             let c = self.coder.clone().unwrap();
-            let critic = self.inference.clone();
-            let rounds: usize = std::env::var("YM_DELEGATE_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            let house = self.inference.clone();
+            let named_critic = critic_from_env();
+            // 50, not 3. The cap is a RUNAWAY BACKSTOP, not the quality bar: the loop's real exits
+            // are the critic's SHIP, the dead-provider guard, and the fail-closed critic path. With
+            // those in place a low cap only truncates honest iteration — the whole point is to keep
+            // going until the work is good, and a ~15-min round on a cached subscription makes 50
+            // affordable. (When the cap DOES fire, the result says "round limit" and carries the
+            // last review, so a stuck loop is visible, not silent.)
+            let rounds: usize = std::env::var("YM_DELEGATE_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
             tokio::spawn(async move {
+                // Who is judging is part of the record: a run reviewed by the local pool and one
+                // reviewed by a peer-strength model are not the same evidence.
+                let (critic, critic_label) = match &named_critic {
+                    Some((pool, spec)) => (pool, spec.clone()),
+                    None => (&house, format!("{} (household route)", house.provider())),
+                };
+                scratch_note(&mem, &id2, &format!("critic: {critic_label}")).await;
                 let mut wd: Option<String> = None;
                 let mut last: Option<mind_tools::coder::CoderResult> = None;
                 let mut verdict = String::new();
+                // Reviewed means A CRITIC ACTUALLY RAN. It used to be inferred from the verdict,
+                // and a dead critic was papered over with a literal "SHIP" — inference failure was
+                // scored as passing review. Quality must fail CLOSED: unreviewed work goes out
+                // labelled unreviewed.
+                let mut reviewed = false;
+                // The final round's review came back empty even on retry. Distinct from `!reviewed`
+                // (no critic ever answered) and from a round-limit stop (a real review is standing),
+                // because the honest report differs: earlier rounds may have been reviewed while the
+                // CURRENT artifact was not.
+                let mut inconclusive = false;
+                // Post-round fingerprint of the workdir, for the dead-provider guard below.
+                let mut prev_snap: Option<std::collections::BTreeMap<String, (u64, i64)>> = None;
                 let mut brief = task2.clone();
                 for round in 1..=rounds {
                     scratch_note(&mem, &id2, &format!("round {round}: building — {}", brief.chars().take(160).collect::<String>())).await;
+                    // The builder is told where it stands: what round, how many remain, and that
+                    // the clock is real. It cannot triage what it does not know — the first run
+                    // spent its whole budget reading because nothing told it there was a budget.
+                    let situated = format!(
+                        "(Round {round} of at most {rounds}. Your wall clock is limited and expires WITHOUT WARNING — whatever is on disk at that moment is what gets judged. Land one change fully before starting the next, and keep notes of intent in the files themselves.)\n\n{brief}"
+                    );
                     let res = match &wd {
-                        Some(w) => c.run_in(&brief, w.clone()).await,
-                        None => c.run(&task2).await,
+                        // Rounds after the first RESUME the builder's session: the critique lands
+                        // on a builder that remembers why it made its choices, instead of a cold
+                        // one re-reading the tree and re-deriving (or undoing) its own intent.
+                        Some(w) => c.continue_in(&situated, w.clone()).await,
+                        None => c.run(&situated).await,
                     };
                     let r = match res {
                         Ok(r) => r,
                         Err(e) => {
+                            // A spawn/IO error means there is genuinely nothing to salvage — this
+                            // is the only path that still fails the round outright. If an earlier
+                            // round produced work, fall through and let it be judged instead of
+                            // discarding it.
                             scratch_note(&mem, &id2, &format!("round {round}: build error — {e}")).await;
+                            if last.is_some() {
+                                break;
+                            }
                             let msg = format!("🛠️ [{name2}] failed in round {round}: {e}");
                             ledger_update(&mem, &id2, "failed", Some(msg.clone())).await;
                             q.lock().unwrap().push(msg);
@@ -549,23 +787,137 @@ impl super::ConversationEngine {
                         }
                     };
                     wd = Some(r.workdir.clone());
-                    scratch_note(&mem, &id2, &format!("round {round}: built {} file(s) — {}", r.files.len(), r.summary.chars().take(200).collect::<String>())).await;
-                    // CRITIQUE — a separate set of eyes on the artifact, judging against the ORIGINAL
-                    // task (not the round brief, which narrows every iteration). "SHIP" ends the loop.
-                    let listing = r.files.join(", ");
+                    // A round that FAILED and touched NOTHING is a dead provider, not a bad build:
+                    // iterating cannot help, and each retry costs a full-session replay. Keep the
+                    // previous round's work as the result (do not let the dead round become `last`)
+                    // and stop here. First round is exempt — there is nothing to compare against,
+                    // and a round-1 failure already has its own paths below.
+                    let snap = workdir_snapshot(&r.workdir);
+                    let round_changed_nothing = prev_snap.as_ref() == Some(&snap);
+                    prev_snap = Some(snap);
+                    if !r.ok && !r.timed_out && round_changed_nothing && last.is_some() {
+                        scratch_note(&mem, &id2, &format!(
+                            "round {round}: builder failed without touching a file ({}) — provider-level failure, stopping with round {}'s work",
+                            r.summary.chars().take(160).collect::<String>(),
+                            round - 1
+                        )).await;
+                        break;
+                    }
+                    // STALEMATE: the builder ran fine but wrote nothing — it considers the critique
+                    // addressed or won't act on it. Re-critiquing an identical tree can only repeat
+                    // itself; with a 50-round cap that is hours of perfectly circular work. Stop and
+                    // let the standing review speak. (A high cap only works because the loop can
+                    // tell "still improving" from "going in circles" — this is the second half of
+                    // that, the dead-provider guard being the first.)
+                    if r.ok && round_changed_nothing && last.is_some() {
+                        scratch_note(&mem, &id2, &format!(
+                            "round {round}: builder made no changes — stalemate with the critic, stopping with the standing review"
+                        )).await;
+                        break;
+                    }
+                    if r.timed_out {
+                        // The wall clock cut the agent off, but its work up to the cutoff is on
+                        // disk. A timed-out round with files is a PARTIAL ROUND to judge — the
+                        // previous behaviour discarded a complete, gate-passing redesign because
+                        // the agent overran while double-checking it.
+                        scratch_note(&mem, &id2, &format!("round {round}: wall clock expired — salvaging {} file(s) from the cutoff", r.files.len())).await;
+                        if r.files.is_empty() {
+                            let msg = format!("🛠️ [{name2}] failed in round {round}: timed out before producing anything");
+                            ledger_update(&mem, &id2, "failed", Some(msg.clone())).await;
+                            q.lock().unwrap().push(msg);
+                            jobs.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+                    } else {
+                        scratch_note(&mem, &id2, &format!("round {round}: built {} file(s) — {}", r.files.len(), r.summary.chars().take(200).collect::<String>())).await;
+                    }
+                    // CRITIQUE — a separate set of eyes, judging against the ORIGINAL task (not the
+                    // round brief, which narrows every iteration). The critic reads the ARTIFACT
+                    // ITSELF, not the builder's account of it: excerpts of the real files, plus the
+                    // summary as a claim to check rather than the evidence. "SHIP" ends the loop.
+                    let excerpt = artifact_excerpt(&r.workdir, &r.files, 12_000);
+                    // THE BAR IS THE TASK'S OWN BAR. The old prompt shipped anything that "plausibly
+                    // satisfies the task and has no obvious defects" — a smoke test, not a standard,
+                    // and it passed round 1 every time even when the task said clean-but-unremarkable
+                    // is a FAILURE. A critic that only looks for breakage cannot drive a loop whose
+                    // purpose is to make something good.
                     let critique_prompt = format!(
-                        "You are reviewing a delegated build.\nTASK: {task2}\nFILES PRODUCED: {listing}\nBUILDER'S SUMMARY: {}\n\n\
-                         Judge the ARTIFACT against the TASK. If it plausibly satisfies the task and has no obvious defects, reply exactly SHIP. \
-                         Otherwise list up to 4 CONCRETE defects to fix (one line each, imperative, specific).",
-                        r.summary.chars().take(1200).collect::<String>()
+                        "You are the QUALITY BAR for a delegated build, not a smoke test.\n\nTASK AS GIVEN:\n{task2}\n\n\
+                         THE ARTIFACT (file excerpts — this is the evidence; the builder's summary below is only a claim to check against it):\n{excerpt}\n\
+                         BUILDER'S SUMMARY: {}\n{}\n\
+                         Hold the artifact to the standard THE TASK ITSELF sets. If the task asks for excellence, \
+                         then \"it works and nothing is broken\" is a FAILING result, not a passing one — absence of \
+                         defects is not a reason to ship.\n\n\
+                         Reply exactly SHIP only if you would defend this work as FINISHED to the person who asked for it. \
+                         Otherwise list up to 4 concrete, specific, imperative findings (one line each). Name what is \
+                         merely adequate, not only what is broken: a missed opportunity is a finding. Do not repeat a \
+                         finding the artifact already addresses.",
+                        r.summary.chars().take(1200).collect::<String>(),
+                        if r.timed_out { "NOTE: the builder was stopped by the wall clock mid-run, so the artifact may be mid-edit. Judge what is there.\n" } else { "" },
                     );
-                    let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
-                    verdict = critic
+                    // BUDGET GENEROUSLY: every model in this fleet is a thinking model, and a thinking
+                    // model shares max_tokens with its own reasoning — the answer is whatever is left.
+                    // Measured: deepseek-v4-pro spends 57 tokens reasoning about a ONE-WORD probe and
+                    // returns an EMPTY string at max_tokens=16 (finish_reason "length"). At 2000 a real
+                    // critique over a 12KB excerpt still came back empty on round 2 of job 701106 while
+                    // round 1 succeeded — so the failure is variance under a tight ceiling, which is
+                    // the worst kind: it looks like an approving judge. 15k leaves room to reason AND
+                    // to say four specific things. A judge that cannot afford to explain itself
+                    // defaults to approving, and this loop's whole quality bar is the judge.
+                    let cfg = GenerationConfig {
+                        max_tokens: 15_000,
+                        think: mind_inference::think_for("critique", None),
+                        prefer_reasoner: true,
+                        ..GenerationConfig::default()
+                    };
+                    let mut critic_says = critic
                         .chat_scoped(vec![ChatMessage::user(&critique_prompt)], cfg, mind_inference::PrivacyScope::Household)
                         .await
-                        .map(|x| x.text.trim().to_string())
-                        .unwrap_or_else(|_| "SHIP".to_string()); // a dead critic must not wedge the loop open
+                        .map(|x| x.text.trim().to_string());
+                    // AN EMPTY VERDICT IS NOT A REVIEW. It is neither SHIP nor findings, and feeding
+                    // it forward hands the next round a brief reading "Fix these review findings:"
+                    // followed by nothing — observed live in job 701106, where round 3 was dispatched
+                    // with no guidance at all. The generous budget above is the real fix; this is the
+                    // backstop for the case it does not cover: retry with thinking OFF, so the entire
+                    // budget goes to the answer and no reasoning can crowd it out.
+                    if critic_says.as_deref().map(|v| !verdict_is_usable(v)).unwrap_or(false) {
+                        scratch_note(&mem, &id2, &format!(
+                            "round {round}: critic did not return a review (got {:?}) — retrying",
+                            critic_says.as_deref().unwrap_or("").chars().take(120).collect::<String>()
+                        )).await;
+                        // Thinking stays ON for the retry. Turning it off is what produced the
+                        // builder-voice reply in the first place: with no room to reason the judge
+                        // pattern-matched the task text and continued it instead of reviewing it.
+                        let retry = GenerationConfig { max_tokens: 15_000, think: Some(true), prefer_reasoner: true, ..GenerationConfig::default() };
+                        critic_says = critic
+                            .chat_scoped(vec![ChatMessage::user(&critique_prompt)], retry, mind_inference::PrivacyScope::Household)
+                            .await
+                            .map(|x| x.text.trim().to_string());
+                    }
                     last = Some(r);
+                    match critic_says {
+                        // Still not a review after the retry: the judge is not judging. Stop rather
+                        // than spend the remaining rounds editing against noise, and do NOT let the
+                        // result claim it passed a review that never happened.
+                        Ok(v) if !verdict_is_usable(&v) => {
+                            scratch_note(&mem, &id2, &format!("round {round}: critic failed to review twice — stopping; the artifact stands unreviewed at this round")).await;
+                            inconclusive = true;
+                            verdict.clear();
+                            break;
+                        }
+                        Ok(v) => {
+                            reviewed = true;
+                            verdict = v;
+                        }
+                        Err(e) => {
+                            // Fail CLOSED: no review happened, so nothing may claim to have passed
+                            // one. Keep the artifact, end the loop, and say so out loud.
+                            scratch_note(&mem, &id2, &format!("round {round}: critic unavailable — {e}")).await;
+                            reviewed = false;
+                            verdict.clear();
+                            break;
+                        }
+                    }
                     if verdict_ships(&verdict) {
                         scratch_note(&mem, &id2, &format!("round {round}: critique — SHIP")).await;
                         break;
@@ -575,12 +927,20 @@ impl super::ConversationEngine {
                 }
                 let r = last.expect("at least one round ran");
                 ledger_artifacts(&mem, &id2, &r.workdir, &r.files).await;
-                let shipped = verdict_ships(&verdict);
+                let shipped = reviewed && verdict_ships(&verdict) && !inconclusive;
+                let status_line = if shipped {
+                    "done (passed review)"
+                } else if !reviewed {
+                    "done (UNREVIEWED — the critic was unavailable; treat this as a draft)"
+                } else if inconclusive {
+                    "done (review INCONCLUSIVE — the critic returned nothing on the final round; treat this as a draft)"
+                } else {
+                    "done (round limit — last review below)"
+                };
                 let msg = format!(
-                    "🛠️ [{name2}] {}:\n\n{}{}",
-                    if shipped { "done (passed review)" } else { "done (round limit — last review below)" },
+                    "🛠️ [{name2}] {status_line}:\n\n{}{}",
                     mind_tools::render_coder(&r),
-                    if shipped { String::new() } else { format!("\n\nOutstanding review notes:\n{verdict}") }
+                    if shipped || verdict.is_empty() { String::new() } else { format!("\n\nOutstanding review notes:\n{verdict}") }
                 );
                 ledger_update(&mem, &id2, "done", Some(msg.clone())).await;
                 q.lock().unwrap().push(msg);
@@ -649,6 +1009,41 @@ impl super::ConversationEngine {
         if let Some(id) = rest.strip_prefix("drop ") {
             let n = self.job_purge_scratch(id.trim()).await;
             return format!("🗑 Dropped [{}] scratch ({n} note(s)) — nothing entered memory.", id.trim());
+        }
+        // `drop` only ever purged the SCRATCH; the ledger row survived, so a finished or failed
+        // agent stayed on the board with no way to remove it. Deleting the row is a separate,
+        // louder verb because it is the destructive one: the scratch is a working note, the row is
+        // the record that the job happened.
+        if let Some(id) = rest.strip_prefix("delete ").or_else(|| rest.strip_prefix("forget ")) {
+            let id = id.trim();
+            let mut rows: Vec<serde_json::Value> = self
+                .memory
+                .profile_get(LEDGER_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let before = rows.len();
+            let running = rows.iter().any(|r| {
+                r.get("id").and_then(|x| x.as_str()) == Some(id)
+                    && r.get("status").and_then(|x| x.as_str()) == Some("running")
+            });
+            if running {
+                return format!(
+                    "[{id}] is still running — deleting its row would leave the work with no record. Let it finish, or restart the service to interrupt it, then delete."
+                );
+            }
+            rows.retain(|r| r.get("id").and_then(|x| x.as_str()) != Some(id));
+            if rows.len() == before {
+                return format!("No job [{id}] on the board.");
+            }
+            let n = self.job_purge_scratch(id).await;
+            let _ = self
+                .memory
+                .profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default())
+                .await;
+            return format!("🗑 Deleted [{id}] from the board, with its {n} scratch note(s).");
         }
         let rows: Vec<serde_json::Value> = self
             .memory
@@ -771,5 +1166,92 @@ mod iterate_tests {
         for v in ["Fix the contrast before you ship", "1. broken nav\n2. SHIP the fixed css", "needs work"] {
             assert!(!verdict_ships(v), "{v:?} must keep iterating");
         }
+    }
+
+    /// The page/code boundary: a page noun describes the DELIVERABLE only when the task is not
+    /// pointing at existing source. The cockpit brief once had to be worded around the words
+    /// "site", "page" and "dashboard" to reach the coder — that contortion is the bug.
+    #[test]
+    fn existing_source_beats_page_nouns() {
+        for t in [
+            "redesign the dashboard UI in /srv/cockpit — start from styles.css and index.html",
+            "improve the site's styles.css and app.js in our codebase",
+            "rewrite the landing page component in crates/mind-web",
+            "polish the settings page in the repo",
+        ] {
+            assert_eq!(classify(t), "code", "existing source must go to the coder: {t}");
+        }
+        // Without a codebase signal the page nouns still mean a page.
+        for t in [
+            "create a stunning portfolio website for me",
+            "make me a landing page for the product",
+        ] {
+            assert_eq!(classify(t), "page", "a new standalone page stays a page: {t}");
+        }
+    }
+
+    /// Improvement verbs are MAKE verbs: asking for something to be made better is asking for
+    /// work, not for reading. "improve the dashboard" used to route to research.
+    #[test]
+    fn improvement_verbs_are_make_verbs() {
+        for t in ["improve the dashboard", "redesign the cockpit app", "polish the CLI tool", "modernize the settings form"] {
+            assert_ne!(classify(t), "research", "an improvement ask is work: {t}");
+        }
+    }
+
+    /// The judge must answer in the judge's voice. Shape-checking the verdict is what stops a
+    /// builder-preamble reply from being fed forward as findings (job bf77af, round 3 → 4).
+    #[test]
+    fn a_verdict_must_look_like_a_review() {
+        assert!(verdict_is_usable("SHIP"), "ship is always usable");
+        assert!(verdict_is_usable("1. Tune line-height to at least 1.6\n2. Differentiate the sub-line"));
+        assert!(verdict_is_usable("- the empty state hangs from the top\n- the fade erases data"));
+        // The exact reply that broke the loop.
+        assert!(!verdict_is_usable(
+            "I'll start by reading the current state of the files and understanding what we're working with, then write IDEAS.md before making any changes."
+        ));
+        assert!(!verdict_is_usable("Let me first look at the stylesheet."));
+        assert!(!verdict_is_usable(""));
+        assert!(!verdict_is_usable("   \n  "));
+        // Prose with no enumerated finding is not the requested format.
+        assert!(!verdict_is_usable("This looks generally fine to me overall."));
+        // A finding that uses first person mid-text is still a finding.
+        assert!(verdict_is_usable("1. I would tighten the rail hairlines; they read as borders."));
+    }
+
+    /// The dead-provider guard's sensor: identical snapshots mean no work happened; any size or
+    /// mtime movement reads as change.
+    #[test]
+    fn workdir_snapshots_detect_change_and_stillness() {
+        let wd = std::env::temp_dir().join(format!("ym-snap-test-{}", std::process::id()));
+        std::fs::create_dir_all(&wd).unwrap();
+        std::fs::write(wd.join("a.txt"), "one").unwrap();
+        let s1 = workdir_snapshot(&wd.to_string_lossy());
+        let s2 = workdir_snapshot(&wd.to_string_lossy());
+        assert_eq!(s1, s2, "an untouched tree must fingerprint identically");
+        std::fs::write(wd.join("a.txt"), "different length").unwrap();
+        let s3 = workdir_snapshot(&wd.to_string_lossy());
+        assert_ne!(s1, s3, "an edit must change the fingerprint");
+        std::fs::write(wd.join(".hidden"), "x").unwrap();
+        let s4 = workdir_snapshot(&wd.to_string_lossy());
+        assert_eq!(s3, s4, "dotfiles are the agent's own state, not the artifact");
+        std::fs::remove_dir_all(&wd).ok();
+    }
+
+    /// The critic reads the artifact itself. Excerpts respect the budget, mark binary files
+    /// without quoting them, and never split a UTF-8 character.
+    #[test]
+    fn artifact_excerpts_are_bounded_and_binary_safe() {
+        let wd = std::env::temp_dir().join(format!("ym-excerpt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&wd).unwrap();
+        std::fs::write(wd.join("notes.md"), "café ".repeat(1_000)).unwrap(); // multibyte, > per-file cap
+        std::fs::write(wd.join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
+        let files = vec!["notes.md".to_string(), "blob.bin".to_string()];
+        let ex = artifact_excerpt(&wd.to_string_lossy(), &files, 4_000);
+        assert!(ex.len() <= 4_600, "budget overshot: {} bytes", ex.len());
+        assert!(ex.contains("café"), "text content must be quoted");
+        assert!(ex.contains("binary — not shown"), "binary must be named, not quoted");
+        assert!(std::str::from_utf8(ex.as_bytes()).is_ok(), "must never split a UTF-8 char");
+        std::fs::remove_dir_all(&wd).ok();
     }
 }

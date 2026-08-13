@@ -564,20 +564,64 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         eng = eng.with_workers(Arc::new(pool));
     }
 
-    // Agentic coder (the `code` role): Claude Code driven by MiniMax-M2 via MiniMax's Anthropic-compat
-    // endpoint — runs on the MiniMax subscription, zero Anthropic cost. Needs the `claude` CLI present
-    // + MINIMAX_API_KEY. Isolated scratch under the service user's home; secret-stripped child env.
+    // Agentic coder (the `code` role): Claude Code driven by an Anthropic-compatible endpoint, so
+    // WHICH subscription pays for delegated building is a config decision rather than a rebuild —
+    // the same fleet idea as the nightly builder's YM_BUILDER. Needs the `claude` CLI present.
+    // Isolated scratch under the service user's home; secret-stripped child env.
     if mind_tools::Coder::available() {
         let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|t| !t.trim().is_empty());
         let minimax = std::env::var("MINIMAX_API_KEY").ok().filter(|k| !k.trim().is_empty());
-        if oauth.is_some() || minimax.is_some() {
-            let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
-            let scratch = std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
-            let mut coder = mind_tools::Coder::new(minimax.unwrap_or_default(), model, "https://api.minimax.io/anthropic", scratch);
-            if let Some(t) = oauth {
-                coder = coder.with_oauth(t); // prefer the Max-plan subscription (real Claude)
-            }
-            eng = eng.with_coder(Arc::new(coder));
+        let qwen = std::env::var("QWEN_API_KEY").ok().filter(|k| !k.trim().is_empty());
+        let scratch = std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
+        // Unset keeps the historical behaviour EXACTLY: Max-plan OAuth when present, else MiniMax.
+        // Naming a provider is what makes the choice explicit and reproducible.
+        let provider = std::env::var("YM_CODER_PROVIDER").unwrap_or_default().trim().to_lowercase();
+        let coder = match provider.as_str() {
+            // QwenCloud token-plan, on the SAME endpoint the nightly qwen builder already uses, so
+            // both wings run the identical model. The host matters: the documented dashscope-intl
+            // endpoint returns 401 for token-plan keys (sk-sp-…) — measured, not assumed.
+            // HOUSEHOLD LANE ONLY, like every cloud provider here: it must never serve a
+            // private-grounded turn. Delegated building is household work, so this is in bounds.
+            "qwen" => qwen.map(|key| {
+                let model = std::env::var("YM_QWEN_MODEL").unwrap_or_else(|_| "qwen3.8-max".to_string());
+                mind_tools::Coder::new(
+                    key,
+                    model,
+                    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+                    scratch,
+                )
+            }),
+            "minimax" => minimax.clone().map(|key| {
+                let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
+                mind_tools::Coder::new(key, model, "https://api.minimax.io/anthropic", scratch)
+            }),
+            // "claude", or unset. MiniMax stays configured underneath as the fallback the coder
+            // itself drops to when a revoked OAuth token is rejected mid-run.
+            _ => (oauth.is_some() || minimax.is_some()).then(|| {
+                let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
+                let c = mind_tools::Coder::new(
+                    minimax.clone().unwrap_or_default(),
+                    model,
+                    "https://api.minimax.io/anthropic",
+                    scratch,
+                );
+                match oauth {
+                    Some(t) => c.with_oauth(t), // prefer the Max-plan subscription (real Claude)
+                    None => c,
+                }
+            }),
+        };
+        // The struct's 300s default is a scratch-script budget. Improving an EXISTING codebase can
+        // spend all of it before the first edit: pointed at the desktop cockpit (190KB across four
+        // files) the run died having only listed, copied and read them — correct behaviour, an
+        // impossible budget. The nightly builder gives its agent 1500s for the same reason.
+        let timeout_secs = std::env::var("YM_CODER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(300);
+        if let Some(c) = coder {
+            eng = eng.with_coder(Arc::new(c.with_timeout(timeout_secs)));
         }
     }
     eng

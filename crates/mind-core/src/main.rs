@@ -105,7 +105,31 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (backend, name) = build_backend();
-    let permits = if name.starts_with("nanogpt") { 4 } else { 1 };
+    // HOW MANY MODEL CALLS MAY BE IN FLIGHT AT ONCE.
+    //
+    // This was `if name.starts_with("nanogpt") { 4 } else { 1 }`, and the production backend is
+    // named `brain-pool/failover[…]`, so every local deployment ran at ONE. The stated reason was
+    // that a local single-model backend serializes anyway, making extra permits "pointless".
+    //
+    // Measured 2026-08-14 against the actual pool, and it is not so: two CONCURRENT requests to
+    // qwen3.6:35b-a3b-mtp on 192.168.4.180 both completed inside the wall time of one (29.9 s
+    // combined, 29.4 s and 29.9 s individually). Ollama parallelises them; the mind was the thing
+    // serializing. That matters much more than it looks, because the same measurement showed a
+    // FIXED 14–28 s per-call cost unrelated to token count — so a turn's latency is essentially
+    // (number of calls) × (that constant), and permits are the only lever that divides it.
+    //
+    // A pool is also frequently several DIFFERENT hosts (gemma on one endpoint, qwen on another);
+    // serializing across them left whole machines idle.
+    //
+    // Default 2 rather than 4: two concurrent requests are what was actually measured, and each
+    // extra in-flight request costs KV-cache VRAM on a card already holding 22.2 GB of weights.
+    // YM_INFER_PERMITS overrides once someone measures further.
+    let permits = std::env::var("YM_INFER_PERMITS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(if name.starts_with("nanogpt") { 4 } else { 2 });
+    println!("brain: {permits} concurrent model call(s) permitted (YM_INFER_PERMITS)");
     let mut pool = InferencePool::new(backend, permits).with_provider(&name);
     // ARCH: when an owned-hardware endpoint is configured (YM_LOCAL_OLLAMA_URL), attach it as the
     // dedicated LOCAL-ONLY PRIVATE lane. A private-grounded turn is then served ONLY here (cloud

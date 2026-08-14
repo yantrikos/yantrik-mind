@@ -559,6 +559,54 @@ fn weighted_index(weights: &[u32], n: usize, counter: usize) -> usize {
     0
 }
 
+/// The smallest reply budget worth giving a model running on OWNED HARDWARE.
+///
+/// Measured on the local pool, 2026-08-14, against `qwen3.6:35b-a3b-mtp-q4_K_M`:
+///
+/// ```text
+/// num_predict=1     total=28.1s  load=0.30  prompt=0.12  eval=0.00
+/// num_predict=20    total=15.0s  load=0.28  prompt=0.03  eval=0.06
+/// num_predict=100   total=14.8s  load=0.29  prompt=0.03  eval=0.06
+/// ```
+///
+/// Asking for a hundred tokens costs the SAME as asking for one. Load, prompt eval and generation
+/// together account for under a second of it; the rest is a fixed per-call cost. On a local GPU the
+/// bill is per CALL, not per token — so a tight cap buys nothing at all, while a truncated reply
+/// costs the whole turn. We have already paid for that truncation twice: cut off mid-JSON it is an
+/// unparseable tool call ("Sorry — I had trouble putting that together"), and cut off mid-`<think>`
+/// it is an empty answer, because the reasoning consumed the budget the answer needed.
+///
+/// Cloud links are deliberately NOT touched — there, tokens are the invoice.
+fn local_min_tokens() -> usize {
+    std::env::var("YM_LOCAL_MIN_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(8192)
+}
+
+/// Below this, a caller is asking for ONE WORD or ONE LINE, not writing a reply budget — the
+/// dispatch classifier that wants `yes` (12), a festival line (80). Those are exempt: raising them
+/// would let a chatty model return a paragraph where the code expects a token, and truncation is
+/// not a risk for a reply that was always meant to be three words. Everything at or above this is a
+/// reply budget, where being cut off mid-structure is the failure that actually happens.
+const DELIBERATE_BREVITY: usize = 128;
+
+/// Raise a too-small budget when this link is owned hardware. `None` = leave the config alone.
+///
+/// Keyed on the `ollama-local:` label prefix, which is how local links are named at construction
+/// and already how the privacy lane recognises owned hardware.
+fn local_budget(label: &str, cfg: &GenerationConfig) -> Option<GenerationConfig> {
+    if !label.to_lowercase().starts_with("ollama-local") {
+        return None;
+    }
+    let floor = local_min_tokens();
+    if cfg.max_tokens < DELIBERATE_BREVITY || cfg.max_tokens >= floor {
+        return None;
+    }
+    Some(GenerationConfig { max_tokens: floor, ..cfg.clone() })
+}
+
 pub struct ChainBackend {
     links: Vec<Arc<dyn LLMBackend>>,
     labels: Vec<String>,
@@ -828,6 +876,10 @@ impl LLMBackend for ChainBackend {
         for i in order {
             let be = &self.links[i];
             let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
+            // Owned hardware bills time, not tokens — give it room rather than truncating a tool
+            // call or an answer to save a token that costs nothing. Cloud links pass through.
+            let raised = local_budget(label, config);
+            let config = raised.as_ref().unwrap_or(config);
             match be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
                     // Cloud answered: clear survival mode if it was active.
@@ -854,6 +906,10 @@ impl LLMBackend for ChainBackend {
         }
         // All cloud links exhausted — try the local survival tier.
         if let Some((local_be, local_label)) = &self.local {
+            // The survival tier IS owned hardware, and it is reached when everything else has
+            // already failed — the worst moment to also truncate the reply.
+            let raised = local_budget(local_label, config);
+            let config = raised.as_ref().unwrap_or(config);
             match local_be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
                     if !SURVIVAL_MODE.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1410,6 +1466,48 @@ mod tests {
         let wt = ChainBackend::new_labeled(mk(), labels).with_strategy(ChainStrategy::Weighted(vec![2, 0, 1]));
         let got: Vec<String> = (0..3).map(|_| wt.chat(&[], &cfg, None).unwrap().text).collect();
         assert_eq!(got, vec!["A", "A", "C"]);
+    }
+
+    #[test]
+    /// Owned hardware gets room; the cloud keeps its budget.
+    ///
+    /// Measured 2026-08-14 on the local pool: a call costs a fixed 14–28 s, and `num_predict=100`
+    /// costs the same as `num_predict=1`. So on local the cap buys nothing while truncation costs a
+    /// whole turn — an unparseable tool call, or an empty answer whose budget went to `<think>`.
+    /// On a cloud link the same tokens are the invoice, so nothing there may change.
+    #[test]
+    fn a_local_link_gets_a_generous_budget_and_the_cloud_does_not() {
+        let floor = local_min_tokens();
+        let small = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+
+        // Local: raised to the floor, and everything else about the config is preserved.
+        let raised = local_budget("ollama-local:qwen3.6:35b-a3b-mtp-q4_K_M", &small)
+            .expect("a 300-token cap on owned hardware must be raised");
+        assert_eq!(raised.max_tokens, floor);
+        assert_eq!(raised.temperature, small.temperature, "only the budget changes");
+        assert_eq!(raised.think, small.think);
+
+        // Cloud: untouched, because there tokens are the bill.
+        for cloud in ["nanogpt:deepseek/deepseek-v4-pro", "minimax", "ollama-cloud", "qwen-cloud"] {
+            assert!(local_budget(cloud, &small).is_none(), "{cloud} must keep its budget");
+        }
+
+        // Already generous — nothing to do (never LOWER a caller's budget).
+        let big = GenerationConfig { max_tokens: floor + 5_000, ..GenerationConfig::default() };
+        assert!(local_budget("ollama-local:gemma4:e4b", &big).is_none());
+
+        // Deliberate brevity is exempt: these callers want one word or one line, and a paragraph
+        // where the code expects a token is its own bug.
+        for tiny in [12, 80, 90, DELIBERATE_BREVITY - 1] {
+            let cfg = GenerationConfig { max_tokens: tiny, ..GenerationConfig::default() };
+            assert!(
+                local_budget("ollama-local:gemma4:e4b", &cfg).is_none(),
+                "a {tiny}-token cap is a deliberate one-liner, not a truncation risk"
+            );
+        }
+        // …and the boundary itself IS a reply budget, so it gets raised.
+        let boundary = GenerationConfig { max_tokens: DELIBERATE_BREVITY, ..GenerationConfig::default() };
+        assert!(local_budget("ollama-local:gemma4:e4b", &boundary).is_some());
     }
 
     #[test]

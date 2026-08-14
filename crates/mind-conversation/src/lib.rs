@@ -7269,13 +7269,38 @@ Open reminders you're carrying for them:");
             } else {
                 format!("You have {steps_left} tool-steps left before you must give the final answer — prefer answering as soon as you can.")
             };
+            // ONE PROTOCOL, NOT TWO.
+            //
+            // We were attaching native tool SCHEMAS and, in the same request, instructing the model
+            // in prose to hand-write a JSON blob instead. Measured on gemma4:e4b, 2026-08-14, the
+            // same question ("what is the weather in Dallas right now?") three ways:
+            //
+            //   schemas only               -> native call {"name":"weather","place":"Dallas"}, 1.1s
+            //   schemas + the prose spec   -> NO native call; content '{"thought":"The user is ask…'
+            //   prose spec, no schemas     -> NO native call; the same blob
+            //
+            // The prose spec OVERRIDES native tool-calling — so we shipped the schemas and then
+            // told the model to ignore them. Worse, the blob it writes instead leads with
+            // "thought", so a reply cut off by the budget loses the tool NAME entirely and parses
+            // as nothing. That is exactly the "Sorry — I had trouble putting that together" turn,
+            // and it is why the mind could not answer a plain weather question while the very same
+            // model answered it correctly in one second when simply handed the schema.
+            //
+            // So: if the backend was given schemas, say NOTHING about JSON and let the tool layer
+            // do its job. The free-text spec survives only for backends that got no schemas — and
+            // there `tool` now comes FIRST, so even a truncated blob still names an action.
+            let protocol = if schemas.is_empty() {
+                "Reply with ONE JSON object — to use a tool: {\"tool\":\"<name>\",\"args\":{...},\"thought\":\"...\"}; to respond: {\"answer\":\"<reply>\",\"thought\":\"...\"}. Output ONLY the JSON."
+            } else {
+                "Use one of the tools you have been given whenever one fits; otherwise reply to the user directly."
+            };
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\nReply with ONE JSON object — to use a tool: {{\"thought\":\"...\",\"tool\":\"<name>\",\"args\":{{...}}}}; to respond: {{\"thought\":\"...\",\"answer\":\"<reply>\"}}. Output ONLY the JSON.",
+                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build. Output ONLY the JSON object."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build."),
                 ChatMessage::user(&prompt),
             ];
             // Mounted pack rules apply to the TOOL-USING path too. Injecting them only into the

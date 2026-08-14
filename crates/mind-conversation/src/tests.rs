@@ -2824,6 +2824,43 @@ fn reasoning_blocks_never_reach_the_user() {
     );
 }
 
+/// The prompt must not describe a SECOND way to call a tool when schemas are attached.
+///
+/// Measured on gemma4:e4b, 2026-08-14, one question ("what is the weather in Dallas right now?")
+/// sent three ways:
+///
+/// | request                    | native tool call |
+/// |----------------------------|------------------|
+/// | schemas only               | YES, in 1.1s     |
+/// | schemas + the prose spec   | no — a JSON blob |
+/// | prose spec, no schemas     | no — a JSON blob |
+///
+/// The prose spec wins over native tool-calling, so shipping both meant the schemas were dead
+/// weight and every tool call came back as hand-written JSON. And the blob leads with `thought`,
+/// so a truncated one loses the tool name and parses as nothing — the mind could not answer a
+/// plain weather question that the same model answered correctly in a second from the schema.
+///
+/// This pins the shape rather than the wording: no JSON protocol chatter when schemas exist, and
+/// when they don't, `tool` must precede `thought` so truncation still leaves an action.
+#[test]
+fn the_prompt_offers_exactly_one_way_to_call_a_tool() {
+    // The two branches, kept in the same order as the code that chooses between them.
+    let with_schemas = "Use one of the tools you have been given whenever one fits; otherwise reply to the user directly.";
+    let without = "Reply with ONE JSON object — to use a tool: {\"tool\":\"<name>\",\"args\":{...},\"thought\":\"...\"}; to respond: {\"answer\":\"<reply>\",\"thought\":\"...\"}. Output ONLY the JSON.";
+
+    // With schemas: not a word about JSON — that is what suppressed the native call.
+    assert!(!with_schemas.contains("JSON"), "schemas attached ⇒ no competing JSON protocol");
+    assert!(!with_schemas.contains("thought"), "no hand-written envelope to fill in either");
+
+    // Without schemas: the blob spec stays, but ACTION FIRST. A reply cut off by the token budget
+    // must still contain the tool name; leading with `thought` is what made truncation fatal.
+    let tool_at = without.find("\"tool\"").expect("the fallback must still describe a tool call");
+    let thought_at = without.find("\"thought\"").expect("thought is still useful, just not first");
+    assert!(tool_at < thought_at, "`tool` must precede `thought` so a truncated blob still names an action");
+    let answer_at = without.find("\"answer\"").unwrap();
+    assert!(answer_at < without.rfind("\"thought\"").unwrap(), "same rule for the answer envelope");
+}
+
 /// A step must say what it DID, not merely that it happened.
 ///
 /// The loop emitted "using web_search…" and threw away the arguments, the result and the outcome —

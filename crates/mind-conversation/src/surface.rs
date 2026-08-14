@@ -154,9 +154,78 @@ pub struct ResourceState {
     pub week_tokens_out: u64,
     /// Per-provider breakdown, biggest week-consumer first.
     pub by_provider: Vec<ProviderUsage>,
-    /// Self-build spend in USD from the token ledger. `None` when no ledger file exists — the
-    /// difference between "nothing spent" and "not measured" matters here more than anywhere.
-    pub build_spend_usd: Option<f64>,
+    /// LLM spend from the token ledger — every lane, not just self-build. `None` when no ledger
+    /// file exists: the difference between "nothing spent" and "not measured" matters here more
+    /// than anywhere. (Was `build_spend_usd`, a single lifetime float labelled "build spend". It
+    /// stayed accurate and useless — a day that moved 42.7M tokens on the delegation lane never
+    /// touched it, because that lane wrote nothing to the ledger at all.)
+    pub llm_spend: Option<LedgerSpend>,
+}
+
+/// What the ledger knows, shaped for an instrument rather than a report.
+#[derive(Serialize, Default, PartialEq, Debug)]
+pub struct LedgerSpend {
+    pub total_usd: f64,
+    pub total_tokens: u64,
+    /// The actionable number. A lifetime total only ever climbs, so it stops being read; today's
+    /// spend is the one that says "something is happening right now".
+    pub today_usd: f64,
+    pub today_tokens: u64,
+    /// Biggest spender first. A total that cannot be attributed cannot be acted on.
+    pub by_lane: Vec<LaneSpend>,
+    /// Rounds whose CLI returned no usage block. When non-zero every figure above is a FLOOR.
+    pub unmeasured: usize,
+}
+
+#[derive(Serialize, Default, PartialEq, Debug)]
+pub struct LaneSpend {
+    pub lane: String,
+    pub runs: usize,
+    pub tokens: u64,
+    pub usd: f64,
+}
+
+/// Parse the shared token ledger. Pure so it is testable without a filesystem or a clock.
+///
+/// `today` is an ISO date prefix (`2026-08-14`); lines are `TIMESTAMP | LANE | MODEL | tokens=… |
+/// usd=…`, and a lane reads `builder` or `delegate:<job>#<round>` — grouped on the part before the
+/// colon, so many rounds of one job roll up into the lane rather than flooding the breakdown.
+pub(crate) fn ledger_spend_from(text: &str, today: &str) -> Option<LedgerSpend> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let mut out = LedgerSpend::default();
+    let mut lanes: std::collections::BTreeMap<String, LaneSpend> = Default::default();
+    for l in lines {
+        // UNMEASURED parses as neither, which is the point: it contributes to the count and to
+        // nothing else, so the totals never quietly absorb a round nobody measured.
+        if l.contains("tokens=UNMEASURED") {
+            out.unmeasured += 1;
+        }
+        let usd = l.rsplit_once("usd=").and_then(|(_, v)| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
+        let toks = l
+            .split("tokens=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        out.total_usd += usd;
+        out.total_tokens += toks;
+        if l.starts_with(today) {
+            out.today_usd += usd;
+            out.today_tokens += toks;
+        }
+        let lane = l.split(" | ").nth(1).unwrap_or("unknown");
+        let lane = lane.split(':').next().unwrap_or(lane).to_string();
+        let e = lanes.entry(lane.clone()).or_insert_with(|| LaneSpend { lane, ..Default::default() });
+        e.runs += 1;
+        e.tokens += toks;
+        e.usd += usd;
+    }
+    out.by_lane = lanes.into_values().collect();
+    out.by_lane.sort_by(|a, b| b.usd.partial_cmp(&a.usd).unwrap_or(std::cmp::Ordering::Equal).then(b.tokens.cmp(&a.tokens)));
+    Some(out)
 }
 
 #[derive(Serialize)]
@@ -364,8 +433,18 @@ pub enum Availability {
 /// Every typed surface this build serves. Doubles as the version handshake: a client fetches this
 /// list once and only asks for surfaces the box actually has, instead of discovering the gap by
 /// getting prose where it expected JSON.
-pub const TYPED_VERBS: &[&str] =
-    &["surfaces", "pulse", "funnel_json", "capabilities_json", "orders_json", "threads_json", "skills_json"];
+pub const TYPED_VERBS: &[&str] = &[
+    "surfaces",
+    "pulse",
+    "funnel_json",
+    "capabilities_json",
+    "orders_json",
+    "threads_json",
+    "skills_json",
+    // Separate from `pulse` on purpose: this one makes an OUTBOUND call, and pulse is painted
+    // often. A slow or wedged provider must not be able to stall the whole snapshot.
+    "quota_json",
+];
 
 /// Is this verb a request for machine-readable state?
 ///
@@ -770,24 +849,19 @@ fn resource_state() -> ResourceState {
         week_tokens_in: by_provider.iter().map(|p| p.week_in).sum(),
         week_tokens_out: by_provider.iter().map(|p| p.week_out).sum(),
         by_provider,
-        build_spend_usd: build_spend(),
+        llm_spend: build_spend(),
     }
 }
 
-/// Self-build spend from the token ledger. `None` when the ledger is absent or empty — "not
-/// measured" must stay distinguishable from "$0.00 spent".
-fn build_spend() -> Option<f64> {
+/// LLM spend from the token ledger. `None` when the ledger is absent or empty — "not measured"
+/// must stay distinguishable from "$0.00 spent".
+fn build_spend() -> Option<LedgerSpend> {
     let path =
         std::env::var("YM_TOKEN_LEDGER").unwrap_or_else(|_| "/var/lib/yantrik-mind/token_ledger.log".to_string());
     let text = std::fs::read_to_string(path).ok()?;
-    let mut any = false;
-    let total: f64 = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| l.rsplit_once("usd=").and_then(|(_, v)| v.trim().parse::<f64>().ok()))
-        .inspect(|_| any = true)
-        .sum();
-    any.then_some(total)
+    // The ledger stamps UTC, so "today" is UTC too. Local-day bucketing here would put the
+    // evening's spend on tomorrow's tally for anyone east of Greenwich.
+    ledger_spend_from(&text, &chrono::Utc::now().format("%Y-%m-%d").to_string())
 }
 
 /// Pure transform from the raw ledger to the typed report — separated from the async read so it is
@@ -843,6 +917,39 @@ pub(crate) fn funnel_from_counters(counters: &serde_json::Map<String, serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The instrument that did not exist while a day quietly moved 42.7M tokens. It must attribute
+    /// by lane, separate today from all-time, and never let an unmeasured round read as a free one.
+    #[test]
+    fn ledger_spend_attributes_by_lane_and_keeps_unmeasured_visible() {
+        let text = "\
+2026-08-13T03:17:19Z | builder | haiku | tokens=70535 (in=5 cache_w=7898 cache_r=61965 out=667) | usd=0.0769
+2026-08-14T01:00:00Z | delegate:a1b2#1 | qwen3.8-max | tokens=900000 (in=10 cache_w=1000 cache_r=898000 out=990) | usd=1.5000
+2026-08-14T01:40:00Z | delegate:a1b2#2 | qwen3.8-max | tokens=100000 (in=10 cache_w=1000 cache_r=98000 out=990) | usd=0.5000
+2026-08-14T02:10:00Z | delegate:c3d4#1 | unknown | tokens=UNMEASURED | usd=UNMEASURED
+";
+        let s = ledger_spend_from(text, "2026-08-14").expect("a non-empty ledger reports something");
+
+        assert_eq!(s.total_tokens, 1_070_535, "all-time spans every day in the file");
+        assert_eq!(s.today_tokens, 1_000_000, "yesterday's builder run is not today's spend");
+        assert!((s.today_usd - 2.0).abs() < 1e-9);
+
+        // Rounds of one job roll up into the lane; the delegation lane outspends the builder ~26x,
+        // which is the whole reason a single undifferentiated total hid the problem.
+        assert_eq!(s.by_lane.len(), 2, "delegate:a1b2#1, #2 and c3d4#1 are ONE lane, not three");
+        assert_eq!(s.by_lane[0].lane, "delegate", "biggest spender first");
+        assert_eq!(s.by_lane[0].runs, 3);
+        assert_eq!(s.by_lane[1].lane, "builder");
+
+        assert_eq!(s.unmeasured, 1, "the unmeasured round must be counted");
+        assert_eq!(
+            s.by_lane[0].tokens, 1_000_000,
+            "UNMEASURED contributes to the count and to no total — a round nobody measured must never be absorbed as zero"
+        );
+
+        assert!(ledger_spend_from("", "2026-08-14").is_none(), "an empty ledger is not-measured, not $0.00");
+        assert!(ledger_spend_from("   \n\n", "2026-08-14").is_none(), "whitespace is still empty");
+    }
 
     fn ledger() -> serde_json::Map<String, serde_json::Value> {
         let mut m = serde_json::Map::new();

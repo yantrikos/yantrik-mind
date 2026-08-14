@@ -4273,6 +4273,12 @@ impl ConversationEngine {
             "orders_json" => surface::json_or_error(&self.orders_report()),
             "threads_json" => surface::json_or_error(&self.thread_report().await),
             "skills_json" => surface::json_or_error(&self.skill_report().await),
+            // Blocking ureq behind spawn_blocking, and internally cached for 60s, so a UI can poll
+            // this as freely as it polls pulse without generating a request per paint.
+            "quota_json" => {
+                let r = tokio::task::spawn_blocking(mind_tools::quota_report).await.unwrap_or_default();
+                surface::json_or_error(&r)
+            }
             "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,
@@ -4933,6 +4939,43 @@ impl ConversationEngine {
                     }
                     _ => "💸 LLM spend: nothing recorded yet — the next builder or delegation round writes the first entry.".to_string(),
                 }
+            }
+            // The other half of the spend question. `tokens` says what was SPENT; this says how
+            // much ROOM is left — which a spend total cannot tell you, because the limit is a
+            // rolling provider window whose reset moves with usage rather than a fixed period.
+            "quota" | "headroom" | "windows" => {
+                let r = tokio::task::spawn_blocking(mind_tools::quota_report).await.unwrap_or_default();
+                let mut out = String::new();
+                if r.windows.is_empty() {
+                    out.push_str("🪫 No usage window is currently measurable.\n");
+                } else {
+                    out.push_str("🪫 Quota windows — fullest first\n");
+                    for w in &r.windows {
+                        // A bar, because 83% and 20% should be distinguishable without reading.
+                        let filled = ((w.utilization / 100.0) * 20.0).round().clamp(0.0, 20.0) as usize;
+                        let mark = if w.utilization >= 90.0 {
+                            "🔴"
+                        } else if w.utilization >= 75.0 {
+                            "🟠"
+                        } else {
+                            "🟢"
+                        };
+                        out.push_str(&format!(
+                            "  {mark} {:<12} {:>5.1}%  [{}{}]  {}\n",
+                            w.name,
+                            w.utilization,
+                            "█".repeat(filled),
+                            "·".repeat(20 - filled),
+                            w.resets_at.as_deref().map(|t| format!("resets {t}")).unwrap_or_else(|| "no stated reset".into()),
+                        ));
+                    }
+                }
+                // Never let an unmonitored provider read as a healthy one.
+                for u in &r.unmonitored {
+                    out.push_str(&format!("  ⚪ {u}\n"));
+                }
+                out.push_str("\nA rolling window resets when old usage ages out, so heavy use pushes the reset LATER.");
+                out
             }
             "handoff_prompt" => self.handoff_prompt().await,
             // Written at the END of every self-build run: `handoff_write <OUTCOME>|<goal>|<note>`

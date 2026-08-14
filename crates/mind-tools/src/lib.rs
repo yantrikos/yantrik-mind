@@ -34,6 +34,10 @@ pub use sandbox::{ExecResult, Limits, Sandbox};
 pub mod coder;
 pub use coder::{render_coder, Coder, CoderResult};
 
+/// How full the provider's rolling usage windows are — the headroom the spend ledger cannot show.
+pub mod quota;
+pub use quota::{quota_report, QuotaReport, QuotaWindow};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

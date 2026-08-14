@@ -311,8 +311,23 @@ impl PluginRegistry {
                 "- research {query}: kick off a DEEP background research job (multi-source) — for big questions, delivers when done")
                 // The sub-agent reaches for search and fetch; without either it has nothing to research WITH.
                 .requiring(&[Requirement::Researcher, Requirement::WebSearch, Requirement::WebFetch]),
+            // SAY WHEN TO CALL IT, not just what it does. The old line — "kick off a background
+            // coding job (writes+runs a script in an isolated sandbox)" — describes the mechanism
+            // and never the occasion, so a request to AUTHOR something ("create a pack: a markdown
+            // corpus and a toml config") does not read as belonging here. It reads as "execute
+            // code", which that request is not.
+            //
+            // Measured on the live dispatch model (qwen3.6:35b, think:false, temperature 0), same
+            // catalog, same user turn — "Create a YantrikDB pack … for svg generation":
+            //   old line -> EMPTY response, which is exactly the observed live failure
+            //               ("[agent] dispatch produced no tool/answer"), ending in the generic
+            //               "Sorry — I had trouble putting that together."
+            //   this line -> parses, tool = "code", sensible args, first try.
+            // The capability was never missing; nothing in the catalog pointed at it. The model
+            // then invented `create_yantrikdb_pack`, which is what a model does when the tool it
+            // needs is not described as the tool it needs.
             PluginSpec::new("coder", "Code sandbox", "Dev", GatedWrite, &["code"], &["code"],
-                "- code {task}: kick off a background coding job (writes+runs a script in an isolated sandbox)")
+                "- code {task}: AUTHOR FILES or run code in an isolated sandbox. Use this whenever the user asks you to CREATE, WRITE, BUILD or GENERATE an artifact — a document, config, dataset, corpus, pack, script, page or app. Returns the files it produced.")
                 .requiring(&[Requirement::Coder]),
             PluginSpec::new("dashboards", "Dashboards & pages", "Utility", ReadOnly, &["make_dashboard", "publish_page"], &["dashboard"],
                 "- make_dashboard {title, sections}: render + host a styled dashboard/list/comparison page, return a URL

@@ -4349,6 +4349,38 @@ impl ConversationEngine {
                     Err(e) => format!("(error: {e})"),
                 }
             }
+            // `ym logs [n]` — what the service is actually doing. The cockpit has a Console view,
+            // but it is a verb PROMPT: you can ask the mind things, and see nothing of the running
+            // process. When a delegation stalls or a provider starts refusing, the answer is in the
+            // log and there was no way to reach it without ssh.
+            //
+            // The journal IS the log here: the mind writes to stdout and systemd captures it, and
+            // there is no in-process ring buffer to read instead. Bounded, read-only, and it says
+            // why it failed rather than rendering an empty pane — an empty log and an unreadable
+            // one look identical to a viewer, and they mean opposite things.
+            "logs" | "log" => {
+                let n: usize = rest.trim().parse().unwrap_or(80).clamp(1, 500);
+                let unit = std::env::var("YM_LOG_UNIT").unwrap_or_else(|_| "yantrik-mind".to_string());
+                match tokio::process::Command::new("journalctl")
+                    .args(["-u", &unit, "-n", &n.to_string(), "--no-pager", "--output", "short-iso"])
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => {
+                        let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if text.is_empty() {
+                            format!("(no log lines for unit '{unit}' — it may never have logged, or the journal was rotated)")
+                        } else {
+                            text
+                        }
+                    }
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                        format!("(could not read the journal for '{unit}': {})", if err.is_empty() { "journalctl refused".into() } else { err })
+                    }
+                    Err(e) => format!("(journalctl is not available here: {e})"),
+                }
+            }
             // DISMISS is not DONE. "I finished the errand" and "stop carrying this, I am never
             // doing it" are different facts about the world, and the mind reasons from its task
             // list — recording an abandoned intention as completed would teach it the gift was

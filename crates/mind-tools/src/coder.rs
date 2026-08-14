@@ -125,13 +125,30 @@ impl Coder {
                 .env("ANTHROPIC_AUTH_TOKEN", &self.token)
                 .env("ANTHROPIC_MODEL", &self.model);
         }
-        // Round N+1 resumes round N's session (HOME is the workdir, so the transcript lives
-        // there): a warm builder remembers WHY it made its earlier choices instead of re-reading
-        // the whole tree cold and re-deriving — or undoing — its own intent every round.
+        // Opt-in only, and OFF by default — see delegate.rs's YM_DELEGATE_RESUME. Resuming makes
+        // round N re-send rounds 1..N-1's transcript on every one of its tool calls, so cost grows
+        // with the SQUARE of total turns; the caller now hands down a written history instead.
         if resume {
             cmd.arg("--continue");
         }
-        cmd.arg("-p")
+        // A CEILING ON THE ROUND, because turns are the cost axis and an uncapped round can spiral
+        // by itself: each turn re-sends the whole conversation so far, so one 400-turn round costs
+        // far more than ten 40-turn rounds doing the same work. That shape is how a week's token
+        // quota went in a day. Being stopped at the ceiling is a pause, not a loss — the round
+        // structure is already the checkpoint, and the critic judges whatever is on disk.
+        //
+        // CAVEAT: the CLI prices the run from its own model table, so on the qwen/MiniMax path
+        // (ANTHROPIC_BASE_URL override) it may not recognise the model and the cap may not bind.
+        // It is a real ceiling on the OAuth path and a best-effort one elsewhere; the wall clock
+        // (timeout_secs) remains the backstop that always holds.
+        let max_usd = std::env::var("YM_CODER_MAX_USD")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|n| *n > 0.0)
+            .unwrap_or(5.0);
+        cmd.arg("--max-budget-usd")
+            .arg(format!("{max_usd}"))
+            .arg("-p")
             .arg(task)
             .arg("--permission-mode")
             .arg("acceptEdits")

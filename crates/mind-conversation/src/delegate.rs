@@ -405,6 +405,47 @@ pub(crate) fn verdict_is_usable(v: &str) -> bool {
     })
 }
 
+/// What the NEXT round is told about the rounds before it — the mind's memory of the job, handed
+/// to a builder that has none.
+///
+/// This exists because the alternative was `--continue`, which resumed the builder's whole session
+/// so round N re-sent rounds 1..N-1's transcript on EVERY ONE of its tool calls. That makes cost
+/// roughly quadratic in total turns: one 5-round job reached 405 API turns against a 14MB
+/// transcript and helped exhaust a week's token quota in a day. It was also the wrong layer — the
+/// delegation design is "one mind, many hands", and `--continue` gave the hand beliefs. The hand
+/// should be stateless; the mind remembers and hands down only what the next round needs.
+///
+/// Newest LAST (the builder reads forward into its current instructions), and the oldest entries
+/// are dropped first when the budget binds — a recent failed approach is what stops a re-try, an
+/// ancient one rarely is. Deliberately carries NEGATIVE knowledge ("tried X, critic still says Y"):
+/// knowing what already failed is what a cold builder cannot re-derive from the tree.
+pub(crate) fn history_block(trail: &[String], budget: usize) -> String {
+    if trail.is_empty() {
+        return String::new();
+    }
+    // Walk newest-first to decide what fits, then emit oldest-first.
+    let mut keep: Vec<&String> = Vec::new();
+    let mut used = 0usize;
+    for entry in trail.iter().rev() {
+        if used + entry.len() + 1 > budget && !keep.is_empty() {
+            break;
+        }
+        used += entry.len() + 1;
+        keep.push(entry);
+    }
+    keep.reverse();
+    let dropped = trail.len() - keep.len();
+    let mut out = String::from("\nWHAT EARLIER ROUNDS ALREADY TRIED (do not repeat a failed approach; do not undo work that passed):\n");
+    if dropped > 0 {
+        out.push_str(&format!("({dropped} earlier round(s) omitted)\n"));
+    }
+    for entry in keep {
+        out.push_str(entry);
+        out.push('\n');
+    }
+    out
+}
+
 /// What the critic gets to SEE. A critic that receives only file names and the builder's own
 /// summary is grading a self-report — the first real run shipped on exactly that. So: excerpts of
 /// the actual text files, newest thinking included, bounded so a big tree can't blow the context.
@@ -729,6 +770,16 @@ impl super::ConversationEngine {
             // affordable. (When the cap DOES fire, the result says "round limit" and carries the
             // last review, so a stuck loop is visible, not silent.)
             let rounds: usize = std::env::var("YM_DELEGATE_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+            // COLD by default. Warm `--continue` resume was measured to be the loop's dominant cost:
+            // it replays the accumulated transcript on every tool call of every later round, so spend
+            // grows with the SQUARE of total turns. The trade it bought — a builder that remembers its
+            // own intent — is now bought instead by history_block(), at kilobytes instead of megabytes.
+            // Kept switchable because the honest comparison needs a live run: if a cold builder is
+            // seen re-exploring or undoing its own work, YM_DELEGATE_RESUME=warm restores the old
+            // behaviour without a deploy.
+            let warm_resume = std::env::var("YM_DELEGATE_RESUME")
+                .map(|v| v.trim().eq_ignore_ascii_case("warm"))
+                .unwrap_or(false);
             tokio::spawn(async move {
                 // Who is judging is part of the record: a run reviewed by the local pool and one
                 // reviewed by a peer-strength model are not the same evidence.
@@ -753,6 +804,10 @@ impl super::ConversationEngine {
                 // Post-round fingerprint of the workdir, for the dead-provider guard below.
                 let mut prev_snap: Option<std::collections::BTreeMap<String, (u64, i64)>> = None;
                 let mut brief = task2.clone();
+                // The mind's memory of this job: one line per finished round, "what it touched →
+                // what the critic still said". This is what a cold builder gets instead of the
+                // previous round's session, and it is the whole reason a cold builder is viable.
+                let mut trail: Vec<String> = Vec::new();
                 for round in 1..=rounds {
                     scratch_note(&mem, &id2, &format!("round {round}: building — {}", brief.chars().take(160).collect::<String>())).await;
                     // The builder is told where it stands: what round, how many remain, and that
@@ -762,10 +817,14 @@ impl super::ConversationEngine {
                         "(Round {round} of at most {rounds}. Your wall clock is limited and expires WITHOUT WARNING — whatever is on disk at that moment is what gets judged. Land one change fully before starting the next, and keep notes of intent in the files themselves.)\n\n{brief}"
                     );
                     let res = match &wd {
-                        // Rounds after the first RESUME the builder's session: the critique lands
-                        // on a builder that remembers why it made its choices, instead of a cold
-                        // one re-reading the tree and re-deriving (or undoing) its own intent.
-                        Some(w) => c.continue_in(&situated, w.clone()).await,
+                        // Rounds after the first run COLD in the same workdir: same tree, same files,
+                        // fresh context. What the resumed session used to supply — why the builder
+                        // made its choices, what it already tried — now arrives as text in the brief
+                        // (see history_block). The tree itself is the other half of that memory: the
+                        // files on disk ARE the state, and re-reading them is cheap next to replaying
+                        // a transcript that grows every turn.
+                        Some(w) if warm_resume => c.continue_in(&situated, w.clone()).await,
+                        Some(w) => c.run_in(&situated, w.clone()).await,
                         None => c.run(&situated).await,
                     };
                     let r = match res {
@@ -835,6 +894,18 @@ impl super::ConversationEngine {
                     // round brief, which narrows every iteration). The critic reads the ARTIFACT
                     // ITSELF, not the builder's account of it: excerpts of the real files, plus the
                     // summary as a claim to check rather than the evidence. "SHIP" ends the loop.
+                    // Captured before `r` is moved into `last` below, so the trail entry can be
+                    // written once the critic has spoken. File names, not the summary: the summary
+                    // is the builder's own claim, and the trail's job is to record what actually
+                    // happened to the tree.
+                    let round_touched = if r.files.is_empty() {
+                        "touched no files".to_string()
+                    } else if r.files.len() > 8 {
+                        format!("touched {} (+{} more)", r.files[..8].join(", "), r.files.len() - 8)
+                    } else {
+                        format!("touched {}", r.files.join(", "))
+                    };
+                    let round_cut = r.timed_out;
                     let excerpt = artifact_excerpt(&r.workdir, &r.files, 12_000);
                     // THE BAR IS THE TASK'S OWN BAR. The old prompt shipped anything that "plausibly
                     // satisfies the task and has no obvious defects" — a smoke test, not a standard,
@@ -923,7 +994,26 @@ impl super::ConversationEngine {
                         break;
                     }
                     scratch_note(&mem, &id2, &format!("round {round}: critique — {}", verdict.chars().take(400).collect::<String>())).await;
-                    brief = format!("Improve the existing build in this directory. Fix these review findings:\n{verdict}\nDo not start over; edit in place.");
+                    // Record the round before briefing the next one. Flattened to a single line so
+                    // twenty rounds of history stay readable and bounded — the next builder needs the
+                    // SHAPE of what was tried, not a replay of it.
+                    trail.push(format!(
+                        "round {round}: {round_touched}{} → critic still said: {}",
+                        if round_cut { " (cut off mid-edit by the wall clock)" } else { "" },
+                        verdict
+                            .lines()
+                            .map(|l| l.trim())
+                            .filter(|l| !l.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                            .chars()
+                            .take(400)
+                            .collect::<String>()
+                    ));
+                    brief = format!(
+                        "Improve the existing build in this directory. Fix these review findings:\n{verdict}\nDo not start over; edit in place.\n{}",
+                        history_block(&trail, 4_000)
+                    );
                 }
                 let r = last.expect("at least one round ran");
                 ledger_artifacts(&mem, &id2, &r.workdir, &r.files).await;
@@ -1236,6 +1326,34 @@ mod iterate_tests {
         let s4 = workdir_snapshot(&wd.to_string_lossy());
         assert_eq!(s3, s4, "dotfiles are the agent's own state, not the artifact");
         std::fs::remove_dir_all(&wd).ok();
+    }
+
+    /// The cold builder's only memory of earlier rounds. Must stay bounded (it replaced an
+    /// unbounded transcript), keep the NEWEST rounds when it has to choose, emit them oldest-first
+    /// so the brief reads forward, and say out loud when it dropped something.
+    #[test]
+    fn history_block_is_bounded_and_keeps_the_newest_rounds() {
+        assert_eq!(history_block(&[], 4_000), "", "no rounds yet means no history section at all");
+
+        let trail: Vec<String> = (1..=6).map(|n| format!("round {n}: touched a.js → critic still said: fix {n}")).collect();
+
+        // Generous budget: every round survives, oldest first.
+        let full = history_block(&trail, 4_000);
+        let pos1 = full.find("round 1:").expect("oldest round present");
+        let pos6 = full.find("round 6:").expect("newest round present");
+        assert!(pos1 < pos6, "rounds must read oldest-first so the brief runs forward into the findings");
+        assert!(!full.contains("omitted"), "nothing was dropped, so nothing should claim to be");
+
+        // Tight budget: the RECENT rounds are the ones that stop a repeated approach, so they win.
+        let tight = history_block(&trail, 120);
+        assert!(tight.len() < full.len(), "a tight budget must actually bind");
+        assert!(tight.contains("round 6:"), "the newest round is the one a builder most needs");
+        assert!(!tight.contains("round 1:"), "the oldest round is dropped first");
+        assert!(tight.contains("omitted"), "a silent drop would misrepresent the history as complete");
+
+        // Never drop everything: one oversized entry still comes through rather than vanishing.
+        let huge = vec![format!("round 9: {}", "x".repeat(5_000))];
+        assert!(history_block(&huge, 100).contains("round 9:"), "a single oversized round must not be silently swallowed");
     }
 
     /// The critic reads the artifact itself. Excerpts respect the budget, mark binary files

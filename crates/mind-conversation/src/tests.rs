@@ -3555,3 +3555,45 @@ fn one_occasion_collapses_to_one_panel_row() {
     let errand = subject("Thu Aug 13: ⏰ Coordinate plans for Maa Durga's birthday celebration");
     println!("occasion={occasion:?} errand={errand:?} similar={}", crate::task_similar(&occasion, &errand));
 }
+
+/// A face in someone's real photo library must never be named from a sentence.
+///
+/// Live 2026-08-14: asked who a face appearing in ~431 photos was, the user answered "I don't
+/// remember" — and the mind replied "Got it — that's I don't remember. I also named them in your
+/// photo app itself." It wrote that string into the photo library.
+///
+/// This is the FOURTH time in the same shape ("N/A", a command word, "Hi", and now this), and the
+/// comment on `looks_like_greeting` had already named why: each fix only covered the shapes already
+/// seen. So the test pins the POSITIVE gate, not another list of literals — because there are
+/// unbounded ways to say you don't know and a small, describable shape for a name.
+#[test]
+fn a_sentence_is_never_a_persons_name() {
+    use crate::ConversationEngine as E;
+
+    // The exact string that reached the photo library, and its family.
+    for said in [
+        "I don't remember", "i dont remember", "I can't remember", "I forgot",
+        "no idea", "not sure", "I don't know", "dunno", "idk", "skip",
+    ] {
+        assert!(
+            !E::looks_like_person_name(said),
+            "{said:?} is a decline, not a name — it must never reach the library write"
+        );
+    }
+
+    // …and every one of those must ALSO be caught earlier, as a graceful decline rather than a
+    // re-ask, so the user gets "I'll leave that face unnamed" instead of "couldn't pick a name".
+    for said in ["I don't remember", "i dont remember", "I can't remember", "I forgot"] {
+        assert!(E::is_non_answer(said), "{said:?} must be recognised as a decline");
+    }
+
+    // Real names must still flow through untouched — the gate is worthless if it blocks answers.
+    for name in ["Ritu", "Ritu Sarkar", "Aadrisha", "O'Brien", "Jean-Luc Picard", "Dr. Sen"] {
+        assert!(E::looks_like_person_name(name), "{name:?} is a real name and must be accepted");
+    }
+
+    // Shape rules: no digits or slashes (this is what killed "N/A"), and not a whole sentence.
+    assert!(!E::looks_like_person_name("N/A"));
+    assert!(!E::looks_like_person_name("that is my wife's mother sitting there"));
+    assert!(!E::looks_like_person_name(""));
+}

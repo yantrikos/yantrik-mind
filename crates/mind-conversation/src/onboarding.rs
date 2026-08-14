@@ -370,7 +370,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         || nl.contains(" my ")
                         || nl.ends_with("'s")
                         || nl.ends_with("\u{2019}s");
-                    if !junk && !Self::is_placeholder_name(&name) && name.len() > 1 {
+                    if !junk && !Self::is_placeholder_name(&name) && Self::looks_like_person_name(&name) && name.len() > 1 {
                         name
                     } else {
                         // resolve pure relations via the household registry + profiles
@@ -519,9 +519,59 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             "cannot tell", "cant see", "can't see", "not clear", "unclear", "hazy", "blurry",
             "blurred", "unrecognizable", "unrecognisable", "cant recognize", "can't recognize",
             "not recognizable",
+            // Live 2026-08-14: "I don't remember" was captured as the NAME and written into the
+            // photo library for a face appearing in ~431 photos. Not-knowing and not-remembering
+            // are the same answer; only one of them was listed.
+            "dont remember", "don't remember", "do not remember", "not remember",
+            "cant remember", "can't remember", "cannot remember", "forgot", "forget", "no memory",
         ];
         // `contains`, not `starts_with`: uncertainty usually arrives mid-sentence.
         DECLINE.iter().any(|w| low == *w || low.contains(w))
+    }
+
+    /// Does this look like a PERSON'S NAME? The POSITIVE test — and the reason this file should
+    /// stop growing negative lists.
+    ///
+    /// `is_non_answer` enumerates ways to decline, and it has now been wrong four times in the same
+    /// shape: "N/A", a command word, "Hi" (2026-08-05), and "I don't remember" (2026-08-14, live,
+    /// written into the photo library for a face in ~431 photos). Each fix added the literal that
+    /// had just escaped, and the comment on `looks_like_greeting` already named the pattern: "each
+    /// guard only covered the shapes already seen."
+    ///
+    /// There are unbounded ways to say you don't know and a small, describable shape for a name. So
+    /// the last gate before a WRITE to someone's real photo library tests the shape it WANTS rather
+    /// than enumerating the shapes it fears. A sentence contains function words; a name does not.
+    pub(crate) fn looks_like_person_name(s: &str) -> bool {
+        let t = s.trim();
+        if t.is_empty() || t.chars().count() > 48 {
+            return false;
+        }
+        // Letters, spaces, and the punctuation real names actually carry (O'Brien, Jean-Luc, Dr.).
+        // This alone rejects "N/A", handles/URLs, and anything with digits.
+        if !t.chars().all(|c| c.is_alphabetic() || c.is_whitespace() || "'-.\u{2019}".contains(c)) {
+            return false;
+        }
+        let words: Vec<String> = t
+            .split_whitespace()
+            .map(|w| w.to_lowercase().replace(['\'', '\u{2019}', '.'], ""))
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.is_empty() || words.len() > 4 {
+            return false;
+        }
+        // One function word anywhere means this is a sentence about the person, not their name.
+        const NOT_A_NAME: &[&str] = &[
+            "i", "im", "me", "my", "mine", "you", "your", "he", "she", "it", "we", "us", "they",
+            "them", "their", "dont", "doesnt", "didnt", "cant", "cannot", "wont", "not", "no",
+            "never", "none", "nobody", "nothing", "know", "knew", "remember", "recall", "forgot",
+            "forget", "sure", "maybe", "think", "guess", "idk", "dunno", "sorry", "skip", "pass",
+            "later", "unknown", "unsure", "someone", "somebody", "anyone", "person", "face",
+            "what", "who", "whom", "whose", "why", "how", "when", "where", "which", "that", "this",
+            "these", "those", "is", "are", "was", "were", "be", "am", "the", "a", "an", "and",
+            "or", "but", "of", "to", "in", "on", "for", "yes", "yeah", "yep", "nope", "ok", "okay",
+            "hi", "hello", "hey",
+        ];
+        !words.iter().any(|w| NOT_A_NAME.contains(&w.as_str()))
     }
 
     /// Placeholder junk that must never become a person's name, even if something upstream produced

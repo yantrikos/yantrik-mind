@@ -2824,6 +2824,52 @@ fn reasoning_blocks_never_reach_the_user() {
     );
 }
 
+/// A step must say what it DID, not merely that it happened.
+///
+/// The loop emitted "using web_search…" and threw away the arguments, the result and the outcome —
+/// all three of which it already had and wrote to the work log one line later. A 28-step turn
+/// therefore folded up into 28 near-identical labels: the shape of the work with none of its
+/// content, which cannot answer the one question the fold gets opened to settle.
+#[test]
+fn step_detail_reads_as_the_work_not_as_json() {
+    use super::args_summary;
+
+    // The common case: one string argument. The key is dropped — the tool name is already on the
+    // line above, and "query: weather in Dallas" reads worse than the term itself.
+    assert_eq!(args_summary(&serde_json::json!({"query": "weather in Dallas"})), "weather in Dallas");
+
+    // A lone NON-string keeps its key, because a bare "10" on its own says nothing.
+    assert_eq!(args_summary(&serde_json::json!({"limit": 10})), "limit: 10");
+
+    // Several arguments stay labelled.
+    let two = args_summary(&serde_json::json!({"url": "https://packs.yantrikdb.com", "depth": 2}));
+    assert!(two.contains("url: https://packs.yantrikdb.com"), "{two}");
+    assert!(two.contains("depth: 2"), "{two}");
+    assert!(two.contains(" · "), "multiple args are separated for reading: {two}");
+
+    // No arguments produces nothing, and `emit_detail` drops an empty line rather than showing a
+    // blank detail row under the step.
+    assert_eq!(args_summary(&serde_json::json!({})), "");
+}
+
+/// The operator's badge must keep the classifier's five-way distinction.
+///
+/// Collapsing it to ok/failed on screen would re-introduce, in the UI, exactly the boolean
+/// `tool_outcome` exists to replace — and "ran fine, found nothing" versus "the tool broke" is the
+/// pair that matters most to whoever is reading, while looking identical in a spinner.
+#[test]
+fn the_outcome_badge_keeps_every_case_distinct() {
+    use crate::tool_outcome::Outcome;
+
+    let all = [Outcome::Ok, Outcome::Empty, Outcome::Unavailable, Outcome::Denied, Outcome::Failed];
+    let badges: Vec<&str> = all.iter().map(|o| o.badge()).collect();
+
+    assert_eq!(badges, vec!["ok", "empty", "unavailable", "denied", "failed"]);
+    let unique: std::collections::HashSet<_> = badges.iter().collect();
+    assert_eq!(unique.len(), all.len(), "two outcomes must never share a badge");
+    assert!(badges.iter().all(|b| !b.is_empty()), "every outcome needs a visible badge");
+}
+
 /// `answer` must TERMINATE the loop, however the model spells it.
 ///
 /// The catalog advertises "- answer {text}: give the user your final reply". The native tool-calling

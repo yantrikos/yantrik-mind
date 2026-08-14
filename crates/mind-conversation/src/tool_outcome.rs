@@ -147,6 +147,23 @@ impl Outcome {
         }
     }
 
+    /// One word for the OPERATOR, where `note` is a sentence for the model.
+    ///
+    /// The step list needs to say how a call ended in the width of a badge, and it must carry the
+    /// same five-way distinction the classifier already made — collapsing it to ok/failed in the UI
+    /// would re-introduce, on screen, exactly the boolean this module exists to replace. "Found
+    /// nothing" and "broke" look identical in a spinner and are completely different to the person
+    /// reading it.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Empty => "empty",
+            Outcome::Unavailable => "unavailable",
+            Outcome::Denied => "denied",
+            Outcome::Failed => "failed",
+        }
+    }
+
     /// A short label for the work log, so the model sees the DISTINCTION rather than re-deriving it
     /// from the same words the classifier just read.
     pub fn note(self) -> &'static str {

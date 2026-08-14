@@ -862,6 +862,69 @@ pub(crate) fn emit_thinking(text: &str) {
     emit_progress(&format!("{THINKING_MARK}{t}"));
 }
 
+/// Marks a progress message as STEP DETAIL — what a step actually did, as opposed to the label
+/// saying it happened. Same sentinel-on-the-shared-channel trick as `THINKING_MARK`, for the same
+/// reason: the channel is already per-turn and ordered, and a second one would have to re-solve both.
+pub const DETAIL_MARK: &str = "\u{1}detail\u{1}";
+
+/// How long a single detail line may be on the wire.
+///
+/// The work log keeps 900 characters of a successful observation because the MODEL reads it and has
+/// to answer from it. A person scanning a step list does not read 900 characters — they read enough
+/// to recognise what came back and open the fold if it matters. 240 is about two lines on screen.
+const DETAIL_MAX: usize = 240;
+
+/// Stream what a step DID, not merely that it happened.
+///
+/// The loop has always emitted "using web_search…" and thrown away the arguments, the result and
+/// the outcome — all three of which it already has and writes to the work log one line later. So a
+/// 28-step turn folded up into 28 identical-looking labels: the SHAPE of the work with none of its
+/// content, which cannot answer the only question the fold is opened to settle — what did it
+/// actually find?
+///
+/// Detail is a separate line type rather than a longer label so that a client which does not
+/// understand it keeps rendering the terse timeline exactly as before.
+///
+/// SCOPE: this rides `/chat-stream`, which is operator-only, and the arguments have already been
+/// through the egress cleaner. The observation may still contain private grounding — that is the
+/// same principal who receives the final answer built from it, so this widens no audience.
+pub(crate) fn emit_detail(text: &str) {
+    let t = text.trim();
+    if t.is_empty() {
+        return;
+    }
+    let clipped: String = if t.chars().count() > DETAIL_MAX {
+        format!("{}…", t.chars().take(DETAIL_MAX).collect::<String>())
+    } else {
+        t.to_string()
+    };
+    emit_progress(&format!("{DETAIL_MARK}{clipped}"));
+}
+
+/// Render tool arguments for a PERSON, not for a parser.
+///
+/// `{"query":"weather in Dallas"}` reads better as `weather in Dallas` than as JSON, and the
+/// single-string case — most tool calls — drops the key entirely, because the tool name is already
+/// on the line above and `query:` in front of a search term is noise. A non-string value keeps its
+/// key, since a bare `10` or `true` on its own says nothing.
+fn args_summary(args: &serde_json::Value) -> String {
+    let Some(obj) = args.as_object() else { return args.to_string() };
+    if obj.is_empty() {
+        return String::new(); // `emit_detail` drops it — a no-argument call has nothing to add.
+    }
+    let show = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if let Some((k, v)) = obj.iter().next().filter(|_| obj.len() == 1) {
+        return match v {
+            serde_json::Value::String(s) => s.clone(),
+            _ => format!("{k}: {}", show(v)),
+        };
+    }
+    obj.iter().map(|(k, v)| format!("{k}: {}", show(v))).collect::<Vec<_>>().join(" · ")
+}
+
 fn looks_like_non_answer(text: &str) -> bool {
     let t = text.trim();
     if t.ends_with('?') || t.starts_with('/') || t.starts_with("http://") || t.starts_with("https://") {
@@ -7427,6 +7490,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
             last_call = call_sig.clone();
             done_calls.insert(call_sig);
+            // What this step is about to run, with the arguments that survived the egress cleaner —
+            // "using web_search…" does not distinguish a search for the user's own name from a
+            // search for a stock ticker, and that difference is the whole reason to open the fold.
+            emit_detail(&args_summary(&args));
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
@@ -7439,6 +7506,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if let Some(ok) = outcome.counts_toward_reliability() {
                 let _ = self.memory.record_tool_outcome(&tool, ok).await;
             }
+            // …and what came back. The badge carries the classifier's five-way distinction rather
+            // than a tick or a cross, because "found nothing" and "the tool broke" are the two the
+            // operator most needs told apart and they look identical in a spinner.
+            emit_detail(&format!("[{}] {}", outcome.badge(), obs.replace('\n', " ")));
 
             // ── BARREN-STEP GUARD ────────────────────────────────────────────────────────────────
             //

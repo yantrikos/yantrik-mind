@@ -655,9 +655,17 @@ fn ctl_handle(
                         // with a sentinel, and is split back out here into its own "t:" line type.
                         // A client that does not know "t:" ignores it, which is exactly the
                         // degrade-quietly behaviour the surfaces handshake already assumes.
-                        match p.strip_prefix(mind_conversation::THINKING_MARK) {
-                            Some(t) => chunk(&format!("t:{}\n", t.replace('\n', "\u{1}"))),
-                            None => chunk(&format!("p:{}\n", p.replace('\n', " "))),
+                        // Three line types off one ordered channel: "t:" reasoning, "d:" step
+                        // detail — the arguments a step ran with and the classified result it got
+                        // back — and "p:" the step label itself. A client that knows only "p:"
+                        // still sees exactly the timeline it saw before, which is what lets the
+                        // cockpit gain detail without the terminal or Telegram changing at all.
+                        if let Some(t) = p.strip_prefix(mind_conversation::THINKING_MARK) {
+                            chunk(&format!("t:{}\n", t.replace('\n', "\u{1}")));
+                        } else if let Some(d) = p.strip_prefix(mind_conversation::DETAIL_MARK) {
+                            chunk(&format!("d:{}\n", d.replace('\n', "\u{1}")));
+                        } else {
+                            chunk(&format!("p:{}\n", p.replace('\n', " ")));
                         }
                     }
                 });

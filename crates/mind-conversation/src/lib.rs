@@ -7292,7 +7292,17 @@ Open reminders you're carrying for them:");
             let protocol = if schemas.is_empty() {
                 "Reply with ONE JSON object — to use a tool: {\"tool\":\"<name>\",\"args\":{...},\"thought\":\"...\"}; to respond: {\"answer\":\"<reply>\",\"thought\":\"...\"}. Output ONLY the JSON."
             } else {
-                "Use one of the tools you have been given whenever one fits; otherwise reply to the user directly."
+                // "…otherwise reply directly" is NOT safe on its own. Measured immediately after
+                // the first version of this change: asked for the weather in Reykjavik and Hanoi,
+                // the mind called NO tool and produced confident, specific, WRONG numbers (4°C for
+                // Reykjavik in August). Removing the JSON spec had also removed the only pressure
+                // to act, and the standing anti-confabulation rule does not cover this because it
+                // is scoped to "a fact about the user's world" — weather is a fact about the world.
+                //
+                // A fabricated answer is worse than the failure it replaced: "Sorry, I had trouble
+                // putting that together" is visibly wrong, and 4°C is invisibly wrong. So the
+                // licence to answer directly is now explicitly bounded by the class of fact.
+                "Use one of the tools you have been given whenever one fits. NEVER state a current real-world fact — weather, prices, quotes, news, someone's status, what time or date it is — from your own knowledge: call the tool that provides it, or say plainly that you don't know. Reply directly only when no tool applies."
             };
             let prompt = format!(
                 "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",

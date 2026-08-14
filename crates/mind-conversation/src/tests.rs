@@ -2845,7 +2845,19 @@ fn reasoning_blocks_never_reach_the_user() {
 #[test]
 fn the_prompt_offers_exactly_one_way_to_call_a_tool() {
     // The two branches, kept in the same order as the code that chooses between them.
-    let with_schemas = "Use one of the tools you have been given whenever one fits; otherwise reply to the user directly.";
+    let with_schemas = "Use one of the tools you have been given whenever one fits. NEVER state a current real-world fact — weather, prices, quotes, news, someone's status, what time or date it is — from your own knowledge: call the tool that provides it, or say plainly that you don't know. Reply directly only when no tool applies.";
+
+    // Dropping the JSON spec also drops the only pressure to ACT, and the first version of this
+    // change did exactly that: asked for the weather in Reykjavik it called no tool and invented
+    // 4°C in August. A fabricated answer is worse than the failure it replaced, because "Sorry, I
+    // had trouble putting that together" is visibly wrong and 4°C is invisibly wrong. So the
+    // licence to answer directly must stay bounded by the class of fact.
+    assert!(with_schemas.contains("NEVER state a current real-world fact"), "no licence to confabulate");
+    assert!(with_schemas.contains("weather"), "name the classes that actually got fabricated");
+    assert!(
+        with_schemas.contains("only when no tool applies"),
+        "answering directly must be the exception, not the escape hatch"
+    );
     let without = "Reply with ONE JSON object — to use a tool: {\"tool\":\"<name>\",\"args\":{...},\"thought\":\"...\"}; to respond: {\"answer\":\"<reply>\",\"thought\":\"...\"}. Output ONLY the JSON.";
 
     // With schemas: not a word about JSON — that is what suppressed the native call.

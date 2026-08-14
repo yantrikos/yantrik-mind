@@ -189,6 +189,16 @@ pub enum RenderFormat {
     Summary,
     Table,
     Cards,
+    /// Flowing prose — no markers. For a CONVERSATIONAL answer, where the citation machinery is
+    /// there to strip ungrounded claims, not to reformat the reply as a list.
+    ///
+    /// `Summary` is right for a briefing, which genuinely is a list of items. It is wrong for a
+    /// chat turn, and the seam showed: the agent loop's compose step is told "compose FRESH in your
+    /// own voice; never mirror the work log's list formatting", and then the re-grounding pass
+    /// OVERWROTE that prose with `- {claim}` lines. Every factual answer came out as bullets, and a
+    /// one-claim reply came out as a single bullet — the cockpit rendered a plain "hi" as "• hi",
+    /// which is what made this visible.
+    Prose,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,7 +417,11 @@ impl RecipeEngine {
         if kept.claims.is_empty() {
             return None;
         }
-        Some(render(&kept, &RenderFormat::Summary))
+        // PROSE, not Summary. This is a CHAT reply: the citation pass exists to strip ungrounded
+        // claims, and reformatting the result as a bullet list was a side effect nobody asked for —
+        // it silently undid the compose step's "never mirror the work log's list formatting" and
+        // turned every factual answer into bullets.
+        Some(render(&kept, &RenderFormat::Prose))
     }
 
     pub async fn run_with(&self, recipe: &Recipe, vars: HashMap<String, Value>) -> RunOutcome {
@@ -954,6 +968,23 @@ fn render(cited: &CitedOutput, format: &RenderFormat) -> String {
     }
     match format {
         RenderFormat::Summary => cited.claims.iter().map(|c| format!("- {}", c.text)).collect::<Vec<_>>().join("\n"),
+        // The claims ARE sentences, so joining them reads as a paragraph. Terminal punctuation is
+        // supplied where the model omitted it, because "A B C" run together is the one way this
+        // renders worse than the bullets it replaces.
+        RenderFormat::Prose => cited
+            .claims
+            .iter()
+            .map(|c| {
+                let t = c.text.trim();
+                match t.chars().last() {
+                    Some(last) if ".!?:;\"')".contains(last) => t.to_string(),
+                    Some(_) => format!("{t}."),
+                    None => String::new(),
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
         RenderFormat::Cards => cited
             .claims
             .iter()
@@ -1019,6 +1050,54 @@ mod tests {
         let scripted = Arc::new(ScriptedLLM::new(llm_text));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
         RecipeEngine::new(pool, Arc::new(ScriptedHost), "You are JARVIS.")
+    }
+
+    /// A chat answer must come back as PROSE, not as a bullet list.
+    ///
+    /// `cited_answer` is the agent loop's anti-confabulation pass: it re-derives the answer as
+    /// claims and deterministically drops any that cite nothing. That part is right. What was wrong
+    /// is that it rendered the survivors with `RenderFormat::Summary` — `- {claim}` per line — and
+    /// that output REPLACES the composed reply. So the compose step was told "compose fresh in your
+    /// own voice; never mirror the work log's list formatting", produced prose, and had it
+    /// overwritten with bullets on every factual turn.
+    ///
+    /// The single-claim case is how it surfaced: a plain "hi" came back as one bullet, and the
+    /// cockpit dutifully rendered "• hi".
+    #[tokio::test]
+    async fn a_cited_chat_answer_reads_as_prose_not_bullets() {
+        let e = engine(
+            r#"{"claims":[{"text":"The deploy finished at 09:14","sources":["evidence"],"confidence":"high"},
+                          {"text":"Two checks are still pending.","sources":["evidence"],"confidence":"medium"}]}"#,
+        );
+        let out = e.cited_answer("how did the deploy go?", "EVIDENCE: deploy ok 09:14; 2 checks pending").await.unwrap();
+
+        assert!(!out.contains("- "), "a chat answer must not be rendered as a markdown list: {out}");
+        assert!(!out.starts_with('-'), "no leading bullet marker: {out}");
+        // Both grounded claims survive, joined as sentences with punctuation supplied where missing.
+        assert_eq!(out, "The deploy finished at 09:14. Two checks are still pending.");
+
+        // THE ONE-CLAIM CASE that put "• hi" on the screen — bare text, no marker at all.
+        let e = engine(r#"{"claims":[{"text":"hi","sources":["evidence"],"confidence":"high"}]}"#);
+        assert_eq!(e.cited_answer("hi", "EVIDENCE: greeting").await.unwrap(), "hi.");
+
+        // Still fails CLOSED: nothing grounded means None, so the caller keeps its own answer
+        // rather than showing "(nothing grounded to report)".
+        let e = engine(r#"{"claims":[{"text":"invented","sources":[],"confidence":"uncited"}]}"#);
+        assert!(e.cited_answer("q", "EVIDENCE: none").await.is_none(), "ungrounded claims must yield None");
+    }
+
+    /// `Summary` is still bullets — the briefing recipe genuinely IS a list of items, and the fix
+    /// above must not have changed it.
+    #[test]
+    fn the_briefing_summary_format_is_still_a_list() {
+        let cited = CitedOutput {
+            claims: vec![
+                CitedClaim { text: "Inbox: 2 from boss".into(), sources: vec!["evidence".into()], confidence: "high".into() },
+                CitedClaim { text: "PR #8 needs review".into(), sources: vec!["evidence".into()], confidence: "high".into() },
+            ],
+        };
+        assert_eq!(render(&cited, &RenderFormat::Summary), "- Inbox: 2 from boss\n- PR #8 needs review");
+        assert_eq!(render(&cited, &RenderFormat::Prose), "Inbox: 2 from boss. PR #8 needs review.");
     }
 
     use mind_types::{ActionDecision, ActionReceipt, ActionRequest};

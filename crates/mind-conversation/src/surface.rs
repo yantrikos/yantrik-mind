@@ -142,6 +142,11 @@ pub struct UpcomingItem {
     pub label: String,
     /// Whole days from now; negative would mean overdue.
     pub in_days: i64,
+    /// The reminder this row came from, when it came from one. `None` for calendar events and
+    /// people dates — those are facts about the world, not commitments the mind is carrying, so
+    /// there is nothing to dismiss. A client must render a dismiss control ONLY when this is set,
+    /// rather than offering one that cannot work.
+    pub task_id: Option<String>,
 }
 
 /// Token and spend accounting, from the PERSISTED rollup (survives restart) rather than the
@@ -602,7 +607,7 @@ impl ConversationEngine {
             upcoming: spine
                 .into_iter()
                 .take(6)
-                .map(|(at_ms, label)| UpcomingItem {
+                .map(|(at_ms, label, task_id)| UpcomingItem {
                     at_ms,
                     // CALENDAR days, not elapsed milliseconds. `(at_ms - now_ms).div_euclid(day)`
                     // floors toward negative infinity, so anything earlier TODAY came back as -1 —
@@ -613,6 +618,7 @@ impl ConversationEngine {
                         .map(|t| (t.with_timezone(now.offset()).date_naive() - now.date_naive()).num_days())
                         .unwrap_or(0),
                     label,
+                    task_id,
                 })
                 .collect(),
             resources: resource_state(),

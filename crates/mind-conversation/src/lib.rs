@@ -4816,7 +4816,7 @@ impl ConversationEngine {
                 let raw_bytes: usize = recent.iter().map(|(r, t)| r.len() + t.len() + 2).sum();
                 let recent_bytes = tool_catalog::compact_recent(&recent).len();
                 let spine = self.upcoming_spine(7).await;
-                let spine_bytes: usize = spine.iter().take(5).map(|(_, l)| l.len() + 3).sum();
+                let spine_bytes: usize = spine.iter().take(5).map(|(_, l, _)| l.len() + 3).sum();
                 let conflicts = self.memory.conflicts(&ctx2).await.unwrap_or_default();
                 let conflict_bytes: usize =
                     conflicts.iter().take(4).map(|c| c.belief_a.len() + c.belief_b.len() + 10).sum();
@@ -6997,7 +6997,7 @@ FROM A MOUNTED KNOWLEDGE PACK (third-party reference, not the household's own fa
         if !spine.is_empty() {
             grounding.push_str("
 Next 7 days:");
-            for (_, line) in spine.iter().take(5) {
+            for (_, line, _) in spine.iter().take(5) {
                 grounding.push_str(&format!("
 - {line}"));
             }

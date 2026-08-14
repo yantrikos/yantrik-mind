@@ -284,7 +284,7 @@ impl super::ConversationEngine {
         let spine = self.upcoming_spine(4).await;
         let mut tom_lines = Vec::new();
         let mut soon_lines = Vec::new();
-        for (ms, line) in &spine {
+        for (ms, line, _) in &spine {
             let d = chrono::DateTime::from_timestamp_millis(*ms)
                 .map(|t| t.with_timezone(now.offset()).format("%Y-%m-%d").to_string())
                 .unwrap_or_default();

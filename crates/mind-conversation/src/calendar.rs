@@ -86,11 +86,17 @@ impl super::ConversationEngine {
 
     /// Everything time-shaped in the next `days`, unified: calendar events (yours + external),
     /// people key dates, and reminder deadlines. Returns (ms, line) sorted soonest-first.
-    pub(crate) async fn upcoming_spine(&self, days: i64) -> Vec<(i64, String)> {
+    /// Rows for the next-N-days panel: `(when_ms, label, dismissable_task_id)`.
+    ///
+    /// The third element is what makes a row ACTIONABLE. Only reminders carry one — a calendar
+    /// event or a birthday is a fact about the world, not a commitment the mind is holding, so
+    /// there is nothing to dismiss. A `None` row must render without a dismiss control rather
+    /// than with one that fails.
+    pub(crate) async fn upcoming_spine(&self, days: i64) -> Vec<(i64, String, Option<String>)> {
         let today = local_now();
         let now = today.timestamp_millis();
         let horizon = now + days * 86_400_000;
-        let mut out: Vec<(i64, String)> = Vec::new();
+        let mut out: Vec<(i64, String, Option<String>)> = Vec::new();
         for e in self.load_calendar().await {
             let ms = e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
             if ms >= now - 86_400_000 / 2 && ms <= horizon {
@@ -99,11 +105,11 @@ impl super::ConversationEngine {
                 let when = chrono::DateTime::from_timestamp_millis(ms)
                     .map(|t| t.with_timezone(today.offset()).format("%a %b %-d").to_string())
                     .unwrap_or_default();
-                out.push((ms, format!("{when}: {title}{src}")));
+                out.push((ms, format!("{when}: {title}{src}"), None));
             }
         }
         for (name, label, d, mmdd) in self.upcoming_people_dates(days).await {
-            out.push((now + d * 86_400_000, format!("{mmdd}: {name}'s {label}")));
+            out.push((now + d * 86_400_000, format!("{mmdd}: {name}'s {label}"), None));
         }
         let (reminders, _) = self.split_tasks().await;
         for t in &reminders {
@@ -122,11 +128,11 @@ impl super::ConversationEngine {
                     let when = chrono::DateTime::from_timestamp_millis(ms)
                         .map(|x| x.with_timezone(today.offset()).format("%a %b %-d").to_string())
                         .unwrap_or_default();
-                    out.push((ms, format!("{when}: ⏰ {short}")));
+                    out.push((ms, format!("{when}: ⏰ {short}"), Some(t.id.clone())));
                 }
             }
         }
-        out.sort_by_key(|(ms, _)| *ms);
+        out.sort_by_key(|(ms, _, _)| *ms);
         // ONE OCCASION, ONE ROW. The three sources overlap by design — a birthday is in the people
         // registry AND usually has a reminder attached — so the panel showed "Pranab's Mom's
         // birthday" twice, once as "08-13: …" and once as "Thu Aug 13: ⏰ …". Two rows for one fact
@@ -154,17 +160,25 @@ impl super::ConversationEngine {
         let local_day = |ms: i64| -> Option<chrono::NaiveDate> {
             chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(today.offset()).date_naive())
         };
-        let mut deduped: Vec<(i64, String)> = Vec::new();
-        for (ms, line) in out {
+        let mut deduped: Vec<(i64, String, Option<String>)> = Vec::new();
+        for (ms, line, id) in out {
             let day = local_day(ms);
             let subj = subject(&line);
-            if deduped
-                .iter()
-                .any(|(m, l)| local_day(*m) == day && crate::task_similar(&subject(l), &subj))
+            if let Some(existing) = deduped
+                .iter_mut()
+                .find(|(m, l, _)| local_day(*m) == day && crate::task_similar(&subject(l), &subj))
             {
+                // MERGE THE ID, don't just drop the duplicate. One occasion often arrives twice —
+                // once as a people-date or calendar event (nothing to dismiss) and once as the
+                // reminder the mind is actually carrying (dismissable). Which one sorts first is an
+                // accident of milliseconds, so keeping only the first would randomly decide whether
+                // the row can be dismissed at all. Whichever copy carries the id wins that field.
+                if existing.2.is_none() {
+                    existing.2 = id;
+                }
                 continue;
             }
-            deduped.push((ms, line));
+            deduped.push((ms, line, id));
         }
         deduped
     }
@@ -176,7 +190,7 @@ impl super::ConversationEngine {
             return "📅 Nothing on the spine for the next 14 days. `ym calendar add <what> on <date>` — or `ym calendar connect <ics-url>` to bring your external calendar in.".to_string();
         }
         let mut out = String::from("📅 Next 14 days:");
-        for (_, line) in spine.iter().take(14) {
+        for (_, line, _) in spine.iter().take(14) {
             out.push_str(&format!("\n  • {line}"));
         }
         out

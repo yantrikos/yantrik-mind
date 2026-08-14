@@ -535,7 +535,7 @@ impl super::ConversationEngine {
         }
         // Forward spine = calendar (incl. fest: entries) + people dates + deadlined reminders.
         let spine = self.upcoming_spine(21).await;
-        let hit: Option<String> = spine.iter().find_map(|(_, label)| {
+        let hit: Option<String> = spine.iter().find_map(|(_, label, _)| {
             let ll = label.to_lowercase();
             let ltoks: std::collections::HashSet<String> = ll
                 .split(|c: char| !c.is_alphanumeric())

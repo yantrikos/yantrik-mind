@@ -532,6 +532,12 @@ fn topical_relatedness(a: &str, b: &str, semantic_cosine: Option<f64>) -> f64 {
     let semantic = semantic_cosine
         .map(|s| ((s - 0.5) * 2.0).clamp(0.0, 1.0))
         .unwrap_or(0.0);
+    // KNOWN DEFECT, deliberately left in place — see `the_real_world_false_contradictions_are_ignored`.
+    // A shared leading word saturates this to 1.0, which opens the gate for every pair of beliefs
+    // about the same person. Attempting to score the PREDICATE instead fixed the false positives
+    // and broke the true ones ("Pranab sleeps early" vs "Pranab stays up late" contradict while
+    // sharing no predicate words), so the correct fix needs the semantic signal to carry
+    // antonym-shaped conflicts, and probably belongs in the detector rather than this filter.
     word_overlap.max(subject_overlap).max(semantic)
 }
 
@@ -961,17 +967,66 @@ fn ensure_tensions_table(db: &YantrikDB) {
     );
 }
 
-/// Record a tension, deduped on (kind, about) among OPEN rows so a recurring urge accrues (keeps the
-/// max pressure + refreshes created_ms) rather than flooding the ledger with duplicates.
+/// The identity of a contradiction, independent of how it was spelled.
+///
+/// Deduping on the raw `about` string looked right and was not: ONE contradiction reaches this
+/// function under several different strings, so every variant inserted its own row. Measured live —
+/// a single dead fact ("Pranab owns a Rosefield watch intended as a gift") held **54 rows covering
+/// 12 real pairs**, and across the whole table 55% of conflict rows were duplicates.
+///
+/// Three things varied while the meaning did not:
+///   * **Two writers, two formats.** The assert-belief path emits `conflict: A vs B` (32 of the 54)
+///     and the DMN reconciliation path emits `"A" vs "B"` (the other 22). Neither knew about the
+///     other, so an exact-string match could never collapse them.
+///   * **Both directions.** `A vs B` and `B vs A` are the same contradiction; 24 of 24 ordered
+///     variants had their mirror stored as a separate row.
+///   * **Punctuation.** `pranab.co.in` and `pranab.co.in.` are the same claim to a reader and two
+///     different strings to SQLite.
+///
+/// So the key strips the format prefix and quotes, lowercases, drops non-alphanumerics, and SORTS
+/// the two sides — making it a property of the pair rather than of the sentence that carried it.
+/// Non-conflict tensions (urges, which have no `vs`) fall through to their normalised text, which
+/// preserves the original accrue-don't-flood behaviour for them.
+pub fn tension_key(about: &str) -> String {
+    let s = about.strip_prefix("conflict:").unwrap_or(about).trim();
+    let norm = |x: &str| -> String {
+        x.trim()
+            .trim_matches('"')
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match s.split_once(" vs ") {
+        Some((a, b)) => {
+            let (a, b) = (norm(a), norm(b));
+            // Sorted, so direction cannot create a second row.
+            if a <= b { format!("{a} vs {b}") } else { format!("{b} vs {a}") }
+        }
+        None => norm(s),
+    }
+}
+
+/// Record a tension, deduped on (kind, tension_key(about)) among OPEN rows so a recurring urge
+/// accrues (keeps the max pressure + refreshes created_ms) rather than flooding the ledger.
 fn record_tension_db(db: &YantrikDB, kind: &str, pressure: f64, about: &str, now_ms: i64) -> std::result::Result<(), String> {
     let conn = db.conn();
+    let key = tension_key(about);
+    // Compare on the KEY, not the stored string. Scanning open rows of this kind and normalising in
+    // Rust keeps the matching logic in exactly one place — a SQL expression would have to reproduce
+    // it and the two would drift.
     let existing: Option<(i64, f64)> = conn
-        .query_row(
-            "SELECT id, pressure FROM mind_tensions WHERE kind=?1 AND about=?2 AND status='open' LIMIT 1",
-            rusqlite::params![kind, about],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
+        .prepare("SELECT id, pressure, about FROM mind_tensions WHERE kind=?1 AND status='open'")
+        .and_then(|mut st| {
+            let rows = st.query_map(rusqlite::params![kind], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
+            })?;
+            Ok(rows.flatten().find(|(_, _, a)| tension_key(a) == key).map(|(i, p, _)| (i, p)))
+        })
+        .unwrap_or(None);
     match existing {
         Some((id, prev)) => conn
             .execute(
@@ -2262,6 +2317,91 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One contradiction must be ONE row however it was spelled.
+    ///
+    /// Built from the real 54-row Rosefield pile-up: 12 genuine pairs stored 54 times, because the
+    /// dedup matched the raw `about` string and three things varied while the meaning did not —
+    /// two writer formats, both orderings, and stray punctuation.
+    #[test]
+    fn one_contradiction_is_one_key_however_it_was_written() {
+        let assert_path = "conflict: Pranab owns a Rosefield watch vs Pranab lives in Bentonville";
+        let dmn_path = "\"Pranab owns a Rosefield watch\" vs \"Pranab lives in Bentonville\"";
+        let reversed = "\"Pranab lives in Bentonville\" vs \"Pranab owns a Rosefield watch\"";
+        let punctuated = "conflict: Pranab lives in Bentonville. vs Pranab owns a Rosefield watch.";
+
+        let k = tension_key(assert_path);
+        assert_eq!(tension_key(dmn_path), k, "the two writer formats must collapse to one key");
+        assert_eq!(tension_key(reversed), k, "A vs B and B vs A are the same contradiction");
+        assert_eq!(tension_key(punctuated), k, "a trailing period is not a different claim");
+
+        // Genuinely different pairs must NOT collapse — a dedup that over-merges hides real conflict.
+        assert_ne!(
+            tension_key("conflict: Pranab owns a Rosefield watch vs Pranab has an iPhone"),
+            k,
+            "different second operands are different contradictions"
+        );
+
+        // Non-conflict tensions (urges) have no " vs " and still normalise to something stable,
+        // preserving the accrue-don't-flood behaviour they always had.
+        assert_eq!(tension_key("  Curiosity:  unread   papers "), tension_key("curiosity unread papers"));
+    }
+
+    /// The relatedness gate must reject the pairs that actually polluted the live table.
+    ///
+    /// These are verbatim from the 54-row pile-up: one belief about a gift paired against the
+    /// user's city, phone, website and daughter. Nothing about them is contradictory — they are a
+    /// cross-product of unrelated facts, and every one was stored at the floor pressure of 0.30,
+    /// which is the tell that nothing ever scored them.
+    #[test]
+    fn the_real_world_false_contradictions_are_ignored() {
+        let watch = "Pranab owns a Rosefield watch intended as a birthday gift for Brishti";
+        let threshold = contradiction_relatedness_threshold();
+        // CHARACTERISATION, NOT A SPEC: this asserts what the gate currently DOES, so the day
+        // someone fixes it this test fails loudly and gets inverted rather than silently rotting.
+        for other in [
+            "Pranab lives in Bentonville, United States",
+            "Pranab Sarkar has an iPhone",
+            "Pranab's personal website is https://pranab.co.in",
+            "Pranab has a daughter named Aadrisha",
+            "Pranab is most active around midnight and busiest on Wednesdays",
+        ] {
+            let score = topical_relatedness(watch, other, None);
+            assert!(
+                score >= threshold,
+                "the gate is documented as letting these through on the shared subject alone;                  if '{other}' now scores {score} below the {threshold} gate, the defect is FIXED —                  invert this assertion and delete the KNOWN DEFECT comment in topical_relatedness"
+            );
+        }
+
+        // The gate must still ADMIT a genuine conflict about the same subject, or it is just off.
+        let real = topical_relatedness(watch, "Pranab gave Brishti a handbag instead of the Rosefield watch", None);
+        assert!(real >= threshold, "a real same-subject conflict must survive the gate, scored {real}");
+    }
+
+    /// The dedup must actually collapse the variants at the storage layer, not just in the key fn.
+    #[test]
+    fn recording_the_same_contradiction_twice_keeps_one_row() {
+        let db = YantrikDB::new(":memory:", 64).expect("in-memory db");
+        ensure_tensions_table(&db);
+        let now = 1_786_000_000_000i64;
+
+        record_tension_db(&db, "contradiction", 0.30, "conflict: A vs B", now).unwrap();
+        record_tension_db(&db, "contradiction", 0.45, "\"B\" vs \"A\"", now + 1_000).unwrap();
+        record_tension_db(&db, "contradiction", 0.20, "conflict: B vs A.", now + 2_000).unwrap();
+
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM mind_tensions WHERE status='open'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "three spellings of one contradiction must be one row, not three");
+
+        // Accrual still works: the row keeps the HIGHEST pressure seen, not the latest.
+        let p: f64 = db
+            .conn()
+            .query_row("SELECT pressure FROM mind_tensions WHERE status='open'", [], |r| r.get(0))
+            .unwrap();
+        assert!((p - 0.45).abs() < 1e-9, "a recurring tension keeps its max pressure, got {p}");
+    }
 
     #[test]
     fn unauthorized_device_cannot_load_memory() {

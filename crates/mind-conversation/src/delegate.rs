@@ -405,6 +405,35 @@ pub(crate) fn verdict_is_usable(v: &str) -> bool {
     })
 }
 
+/// Append one round's spend to the SHARED token ledger — the same file `ym-record-spend` writes
+/// for the nightly self-build and the same one the `tokens` verb already reads. Only the lane label
+/// differs ("delegate" vs "builder"), so delegated spend appears in the existing report with no
+/// reader change.
+///
+/// This exists because delegation was invisible. The nightly tick logged every run; the iterate
+/// loop logged nothing, so the ledger showed $1.71 across six builds while a single day of
+/// delegation quietly moved 42.7M tokens and exhausted a week's quota. The expensive path was the
+/// unmeasured one.
+///
+/// UNMEASURED IS NOT FREE. A round whose CLI returned no usage block is recorded as UNMEASURED
+/// rather than skipped or zeroed: a silent gap reads as "nothing was spent", which is the exact
+/// misreading that let this go unnoticed.
+pub(crate) fn record_round_spend(spend: Option<&mind_tools::coder::RoundSpend>, job: &str, round: usize) {
+    let dir = std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".to_string());
+    let when = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let lane = format!("delegate:{job}#{round}");
+    let line = match spend {
+        Some(s) => s.ledger_line(&lane, &when),
+        None => format!("{when} | {lane} | unknown | tokens=UNMEASURED | usd=UNMEASURED"),
+    };
+    // Best effort by design: a delegation must not fail because its meter could not write. The
+    // loss is visible either way — a missing line is a gap in the ledger, not a silent zero.
+    if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{dir}/token_ledger.log")) {
+        use std::io::Write;
+        let _ = writeln!(fh, "{line}");
+    }
+}
+
 /// What the NEXT round is told about the rounds before it — the mind's memory of the job, handed
 /// to a builder that has none.
 ///
@@ -846,6 +875,18 @@ impl super::ConversationEngine {
                         }
                     };
                     wd = Some(r.workdir.clone());
+                    // Meter EVERY round, before any of the early-exit paths below — a round that
+                    // failed still burned whatever it burned getting there, and those are exactly
+                    // the rounds a cost review wants to see.
+                    record_round_spend(r.spend.as_ref(), &id2, round);
+                    if let Some(s) = r.spend.as_ref() {
+                        // Also on the job's own trail, so `ym jobs` shows the cost next to the work
+                        // instead of making you cross-reference a separate ledger.
+                        scratch_note(&mem, &id2, &format!(
+                            "round {round}: spend — {} tokens (cache_r={}), ${:.4}",
+                            s.total_tokens(), s.cache_read, s.usd
+                        )).await;
+                    }
                     // A round that FAILED and touched NOTHING is a dead provider, not a bad build:
                     // iterating cannot help, and each retry costs a full-session replay. Keep the
                     // previous round's work as the result (do not let the dead round become `last`)

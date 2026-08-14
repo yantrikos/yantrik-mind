@@ -4897,18 +4897,41 @@ impl ConversationEngine {
                                 l.split("tokens=").nth(1)?.split_whitespace().next()?.parse::<u64>().ok()
                             })
                             .sum();
+                        // BY LANE, because one number hid the problem. This report said "$1.71 across
+                        // six builds" while a single day of delegation moved 42.7M tokens and put a
+                        // week's quota away — the nightly tick was metered and the expensive path was
+                        // not. A total that cannot be attributed cannot be acted on.
+                        let mut lanes: std::collections::BTreeMap<&str, (usize, u64, f64)> = Default::default();
+                        for l in &lines {
+                            let lane = l.split(" | ").nth(1).unwrap_or("unknown");
+                            // "delegate:a1b2#3" and "delegate:c4d5#1" are the same LANE, different jobs.
+                            let lane = lane.split(':').next().unwrap_or(lane);
+                            let e = lanes.entry(lane).or_default();
+                            e.0 += 1;
+                            e.1 += l.split("tokens=").nth(1).and_then(|s| s.split_whitespace().next()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                            e.2 += l.rsplit_once("usd=").and_then(|(_, v)| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                        }
+                        let by_lane = lanes
+                            .iter()
+                            .map(|(k, (n, tk, usd))| format!("  {k}: {n} run(s), {tk} tokens, ${usd:.2}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        // Say the gap out loud. An unmeasured round is not a free one, and a total
+                        // that quietly omits it is the same misreading in a new place.
+                        let unmeasured = lines.iter().filter(|l| l.contains("tokens=UNMEASURED")).count();
+                        let caveat = if unmeasured > 0 {
+                            format!("\n⚠️  {unmeasured} round(s) UNMEASURED (the CLI returned no usage) — the totals above are a FLOOR, not the full cost.")
+                        } else {
+                            String::new()
+                        };
                         let recent: Vec<&str> = lines.iter().rev().take(8).copied().collect();
                         format!(
-                            "💸 Self-build spend — {} run(s), {toks} tokens, ${total:.2} total
-{}
-
-Each agentic build reads the codebase, so cost scales with runs, not with diff size.",
+                            "💸 LLM spend — {} run(s), {toks} tokens, ${total:.2} total\n{by_lane}{caveat}\n\n{}\n\nEach agentic run reads the codebase, so cost scales with runs and with TURNS PER RUN, not with diff size.",
                             lines.len(),
-                            recent.join("
-")
+                            recent.join("\n")
                         )
                     }
-                    _ => "💸 Self-build spend: nothing recorded yet — the next builder run writes the first entry.".to_string(),
+                    _ => "💸 LLM spend: nothing recorded yet — the next builder or delegation round writes the first entry.".to_string(),
                 }
             }
             "handoff_prompt" => self.handoff_prompt().await,

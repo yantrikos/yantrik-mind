@@ -33,11 +33,81 @@ pub struct Coder {
     oauth_token: Option<String>,
 }
 
+/// What one round actually cost. Absent when the CLI did not return usable JSON — an UNMEASURED
+/// round must be distinguishable from a free one, so this is an Option and never a zeroed struct.
+/// (A spend meter that reports 0 when it failed is worse than no meter: it reads as "nothing
+/// happened yet" while the money leaves.)
+#[derive(Debug, Clone)]
+pub struct RoundSpend {
+    pub model: String,
+    pub input: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub usd: f64,
+}
+
+impl RoundSpend {
+    pub fn total_tokens(&self) -> u64 {
+        self.input + self.cache_write + self.cache_read + self.output
+    }
+
+    /// The ledger line format already written by `ym-record-spend` and already parsed by the
+    /// `tokens` verb. Matching it byte-for-byte (only the lane label differs) means delegation
+    /// spend shows up in the existing report with no reader change — one ledger, one truth. The
+    /// 08-05 control-center research put "never two sources of truth for spend" at #2 by user pain,
+    /// after an ecosystem shipped a $12.3M header against $10-15 of real cost.
+    pub fn ledger_line(&self, lane: &str, when: &str) -> String {
+        format!(
+            "{when} | {lane} | {} | tokens={} (in={} cache_w={} cache_r={} out={}) | usd={:.4}",
+            self.model,
+            self.total_tokens(),
+            self.input,
+            self.cache_write,
+            self.cache_read,
+            self.output,
+            self.usd
+        )
+    }
+}
+
+/// Pull the prose and the spend out of a `claude --output-format json` blob. Returns the raw text
+/// unchanged (and no spend) when it is not that shape — the CLI emits plain text on some error
+/// paths, and losing the error message to a parse failure would be a bad trade.
+fn parse_cli_json(raw: &str) -> (String, Option<RoundSpend>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (raw.trim().to_string(), None);
+    };
+    let prose = v
+        .get("result")
+        .and_then(|r| r.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| raw.trim().to_string());
+    let u = v.get("usage");
+    let n = |k: &str| u.and_then(|u| u.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
+    // No usage block means the run reported no spend it can vouch for — say unmeasured, not zero.
+    let spend = u.map(|_| RoundSpend {
+        model: v
+            .get("modelUsage")
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.keys().next().cloned())
+            .unwrap_or_else(|| "unknown".to_string()),
+        input: n("input_tokens"),
+        cache_write: n("cache_creation_input_tokens"),
+        cache_read: n("cache_read_input_tokens"),
+        output: n("output_tokens"),
+        usd: v.get("total_cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0),
+    });
+    (prose, spend)
+}
+
 /// The result of one coder run.
 pub struct CoderResult {
     pub ok: bool,
     /// The agent's final text (its own summary of what it did).
     pub summary: String,
+    /// What the round cost, when the CLI reported it. `None` means UNMEASURED, not free.
+    pub spend: Option<RoundSpend>,
     /// Absolute path of the scratch workdir holding any files it produced.
     pub workdir: String,
     /// Non-hidden files the agent created/left in the workdir.
@@ -154,7 +224,7 @@ impl Coder {
             .arg("acceptEdits")
             .arg("--dangerously-skip-permissions")
             .arg("--output-format")
-            .arg("text")
+            .arg("json")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -209,13 +279,18 @@ impl Coder {
             out
         };
 
-        let mut summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // stdout is a JSON envelope now (see --output-format json): the prose lives at .result and
+        // the spend at .usage/.total_cost_usd. Falls back to the raw text when it is not JSON,
+        // because the CLI prints bare errors on some paths and that message is worth more than a
+        // clean parse failure.
+        let (mut summary, spend) = parse_cli_json(&String::from_utf8_lossy(&out.stdout));
         if summary.is_empty() {
             summary = String::from_utf8_lossy(&out.stderr).trim().to_string();
         }
         Ok(CoderResult {
             ok: out.status.success(),
             summary,
+            spend,
             files: list_files(&wd),
             workdir: wd,
             timed_out: false,
@@ -232,6 +307,10 @@ impl Coder {
                 self.timeout_secs,
                 if resumed { " while refining an earlier round" } else { "" },
             ),
+            // A killed child never printed its JSON envelope, so the round's cost is genuinely
+            // unknown — not zero. The ledger will show it as UNMEASURED rather than quietly
+            // under-reporting the total, which is the failure this whole meter exists to prevent.
+            spend: None,
             files: list_files(&wd),
             workdir: wd,
             timed_out: true,
@@ -282,6 +361,56 @@ pub fn render_coder(r: &CoderResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The envelope the CLI actually returns under `--output-format json`, shaped exactly like the
+    /// blobs `ym-record-spend` has been parsing on the box.
+    #[test]
+    fn cli_json_yields_both_the_prose_and_the_spend() {
+        let raw = r#"{
+            "result": "  Added tests/mail-form.test.ts (67 lines).  ",
+            "total_cost_usd": 0.0769,
+            "modelUsage": {"claude-haiku-4-5-20251001": {"anything": 1}},
+            "usage": {"input_tokens": 5, "cache_creation_input_tokens": 7898,
+                      "cache_read_input_tokens": 61965, "output_tokens": 667}
+        }"#;
+        let (prose, spend) = parse_cli_json(raw);
+        assert_eq!(prose, "Added tests/mail-form.test.ts (67 lines).", "the prose is .result, trimmed — not the whole envelope");
+        let s = spend.expect("a usage block means the round is measured");
+        assert_eq!(s.total_tokens(), 70_535, "total must include cache reads — they are the whole story of this loop's cost");
+        assert_eq!(s.model, "claude-haiku-4-5-20251001");
+        assert!((s.usd - 0.0769).abs() < 1e-9);
+    }
+
+    /// The line must match what `ym-record-spend` already writes, because the `tokens` verb parses
+    /// that shape. Only the lane label differs. Drift here silently splits the ledger in two.
+    #[test]
+    fn ledger_line_matches_the_existing_recorder_format() {
+        let s = RoundSpend {
+            model: "claude-haiku-4-5-20251001".into(),
+            input: 5,
+            cache_write: 7898,
+            cache_read: 61965,
+            output: 667,
+            usd: 0.0769,
+        };
+        assert_eq!(
+            s.ledger_line("delegate:a1b2c3#2", "2026-08-13T03:17:19Z"),
+            "2026-08-13T03:17:19Z | delegate:a1b2c3#2 | claude-haiku-4-5-20251001 | tokens=70535 (in=5 cache_w=7898 cache_r=61965 out=667) | usd=0.0769"
+        );
+    }
+
+    /// Unmeasured must never masquerade as free. A CLI error prints bare text, and a JSON envelope
+    /// can arrive with no usage block; in both cases the answer is None, and the caller records
+    /// UNMEASURED. Reporting 0.0 here is what makes an expensive path look idle.
+    #[test]
+    fn a_round_without_usage_is_unmeasured_not_zero() {
+        let (prose, spend) = parse_cli_json("API Error: Request rejected (429) · quota exhausted");
+        assert!(prose.contains("429"), "a bare CLI error is worth more than a clean parse failure — keep the text");
+        assert!(spend.is_none(), "no envelope means no measurement");
+
+        let (_, spend) = parse_cli_json(r#"{"result": "done", "total_cost_usd": 0.0}"#);
+        assert!(spend.is_none(), "an envelope with no usage block is unmeasured, not a free round");
+    }
 
     #[test]
     fn oauth_token_trims_surrounding_whitespace() {

@@ -94,7 +94,8 @@ impl ConversationEngine {
         // A plain (ungrounded) call — no private lane, no grounding, a FRESH message list with no
         // shared state carrying private context.
         let text = self.inference.chat(vec![ChatMessage::system(sys), ChatMessage::user(&user)], cfg).await.ok()?.text;
-        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
         let obj = match (body.find('{'), body.rfind('}')) {
             (Some(a), Some(b)) if b > a => &body[a..=b],
             _ => return None, // fail closed: no usable JSON from the clean planner

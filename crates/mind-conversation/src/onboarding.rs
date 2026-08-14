@@ -608,7 +608,8 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             ChatMessage::user(&prompt),
         ];
         let text = self.inference.chat_grounded(messages, GenerationConfig::default()).await.ok()?.text;
-        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
         let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
         let obj = match (body.find('{'), body.rfind('}')) {
             (Some(s), Some(e)) if e > s => &body[s..=e],

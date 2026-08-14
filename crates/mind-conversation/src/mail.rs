@@ -163,7 +163,7 @@ impl super::ConversationEngine {
                     .await
                 {
                     Ok(r) => {
-                        let body = r.text.rsplit("</think>").next().unwrap_or(&r.text).to_string();
+                        let body = crate::strip_reasoning(&r.text);
                         match (body.find('['), body.rfind(']')) {
                             (Some(x), Some(y)) if y > x => serde_json::from_str(&body[x..=y]).unwrap_or_default(),
                             _ => Vec::new(),
@@ -320,7 +320,7 @@ impl super::ConversationEngine {
             .chat(vec![ChatMessage::system("You triage email headers. Output only JSON."), ChatMessage::user(&triage)], cfg_small)
             .await
         {
-            let body = r.text.rsplit("</think>").next().unwrap_or(&r.text).to_string();
+            let body = crate::strip_reasoning(&r.text);
             let picks: Vec<serde_json::Value> = match (body.find('['), body.rfind(']')) {
                 (Some(x), Some(y)) if y > x => serde_json::from_str(&body[x..=y]).unwrap_or_default(),
                 _ => Vec::new(),

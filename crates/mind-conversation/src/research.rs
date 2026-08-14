@@ -247,7 +247,8 @@ impl super::ConversationEngine {
             ChatMessage::user(&prompt),
         ];
         let text = self.inference.chat(messages, GenerationConfig::default()).await.map_err(|e| MindError::Inference(e.to_string()))?.text;
-        let b = text.rsplit("</think>").next().unwrap_or(&text);
+        let b_owned = crate::strip_reasoning(&text);
+        let b = b_owned.as_str();
         let b = b.split("```").find(|s| s.contains('{')).unwrap_or(b);
         let obj = match (b.find('{'), b.rfind('}')) {
             (Some(s), Some(e)) if e > s => &b[s..=e],

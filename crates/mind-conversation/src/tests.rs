@@ -2774,6 +2774,51 @@ async fn the_voice_path_grounds_in_the_people_layer() {
 ///
 /// The catalog advertises "- answer {text}: give the user your final reply". The native tool-calling
 /// path honoured it; the free-text JSON path did not, so `{"tool":"answer","args":{"text":"..."}}`
+/// Reasoning must not reach the user, including the case that actually leaked.
+///
+/// The old idiom was `text.rsplit("</think>").next()`, copy-pasted to a dozen sites. It handled the
+/// happy path and failed two ways: it knew only ONE tag name, and with no closing tag `rsplit`
+/// returns the whole string — so a `<think>` truncated by max_tokens delivered the entire reasoning
+/// dump to the cockpit. Measured on the local reasoner, a single turn spent 1762–2884 tokens
+/// thinking against an 8000-token cap, so that truncation is ordinary, not exotic.
+#[test]
+fn reasoning_blocks_never_reach_the_user() {
+    use super::strip_reasoning;
+
+    assert_eq!(strip_reasoning("<think>weighing it up</think>\nThe answer is 42."), "The answer is 42.");
+
+    // THE LEAK: opened, never closed. Everything from the tag on is reasoning.
+    assert_eq!(
+        strip_reasoning("<think>Let me consider the options. First I should check whether"),
+        "",
+        "an unterminated block must be removed entirely — rsplit returned it verbatim"
+    );
+    assert_eq!(
+        strip_reasoning("Here is the plan.\n<think>now let me second-guess it and run out of budget"),
+        "Here is the plan.",
+        "content before an unterminated block survives; the block does not"
+    );
+
+    // Every variant the local reasoners emit, not just <think>.
+    for tag in ["thinking", "reasoning", "thought", "REASONING_SCRATCHPAD"] {
+        assert_eq!(
+            strip_reasoning(&format!("<{tag}>hidden</{tag}>\nVisible.")),
+            "Visible.",
+            "<{tag}> must be stripped too"
+        );
+    }
+
+    // Case-insensitive, and more than one block per reply.
+    assert_eq!(strip_reasoning("<THINK>a</THINK>Keep<think>b</think> this."), "Keep this.");
+
+    // A bare MENTION mid-sentence is prose, not a block — truncating here would eat real content.
+    let mention = "Wrap your reasoning in <think> tags when you reply.";
+    assert_eq!(strip_reasoning(mention), mention, "a mid-sentence mention must survive untouched");
+
+    // Nothing to strip is a no-op (trimmed).
+    assert_eq!(strip_reasoning("  plain reply  "), "plain reply");
+}
+
 /// hit the dispatch table, found no such arm, and came back "(unknown tool: answer)". The loop
 /// counted that as a failed step and asked again — the model kept choosing the one action the catalog
 /// promised and the runtime refused.

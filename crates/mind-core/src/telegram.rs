@@ -651,7 +651,14 @@ fn ctl_handle(
                 // Drain progress until the turn completes; rx closes when the scope drops its tx.
                 rt.block_on(async {
                     while let Some(p) = rx.recv().await {
-                        chunk(&format!("p:{}\n", p.replace('\n', " ")));
+                        // Reasoning rides the same ordered per-turn channel as progress, marked
+                        // with a sentinel, and is split back out here into its own "t:" line type.
+                        // A client that does not know "t:" ignores it, which is exactly the
+                        // degrade-quietly behaviour the surfaces handshake already assumes.
+                        match p.strip_prefix(mind_conversation::THINKING_MARK) {
+                            Some(t) => chunk(&format!("t:{}\n", t.replace('\n', "\u{1}"))),
+                            None => chunk(&format!("p:{}\n", p.replace('\n', " "))),
+                        }
                     }
                 });
                 let final_text = rt

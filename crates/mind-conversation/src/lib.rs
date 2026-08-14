@@ -369,10 +369,88 @@ fn pending_proposals() -> String {
 /// Parse a loose due expression ("tomorrow", "tonight", "next week", "in 3 days", "in 2 hours") to
 /// an absolute epoch-ms. None for null/empty/unparseable — the commitment still becomes an open task,
 /// just without an auto-reminder. Calendar dates + weekday names are a later refinement.
+/// Remove reasoning blocks from a model reply.
+///
+/// Replaces the `text.rsplit("</think>").next()` idiom that was copy-pasted to a dozen call sites,
+/// and closes the two holes every copy shared:
+///
+/// 1. **Only `</think>`.** Local reasoners also emit `<thinking>`, `<reasoning>`, `<thought>` and
+///    `<REASONING_SCRATCHPAD>`; those sailed straight through to the user.
+/// 2. **An UNTERMINATED block leaked in full.** `rsplit` on a string with no closing tag returns the
+///    whole string, so a `<think>` cut off by `max_tokens` delivered the entire reasoning dump to
+///    the screen. That is reachable in practice: measured on the local reasoner, one turn spent
+///    1762–2884 tokens thinking against an 8000-token cap. This is the bug that put visible
+///    reasoning in the cockpit.
+///
+/// An open tag is only treated as an opener at a line boundary, so prose that merely MENTIONS
+/// `<think>` is left alone; a closed pair is always removed wherever it appears, because a closed
+/// pair is a deliberate, bounded construct. Both rules follow the Hermes scrubber, which solved
+/// this first.
+pub(crate) fn strip_reasoning(text: &str) -> String {
+    split_reasoning(text).1
+}
+
+/// Separate a reply into `(reasoning, visible)`.
+///
+/// Reasoning is SEPARATED rather than deleted, because it is worth showing: the cockpit streams it
+/// while the model works, then collapses it behind a toggle once the real answer arrives. Watching
+/// a local model reason is the difference between a progress spinner and knowing what it is doing —
+/// and being able to reopen it afterwards is how you debug a wrong answer. Callers that only want
+/// the answer use `strip_reasoning`; the chat transport wants both halves.
+pub(crate) fn split_reasoning(text: &str) -> (String, String) {
+    const TAGS: [&str; 5] = ["think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD"];
+    let mut out = text.to_string();
+    let mut reasoning = String::new();
+    for tag in TAGS {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        loop {
+            // Case-insensitive search without allocating a lowercase copy per iteration would be
+            // nicer; replies are small and this runs once per turn, so clarity wins.
+            let lower = out.to_lowercase();
+            let Some(start) = lower.find(&open.to_lowercase()) else { break };
+            // Boundary rule: only treat this as a block when the tag opens a line (or the whole
+            // reply). Otherwise "wrap it in <think> tags" would swallow a legitimate sentence.
+            let at_boundary = out[..start].trim_end_matches([' ', '\t']).ends_with('\n') || out[..start].trim().is_empty();
+            match lower[start..].find(&close.to_lowercase()) {
+                Some(rel_end) => {
+                    // Closed pair: always a block, boundary or not.
+                    let end = start + rel_end + close.len();
+                    let inner = &out[start + open.len()..start + rel_end];
+                    if !inner.trim().is_empty() {
+                        if !reasoning.is_empty() {
+                            reasoning.push_str("\n\n");
+                        }
+                        reasoning.push_str(inner.trim());
+                    }
+                    out.replace_range(start..end, "");
+                }
+                None if at_boundary => {
+                    // Unterminated and it owns the line: everything from here is reasoning the
+                    // model never got to close. THIS is the leak the old rsplit idiom shipped —
+                    // with no closing tag it returned the whole string verbatim.
+                    let inner = out[start + open.len()..].trim().to_string();
+                    if !inner.is_empty() {
+                        if !reasoning.is_empty() {
+                            reasoning.push_str("\n\n");
+                        }
+                        reasoning.push_str(&inner);
+                    }
+                    out.truncate(start);
+                    break;
+                }
+                None => break, // a bare mention mid-sentence — leave the text alone
+            }
+        }
+    }
+    (reasoning.trim().to_string(), out.trim().to_string())
+}
+
 /// Tolerant JSON-object extraction from a model reply (handles `<think>` preambles + ```json fences).
 /// Returns `{}` on failure so callers can `.get(...)` safely.
 fn parse_json_obj(text: &str) -> serde_json::Value {
-    let body = text.rsplit("</think>").next().unwrap_or(text);
+    let stripped = strip_reasoning(text);
+    let body = stripped.as_str();
     let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
     let obj = match (body.find('{'), body.rfind('}')) {
         (Some(s), Some(e)) if e > s => &body[s..=e],
@@ -762,6 +840,26 @@ pub(crate) fn emit_progress(msg: &str) {
     let _ = TURN_PROGRESS.try_with(|tx| {
         let _ = tx.send(msg.to_string());
     });
+}
+
+/// Marks a progress message as REASONING rather than a status line, so the transport can route it
+/// to its own channel. A sentinel on the existing channel rather than a second channel: progress is
+/// already scoped per turn and ordered, and a parallel path would have to re-solve both.
+pub const THINKING_MARK: &str = "\u{1}think\u{1}";
+
+/// Stream the model's own reasoning to the caller.
+///
+/// Reasoning is shown, not hidden. The cockpit renders it live while the model works and collapses
+/// it behind a toggle once the answer lands — a local model can spend 1700–2900 tokens thinking, and
+/// the difference between watching that and watching a spinner is the difference between trusting
+/// the machine and waiting on it. Kept expandable afterwards because a wrong answer is much easier
+/// to diagnose with the reasoning that produced it.
+pub(crate) fn emit_thinking(text: &str) {
+    let t = text.trim();
+    if t.is_empty() {
+        return;
+    }
+    emit_progress(&format!("{THINKING_MARK}{t}"));
 }
 
 fn looks_like_non_answer(text: &str) -> bool {
@@ -3470,7 +3568,8 @@ impl ConversationEngine {
             Err(_) => return 0,
         };
         // Robust object extraction (tolerates <think> preambles + ```json fences).
-        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
         let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
         let obj = match (body.find('{'), body.rfind('}')) {
             (Some(s), Some(e)) if e > s => &body[s..=e],
@@ -3618,7 +3717,8 @@ impl ConversationEngine {
             Err(e) => return format!("Couldn't run the analysis ({e})."),
         };
         // Robust object extraction (tolerates <think> preambles + ```json fences).
-        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
         let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
         let obj = match (body.find('{'), body.rfind('}')) {
             (Some(s), Some(e)) if e > s => &body[s..=e],
@@ -7137,7 +7237,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 Ok(r) => r,
                 Err(e) => return Ok(format!("(couldn't think just now: {e})")),
             };
-            let text = resp.text;
+            // Split the model's reasoning off the reply and STREAM IT. The reasoning is the most
+            // interesting thing happening during a 30-second local-model turn and it used to be
+            // either discarded or — when the block was left unterminated — dumped into the chat as
+            // raw text. It is now its own channel: shown live, collapsed when the answer arrives.
+            let (reasoning, text) = split_reasoning(&resp.text);
+            emit_thinking(&reasoning);
             // SOURCE-AGNOSTIC INTENT: prefer the model's NATIVE structured tool call (reliable args,
             // no string-slicing); fall back to parsing a free-text JSON object from the reply for
             // backends that don't do tool-calling. Either way we produce the same `{tool,args}` /
@@ -7153,7 +7258,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 Some(tc) => (serde_json::json!({ "tool": tc.name, "args": tc.arguments }), String::new()),
                 None => {
-                    let body = text.rsplit("</think>").next().unwrap_or(&text);
+                    let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
                     let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
                     let obj = match (body.find('{'), body.rfind('}')) {
                         (Some(a), Some(b)) if b > a => &body[a..=b],

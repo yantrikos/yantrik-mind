@@ -392,7 +392,8 @@ impl super::ConversationEngine {
             Ok(r) => r.text,
             Err(e) => return format!("Couldn't analyze the email: {e}"),
         };
-        let body = text.rsplit("</think>").next().unwrap_or(&text);
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
         let arr: Vec<serde_json::Value> = match (body.find('['), body.rfind(']')) {
             (Some(a), Some(b)) if b > a => serde_json::from_str(&body[a..=b]).unwrap_or_default(),
             _ => Vec::new(),

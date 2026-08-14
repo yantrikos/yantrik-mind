@@ -2770,10 +2770,6 @@ async fn the_voice_path_grounds_in_the_people_layer() {
 {prompt}");
 }
 
-/// `answer` must TERMINATE the loop, however the model spells it.
-///
-/// The catalog advertises "- answer {text}: give the user your final reply". The native tool-calling
-/// path honoured it; the free-text JSON path did not, so `{"tool":"answer","args":{"text":"..."}}`
 /// Reasoning must not reach the user, including the case that actually leaked.
 ///
 /// The old idiom was `text.rsplit("</think>").next()`, copy-pasted to a dozen sites. It handled the
@@ -2817,8 +2813,21 @@ fn reasoning_blocks_never_reach_the_user() {
 
     // Nothing to strip is a no-op (trimmed).
     assert_eq!(strip_reasoning("  plain reply  "), "plain reply");
+
+    // A reply that is NOTHING BUT a (properly closed) reasoning block strips to empty. This is the
+    // well-behaved-reasoner shape, and it is why the compose step must guard for empty rather than
+    // hand its result to the screen: correct stripping and "no answer" are the same string here.
+    assert_eq!(strip_reasoning("<think>I considered it at length.</think>"), "");
+    assert!(
+        strip_reasoning("<think>ran out of budget mid-thought").is_empty(),
+        "an all-reasoning reply leaves nothing to show — the caller must fall back, not render this"
+    );
 }
 
+/// `answer` must TERMINATE the loop, however the model spells it.
+///
+/// The catalog advertises "- answer {text}: give the user your final reply". The native tool-calling
+/// path honoured it; the free-text JSON path did not, so `{"tool":"answer","args":{"text":"..."}}`
 /// hit the dispatch table, found no such arm, and came back "(unknown tool: answer)". The loop
 /// counted that as a failed step and asked again — the model kept choosing the one action the catalog
 /// promised and the runtime refused.

@@ -7547,7 +7547,17 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // Normalise BEFORE the guards and the dispatch: every downstream reader (the egress
             // cleaner, the exact-value guard, the loop signature, the tool itself) assumes plain
             // `{name: value}`, and a content-block wrapper defeats all four at once.
-            let grounded_args = normalize_tool_args(v.get("args").cloned().unwrap_or_else(|| serde_json::json!({})));
+            let raw_args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let grounded_args = normalize_tool_args(raw_args.clone());
+            // Which producer supplied these, and in what shape. Tool ARGUMENTS have now been wrong
+            // in three distinct ways on the same call while the model was demonstrably right on the
+            // wire, and each time the only evidence was the rendered detail line — after
+            // normalisation, so the original shape was already gone. Log both.
+            if raw_args != grounded_args {
+                eprintln!("[agent] step {step}: {tool} args normalised {raw_args} -> {grounded_args}");
+            } else {
+                eprintln!("[agent] step {step}: {tool} raw args {raw_args}");
+            }
             // ARCH-3 slice 2: for an eligible EGRESS tool, re-author the args in a clean context that
             // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
             let args = match self.egress_clean_args(&tool, user_text, grounded_args).await {

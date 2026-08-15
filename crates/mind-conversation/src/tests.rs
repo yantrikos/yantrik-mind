@@ -3644,3 +3644,38 @@ fn tool_arguments_are_unwrapped_to_what_the_tool_can_use() {
     // A string that is NOT JSON stays a string rather than becoming null.
     assert_eq!(normalize_tool_args(json!("Oslo")), json!("Oslo"));
 }
+
+/// A generated tool schema must SAY what it wants, or the model will invent it.
+///
+/// Measured on qwen3.8:27b, 2026-08-15: asked for the weather in Kyoto it emitted native tool calls
+/// of `{"place": 35.0116}`, then `{"place": 127.002783}`, then `{"place": 15}` — Kyoto's latitude,
+/// then a longitude. The catalog generated `place` as `{"description":"place"}` with NO type, so
+/// nothing said it was text and the model picked a plausible shape. The same model answers
+/// `{"place":"Bergen"}` flawlessly against a schema declaring `"type":"string"`.
+#[test]
+fn generated_schemas_type_their_text_arguments() {
+    use crate::tool_catalog::tool_schemas;
+
+    let src = "- weather {place}: current conditions for a city/town\n\
+               - search {query}: web search\n\
+               - github_repo_items {repo, limit?}: recent items";
+    let schemas = tool_schemas("what is the weather in Kyoto right now?", &src);
+    let find = |n: &str| schemas.iter().find(|s| s["function"]["name"] == n).expect("schema present").clone();
+
+    // The case that failed: `place` must be declared text.
+    let place = &find("weather")["function"]["parameters"]["properties"]["place"];
+    assert_eq!(place["type"], "string", "an untyped `place` is what produced a latitude");
+
+    // Every ordinary free-text arg gets the same treatment.
+    assert_eq!(find("search")["function"]["parameters"]["properties"]["query"]["type"], "string");
+    assert_eq!(find("github_repo_items")["function"]["parameters"]["properties"]["repo"]["type"], "string");
+
+    // …but a genuinely numeric arg is NOT forced to string.
+    let limit = &find("github_repo_items")["function"]["parameters"]["properties"]["limit"];
+    assert!(limit.get("type").is_none(), "`limit` is a number and must stay untyped, not become text");
+
+    // Required/optional is unchanged by typing.
+    let req = find("github_repo_items")["function"]["parameters"]["required"].clone();
+    assert!(req.as_array().unwrap().iter().any(|r| r == "repo"), "repo stays required");
+    assert!(!req.as_array().unwrap().iter().any(|r| r == "limit"), "limit? stays optional");
+}

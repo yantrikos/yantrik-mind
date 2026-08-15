@@ -157,9 +157,24 @@ fn one_schema(fragment: &str) -> Option<Value> {
     if name.is_empty() || name.chars().all(|c| !c.is_lowercase()) {
         return None;
     }
-    // Args inside {...}: each becomes a property; a trailing `?` marks it optional. Properties are
-    // left UNTYPED (an empty schema accepts any JSON) so numeric/array args (shares, sections, html)
-    // aren't wrongly forced to string — the loop's dispatch reads args leniently either way.
+    // Args inside {...}: each becomes a property; a trailing `?` marks it optional.
+    //
+    // TYPED, because untyped invites invention. These properties used to carry only a description,
+    // on the reasoning that an empty schema accepts any JSON and so would not wrongly force a
+    // numeric arg to string. The cost was measured on qwen3.8:27b, 2026-08-15: asked for the
+    // weather in Kyoto it emitted native calls of
+    //
+    //     {"place": 35.0116}    {"place": 127.002783}    {"place": 15}
+    //
+    // — Kyoto's LATITUDE, then a longitude. With nothing saying `place` is text, the model picked a
+    // plausible shape and the tool answered "which place?" three times. The same model returns
+    // {"place":"Bergen"} flawlessly against a schema that says `"type":"string"`, so this was never
+    // the model being weak; it was the schema declining to say what it wanted.
+    //
+    // String is the right default because nearly every catalog arg is free text (query, place, url,
+    // topic, text, to, symbol). The genuinely numeric names stay untyped so they are not forced.
+    const NUMERIC_ARGS: &[&str] =
+        &["limit", "count", "n", "top_k", "shares", "quantity", "amount", "price", "days", "hours", "minutes", "sections", "year"];
     let mut props = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
     if let (Some(a), Some(b)) = (body.find('{'), body.find('}')) {
@@ -174,7 +189,12 @@ fn one_schema(fragment: &str) -> Option<Value> {
                 if key.is_empty() {
                     continue;
                 }
-                props.insert(key.to_string(), json!({ "description": key }));
+                let prop = if NUMERIC_ARGS.contains(&key) {
+                    json!({ "description": key })
+                } else {
+                    json!({ "type": "string", "description": key })
+                };
+                props.insert(key.to_string(), prop);
                 if !optional {
                     required.push(key.to_string());
                 }

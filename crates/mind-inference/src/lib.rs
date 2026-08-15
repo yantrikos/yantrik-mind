@@ -454,6 +454,7 @@ impl LLMBackend for ScriptedLLM {
         *self.last_user.lock().unwrap() = usr;
         *self.last_all.lock().unwrap() = all;
         Ok(LLMResponse {
+            thinking: String::new(),
             text: self.reply.clone(),
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -556,6 +557,7 @@ impl LLMBackend for SequencedLLM {
         let tool_calls = self.native.get(i).cloned().flatten().into_iter().collect::<Vec<_>>();
         let stop_reason = if tool_calls.is_empty() { "stop" } else { "tool_calls" }.to_string();
         Ok(LLMResponse {
+            thinking: String::new(),
             text: reply,
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -1327,7 +1329,7 @@ mod privacy_tests {
             for m in messages {
                 assert!(!m.content.contains(&self.canary), "PRIVACY LEAK: private canary reached the cloud backend");
             }
-            Ok(LLMResponse { text: "cloud-ok".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+            Ok(LLMResponse { thinking: String::new(), text: "cloud-ok".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
         }
         fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
             self.chat(m, c, t)
@@ -1470,6 +1472,7 @@ mod tests {
 
     fn resp(text: &str) -> LLMResponse {
         LLMResponse {
+            thinking: String::new(),
             text: text.to_string(),
             prompt_tokens: 0,
             completion_tokens: 0,

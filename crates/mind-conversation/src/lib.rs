@@ -7402,7 +7402,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // interesting thing happening during a 30-second local-model turn and it used to be
             // either discarded or — when the block was left unterminated — dumped into the chat as
             // raw text. It is now its own channel: shown live, collapsed when the answer arrives.
-            let (reasoning, text) = split_reasoning(&resp.text);
+            // TWO SPELLINGS OF THE SAME THING. Older models wrap reasoning in `<think>` tags inside
+            // the reply; newer ones (qwen3.8) return it as its own `thinking` field and leave the
+            // content clean. Take the structured field when the backend gave us one — it needs no
+            // parsing and cannot be truncated mid-tag — and fall back to splitting the text.
+            //
+            // This is what the cockpit's reasoning fold has been waiting for. It has been wired
+            // end-to-end since desktop 8d7c5de and has never had anything to show, because the
+            // tag-scanner finds nothing in a reply whose reasoning was never in the text.
+            let (tagged, text) = split_reasoning(&resp.text);
+            let reasoning = if resp.thinking.trim().is_empty() { tagged } else { resp.thinking.trim().to_string() };
             emit_thinking(&reasoning);
             // SOURCE-AGNOSTIC INTENT: prefer the model's NATIVE structured tool call (reliable args,
             // no string-slicing); fall back to parsing a free-text JSON object from the reply for

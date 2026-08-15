@@ -506,6 +506,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| "{\"action\":\"finish\",\"answer\":\"done\"}".into());
             Ok(LLMResponse {
+                thinking: String::new(),
                 text,
                 prompt_tokens: 0,
                 completion_tokens: 0,

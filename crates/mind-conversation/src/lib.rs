@@ -901,6 +901,69 @@ pub(crate) fn emit_detail(text: &str) {
     emit_progress(&format!("{DETAIL_MARK}{clipped}"));
 }
 
+/// Coerce tool arguments into the plain `{name: value}` object the dispatch table expects.
+///
+/// Arguments reach the loop from three different producers — the native tool-call path, the
+/// free-text JSON path, and the backend template's own tool-call parser — and they do not agree on
+/// a shape. Observed live on qwen3.8:27b, all for the same `weather` call whose argument the model
+/// itself got right every time (`{"place":"Bergen"}` on the wire):
+///
+/// ```text
+/// place: [{"content":"Bergen, Norway","name":"place","type":"text"}]   content blocks
+/// place: 14                                                            a stray scalar
+/// ```
+///
+/// So the tool was chosen correctly and then handed something it could not use, and `weather`
+/// answered "which place?" — a failure that reads like a bad model and is actually a shape mismatch
+/// two layers down. Normalising here rather than in any one producer is deliberate: this is the
+/// single point every producer funnels through, and the next backend will invent a fourth shape.
+///
+/// Unwrapped: a JSON string holding an object (the OpenAI convention), a `{type,content}` block, a
+/// list of such blocks (concatenated), and a single-element list wrapping the real value. Anything
+/// already plain is returned untouched.
+fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+
+    /// One argument VALUE, unwrapped to the scalar a tool can consume.
+    fn scalar(v: &Value) -> Value {
+        match v {
+            // A content block: {"type":"text","content":"Bergen, Norway"} (also "text" as the key).
+            Value::Object(o) if o.contains_key("content") || o.contains_key("text") => {
+                let inner = o.get("content").or_else(|| o.get("text")).cloned().unwrap_or(Value::Null);
+                scalar(&inner)
+            }
+            // A list of blocks — join their text, which is how a split string arrives.
+            Value::Array(items) => {
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(scalar)
+                    .filter_map(|s| match s {
+                        Value::String(s) => Some(s),
+                        Value::Null => None,
+                        other => Some(other.to_string()),
+                    })
+                    .collect();
+                if parts.is_empty() { v.clone() } else { Value::String(parts.join("")) }
+            }
+            other => other.clone(),
+        }
+    }
+
+    // The OpenAI convention: `arguments` is a STRING holding the JSON object.
+    if let Value::String(s) = &v {
+        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+            if parsed.is_object() {
+                return normalize_tool_args(parsed);
+            }
+        }
+        return v;
+    }
+    match v {
+        Value::Object(o) => Value::Object(o.into_iter().map(|(k, val)| (k, scalar(&val))).collect()),
+        other => other,
+    }
+}
+
 /// Render tool arguments for a PERSON, not for a parser.
 ///
 /// `{"query":"weather in Dallas"}` reads better as `weather in Dallas` than as JSON, and the
@@ -7481,7 +7544,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                 return Ok(a);
             }
-            let grounded_args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            // Normalise BEFORE the guards and the dispatch: every downstream reader (the egress
+            // cleaner, the exact-value guard, the loop signature, the tool itself) assumes plain
+            // `{name: value}`, and a content-block wrapper defeats all four at once.
+            let grounded_args = normalize_tool_args(v.get("args").cloned().unwrap_or_else(|| serde_json::json!({})));
             // ARCH-3 slice 2: for an eligible EGRESS tool, re-author the args in a clean context that
             // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
             let args = match self.egress_clean_args(&tool, user_text, grounded_args).await {

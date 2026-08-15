@@ -3597,3 +3597,50 @@ fn a_sentence_is_never_a_persons_name() {
     assert!(!E::looks_like_person_name("that is my wife's mother sitting there"));
     assert!(!E::looks_like_person_name(""));
 }
+
+/// A tool must receive the argument the model actually chose.
+///
+/// Observed live on qwen3.8:27b, 2026-08-15. On the wire the model returned a perfect native call —
+/// `{"place":"Bergen"}` — every single time. What reached the `weather` tool was:
+///
+/// ```text
+/// place: [{"content":"Bergen, Norway","name":"place","type":"text"}]
+/// place: 14
+/// ```
+///
+/// so the tool answered "which place?" and the turn reported no weather. It reads like a stupid
+/// model and is a shape mismatch two layers down: arguments arrive from three producers (the native
+/// path, the free-text JSON path, and the backend template's own parser) that disagree about shape.
+#[test]
+fn tool_arguments_are_unwrapped_to_what_the_tool_can_use() {
+    use super::normalize_tool_args;
+    use serde_json::json;
+
+    // THE CASE THAT BROKE IT: a content-block wrapper around the real value.
+    assert_eq!(
+        normalize_tool_args(json!({"place": [{"content": "Bergen, Norway", "name": "place", "type": "text"}]})),
+        json!({"place": "Bergen, Norway"})
+    );
+
+    // A bare content block, and the "text" spelling of the same idea.
+    assert_eq!(normalize_tool_args(json!({"q": {"type": "text", "content": "rain"}})), json!({"q": "rain"}));
+    assert_eq!(normalize_tool_args(json!({"q": {"type": "text", "text": "rain"}})), json!({"q": "rain"}));
+
+    // A value split across blocks arrives joined, not truncated to the first piece.
+    assert_eq!(
+        normalize_tool_args(json!({"query": [{"type": "text", "content": "Bergen"}, {"type": "text", "content": " weather"}]})),
+        json!({"query": "Bergen weather"})
+    );
+
+    // The OpenAI convention: `arguments` is a STRING holding the object.
+    assert_eq!(normalize_tool_args(json!("{\"place\":\"Oslo\"}")), json!({"place": "Oslo"}));
+
+    // Already-plain args are untouched — including legitimate non-strings, which must NOT be
+    // stringified (a `limit` of 10 is a number and the tool expects a number).
+    assert_eq!(normalize_tool_args(json!({"place": "Oslo"})), json!({"place": "Oslo"}));
+    assert_eq!(normalize_tool_args(json!({"limit": 10, "deep": true})), json!({"limit": 10, "deep": true}));
+    assert_eq!(normalize_tool_args(json!({})), json!({}));
+
+    // A string that is NOT JSON stays a string rather than becoming null.
+    assert_eq!(normalize_tool_args(json!("Oslo")), json!("Oslo"));
+}

@@ -39,6 +39,44 @@ impl PrivacyScope {
     }
 }
 
+/// Collapse every `system` message into ONE leading system message.
+///
+/// Strict chat templates require the system message to be first, and to be singular. qwen3.8's
+/// raises `Jinja Exception: System message must be at the beginning.` and the whole request comes
+/// back 500; gemma's accepts the same list happily. The mind always builds several system blocks
+/// (persona, pack rules, format note, agent instructions), so "which model" silently decided
+/// whether the mind worked at all.
+///
+/// Order is preserved and the blocks are joined with a blank line, so nothing is lost or reordered
+/// relative to the other system blocks. A system message that arrives AFTER a user turn is also
+/// hoisted — such a block is late-added context, and every template that rejects mid-conversation
+/// system turns would reject it anyway.
+pub(crate) fn merge_system_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    if messages.iter().filter(|m| m.role == "system").count() < 2 {
+        return messages;
+    }
+    let mut system = String::new();
+    let mut rest: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    for m in messages {
+        if m.role == "system" {
+            if !m.content.trim().is_empty() {
+                if !system.is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(m.content.trim());
+            }
+        } else {
+            rest.push(m);
+        }
+    }
+    let mut out = Vec::with_capacity(rest.len() + 1);
+    if !system.is_empty() {
+        out.push(ChatMessage::system(&system));
+    }
+    out.extend(rest);
+    out
+}
+
 /// Pure policy: may a pool labeled `provider` serve a request of `scope`, given the two CSV
 /// allowlists? Pure so it's testable without env races.
 pub fn scope_allows(scope: PrivacyScope, provider: &str, household_csv: &str, private_csv: &str) -> bool {
@@ -233,6 +271,20 @@ impl InferencePool {
         tools: Vec<serde_json::Value>,
     ) -> anyhow::Result<LLMResponse> {
         use std::sync::atomic::Ordering;
+        // ONE SYSTEM MESSAGE. Every caller here builds its prompt as several system blocks —
+        // persona, then agent instructions, with pack rules and a format note INSERTED at index 1 —
+        // and some chat templates refuse that outright. Diagnosed 2026-08-15 through a logging
+        // proxy, after the turn had failed for an hour behind the words "Ollama API request failed":
+        //
+        //   HTTP 500 — Jinja Exception: System message must be at the beginning.
+        //
+        // qwen3.8's template raises on any system message that is not the first; gemma's tolerates
+        // them, which is the entire reason this looked like a model-specific network fault and
+        // survived every black-box probe (curl reproduced none of it, because curl sent one system
+        // message). Merging is semantically free — the blocks are all system-level context in
+        // order — and it makes the mind portable across templates instead of only working on the
+        // ones that happen to be lenient.
+        let messages = merge_system_messages(messages);
         let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
         let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
         // A PRIVATE call, when a dedicated local-owned lane exists, is served ONLY by that local-only
@@ -309,7 +361,15 @@ impl InferencePool {
                 // The turn's caller degrades to deterministic rendering / an honest "unavailable".
                 if self.private.is_some() {
                     PRIVACY_REFUSED[scope_idx(PrivacyScope::Private)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {e}");
+                    // `{e:#}`, not `{e}`: this is an anyhow chain, and the OUTERMOST link is the
+                    // generic context string ("Ollama API request failed") while the CAUSE — the
+                    // transport error, the HTTP status, the TLS complaint — sits underneath it.
+                    // Printing only the outer link cost hours on 2026-08-15: the log said the same
+                    // seven words whether the endpoint was unreachable, the model name was wrong,
+                    // or the body was rejected, so every diagnosis had to be done by black-box
+                    // probing from outside. A fail-closed path is exactly where the reason must
+                    // survive, because it is the path that ends the turn.
+                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {e:#}");
                     return Err(anyhow::anyhow!(
                         "private inference unavailable — refusing to route private context to a cloud provider (local lane down)"
                     ));
@@ -1732,5 +1792,58 @@ mod tests {
         // Clean up so subsequent tests start from a known state.
         super::SURVIVAL_MODE.store(false, Ordering::SeqCst);
         *super::SURVIVAL_SINCE.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+mod system_merge_tests {
+    use super::*;
+
+    /// A strict chat template must never see a second system message.
+    ///
+    /// Diagnosed live 2026-08-15 with a logging proxy in front of the endpoint. The mind sends
+    /// persona + agent instructions, and inserts pack rules and a format note at index 1, so a
+    /// normal turn carries three or four system blocks. qwen3.8's template answers that with
+    /// `HTTP 500 — Jinja Exception: System message must be at the beginning.` while gemma's accepts
+    /// it — so which model was configured silently decided whether the mind worked at all, and the
+    /// failure surfaced only as "Ollama API request failed".
+    #[test]
+    fn every_system_block_is_merged_into_one_leading_message() {
+        let msgs = vec![
+            ChatMessage::system("persona"),
+            ChatMessage::system("pack rules"),
+            ChatMessage::system("agent instructions"),
+            ChatMessage::user("what is the weather in Oslo?"),
+        ];
+        let out = merge_system_messages(msgs);
+
+        assert_eq!(out.len(), 2, "three system blocks collapse to one, user untouched");
+        assert_eq!(out[0].role, "system");
+        assert_eq!(out[0].content, "persona\n\npack rules\n\nagent instructions", "order preserved, joined readably");
+        assert_eq!(out[1].role, "user");
+
+        // A system block arriving after a user turn is hoisted, not left mid-conversation.
+        let late = merge_system_messages(vec![
+            ChatMessage::system("persona"),
+            ChatMessage::user("hi"),
+            ChatMessage::system("late context"),
+        ]);
+        assert_eq!(late.len(), 2);
+        assert_eq!(late[0].role, "system");
+        assert_eq!(late[0].content, "persona\n\nlate context");
+        assert_eq!(late[1].role, "user");
+
+        // Untouched when there is nothing to merge — no allocation, no reordering.
+        let one = vec![ChatMessage::system("persona"), ChatMessage::user("hi")];
+        assert_eq!(merge_system_messages(one.clone()).len(), 2);
+        assert_eq!(merge_system_messages(one)[0].content, "persona");
+
+        // An empty system block contributes nothing rather than a stray blank line.
+        let blank = merge_system_messages(vec![
+            ChatMessage::system("persona"),
+            ChatMessage::system("   "),
+            ChatMessage::user("hi"),
+        ]);
+        assert_eq!(blank[0].content, "persona");
     }
 }

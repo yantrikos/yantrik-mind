@@ -395,6 +395,57 @@ fn list_approaches(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<Stri
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Tables a sealed craft pack may carry. Everything else in the file is DROPPED after sealing.
+///
+/// The engine's seal scrubs the tables IT knows about — but the mind bolts its own tables onto
+/// the same database file (transcript, skills, belief scopes, tensions), and the engine's list
+/// cannot know them. The first live seal proved it: a 26 MB pack carrying 1,944 rows of the
+/// household's conversation transcript beside its 9 craft rows. A denylist loses that race
+/// forever — every table added later starts out leaked. The allowlist inverts it: a pack IS
+/// its corpus, the corpus's search index, its chunk vectors, and its manifest; anything else
+/// in the file is a leak by definition.
+const PACK_TABLE_ALLOWLIST: &[&str] = &["memories", "memory_chunks", "meta"];
+
+/// Drop every non-allowlisted table from a freshly sealed pack, then VERIFY. Fail closed: the
+/// caller deletes the file on any error — a pack that cannot be proven clean must not exist.
+fn scrub_sealed_pack(dest: &str) -> std::result::Result<(), String> {
+    let conn = rusqlite::Connection::open(dest).map_err(|e| e.to_string())?;
+    // FK enforcement is per-connection; with it on, drop order matters and a referenced table
+    // fails mid-scrub. The tables are being deleted wholesale — referential order is meaningless.
+    conn.execute_batch("PRAGMA foreign_keys=OFF").map_err(|e| e.to_string())?;
+    let names: Vec<(String, String)> = conn
+        .prepare("SELECT name, type FROM sqlite_master WHERE type IN ('table','view')")
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .map_err(|e| e.to_string())?;
+    for (n, kind) in &names {
+        let keep = PACK_TABLE_ALLOWLIST.contains(&n.as_str())
+            || n.starts_with("memories_fts") // the kept corpus's FTS shadow family
+            || n.starts_with("sqlite_"); // sqlite internals are not droppable
+        if !keep {
+            // The statement must match the object: DROP TABLE on a view errors even with IF
+            // EXISTS ("use DROP VIEW to delete view edges" — the engine keeps `edges` as a view).
+            let stmt = if kind == "view" { "DROP VIEW" } else { "DROP TABLE" };
+            conn.execute_batch(&format!("{stmt} IF EXISTS \"{}\"", n.replace('"', "\"\"")))
+                .map_err(|e| format!("dropping {n}: {e}"))?;
+        }
+    }
+    conn.execute_batch("VACUUM").map_err(|e| e.to_string())?;
+    // The verification is the point: enumerate what SURVIVED and refuse anything off-list.
+    let survivors: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        .and_then(|mut s| s.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.filter_map(|r| r.ok()).collect()))
+        .map_err(|e| e.to_string())?;
+    for n in &survivors {
+        if !PACK_TABLE_ALLOWLIST.contains(&n.as_str()) && !n.starts_with("memories_fts") {
+            return Err(format!("table {n} survived the pack scrub — refusing to leave this file on disk"));
+        }
+    }
+    Ok(())
+}
+
 /// Seal pre-gathered craft texts into a pack file (the LEARNING → PACKS direction).
 ///
 /// The rows are STAGED into a dedicated namespace and the seal is scoped to exactly that
@@ -469,7 +520,19 @@ fn seal_craft_pack(
                     return Err(format!("building the pack manifest failed: {e}"));
                 }
             };
-            db.seal_pack(dest, &manifest, Some(NS)).map(|m| m.corpus_rows).map_err(|e| e.to_string())
+            db.seal_pack(dest, &manifest, Some(NS))
+                .map_err(|e| e.to_string())
+                .and_then(|m| {
+                    // The engine sealed ITS tables clean; now drop the mind's own bolt-ons and
+                    // verify. A pack that cannot be proven clean is deleted, not shipped.
+                    match scrub_sealed_pack(dest) {
+                        Ok(()) => Ok(m.corpus_rows),
+                        Err(e) => {
+                            let _ = std::fs::remove_file(dest);
+                            Err(format!("pack scrub failed ({e}) — the file was removed"))
+                        }
+                    }
+                })
         }
     };
     // Staging rows out, regardless of outcome.
@@ -2574,10 +2637,36 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("craft.ydbpack");
         let _ = std::fs::remove_file(&dest);
+        // A transcript line stands in for everything the household file carries that a pack
+        // must not: the first live seal shipped 1,944 of these before the scrub existed.
+        mem.append_message("user", "a private household line that must never enter a pack").await.unwrap();
+
         let summary = mem.seal_learned_pack(dest.to_str().unwrap(), "learned-craft", "0.1.0").await.unwrap();
         assert!(dest.exists(), "the pack file must exist: {summary}");
         assert!(summary.contains("sealed 2"), "skill + clean approach, not the private one: {summary}");
         assert!(summary.contains("withheld"), "the withholding must be SAID, not silent: {summary}");
+
+        // THE SCRUB, proven on the artifact itself: the pack carries its corpus and nothing of
+        // the household's — no transcript table, no belief graph, no skills ledger, and no
+        // off-allowlist table of any name.
+        {
+            let conn = rusqlite::Connection::open(&dest).unwrap();
+            let tables: Vec<String> = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            for t in &tables {
+                assert!(
+                    PACK_TABLE_ALLOWLIST.contains(&t.as_str()) || t.starts_with("memories_fts"),
+                    "off-allowlist table {t} inside a sealed pack — the household leaks: {tables:?}"
+                );
+            }
+            let corpus: i64 = conn.query_row("SELECT count(*) FROM memories", [], |r| r.get(0)).unwrap();
+            assert_eq!(corpus, 2, "exactly the exported craft, nothing else");
+        }
         // The staging rows must not linger: a second seal exports the same 2, not 4.
         let dest2 = dir.join("craft2.ydbpack");
         let _ = std::fs::remove_file(&dest2);

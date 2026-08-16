@@ -352,6 +352,49 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 Grade::AnswerContains("sunny in Pune".into()),
             ],
         },
+        // 11. UNAVAILABLE-TOOL BAN: a tool that came back "not configured" is never EXECUTED again
+        //     this turn, even with different args — the signature guard can't see that (new args =
+        //     new signature), so the runtime must. The second call gets a runtime refusal in the
+        //     work log instead of a second dispatch round-trip to learn the same fact.
+        LoopScenario {
+            name: "an unavailable tool is never executed twice".into(),
+            seeds: vec![],
+            replies: vec![
+                call("github_repo_items", serde_json::json!({ "repo": "acme/x" })), // github unconfigured
+                call("github_repo_items", serde_json::json!({ "repo": "acme/y" })), // different args — sig guard passes
+                answer("GitHub isn't set up here — connect it and I'll check your PRs."),
+            ],
+            native: vec![],
+            turn: "what are my open PRs and issues?".into(),
+            grades: vec![
+                Grade::PromptAtContains(1, "do not retry".into()),                  // the outcome note, first time
+                Grade::PromptAtContains(2, "established earlier this turn".into()), // the runtime ban, second time
+                Grade::AnswerContains("isn't set up".into()),
+                Grade::MaxCalls(3),
+            ],
+        },
+        // 12. FORMAT-FLUB RECOVERY: a model reply that is neither a tool call nor an answer gets
+        //     explicit feedback about WHAT was wrong, then one corrective retry — not a verbatim
+        //     resend of the identical prompt (the escalated retry used to change nothing, which is
+        //     the observed two-calls-then-"Sorry — I had trouble" live failure on declarative
+        //     messages). The turn shape mirrors the live repro: a statement containing a URL.
+        LoopScenario {
+            name: "a format flub gets feedback, then a corrective retry, then the answer".into(),
+            seeds: vec![],
+            replies: vec![
+                String::new(),                                                      // dispatch: nothing usable
+                r#"{"thought":"The user is working on YantrikDB packs and"#.into(), // reasoner: truncated blob
+                answer("Noted — you're working on YantrikDB packs; I've got the link."),
+            ],
+            native: vec![],
+            turn: "I am working on YantrikDB packs currently. You can find more details on https://packs.yantrikdb.com".into(),
+            grades: vec![
+                Grade::PromptAtContains(1, "neither a usable tool call nor an answer".into()),
+                Grade::PromptAtContains(2, "still neither a tool call nor an answer".into()),
+                Grade::AnswerContains("YantrikDB packs".into()),
+                Grade::MaxCalls(3),
+            ],
+        },
     ]
 }
 

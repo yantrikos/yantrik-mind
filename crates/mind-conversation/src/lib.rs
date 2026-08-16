@@ -7321,6 +7321,16 @@ Open reminders you're carrying for them:");
         // reasoner (think:true routes there). Sticky for the turn — a request hard enough to trip the
         // small model once will likely need the capable one for the remaining steps too.
         let mut escalated = false;
+        // One more chance after escalation: the reasoner gets explicit feedback about WHAT was wrong
+        // with the reply before the turn is abandoned. Observed live (2026-08-14): a declarative
+        // message died after exactly two model calls with "Sorry — I had trouble putting that
+        // together" because the escalated retry re-sent the IDENTICAL prompt — the model had no way
+        // to know its previous reply was unusable, so it produced the same one again.
+        let mut format_retried = false;
+        // Tools this turn has already seen come back UNAVAILABLE (not configured, no credential).
+        // Re-executing one teaches nothing and wastes a dispatch round-trip — the runtime answers
+        // for it instead. Per-turn, not persistent: the user may configure the tool between turns.
+        let mut unavailable_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
         for step in 0..max_steps {
             emit_progress(if step == 0 { "thinking…" } else { "thinking (continuing)…" });
             // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
@@ -7525,14 +7535,31 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // routes to the capable model in the pool. This is what makes a small dispatch model
                 // safe as the primary — the hard turns fall through to the strong one instead of a
                 // "Sorry, I had trouble" dead end. Sticky for the rest of the turn.
-                if !escalated && (raw.is_empty() || is_tool_call_blob(raw)) {
-                    escalated = true;
-                    // Route to the strong reasoner MODEL but keep think:false. The big model handles
-                    // the agentic format the small one flubbed — WITHOUT think:true's thousands of
-                    // thinking tokens that hold the GPU 60-90s/call and pile up a multi-minute queue.
-                    cfg.prefer_reasoner = true;
-                    eprintln!("[agent] dispatch produced no tool/answer — escalating to the reasoner model (think:false)");
-                    continue;
+                if raw.is_empty() || is_tool_call_blob(raw) {
+                    if !escalated {
+                        escalated = true;
+                        // Route to the strong reasoner MODEL but keep think:false. The big model handles
+                        // the agentic format the small one flubbed — WITHOUT think:true's thousands of
+                        // thinking tokens that hold the GPU 60-90s/call and pile up a multi-minute queue.
+                        cfg.prefer_reasoner = true;
+                        eprintln!("[agent] dispatch produced no tool/answer — escalating to the reasoner model (think:false)");
+                        // Tell the next call what went wrong. The escalated retry used to re-send the
+                        // IDENTICAL prompt, so a model in a bad groove had no reason to leave it —
+                        // that is the two-calls-then-apologize live failure.
+                        scratch.push_str(&format!(
+                            "\n[{step}] (your previous reply was neither a usable tool call nor an answer — reply with exactly ONE action: a tool call, or the final answer)"
+                        ));
+                        continue;
+                    }
+                    if !format_retried {
+                        format_retried = true;
+                        eprintln!("[agent] reasoner also produced no tool/answer — one corrective retry with explicit feedback");
+                        scratch.push_str(&format!(
+                            "\n[{step}] (still neither a tool call nor an answer — choose ONE tool from the catalog above, or give the final answer now)"
+                        ));
+                        continue;
+                    }
+                    // Two corrective attempts spent; fall through to the honest apology below.
                 }
                 // A broken tool-call blob is NOT a real answer — never echo it or publish it as a page
                 // (recovery above already handled a salvageable publish_page). Ask for a retry instead.
@@ -7552,6 +7579,31 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
                 let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                 return Ok(a);
+            }
+            // A tool already established as UNAVAILABLE this turn is answered by the runtime, not
+            // re-executed: the observation cannot change mid-turn ("not configured" stays not
+            // configured), so a repeat costs a dispatch round-trip to learn nothing. The model was
+            // told once via the outcome note; a model that calls it anyway gets an unmissable
+            // refusal, and the barren counter still bounds how long it may keep trying.
+            if unavailable_tools.contains(&tool) {
+                eprintln!("[agent] step {step}: {tool} known unavailable this turn — not re-executed");
+                // An IDENTICAL repeat is the loop-guard's case, and its response is stronger: the
+                // result is already in the log, so compose now rather than spending another model
+                // call to be told the same thing. (Signature is pre-egress here; for a core tool the
+                // cleaner is a no-op, and for an external one a mismatch just means one more
+                // interception below — never an execution.)
+                if format!("{tool}|{}", normalize_tool_args(v.get("args").cloned().unwrap_or_else(|| serde_json::json!({})))) == last_call {
+                    break;
+                }
+                emit_detail("[unavailable] not retried — found unavailable earlier this turn");
+                scratch.push_str(&format!(
+                    "\n[{step}] {tool} -> (unavailable on this box — established earlier this turn; do NOT call it again: use another route or tell the user plainly)"
+                ));
+                barren += 1;
+                if barren >= MAX_BARREN_STEPS {
+                    break;
+                }
+                continue;
             }
             // Normalise BEFORE the guards and the dispatch: every downstream reader (the egress
             // cleaner, the exact-value guard, the loop signature, the tool itself) assumes plain
@@ -7625,6 +7677,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let outcome = crate::tool_outcome::Outcome::classify(&tool, &obs);
             if let Some(ok) = outcome.counts_toward_reliability() {
                 let _ = self.memory.record_tool_outcome(&tool, ok).await;
+            }
+            // Once unavailable, unavailable for the whole turn — the runtime refuses the re-execution
+            // above instead of paying for the same "(not configured)" again.
+            if outcome == crate::tool_outcome::Outcome::Unavailable {
+                unavailable_tools.insert(tool.clone());
             }
             // …and what came back. The badge carries the classifier's five-way distinction rather
             // than a tick or a cross, because "found nothing" and "the tool broke" are the two the

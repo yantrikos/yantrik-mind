@@ -103,6 +103,18 @@ pub trait Bus: Send + Sync {
     async fn ground(&self, _question: &str, _evidence: &str) -> Option<String> {
         None
     }
+
+    /// Is this tool's successful output THE answer, to be delivered to the user verbatim?
+    ///
+    /// A published page's URL, an async delegation's ack, a self-contained cited brief: synthesis
+    /// can only damage these — a paraphrased URL is the 404 the terminal rule exists to prevent,
+    /// and a re-worded ack invites the loop to delegate the same work again. The production bus
+    /// answers from the SAME definition the legacy loop uses, so the two loops cannot disagree
+    /// about which outputs are load-bearing verbatim. Default false: an ordinary result is
+    /// material, not an answer.
+    fn is_terminal(&self, _tool: &str, _obs: &str) -> bool {
+        false
+    }
 }
 
 /// A stable signature for one tool call.
@@ -143,6 +155,7 @@ pub(crate) mod tests_support {
         pub outward: Vec<String>,
         pub calls: Mutex<Vec<String>>,
         pub grounded: Option<String>,
+        pub terminal: Vec<String>,
     }
 
     impl FakeBus {
@@ -156,7 +169,13 @@ pub(crate) mod tests_support {
                 outward: Vec::new(),
                 calls: Mutex::new(Vec::new()),
                 grounded: None,
+                terminal: Vec::new(),
             }
+        }
+        /// Mark tools whose successful output is delivered verbatim.
+        pub fn terminal(mut self, tools: &[&str]) -> Self {
+            self.terminal = tools.iter().map(|s| s.to_string()).collect();
+            self
         }
         pub fn returning(self, tool: &str, reply: &str) -> Self {
             self.replies.lock().unwrap().insert(tool.to_string(), reply.to_string());
@@ -215,6 +234,9 @@ pub(crate) mod tests_support {
         async fn bank_procedure(&self, name: &str, _when: &str, _steps: &[String]) -> bool {
             self.banked.lock().unwrap().push(name.to_string());
             true
+        }
+        fn is_terminal(&self, tool: &str, _obs: &str) -> bool {
+            self.terminal.iter().any(|t| t == tool)
         }
     }
 }

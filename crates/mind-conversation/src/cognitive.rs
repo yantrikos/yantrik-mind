@@ -169,6 +169,12 @@ impl Bus for EngineBus {
         self.engine.recipes.as_ref()?.cited_answer(question, evidence).await
     }
 
+    /// The engine's ONE terminal-delivery definition — the same list the legacy loop consults, so
+    /// a published URL or delegation ack is delivered verbatim on both paths, never synthesized.
+    fn is_terminal(&self, tool: &str, obs: &str) -> bool {
+        self.engine.terminal_delivery(tool, obs)
+    }
+
     /// Remembered approaches, from BOTH kinds of procedural memory this mind keeps.
     ///
     /// Banked skills carry real `runs`/`successes`, so their reliability is measured and the loop can
@@ -486,6 +492,21 @@ mod tests {
         let n = bus.normalize("news", &serde_json::json!({}), &heading, true);
         assert!(n.evidence[0].summary.contains("substantive"), "a 4-char heading must not become the summary: {}", n.evidence[0].summary);
         assert!(n.evidence[0].body.len() > 200, "the body keeps the whole thing for paging");
+    }
+
+    /// The bus serves the ENGINE's terminal-delivery list — a published URL, a delegation ack, a
+    /// rich brief all read as terminal through the bounded loop exactly as they do in the legacy
+    /// loop, because it is literally the same function. A second list is how the classifier forked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn terminal_delivery_is_one_definition_across_both_loops() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        assert!(bus.is_terminal("publish_page", "Done — published (works on your home network):\nhttp://192.168.4.90:8088/x.html"));
+        assert!(bus.is_terminal("code", "On it — building \"a page\" in the background (isolated sandbox)"));
+        assert!(bus.is_terminal("news", &format!("MORNING BRIEF\n{}", "story with sources. ".repeat(20))));
+        assert!(!bus.is_terminal("publish_page", "(couldn't publish the page)"), "a failed publish is not an answer");
+        assert!(!bus.is_terminal("news", "quiet day"), "a stub brief goes through synthesis like anything else");
+        assert!(!bus.is_terminal("web_fetch", "http://example.com returned a page"), "an ordinary fetch is material, not an answer");
     }
 
     /// A stored routine round-trips: what it is for, and its steps in order.

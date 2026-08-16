@@ -109,6 +109,7 @@ impl Cognition {
         let mut escalated = false;
         let mut stopped_because = None;
         let mut question = None;
+        let mut delivered: Option<String> = None;
 
         // ── SURFACE WHAT WE ALREADY KNOW HOW TO DO. No model call. ─────────────────────────────
         //
@@ -276,7 +277,7 @@ impl Cognition {
             }
 
             // ── EXECUTE + NORMALIZE. No model. ────────────────────────────────────────────────
-            let mut obs = self.execute(&action).await;
+            let (mut obs, terminal) = self.execute(&action).await;
             // Evidence ids belong to the run, not the bus — so they are stable and citable.
             for e in obs.evidence.iter_mut() {
                 if e.id.is_empty() {
@@ -291,13 +292,30 @@ impl Cognition {
                 n: capsule.progress.steps,
                 action: sig,
                 ok,
-                decision: None,
+                decision: if terminal.is_some() { Some(ReasonCode::Delivered) } else { None },
                 elapsed_ms: clock.now_ms().saturating_sub(started),
             });
+            // A TERMINAL output ends the run with itself as the answer. Synthesis would paraphrase
+            // the one thing that must survive exactly (a published URL, a delegation ack), and the
+            // grounding pass would strip a URL as an uncited claim — both checks exist to protect
+            // the user from the model's words, and this is the tool's words.
+            if let Some(raw) = terminal {
+                delivered = Some(raw);
+                stopped_because = Some(ReasonCode::Delivered);
+                break;
+            }
         }
 
         // ── The completion boundary: this is where the tokens go. ───────────────────────────────
         let verdict = spec.contract.completion.evaluate(&capsule, &spec.contract.requirements);
+
+        // A DELIVERED run is already answered, in the tool's own words. No synthesis (it would
+        // paraphrase), no grounding (it would strip the URL as uncited), and no procedure ledger —
+        // the contract's verdict says nothing about a run whose answer was the tool's output, so
+        // recording met/unmet against a followed approach would teach a lie either way.
+        if let Some(raw) = delivered {
+            return Outcome { answer: raw, capsule, verdict, stopped_because, verified: None, question: None, trace };
+        }
         let mut verified = None;
         let mut answer = if question.is_some() {
             question.clone().unwrap_or_default()
@@ -347,7 +365,12 @@ impl Cognition {
     }
 
     /// Perform one action through the bus.
-    async fn execute(&self, action: &Action) -> Observation {
+    ///
+    /// The second value is a TERMINAL delivery: the raw output of a tool the bus declares
+    /// answer-shaped (a published URL, a delegation ack). It is carried alongside the observation
+    /// rather than inside it because the observation gets normalized and reduced — and the whole
+    /// point of a terminal output is that it must survive to the user without a paraphrase.
+    async fn execute(&self, action: &Action) -> (Observation, Option<String>) {
         let (tool, args) = match action.verb {
             Verb::CallTool => (action.target.clone(), action.args.clone()),
             Verb::RecallMemory => ("recall".to_string(), serde_json::json!({ "query": action.target })),
@@ -356,11 +379,19 @@ impl Cognition {
             // A banked skill runs through the engine's own sandboxed skill path — reuse never grants
             // unsandboxed power, which is the invariant the skill store was built on.
             Verb::RunSkill => ("run_skill".to_string(), serde_json::json!({ "name": action.target })),
-            _ => return Observation { action: action.signature(), ok: false, error: Some("not an executable action".into()), ..Default::default() },
+            _ => {
+                return (
+                    Observation { action: action.signature(), ok: false, error: Some("not an executable action".into()), ..Default::default() },
+                    None,
+                )
+            }
         };
         match self.bus.call(&tool, &args).await {
-            Ok(raw) => self.bus.normalize(&tool, &args, &raw, true),
-            Err(e) => self.bus.normalize(&tool, &args, &e.to_string(), false),
+            Ok(raw) => {
+                let terminal = self.bus.is_terminal(&tool, &raw).then(|| raw.clone());
+                (self.bus.normalize(&tool, &args, &raw, true), terminal)
+            }
+            Err(e) => (self.bus.normalize(&tool, &args, &e.to_string(), false), None),
         }
     }
 
@@ -495,6 +526,30 @@ mod tests {
         assert_eq!(bus.called(), vec!["search|{\"query\":\"the thing\"}"], "exactly one tool call");
         assert!(backend.call_count() <= 3, "2 decisions + 1 synthesis, got {}", backend.call_count());
         assert!(out.answer.contains('X'));
+    }
+
+    /// A TERMINAL tool output ends the run as the answer, verbatim. No synthesis call (it would
+    /// paraphrase the URL into a 404), no grounding (it would strip the URL as an uncited claim),
+    /// no banking (the contract's verdict says nothing about a delivered run).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_terminal_tool_output_is_delivered_verbatim() {
+        let ack = "Done — I published it as a page (works on your home network):\nhttp://192.168.4.90:8088/x.html";
+        let (step, reason, backend) =
+            pools(vec![&call("publish_page", "the page"), "SYNTHESIS MUST NOT RUN"]);
+        let bus = Arc::new(
+            FakeBus::new(&["publish_page"])
+                .returning("publish_page", ack)
+                .terminal(&["publish_page"])
+                .grounding("a grounded paraphrase that must not replace the url"),
+        );
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+
+        assert_eq!(out.answer, ack, "the tool's words reach the user exactly");
+        assert_eq!(out.stopped_because, Some(ReasonCode::Delivered));
+        assert!(out.verified.is_none(), "nothing was synthesized, so nothing reads as verified");
+        assert_eq!(backend.call_count(), 1, "one decision, zero synthesis calls — got {}", backend.call_count());
+        assert!(bus.banked_names().is_empty(), "a delivered run banks no approach");
+        assert!(out.trace.iter().any(|s| s.decision == Some(ReasonCode::Delivered)), "{:?}", out.trace);
     }
 
     /// A model wanting to finish early does NOT get to decide. The contract does.

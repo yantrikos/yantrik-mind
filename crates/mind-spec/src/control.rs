@@ -92,6 +92,9 @@ pub enum ReasonCode {
     NeedsUserInput,
     /// A high-consequence action is about to be taken.
     HighConsequence,
+    /// A tool produced output that IS the answer (a published URL, a delegation ack) — delivered
+    /// verbatim, because synthesis would paraphrase the one thing that must survive exactly.
+    Delivered,
 }
 
 impl ReasonCode {
@@ -110,6 +113,7 @@ impl ReasonCode {
             Self::ToolFailures => "the tools it needs keep failing",
             Self::NeedsUserInput => "it needs something only you can answer",
             Self::HighConsequence => "the next step has real consequences",
+            Self::Delivered => "a tool's own output was the answer, passed on exactly",
         }
     }
 }
@@ -545,7 +549,7 @@ mod tests {
             ReasonCode::ContractMet, ReasonCode::StepBudget, ReasonCode::ModelBudget, ReasonCode::Timeout,
             ReasonCode::RepeatedAction, ReasonCode::NoProgress, ReasonCode::Circling, ReasonCode::Contradiction,
             ReasonCode::ConfidenceDropped, ReasonCode::ToolFailures, ReasonCode::NeedsUserInput,
-            ReasonCode::HighConsequence,
+            ReasonCode::HighConsequence, ReasonCode::Delivered,
         ] {
             let d = code.describe();
             assert!(d.len() > 12, "{code:?} needs a real description");

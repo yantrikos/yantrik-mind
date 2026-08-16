@@ -6592,6 +6592,39 @@ impl ConversationEngine {
     /// Execute ONE agent tool, returning a short observation. Read/compose tools; outward effects stay
     /// gated on their own paths. `build_capability` is the self-extension hook (author + save a skill).
     /// Unscoped tool dispatch (the `ym` CLI + non-chat paths) — acts as the primary member.
+    /// ONE definition of "this tool's successful output IS the answer, delivered verbatim" —
+    /// consulted by the legacy loop's terminal arm and by `EngineBus::is_terminal` for the bounded
+    /// loop. Two copies of this list is how the classifier fork happened; there is exactly one.
+    ///
+    /// The cases, each with its scar:
+    /// - A PUBLISH result: the compose step paraphrases the link (wrong slug, trailing punctuation)
+    ///   into a 404. The user must get the exact URL the tool printed.
+    /// - An async DELEGATION ack ("On it — building…"): re-processing it invites re-delegation —
+    ///   four near-identical `code` jobs in one live turn, 2026-08-16.
+    /// - RICH SELF-CONTAINED SYNTHESIS (news brief, ticker analysis, portfolio): already cited and
+    ///   balanced; a re-paraphrase drops the source links and dilutes it.
+    /// - A MUTATING MCP tool: its result is a confirmation prompt the user must see verbatim (a
+    ///   pending confirmation pauses the turn), a denial, or a done — never a working material.
+    pub(crate) fn terminal_delivery(&self, tool: &str, obs: &str) -> bool {
+        if tool == "code" && obs.starts_with("On it — building") {
+            return true;
+        }
+        if matches!(tool, "publish_page" | "make_dashboard") && obs.contains("http") {
+            return true;
+        }
+        if matches!(tool, "news" | "analyze" | "analyze_stock" | "stock_analysis" | "portfolio" | "holdings" | "my_stocks")
+            && obs.chars().count() > 200
+        {
+            return true;
+        }
+        if tool.starts_with("mcp.")
+            && self.mcp.as_ref().and_then(|h| h.lookup(tool)).map(|t| !t.read_only).unwrap_or(false)
+        {
+            return true;
+        }
+        false
+    }
+
     async fn run_agent_tool(&self, tool: &str, args: &serde_json::Value) -> String {
         self.run_agent_tool_as(tool, args, &TurnIdentity::primary()).await
     }
@@ -7749,39 +7782,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 barren = 0;
                 seen_obs.insert(obs_sig);
             }
-            // An async DELEGATION ack is TERMINAL: the work now belongs to a background job that
-            // will notify when done, so there is nothing useful left for the loop to do with the
-            // ack — except re-delegate the same task, which is exactly what happened live on
-            // 2026-08-16: four near-identical `code` jobs spawned in one turn, because each "On
-            // it — building…" read as a successful step inviting another. The ack already tells
-            // the user what is happening and that the result will arrive here; deliver it.
-            if tool == "code" && obs.starts_with("On it — building") {
-                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
-                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
-                return Ok(obs);
-            }
-            // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
-            // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
-            // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).
-            if matches!(tool.as_str(), "publish_page" | "make_dashboard") && obs.contains("http") {
-                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
-                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
-                return Ok(obs);
-            }
-            // Rich, self-contained synthesis (news brief / ticker analysis / portfolio) is TERMINAL:
-            // it already cites its sources and is balanced — re-paraphrasing it through the compose
-            // step drops the source links and dilutes it. Deliver it verbatim.
-            if matches!(tool.as_str(), "news" | "analyze" | "analyze_stock" | "stock_analysis" | "portfolio" | "holdings" | "my_stocks") && obs.chars().count() > 200 {
-                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
-                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
-                return Ok(obs);
-            }
-            // A mutating MCP integration tool is TERMINAL: its result is a confirmation prompt the user
-            // must see verbatim (a pending confirmation pauses the turn), a denial, or a done — never
-            // something the loop should keep working past.
-            if tool.starts_with("mcp.")
-                && self.mcp.as_ref().and_then(|h| h.lookup(&tool)).map(|t| !t.read_only).unwrap_or(false)
-            {
+            // TERMINAL DELIVERY — one shared definition (see `terminal_delivery`), also served to
+            // the bounded loop through `EngineBus::is_terminal` so the two loops cannot drift on
+            // which outputs are load-bearing verbatim.
+            if self.terminal_delivery(&tool, &obs) {
                 let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
                 let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
                 return Ok(obs);

@@ -79,12 +79,23 @@ impl Bus for EngineBus {
         // plugin enablement, the egress broker, the exact-value exfiltration check, read isolation —
         // applies unchanged. A second dispatch path would be a second set of holes.
         let out = self.engine.run_agent_tool_as(tool, args, &self.identity).await;
-        // The engine reports failure in prose, so classify the same way the legacy loop does rather
-        // than inventing a second definition of "worked".
-        if tool_failed(&out) {
-            anyhow::bail!("{out}");
+        // ONE definition of "worked", shared with the legacy loop: the five-way classifier in
+        // `tool_outcome`. This used to be a private substring boolean copied from the legacy loop —
+        // and then the legacy loop moved on to the classifier while the copy stayed behind, so the
+        // two paths disagreed about the same result. Concretely: "(no results)" counted as a FAILURE
+        // here, `capsule.progress.failures` climbed, and five honest empty searches ended the run
+        // with "the tools it needs keep failing" — a lie about a working tool.
+        let outcome = crate::tool_outcome::Outcome::classify(tool, &out);
+        // The reliability ledger learns on this path too — measured self-knowledge must not stop
+        // accruing because the bounded loop ran the tool instead of the legacy one.
+        if let Some(ok) = outcome.counts_toward_reliability() {
+            let _ = self.engine.memory.record_tool_outcome(tool, ok).await;
         }
-        Ok(out)
+        match outcome {
+            // An empty result is the tool WORKING; the capsule sees it as a barren step, not a break.
+            crate::tool_outcome::Outcome::Ok | crate::tool_outcome::Outcome::Empty => Ok(out),
+            _ => anyhow::bail!("{out}"),
+        }
     }
 
     /// Shape a raw result into an observation.
@@ -94,10 +105,28 @@ impl Bus for EngineBus {
     /// first line, because for those the first line is a heading and the substance is below it.
     fn normalize(&self, tool: &str, args: &Value, raw: &str, ok: bool) -> Observation {
         if !ok {
+            // Carry the classifier's recovery hint with the failure, so the capsule's FAILED list
+            // tells the next decision what KIND of dead end this was — "not configured" wants a
+            // different route, a timeout wants one retry — instead of leaving the model to re-derive
+            // that from the same words the classifier already read.
+            let note = crate::tool_outcome::Outcome::classify(tool, raw).note();
             return Observation {
                 action: signature(tool, args),
                 ok: false,
-                error: Some(raw.chars().take(300).collect()),
+                error: Some(format!("{}{note}", raw.chars().take(300).collect::<String>())),
+                ..Default::default()
+            };
+        }
+        // An honest empty answer is not evidence — promoting "(no results)" to an evidence ref would
+        // reset the capsule's stall counter, making a run of fruitless searches read as progress and
+        // hiding the very signal the controller replans on. It becomes a NOTE (context, not
+        // conclusions) and the step stays barren.
+        if crate::tool_outcome::Outcome::classify(tool, raw) == crate::tool_outcome::Outcome::Empty {
+            return Observation {
+                action: signature(tool, args),
+                ok: true,
+                notes: vec![format!("{tool} ran fine and found nothing — a different query or source may help")],
+                did: Some(format!("used {tool} (found nothing)")),
                 ..Default::default()
             };
         }
@@ -264,20 +293,6 @@ fn routine_name(text: &str) -> String {
     text.lines().next().unwrap_or("remembered approach").trim().chars().take(60).collect()
 }
 
-/// Does this engine output represent a failure?
-///
-/// Kept identical in spirit to the legacy loop's classifier, and for the same reason: the engine
-/// signals failure in prose ("(github not configured)"), so a second, subtly different definition of
-/// "worked" would make the two loops disagree about the same tool result.
-fn tool_failed(out: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "error", "couldn't", "could not", "failed", "not configured", "isn't configured", "no mailbox",
-        "not set", "unavailable", "unable", "no such", "nothing", "no results", "not found",
-    ];
-    let lc = out.to_lowercase();
-    out.chars().count() <= 10 || (out.trim_start().starts_with('(') && MARKERS.iter().any(|m| lc.contains(m)))
-}
-
 impl ConversationEngine {
     /// Is the bounded cognitive loop enabled?
     pub fn cognition_enabled() -> bool {
@@ -412,18 +427,49 @@ mod tests {
         assert!(cat.contains("OTHER TOOLS"), "the name-only tail must survive:\n{cat}");
     }
 
-    /// The engine reports failure in prose, so the bus must classify it the same way the legacy loop
-    /// does — otherwise the two loops disagree about whether the same call worked.
-    #[test]
-    fn failure_classification_matches_the_legacy_definition() {
-        assert!(tool_failed("(github not configured)"));
-        assert!(tool_failed("(couldn't reach the server)"));
-        assert!(tool_failed("(no results)"));
-        assert!(tool_failed("short"), "a trivially short output is not a result");
-        assert!(!tool_failed("The weather in Pune is 28C and clear, with light winds this afternoon."));
-        // The parenthetical form matters: a real answer that merely mentions a marker word is not a
-        // failure. This is why the legacy classifier checks for a leading '('.
-        assert!(!tool_failed("The error rate in the report was 3%, which is within tolerance."));
+    /// ONE definition of "worked" across both loops: the bus classifies with the same five-way
+    /// `tool_outcome` the legacy loop uses. The old private boolean here counted "(no results)" as
+    /// a failure — so five honest empty searches killed a cognitive run with "tools keep failing".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_empty_result_is_not_a_failure_on_the_cognitive_path() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        // discover_tools over a query nothing matches: the tool WORKED, the world was empty.
+        let r = bus.call("discover_tools", &serde_json::json!({ "query": "zzqx warp drive" })).await;
+        assert!(r.is_ok(), "an honest empty answer must not be classified as a break: {r:?}");
+        // An unconfigured capability is still a dead end the run must not walk into.
+        let r = bus.call("github_repo_items", &serde_json::json!({ "repo": "acme/x" })).await;
+        assert!(r.is_err(), "an unavailable tool must surface as one");
+        // A short correct answer is a result. The old boolean called anything ≤10 chars a failure.
+        let r = bus.call("calc", &serde_json::json!({ "expr": "6*7" })).await;
+        assert!(matches!(r.as_deref(), Ok(s) if s.contains("42")), "42 is an answer, not a failure: {r:?}");
+    }
+
+    /// An empty result folds into the capsule as a NOTE, never as evidence — evidence resets the
+    /// stall counter, and a run of fruitless searches must stay visible as a stall.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_empty_result_stays_a_barren_step_in_the_capsule() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        let obs = bus.normalize("web_search", &serde_json::json!({"query":"x"}), "(no results for 'x')", true);
+        assert!(obs.ok, "the tool worked");
+        assert!(obs.evidence.is_empty(), "absence is not evidence");
+        assert!(obs.notes[0].contains("found nothing"));
+        let c = mind_spec::capsule::Capsule::new("g", "goal").reduce(obs);
+        assert_eq!(c.progress.failures, 0, "no failure was invented");
+        assert_eq!(c.progress.barren_steps, 1, "and the stall signal still sees the step");
+    }
+
+    /// A real failure keeps its recovery hint, so the FAILED list tells the next decision what kind
+    /// of dead end it was.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failure_observation_carries_the_recovery_hint() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        let obs = bus.normalize("github_repo_items", &serde_json::json!({}), "(github not configured)", false);
+        assert!(!obs.ok);
+        let err = obs.error.unwrap();
+        assert!(err.contains("not available on this box"), "the reroute hint travels with the failure: {err}");
     }
 
     /// A long result keeps a useful summary; a heading-first result does not get reduced to its

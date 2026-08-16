@@ -7749,6 +7749,17 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 barren = 0;
                 seen_obs.insert(obs_sig);
             }
+            // An async DELEGATION ack is TERMINAL: the work now belongs to a background job that
+            // will notify when done, so there is nothing useful left for the loop to do with the
+            // ack — except re-delegate the same task, which is exactly what happened live on
+            // 2026-08-16: four near-identical `code` jobs spawned in one turn, because each "On
+            // it — building…" read as a successful step inviting another. The ack already tells
+            // the user what is happening and that the result will arrive here; deliver it.
+            if tool == "code" && obs.starts_with("On it — building") {
+                let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                let _ = self.memory.append_message_scoped("assistant", &obs, id.write_scope()).await;
+                return Ok(obs);
+            }
             // Publishing tools are TERMINAL: the user must get the EXACT url the tool produced. The
             // follow-up compose step tends to paraphrase the link (wrong slug / trailing punctuation →
             // 404), so on a successful publish return the tool result verbatim and stop (also 1 less call).

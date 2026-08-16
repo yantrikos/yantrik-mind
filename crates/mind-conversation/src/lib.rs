@@ -4526,6 +4526,21 @@ impl ConversationEngine {
                 let r = tokio::task::spawn_blocking(mind_tools::quota_report).await.unwrap_or_default();
                 surface::json_or_error(&r)
             }
+            // The chat pane's memory. PRIMARY-lane scoped — the cockpit is the owner's surface,
+            // and this must show exactly what the chat itself grounds on, no wider: another
+            // member's private lines never appear here even for an operator device.
+            "transcript_json" => {
+                let n: usize = rest.parse().ok().filter(|n: &usize| (1..=200).contains(n)).unwrap_or(40);
+                let ctx2 = mind_types::AccessContext::Principal(mind_types::Scope::Private(mind_types::PRIMARY.to_string()));
+                let msgs = self.memory.recent_messages(n, &ctx2).await.unwrap_or_default();
+                serde_json::json!({
+                    "messages": msgs
+                        .iter()
+                        .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
+                        .collect::<Vec<_>>()
+                })
+                .to_string()
+            }
             "device" | "devices" => self.device_cmd(&rest).await,
             "proposals" => pending_proposals(),
             "now" | "date" | "time" => self.run_agent_tool("now", &serde_json::json!({})).await,

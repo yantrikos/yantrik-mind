@@ -449,6 +449,10 @@ pub const TYPED_VERBS: &[&str] = &[
     // Separate from `pulse` on purpose: this one makes an OUTBOUND call, and pulse is painted
     // often. A slow or wedged provider must not be able to stall the whole snapshot.
     "quota_json",
+    // The chat pane's memory: recent primary-lane conversation, oldest first. Exists so a client
+    // opening fresh does not present an amnesiac chat over a mind that remembers — and so results
+    // that background jobs mirrored into the transcript are visible without asking.
+    "transcript_json",
 ];
 
 /// Is this verb a request for machine-readable state?

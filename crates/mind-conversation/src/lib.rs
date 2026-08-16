@@ -19,6 +19,7 @@ mod book;
 mod briefing;
 mod capabilities;
 pub mod cognitive;
+mod guards;
 mod calendar;
 mod cloud_photos;
 mod deals;
@@ -7424,15 +7425,10 @@ Open reminders you're carrying for them:");
         // together" because the escalated retry re-sent the IDENTICAL prompt — the model had no way
         // to know its previous reply was unusable, so it produced the same one again.
         let mut format_retried = false;
-        // Tools this turn has already seen come back UNAVAILABLE (not configured, no credential).
-        // Re-executing one teaches nothing and wastes a dispatch round-trip — the runtime answers
-        // for it instead. Per-turn, not persistent: the user may configure the tool between turns.
-        let mut unavailable_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // What EXTERNAL services have returned this turn — the provenance the egress cleaner may
-        // pass a URL through against (a link from a search result is not a private fact). ONLY
-        // external observations accumulate here; recall/private-tool output must never join, or a
-        // stored private link would launder itself into fetchable.
-        let mut external_obs = String::new();
+        // The per-turn guard-pipeline state: the unavailable-tool set and the egress provenance
+        // both live in `guards::GuardState` now, shared in shape with the bounded loop's bus so
+        // the two paths cannot drift guard-by-guard again.
+        let guard_state = std::sync::Mutex::new(guards::GuardState::default());
         for step in 0..max_steps {
             emit_progress(if step == 0 { "thinking…" } else { "thinking (continuing)…" });
             // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
@@ -7694,63 +7690,40 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 let _ = self.memory.append_message_scoped("assistant", &a, id.write_scope()).await;
                 return Ok(a);
             }
-            // A tool already established as UNAVAILABLE this turn is answered by the runtime, not
-            // re-executed: the observation cannot change mid-turn ("not configured" stays not
-            // configured), so a repeat costs a dispatch round-trip to learn nothing. The model was
-            // told once via the outcome note; a model that calls it anyway gets an unmissable
-            // refusal, and the barren counter still bounds how long it may keep trying.
-            if unavailable_tools.contains(&tool) {
-                eprintln!("[agent] step {step}: {tool} known unavailable this turn — not re-executed");
-                // An IDENTICAL repeat is the loop-guard's case, and its response is stronger: the
-                // result is already in the log, so compose now rather than spending another model
-                // call to be told the same thing. (Signature is pre-egress here; for a core tool the
-                // cleaner is a no-op, and for an external one a mismatch just means one more
-                // interception below — never an execution.)
-                if format!("{tool}|{}", normalize_tool_args(v.get("args").cloned().unwrap_or_else(|| serde_json::json!({})))) == last_call {
-                    break;
-                }
-                emit_detail("[unavailable] not retried — found unavailable earlier this turn");
-                scratch.push_str(&format!(
-                    "\n[{step}] {tool} -> (unavailable on this box — established earlier this turn; do NOT call it again: use another route or tell the user plainly)"
-                ));
-                barren += 1;
-                if barren >= MAX_BARREN_STEPS {
-                    break;
-                }
-                continue;
+            // ── THE GUARD PIPELINE (see `guards`) ────────────────────────────────────────────────
+            // One ordered sequence — availability → normalization → egress clean-authoring →
+            // exact-value tripwire — shared with the bounded loop's bus, so a guard added there is
+            // on both paths by construction. The pipeline decides WHETHER and WITH WHAT ARGS a
+            // call dispatches; how a refusal lands in this loop (work-log note, barren accounting,
+            // compose-vs-continue) stays here, because those are this loop's own idiom.
+            //
+            // The identical-repeat special case first: a known-unavailable tool re-called with the
+            // SAME args is the loop-guard's territory — its result is already in the log, so
+            // compose now rather than spending another model call to be told the same thing.
+            // (Signature is pre-egress here; for a core tool the cleaner is a no-op, and for an
+            // external one a mismatch just means one more interception — never an execution.)
+            if guards::is_unavailable(&guard_state, &tool)
+                && format!("{tool}|{}", normalize_tool_args(v.get("args").cloned().unwrap_or_else(|| serde_json::json!({})))) == last_call
+            {
+                break;
             }
-            // Normalise BEFORE the guards and the dispatch: every downstream reader (the egress
-            // cleaner, the exact-value guard, the loop signature, the tool itself) assumes plain
-            // `{name: value}`, and a content-block wrapper defeats all four at once.
             let raw_args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
-            let grounded_args = normalize_tool_args(raw_args.clone());
-            // Which producer supplied these, and in what shape. Tool ARGUMENTS have now been wrong
-            // in three distinct ways on the same call while the model was demonstrably right on the
-            // wire, and each time the only evidence was the rendered detail line — after
-            // normalisation, so the original shape was already gone. Log both.
-            if raw_args != grounded_args {
-                eprintln!("[agent] step {step}: {tool} args normalised {raw_args} -> {grounded_args}");
-            } else {
-                eprintln!("[agent] step {step}: {tool} raw args {raw_args}");
-            }
-            // ARCH-3 slice 2: for an eligible EGRESS tool, re-author the args in a clean context that
-            // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
-            let args = match self.egress_clean_args(&tool, user_text, grounded_args, &external_obs).await {
-                Some(a) => a,
-                None => {
-                    let msg = format!("(I couldn't compose a safe outbound request for {tool} without pulling in private context — tell me the exact terms you want me to search/fetch)");
+            let args = match guards::pre(self, &guard_state, id, user_text, &tool, raw_args, &format!("step {step}")).await {
+                guards::PreVerdict::Proceed(a) => a,
+                guards::PreVerdict::Refuse { kind: guards::RefusalKind::Unavailable, msg } => {
+                    emit_detail("[unavailable] not retried — found unavailable earlier this turn");
+                    scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
+                    barren += 1;
+                    if barren >= MAX_BARREN_STEPS {
+                        break;
+                    }
+                    continue;
+                }
+                guards::PreVerdict::Refuse { kind: guards::RefusalKind::EgressUnsafe, msg } => {
                     scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
                     continue;
                 }
             };
-            // ARCH-3 slice 2 (complementary): the high-precision exact-value guard — refuse if the model
-            // injected a distinctive stored private value (email/phone/id) the user didn't type into a
-            // NON-clean-planned external tool. Catches the residue clean planning can't.
-            if let Some(msg) = self.model_injected_private_value(&tool, &args, user_text, id).await {
-                eprintln!("[egress] step {step}: blocked exact-value exfil via {tool}");
-                scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
-                continue;
-            }
             // Loop-guard: a weaker chat model often re-issues the SAME tool call instead of answering
             // (it spun on `home` 5× in testing). If the call is identical to the last one, we already
             // have that result in the work log — stop and compose the answer instead of refetching.
@@ -7782,28 +7755,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             emit_detail(&args_summary(&args));
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
-            // Only EXTERNAL tools feed the egress provenance: what came back from the outside world
-            // is already outside. A private tool's output (recall, people, mail bodies) must never
-            // accumulate here — see `external_obs` above.
-            if matches!(mind_governance::egress::classify(&tool), Some(mind_governance::egress::EgressClass::External(_))) {
-                external_obs.push_str(&obs);
-                external_obs.push('\n');
-            }
-            // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
-            // reliability becomes measured self-knowledge instead of a blind spot — which is exactly
-            // why this must not be one boolean off a substring list. `no results` is a search WORKING,
-            // `not configured` is a capability gap, and a gate refusal is the safety machinery doing
-            // its job; none of the three is the tool being unreliable, and averaging them together
-            // taught the mind false beliefs about itself. See `tool_outcome` for the four defects.
-            let outcome = crate::tool_outcome::Outcome::classify(&tool, &obs);
-            if let Some(ok) = outcome.counts_toward_reliability() {
-                let _ = self.memory.record_tool_outcome(&tool, ok).await;
-            }
-            // Once unavailable, unavailable for the whole turn — the runtime refuses the re-execution
-            // above instead of paying for the same "(not configured)" again.
-            if outcome == crate::tool_outcome::Outcome::Unavailable {
-                unavailable_tools.insert(tool.clone());
-            }
+            // The pipeline's post side: reliability ledger, unavailable set, egress provenance —
+            // and the five-way outcome for this loop's own rendering.
+            let outcome = guards::post(self, &guard_state, &tool, &obs).await;
             // …and what came back. The badge carries the classifier's five-way distinction rather
             // than a tick or a cross, because "found nothing" and "the tool broke" are the two the
             // operator most needs told apart and they look identical in a spinner.

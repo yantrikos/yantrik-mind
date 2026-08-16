@@ -23,15 +23,18 @@ use super::*;
 pub struct EngineBus {
     engine: Arc<ConversationEngine>,
     identity: TurnIdentity,
-    /// The user's literal request, for the exact-value exfil guard — the same third check the
-    /// legacy loop runs before an external tool call. Empty when unknown (tests, tools-only use),
-    /// which makes the guard STRICTER, never looser: nothing reads as "the user typed it".
+    /// The user's literal request, for the guard pipeline's egress checks. Empty when unknown
+    /// (tests, tools-only use), which makes the guards STRICTER, never looser: nothing reads as
+    /// "the user typed it".
     user_text: String,
+    /// Per-turn guard-pipeline state — the same `guards::GuardState` the legacy loop keeps, so
+    /// the unavailable-ban and the egress provenance behave identically on both paths.
+    guard_state: std::sync::Mutex<crate::guards::GuardState>,
 }
 
 impl EngineBus {
     pub fn new(engine: Arc<ConversationEngine>, identity: TurnIdentity) -> Self {
-        Self { engine, identity, user_text: String::new() }
+        Self { engine, identity, user_text: String::new(), guard_state: std::sync::Mutex::new(Default::default()) }
     }
 
     /// Carry the user's literal request so per-call guards can distinguish "the user typed this
@@ -86,35 +89,21 @@ impl Bus for EngineBus {
     }
 
     async fn call(&self, tool: &str, args: &Value) -> anyhow::Result<String> {
-        // Dispatch through the SAME path the legacy loop uses, so plugin enablement, the egress
-        // broker, and read isolation apply unchanged. A second dispatch path would be a second set
-        // of holes. Two legacy-loop guards live OUTSIDE that path and are re-run here:
-        //
-        // - The EXACT-VALUE EXFIL GUARD: a distinctive stored private value (email/phone/id) the
-        //   model wrote into an external tool's args that the user did not type. Without this the
-        //   bounded loop was the one dispatch route that skipped it.
-        // - NOT yet re-run: egress-clean ARG RE-AUTHORING (the legacy loop's clean-context arg
-        //   planner). Documented gap — it needs per-turn external provenance plumbing through the
-        //   bus; until then the broker + this tripwire are the bounded loop's egress protections,
-        //   and the flag stays off in production partly for this reason.
-        if let Some(msg) = self.engine.model_injected_private_value(tool, args, &self.user_text, &self.identity).await {
-            anyhow::bail!("{msg}");
-        }
-        let out = self.engine.run_agent_tool_as(tool, args, &self.identity).await;
-        // ONE definition of "worked", shared with the legacy loop: the five-way classifier in
-        // `tool_outcome`. This used to be a private substring boolean copied from the legacy loop —
-        // and then the legacy loop moved on to the classifier while the copy stayed behind, so the
-        // two paths disagreed about the same result. Concretely: "(no results)" counted as a FAILURE
-        // here, `capsule.progress.failures` climbed, and five honest empty searches ended the run
-        // with "the tools it needs keep failing" — a lie about a working tool.
-        let outcome = crate::tool_outcome::Outcome::classify(tool, &out);
-        // The reliability ledger learns on this path too — measured self-knowledge must not stop
-        // accruing because the bounded loop ran the tool instead of the legacy one.
-        if let Some(ok) = outcome.counts_toward_reliability() {
-            let _ = self.engine.memory.record_tool_outcome(tool, ok).await;
-        }
-        match outcome {
-            // An empty result is the tool WORKING; the capsule sees it as a barren step, not a break.
+        // THE GUARD PIPELINE — the same `guards::pre`/`guards::post` the legacy loop runs, then
+        // dispatch through the same path (plugin enablement, egress broker, read isolation all
+        // apply unchanged). This closes what used to be a documented gap on this path: egress
+        // clean-authoring with per-turn external provenance now runs here too, which was one of
+        // the stated reasons YM_COGNITION stayed off. A guard added to the pipeline reaches both
+        // loops by construction — the classifier fork, the terminal-list fork and the missing
+        // tripwire were all children of the two-copies disease this ends.
+        let clean = match crate::guards::pre(&self.engine, &self.guard_state, &self.identity, &self.user_text, tool, args.clone(), "bus").await {
+            crate::guards::PreVerdict::Proceed(a) => a,
+            crate::guards::PreVerdict::Refuse { msg, .. } => anyhow::bail!("{msg}"),
+        };
+        let out = self.engine.run_agent_tool_as(tool, &clean, &self.identity).await;
+        // ONE definition of "worked": the five-way outcome, recorded and classified in `post`.
+        // An empty result is the tool WORKING; the capsule sees it as a barren step, not a break.
+        match crate::guards::post(&self.engine, &self.guard_state, tool, &out).await {
             crate::tool_outcome::Outcome::Ok | crate::tool_outcome::Outcome::Empty => Ok(out),
             _ => anyhow::bail!("{out}"),
         }

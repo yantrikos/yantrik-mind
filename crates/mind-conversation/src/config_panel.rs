@@ -88,6 +88,13 @@ pub(crate) const SCHEMA: &[Setting] = &[
     Setting { key: "YM_MAX_USD", label: "Spend per turn ($)", group: "Agent loop", kind: "string", desc: "Optional cost ceiling for one turn. Empty or 0 = ungoverned.", restart: true },
     Setting { key: "YM_BG_MAX_STEPS", label: "Max iterations (delegated)", group: "Agent loop", kind: "int", desc: "Iteration cap for delegated/scheduled work, where nobody is waiting (default 150). Depth is worth more here.", restart: true },
     Setting { key: "YM_COGNITION", label: "Bounded control loop", group: "Agent loop", kind: "toggle", desc: "Use the state-capsule runtime instead of the classic think→tool→think loop: the runtime keeps the execution state, so a long turn costs what a short one does. Off = the loop that has always run.", restart: true },
+    // The think toggles were real knobs the schema did not list: YM_THINK_DISPATCH=on sat in the
+    // env for days silently overriding a measured in-code default, and cost three multi-minute
+    // generations before anyone found it. A knob the panel cannot see is a knob nobody remembers
+    // turning. (Every other YM_THINK_<role> the code reads surfaces in `ym config dump`.)
+    Setting { key: "YM_THINK_DISPATCH", label: "Think on dispatch", group: "Agent loop", kind: "toggle", desc: "Reasoning mode for tool-selection calls. Measured off: 4/4 correct at 3.6× fewer tokens; on, a page-writing dispatch can spend its whole token budget inside the thinking block (observed live 2026-08-16). Format-flub retries force it off regardless.", restart: true },
+    Setting { key: "YM_THINK_REASONING", label: "Think on reasoning", group: "Agent loop", kind: "toggle", desc: "Reasoning mode for the deep-reasoning call sites.", restart: true },
+    Setting { key: "YM_THINK_PLAN", label: "Think on planning", group: "Agent loop", kind: "toggle", desc: "Reasoning mode for plan/replan calls.", restart: true },
     // ── Switches ─────────────────────────────────────────────────────────
     Setting { key: "YM_PROACTIVE", label: "Proactive layer", group: "Switches", kind: "toggle", desc: "Digests, asks, patterns — the unprompted voice.", restart: true },
     Setting { key: "YM_KNOCK", label: "Calibrated knock", group: "Switches", kind: "toggle", desc: "Prepared-work interruptions with a confidence band.", restart: true },
@@ -131,6 +138,47 @@ impl super::ConversationEngine {
                 .collect();
             return serde_json::json!({ "schema_version": 1, "settings": items }).to_string();
         }
+        // `ym config dump` — every knob RESOLVED, with its source, plus the section the schema
+        // cannot know about. The DeepSeek Harness steal (`--dump-config` prints the tree a machine
+        // actually boots): drift between file, env and process is the #1 config failure, and the
+        // cure is one command that shows what is REALLY in force and where each value came from.
+        if rest.trim() == "dump" {
+            let mut out = String::from("⚙️ CONFIG DUMP — every knob resolved, with its source\n\nREGISTERED (settings schema):\n");
+            for s in SCHEMA {
+                let live = std::env::var(s.key).unwrap_or_default();
+                let (val, src) = if live.is_empty() {
+                    ("—".to_string(), "default")
+                } else if s.kind == "secret" {
+                    (mask(&live), "env")
+                } else {
+                    (live, "env")
+                };
+                out.push_str(&format!("  {:<26} {:<44} [{src}]\n", s.key, val));
+            }
+            // The section that catches what the schema does not list. YM_THINK_DISPATCH=on lived
+            // here unseen — the code read it on every dispatch call while every config surface
+            // showed defaults. An env var with the mind's prefix that no schema row claims is a
+            // knob somebody turned outside the panel's sight, and it is shown, not hidden.
+            let known: std::collections::HashSet<&str> = SCHEMA.iter().map(|s| s.key).collect();
+            let mut unregistered: Vec<(String, String)> = std::env::vars()
+                .filter(|(k, _)| (k.starts_with("YM_") || k.starts_with("YANTRIK") || k.starts_with("NANOGPT") || k.starts_with("OLLAMA")) && !known.contains(k.as_str()))
+                .collect();
+            unregistered.sort();
+            if !unregistered.is_empty() {
+                out.push_str("\nUNREGISTERED OVERRIDES (env the code may read; no schema row lists them):\n");
+                for (k, v) in unregistered {
+                    let secretish = ["KEY", "TOKEN", "SECRET", "PASSWORD"].iter().any(|m| k.contains(m));
+                    out.push_str(&format!("  {:<26} {}\n", k, if secretish { mask(&v) } else { v }));
+                }
+            }
+            let b = agent_budget();
+            let bg = background_budget();
+            out.push_str(&format!(
+                "\nEFFECTIVE BUDGETS (what the loop actually runs with):\n  interactive: {} steps · {} model calls · {}s wall\n  delegated:   {} steps · {} model calls\n",
+                b.max_steps, b.max_model_calls, b.max_wall_ms / 1000, bg.max_steps, bg.max_model_calls
+            ));
+            return out;
+        }
         let mut out = String::from("⚙️ CONFIG — live values this process was started with\n");
         let mut group = "";
         for s in SCHEMA {
@@ -159,6 +207,31 @@ impl super::ConversationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ym config dump` must SURFACE a knob the schema does not list — that invisible class is
+    /// exactly how YM_THINK_DISPATCH=on silently overrode a measured default for days. And a
+    /// secret-shaped unregistered var must still be masked to shape-only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_dump_surfaces_unregistered_overrides_and_masks_secrets() {
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            std::sync::Arc::new(mind_inference::ScriptedLLM::new("ok")) as std::sync::Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let eng = ConversationEngine::new(std::sync::Arc::new(mem) as std::sync::Arc<dyn mind_types::MemoryFacade>, pool, "JARVIS");
+        std::env::set_var("YM_TEST_UNREGISTERED_KNOB", "on");
+        std::env::set_var("YM_TEST_UNREGISTERED_KEY", "hunter2hunter2");
+        let out = eng.config_panel("dump").await;
+        std::env::remove_var("YM_TEST_UNREGISTERED_KNOB");
+        std::env::remove_var("YM_TEST_UNREGISTERED_KEY");
+
+        assert!(out.contains("UNREGISTERED OVERRIDES"), "{out}");
+        assert!(out.contains("YM_TEST_UNREGISTERED_KNOB"), "an off-schema knob must be shown:\n{out}");
+        assert!(out.contains("YM_TEST_UNREGISTERED_KEY"), "{out}");
+        assert!(!out.contains("hunter2"), "a secret-shaped value must be masked, never printed:\n{out}");
+        assert!(out.contains("EFFECTIVE BUDGETS"), "{out}");
+        assert!(out.contains("[default]") || out.contains("[env]"), "every row carries its source:\n{out}");
+    }
 
     /// The whole point of the schema is that it can't lie: every key must be one the workspace
     /// actually reads. This test greps the source tree at test time so a renamed env var breaks

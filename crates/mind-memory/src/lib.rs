@@ -434,38 +434,40 @@ fn seal_craft_pack(
         Some(e) => Err(format!("staging craft rows failed: {e}")),
         None => {
             let embedder = match db.embedder_identity() {
-                Ok(Some((ename, digest, dim))) => yantrikdb_core::PackEmbedder { name: ename, digest: Some(digest), dim },
-                _ => yantrikdb_core::PackEmbedder { name: None, digest: None, dim: db.embedding_dim() },
+                Ok(Some((ename, digest, dim))) => serde_json::json!({ "name": ename, "digest": digest, "dim": dim }),
+                _ => serde_json::json!({ "name": null, "digest": null, "dim": db.embedding_dim() }),
             };
-            let manifest = yantrikdb_core::PackManifest {
-                name: name.to_string(),
-                version: version.to_string(),
-                origin: format!("yantrik-mind/{name}"),
-                description: Some(
-                    "Craft this mind learned by doing: banked approaches and measured skills.".to_string(),
-                ),
-                embedder,
-                content_digest: None,
-                corpus_rows: 0,
-                namespace: None,
-                publisher_pubkey: None,
-                signature: None,
-                reembedded_from: None,
-                recommended_top_k: None,
-                recommended_min_similarity: None,
+            let coverage: Vec<String> = texts
+                .iter()
+                .filter_map(|t| t.lines().next().map(|l| l.chars().take(60).collect::<String>()))
+                .take(8)
+                .collect();
+            // Built through serde rather than a struct literal ON PURPOSE: every optional
+            // manifest field is #[serde(default)], so this compiles against any engine version
+            // that has the required fields — a literal broke the build the moment the local
+            // engine grew fields the deployment box's checkout did not have yet.
+            let manifest: yantrikdb_core::PackManifest = match serde_json::from_value(serde_json::json!({
+                "name": name,
+                "version": version,
+                "origin": format!("yantrik-mind/{name}"),
+                "description": "Craft this mind learned by doing: banked approaches and measured skills.",
+                "embedder": embedder,
                 // The constitution frames the corpus honestly: these are ONE mind's local
                 // measurements, and a mounting host must not read them as universal claims.
-                constitution: vec![
+                "constitution": [
                     "These approaches were banked by a household mind from its own successful runs. \
                      Reliability notes are that mind's local measurements, not universal claims — \
                      prefer your own measured procedures where they exist."
-                        .to_string(),
                 ],
-                coverage: texts
-                    .iter()
-                    .filter_map(|t| t.lines().next().map(|l| l.chars().take(60).collect::<String>()))
-                    .take(8)
-                    .collect(),
+                "coverage": coverage,
+            })) {
+                Ok(m) => m,
+                Err(e) => {
+                    for rid in &rids {
+                        let _ = db.forget(rid);
+                    }
+                    return Err(format!("building the pack manifest failed: {e}"));
+                }
             };
             db.seal_pack(dest, &manifest, Some(NS)).map(|m| m.corpus_rows).map_err(|e| e.to_string())
         }

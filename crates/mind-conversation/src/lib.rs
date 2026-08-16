@@ -3219,6 +3219,8 @@ pub struct ConversationEngine {
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
+    /// Finished results that could not reach any chat — delivered on the next exchange, any channel.
+    held_notes: Arc<Mutex<Vec<String>>>,
     /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
     /// loop drains and sends them as real Telegram photos. Arc'd so detached studio jobs can deliver.
     photo_queue: Arc<Mutex<Vec<(Vec<u8>, String, Option<i64>)>>>,
@@ -3290,6 +3292,7 @@ impl ConversationEngine {
             dmn_phase: Mutex::new(0),
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
+            held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
             last_sent_photo: Arc::new(Mutex::new(None)),
             video_queue: Arc::new(Mutex::new(Vec::new())),
@@ -3515,6 +3518,24 @@ impl ConversationEngine {
     /// this each tick and delivers each to the active chat. Empty when nothing has completed.
     pub fn take_notifications(&self) -> Vec<String> {
         std::mem::take(&mut *self.notify_queue.lock().unwrap())
+    }
+
+    /// Hold a finished result that could not reach any chat right now, for delivery on the user's
+    /// NEXT exchange — whatever channel it arrives on.
+    ///
+    /// This is the difference between a background job and follow-through. The drain loop used to
+    /// take a result and, with no active Telegram chat, simply drop it: never sent, never
+    /// remembered — so on the console and cockpit channels, "I'll send the result here when it's
+    /// done" was a lie. A held note is delivered appended to the next reply, and the drain loop
+    /// mirrors every result into the transcript regardless, so "is my page done?" grounds even
+    /// before the delivery happens.
+    pub fn hold_for_next_turn(&self, note: &str) {
+        self.held_notes.lock().unwrap().push(note.to_string());
+    }
+
+    /// Take everything held for the next exchange. Called by the turn entry point.
+    pub fn take_held_notes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.held_notes.lock().unwrap())
     }
 
     /// Queue a message for the user's chat from outside the poll loop (event listeners, webhook

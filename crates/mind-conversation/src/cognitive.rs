@@ -342,13 +342,31 @@ impl ConversationEngine {
     /// Falls back to the legacy loop whenever the cognitive path declines to build, so a
     /// misconfiguration degrades to the behaviour that has always worked instead of to an error.
     pub async fn turn(self: &Arc<Self>, user_text: &str, id: TurnIdentity) -> Result<String> {
-        if Self::cognition_enabled() {
-            if let Some(answer) = self.cognitive_turn(user_text, &id).await {
-                return Ok(answer);
+        let answer = if Self::cognition_enabled() {
+            match self.cognitive_turn(user_text, &id).await {
+                Some(a) => Ok(a),
+                None => {
+                    eprintln!("[cognition] could not build the bounded loop for this turn — using the legacy path");
+                    self.handle_turn_as(user_text, id.clone()).await
+                }
             }
-            eprintln!("[cognition] could not build the bounded loop for this turn — using the legacy path");
+        } else {
+            self.handle_turn_as(user_text, id.clone()).await
+        };
+        // FOLLOW-THROUGH, every channel: a delegated result that finished while no chat was
+        // reachable is delivered on the very next exchange, appended after the answer — "also,
+        // the thing you asked for is done." Primary-viewer only: a held result was produced for
+        // the household's owner lane, and another member's next turn must not receive it.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            let held = self.take_held_notes();
+            if !held.is_empty() {
+                let mut a = answer?;
+                a.push_str("\n\n— finished while you were away —\n");
+                a.push_str(&held.join("\n\n"));
+                return Ok(a);
+            }
         }
-        self.handle_turn_as(user_text, id).await
+        answer
     }
 
     /// Run one turn through the bounded control loop.
@@ -626,6 +644,39 @@ mod tests {
             assert!(matches!(p.kind, mind_agents::ProcedureKind::Instructions));
             assert!(!p.reliability.is_trustworthy(), "a freshly banked approach is unproven");
         }
+    }
+
+    /// FOLLOW-THROUGH: a result that finished while no chat was reachable is delivered appended to
+    /// the very next exchange — and exactly once. This is what makes "I'll send the result here
+    /// when it's done" true on channels the notify loop cannot reach.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_held_result_is_delivered_on_the_next_turn_exactly_once() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = engine(&mem);
+        eng.hold_for_next_turn("🛠️ Code — your page is ready: http://192.168.4.90:8088/x.html");
+
+        let a = eng.turn("thanks, and what else?", TurnIdentity::primary()).await.unwrap();
+        assert!(a.contains("finished while you were away"), "{a}");
+        assert!(a.contains("your page is ready"), "{a}");
+
+        let b = eng.turn("ok", TurnIdentity::primary()).await.unwrap();
+        assert!(!b.contains("your page is ready"), "a held note must deliver exactly once: {b}");
+    }
+
+    /// A held result is the PRIMARY lane's. Another household member's next turn must not
+    /// receive it — and must not consume it either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_held_result_never_leaks_to_another_member() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = engine(&mem);
+        eng.hold_for_next_turn("the surprise-gift research finished");
+
+        let member = TurnIdentity::new("guest", false);
+        let a = eng.turn("hello", member).await.unwrap();
+        assert!(!a.contains("surprise-gift"), "another member must not see the owner's result: {a}");
+
+        let b = eng.turn("hi", TurnIdentity::primary()).await.unwrap();
+        assert!(b.contains("surprise-gift"), "…and the owner still gets it on their next turn: {b}");
     }
 
     /// The flag is off unless explicitly turned on: the legacy loop stays primary until evals say

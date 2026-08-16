@@ -1340,15 +1340,25 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         }
 
         // Delegated background jobs (research/code) deliver their results here when finished.
+        //
+        // EVERY result is mirrored into the transcript FIRST — the mind must remember what its own
+        // background work produced whether or not anyone was reachable, or "is my page done?" has
+        // no referent. And a result that cannot reach a chat right now (no Telegram chat has ever
+        // been active — the console/cockpit-only household — or the send failed) is HELD and
+        // delivered on the user's next exchange, whatever channel it arrives on. It used to be
+        // silently dropped here: drained, unsent, unremembered.
         for note in conv.take_notifications() {
+            conv.mirror_proactive(&note).await;
             let target = active_chat.load(Ordering::Relaxed);
-            if target != 0 {
-                let ok = tg_send(&api, target, &note).await.is_ok();
-                if ok {
-                    conv.mirror_proactive(&note).await;
-                }
-                eprintln!("[notify] delivered={ok}: {}", note.chars().take(80).collect::<String>());
+            let delivered = target != 0 && tg_send(&api, target, &note).await.is_ok();
+            if !delivered {
+                conv.hold_for_next_turn(&note);
             }
+            eprintln!(
+                "[notify] delivered={delivered}{}: {}",
+                if delivered { "" } else { " (held for next turn)" },
+                note.chars().take(80).collect::<String>()
+            );
         }
 
         // Proactive HOME WATCH — the moat in action: flag grounded home anomalies (TV on while away,

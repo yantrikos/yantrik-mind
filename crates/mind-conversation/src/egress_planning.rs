@@ -60,7 +60,18 @@ impl ConversationEngine {
     /// HONEST RESIDUAL LEAKS (per the slice-2 spec, NOT covered here): the user's literal request may
     /// itself contain a private detail; the clean model's pretraining; values a later local tool-result
     /// introduces. Clean planning is complementary to the credential/value tripwire, not a total guard.
-    pub(crate) async fn egress_clean_args(&self, tool: &str, user_text: &str, grounded: serde_json::Value) -> Option<serde_json::Value> {
+    ///
+    /// `external_provenance` is what EXTERNAL services have already returned THIS turn (search
+    /// results, fetched pages) — never private-tool output. An arg value found verbatim there, or in
+    /// the user's literal request, passes through unchanged: the outside world already has it, so
+    /// re-authoring it cannot protect anything — and measurably destroys it. Observed live
+    /// 2026-08-16: a research turn's `web_fetch` of a URL taken from its own search results was
+    /// re-authored by the clean planner (which, by design, never sees the work log) into invented
+    /// search-engine URLs and twice into unfetchable garbage — six fetches of one article, none of
+    /// them the article. The pass-through also restores DETERMINISM, which the loop's repeat-guard
+    /// depends on: a re-authoring model call gives the same tool call a different signature each
+    /// time, so the guard never fires on exactly the repeats this failure produces.
+    pub(crate) async fn egress_clean_args(&self, tool: &str, user_text: &str, grounded: serde_json::Value, external_provenance: &str) -> Option<serde_json::Value> {
         // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
         if self.egress.is_none() {
             return Some(grounded);
@@ -78,6 +89,17 @@ impl ConversationEngine {
         }
         if !matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
             return Some(grounded);
+        }
+        // PROVENANCE PASS-THROUGH (scoped to the url-bearing fetch tools, where the breakage is
+        // total): a URL the user typed, or that an external service returned this turn, is not a
+        // private fact — dispatch it exactly as chosen. Queries stay clean-authored: they are built
+        // from the user's request, which the clean planner CAN see, so it does its job there.
+        if matches!(tool, "web_fetch" | "fetch" | "web") {
+            if let Some(url) = grounded.get("url").and_then(|u| u.as_str()) {
+                if !url.is_empty() && (user_text.contains(url) || external_provenance.contains(url)) {
+                    return Some(grounded);
+                }
+            }
         }
         let schema = match tool {
             "web_fetch" | "fetch" | "web" => "{\"url\": \"<the URL, taken ONLY from the user's literal request>\"}",

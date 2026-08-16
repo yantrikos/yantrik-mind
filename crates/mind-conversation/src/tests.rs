@@ -839,7 +839,7 @@ async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
 
     // The grounded model authored a web_search arg that LEAKS a stored private fact.
     let grounded = serde_json::json!({ "query": "Alice oncology appointment July 18 47-12-33" });
-    let clean = conv.egress_clean_args("web_search", "find me good oncology hospitals in pune", grounded.clone()).await.unwrap();
+    let clean = conv.egress_clean_args("web_search", "find me good oncology hospitals in pune", grounded.clone(), "").await.unwrap();
     // The clean-context call's args are what dispatch — the grounded (leaky) args are gone.
     assert_eq!(clean, serde_json::json!({ "query": "best oncology hospitals in Pune" }), "grounded args must be discarded and re-authored");
     assert_ne!(clean, grounded, "the private-fact-bearing grounded args must NOT survive");
@@ -847,7 +847,7 @@ async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
 
     // A NON-eligible egress tool (github) keeps its grounded args (documented not-yet-covered).
     let g = serde_json::json!({ "repo": "owner/repo" });
-    let kept = conv.egress_clean_args("github_repo_items", "my open PRs", g.clone()).await.unwrap();
+    let kept = conv.egress_clean_args("github_repo_items", "my open PRs", g.clone(), "").await.unwrap();
     assert_eq!(kept, g, "a non-eligible tool keeps its grounded args");
 
     // With NO egress broker wired, planning is inert (legacy path unchanged).
@@ -855,7 +855,52 @@ async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
     let pool2 = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv2 = ConversationEngine::new(mem2, pool2, "JARVIS");
     let g2 = serde_json::json!({ "query": "leaky Alice oncology" });
-    assert_eq!(conv2.egress_clean_args("web_search", "hi", g2.clone()).await.unwrap(), g2, "no broker → egress-clean planning is inert");
+    assert_eq!(conv2.egress_clean_args("web_search", "hi", g2.clone(), "").await.unwrap(), g2, "no broker → egress-clean planning is inert");
+}
+
+/// PROVENANCE PASS-THROUGH: a URL the user typed, or that an EXTERNAL service returned this turn,
+/// dispatches exactly as the model chose it — the outside world already has it, so re-authoring
+/// protects nothing and (observed live 2026-08-16) destroys the fetch: the clean planner, which by
+/// design never sees the work log, re-invented a search-result URL as search-engine pages and
+/// unfetchable garbage, six times for one article. A URL with NO such provenance still goes through
+/// the clean planner, so the private-memory property is intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn egress_clean_planning_passes_through_urls_with_external_provenance() {
+    use mind_governance::egress::EgressBroker;
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    // The clean planner is scripted to MANGLE any url it authors — so a pass-through is only
+    // provable when the scripted reply does NOT come back.
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"url":"https://google.com/search?q=mangled"}"#)) as Arc<dyn LLMBackend>, 1);
+    let broker = Arc::new(EgressBroker::open(std::env::temp_dir(), false));
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(broker);
+
+    let article = serde_json::json!({ "url": "https://example.com/blog/local-agents-2026" });
+
+    // 1. The URL came from THIS turn's search results (external provenance) → untouched.
+    let prov = "1. The On-Device Agent Era — https://example.com/blog/local-agents-2026\n";
+    let kept = conv.egress_clean_args("web_fetch", "research local agent runtimes", article.clone(), prov).await.unwrap();
+    assert_eq!(kept, article, "a search-result URL must dispatch exactly as chosen");
+
+    // 2. The user themselves typed the URL → untouched, even with empty provenance.
+    let kept = conv
+        .egress_clean_args("web_fetch", "fetch https://example.com/blog/local-agents-2026 for me", article.clone(), "")
+        .await
+        .unwrap();
+    assert_eq!(kept, article, "a user-typed URL must dispatch exactly as chosen");
+
+    // 3. NO provenance: the URL might carry a private fact — the clean planner still re-authors.
+    let cleaned = conv.egress_clean_args("web_fetch", "look that thing up", article.clone(), "").await.unwrap();
+    assert_ne!(cleaned, article, "an unprovenanced URL must still be clean-authored");
+
+    // 4. Provenance from a PRIVATE tool must not launder: the caller only accumulates EXTERNAL
+    //    observations, and this pins the contract that queries stay clean-authored regardless —
+    //    a query embedding a private fact re-authors even when that fact is in the provenance.
+    let leaky_query = serde_json::json!({ "query": "Alice oncology 47-12-33" });
+    let cleaned = conv
+        .egress_clean_args("web_search", "find hospitals", leaky_query.clone(), "Alice oncology 47-12-33")
+        .await
+        .unwrap();
+    assert_ne!(cleaned, leaky_query, "queries are never passed through on provenance");
 }
 
 /// ARCH-3 slice 2 (complementary): the exact-value exfil guard. A distinctive stored private value
@@ -903,7 +948,7 @@ async fn arch3_slice2_clean_planner_fails_closed_on_garbage() {
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("sorry, I cannot help with that")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
     let grounded = serde_json::json!({ "query": "Alice oncology" });
-    assert!(conv.egress_clean_args("web_search", "search", grounded).await.is_none(), "no usable clean args → fail closed (refuse), not fall back to grounded");
+    assert!(conv.egress_clean_args("web_search", "search", grounded, "").await.is_none(), "no usable clean args → fail closed (refuse), not fall back to grounded");
 }
 
 #[test]

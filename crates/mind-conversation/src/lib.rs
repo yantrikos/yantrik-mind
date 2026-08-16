@@ -6703,7 +6703,12 @@ impl ConversationEngine {
             }
             "remember" => {
                 let t = s("text");
-                if t.len() < 4 {
+                // A fact has words in it. Observed live 2026-08-16: a flailing dispatch model
+                // called remember with numeric args ({"text":[2026,8,15]}), the normalizer dutifully
+                // flattened them to "2026815", and a meaningless all-digit "belief" entered typed
+                // memory. Length alone cannot catch that — the alphabetic requirement does, and no
+                // real remembered fact fails it.
+                if t.len() < 4 || !t.chars().any(|c| c.is_alphabetic()) {
                     return "(nothing to remember)".to_string();
                 }
                 let _ = self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await;
@@ -7331,6 +7336,11 @@ Open reminders you're carrying for them:");
         // Re-executing one teaches nothing and wastes a dispatch round-trip — the runtime answers
         // for it instead. Per-turn, not persistent: the user may configure the tool between turns.
         let mut unavailable_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // What EXTERNAL services have returned this turn — the provenance the egress cleaner may
+        // pass a URL through against (a link from a search result is not a private fact). ONLY
+        // external observations accumulate here; recall/private-tool output must never join, or a
+        // stored private link would launder itself into fetchable.
+        let mut external_obs = String::new();
         for step in 0..max_steps {
             emit_progress(if step == 0 { "thinking…" } else { "thinking (continuing)…" });
             // Budget-awareness (SOTA agentic-loop finding): a small model that doesn't know how many
@@ -7621,7 +7631,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
             // ARCH-3 slice 2: for an eligible EGRESS tool, re-author the args in a clean context that
             // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
-            let args = match self.egress_clean_args(&tool, user_text, grounded_args).await {
+            let args = match self.egress_clean_args(&tool, user_text, grounded_args, &external_obs).await {
                 Some(a) => a,
                 None => {
                     let msg = format!("(I couldn't compose a safe outbound request for {tool} without pulling in private context — tell me the exact terms you want me to search/fetch)");
@@ -7668,6 +7678,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             emit_detail(&args_summary(&args));
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
+            // Only EXTERNAL tools feed the egress provenance: what came back from the outside world
+            // is already outside. A private tool's output (recall, people, mail bodies) must never
+            // accumulate here — see `external_obs` above.
+            if matches!(mind_governance::egress::classify(&tool), Some(mind_governance::egress::EgressClass::External(_))) {
+                external_obs.push_str(&obs);
+                external_obs.push('\n');
+            }
             // The mind learning its OWN tools: every call's outcome feeds the engine bandit, so
             // reliability becomes measured self-knowledge instead of a blind spot — which is exactly
             // why this must not be one boolean off a substring list. `no results` is a search WORKING,

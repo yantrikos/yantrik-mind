@@ -23,11 +23,22 @@ use super::*;
 pub struct EngineBus {
     engine: Arc<ConversationEngine>,
     identity: TurnIdentity,
+    /// The user's literal request, for the exact-value exfil guard — the same third check the
+    /// legacy loop runs before an external tool call. Empty when unknown (tests, tools-only use),
+    /// which makes the guard STRICTER, never looser: nothing reads as "the user typed it".
+    user_text: String,
 }
 
 impl EngineBus {
     pub fn new(engine: Arc<ConversationEngine>, identity: TurnIdentity) -> Self {
-        Self { engine, identity }
+        Self { engine, identity, user_text: String::new() }
+    }
+
+    /// Carry the user's literal request so per-call guards can distinguish "the user typed this
+    /// value" from "the model injected it".
+    pub fn for_turn(mut self, user_text: &str) -> Self {
+        self.user_text = user_text.to_string();
+        self
     }
 }
 
@@ -75,9 +86,20 @@ impl Bus for EngineBus {
     }
 
     async fn call(&self, tool: &str, args: &Value) -> anyhow::Result<String> {
-        // Dispatch through the SAME path the legacy loop uses, so every guard the engine has —
-        // plugin enablement, the egress broker, the exact-value exfiltration check, read isolation —
-        // applies unchanged. A second dispatch path would be a second set of holes.
+        // Dispatch through the SAME path the legacy loop uses, so plugin enablement, the egress
+        // broker, and read isolation apply unchanged. A second dispatch path would be a second set
+        // of holes. Two legacy-loop guards live OUTSIDE that path and are re-run here:
+        //
+        // - The EXACT-VALUE EXFIL GUARD: a distinctive stored private value (email/phone/id) the
+        //   model wrote into an external tool's args that the user did not type. Without this the
+        //   bounded loop was the one dispatch route that skipped it.
+        // - NOT yet re-run: egress-clean ARG RE-AUTHORING (the legacy loop's clean-context arg
+        //   planner). Documented gap — it needs per-turn external provenance plumbing through the
+        //   bus; until then the broker + this tripwire are the bounded loop's egress protections,
+        //   and the flag stays off in production partly for this reason.
+        if let Some(msg) = self.engine.model_injected_private_value(tool, args, &self.user_text, &self.identity).await {
+            anyhow::bail!("{msg}");
+        }
         let out = self.engine.run_agent_tool_as(tool, args, &self.identity).await;
         // ONE definition of "worked", shared with the legacy loop: the five-way classifier in
         // `tool_outcome`. This used to be a private substring boolean copied from the legacy loop —
@@ -133,13 +155,19 @@ impl Bus for EngineBus {
         let trimmed = raw.trim();
         // A one-line answer needs no summarizing; a long one gets its opening as the summary and keeps
         // the whole thing as the body for paging.
-        let summary: String = if trimmed.chars().count() <= 200 {
-            trimmed.to_string()
+        //
+        // 360 chars, not 160: the synthesis step sees ONLY these summaries unless the model pages a
+        // body in, and at 160 a fetched page was reduced to its masthead — the live turn answered
+        // "the source only shows the page title and a Sign in link" about a page whose tagline and
+        // benchmark were sitting in the unread body. The capsule's render budget still caps the
+        // total; a summary's job is to carry enough substance to answer from, not just to name.
+        let summary: String = if trimmed.chars().count() <= 400 {
+            trimmed.replace('\n', " ")
         } else {
-            let head: String = trimmed.lines().next().unwrap_or("").chars().take(160).collect();
-            if head.chars().count() < 24 {
+            let head: String = trimmed.lines().next().unwrap_or("").chars().take(360).collect();
+            if head.chars().count() < 80 {
                 // A short first line is a heading, not a summary — take a prefix of the whole thing.
-                trimmed.chars().take(160).collect::<String>().replace('\n', " ")
+                trimmed.chars().take(360).collect::<String>().replace('\n', " ")
             } else {
                 head
             }
@@ -328,7 +356,7 @@ impl ConversationEngine {
     /// Returns `None` when the loop cannot be built (no recipe engine for grounding, say), so the
     /// caller falls back to the legacy path rather than degrading silently.
     pub async fn cognitive_turn(self: &Arc<Self>, user_text: &str, id: &TurnIdentity) -> Option<String> {
-        let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(self.clone(), id.clone()));
+        let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(self.clone(), id.clone()).for_turn(user_text));
         let router = mind_inference::Router::from_env(self.inference.clone(), 4);
 
         emit_progress("understanding the goal…");
@@ -492,6 +520,33 @@ mod tests {
         let n = bus.normalize("news", &serde_json::json!({}), &heading, true);
         assert!(n.evidence[0].summary.contains("substantive"), "a 4-char heading must not become the summary: {}", n.evidence[0].summary);
         assert!(n.evidence[0].body.len() > 200, "the body keeps the whole thing for paging");
+    }
+
+    /// The bus re-runs the EXACT-VALUE EXFIL GUARD the legacy loop runs: a distinctive stored
+    /// private value the model wrote into an external tool's args — that the user did not type —
+    /// is refused before dispatch. The bounded loop was the one dispatch route that skipped it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_bus_refuses_a_model_injected_private_value() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let _ = mem
+            .remember_as_belief(mind_types::BeliefAssertion {
+                statement: "Pranab's private email is secret.owner@example.com".into(),
+                polarity: 1.0,
+                weight: 1.5,
+                source_event: None,
+                provenance: "told".into(),
+            })
+            .await;
+        // The user asked about laptops; the model smuggled the stored email into the query.
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary()).for_turn("find me a good laptop");
+        let r = bus.call("web_search", &serde_json::json!({ "query": "laptops for secret.owner@example.com" })).await;
+        assert!(r.is_err(), "a stored private value the user never typed must not leave: {r:?}");
+
+        // The user typing the value themselves is their call, not a model exfil.
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
+            .for_turn("search the web for secret.owner@example.com");
+        let r = bus.call("web_search", &serde_json::json!({ "query": "secret.owner@example.com" })).await;
+        assert!(r.is_ok() || !format!("{r:?}").contains("private detail"), "user-typed values pass the guard: {r:?}");
     }
 
     /// The bus serves the ENGINE's terminal-delivery list — a published URL, a delegation ack, a

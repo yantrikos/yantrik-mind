@@ -183,7 +183,44 @@ impl Cognition {
                 stopped_because = Some(ReasonCode::NoProgress);
                 break;
             };
-            let action = choice.action;
+            let mut action = choice.action;
+
+            // URL FIDELITY, enforced by code. Observed on the bounded loop's first live night
+            // (2026-08-16): asked to fetch packs.yantrikdb.com, the decision model called
+            // web_fetch on example.com and the run confidently summarized the wrong page. When
+            // the GOAL carries a URL, a fetch of some other, unprovenanced URL is not a choice
+            // the model gets to make: one goal URL → the runtime substitutes it; several → the
+            // step is refused with the mismatch named. A goal with no URL constrains nothing —
+            // fetching search-result links is what research is.
+            if action.verb == Verb::CallTool && matches!(action.target.as_str(), "web_fetch" | "fetch" | "web") {
+                if let Some(chosen) = action.args.get("url").and_then(|u| u.as_str()).map(str::to_string) {
+                    let goal_urls = urls_in(&spec.goal);
+                    let provenanced = spec.goal.contains(chosen.as_str())
+                        || capsule.evidence.iter().any(|e| e.summary.contains(chosen.as_str()));
+                    if !goal_urls.is_empty() && !provenanced {
+                        if goal_urls.len() == 1 {
+                            trace.push(Step {
+                                n: capsule.progress.steps,
+                                action: format!("url corrected: {chosen} -> {}", goal_urls[0]),
+                                ok: true,
+                                decision: None,
+                                elapsed_ms: clock.now_ms().saturating_sub(started),
+                            });
+                            action.args["url"] = serde_json::json!(goal_urls[0]);
+                        } else {
+                            capsule = capsule.reduce(Observation {
+                                action: action.signature(),
+                                ok: false,
+                                error: Some(format!(
+                                    "refused: {chosen} appears nowhere in the goal or the evidence — fetch one of the goal's own urls"
+                                )),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
 
             // ── Fold in what the last step established. ────────────────────────────────────────
             // This is what promotes evidence into findings, and without it the contract could never
@@ -473,6 +510,16 @@ impl Cognition {
     }
 }
 
+/// The http(s) URLs literally present in a text, trailing punctuation trimmed. This is what "the
+/// user gave a URL" means to the fidelity guard — substring presence, no parsing cleverness.
+fn urls_in(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|t| t.starts_with("http://") || t.starts_with("https://"))
+        .map(|t| t.trim_end_matches(['.', ',', ';', ':', ')', ']', '!', '?']).to_string())
+        .filter(|t| t.len() > 10)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +597,43 @@ mod tests {
         assert_eq!(backend.call_count(), 1, "one decision, zero synthesis calls — got {}", backend.call_count());
         assert!(bus.banked_names().is_empty(), "a delivered run banks no approach");
         assert!(out.trace.iter().any(|s| s.decision == Some(ReasonCode::Delivered)), "{:?}", out.trace);
+    }
+
+    /// THE FIRST LIVE NIGHT'S BUG, pinned: the goal names packs.yantrikdb.com, the decision model
+    /// fetches example.com. The runtime substitutes the goal's URL — the user's literal URL is not
+    /// the model's to overrule — and the trace records the correction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_model_invented_url_is_replaced_by_the_goals_own() {
+        let bad = r#"{"verb":"CALL_TOOL","target":"web_fetch","args":{"url":"http://example.com"},"why":"NEED_EVIDENCE"}"#;
+        let f = learned_then_finish("the page is about packs", "E1");
+        let (step, reason, _) = pools(vec![bad, &f, "It is about packs."]);
+        let bus = Arc::new(FakeBus::new(&["web_fetch"]).returning("web_fetch", "PACKS: mount what your model was never trained on"));
+        let mut g = goal(1);
+        g.goal = "fetch https://packs.yantrikdb.com and tell me what is on that page".into();
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&g, &TestClock::new(0)).await;
+
+        assert_eq!(bus.called().len(), 1);
+        assert!(
+            bus.called()[0].contains("packs.yantrikdb.com"),
+            "the fetch must hit the goal's URL, not the invented one: {:?}",
+            bus.called()
+        );
+        assert!(!bus.called()[0].contains("example.com"));
+        assert!(out.trace.iter().any(|s| s.action.starts_with("url corrected:")), "{:?}", out.trace);
+        assert!(out.complete());
+    }
+
+    /// A goal that names NO url constrains nothing — fetching a link the model picked is what
+    /// research is, and the guard must not break it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_urlless_goal_leaves_fetch_choices_alone() {
+        let pick = r#"{"verb":"CALL_TOOL","target":"web_fetch","args":{"url":"http://a-search-result.example/article"},"why":"NEED_EVIDENCE"}"#;
+        let f = learned_then_finish("found it", "E1");
+        let (step, reason, _) = pools(vec![pick, &f, "answer"]);
+        let bus = Arc::new(FakeBus::new(&["web_fetch"]).returning("web_fetch", "the article body"));
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        assert!(bus.called()[0].contains("a-search-result.example"), "{:?}", bus.called());
+        assert!(out.complete());
     }
 
     /// A model wanting to finish early does NOT get to decide. The contract does.

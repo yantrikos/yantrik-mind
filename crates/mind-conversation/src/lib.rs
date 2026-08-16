@@ -7546,6 +7546,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // safe as the primary — the hard turns fall through to the strong one instead of a
                 // "Sorry, I had trouble" dead end. Sticky for the rest of the turn.
                 if raw.is_empty() || is_tool_call_blob(raw) {
+                    // A RETRY MUST CHANGE WHAT FAILED. When the env pins dispatch thinking on
+                    // (YM_THINK_DISPATCH=on — observed live 2026-08-16), a long generation spends
+                    // its whole token budget inside the thinking block and the reply arrives empty
+                    // or truncated; retrying with the same flag fails the same way for another five
+                    // minutes. Thinking off for the retries is the measured-safe setting for
+                    // dispatch (4/4 correct, 3.6× fewer tokens) — and it only ever kicks in on a
+                    // turn that is already failing.
+                    cfg.think = Some(false);
                     if !escalated {
                         escalated = true;
                         // Route to the strong reasoner MODEL but keep think:false. The big model handles
@@ -7580,6 +7588,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 } else {
                     raw.to_string()
                 };
+                // This exit used to be the only one with no journal line, so a turn ending here was
+                // indistinguishable from one still running — 17 minutes of "is it wedged?" on
+                // 2026-08-16 was this exact silence.
+                eprintln!("[agent] step {step}: no tool chosen — returning a direct reply ({} chars)", a.len());
                 if !is_tool_call_blob(&a) && looks_like_html(&a) {
                     let name = title_from_html(&a).unwrap_or_else(|| "page".to_string());
                     if let Some(url) = publish_html(&name, &a) {

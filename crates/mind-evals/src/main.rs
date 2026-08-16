@@ -17,6 +17,14 @@ async fn main() {
     if args.first().map(String::as_str) == Some("immune") {
         std::process::exit(immune_cli(&args[1..]).await);
     }
+    // `mind-evals loops` — the promotion-gate scoreboard: the same goals through BOTH loops,
+    // outcome grades plus model-call counts side by side.
+    if args.first().map(String::as_str) == Some("loops") {
+        let rows = mind_evals::loop_compare::run_pairs(&mind_evals::loop_compare::pairs()).await;
+        print!("{}", mind_evals::loop_compare::render(&rows));
+        let ok = rows.iter().all(|r| r.legacy.passed == r.legacy.total && r.cognitive.passed == r.cognitive.total);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
 
     let card = mind_evals::run_suite(&mind_evals::standard_suite()).await;
     print!("{}", card.render());

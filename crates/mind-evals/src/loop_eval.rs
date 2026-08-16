@@ -134,7 +134,7 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
     }
     let passed = checks.iter().filter(|c| c.pass).count();
     let total = checks.len();
-    ScenarioResult { name: s.name.clone(), passed, total, checks }
+    ScenarioResult { name: s.name.clone(), passed, total, checks, calls }
 }
 
 pub async fn run_loop_suite(scenarios: &[LoopScenario]) -> Scorecard {

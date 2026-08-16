@@ -123,7 +123,7 @@ pub async fn run_cognition_scenario(s: &CognitionScenario) -> ScenarioResult {
     }
     let passed = checks.iter().filter(|c| c.pass).count();
     let total = checks.len();
-    ScenarioResult { name: s.name.clone(), passed, total, checks }
+    ScenarioResult { name: s.name.clone(), passed, total, checks, calls: seq.call_count() }
 }
 
 pub async fn run_cognition_suite(scenarios: &[CognitionScenario]) -> Scorecard {

@@ -11,6 +11,7 @@
 pub mod brain_bench;
 pub mod cognition_eval;
 pub mod immune;
+pub mod loop_compare;
 pub mod loop_eval;
 
 use std::sync::Arc;
@@ -83,6 +84,9 @@ pub struct ScenarioResult {
     pub passed: usize,
     pub total: usize,
     pub checks: Vec<CheckResult>,
+    /// Model calls the scenario consumed — the economics axis of the loop comparison. Zero when the
+    /// harness has no call counter (the deterministic-dispatch standard suite).
+    pub calls: usize,
 }
 
 #[derive(Serialize)]
@@ -211,7 +215,7 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
 
     let passed = checks.iter().filter(|c| c.pass).count();
     let total = checks.len();
-    ScenarioResult { name: s.name.clone(), passed, total, checks }
+    ScenarioResult { name: s.name.clone(), passed, total, checks, calls: 0 }
 }
 
 pub async fn run_suite(scenarios: &[Scenario]) -> Scorecard {

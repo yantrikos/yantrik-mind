@@ -618,9 +618,16 @@ impl super::ConversationEngine {
                 let mut out = format!("📦 {} knowledge pack(s) mounted\n", packs.len());
                 for p in &packs {
                     out.push_str(&format!(
-                        "  {} {}@{} · {} · {} rows · trust: {}\n",
+                        "  {} {}@{} · {} · {} rows · trust: {} · {}\n",
                         if p.trust.contains("Signed") { "🔏" } else { "•" },
-                        p.name, p.version, p.origin, p.rows, p.trust
+                        p.name,
+                        p.version,
+                        p.origin,
+                        p.rows,
+                        p.trust,
+                        // The distinction the unmount-that-wasn't bug hid: an adopted pack
+                        // returns on every restart, a mounted one dies with the process.
+                        if p.installed { "adopted (returns on restart; `disown` removes)" } else { "this run only" }
                     ));
                 }
                 out

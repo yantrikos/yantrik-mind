@@ -5825,12 +5825,35 @@ impl ConversationEngine {
                         Err(e) => format!("(couldn't install that pack: {e})"),
                     },
                     "unmount" | "drop" if !parg.is_empty() => match self.memory.unmount_pack(&parg).await {
-                        Ok(()) => format!("📦 Unmounted {parg}. Its rules and knowledge are gone; nothing of mine changed."),
+                        Ok(()) => format!("📦 Unmounted {parg} for THIS run. If it was adopted, it returns on my next start — `ym pack disown {parg}` removes it for good."),
                         Err(e) => format!("(couldn't unmount that: {e})"),
                     },
+                    // The durable opposite of `adopt`: unmount AND delete the installed file. A
+                    // plain unmount is process-local, and an adopted pack silently returning on
+                    // restart is how contradictory pack versions contaminated the A/B runs.
+                    "disown" | "expel" if !parg.is_empty() => match self.memory.uninstall_pack(&parg).await {
+                        Ok(true) => format!("📦 Disowned {parg} — unmounted and removed from beside my database. It will not return."),
+                        Ok(false) => format!("(no installed pack matches {parg} — `ym pack mounted` to see what's here)"),
+                        Err(e) => format!("(couldn't disown that: {e})"),
+                    },
+                    // The self-improvement EXPORT: what this mind learned by doing — banked
+                    // approaches, skills with their measured ledgers — sealed into a mountable
+                    // pack. Personal values are withheld by the export filter, and the seal is
+                    // namespace-scoped so nothing else in the database can ride along.
+                    "seal-learned" | "seal" => {
+                        let (dest, version) = if parg.is_empty() {
+                            (format!("{}/learned-craft.ydbpack", std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".into())), "0.1.0".to_string())
+                        } else {
+                            (parg.clone(), "0.1.0".to_string())
+                        };
+                        match self.memory.seal_learned_pack(&dest, "learned-craft", &version).await {
+                            Ok(summary) => format!("📦 {summary}"),
+                            Err(e) => format!("(couldn't seal my learned craft: {e})"),
+                        }
+                    }
                     "mounted" | "knowledge" => self.packs_mounted().await,
                     "" | "list" | "ls" => self.pack_list().await,
-                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · mounted".to_string(),
+                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted".to_string(),
                 }
             }
             "plugins" => self.plugins.lock().unwrap().render_list(),

@@ -232,28 +232,61 @@ impl Bus for EngineBus {
             });
         }
 
-        // Guidance: `MemoryKind::Routine` — the procedural slot in typed memory. A remembered approach
-        // is stored as numbered lines, so the steps are recovered by splitting rather than by asking a
-        // model to re-read its own note.
-        let q = mind_types::RecallQuery {
-            text: goal.to_string(),
-            top_k: limit,
-            kind: Some(mind_types::MemoryKind::Routine),
-        };
-        if let Ok(hits) = self.engine.memory.recall_typed(q, &mind_types::AccessContext::Operator).await {
-            for h in hits {
-                let (when, steps) = split_routine(&h.item.text);
-                if !steps.is_empty() {
+        // MOUNTED-PACK CRAFT: a pack can teach the loop HOW to work, not just what is true. Pack
+        // rows that parse as procedures (APPROACH:/WHEN:/numbered steps — the same shape banking
+        // writes) join the candidates, labeled with their provenance: a publisher's claimed way of
+        // working must never read as the household's own tested one. Reliability is DECLARED, not
+        // measured — the local outcome ledger has never seen it run — so a proven local procedure
+        // outranks it at selection, which is exactly right.
+        if let Ok(hits) = self.engine.memory.recall_from_packs(goal, limit).await {
+            for (text, _score) in hits {
+                let (when, steps) = split_routine(&text);
+                if steps.len() >= 2 {
                     out.push(Procedure {
-                        name: routine_name(&h.item.text),
-                        when,
+                        name: routine_name(&text),
+                        when: if when.is_empty() { "from a mounted pack".to_string() } else { format!("{when} [from a mounted pack]") },
                         steps,
                         kind: ProcedureKind::Instructions,
-                        reliability: Prior::declared(h.item.confidence.clamp(0.0, 1.0)),
+                        reliability: Prior::declared(0.5),
                     });
                 }
             }
         }
+
+        // Guidance: the mind's own BANKED approaches, enumerated deterministically and ranked by
+        // word overlap with the goal. This used to go through `recall_typed`, which scores only
+        // Belief-kind nodes — while banking writes episodic memories — so every approach the loop
+        // ever banked was unreachable from the moment it was saved, and the library was
+        // write-only. Enumeration + cheap overlap ranking is deliberately not semantic search:
+        // the approach corpus is small (hundreds at most) and a deterministic read can never
+        // silently lose the library again.
+        let goal_words: std::collections::HashSet<String> = goal
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4)
+            .map(String::from)
+            .collect();
+        let mut ranked: Vec<(usize, Procedure)> = Vec::new();
+        for t in self.engine.memory.list_approaches(200).await.unwrap_or_default() {
+            let (when, steps) = split_routine(&t);
+            if steps.is_empty() {
+                continue;
+            }
+            let tl = t.to_lowercase();
+            let overlap = goal_words.iter().filter(|w| tl.contains(w.as_str())).count();
+            ranked.push((
+                overlap,
+                Procedure {
+                    name: routine_name(&t),
+                    when,
+                    steps,
+                    kind: ProcedureKind::Instructions,
+                    reliability: Prior::declared(0.5),
+                },
+            ));
+        }
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        out.extend(ranked.into_iter().take(limit).map(|(_, p)| p));
         out
     }
 
@@ -635,15 +668,19 @@ mod tests {
             .await
         );
         let found = bus.procedures("how should I evaluate this repository?", 5).await;
-        let p = found.iter().find(|p| p.name == "repo review");
-        // Recall is semantic, so a miss here is a store/embedding matter rather than a parse bug — but
-        // when it hits, the shape must be right.
-        if let Some(p) = p {
-            assert_eq!(p.when, "evaluating a repository");
-            assert_eq!(p.steps.len(), 2, "both steps survive the round trip");
-            assert!(matches!(p.kind, mind_agents::ProcedureKind::Instructions));
-            assert!(!p.reliability.is_trustworthy(), "a freshly banked approach is unproven");
-        }
+        // UNCONDITIONAL, deliberately. This assertion used to sit behind an `if let` excusing a
+        // semantic-recall miss — which is exactly how the library being WRITE-ONLY went unnoticed:
+        // banking wrote episodic memories, recall read only beliefs, the test shrugged at the
+        // permanent miss, and every banked approach was unreachable. The read is deterministic
+        // enumeration now, so a miss IS a bug.
+        let p = found
+            .iter()
+            .find(|p| p.name == "repo review")
+            .expect("a banked approach must come back — the library was write-only once already");
+        assert_eq!(p.when, "evaluating a repository");
+        assert_eq!(p.steps.len(), 2, "both steps survive the round trip");
+        assert!(matches!(p.kind, mind_agents::ProcedureKind::Instructions));
+        assert!(!p.reliability.is_trustworthy(), "a freshly banked approach is unproven");
     }
 
     /// FOLLOW-THROUGH: a result that finished while no chat was reachable is delivered appended to

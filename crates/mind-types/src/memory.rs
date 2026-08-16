@@ -300,6 +300,10 @@ pub struct PackBrief {
     pub rows: u64,
     /// The namespace the pack's rows live under — what scoped recall needs to reach them.
     pub namespace: Option<String>,
+    /// Durably installed beside the database (returns on every restart), as opposed to a
+    /// process-local mount that vanishes with the process. The distinction an operator needs
+    /// before trusting that `unmount` actually removed anything.
+    pub installed: bool,
 }
 
 #[async_trait]
@@ -431,6 +435,23 @@ pub trait MemoryFacade: Send + Sync {
 
     /// Mount a sealed pack for this process. Returns the pack id.
     async fn mount_pack(&self, _path: &str) -> Result<String> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// Every banked approach (APPROACH:/PROCEDURE:-prefixed craft), newest first — a DETERMINISTIC
+    /// enumeration, not similarity search. Exists because the loop's banked craft was write-only:
+    /// stored as episodic memories, read back through a belief-only recall that could never see it.
+    async fn list_approaches(&self, _limit: usize) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// Remove a durably-installed pack: unmount AND delete the installed file, so it does not
+    /// silently return on the next restart (which is exactly what a plain unmount does).
+    async fn uninstall_pack(&self, _id: &str) -> Result<bool> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// Seal the mind's own banked craft — approaches it learned by doing, skills with their
+    /// measured track records — into a mountable pack file. The self-improvement loop's EXPORT:
+    /// what one mind earned becomes attachable expertise for another. Returns a one-line summary.
+    async fn seal_learned_pack(&self, _dest: &str, _name: &str, _version: &str) -> Result<String> {
         Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
     }
     /// Copy a pack beside the database and mount it on every open from now on.

@@ -90,7 +90,13 @@ enum Cmd {
     MountPack { path: String, reply: Reply<String> },
     InstallPack { path: String, reply: Reply<String> },
     UnmountPack { id: String, reply: Reply<()> },
+    UninstallPack { id: String, reply: Reply<bool> },
+    ListApproaches { limit: usize, reply: Reply<Vec<String>> },
     MountedPacks { reply: Reply<Vec<mind_types::memory::PackBrief>> },
+    /// Seal the given craft texts into a pack file: stage them in a dedicated namespace, seal THAT
+    /// namespace only, then remove the staging rows win or lose. The texts arrive pre-gathered and
+    /// pre-filtered (see `seal_learned_pack`) — the actor only does the parts that need the db.
+    SealCraftPack { dest: String, name: String, version: String, texts: Vec<String>, reply: Reply<u64> },
     PackContext { reply: Reply<Option<String>> },
     RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<(String, f64)>> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
@@ -363,6 +369,141 @@ fn record_memory(
         db.record(text, mtype, importance, 0.0, 604_800.0, meta, zero, "default", certainty, "general", source, None)
             .map_err(|e| e.to_string())
     }
+}
+
+/// Every banked approach, newest first — a deterministic LIKE scan, not similarity search.
+///
+/// This exists because the approaches were WRITE-ONLY: `bank_procedure` stores them as episodic
+/// memories via `remember_observation`, while `recall_typed` (the path the loop read them back
+/// through) scores only Belief-kind cognitive nodes — so every banked approach was unreachable
+/// from the moment it was saved, and the roundtrip test never noticed because its assertion sat
+/// behind an `if let`. The prefix contract is the same one `split_routine` parses and banking
+/// writes; enumeration is capped and newest-first so the freshest craft wins a tie.
+fn list_approaches(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<String>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare(
+            "SELECT text FROM memories \
+             WHERE (text LIKE 'APPROACH:%' OR text LIKE 'PROCEDURE:%') \
+               AND consolidation_status != 'tombstoned' \
+             ORDER BY rowid DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([limit as i64], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Seal pre-gathered craft texts into a pack file (the LEARNING → PACKS direction).
+///
+/// The rows are STAGED into a dedicated namespace and the seal is scoped to exactly that
+/// namespace — never `None`, which would export every private household row in the database.
+/// The staging rows are removed afterward win or lose: they exist only to be exported, and
+/// leaving them behind on a failed seal would make the next attempt double-export.
+fn seal_craft_pack(
+    db: &YantrikDB,
+    dest: &str,
+    name: &str,
+    version: &str,
+    texts: &[String],
+) -> std::result::Result<u64, String> {
+    if texts.is_empty() {
+        return Err("nothing to seal — no banked approaches or skills survived the export filter".into());
+    }
+    const NS: &str = "learned-craft";
+    let meta = serde_json::json!({ "source": "yantrik-mind self-learning" });
+    let mut rids: Vec<String> = Vec::new();
+    let mut stage_err: Option<String> = None;
+    for t in texts {
+        let r = if db.has_embedder() {
+            db.record_text(t, "procedural", 0.7, 0.0, 604_800.0, &meta, NS, 0.8, "general", "system", None)
+        } else {
+            let zero = vec![0.0f32; db.embedding_dim()];
+            db.record(t, "procedural", 0.7, 0.0, 604_800.0, &meta, &zero, NS, 0.8, "general", "system", None)
+        };
+        match r {
+            Ok(rid) => rids.push(rid),
+            Err(e) => {
+                stage_err = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    let sealed = match stage_err {
+        Some(e) => Err(format!("staging craft rows failed: {e}")),
+        None => {
+            let embedder = match db.embedder_identity() {
+                Ok(Some((ename, digest, dim))) => yantrikdb_core::PackEmbedder { name: ename, digest: Some(digest), dim },
+                _ => yantrikdb_core::PackEmbedder { name: None, digest: None, dim: db.embedding_dim() },
+            };
+            let manifest = yantrikdb_core::PackManifest {
+                name: name.to_string(),
+                version: version.to_string(),
+                origin: format!("yantrik-mind/{name}"),
+                description: Some(
+                    "Craft this mind learned by doing: banked approaches and measured skills.".to_string(),
+                ),
+                embedder,
+                content_digest: None,
+                corpus_rows: 0,
+                namespace: None,
+                publisher_pubkey: None,
+                signature: None,
+                reembedded_from: None,
+                recommended_top_k: None,
+                recommended_min_similarity: None,
+                // The constitution frames the corpus honestly: these are ONE mind's local
+                // measurements, and a mounting host must not read them as universal claims.
+                constitution: vec![
+                    "These approaches were banked by a household mind from its own successful runs. \
+                     Reliability notes are that mind's local measurements, not universal claims — \
+                     prefer your own measured procedures where they exist."
+                        .to_string(),
+                ],
+                coverage: texts
+                    .iter()
+                    .filter_map(|t| t.lines().next().map(|l| l.chars().take(60).collect::<String>()))
+                    .take(8)
+                    .collect(),
+            };
+            db.seal_pack(dest, &manifest, Some(NS)).map(|m| m.corpus_rows).map_err(|e| e.to_string())
+        }
+    };
+    // Staging rows out, regardless of outcome.
+    for rid in &rids {
+        let _ = db.forget(rid);
+    }
+    sealed
+}
+
+/// Would exporting this text carry a distinctive personal value out of the household?
+///
+/// A deliberately narrow mirror of `egress_planning::distinctive_pii` (which lives in
+/// mind-conversation and cannot be reached from here): emails, contiguous 7–15-digit numbers, and
+/// long mixed alphanumeric tokens. High precision over recall — a false positive silently drops a
+/// real approach from the export, so only value-shaped tokens qualify.
+fn looks_private(text: &str) -> bool {
+    for raw in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | ',' | '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ';' | '/' | '\\' | ':' | '=' | '&' | '?' | '|' | '`')) {
+        let tok = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+');
+        if tok.len() < 7 {
+            continue;
+        }
+        let is_email = tok
+            .find('@')
+            .map(|at| at > 0 && tok[at + 1..].contains('.') && !tok[at + 1..].ends_with('.'))
+            .unwrap_or(false);
+        let is_phone_like = tok.chars().all(|c| c.is_ascii_digit()) && (7..=15).contains(&tok.len());
+        let digits = tok.chars().filter(|c| c.is_ascii_digit()).count();
+        let is_long_id = tok.len() >= 16
+            && tok.chars().all(|c| c.is_ascii_alphanumeric())
+            && digits > 0
+            && tok.chars().any(|c| c.is_ascii_alphabetic());
+        if is_email || is_phone_like || is_long_id {
+            return true;
+        }
+    }
+    false
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -1553,7 +1694,20 @@ impl MemoryHandle {
                                 db.unmount_pack(&id).map(|_| ()).map_err(|e| e.to_string()),
                             );
                         }
+                        Cmd::ListApproaches { limit, reply } => {
+                            let _ = reply.send(list_approaches(&db, limit));
+                        }
+                        Cmd::UninstallPack { id, reply } => {
+                            // The engine removes the durably-installed file AND unmounts; a plain
+                            // unmount is process-local and the pack silently returns on restart —
+                            // the A/B-contamination bug this verb exists to end.
+                            let _ = reply.send(db.uninstall_pack(&id).map_err(|e| e.to_string()));
+                        }
+                        Cmd::SealCraftPack { dest, name, version, texts, reply } => {
+                            let _ = reply.send(seal_craft_pack(&db, &dest, &name, &version, &texts));
+                        }
                         Cmd::MountedPacks { reply } => {
+                            let pack_dir = db.pack_dir().map(|d| d.to_string_lossy().to_string());
                             let packs = db
                                 .mounted_packs()
                                 .into_iter()
@@ -1565,6 +1719,9 @@ impl MemoryHandle {
                                     trust: format!("{:?}", p.trust),
                                     rows: p.rows as u64,
                                     namespace: p.namespace.clone(),
+                                    // A file living in the engine's install dir comes back on every
+                                    // open; anything else is this process's transient mount.
+                                    installed: pack_dir.as_deref().map(|d| p.path.starts_with(d)).unwrap_or(false),
                                 })
                                 .collect();
                             let _ = reply.send(Ok(packs));
@@ -2235,6 +2392,58 @@ impl MemoryFacade for MemoryHandle {
         let name = name.to_string();
         self.call(|reply| Cmd::RecordSkillOutcome { name, success, reply }).await
     }
+    async fn uninstall_pack(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        self.call(|reply| Cmd::UninstallPack { id, reply }).await
+    }
+
+    async fn list_approaches(&self, limit: usize) -> Result<Vec<String>> {
+        self.call(move |reply| Cmd::ListApproaches { limit, reply }).await
+    }
+
+    async fn seal_learned_pack(&self, dest: &str, name: &str, version: &str) -> Result<String> {
+        // GATHER the craft through the same surfaces the loop itself reads, then filter.
+        // Skills carry their measured ledger; banked approaches are recognized by the same
+        // prefix contract `split_routine` parses. The PII gate errs toward withholding: a
+        // dropped approach costs a pack row, a leaked personal value costs trust.
+        let mut texts: Vec<String> = Vec::new();
+        for s in MemoryFacade::list_skills(self).await.unwrap_or_default() {
+            if s.status == "quarantined" {
+                continue; // measured-bad craft is not craft
+            }
+            let measured = if s.runs > 0 {
+                format!("worked {} of {} runs", s.successes, s.runs)
+            } else {
+                "not yet run".to_string()
+            };
+            texts.push(format!(
+                "SKILL: {}\nWHEN: {}\nMEASURED: {} (status {})\n```{}\n{}\n```",
+                s.name, s.summary, measured, s.status, s.lang, s.code
+            ));
+        }
+        for t in MemoryFacade::list_approaches(self, 200).await.unwrap_or_default() {
+            if !texts.contains(&t) {
+                texts.push(t);
+            }
+        }
+        let before = texts.len();
+        texts.retain(|t| !looks_private(t));
+        let withheld = before - texts.len();
+
+        let (dest_o, name_o, version_o) = (dest.to_string(), name.to_string(), version.to_string());
+        let rows = self
+            .call(move |reply| Cmd::SealCraftPack { dest: dest_o, name: name_o, version: version_o, texts, reply })
+            .await?;
+        Ok(format!(
+            "sealed {rows} craft row(s) into {dest}{}",
+            if withheld > 0 {
+                format!(" — {withheld} withheld (carried a personal value; the pack must not)")
+            } else {
+                String::new()
+            }
+        ))
+    }
+
     async fn mount_pack(&self, path: &str) -> Result<String> {
         let path = path.to_string();
         self.call(|reply| Cmd::MountPack { path, reply }).await
@@ -2317,6 +2526,64 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The self-learning loop, closed: banked approaches are ENUMERABLE (the library was
+    /// write-only once — banking wrote episodic memories, recall read only beliefs), and the
+    /// mind's craft seals into a pack with personal values withheld and the staging rows gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn learned_craft_is_enumerable_and_seals_into_a_pack() {
+        use mind_types::MemoryFacade;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+
+        // A measured skill, a clean banked approach, and an approach carrying a personal value.
+        mem.save_skill(mind_types::Skill {
+            name: "fetch-then-cite".into(),
+            lang: "python".into(),
+            code: "print('fetch then cite')".into(),
+            summary: "fetch a page then cite it".into(),
+            tags: vec![],
+            status: "active".into(),
+            runs: 4,
+            successes: 4,
+            created_ms: 0,
+        })
+        .await
+        .unwrap();
+        mem.remember_observation(
+            "APPROACH: repo review\nWHEN: evaluating a repository\n1. read the README\n2. read the commits",
+            mind_types::safety::ProvenanceCategory::SubAgent,
+        )
+        .await
+        .unwrap();
+        mem.remember_observation(
+            "APPROACH: mail check\nWHEN: checking the inbox\n1. open secret.owner@example.com\n2. read the top thread",
+            mind_types::safety::ProvenanceCategory::SubAgent,
+        )
+        .await
+        .unwrap();
+
+        // Deterministic enumeration sees BOTH approaches, newest first.
+        let approaches = mem.list_approaches(50).await.unwrap();
+        assert_eq!(approaches.len(), 2, "banked craft must be enumerable: {approaches:?}");
+        assert!(approaches[0].starts_with("APPROACH: mail check"), "newest first");
+
+        // Sealing exports the skill + the clean approach; the personal value is withheld.
+        let dir = std::env::temp_dir().join(format!("ym_seal_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("craft.ydbpack");
+        let _ = std::fs::remove_file(&dest);
+        let summary = mem.seal_learned_pack(dest.to_str().unwrap(), "learned-craft", "0.1.0").await.unwrap();
+        assert!(dest.exists(), "the pack file must exist: {summary}");
+        assert!(summary.contains("sealed 2"), "skill + clean approach, not the private one: {summary}");
+        assert!(summary.contains("withheld"), "the withholding must be SAID, not silent: {summary}");
+        // The staging rows must not linger: a second seal exports the same 2, not 4.
+        let dest2 = dir.join("craft2.ydbpack");
+        let _ = std::fs::remove_file(&dest2);
+        let summary2 = mem.seal_learned_pack(dest2.to_str().unwrap(), "learned-craft", "0.1.0").await.unwrap();
+        assert!(summary2.contains("sealed 2"), "staging rows leaked into a re-seal: {summary2}");
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&dest2);
+    }
 
     /// One contradiction must be ONE row however it was spelled.
     ///

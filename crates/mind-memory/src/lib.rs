@@ -1518,6 +1518,13 @@ fn recent_messages(db: &YantrikDB, limit: usize, viewer: Option<&str>) -> std::r
             rows.filter_map(|r| r.ok()).collect()
         }
     };
+    // A CONTEXT BREAK ends the conversational window: everything before the newest break row is
+    // invisible to prompt assembly and to the restored chat pane, while memory and consolidation
+    // (which read by id, not through here) keep the full record. The scan is newest-first, so
+    // truncate at the FIRST break met and drop the marker itself — it is punctuation, not content.
+    if let Some(pos) = v.iter().position(|(role, _)| role == "break") {
+        v.truncate(pos);
+    }
     v.reverse(); // newest-first SQL -> chronological for the prompt
     Ok(v)
 }
@@ -2591,6 +2598,27 @@ impl MemoryFacade for MemoryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A context break ends the conversational WINDOW, never the RECORD: recent_messages stops at
+    /// the newest break (the marker itself invisible), while the id-ordered reader consolidation
+    /// uses still sees everything — a fresh start must not starve what memory learns from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_context_break_ends_the_window_not_the_record() {
+        use mind_types::MemoryFacade;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message("user", "the old topic").await.unwrap();
+        mem.append_message("assistant", "the old answer").await.unwrap();
+        mem.append_message("break", "— context break (operator) —").await.unwrap();
+        mem.append_message("user", "a brand new topic").await.unwrap();
+
+        let window = mem.recent_messages(10, &mind_types::AccessContext::Operator).await.unwrap();
+        let texts: Vec<&str> = window.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(texts, vec!["a brand new topic"], "the window starts after the break: {texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("context break")), "the marker is punctuation, not content");
+
+        let all = mem.messages_since(0, 50).await.unwrap();
+        assert!(all.iter().any(|(_, _, t)| t.contains("the old topic")), "the full record survives for consolidation");
+    }
 
     /// The self-learning loop, closed: banked approaches are ENUMERABLE (the library was
     /// write-only once — banking wrote episodic memories, recall read only beliefs), and the

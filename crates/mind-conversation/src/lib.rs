@@ -5023,6 +5023,14 @@ impl ConversationEngine {
             // Typed settings view — the desktop renders forms from `config schema`. Read-only from
             // in here by design: the process can't rewrite its own environment.
             "config" | "settings" => self.config_panel(&rest).await,
+            // A FRESH START, not amnesia. The break row ends the conversational window: prompt
+            // assembly and the restored chat pane stop at it, while typed memory, consolidation
+            // and the transcript's full record are untouched — the mind still KNOWS everything,
+            // it just stops carrying the previous thread's momentum into unrelated turns.
+            "break" | "fresh" => {
+                let _ = self.memory.append_message("break", "— context break (operator) —").await;
+                "Fresh start — I keep everything in memory, but the new conversation begins clean.".to_string()
+            }
             "packets" if rest.trim() == "prune" => {
                 format!("🧹 Pruned {} terminal packet(s) from the store.", self.packets_prune().await)
             }

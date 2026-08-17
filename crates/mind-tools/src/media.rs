@@ -147,10 +147,21 @@ pub fn probe(url: &str) -> anyhow::Result<MediaProbe> {
     Ok(probe_from_json(&v))
 }
 
+/// Not every "subtitle" track is speech. YouTube lists `live_chat` — the chat replay — alongside
+/// real caption languages, and treating it as a transcript sends the whole pipeline off to read
+/// an audience chat log instead of listening to anyone. Found by probing a real stream, which is
+/// the only way this kind of thing is ever found.
+fn has_speech_tracks(v: &serde_json::Value, key: &str) -> bool {
+    v.get(key)
+        .and_then(|s| s.as_object())
+        .map(|m| m.keys().any(|k| k != "live_chat"))
+        .unwrap_or(false)
+}
+
 /// Parse yt-dlp's metadata JSON. Split out so the shape can be tested without the binary.
 pub fn probe_from_json(v: &serde_json::Value) -> MediaProbe {
-    let subs = v.get("subtitles").and_then(|s| s.as_object()).map(|m| !m.is_empty()).unwrap_or(false);
-    let auto = v.get("automatic_captions").and_then(|s| s.as_object()).map(|m| !m.is_empty()).unwrap_or(false);
+    let subs = has_speech_tracks(v, "subtitles");
+    let auto = has_speech_tracks(v, "automatic_captions");
     MediaProbe {
         title: v.get("title").and_then(|x| x.as_str()).unwrap_or("(untitled)").to_string(),
         uploader: v.get("uploader").or_else(|| v.get("channel")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -422,6 +433,34 @@ mod tests {
         // A live broadcast with no duration and no captions.
         let live = probe_from_json(&serde_json::json!({"title": "x", "is_live": true}));
         assert!(live.is_live && live.duration_secs == 0 && !live.has_captions);
+    }
+
+    /// The real TraderTV probe returned `subtitles: {live_chat: …}` and nothing else. A chat
+    /// replay is not speech: counting it as captions would send a finished stream down the
+    /// caption path to read an audience chat log instead of hearing anyone talk.
+    #[test]
+    fn a_live_chat_replay_is_not_a_transcript() {
+        let v = serde_json::json!({
+            "title": "MARKETS PAUSE | Stock Market Live",
+            "channel": "TraderTV Live",
+            "is_live": true,
+            "duration": serde_json::Value::Null,
+            "subtitles": {"live_chat": [{"ext": "json"}]},
+            "automatic_captions": {}
+        });
+        let p = probe_from_json(&v);
+        assert!(!p.has_captions, "live_chat must not count as captions");
+        assert!(p.is_live && p.duration_secs == 0);
+        // …so even once it ends, it is heard rather than mis-read as a transcript.
+        let ended = probe_from_json(&serde_json::json!({
+            "title": "t", "duration": 600.0, "subtitles": {"live_chat": []}, "automatic_captions": {}
+        }));
+        assert_eq!(plan(&ended, 1800, 180), MediaPlan::Transcribe { secs: 600 });
+        // A real language track still counts.
+        let real = probe_from_json(&serde_json::json!({
+            "title": "t", "duration": 600.0, "subtitles": {"live_chat": [], "en": [{"ext":"vtt"}]}
+        }));
+        assert!(real.has_captions);
     }
 
     #[test]

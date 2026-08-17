@@ -863,6 +863,48 @@ pub(crate) fn emit_thinking(text: &str) {
     emit_progress(&format!("{THINKING_MARK}{t}"));
 }
 
+/// Marks a progress message as a LIVE TOKEN — a fragment of the model's output as it generates,
+/// not a completed anything. Same sentinel-on-the-shared-channel pattern as the other marks. A
+/// client renders these as a dim live tail and lets every STRUCTURED line (progress, detail,
+/// reasoning, the final reply) supersede them — tokens are the heartbeat, never the record.
+pub const TOKEN_MARK: &str = "\u{1}tok\u{1}";
+
+impl ConversationEngine {
+    /// Run a tool-less model call, streaming its tokens to the turn's progress channel when one is
+    /// attached (the cockpit), and exactly the plain call when none is (Telegram, console, tests).
+    ///
+    /// The watchable calls are the LONG ones — compose and synthesis, thousands of tokens on a
+    /// local lane — and they are tool-less, which is what makes streaming safe: no provider's
+    /// stream has to carry native tool_calls. The forwarder task ends by itself when the model
+    /// call drops the sink.
+    async fn chat_streamed_to_progress(
+        &self,
+        messages: Vec<ChatMessage>,
+        cfg: GenerationConfig,
+    ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+        let progress = TURN_PROGRESS.try_with(|tx| tx.clone()).ok();
+        match progress {
+            Some(ptx) => {
+                let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let fwd = tokio::spawn(async move {
+                    while let Some(t) = tok_rx.recv().await {
+                        let _ = ptx.send(format!("{TOKEN_MARK}{t}"));
+                    }
+                });
+                let r = self.inference.chat_streaming_sink(messages, cfg, tok_tx).await;
+                let _ = fwd.await; // sink dropped by the call → recv drains → forwarder ends
+                r
+            }
+            // DECLARED Household scope — the lane the compose call has always ridden (the old call
+            // sat on `.chat()`, which is Household by default; this says so instead of defaulting).
+            // The privacy audit is right that compose carries household memory: Household scope is
+            // the allowlist-gated lane FOR that. Moving compose to the private-grounded lane is a
+            // deliberate future sweep, not a side effect of adding streaming.
+            None => self.inference.chat_scoped(messages, cfg, mind_inference::PrivacyScope::Household).await,
+        }
+    }
+}
+
 /// Marks a progress message as STEP DETAIL — what a step actually did, as opposed to the label
 /// saying it happened. Same sentinel-on-the-shared-channel trick as `THINKING_MARK`, for the same
 /// reason: the channel is already per-turn and ordered, and a second one would have to re-solve both.
@@ -7861,8 +7903,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // miss: a short turn ends at the in-loop `answer` path, but every TOOL-HEAVY turn ends
         // here, so the leak survived on exactly the turns that reason the most.
         let composed = match self
-            .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)], cfg.clone())
+            .chat_streamed_to_progress(vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)], cfg.clone())
             .await
         {
             Ok(r) => {

@@ -285,14 +285,35 @@ impl InferencePool {
         // order — and it makes the mind portable across templates instead of only working on the
         // ones that happen to be lenient.
         let messages = merge_system_messages(messages);
+        let backend = self.gate_scope(scope)?;
+        let permit = self
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore never closed");
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit; // released when the blocking work finishes
+            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+            backend.chat(&messages, &config, tools_ref)
+        })
+        .await?
+    }
+
+    /// The privacy gate, shared by the plain and STREAMING call paths so they can never drift:
+    /// resolves which backend may serve this scope, refuses what the allowlists refuse, and keeps
+    /// the served/refused counters honest.
+    ///
+    /// A PRIVATE call, when a dedicated local-owned lane exists, is served ONLY by that local-only
+    /// backend — cloud is unreachable for it by construction (sol 019f8287: enforce at dispatch).
+    /// Everything else (and Private when no local lane is configured) routes on the default backend.
+    /// The explicit local-only lane is SANCTIONED BY CONSTRUCTION (built from the owned endpoint),
+    /// which is stronger evidence than the env CSV ("a declaration, not evidence" — sol #5), so it
+    /// bypasses the CSV allowlist; the CSV still gates the label-based (non-explicit) paths.
+    fn gate_scope(&self, scope: PrivacyScope) -> anyhow::Result<Arc<dyn LLMBackend>> {
+        use std::sync::atomic::Ordering;
         let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
         let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
-        // A PRIVATE call, when a dedicated local-owned lane exists, is served ONLY by that local-only
-        // backend — cloud is unreachable for it by construction (sol 019f8287: enforce at dispatch).
-        // Everything else (and Private when no local lane is configured) routes on the default backend.
-        // The explicit local-only lane is SANCTIONED BY CONSTRUCTION (built from the owned endpoint),
-        // which is stronger evidence than the env CSV ("a declaration, not evidence" — sol #5), so it
-        // bypasses the CSV allowlist; the CSV still gates the label-based (non-explicit) paths.
         let (backend, label, sanctioned) = match (scope, &self.private) {
             (PrivacyScope::Private, Some((be, lbl))) => (be.clone(), lbl.clone(), true),
             _ => (self.backend.clone(), self.provider.clone(), false),
@@ -312,6 +333,22 @@ impl InferencePool {
             );
         }
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
+        Ok(backend)
+    }
+
+    /// Household-scope chat that STREAMS tokens into `sink` as the model generates them, returning
+    /// the same complete response the plain call would. Tool-less by design: several providers'
+    /// streaming paths do not carry native tool_calls reliably, and the calls worth watching live —
+    /// compose, synthesis — never use tools. The sink is unbounded because a slow UI must never
+    /// backpressure a model turn; a dropped receiver makes sends into harmless no-ops.
+    pub async fn chat_streaming_sink(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        sink: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> anyhow::Result<LLMResponse> {
+        let messages = merge_system_messages(messages);
+        let backend = self.gate_scope(PrivacyScope::Household)?;
         let permit = self
             .sem
             .clone()
@@ -319,9 +356,10 @@ impl InferencePool {
             .await
             .expect("semaphore never closed");
         tokio::task::spawn_blocking(move || {
-            let _permit = permit; // released when the blocking work finishes
-            let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
-            backend.chat(&messages, &config, tools_ref)
+            let _permit = permit;
+            backend.chat_streaming(&messages, &config, None, &mut |tok| {
+                let _ = sink.send(tok.to_string());
+            })
         })
         .await?
     }

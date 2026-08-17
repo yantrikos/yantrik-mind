@@ -664,6 +664,10 @@ fn ctl_handle(
                             chunk(&format!("t:{}\n", t.replace('\n', "\u{1}")));
                         } else if let Some(d) = p.strip_prefix(mind_conversation::DETAIL_MARK) {
                             chunk(&format!("d:{}\n", d.replace('\n', "\u{1}")));
+                        } else if let Some(k) = p.strip_prefix(mind_conversation::TOKEN_MARK) {
+                            // Live tokens — the model's output as it generates. A client that does
+                            // not know "k:" simply never renders a heartbeat; nothing else changes.
+                            chunk(&format!("k:{}\n", k.replace('\n', "\u{1}")));
                         } else {
                             chunk(&format!("p:{}\n", p.replace('\n', " ")));
                         }

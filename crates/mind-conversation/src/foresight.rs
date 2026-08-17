@@ -985,6 +985,20 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 s.push_str(&format!("\n- measured tool reliability (worst first): {}", top.join(" · ")));
             }
         }
+        // The turn-level reward channel: how often the user corrected an answer vs let it stand.
+        // Two counters, never a ratio pretending to be a score — tacit acceptance is weak evidence
+        // and must read as such.
+        if let Ok(Some(g)) = self.memory.profile_get("turn_grades").await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&g) {
+                let (c, a) = (v["corrected"].as_u64().unwrap_or(0), v["accepted"].as_u64().unwrap_or(0));
+                if c + a > 0 {
+                    s.push_str(&format!("\n- answers graded by the conversation itself: {c} corrected, {a} let stand"));
+                    if let Some(last) = v["recent"].as_array().and_then(|r| r.last()) {
+                        s.push_str(&format!("\n  latest correction: \"{}\"", last["correction"].as_str().unwrap_or("").chars().take(100).collect::<String>()));
+                    }
+                }
+            }
+        }
         let topics = self.load_news_topics().await;
         if !topics.is_empty() {
             s.push_str(&format!("\n- tracking for them: {}", topics.join(", ")));

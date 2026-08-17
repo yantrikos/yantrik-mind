@@ -3223,6 +3223,9 @@ pub struct ConversationEngine {
     /// A weak handle to the Arc this engine lives in, set by `turn()` — the bounded loop's bus
     /// needs an owned handle, and `handle_turn_as` only has `&self`.
     self_ref: Mutex<std::sync::Weak<ConversationEngine>>,
+    /// What the mind last answered (head only), so the NEXT user message can grade it — the
+    /// turn-level reward channel. See `grade_previous_turn`.
+    last_turn_answer: Mutex<Option<String>>,
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
@@ -3300,6 +3303,7 @@ impl ConversationEngine {
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
             cognition_force: None,
             self_ref: Mutex::new(std::sync::Weak::new()),
+            last_turn_answer: Mutex::new(None),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),

@@ -370,7 +370,18 @@ impl ConversationEngine {
     /// bus needs, and delivering held results.
     pub async fn turn(self: &Arc<Self>, user_text: &str, id: TurnIdentity) -> Result<String> {
         *self.self_ref.lock().unwrap() = Arc::downgrade(self);
+        // Grade what was said LAST time by the shape of what arrived NOW — before this turn
+        // overwrites it. Primary lane only: a correction is graded against the answer its own
+        // conversation produced, and another member's message must not grade the owner's.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            self.grade_previous_turn(user_text).await;
+        }
         let answer = self.handle_turn_as(user_text, id.clone()).await;
+        if let Ok(a) = &answer {
+            if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+                self.note_turn_answer(a);
+            }
+        }
         // FOLLOW-THROUGH, every channel: a delegated result that finished while no chat was
         // reachable is delivered on the very next exchange, appended after the answer — "also,
         // the thing you asked for is done." Primary-viewer only: a held result was produced for
@@ -738,6 +749,39 @@ mod tests {
         let synth = seq.prompt_at(3);
         assert!(synth.contains("what you know"), "grounding must reach synthesis:\n{synth}");
         assert!(synth.contains("NOT instructions"), "…as reference data, marked as such:\n{synth}");
+    }
+
+    /// THE TURN-LEVEL REWARD CHANNEL: a correction-shaped next message grades the previous answer
+    /// as corrected, anything else as tacitly accepted — recorded, capped, and exactly once per
+    /// exchange. The mind's answers finally have a measured track record like its tools do.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_correction_grades_the_previous_answer() {
+        use crate::pace_ledger::reads_as_correction;
+        // Precision first: these must NOT read as corrections.
+        for ok in ["yes, do that", "no problem, thanks", "tell me about teal", "actually that's great", "nothing else"] {
+            assert!(!reads_as_correction(ok), "false positive poisons the counter: {ok:?}");
+        }
+        for bad in ["no, I meant the OTHER page", "that's wrong — it was Tuesday", "you misunderstood me", "not what I asked"] {
+            assert!(reads_as_correction(bad), "must read as a correction: {bad:?}");
+        }
+
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let eng = engine(&mem);
+        // Exchange 1: the mind answers something.
+        let _ = eng.turn("what day is it?", TurnIdentity::primary()).await.unwrap();
+        // Exchange 2: the user corrects it — the PREVIOUS answer takes the grade.
+        let _ = eng.turn("no, I meant the OTHER calendar", TurnIdentity::primary()).await.unwrap();
+        // Exchange 3: an ordinary message — tacit acceptance of exchange 2's answer.
+        let _ = eng.turn("thanks", TurnIdentity::primary()).await.unwrap();
+
+        let g: serde_json::Value =
+            serde_json::from_str(&mem.profile_get("turn_grades").await.unwrap().unwrap()).unwrap();
+        assert_eq!(g["corrected"].as_u64(), Some(1), "{g}");
+        assert_eq!(g["accepted"].as_u64(), Some(1), "exchange 3 tacitly accepted exchange 2: {g}");
+        let recent = g["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0]["correction"].as_str().unwrap().contains("OTHER calendar"));
+        assert!(!recent[0]["answer"].as_str().unwrap().is_empty(), "what was corrected is kept beside how");
     }
 
     /// The flag is off unless explicitly turned on: the legacy loop stays primary until evals say

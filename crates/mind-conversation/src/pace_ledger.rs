@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// Does this message read as a correction of what was just said?
+///
+/// Deliberately conservative: only openings and phrases that are overwhelmingly correction-shaped.
+/// "actually" mid-sentence, bare "no" answering a question the mind asked, and topic changes must
+/// NOT match — a false "corrected" is worse than a missed one, because the counter's value is that
+/// it can be trusted.
+pub(crate) fn reads_as_correction(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    const OPENERS: &[&str] = &[
+        "no, ", "no - ", "no — ", "nope, ", "wrong", "that's wrong", "thats wrong", "that is wrong",
+        "not true", "that's not", "thats not", "that is not what", "i didn't ask", "i didnt ask",
+        "i meant ", "that's incorrect", "incorrect.", "you're wrong", "youre wrong", "not what i asked",
+        "not what i meant", "you misunderstood", "you got it wrong", "actually, no",
+    ];
+    OPENERS.iter().any(|o| t.starts_with(o) || (o.len() > 8 && t.contains(o)))
+}
+
 impl super::ConversationEngine {
     pub(crate) async fn ledger(&self) -> Vec<serde_json::Value> {
         self.memory
@@ -38,6 +55,49 @@ impl super::ConversationEngine {
             "lesson": null,
         }));
         self.save_ledger(&l).await;
+    }
+
+    /// Grade the PREVIOUS exchange from the shape of the CURRENT user message — the turn-level
+    /// reward channel the mind never had. Skills and tools carry measured ledgers; ANSWERS did
+    /// not: a correction was absorbed into the next reply and taught nothing durable. Detection
+    /// is deterministic and conservative (high precision — a false "corrected" poisons the
+    /// signal); anything not correction-shaped counts as tacit acceptance, which is weaker
+    /// evidence and weighed as such by keeping the two as separate counters, never a ratio
+    /// pretending to be a score.
+    pub(crate) async fn grade_previous_turn(&self, user_text: &str) {
+        let prev = self.last_turn_answer.lock().unwrap().take();
+        let Some(prev) = prev else { return };
+        let corrected = reads_as_correction(user_text);
+        let mut g: serde_json::Value = self
+            .memory
+            .profile_get("turn_grades")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({ "corrected": 0, "accepted": 0, "recent": [] }));
+        let key = if corrected { "corrected" } else { "accepted" };
+        g[key] = serde_json::json!(g[key].as_u64().unwrap_or(0) + 1);
+        if corrected {
+            // The lesson keeps WHAT was corrected beside HOW — the pair a future grounding pass
+            // (or the regret replay) needs to learn anything from it.
+            let recent = g["recent"].as_array().cloned().unwrap_or_default();
+            let mut recent: Vec<serde_json::Value> = recent;
+            recent.push(serde_json::json!({
+                "ts": chrono::Utc::now().timestamp_millis(),
+                "answer": prev.chars().take(200).collect::<String>(),
+                "correction": user_text.chars().take(200).collect::<String>(),
+            }));
+            let start = recent.len().saturating_sub(10);
+            g["recent"] = serde_json::json!(recent[start..]);
+            self.ledger_correction("turn", &prev.chars().take(140).collect::<String>(), &user_text.chars().take(200).collect::<String>()).await;
+        }
+        let _ = self.memory.profile_set("turn_grades", &g.to_string()).await;
+    }
+
+    /// Remember what was just said, so the NEXT message can grade it.
+    pub(crate) fn note_turn_answer(&self, answer: &str) {
+        *self.last_turn_answer.lock().unwrap() = Some(answer.chars().take(300).collect());
     }
 
     /// Log a user correction — the most valuable signal there is. The lesson is permanent.

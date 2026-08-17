@@ -748,7 +748,17 @@ impl VisionClient {
                         "messages": [{ "role": "user", "content": prompt, "images": [b64] }],
                     });
                     if think_off {
+                        // TWO DIALECTS, because one endpoint fronts two backends. `think` is
+                        // ollama's spelling; llama.cpp (which is what actually serves qwen3.8
+                        // behind the gateway) ignores it entirely and reads
+                        // `chat_template_kwargs.enable_thinking`. Sending only ollama's word
+                        // meant the request was politely ignored and every frame paid for
+                        // chain-of-thought nobody reads: MEASURED at 35.6s burning all 400
+                        // tokens on thinking and returning EMPTY content, against 11.9s and a
+                        // correct answer once thinking was actually off. Unknown fields are
+                        // ignored by both, so saying it both ways costs nothing.
                         body["think"] = serde_json::json!(false);
+                        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
                     }
                     Ok(ureq::post(&format!("{base}/api/chat"))
                         .set("content-type", "application/json")
@@ -761,6 +771,9 @@ impl VisionClient {
             } else {
                 let body = serde_json::json!({
                     "model": model, "max_tokens": 900,
+                    // Same reasoning as the native path: a reasoning model with a token cap can
+                    // spend the entire budget thinking and return nothing at all.
+                    "chat_template_kwargs": { "enable_thinking": false },
                     "messages": [{ "role": "user", "content": [
                         { "type": "text", "text": prompt },
                         { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{b64}") } }

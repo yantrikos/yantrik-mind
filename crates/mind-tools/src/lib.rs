@@ -173,6 +173,155 @@ fn declutter(html: &str) -> String {
     s
 }
 
+/// Text between two ASCII-case-insensitive markers (indices come from an ascii-lowercased
+/// copy, which is byte-length-stable — see `strip_block_unicode_byte_len_change`).
+fn between_ci<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let lower = s.to_ascii_lowercase();
+    let i = lower.find(&open.to_ascii_lowercase())? + open.len();
+    let j = lower[i..].find(&close.to_ascii_lowercase())? + i;
+    Some(&s[i..j])
+}
+
+/// Read an attribute's value out of a single tag: `content="…"` / `content='…'`.
+fn tag_attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(name)?;
+    let rest = &tag[at + name.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let body = &rest[quote.len_utf8()..];
+    let end = body.find(quote)?;
+    Some(unescape_entities(&body[..end]))
+}
+
+/// The `content` of the first `<meta …>` whose tag mentions `key` (e.g. `og:description`).
+fn meta_content(html: &str, key: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut i = 0usize;
+    while let Some(rel) = lower[i..].find("<meta") {
+        let start = i + rel;
+        let end = lower[start..].find('>').map(|e| start + e + 1).unwrap_or(html.len());
+        let tag = &html[start..end];
+        if tag.to_ascii_lowercase().contains(key) {
+            if let Some(v) = tag_attr(tag, "content") {
+                if !v.trim().is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        i = end.max(start + 5);
+        if i >= html.len() {
+            break;
+        }
+    }
+    None
+}
+
+fn unescape_entities(s: &str) -> String {
+    s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
+}
+
+/// Unescape a JSON string body (the value is read raw out of embedded page JSON).
+fn unescape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => {}
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(ch) => out.push(ch),
+                    None => out.push_str(&hex),
+                }
+            }
+            Some(other) => out.push(other),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Read a JSON string field out of embedded page script (`"key":"…"`), honoring escapes.
+fn json_string_field(html: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let start = html.find(&needle)? + needle.len();
+    let rest = &html[start..];
+    let mut end = 0usize;
+    let bytes = rest.as_bytes();
+    while end < bytes.len() {
+        if bytes[end] == b'"' {
+            let backslashes = rest[..end].chars().rev().take_while(|c| *c == '\\').count();
+            if backslashes % 2 == 0 {
+                break;
+            }
+        }
+        end += 1;
+    }
+    let v = unescape_json(&rest[..end]);
+    if v.trim().is_empty() { None } else { Some(v) }
+}
+
+/// THE PAGE'S IDENTITY, taken from the HTML it actually served.
+///
+/// A JavaScript-rendered page still says what it IS in its markup — `<title>`, the meta/og
+/// description, and (for YouTube) the video's own description and live flag — even when its
+/// body renders to nothing without a browser. `declutter` strips every `<script>`, which on
+/// such a page is where all the content lives, so text extraction alone returns footer scraps
+/// and the honest-but-useless report "I fetched it and learned nothing". That was a real miss:
+/// a YouTube link came back as a copyright line while its title and a full description sat in
+/// the markup, unread. Reading them costs one pass and never invents anything — it reports only
+/// what the server sent.
+fn page_identity(raw: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let title = between_ci(raw, "<title>", "</title>")
+        .map(|t| unescape_entities(t.trim()))
+        .filter(|t| !t.is_empty())
+        .or_else(|| meta_content(raw, "og:title"));
+    if let Some(t) = title {
+        lines.push(format!("TITLE: {}", t.chars().take(300).collect::<String>()));
+    }
+    // YouTube keeps the real description in page JSON; prefer it over the truncated og: one.
+    let desc = json_string_field(raw, "shortDescription").or_else(|| {
+        meta_content(raw, "og:description").or_else(|| meta_content(raw, "name=\"description\"")).or_else(|| meta_content(raw, "description"))
+    });
+    if let Some(d) = desc {
+        lines.push(format!("DESCRIPTION: {}", d.chars().take(1200).collect::<String>()));
+    }
+    if raw.contains("\"isLiveNow\":true") || raw.contains("\"isLive\":true") {
+        lines.push("NOTE: this is a LIVE broadcast — there is no finished recording or transcript to read.".to_string());
+    }
+    lines.join("\n")
+}
+
+/// Identity + readable body, with the difference between them made explicit: a page whose body
+/// needs a browser must not read as an empty page.
+fn extract_readable(raw: &str) -> String {
+    let identity = page_identity(raw);
+    let body = compact_blanks(&html2text::from_read(declutter(raw).as_bytes(), 100));
+    if identity.is_empty() {
+        return body;
+    }
+    if body.trim().chars().count() < 200 {
+        format!(
+            "{identity}\nNOTE: the page body is rendered by JavaScript — the above is the metadata the server sent, not the page's text content.\n{}",
+            body.trim()
+        )
+    } else {
+        format!("{identity}\n\n{body}")
+    }
+}
+
 /// Real HTTP fetcher: GET → declutter → HTML→readable text → bound length. Blocking ureq on the
 /// blocking pool so it never stalls the async runtime.
 pub struct HttpFetcher {
@@ -226,8 +375,7 @@ fn fetch_direct(url: &str) -> anyhow::Result<String> {
         .call()?;
     let mut bytes = Vec::new();
     resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?; // 2 MB cap (memory wall)
-    let cleaned = declutter(&String::from_utf8_lossy(&bytes));
-    Ok(compact_blanks(&html2text::from_read(cleaned.as_bytes(), 100)))
+    Ok(extract_readable(&String::from_utf8_lossy(&bytes)))
 }
 
 /// Tier-3 fetch: a LOCAL headless Chromium (Playwright + stealth) renders the page with a real browser
@@ -452,6 +600,56 @@ mod tests {
         assert!(!out.contains("menu home about"), "drops nav");
         assert!(!out.contains("copyright junk"), "drops footer");
         assert!(out.contains("keep this"), "boundary: <navbar> is NOT <nav>");
+    }
+
+    /// THE FETCH-BLINDNESS REGRESSION (live, 2026-08-17): a YouTube link was fetched and
+    /// reported as "no title, no description" — just a footer and a copyright line — while the
+    /// title and a full description sat in the served markup. `declutter` strips every
+    /// `<script>`, which on a JS-rendered page is where the content lives, so text extraction
+    /// alone saw nothing. The page's identity must survive that.
+    #[test]
+    fn a_js_rendered_page_still_reports_what_it_is() {
+        // Shaped like the real page: content only inside <script>, plus the noscript footer.
+        let html = "<html><head><title>MARKETS PAUSE &amp; $SPY Flat | Stock Market Live - YouTube</title>\
+            <meta property=\"og:description\" content=\"truncated og copy\"></head><body>\
+            <script>var ytInitialPlayerResponse = {\"videoDetails\":{\
+            \"shortDescription\":\"TraderTV Live is a professional day trading broadcast \\u0026 two active traders,\\nreal money, live from our Toronto trading floor.\",\
+            \"isLiveContent\":true},\"isLive\":true};</script>\
+            <footer>About Press Copyright</footer></body></html>";
+        let out = extract_readable(html);
+        // The identity survives, entity- and JSON-unescaped.
+        assert!(out.contains("TITLE: MARKETS PAUSE & $SPY Flat"), "title must survive: {out}");
+        assert!(out.contains("TraderTV Live is a professional day trading broadcast & two active traders"),
+            "the page's own description must survive, unescaped: {out}");
+        assert!(out.contains("real money, live from our Toronto trading floor"), "newline escapes decode: {out}");
+        // The richer in-page description beats the truncated og: one.
+        assert!(!out.contains("truncated og copy"), "prefer the page's full description: {out}");
+        // A live broadcast says so — there is no recording to transcribe.
+        assert!(out.contains("LIVE broadcast"), "live status must be reported: {out}");
+        // And an empty EXTRACTION must never read as an empty PAGE.
+        assert!(out.contains("rendered by JavaScript"), "the reader must know why the body is thin: {out}");
+    }
+
+    #[test]
+    fn an_ordinary_article_keeps_its_body_and_gains_its_title() {
+        let html = "<html><head><title>A Real Article</title>\
+            <meta name=\"description\" content=\"what it is about\"></head><body><article>\
+            The real article text goes on for a while so the body is comfortably past the thin \
+            threshold and reads as genuine content rather than a metadata-only fetch, which is \
+            exactly the distinction the identity block exists to preserve for the reader.\
+            </article></body></html>";
+        let out = extract_readable(html);
+        assert!(out.contains("TITLE: A Real Article"), "{out}");
+        assert!(out.contains("DESCRIPTION: what it is about"), "{out}");
+        assert!(out.contains("The real article text"), "body still extracted: {out}");
+        assert!(!out.contains("rendered by JavaScript"), "a real body is not flagged as JS-empty: {out}");
+    }
+
+    #[test]
+    fn identity_is_empty_when_the_page_declares_none() {
+        assert_eq!(page_identity("<html><body><p>bare</p></body></html>"), "");
+        // …and extraction is then exactly what it always was.
+        assert!(extract_readable("<html><body><p>bare</p></body></html>").contains("bare"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

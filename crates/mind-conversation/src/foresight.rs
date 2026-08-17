@@ -1009,6 +1009,11 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 s.push_str(&format!("\n- self-improvement loop, latest: {}", last.chars().take(120).collect::<String>()));
             }
         }
+        // Narrative-as-checksum, recalled at boot: the newest nightly self-record —
+        // rendered from measured rows, so quoting it can never smuggle in mythology.
+        if let Some((date, text)) = self.last_narrative().await {
+            s.push_str(&format!("\n- last self-record ({date}): {}", text.chars().take(500).collect::<String>()));
+        }
         s.push('\n');
         s
     }

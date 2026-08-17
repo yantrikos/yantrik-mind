@@ -205,7 +205,7 @@ impl super::ConversationEngine {
         // Policy pass: domains ignored hard get slower; domains loved speed back up. Logged.
         let mut policy_notes: Vec<String> = Vec::new();
         if apply_policy {
-            for (d, (sends, eng, ign, _)) in &stats {
+            for (d, (sends, eng, ign, _, _)) in &stats {
                 if *sends >= 4 {
                     let cur = self.domain_pace(d).await;
                     if *ign as f64 >= *sends as f64 * 0.75 && cur < 4.0 {
@@ -222,14 +222,18 @@ impl super::ConversationEngine {
             let _ = self.memory.profile_set("report_beliefs", &beliefs_now.to_string()).await;
             let _ = self.memory.profile_set("report_last", &now.to_string()).await;
         }
+        // Rates stand on the RESOLVED denominator, with pending counted — an
+        // engagement % over self-chosen sends is the silence-gated metric the
+        // One Mind vision names as spam wearing a metric (see scoreboard.rs).
         let scoreboard: String = if stats.is_empty() {
             "(no proactive acts logged yet — the ledger just opened)".to_string()
         } else {
             stats
                 .iter()
-                .map(|(d, (s, e, ig, c))| {
-                    let pct = if *s > 0 { *e as f64 * 100.0 / *s as f64 } else { 0.0 };
-                    format!("- {d}: {s} sent, {e} engaged ({pct:.0}%), {ig} ignored, {c} corrected")
+                .map(|(d, (s, e, ig, c, p))| {
+                    let resolved = e + ig;
+                    let pending = if *p > 0 { format!(", {p} pending") } else { String::new() };
+                    format!("- {d}: {s} sent (self-chosen), {e} of {resolved} resolved engaged, {ig} ignored, {c} corrected{pending}")
                 })
                 .collect::<Vec<_>>()
                 .join("\n")

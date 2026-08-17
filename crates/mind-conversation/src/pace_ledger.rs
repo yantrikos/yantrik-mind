@@ -146,21 +146,23 @@ impl super::ConversationEngine {
             .unwrap_or(1.0)
     }
 
-    /// Per-domain scoreboard over a trailing window: (sends, engaged, ignored, corrected).
-    pub(crate) fn ledger_stats(l: &[serde_json::Value], since_ms: i64) -> std::collections::BTreeMap<String, (u32, u32, u32, u32)> {
-        let mut m: std::collections::BTreeMap<String, (u32, u32, u32, u32)> = std::collections::BTreeMap::new();
+    /// Per-domain scoreboard over a trailing window: (sends, engaged, ignored,
+    /// corrected, pending). Pending is counted, never absorbed — a rate that
+    /// silently drops unresolved rows is flattering itself (see scoreboard.rs).
+    pub(crate) fn ledger_stats(l: &[serde_json::Value], since_ms: i64) -> std::collections::BTreeMap<String, (u32, u32, u32, u32, u32)> {
+        let mut m: std::collections::BTreeMap<String, (u32, u32, u32, u32, u32)> = std::collections::BTreeMap::new();
         for e in l {
             if e["ts"].as_i64().unwrap_or(0) < since_ms {
                 continue;
             }
             let d = e["domain"].as_str().unwrap_or("general").to_string();
-            let s = m.entry(d).or_insert((0, 0, 0, 0));
+            let s = m.entry(d).or_insert((0, 0, 0, 0, 0));
             s.0 += 1;
             match e["outcome"].as_str().unwrap_or("pending") {
                 "engaged" => s.1 += 1,
                 "ignored" => s.2 += 1,
                 "corrected" => s.3 += 1,
-                _ => {}
+                _ => s.4 += 1,
             }
         }
         m

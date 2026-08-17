@@ -77,11 +77,16 @@ isolation survives grants. Plus the pure-policy suite in `mind-types::purpose::t
 
 ## Next (per the ratified build order)
 
-2. **Outer Scoreboard** — one type joining `turn_grades` + domain ledger + judgment ledger + tool
-   bandits, segmented by domain/risk/channel/latency, never collapsed to one number (and fix the
-   silence-gated denominator at `plugins_mod.rs` engagement pct).
-3. **Narrative-as-checksum** — nightly paragraph RENDERED from measured rows (the weekly
-   `self_report` currently hands facts to an LLM — backwards), recalled at boot.
+2. **Outer Scoreboard** — BUILT (`mind-conversation/src/scoreboard.rs`): one board joining turn
+   grades + domain ledger (now with pending counted) + the judgment-trend instrument + tool
+   bandits + receptivity; every rate names an adversary-acceptable denominator, unmeasured axes
+   (risk/channel/latency) are declared on the board, and the silence-gated engagement pct in the
+   weekly report was replaced with resolved-denominator rows. `ym scoreboard`.
+3. **Narrative-as-checksum** — BUILT (`mind-conversation/src/narrative.rs`): nightly first-person
+   paragraph rendered by `format!` over the scoreboard + regret log (one regret, one watch-for,
+   one policy in force, one forbidden self-claim), persisted with its measured basis, own
+   per-date gate in the poll loop, recalled every turn via the telemetry block. `ym narrative`.
+   (The weekly `self_report` prose pass remains a letter to the operator, not the self-record.)
 4. **Reflex Arc** — corrections (not just regrets) cluster into `mind-spec::GoalSpec`-typed
    self-build goals behind the six-condition gate (repro fixture, named module, predicted metric,
    rollback, post-deploy measurement).

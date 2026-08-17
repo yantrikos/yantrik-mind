@@ -40,8 +40,10 @@ mod mail;
 mod members;
 mod news;
 mod onboarding;
+mod narrative;
 mod pace_ledger;
 pub mod pack;
+pub mod scoreboard;
 mod people;
 mod photo;
 mod plugins_mod;
@@ -4455,7 +4457,7 @@ impl ConversationEngine {
         let l = self.ledger().await;
         let stats = Self::ledger_stats(&l, week_ago);
         let mut worst: Vec<String> = Vec::new();
-        for (domain, (sends, engaged, ignored, corrected)) in &stats {
+        for (domain, (sends, engaged, ignored, corrected, _pending)) in &stats {
             if *sends >= 2 && (*ignored + *corrected) * 2 >= *sends {
                 worst.push(format!("{domain}: {sends} sends, {engaged} engaged, {ignored} ignored, {corrected} corrected"));
             }
@@ -5148,7 +5150,22 @@ impl ConversationEngine {
             }
             "jobs" | "board" | "delegations" => self.jobs_report_cmd(&rest).await,
             // The real-world scoreboard the self-build loop now optimises against.
-            "fitness" | "scoreboard" => self.fitness_report().await,
+            // The Outer Scoreboard — the one measured "how am I actually doing",
+            // segmented, denominator-honest, never one number. `fitness` remains
+            // the self-build pipeline's own report.
+            "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
+            "fitness" => self.fitness_report().await,
+            // The nightly self-record: `ym narrative` reads the latest; `now` re-renders.
+            "narrative" | "selfrecord" => {
+                if rest.trim() == "now" {
+                    self.nightly_narrative_tick().await
+                } else {
+                    match self.last_narrative().await {
+                        Some((date, text)) => format!("({date}) {text}"),
+                        None => "No self-record yet — the first renders tonight, or `ym narrative now`.".to_string(),
+                    }
+                }
+            }
             // The thread between self-build ticks: what the last ones did, incl. what never merged.
             "handoff" | "thread" => self.handoff_report().await,
             // PROMPT AUDIT — where the agent loop's tokens actually go, measured on the LIVE store

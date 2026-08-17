@@ -1711,6 +1711,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // NARRATIVE-AS-CHECKSUM: the nightly self-record, rendered from measured rows
+        // (never model-written), persisted with its basis, recalled by every turn's
+        // telemetry block. Own gate + key: a dry treasury or failed night shift must
+        // never cost the self-record. Silent — `ym narrative` reads it.
+        {
+            if conv.narrative_due().await {
+                let conv2 = conv.clone();
+                tokio::spawn(async move {
+                    let text = conv2.nightly_narrative_tick().await;
+                    eprintln!("[narrative] {}", text.replace('\n', " | "));
+                });
+            }
+        }
+
         // WORKOPS: paced field-scan of the owner's actual projects (registry-driven, not
         // conversation-derived). Speaks only when the field moved. Detached; treasury-gated.
         {

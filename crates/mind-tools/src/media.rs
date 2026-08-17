@@ -320,11 +320,14 @@ pub fn transcribe(url: &str, secs: u64) -> anyhow::Result<String> {
     Ok(text)
 }
 
-/// SEE: sample scene-change frames as JPEGs, ready for `VisionClient`. Returns (approx_second, bytes).
+/// SEE: sample frames as JPEGs across the window, ready for `VisionClient`. Returns (second, bytes).
 ///
-/// Scene detection rather than a fixed interval: on material that holds one shot for minutes (a
-/// chart, a slide, a trading desk) a fixed sample returns the same picture N times, while scene
-/// change returns the moments something actually happened.
+/// EVEN INTERVALS, not scene detection — and that is the opposite of what I first built. The
+/// reasoning for scene change was that a static shot would return the same picture N times; the
+/// measurement said otherwise. Pointed at a real trading broadcast, scene detection returned ONE
+/// frame from twenty seconds, because a trading desk's layout never changes even as every number
+/// on it does. The information on that screen is precisely what a scene detector is built to
+/// ignore. An even interval returns the whole window and gives each frame an exact timestamp.
 pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
     crate::ssrf_check_pub(url)?;
     if !have(&ffmpeg_bin()) {
@@ -334,9 +337,13 @@ pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec
         anyhow::bail!("yt-dlp is not installed on this host");
     }
     let want = want.clamp(1, 16);
+    let within_secs = within_secs.max(1);
     let scratch = Scratch::new("frames")?;
     let pattern = scratch.path().join("f_%03d.jpg");
     let src = stream_url(url, false)?;
+    // `fps=want/window` spaces the samples evenly across the window, so the count is what was
+    // asked for and each frame's second is known rather than guessed.
+    let vf = format!("fps={want}/{within_secs},scale=768:-1");
     let out = run_bounded(
         &ffmpeg_bin(),
         &[
@@ -346,9 +353,7 @@ pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec
             "-t",
             &within_secs.to_string(),
             "-vf",
-            "select='gt(scene,0.3)',scale=768:-1",
-            "-vsync",
-            "vfr",
+            &vf,
             "-frames:v",
             &want.to_string(),
             "-q:v",
@@ -363,11 +368,11 @@ pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec
         .filter(|p| p.extension().map(|e| e == "jpg").unwrap_or(false))
         .collect();
     entries.sort();
-    let n = entries.len().max(1) as u64;
+    // Evenly spaced by construction, so the second is exact: frame i sits at i·window/want.
+    let step = within_secs / (want as u64).max(1);
     for (i, p) in entries.iter().enumerate() {
         if let Ok(bytes) = std::fs::read(p) {
-            // Even spacing is an approximation; scene frames carry no timestamp of their own.
-            frames.push((within_secs * (i as u64) / n, bytes));
+            frames.push((step * i as u64, bytes));
         }
     }
     if frames.is_empty() {

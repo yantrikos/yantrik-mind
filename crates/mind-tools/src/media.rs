@@ -291,9 +291,63 @@ fn stream_url(url: &str, want_audio: bool) -> anyhow::Result<String> {
     s.lines().find(|l| l.starts_with("http")).map(|l| l.to_string()).ok_or_else(|| anyhow::anyhow!("no stream url returned"))
 }
 
+/// One thing that was said, and when — the unit that lets speech line up with pictures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Utterance {
+    pub at_secs: u64,
+    pub text: String,
+}
+
+/// Parse whisper.cpp's timestamped output into utterances.
+///
+/// Whisper emits `[00:00:04.360 --> 00:00:06.780]   words` for free; the voice-note path passes
+/// `-nt` to suppress it because a voice note only needs the words. Media needs the clock: without
+/// it, speech and frames are two lists that cannot be laid against each other, and "what was on
+/// screen when they said that" is unanswerable.
+pub fn parse_whisper_segments(out: &str) -> Vec<Utterance> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('[') else { continue };
+        let Some((stamp, text)) = rest.split_once(']') else { continue };
+        let start = stamp.split("-->").next().unwrap_or("").trim();
+        let parts: Vec<&str> = start.split(':').collect();
+        let secs = match parts.len() {
+            3 => {
+                let h: u64 = parts[0].trim().parse().unwrap_or(0);
+                let m: u64 = parts[1].trim().parse().unwrap_or(0);
+                let s: f64 = parts[2].trim().parse().unwrap_or(0.0);
+                h * 3600 + m * 60 + s as u64
+            }
+            2 => {
+                let m: u64 = parts[0].trim().parse().unwrap_or(0);
+                let s: f64 = parts[1].trim().parse().unwrap_or(0.0);
+                m * 60 + s as u64
+            }
+            _ => continue,
+        };
+        let text = text.trim();
+        if !text.is_empty() {
+            v.push(Utterance { at_secs: secs, text: text.to_string() });
+        }
+    }
+    v
+}
+
+/// Flatten utterances back to plain prose (for consumers that only want the words).
+pub fn utterances_to_text(u: &[Utterance]) -> String {
+    u.iter().map(|x| x.text.as_str()).collect::<Vec<_>>().join(" ")
+}
+
 /// HEAR: pull `secs` of audio and run the LOCAL whisper over it. Nothing leaves the house — the
 /// same whisper that already handles voice notes, pointed at a different source.
 pub fn transcribe(url: &str, secs: u64) -> anyhow::Result<String> {
+    Ok(utterances_to_text(&transcribe_segments(url, secs)?))
+}
+
+/// HEAR WITH A CLOCK: the same capture, keeping whisper's own timestamps so speech can be laid
+/// against the frames on one timeline.
+pub fn transcribe_segments(url: &str, secs: u64) -> anyhow::Result<Vec<Utterance>> {
     crate::ssrf_check_pub(url)?;
     if !have(&ytdlp_bin()) {
         anyhow::bail!("yt-dlp is not installed on this host");
@@ -317,12 +371,15 @@ pub fn transcribe(url: &str, secs: u64) -> anyhow::Result<String> {
     if !wav.exists() {
         anyhow::bail!("could not extract audio: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim());
     }
-    let out = run_bounded(&whisper, &["-m", &model, "-f", wav.to_str().unwrap_or("a.wav"), "-nt", "-np"])?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if text.is_empty() {
+    // Timestamps KEPT (no `-nt`): they are what lets speech line up with the frames.
+    // `-t 8` uses the box's cores — measured at ~5.5x real time on 60s of audio.
+    let out = run_bounded(&whisper, &["-m", &model, "-f", wav.to_str().unwrap_or("a.wav"), "-np", "-t", "8"])?;
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let segments = parse_whisper_segments(&raw);
+    if segments.is_empty() {
         anyhow::bail!("the audio produced no words — it may be music, silence, or a language the local model does not cover");
     }
-    Ok(text)
+    Ok(segments)
 }
 
 /// SEE: sample frames as JPEGs across the window, ready for `VisionClient`. Returns (second, bytes).
@@ -506,6 +563,35 @@ mod tests {
         if Command::new("cargo").arg("-version").output().is_ok() {
             assert!(have("cargo"), "a spawnable binary is present regardless of how it exits");
         }
+    }
+
+    /// The clock is the whole point. This is whisper's real output, captured from 60s of the
+    /// live trading stream — the voice-note path suppresses these stamps with `-nt`, and without
+    /// them "what was on screen when they said that" cannot be answered at all.
+    #[test]
+    fn whisper_timestamps_become_utterances() {
+        let raw = "\n[00:00:00.000 --> 00:00:04.360]   thought about that i mean like who does stuff like that man\n\
+                   [00:00:04.360 --> 00:00:06.780]   reverted if you're contrarian\n\
+                   [00:01:07.760 --> 00:01:11.240]   so many different ways to make money in this market\n";
+        let u = parse_whisper_segments(raw);
+        assert_eq!(u.len(), 3, "{u:?}");
+        assert_eq!(u[0].at_secs, 0);
+        assert_eq!(u[1].at_secs, 4, "seconds come from the START of the segment");
+        assert_eq!(u[2].at_secs, 67, "hh:mm:ss carries minutes correctly");
+        assert!(u[1].text.starts_with("reverted if you're contrarian"), "{:?}", u[1].text);
+        // Flattening drops the clock but keeps every word, for callers that only want prose.
+        let flat = utterances_to_text(&u);
+        assert!(flat.contains("contrarian") && flat.contains("make money"), "{flat}");
+    }
+
+    #[test]
+    fn non_segment_noise_is_ignored() {
+        // whisper prints load/system lines around the segments; none of it is speech.
+        let raw = "whisper_init_from_file: loading model\n[00:00:02.000 --> 00:00:03.000]   real words\nsystem_info: n_threads = 8\n";
+        let u = parse_whisper_segments(raw);
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].text, "real words");
+        assert!(parse_whisper_segments("no timestamps at all here").is_empty());
     }
 
     #[test]

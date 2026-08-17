@@ -49,6 +49,7 @@ impl super::ConversationEngine {
         out.push('\n');
 
         // ── HEARING ────────────────────────────────────────────────────────────────────────
+        let mut spoken: Vec<mind_tools::media::Utterance> = Vec::new();
         let heard: Option<String> = match &plan {
             mind_tools::media::MediaPlan::Captions => {
                 let u = url.to_string();
@@ -67,8 +68,10 @@ impl super::ConversationEngine {
             mind_tools::media::MediaPlan::Transcribe { secs } | mind_tools::media::MediaPlan::LiveWindow { secs } => {
                 let (u, s) = (url.to_string(), *secs);
                 let live = matches!(plan, mind_tools::media::MediaPlan::LiveWindow { .. });
-                match tokio::task::spawn_blocking(move || mind_tools::media::transcribe(&u, s)).await {
-                    Ok(Ok(t)) => {
+                match tokio::task::spawn_blocking(move || mind_tools::media::transcribe_segments(&u, s)).await {
+                    Ok(Ok(segs)) => {
+                        spoken = segs;
+                        let t = mind_tools::media::utterances_to_text(&spoken);
                         out.push_str(&if live {
                             format!("🎧 Heard a {s}s sample of the live broadcast (there is no finished recording to hear in full).\n")
                         } else {
@@ -112,6 +115,7 @@ impl super::ConversationEngine {
             Err(_) => Vec::new(),
         };
         let mut seen: Vec<String> = Vec::new();
+        let mut seen_at: Vec<(u64, String)> = Vec::new();
         if !frames.is_empty() {
             let q = if question.trim().is_empty() {
                 "Describe what is on screen. Read any text, prices, tickers, or numbers exactly as shown."
@@ -121,6 +125,7 @@ impl super::ConversationEngine {
             for (at, bytes) in frames {
                 let caption = self.analyze_image_bytes(bytes, "image/jpeg", q).await;
                 seen.push(format!("[{}:{:02}] {}", at / 60, at % 60, caption.trim()));
+                seen_at.push((at, caption.trim().to_string()));
             }
             out.push_str(&format!("👁 Looked at {} frame(s) with the local vision model.\n", seen.len()));
         }
@@ -130,16 +135,35 @@ impl super::ConversationEngine {
             return out;
         }
 
-        // ── WHAT IT PERCEIVED ──────────────────────────────────────────────────────────────
-        if !seen.is_empty() {
-            out.push_str("\nON SCREEN:\n");
-            for s in &seen {
-                out.push_str(&format!("{}\n", s.chars().take(600).collect::<String>()));
+        // ── ONE TIMELINE ───────────────────────────────────────────────────────────────────
+        // Speech and pictures are laid against each other by second, not listed separately.
+        // Two parallel lists cannot answer "what was on screen when they said that"; a single
+        // ordered timeline answers it by construction, which is the whole point of keeping
+        // whisper's timestamps.
+        if !spoken.is_empty() && !seen_at.is_empty() {
+            let mut rows: Vec<(u64, String)> = Vec::new();
+            for (at, caption) in &seen_at {
+                rows.push((*at, format!("👁 {}", caption.chars().take(400).collect::<String>())));
             }
-        }
-        if let Some(t) = &heard {
-            let excerpt: String = t.chars().take(4000).collect();
-            out.push_str(&format!("\nSPOKEN:\n{excerpt}\n"));
+            for u in &spoken {
+                rows.push((u.at_secs, format!("🗣 {}", u.text)));
+            }
+            rows.sort_by_key(|(at, _)| *at);
+            out.push_str("\nTIMELINE (screen and speech, aligned by second):\n");
+            for (at, row) in rows.iter().take(60) {
+                out.push_str(&format!("[{}:{:02}] {}\n", at / 60, at % 60, row));
+            }
+        } else {
+            if !seen.is_empty() {
+                out.push_str("\nON SCREEN:\n");
+                for s in &seen {
+                    out.push_str(&format!("{}\n", s.chars().take(600).collect::<String>()));
+                }
+            }
+            if let Some(t) = &heard {
+                let excerpt: String = t.chars().take(4000).collect();
+                out.push_str(&format!("\nSPOKEN:\n{excerpt}\n"));
+            }
         }
 
         // The perception is a machine-derived OBSERVATION, never a naked belief — it enters memory

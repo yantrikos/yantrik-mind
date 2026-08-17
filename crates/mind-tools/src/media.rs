@@ -91,10 +91,15 @@ fn ffmpeg_bin() -> String {
     std::env::var("YM_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into())
 }
 
-/// Is an external binary actually present? (`Command` failing to spawn is the check — asking the
-/// tool for its version is cheap and unambiguous.)
+/// Is an external binary actually present?
+///
+/// Presence is "can it be SPAWNED", never "did it like the flag I passed". The first version of
+/// this asked every tool for `--version` and believed a non-zero exit meant absence — so ffmpeg,
+/// which wants `-version` and exits 1 on the double-dash form, was reported as not installed while
+/// sitting at /usr/bin/ffmpeg. The mind then told its owner it had no ears, which was false and
+/// sounded exactly like the truth. A failed spawn is the only honest signal of a missing binary.
 pub fn have(bin: &str) -> bool {
-    Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new(bin).arg("-version").output().is_ok()
 }
 
 /// Run a command under a hard wall-clock kill, so a hung download can never wedge the mind.
@@ -488,6 +493,19 @@ mod tests {
         let text = captions_to_text(srt);
         assert!(text.contains("real words"));
         assert!(!text.starts_with('1'), "the cue number is not speech: {text}");
+    }
+
+    /// A tool that runs and dislikes the flag is still installed. `ffmpeg --version` exits 1 (it
+    /// wants `-version`), and reading that as absence made the mind claim it had no ears while
+    /// ffmpeg sat on the PATH.
+    #[test]
+    fn presence_is_spawnability_not_exit_status() {
+        assert!(!have("ym-definitely-not-a-real-binary-9f3a"), "a missing binary is absent");
+        // The check must not depend on the exit code: a spawnable tool counts even when the flag
+        // is wrong for it. `cargo` runs these tests, so it is present by construction here.
+        if Command::new("cargo").arg("-version").output().is_ok() {
+            assert!(have("cargo"), "a spawnable binary is present regardless of how it exits");
+        }
     }
 
     #[test]

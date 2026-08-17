@@ -20,6 +20,7 @@ mod briefing;
 mod capabilities;
 pub mod cognitive;
 mod guards;
+mod redact;
 mod calendar;
 mod cloud_photos;
 mod deals;
@@ -860,7 +861,10 @@ pub(crate) fn emit_thinking(text: &str) {
     if t.is_empty() {
         return;
     }
-    emit_progress(&format!("{THINKING_MARK}{t}"));
+    // DISPLAY-EDGE REDACTION: diagnostics are read for shape, never for value — a stored phone
+    // number riding through a reasoning fold is a leak with no upside. The transcript and the
+    // model keep the truth; the screen gets the shape. See `redact`.
+    emit_progress(&format!("{THINKING_MARK}{}", crate::redact::redact_stream(t)));
 }
 
 /// Marks a progress message as a LIVE TOKEN — a fragment of the model's output as it generates,
@@ -887,8 +891,29 @@ impl ConversationEngine {
             Some(ptx) => {
                 let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 let fwd = tokio::spawn(async move {
+                    // SNAPSHOTS, not fragments. A raw token stream splits values across sends —
+                    // an email arrives as "brishti", ".sarkar@gm", "ail.com" and no per-fragment
+                    // redactor can see it. The forwarder accumulates the whole text, redacts the
+                    // ACCUMULATION, and ships the last-360-chars tail every few tokens; the client
+                    // REPLACES its tail with each snapshot. Values can never straddle a boundary,
+                    // because there is no boundary.
+                    let mut acc = String::new();
+                    let mut since = 0usize;
                     while let Some(t) = tok_rx.recv().await {
-                        let _ = ptx.send(format!("{TOKEN_MARK}{t}"));
+                        acc.push_str(&t);
+                        since += 1;
+                        if since >= 6 {
+                            since = 0;
+                            let tail: String = crate::redact::redact_stream(&acc)
+                                .chars()
+                                .rev()
+                                .take(360)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            let _ = ptx.send(format!("{TOKEN_MARK}{tail}"));
+                        }
                     }
                 });
                 let r = self.inference.chat_streaming_sink(messages, cfg, tok_tx).await;
@@ -941,7 +966,9 @@ pub(crate) fn emit_detail(text: &str) {
     } else {
         t.to_string()
     };
-    emit_progress(&format!("{DETAIL_MARK}{clipped}"));
+    // Same display-edge rule as `emit_thinking`: shapes, not values. Redacted AFTER clipping so
+    // the mask markers themselves cannot be truncated into something that reads like a value.
+    emit_progress(&format!("{DETAIL_MARK}{}", crate::redact::redact_stream(&clipped)));
 }
 
 /// Coerce tool arguments into the plain `{name: value}` object the dispatch table expects.

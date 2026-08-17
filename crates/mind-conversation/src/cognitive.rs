@@ -392,10 +392,15 @@ impl ConversationEngine {
                 let mut a = answer?;
                 a.push_str("\n\n— finished while you were away —\n");
                 a.push_str(&held.join("\n\n"));
-                return Ok(a);
+                // Same credential rule as below — held results are answers too.
+                return Ok(crate::redact::redact_answer(&a));
             }
         }
-        answer
+        // THE ANSWER'S display rule: personal values pass (asking for them is what the mind is
+        // for); CREDENTIAL-shaped values never render in chat, asked or not — a key's home is the
+        // env file and the masked settings row. The transcript stored the true text inside the
+        // loop, before this edge; memory is never corrupted by display masking.
+        answer.map(|a| crate::redact::redact_answer(&a))
     }
 
     /// Run one turn through the bounded control loop.

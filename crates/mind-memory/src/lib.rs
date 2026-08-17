@@ -107,6 +107,12 @@ enum Cmd {
     // group-chat read-isolation: per-belief visibility scope (keyed by proposition)
     SetBeliefScope { proposition: String, scope: String, reply: Reply<()> },
     BeliefScopeMap { reply: Reply<std::collections::HashMap<String, String>> },
+    // Purpose Gate v1: explicit per-belief sensitivity overrides + standing purpose grants
+    SetBeliefSensitivity { proposition: String, class: String, reply: Reply<()> },
+    BeliefSensitivityMap { reply: Reply<std::collections::HashMap<String, String>> },
+    GrantPurpose { spec: mind_types::PurposeGrantSpec, reply: Reply<i64> },
+    RevokePurposeGrant { id: i64, reply: Reply<bool> },
+    ListPurposeGrants { reply: Reply<Vec<mind_types::PurposeGrant>> },
     // tension economy (the "urges" drives emit; plain CRUD ledger)
     RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
     OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
@@ -1036,6 +1042,135 @@ fn belief_scope_map(db: &YantrikDB) -> std::result::Result<std::collections::Has
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Purpose Gate v1 storage: an explicit per-belief sensitivity override (keyed by canonical
+/// proposition, like `mind_belief_scope`) and the standing purpose-grant ledger. A belief with
+/// no sensitivity row is classified deterministically at read time (`Sensitivity::classify`);
+/// an explicit row wins in either direction — it is the correction path.
+fn ensure_purpose_tables(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_belief_sensitivity (proposition TEXT PRIMARY KEY, class TEXT NOT NULL)",
+        [],
+    );
+    // Grants are never deleted — revocation flips a flag, so the audit story survives.
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_purpose_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner TEXT NOT NULL,
+            beneficiary TEXT NOT NULL,
+            class TEXT NOT NULL,
+            activity TEXT NOT NULL,
+            expires_ms INTEGER NOT NULL,
+            note TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            created_ms INTEGER NOT NULL
+        )",
+        [],
+    );
+}
+
+fn set_belief_sensitivity(db: &YantrikDB, proposition: &str, class: &str) -> std::result::Result<(), String> {
+    db.conn()
+        .execute(
+            "INSERT INTO mind_belief_sensitivity (proposition, class) VALUES (?1, ?2) \
+             ON CONFLICT(proposition) DO UPDATE SET class=excluded.class",
+            [proposition, class],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn belief_sensitivity_map(db: &YantrikDB) -> std::result::Result<std::collections::HashMap<String, String>, String> {
+    let conn = db.conn();
+    let mut stmt = conn.prepare("SELECT proposition, class FROM mind_belief_sensitivity").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn grant_purpose(db: &YantrikDB, spec: &mind_types::PurposeGrantSpec) -> std::result::Result<i64, String> {
+    let now_ms = (now_secs() * 1000.0) as i64;
+    db.conn()
+        .execute(
+            "INSERT INTO mind_purpose_grants (owner, beneficiary, class, activity, expires_ms, note, revoked, created_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            rusqlite::params![
+                spec.owner.as_tag(),
+                spec.beneficiary.as_tag(),
+                spec.class.map(|c| c.as_tag().to_string()).unwrap_or_else(|| "*".into()),
+                spec.activity.map(|a| a.as_tag().to_string()).unwrap_or_else(|| "*".into()),
+                spec.expires_ms as i64,
+                spec.note,
+                now_ms,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(db.conn().last_insert_rowid())
+}
+
+fn revoke_purpose_grant(db: &YantrikDB, id: i64) -> std::result::Result<bool, String> {
+    db.conn()
+        .execute("UPDATE mind_purpose_grants SET revoked = 1 WHERE id = ?1 AND revoked = 0", [id])
+        .map(|n| n > 0)
+        .map_err(|e| e.to_string())
+}
+
+fn list_purpose_grants(db: &YantrikDB) -> std::result::Result<Vec<mind_types::PurposeGrant>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT id, owner, beneficiary, class, activity, expires_ms, note, revoked, created_ms FROM mind_purpose_grants ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(mind_types::PurposeGrant {
+                id: r.get::<_, i64>(0)?,
+                owner: mind_types::Subject::parse(&r.get::<_, String>(1)?),
+                beneficiary: mind_types::Subject::parse(&r.get::<_, String>(2)?),
+                class: match r.get::<_, String>(3)?.as_str() {
+                    "*" => None,
+                    c => Some(mind_types::Sensitivity::parse(c)),
+                },
+                activity: match r.get::<_, String>(4)?.as_str() {
+                    "*" => None,
+                    a => mind_types::Activity::parse(a),
+                },
+                expires_ms: r.get::<_, i64>(5)? as u64,
+                note: r.get::<_, String>(6)?,
+                revoked: r.get::<_, i64>(7)? != 0,
+                created_ms: r.get::<_, i64>(8)? as u64,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// The per-read purpose lens (Purpose Gate v1): resolves each item's data OWNER
+/// (from its scope tag — a fact that entered through X's private channel is X's)
+/// and SENSITIVITY (explicit override row, else the deterministic classifier),
+/// then asks the pure policy whether the declared purpose may hydrate it.
+/// Grants can open the operator's background lanes; they never widen a
+/// principal's viewing scope — the scope wall runs first and stays supreme.
+struct PurposeLens {
+    purpose: mind_types::Purpose,
+    scopes: std::collections::HashMap<String, String>,
+    sensitivity: std::collections::HashMap<String, String>,
+    grants: Vec<mind_types::PurposeGrant>,
+    now_ms: u64,
+}
+
+impl PurposeLens {
+    fn allows(&self, proposition: &str) -> bool {
+        let owner = mind_types::Subject::owner_of_scope_tag(self.scopes.get(proposition).map(|s| s.as_str()));
+        let sens = self
+            .sensitivity
+            .get(proposition)
+            .map(|s| mind_types::Sensitivity::parse(s))
+            .unwrap_or_else(|| mind_types::Sensitivity::classify(proposition));
+        let granted = self.grants.iter().any(|g| g.covers(&self.purpose, &owner, sens, self.now_ms));
+        mind_types::purpose_allows(&self.purpose, &owner, sens, granted)
+    }
+}
+
 /// Per-belief monotonic evidence version — an optimistic-concurrency guard, keyed by the belief's
 /// canonical proposition. A confidence write must carry a version STRICTLY GREATER than the one last
 /// applied; anything ≤ it is an out-of-order or replayed evidence update and is dropped, so a stale
@@ -1602,6 +1737,7 @@ impl MemoryHandle {
                 ensure_tensions_table(&db);
                 ensure_belief_scope_table(&db);
                 ensure_belief_evidence_version_table(&db);
+                ensure_purpose_tables(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -1841,6 +1977,21 @@ impl MemoryHandle {
                         }
                         Cmd::BeliefScopeMap { reply } => {
                             let _ = reply.send(belief_scope_map(&db));
+                        }
+                        Cmd::SetBeliefSensitivity { proposition, class, reply } => {
+                            let _ = reply.send(set_belief_sensitivity(&db, &proposition, &class));
+                        }
+                        Cmd::BeliefSensitivityMap { reply } => {
+                            let _ = reply.send(belief_sensitivity_map(&db));
+                        }
+                        Cmd::GrantPurpose { spec, reply } => {
+                            let _ = reply.send(grant_purpose(&db, &spec));
+                        }
+                        Cmd::RevokePurposeGrant { id, reply } => {
+                            let _ = reply.send(revoke_purpose_grant(&db, id));
+                        }
+                        Cmd::ListPurposeGrants { reply } => {
+                            let _ = reply.send(list_purpose_grants(&db));
                         }
                         Cmd::RecentMessages { limit, viewer, reply } => {
                             let _ = reply.send(recent_messages(&db, limit, viewer.as_deref()));
@@ -2093,12 +2244,10 @@ impl MemoryHandle {
         }
     }
 
-    /// Receipt a boundary-crossing read (principal contexts only — the operator
-    /// is the trusted owner path and is not receipted).
-    fn receipt_read(&self, ctx: &mind_types::AccessContext, method: &str, detail: &str, results: usize) {
-        if ctx.is_operator() {
-            return;
-        }
+    /// Receipt a boundary-crossing read — EVERY context, operator included
+    /// (Purpose Gate v1: the background lanes are exactly the reads a purpose
+    /// audit exists to catch; a ledger blind to them would be theater).
+    fn receipt_read(&self, ctx: &mind_types::AccessContext, method: &str, detail: &str, results: usize, suppressed: usize) {
         let detail: String = detail.chars().take(120).collect();
         self.receipts.append(receipts::ReadReceipt {
             ts_ms: receipts::now_ms(),
@@ -2106,12 +2255,58 @@ impl MemoryHandle {
             method: method.to_string(),
             detail,
             results,
+            purpose: Some(ctx.purpose().label()),
+            suppressed: if suppressed == 0 { None } else { Some(suppressed) },
         });
     }
 
     /// Scope-filter helper: the belief-scope map applied to anything belief-shaped.
     async fn belief_scopes(&self) -> HashMap<String, String> {
         self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default()
+    }
+
+    /// Build the per-read purpose lens (Purpose Gate v1), or None for the
+    /// unrestricted lanes (Audit/Maintenance) so hygiene reads cost nothing.
+    async fn purpose_lens(&self, ctx: &mind_types::AccessContext) -> Option<PurposeLens> {
+        let purpose = ctx.purpose().clone();
+        if purpose.is_unrestricted_lane() {
+            return None;
+        }
+        let scopes = self.belief_scopes().await;
+        let sensitivity = self.call(|reply| Cmd::BeliefSensitivityMap { reply }).await.unwrap_or_default();
+        let grants = self.call(|reply| Cmd::ListPurposeGrants { reply }).await.unwrap_or_default();
+        Some(PurposeLens { purpose, scopes, sensitivity, grants, now_ms: (now_secs() * 1000.0) as u64 })
+    }
+
+    /// Both read walls in one pass, in their fixed order: scope visibility
+    /// (who may VIEW — supreme, never widened by a grant), then the purpose
+    /// lens (what this work may USE). Returns the surviving items and how many
+    /// scope-visible items the purpose gate suppressed (for the receipt).
+    async fn wall<T>(&self, ctx: &mind_types::AccessContext, items: Vec<T>, key: impl Fn(&T) -> &str) -> (Vec<T>, usize) {
+        let lens = self.purpose_lens(ctx).await;
+        let viewer = ctx.viewer();
+        let scopes_owned;
+        let scopes: &HashMap<String, String> = match &lens {
+            Some(l) => &l.scopes,
+            None => {
+                scopes_owned = if viewer.is_some() { self.belief_scopes().await } else { HashMap::new() };
+                &scopes_owned
+            }
+        };
+        let scoped: Vec<T> = match &viewer {
+            None => items,
+            Some(v) => items
+                .into_iter()
+                .filter(|t| mind_types::Scope::visible_to(scopes.get(key(t)).map(|s| s.as_str()), Some(v)))
+                .collect(),
+        };
+        let before = scoped.len();
+        let kept: Vec<T> = match &lens {
+            None => scoped,
+            Some(l) => scoped.into_iter().filter(|t| l.allows(key(t))).collect(),
+        };
+        let suppressed = before - kept.len();
+        (kept, suppressed)
     }
 
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
@@ -2180,23 +2375,16 @@ impl MemoryHandle {
 
 #[async_trait]
 impl MemoryFacade for MemoryHandle {
-    // ── ARCH-1 slice 2: reads are authorized AT THIS BOUNDARY. Operator ctx =
-    // unfiltered; Principal ctx = scope-filtered here (never by the caller) and
-    // receipted into the hash-chained read ledger. ──
+    // ── ARCH-1 slice 2 + Purpose Gate v1: reads are authorized AT THIS BOUNDARY.
+    // Two walls, fixed order: the scope wall (who may VIEW — principal contexts
+    // only, never widened by anything), then the purpose lens (what the declared
+    // work may USE — every context outside Audit/Maintenance, operator included).
+    // Every read is receipted into the hash-chained ledger with its purpose. ──
     async fn recall_typed(&self, q: RecallQuery, ctx: &mind_types::AccessContext) -> Result<Vec<Recalled>> {
         let (text, top_k) = (q.text.clone(), q.top_k);
         let recalled = self.call(|reply| Cmd::RecallTyped { text, top_k, reply }).await?;
-        let out = match ctx.viewer() {
-            None => recalled,
-            Some(viewer) => {
-                let scopes = self.belief_scopes().await;
-                recalled
-                    .into_iter()
-                    .filter(|r: &Recalled| mind_types::Scope::visible_to(scopes.get(&r.item.text).map(|s| s.as_str()), Some(&viewer)))
-                    .collect()
-            }
-        };
-        self.receipt_read(ctx, "recall_typed", &q.text, out.len());
+        let (out, suppressed) = self.wall(ctx, recalled, |r: &Recalled| r.item.text.as_str()).await;
+        self.receipt_read(ctx, "recall_typed", &q.text, out.len(), suppressed);
         Ok(out)
     }
 
@@ -2207,16 +2395,8 @@ impl MemoryFacade for MemoryHandle {
     async fn beliefs_matching_n(&self, needle: &str, limit: usize, ctx: &mind_types::AccessContext) -> Result<Vec<Belief>> {
         let needle_owned = needle.to_string();
         let hits = self.call(move |reply| Cmd::BeliefsMatching { needle: needle_owned, limit, reply }).await?;
-        let out = match ctx.viewer() {
-            None => hits,
-            Some(viewer) => {
-                let scopes = self.belief_scopes().await;
-                hits.into_iter()
-                    .filter(|b: &Belief| mind_types::Scope::visible_to(scopes.get(&b.statement).map(|s| s.as_str()), Some(&viewer)))
-                    .collect()
-            }
-        };
-        self.receipt_read(ctx, "beliefs_matching", needle, out.len());
+        let (out, suppressed) = self.wall(ctx, hits, |b: &Belief| b.statement.as_str()).await;
+        self.receipt_read(ctx, "beliefs_matching", needle, out.len(), suppressed);
         Ok(out)
     }
 
@@ -2247,6 +2427,21 @@ impl MemoryFacade for MemoryHandle {
         Ok(belief)
     }
 
+    // ── Purpose Gate v1: sensitivity overrides + the standing-grant ledger ──
+    async fn set_belief_sensitivity(&self, proposition: &str, class: mind_types::Sensitivity) -> Result<()> {
+        let (proposition, class) = (proposition.to_string(), class.as_tag().to_string());
+        self.call(|reply| Cmd::SetBeliefSensitivity { proposition, class, reply }).await
+    }
+    async fn grant_purpose(&self, spec: mind_types::PurposeGrantSpec) -> Result<i64> {
+        self.call(|reply| Cmd::GrantPurpose { spec, reply }).await
+    }
+    async fn revoke_purpose_grant(&self, id: i64) -> Result<bool> {
+        self.call(|reply| Cmd::RevokePurposeGrant { id, reply }).await
+    }
+    async fn list_purpose_grants(&self) -> Result<Vec<mind_types::PurposeGrant>> {
+        self.call(|reply| Cmd::ListPurposeGrants { reply }).await
+    }
+
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()> {
         let (src, dst, rel) = (src.to_string(), dst.to_string(), rel.to_string());
         self.call(|reply| Cmd::Relate { src, dst, rel, weight, reply }).await
@@ -2256,8 +2451,10 @@ impl MemoryFacade for MemoryHandle {
         let recalled = self.recall_typed(RecallQuery { text: question.to_string(), top_k: 5, kind: None }, ctx).await?;
         let open_conflicts = self.conflicts(ctx).await?;
         // Goals/preferences are untagged personal state → legacy semantics: primary-private.
-        // The operator and the primary see them; any other principal reflects without them.
-        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true);
+        // The operator and the primary see them; any other principal reflects without them —
+        // and the declared purpose must be allowed to USE the primary's ordinary facts.
+        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true)
+            && mind_types::purpose_allows(ctx.purpose(), &mind_types::Subject::primary(), mind_types::Sensitivity::Ordinary, false);
         let goals = if owner_view { self.list_goals().await.unwrap_or_default() } else { vec![] };
         let preferences = if owner_view { self.list_preferences().await.unwrap_or_default() } else { vec![] };
         let beliefs: Vec<Belief> = recalled
@@ -2288,21 +2485,35 @@ impl MemoryFacade for MemoryHandle {
 
     async fn conflicts(&self, ctx: &mind_types::AccessContext) -> Result<Vec<Contradiction>> {
         let all: Vec<Contradiction> = self.call(|reply| Cmd::Conflicts { reply }).await?;
-        let out = match ctx.viewer() {
-            None => all,
-            Some(viewer) => {
-                // A conflict is visible only when BOTH sides are — otherwise listing it would
-                // leak the text of a belief outside the principal's scope.
-                let scopes = self.belief_scopes().await;
-                all.into_iter()
-                    .filter(|c| {
-                        mind_types::Scope::visible_to(scopes.get(&c.belief_a).map(|s| s.as_str()), Some(&viewer))
-                            && mind_types::Scope::visible_to(scopes.get(&c.belief_b).map(|s| s.as_str()), Some(&viewer))
-                    })
-                    .collect()
+        // A conflict is usable only when BOTH sides pass both walls — otherwise listing it
+        // would leak the text of a belief outside the principal's scope, or hydrate a
+        // purpose-denied belief through its contradiction partner.
+        let lens = self.purpose_lens(ctx).await;
+        let viewer = ctx.viewer();
+        let scopes_owned;
+        let scopes: &HashMap<String, String> = match &lens {
+            Some(l) => &l.scopes,
+            None => {
+                scopes_owned = if viewer.is_some() { self.belief_scopes().await } else { HashMap::new() };
+                &scopes_owned
             }
         };
-        self.receipt_read(ctx, "conflicts", "", out.len());
+        let scoped: Vec<Contradiction> = match &viewer {
+            None => all,
+            Some(v) => all
+                .into_iter()
+                .filter(|c| {
+                    mind_types::Scope::visible_to(scopes.get(&c.belief_a).map(|s| s.as_str()), Some(v))
+                        && mind_types::Scope::visible_to(scopes.get(&c.belief_b).map(|s| s.as_str()), Some(v))
+                })
+                .collect(),
+        };
+        let before = scoped.len();
+        let out: Vec<Contradiction> = match &lens {
+            None => scoped,
+            Some(l) => scoped.into_iter().filter(|c| l.allows(&c.belief_a) && l.allows(&c.belief_b)).collect(),
+        };
+        self.receipt_read(ctx, "conflicts", "", out.len(), before - out.len());
         Ok(out)
     }
 
@@ -2341,20 +2552,12 @@ impl MemoryFacade for MemoryHandle {
     async fn explain_belief(&self, belief_id: &str, ctx: &mind_types::AccessContext) -> Result<Option<(Belief, Vec<MEvidence>)>> {
         let statement = belief_id.to_string();
         let found: Option<(Belief, Vec<MEvidence>)> = self.call(|reply| Cmd::Explain { statement, reply }).await?;
-        let out = match (&found, ctx.viewer()) {
-            (Some((b, _)), Some(viewer)) => {
-                // Out-of-scope belief → None, indistinguishable from "no such belief"
-                // (an existence oracle would itself be a leak).
-                let scopes = self.belief_scopes().await;
-                if mind_types::Scope::visible_to(scopes.get(&b.statement).map(|s| s.as_str()), Some(&viewer)) {
-                    found
-                } else {
-                    None
-                }
-            }
-            _ => found,
-        };
-        self.receipt_read(ctx, "explain_belief", belief_id, usize::from(out.is_some()));
+        // Out-of-scope OR purpose-denied belief → None, indistinguishable from
+        // "no such belief" (an existence oracle would itself be a leak).
+        let items: Vec<(Belief, Vec<MEvidence>)> = found.into_iter().collect();
+        let (mut kept, suppressed) = self.wall(ctx, items, |(b, _): &(Belief, Vec<MEvidence>)| b.statement.as_str()).await;
+        let out = kept.pop();
+        self.receipt_read(ctx, "explain_belief", belief_id, usize::from(out.is_some()), suppressed);
         Ok(out)
     }
 
@@ -2392,8 +2595,11 @@ impl MemoryFacade for MemoryHandle {
         }
         ws.active_contradictions = open;
         // open tasks ride along as commitments (cheap tier surfaced for grounding) — tasks are
-        // untagged personal state, so only the operator and the primary see them.
-        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true);
+        // untagged personal state: only the operator and the primary VIEW them, and the declared
+        // purpose must be allowed to USE the primary's ordinary facts (a background lane serving
+        // someone else hydrates no commitments).
+        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true)
+            && mind_types::purpose_allows(ctx.purpose(), &mind_types::Subject::primary(), mind_types::Sensitivity::Ordinary, false);
         if owner_view {
             for t in self.list_tasks(false).await.unwrap_or_default() {
                 ws.commitments.push(MemoryItem {
@@ -2551,9 +2757,17 @@ impl MemoryFacade for MemoryHandle {
         self.call(|reply| Cmd::MessagesSince { after_id, limit, reply }).await
     }
     async fn recent_messages(&self, limit: usize, ctx: &mind_types::AccessContext) -> Result<Vec<(String, String)>> {
-        let viewer = ctx.viewer().map(|v| v.as_tag());
+        // Purpose Gate v1 on the transcript: a principal keeps its own scope; an
+        // operator-lane read outside Audit/Maintenance is downgraded to the scope
+        // its BENEFICIARY could see — dream/proactive/code reads serving the
+        // primary see the primary's window, not every member's private lines.
+        let viewer = match (ctx.viewer(), ctx.purpose()) {
+            (Some(v), _) => Some(v.as_tag()),
+            (None, p) if p.is_unrestricted_lane() => None,
+            (None, p) => Some(p.serves.as_viewer_scope().as_tag()),
+        };
         let out: Vec<(String, String)> = self.call(|reply| Cmd::RecentMessages { limit, viewer, reply }).await?;
-        self.receipt_read(ctx, "recent_messages", "", out.len());
+        self.receipt_read(ctx, "recent_messages", "", out.len(), 0);
         Ok(out)
     }
     async fn record_prediction_outcome(&self, domain: &str, subject: &str, raw_confidence: f64, hit: bool) -> Result<()> {
@@ -2599,6 +2813,17 @@ impl MemoryFacade for MemoryHandle {
 mod tests {
     use super::*;
 
+    /// Test context: a member speaking for themselves in a live conversation —
+    /// the standard channel shape (Purpose Gate v1 requires every read to say
+    /// what it serves; a member's turn serves that member).
+    fn member_ctx(scope: mind_types::Scope) -> mind_types::AccessContext {
+        let purpose = match &scope {
+            mind_types::Scope::Private(o) => mind_types::Purpose::conversation(o),
+            mind_types::Scope::Shared => mind_types::Purpose::new(mind_types::Subject::Household, mind_types::Activity::Conversation),
+        };
+        mind_types::AccessContext::principal(scope, purpose)
+    }
+
     /// A context break ends the conversational WINDOW, never the RECORD: recent_messages stops at
     /// the newest break (the marker itself invisible), while the id-ordered reader consolidation
     /// uses still sees everything — a fresh start must not starve what memory learns from.
@@ -2611,7 +2836,7 @@ mod tests {
         mem.append_message("break", "— context break (operator) —").await.unwrap();
         mem.append_message("user", "a brand new topic").await.unwrap();
 
-        let window = mem.recent_messages(10, &mind_types::AccessContext::Operator).await.unwrap();
+        let window = mem.recent_messages(10, &mind_types::AccessContext::operator_audit()).await.unwrap();
         let texts: Vec<&str> = window.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(texts, vec!["a brand new topic"], "the window starts after the break: {texts:?}");
         assert!(!texts.iter().any(|t| t.contains("context break")), "the marker is punctuation, not content");
@@ -2837,24 +3062,24 @@ mod tests {
             Scope::Shared,
         ).await.unwrap();
 
-        let member = AccessContext::Principal(Scope::Private("asha".into()));
-        let owner = AccessContext::Operator;
+        let member = member_ctx(Scope::Private("asha".into()));
+        let owner = mind_types::AccessContext::operator_audit();
 
         // ── Path 1: deterministic exact match ──────────────────────────────
-        let m_secret = mem.beliefs_matching("safe combination", &mind_types::AccessContext::Principal(member.viewer().unwrap())).await.unwrap();
+        let m_secret = mem.beliefs_matching("safe combination", &member_ctx(member.viewer().unwrap())).await.unwrap();
         assert!(!m_secret.iter().any(|b| b.statement == secret), "MEMBER recovered the primary secret via exact match — isolation breached");
-        let m_shared = mem.beliefs_matching("dinner friday", &mind_types::AccessContext::Principal(member.viewer().unwrap())).await.unwrap();
+        let m_shared = mem.beliefs_matching("dinner friday", &member_ctx(member.viewer().unwrap())).await.unwrap();
         assert!(m_shared.iter().any(|b| b.statement == shared), "member must still see genuinely shared facts");
 
         // ── Path 2: semantic recall ────────────────────────────────────────
-        let r_secret = mem.recall_typed(RecallQuery { text: "safe combination".into(), top_k: 10, kind: None }, &mind_types::AccessContext::Principal(member.viewer().unwrap())).await.unwrap();
+        let r_secret = mem.recall_typed(RecallQuery { text: "safe combination".into(), top_k: 10, kind: None }, &member_ctx(member.viewer().unwrap())).await.unwrap();
         assert!(!r_secret.iter().any(|r| r.item.text == secret), "MEMBER recovered the primary secret via semantic recall — isolation breached");
 
         // ── The owner (operator) sees everything ───────────────────────────
         assert!(owner.is_operator());
-        let o_secret = mem.beliefs_matching("safe combination", &mind_types::AccessContext::Operator).await.unwrap();
+        let o_secret = mem.beliefs_matching("safe combination", &mind_types::AccessContext::operator_audit()).await.unwrap();
         assert!(o_secret.iter().any(|b| b.statement == secret), "operator must retain full access");
-        let o_secret_scoped = mem.beliefs_matching("safe combination", &mind_types::AccessContext::Principal(Scope::primary())).await.unwrap();
+        let o_secret_scoped = mem.beliefs_matching("safe combination", &member_ctx(Scope::primary())).await.unwrap();
         assert!(o_secret_scoped.iter().any(|b| b.statement == secret), "primary viewer must see their own private belief");
 
         // ── Path 3: explain_belief — out-of-scope belief is indistinguishable from absent ──
@@ -2906,12 +3131,14 @@ mod tests {
         assert!(o_recent.iter().any(|(_, t)| t.contains("garage")), "operator must retain the full transcript");
     }
 
-    /// ARCH-1 slice 2 (d): every principal read is receipted into a hash-chained,
-    /// append-only ledger next to the DB; operator reads are not recorded; the
-    /// chain verifies end-to-end.
+    /// ARCH-1 slice 2 (d) + Purpose Gate v1: EVERY read — operator included — is
+    /// receipted into a hash-chained, append-only ledger next to the DB, carrying
+    /// its declared purpose; the chain verifies end-to-end. (The operator
+    /// exemption is gone: the background lanes are exactly the reads a purpose
+    /// audit exists to catch.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn arch1_principal_reads_leave_hash_chained_receipts() {
-        use mind_types::{AccessContext, Scope};
+    async fn every_read_leaves_a_hash_chained_receipt_with_its_purpose() {
+        use mind_types::Scope;
         let db_path = scratch_db_path("receipts");
         let ledger_path = std::path::PathBuf::from(format!("{db_path}.read_receipts.jsonl"));
         let mem = MemoryHandle::spawn(&db_path, 8).unwrap();
@@ -2920,22 +3147,143 @@ mod tests {
             Scope::Shared,
         ).await.unwrap();
 
-        // Operator reads leave NO receipts (the trusted owner path is not the audit target).
-        let op = AccessContext::Operator;
+        // Operator reads ARE receipted, named "operator", carrying their declared purpose.
+        let op = mind_types::AccessContext::operator_audit();
         let _ = mem.beliefs_matching("dinner", &op).await.unwrap();
-        assert!(receipts::read_ledger(&ledger_path).is_empty(), "operator reads must not be receipted");
+        let rs = receipts::read_ledger(&ledger_path);
+        assert_eq!(rs.len(), 1, "an operator read must leave a receipt");
+        assert_eq!(rs[0].principal, "operator");
+        assert_eq!(rs[0].purpose.as_deref(), Some("audit→member:primary"), "the receipt carries the declared purpose");
 
-        // Principal reads ARE receipted — one per boundary crossing, chain intact.
-        let member = AccessContext::Principal(Scope::Private("asha".into()));
+        // Principal reads are receipted with their purpose — one per boundary crossing, chain intact.
+        let member = member_ctx(Scope::Private("asha".into()));
         let _ = mem.beliefs_matching("dinner", &member).await.unwrap();
         let _ = mem.recall_typed(RecallQuery { text: "dinner".into(), top_k: 5, kind: None }, &member).await.unwrap();
         let _ = mem.conflicts(&member).await.unwrap();
         let rs = receipts::read_ledger(&ledger_path);
-        assert!(rs.len() >= 3, "each principal read must leave a receipt (got {})", rs.len());
-        assert!(rs.iter().all(|r| r.principal == "private:asha"), "receipts must name the principal");
+        assert!(rs.len() >= 4, "each read must leave a receipt (got {})", rs.len());
+        assert!(rs[1..].iter().all(|r| r.principal == "private:asha"), "receipts must name the principal");
+        assert!(rs[1..].iter().all(|r| r.purpose.as_deref() == Some("conversation→member:asha")), "every receipt carries its purpose");
         assert!(rs.iter().any(|r| r.method == "beliefs_matching" && r.detail.contains("dinner")));
         assert_eq!(receipts::verify_ledger(&ledger_path), Ok(rs.len()), "the receipt chain must verify");
         let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    /// Purpose Gate v1 red-team corpus — the vision's own acceptance metric:
+    /// purpose-incompatible facts that are PRESENT, VISIBLE (to the operator
+    /// capability), and HIGHLY RELEVANT (deterministic word-match queries) must
+    /// produce ZERO unauthorized hydrations across the cross-owner and
+    /// sensitive-class corpora — on every read path, in every background lane.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn purpose_gate_redteam_zero_unauthorized_hydrations() {
+        use mind_types::{Activity, MemoryFacade, Purpose, PurposeGrantSpec, Scope, Sensitivity, Subject};
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let tell = |statement: &str, scope: Scope| {
+            let a = BeliefAssertion { statement: statement.into(), polarity: 1.0, weight: 2.0, source_event: Some("corpus".into()), provenance: "told".into() };
+            (a, scope)
+        };
+        // The corpus. Every fact is stored, scope-tagged, and reachable by exact word match.
+        let asha_health = "Asha's oncology appointment is on July 18"; // cross-owner AND sensitive
+        let primary_health = "Pranab's therapy session is on Tuesday evenings"; // sensitive, own
+        let primary_finance = "Pranab's mortgage payment is 2400 a month"; // sensitive, own
+        let primary_cred = "the garage code is 4921"; // credentials, own
+        let household = "dinner on Friday is at seven"; // household ordinary
+        let primary_ordinary = "Pranab prefers terse replies"; // own ordinary
+        for (a, s) in [
+            tell(asha_health, Scope::Private("asha".into())),
+            tell(primary_health, Scope::primary()),
+            tell(primary_finance, Scope::primary()),
+            tell(primary_cred, Scope::primary()),
+            tell(household, Scope::Shared),
+            tell(primary_ordinary, Scope::primary()),
+        ] {
+            mem.remember_as_belief_scoped(a, s).await.unwrap();
+        }
+        let queries = ["oncology appointment July", "therapy session Tuesday", "mortgage payment month", "garage code 4921", "dinner Friday seven", "terse replies"];
+        let forbidden_for_background = [asha_health, primary_health, primary_finance, primary_cred];
+
+        // 1) EVERY background lane serving the primary: ordinary own/household facts hydrate,
+        //    cross-owner and sensitive-class facts NEVER do — zero, on every read path.
+        for activity in [Activity::Proactive, Activity::Research, Activity::Dream, Activity::Foresight, Activity::CodeWork, Activity::Recipe] {
+            let lane = mind_types::AccessContext::operator(Purpose::serving_primary(activity));
+            for q in queries {
+                let hits = mem.beliefs_matching_n(q, 50, &lane).await.unwrap();
+                for f in forbidden_for_background {
+                    assert!(!hits.iter().any(|b| b.statement == f), "{activity:?} hydrated a purpose-incompatible fact via beliefs_matching({q}): {f}");
+                }
+                let recalled = mem.recall_typed(RecallQuery { text: q.into(), top_k: 50, kind: None }, &lane).await.unwrap();
+                for f in forbidden_for_background {
+                    assert!(!recalled.iter().any(|r| r.item.text == f), "{activity:?} hydrated a purpose-incompatible fact via recall_typed({q}): {f}");
+                }
+                let ws = mem.hydrate_working_set(q, &lane).await.unwrap();
+                for f in forbidden_for_background {
+                    assert!(!ws.stable_facts.iter().any(|i| i.text == f) && !ws.uncertain_beliefs.iter().any(|b| b.statement == f),
+                        "{activity:?} hydrated a purpose-incompatible fact via working set({q}): {f}");
+                }
+            }
+            // No existence oracle through explain either.
+            for f in forbidden_for_background {
+                assert!(mem.explain_belief(f, &lane).await.unwrap().is_none(), "{activity:?} explained a purpose-denied fact: {f}");
+            }
+            // The lane still WORKS: ordinary own + household facts hydrate.
+            let ok = mem.beliefs_matching_n("terse replies", 50, &lane).await.unwrap();
+            assert!(ok.iter().any(|b| b.statement == primary_ordinary), "{activity:?} must still hydrate the primary's ordinary facts");
+            let ok2 = mem.beliefs_matching_n("dinner Friday", 50, &lane).await.unwrap();
+            assert!(ok2.iter().any(|b| b.statement == household), "{activity:?} must still hydrate household facts");
+        }
+
+        // 2) Direct conversation with the owner: sensitive OWN facts answer ("what's my
+        //    garage code?" is the product) — another member's private fact still never appears.
+        let primary_convo = member_ctx(Scope::primary());
+        for own in [primary_health, primary_finance, primary_cred, primary_ordinary] {
+            let hits = mem.beliefs_matching_n(own.split_whitespace().take(3).collect::<Vec<_>>().join(" ").as_str(), 50, &primary_convo).await.unwrap();
+            assert!(hits.iter().any(|b| b.statement == own), "the primary's own conversation must hydrate their own fact: {own}");
+        }
+        let leak = mem.beliefs_matching_n("oncology appointment July", 50, &primary_convo).await.unwrap();
+        assert!(!leak.iter().any(|b| b.statement == asha_health), "Asha's private fact leaked into the primary's conversation");
+        // And Asha's own conversation still answers Asha about her own health.
+        let asha_convo = member_ctx(Scope::Private("asha".into()));
+        let asha_hits = mem.beliefs_matching_n("oncology appointment July", 50, &asha_convo).await.unwrap();
+        assert!(asha_hits.iter().any(|b| b.statement == asha_health), "Asha must be answered about her own health fact");
+
+        // 3) A standing grant opens EXACTLY its crossing — and expiry/revocation close it.
+        //    Grant: Asha's facts may serve the primary's Proactive work (gift planning).
+        let gid = mem.grant_purpose(PurposeGrantSpec {
+            owner: Subject::Member("asha".into()),
+            beneficiary: Subject::primary(),
+            class: None, // wildcard — which deliberately still excludes credentials
+            activity: Some(Activity::Proactive),
+            expires_ms: (receipts::now_ms()) + 60_000,
+            note: "gift planning for Asha's birthday".into(),
+        }).await.unwrap();
+        let proactive = mind_types::AccessContext::operator(Purpose::serving_primary(Activity::Proactive));
+        let granted = mem.beliefs_matching_n("oncology appointment July", 50, &proactive).await.unwrap();
+        assert!(granted.iter().any(|b| b.statement == asha_health), "the standing grant must open the granted crossing");
+        // The grant does NOT leak into other activities…
+        let dream = mind_types::AccessContext::operator(Purpose::serving_primary(Activity::Dream));
+        let dream_hits = mem.beliefs_matching_n("oncology appointment July", 50, &dream).await.unwrap();
+        assert!(!dream_hits.iter().any(|b| b.statement == asha_health), "a Proactive grant must not open the Dream lane");
+        // …and NEVER widens a principal's viewing scope (viewer isolation stays supreme).
+        let still_walled = mem.beliefs_matching_n("oncology appointment July", 50, &primary_convo).await.unwrap();
+        assert!(!still_walled.iter().any(|b| b.statement == asha_health), "a grant must never widen a principal's scope");
+        // Revocation closes it again — zero hydrations, immediately.
+        assert!(mem.revoke_purpose_grant(gid).await.unwrap());
+        let revoked = mem.beliefs_matching_n("oncology appointment July", 50, &proactive).await.unwrap();
+        assert!(!revoked.iter().any(|b| b.statement == asha_health), "a revoked grant must stop hydrating");
+        let ledger = mem.list_purpose_grants().await.unwrap();
+        assert!(ledger.iter().any(|g| g.id == gid && g.revoked), "the revoked grant must survive on the ledger (the audit story)");
+
+        // 4) An explicit sensitivity correction beats the classifier, both directions.
+        mem.set_belief_sensitivity(primary_ordinary, Sensitivity::Finance).await.unwrap();
+        let now_denied = mem.beliefs_matching_n("terse replies", 50, &proactive).await.unwrap();
+        assert!(!now_denied.iter().any(|b| b.statement == primary_ordinary), "an explicit Finance tag must deny the background lane");
+        mem.set_belief_sensitivity(primary_health, Sensitivity::Ordinary).await.unwrap();
+        let now_allowed = mem.beliefs_matching_n("therapy session Tuesday", 50, &proactive).await.unwrap();
+        assert!(now_allowed.iter().any(|b| b.statement == primary_health), "an explicit Ordinary tag must override the classifier");
+
+        // 5) Audit retains full visibility (and is receipted elsewhere).
+        let audit_hits = mem.beliefs_matching_n("oncology appointment July", 50, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        assert!(audit_hits.iter().any(|b| b.statement == asha_health), "the audit lane must retain full visibility");
     }
 
     fn scratch_db_path(tag: &str) -> String {
@@ -2980,10 +3328,10 @@ mod tests {
                 .await;
             assert!(seeded.is_ok(), "copy must accept writes");
             // Copy carried the genuine belief over.
-            assert!(copy.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::Operator).await.unwrap().is_some());
+            assert!(copy.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::operator_audit()).await.unwrap().is_some());
             // Live mind never saw the seed.
-            assert!(live.explain_belief("Asha's birthday is July 9", &mind_types::AccessContext::Operator).await.unwrap().is_none());
-            assert!(live.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::Operator).await.unwrap().is_some());
+            assert!(live.explain_belief("Asha's birthday is July 9", &mind_types::AccessContext::operator_audit()).await.unwrap().is_none());
+            assert!(live.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::operator_audit()).await.unwrap().is_some());
         }
         let _ = std::fs::remove_file(&live_path);
         let _ = std::fs::remove_file(&snap_path);
@@ -3101,7 +3449,7 @@ mod tests {
         assert_eq!(second.id, first.id, "case and trailing punctuation must not create another belief");
         assert_eq!(mem.belief_count().await.unwrap(), 1);
         assert!(
-            mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap().is_empty(),
+            mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap().is_empty(),
             "surface variants are not contradictions"
         );
     }
@@ -3250,7 +3598,7 @@ mod tests {
         assert("The latest stable Rust release is 1.70").await;
         assert("the latest stable Rust release is 1.70.").await; // formatting/case variant → SAME node
         assert("The latest stable Rust release is 1.96").await; // different content → SEPARATE node
-        let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }, &mind_types::AccessContext::Operator).await.unwrap();
+        let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }, &mind_types::AccessContext::operator_audit()).await.unwrap();
         let rust: Vec<_> = hits.iter().filter(|r| r.item.text.contains("Rust release")).collect();
         assert_eq!(rust.len(), 2, "formatting variant merges, contradiction (1.70 vs 1.96) stays separate: {:?}", rust.iter().map(|r| &r.item.text).collect::<Vec<_>>());
     }
@@ -3269,16 +3617,16 @@ mod tests {
         let q = |t: &str| RecallQuery { text: t.into(), top_k: 10, kind: None };
 
         // The WIFE must NOT see the private gift belief.
-        let wife_view = mem.recall_typed(q("birthday gift watch"), &mind_types::AccessContext::Principal(wife.clone())).await.unwrap();
+        let wife_view = mem.recall_typed(q("birthday gift watch"), &member_ctx(wife.clone())).await.unwrap();
         assert!(!wife_view.iter().any(|r| r.item.text.contains("gold watch")), "LEAK: wife saw the surprise: {:?}", wife_view.iter().map(|r| &r.item.text).collect::<Vec<_>>());
         // Pranab MUST see his own private belief.
-        let p_view = mem.recall_typed(q("birthday gift watch"), &mind_types::AccessContext::Principal(primary.clone())).await.unwrap();
+        let p_view = mem.recall_typed(q("birthday gift watch"), &member_ctx(primary.clone())).await.unwrap();
         assert!(p_view.iter().any(|r| r.item.text.contains("gold watch")), "primary must see his own private belief");
         // BOTH see the shared milk fact.
-        assert!(mem.recall_typed(q("out of milk"), &mind_types::AccessContext::Principal(wife.clone())).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "wife sees shared");
-        assert!(mem.recall_typed(q("out of milk"), &mind_types::AccessContext::Principal(primary)).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "primary sees shared");
+        assert!(mem.recall_typed(q("out of milk"), &member_ctx(wife.clone())).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "wife sees shared");
+        assert!(mem.recall_typed(q("out of milk"), &member_ctx(primary)).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "primary sees shared");
         // The wife's GROUNDING (working set) must also exclude the gift — the LLM never even sees it.
-        let ws = mem.hydrate_working_set("birthday gift watch", &mind_types::AccessContext::Principal(wife)).await.unwrap();
+        let ws = mem.hydrate_working_set("birthday gift watch", &member_ctx(wife)).await.unwrap();
         let grounded: Vec<String> = ws.stable_facts.iter().map(|m| m.text.clone()).chain(ws.uncertain_beliefs.iter().map(|b| b.statement.clone())).collect();
         assert!(!grounded.iter().any(|t| t.contains("gold watch")), "LEAK in grounding: {grounded:?}");
     }
@@ -3305,7 +3653,7 @@ mod tests {
 
         // Recall finds it by overlapping words.
         let r = mem
-            .recall_typed(RecallQuery { text: "reply style terse".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(RecallQuery { text: "reply style terse".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
             .await
             .unwrap();
         assert!(r.iter().any(|x| x.item.text.contains("terse")), "recall should surface the belief");
@@ -3329,13 +3677,13 @@ mod tests {
         .await
         .unwrap();
 
-        let conflicts = mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap();
+        let conflicts = mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap();
         assert!(!conflicts.is_empty(), "the contradiction should be detected");
         assert!(conflicts.iter().any(|c| c.belief_a.contains("terse") || c.belief_b.contains("terse")));
 
         // Explanation returns the belief with its evidence trail.
         let (belief, _ev) = mem
-            .explain_belief("Pranab prefers terse replies", &mind_types::AccessContext::Operator)
+            .explain_belief("Pranab prefers terse replies", &mind_types::AccessContext::operator_audit())
             .await
             .unwrap()
             .expect("belief exists");
@@ -3429,7 +3777,7 @@ mod tests {
         .await
         .unwrap();
 
-        let conflicts = mem.conflicts(&mind_types::AccessContext::Operator).await.unwrap();
+        let conflicts = mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap();
         assert_eq!(conflicts.len(), 1, "only the related pair should survive: {conflicts:?}");
         assert!(conflicts[0].belief_a.contains("Pranab"));
         assert!(conflicts[0].belief_b.contains("Pranab"));
@@ -3453,7 +3801,7 @@ mod tests {
 
         // tasks ride into the working-set as commitments (for grounding)
         mem.add_task("call the dentist", "medium", None).await.unwrap();
-        let ws = mem.hydrate_working_set("what's on my plate", &mind_types::AccessContext::Operator).await.unwrap();
+        let ws = mem.hydrate_working_set("what's on my plate", &mind_types::AccessContext::operator_audit()).await.unwrap();
         assert!(ws.commitments.iter().any(|c| c.text.contains("dentist")), "open task should surface in working-set");
     }
 
@@ -3496,7 +3844,7 @@ mod tests {
         }
         // "he likes short responses" shares no keywords with "Pranab prefers concise answers".
         let r = mem
-            .recall_typed(RecallQuery { text: "he likes short responses".into(), top_k: 1, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(RecallQuery { text: "he likes short responses".into(), top_k: 1, kind: None }, &mind_types::AccessContext::operator_audit())
             .await
             .unwrap();
         assert!(!r.is_empty(), "semantic recall returned nothing");
@@ -3556,7 +3904,7 @@ mod tests {
         .await
         .unwrap();
         let recalled = mem
-            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
             .await
             .unwrap();
         let hit = recalled.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
@@ -3573,7 +3921,7 @@ mod tests {
         .await
         .unwrap();
         let recalled2 = mem
-            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
             .await
             .unwrap();
         let hit2 = recalled2.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
@@ -3595,7 +3943,7 @@ mod tests {
         .await
         .unwrap();
         // Single-source: reflect must report evidence_count == 1 (not 0).
-        let reflection = mem.reflect("sky colour", &mind_types::AccessContext::Operator).await.unwrap();
+        let reflection = mem.reflect("sky colour", &mind_types::AccessContext::operator_audit()).await.unwrap();
         let belief = reflection.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from reflection");
         assert_eq!(belief.evidence_count, 1, "reflect must propagate evidence_count from recalled item, got 0");
 
@@ -3609,7 +3957,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let reflection2 = mem.reflect("sky colour", &mind_types::AccessContext::Operator).await.unwrap();
+        let reflection2 = mem.reflect("sky colour", &mind_types::AccessContext::operator_audit()).await.unwrap();
         let belief2 = reflection2.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from second reflection");
         assert_eq!(belief2.evidence_count, 2, "reflect must track accumulated evidence_count");
     }
@@ -3727,7 +4075,7 @@ mod tests {
         .unwrap();
 
         let hits = mem
-            .recall_typed(RecallQuery { text: "red flower".into(), top_k: 10, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(RecallQuery { text: "red flower".into(), top_k: 10, kind: None }, &mind_types::AccessContext::operator_audit())
             .await
             .unwrap();
 

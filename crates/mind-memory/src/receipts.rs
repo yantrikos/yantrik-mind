@@ -1,13 +1,19 @@
-//! Sensitive-read receipts (ARCH-1 slice 2): a hash-chained, append-only JSONL
-//! ledger of every PRINCIPAL memory read — who read, through which facade
-//! method, what they asked, how many results crossed the boundary. Operator
-//! reads (the owner's own system paths) are not recorded; the ledger exists to
-//! audit reads that crossed the authorization boundary from a channel.
+//! Sensitive-read receipts (ARCH-1 slice 2; Purpose Gate v1): a hash-chained,
+//! append-only JSONL ledger of EVERY memory read — who read, through which
+//! facade method, for what declared purpose, what they asked, how many results
+//! crossed the boundary and how many the purpose gate suppressed.
+//!
+//! Operator reads used to be exempt ("the trusted owner path"). The purpose
+//! gate ends that: the operator's background lanes (dream/proactive/research/…)
+//! are exactly the cross-subject reads a purpose audit exists to catch, so a
+//! ledger blind to them would be theater. Every context is receipted now.
 //!
 //! Chain discipline mirrors the immune ledger (mind-evals::immune): each line is
 //! `{"chain":"<hex>","record":{…}}` where `chain = sha256(prev_chain_hex ++ record_json)`
 //! and the first record chains off the literal `"genesis"`. Any edit, reorder,
-//! or deletion of a middle line breaks every later chain value.
+//! or deletion of a middle line breaks every later chain value. The purpose
+//! fields are optional-and-omitted-when-absent so pre-gate ledger lines still
+//! verify byte-for-byte.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,18 +21,25 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// One principal read crossing the authorization boundary.
+/// One read crossing the authorization boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadReceipt {
     pub ts_ms: u64,
-    /// `principal_label()` of the reading context, e.g. "private:wife" | "shared".
+    /// `principal_label()` of the reading context, e.g. "private:wife" | "shared" | "operator".
     pub principal: String,
     /// Facade method: "recall_typed" | "beliefs_matching" | "reflect" | …
     pub method: String,
     /// The query/needle (truncated) — enough to audit intent, not a data copy.
     pub detail: String,
-    /// How many items were returned AFTER scope filtering.
+    /// How many items were returned AFTER scope + purpose filtering.
     pub results: usize,
+    /// The declared purpose label, e.g. "proactive→member:primary". Absent only
+    /// on pre-gate ledger lines (kept optional so those still verify).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// How many scope-visible items the purpose gate suppressed. Omitted when zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,7 +159,15 @@ mod tests {
     }
 
     fn receipt(method: &str, detail: &str) -> ReadReceipt {
-        ReadReceipt { ts_ms: now_ms(), principal: "private:member".into(), method: method.into(), detail: detail.into(), results: 2 }
+        ReadReceipt {
+            ts_ms: now_ms(),
+            principal: "private:member".into(),
+            method: method.into(),
+            detail: detail.into(),
+            results: 2,
+            purpose: Some("conversation→member:member".into()),
+            suppressed: None,
+        }
     }
 
     #[test]

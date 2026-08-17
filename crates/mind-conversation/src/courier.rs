@@ -210,7 +210,7 @@ impl super::ConversationEngine {
         }
         // Recent things the mind actually SAW or was TOLD — the only admissible evidence that a
         // trigger occurred. An inference that it "probably happened" may never fire a thread.
-        let ctx = mind_types::AccessContext::Operator;
+        let ctx = mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive));
         let recent = self.memory.recent_messages(40, &ctx).await.unwrap_or_default();
         let mut changed = false;
         let mut fired: Vec<(String, String, String, String)> = Vec::new();

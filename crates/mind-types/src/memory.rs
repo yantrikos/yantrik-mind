@@ -153,41 +153,69 @@ impl Scope {
 /// authorization kernel). Every personal-data read should carry one, so the
 /// resource layer — not the channel — decides what is visible. `Operator`
 /// (unscoped) is the privileged capability that only the trusted owner path
-/// may mint; a `Principal(scope)` is filtered at the resource boundary and can
+/// may mint; a `Principal` is filtered at the resource boundary and can
 /// never see beyond its scope, whatever channel/command/tool/recipe it arrives
 /// through.
+///
+/// Purpose Gate v1: BOTH variants carry a declared `Purpose` — there is
+/// deliberately no way to construct a context without saying what the read
+/// serves, so every call site's purpose is greppable and every receipt carries
+/// it. For a `Principal`, scope stays supreme and the purpose can only narrow
+/// further (sensitivity classes). For the `Operator`, the purpose is the ONLY
+/// filter background lanes get — which is exactly the point: dream/proactive/
+/// research reads used to be unfiltered and unreceipted; now they are
+/// owner-locked to who they serve unless a standing grant opens a crossing.
 #[derive(Debug, Clone)]
 pub enum AccessContext {
-    /// Full, unfiltered access — the explicit operator capability. Reserved for
-    /// the trusted owner path; never derive this from an untrusted channel.
-    Operator,
-    /// Access limited to what `scope` may see. Enforced by the memory layer.
-    Principal(Scope),
+    /// The explicit operator capability — reserved for the trusted owner path;
+    /// never derive this from an untrusted channel. Sees past scope walls, but
+    /// its reads are purpose-filtered (unless the purpose is Audit/Maintenance)
+    /// and ALWAYS receipted.
+    Operator { purpose: crate::purpose::Purpose },
+    /// Access limited to what `scope` may see, then purpose-filtered on top.
+    /// Enforced by the memory layer.
+    Principal { scope: Scope, purpose: crate::purpose::Purpose },
 }
 
 impl AccessContext {
-    /// A principal filtered to `scope` — the standard context for any channel turn.
-    pub fn principal(scope: Scope) -> AccessContext {
-        AccessContext::Principal(scope)
+    /// A principal filtered to `scope`, reading for `purpose` — the standard
+    /// context for any channel turn.
+    pub fn principal(scope: Scope, purpose: crate::purpose::Purpose) -> AccessContext {
+        AccessContext::Principal { scope, purpose }
+    }
+    /// The operator capability, reading for `purpose`.
+    pub fn operator(purpose: crate::purpose::Purpose) -> AccessContext {
+        AccessContext::Operator { purpose }
+    }
+    /// The operator's console/eval/verification lane — full visibility, always receipted.
+    pub fn operator_audit() -> AccessContext {
+        AccessContext::Operator { purpose: crate::purpose::Purpose::audit() }
     }
     /// The viewer scope for filtering: None for the operator (unfiltered),
     /// Some(scope) for a principal. Feeds `Scope::visible_to`.
     pub fn viewer(&self) -> Option<Scope> {
         match self {
-            AccessContext::Operator => None,
-            AccessContext::Principal(s) => Some(s.clone()),
+            AccessContext::Operator { .. } => None,
+            AccessContext::Principal { scope, .. } => Some(scope.clone()),
         }
     }
     /// True when this context is the privileged, unfiltered operator.
     pub fn is_operator(&self) -> bool {
-        matches!(self, AccessContext::Operator)
+        matches!(self, AccessContext::Operator { .. })
+    }
+    /// The declared purpose of this context's reads.
+    pub fn purpose(&self) -> &crate::purpose::Purpose {
+        match self {
+            AccessContext::Operator { purpose } => purpose,
+            AccessContext::Principal { purpose, .. } => purpose,
+        }
     }
     /// A short label for sensitive-read receipts.
     pub fn principal_label(&self) -> String {
         match self {
-            AccessContext::Operator => "operator".into(),
-            AccessContext::Principal(Scope::Shared) => "shared".into(),
-            AccessContext::Principal(Scope::Private(o)) => format!("private:{o}"),
+            AccessContext::Operator { .. } => "operator".into(),
+            AccessContext::Principal { scope: Scope::Shared, .. } => "shared".into(),
+            AccessContext::Principal { scope: Scope::Private(o), .. } => format!("private:{o}"),
         }
     }
 }
@@ -308,15 +336,17 @@ pub struct PackBrief {
 
 #[async_trait]
 pub trait MemoryFacade: Send + Sync {
-    // ── ARCH-1 (slice 2): EVERY personal-data read carries an AccessContext ──
-    // There is deliberately NO unscoped read API on this trait anymore. A caller
-    // that needs unfiltered access must write `&AccessContext::Operator` at the
-    // call site — the explicit operator capability — so unrestricted reads are
-    // greppable and can never happen by default. A `Principal(scope)` read is
-    // filtered at the resource boundary (mind-memory), whatever channel,
-    // command, model, recipe, or tool it arrives through. The old fail-open
-    // `_as` defaults (scoped variant silently delegating to the unscoped read)
-    // are gone: that inversion is the point of this slice.
+    // ── ARCH-1 (slice 2) + Purpose Gate v1: EVERY personal-data read carries an
+    // AccessContext, and every AccessContext carries a declared Purpose — there
+    // is deliberately NO unscoped read API and NO purposeless context. A caller
+    // that needs unfiltered access must write `AccessContext::operator_audit()`
+    // (or `operator(purpose)` for a background lane) at the call site, so
+    // unrestricted reads are greppable and can never happen by default. A
+    // principal read is scope-filtered at the resource boundary (mind-memory),
+    // then purpose-filtered (sensitivity classes / owner crossings), whatever
+    // channel, command, model, recipe, or tool it arrives through. The old
+    // fail-open `_as` defaults (scoped variant silently delegating to the
+    // unscoped read) are gone: that inversion is the point of this slice.
 
     /// Typed + semantic + temporal recall (multi-signal), filtered to what `ctx` may see.
     async fn recall_typed(&self, q: RecallQuery, ctx: &AccessContext) -> Result<Vec<Recalled>>;
@@ -491,6 +521,28 @@ pub trait MemoryFacade: Send + Sync {
     /// OPERATOR-INTERNAL: only system paths (compaction, research sync) may call this — it is not
     /// reachable from any channel/command/tool. Gets a ctx param when those paths are ctx-threaded.
     async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>>;
+
+    // ── Purpose Gate v1 (the read-boundary purpose policy; defaults = inert for fakes) ──
+    /// Explicitly tag a belief's sensitivity class by canonical proposition —
+    /// overrides the deterministic write-time classifier in either direction
+    /// (a correction path: "that's not sensitive" / "treat that as health").
+    async fn set_belief_sensitivity(&self, _proposition: &str, _class: crate::purpose::Sensitivity) -> Result<()> {
+        Ok(())
+    }
+    /// Create a standing purpose grant — the ONLY way a cross-owner or
+    /// out-of-policy sensitive-class read opens. Expiring and revocable.
+    /// Returns the grant id. OPERATOR-INTERNAL: wire only to owner surfaces.
+    async fn grant_purpose(&self, _spec: crate::purpose::PurposeGrantSpec) -> Result<i64> {
+        Err(crate::MindError::Invalid("this memory backend has no purpose-grant support".into()))
+    }
+    /// Revoke a standing grant by id. Revocation is immediate and permanent.
+    async fn revoke_purpose_grant(&self, _id: i64) -> Result<bool> {
+        Ok(false)
+    }
+    /// Every grant on record, including revoked/expired ones (the audit story).
+    async fn list_purpose_grants(&self) -> Result<Vec<crate::purpose::PurposeGrant>> {
+        Ok(vec![])
+    }
 
     // ── engine learning/metacognition (calibration + self-assessment; defaults = inert for fakes) ──
     /// Feed a graded prediction outcome into the engine's learning layer: the per-action-kind

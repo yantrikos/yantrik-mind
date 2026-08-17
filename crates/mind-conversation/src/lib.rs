@@ -3905,7 +3905,7 @@ impl ConversationEngine {
         for f in facets {
             let rs = self
                 .memory
-                .recall_typed(mind_types::RecallQuery { text: f.into(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
+                .recall_typed(mind_types::RecallQuery { text: f.into(), top_k: 8, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Dream)))
                 .await
                 .unwrap_or_default();
             for r in rs {
@@ -4204,7 +4204,7 @@ impl ConversationEngine {
     async fn beliefs_referencing(&self, needle: &str) -> Vec<String> {
         let rs = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: needle.to_string(), top_k: 50, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(mind_types::RecallQuery { text: needle.to_string(), top_k: 50, kind: None }, &mind_types::AccessContext::operator_audit())
             .await
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
@@ -4531,7 +4531,7 @@ impl ConversationEngine {
         for _ in 0..5 {
             let rs = self
                 .memory
-                .recall_typed(mind_types::RecallQuery { text: needle.clone(), top_k: 50, kind: None }, &mind_types::AccessContext::Operator)
+                .recall_typed(mind_types::RecallQuery { text: needle.clone(), top_k: 50, kind: None }, &mind_types::AccessContext::operator_audit())
                 .await
                 .unwrap_or_default();
             let mut hit = false;
@@ -4619,7 +4619,10 @@ impl ConversationEngine {
             // member's private lines never appear here even for an operator device.
             "transcript_json" => {
                 let n: usize = rest.parse().ok().filter(|n: &usize| (1..=200).contains(n)).unwrap_or(40);
-                let ctx2 = mind_types::AccessContext::Principal(mind_types::Scope::Private(mind_types::PRIMARY.to_string()));
+                let ctx2 = mind_types::AccessContext::principal(
+                    mind_types::Scope::Private(mind_types::PRIMARY.to_string()),
+                    mind_types::Purpose::conversation(mind_types::PRIMARY),
+                );
                 let msgs = self.memory.recent_messages(n, &ctx2).await.unwrap_or_default();
                 serde_json::json!({
                     "messages": msgs
@@ -5153,9 +5156,12 @@ impl ConversationEngine {
             // numbers; the session's repeated lesson is that the guessed bottleneck is rarely the
             // real one. Sizes are bytes; ~4 bytes/token is the working rule for English prose.
             "prompt_audit" | "context_audit" => {
-                let ctx2 = mind_types::AccessContext::Principal(mind_types::Scope::Private(
-                    mind_types::PRIMARY.to_string(),
-                ));
+                // Mirror the REAL turn context (scope AND purpose) — an audit lane here would
+                // measure a wider hydration than the model ever receives.
+                let ctx2 = mind_types::AccessContext::principal(
+                    mind_types::Scope::Private(mind_types::PRIMARY.to_string()),
+                    mind_types::Purpose::conversation(mind_types::PRIMARY),
+                );
                 let probe = if rest.is_empty() { "what is happening this week" } else { rest.as_str() };
                 let ws = self.memory.hydrate_working_set(probe, &ctx2).await.unwrap_or_default();
                 let facts: usize = ws.stable_facts.iter().take(5).map(|b| b.text.len() + 4).sum();
@@ -5827,7 +5833,7 @@ impl ConversationEngine {
                 }
                 out
             }
-            "reflect" | "state" => match self.memory.reflect(rest.trim(), &mind_types::AccessContext::Operator).await {
+            "reflect" | "state" => match self.memory.reflect(rest.trim(), &mind_types::AccessContext::operator_audit()).await {
                 Ok(r) => {
                     let mut out = String::from("BELIEFS (top by confidence):\n");
                     let mut bs = r.beliefs.clone();
@@ -5851,6 +5857,107 @@ impl ConversationEngine {
                 }
                 Err(e) => format!("(reflect error: {e})"),
             },
+            // --- Purpose Gate v1: the standing-grant ledger (owner surface) ---
+            // `ym grants` · `ym grants allow owner=asha to=primary activity=proactive
+            //  [class=health|finance|credentials|*] [days=30] note=gift planning` ·
+            // `ym grants revoke <id>`. Grants open cross-owner / sensitive-class reads
+            // for the operator's background lanes; they expire, revoke, and never widen
+            // a member's viewing scope.
+            "grants" | "grant" => {
+                let mut it = rest.splitn(2, char::is_whitespace);
+                match it.next().unwrap_or("") {
+                    "" | "list" => match self.memory.list_purpose_grants().await {
+                        Ok(gs) if gs.is_empty() => "No purpose grants on record. Every cross-owner or sensitive-class background read is denied by default.".into(),
+                        Ok(gs) => {
+                            let now = chrono::Utc::now().timestamp_millis() as u64;
+                            let mut out = String::from("PURPOSE GRANTS (the only open crossings):\n");
+                            for g in gs {
+                                let state = if g.revoked {
+                                    "revoked"
+                                } else if now >= g.expires_ms {
+                                    "expired"
+                                } else {
+                                    "ACTIVE"
+                                };
+                                out.push_str(&format!(
+                                    "#{} {} → {} · class {} · activity {} · {} · {}\n",
+                                    g.id,
+                                    g.owner.as_tag(),
+                                    g.beneficiary.as_tag(),
+                                    g.class.map(|c| c.as_tag()).unwrap_or("*"),
+                                    g.activity.map(|a| a.as_tag()).unwrap_or("*"),
+                                    state,
+                                    g.note
+                                ));
+                            }
+                            out
+                        }
+                        Err(e) => format!("(grants error: {e})"),
+                    },
+                    "revoke" => match it.next().unwrap_or("").trim().parse::<i64>() {
+                        Ok(id) => match self.memory.revoke_purpose_grant(id).await {
+                            Ok(true) => format!("Grant #{id} revoked — that crossing is closed again, effective immediately."),
+                            Ok(false) => format!("No active grant #{id} to revoke."),
+                            Err(e) => format!("(revoke error: {e})"),
+                        },
+                        Err(_) => "Usage: ym grants revoke <id>".into(),
+                    },
+                    "allow" => {
+                        let args = it.next().unwrap_or("");
+                        let mut owner = None;
+                        let mut to = None;
+                        let mut class: Option<mind_types::Sensitivity> = None;
+                        let mut activity: Option<mind_types::Activity> = None;
+                        let mut days: u64 = 30;
+                        let mut note = String::new();
+                        for part in args.split_whitespace() {
+                            match part.split_once('=') {
+                                Some(("owner", v)) => owner = Some(v.to_string()),
+                                Some(("to", v)) => to = Some(v.to_string()),
+                                Some(("class", "*")) | Some(("class", "any")) => class = None,
+                                Some(("class", v)) => class = Some(mind_types::Sensitivity::parse(v)),
+                                Some(("activity", "*")) | Some(("activity", "any")) => activity = None,
+                                Some(("activity", v)) => activity = mind_types::Activity::parse(v),
+                                Some(("days", v)) => days = v.parse().unwrap_or(30),
+                                Some(("note", v)) => note = v.to_string(),
+                                _ if !note.is_empty() => {
+                                    note.push(' ');
+                                    note.push_str(part);
+                                }
+                                _ => {}
+                            }
+                        }
+                        let subject = |s: &str| {
+                            if s.eq_ignore_ascii_case("household") || s.eq_ignore_ascii_case("shared") {
+                                mind_types::Subject::Household
+                            } else if s.eq_ignore_ascii_case("primary") {
+                                mind_types::Subject::primary()
+                            } else {
+                                mind_types::Subject::Member(s.to_lowercase())
+                            }
+                        };
+                        match (owner, to) {
+                            (Some(o), Some(t)) if !note.trim().is_empty() => {
+                                let spec = mind_types::PurposeGrantSpec {
+                                    owner: subject(&o),
+                                    beneficiary: subject(&t),
+                                    class,
+                                    activity,
+                                    expires_ms: chrono::Utc::now().timestamp_millis() as u64 + days * 86_400_000,
+                                    note: note.trim().to_string(),
+                                };
+                                match self.memory.grant_purpose(spec).await {
+                                    Ok(id) => format!("Grant #{id} recorded — expires in {days} day(s). `ym grants revoke {id}` closes it early."),
+                                    Err(e) => format!("(grant error: {e})"),
+                                }
+                            }
+                            (Some(_), Some(_)) => "A grant needs its audit story: add note=<why this crossing exists>".into(),
+                            _ => "Usage: ym grants allow owner=<member|household> to=<member|household> [class=health|finance|credentials|*] [activity=proactive|dream|research|foresight|code|recipe|conversation|*] [days=30] note=<why>".into(),
+                        }
+                    }
+                    _ => "Usage: ym grants · ym grants allow … · ym grants revoke <id>".into(),
+                }
+            }
             // --- deal finder: grounded, budget-aware, gift-personalized shopping ---
             "deals" | "deal" | "shop" | "shopping" if !rest.is_empty() => self.find_deals(&rest).await,
             "deals" | "deal" | "shop" | "shopping" => "What are you shopping for? e.g. `ym deals gold watch 200`".to_string(),
@@ -6870,7 +6977,7 @@ impl ConversationEngine {
             // around the grounding isolation to reach another member's private facts). ARCH-1 slice 2:
             // this is now enforced at the memory boundary — every lane carries the speaker's ctx.
             "recall" => {
-                let ctx = mind_types::AccessContext::Principal(id.viewer());
+                let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
                 // TWO lanes, ONE answer: the semantic memories lane + the belief working-set the
                 // chat itself grounds on. What was taught as a belief is recallable, period.
                 let q = s("query");
@@ -7360,7 +7467,7 @@ impl ConversationEngine {
     /// it runs in that slot — the breadth trials showed a loop without this answers about an old
     /// belief instead of yesterday's work. One assembly, two loops, zero drift.
     async fn turn_grounding(&self, user_text: &str, id: &TurnIdentity) -> String {
-        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
         let mut grounding = String::new();
         // Continuity summary — PRIMARY VIEWER ONLY. The rolling summary is distilled from the primary
@@ -7494,7 +7601,7 @@ Open reminders you're carrying for them:");
         // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
         // private fact from another household member never reaches the model (the surprise-gift wall).
         let grounding = self.turn_grounding(user_text, id).await;
-        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let recent = self
             .memory
             .recent_messages(self.recent_window, &ctx)
@@ -8077,7 +8184,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         }
 
         let scope = id.write_scope();
-        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let recent = self.memory.recent_messages(8, &ctx).await.unwrap_or_default();
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
         let mut grounding = Self::render_grounding(&ws);
@@ -8118,7 +8225,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
         // ARCH-1 slice 2: every memory read this turn makes — directly or via an intercept
         // (drafting, grounding, pinning) — carries the speaker's Principal ctx.
-        let turn_ctx = mind_types::AccessContext::Principal(id.viewer());
+        let turn_ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         // Onboarding interview: if we're awaiting an answer to a name/purpose question, THIS turn is it.
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         // Feed the temporal layer: every turn is a life-event episode (rhythm/periodicity/bursts),
@@ -8770,7 +8877,10 @@ impl MindRecipeHost {
             memory,
             web: None,
             search: None,
-            read_ctx: mind_types::AccessContext::Principal(mind_types::Scope::Shared),
+            read_ctx: mind_types::AccessContext::principal(
+                mind_types::Scope::Shared,
+                mind_types::Purpose::new(mind_types::Subject::Household, mind_types::Activity::Recipe),
+            ),
             egress: None,
         }
     }

@@ -103,7 +103,7 @@ impl super::ConversationEngine {
         let mut hits: Vec<String> = Vec::new();
         if let Ok(rs) = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: format!("plugin connector {q}"), top_k: 12, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(mind_types::RecallQuery { text: format!("plugin connector {q}"), top_k: 12, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Conversation)))
             .await
         {
             for r in rs {

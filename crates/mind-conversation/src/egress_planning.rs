@@ -149,7 +149,7 @@ impl ConversationEngine {
         }
         let canon = mind_governance::egress::canonicalize(args);
         let user_lc = user_text.to_lowercase();
-        let ctx = mind_types::AccessContext::Principal(id.viewer());
+        let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         for value in distinctive_pii(&canon) {
             let vlc = value.to_lowercase();
             if user_lc.contains(&vlc) {

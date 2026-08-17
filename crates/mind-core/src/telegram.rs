@@ -592,7 +592,7 @@ fn ctl_handle(
             if !authed.is_operator() {
                 ("403 Forbidden", "the ym console requires an operator device".to_string())
             } else {
-                ("200 OK", rt.block_on(conv.cli_dispatch(&body, &mind_types::AccessContext::Operator)))
+                ("200 OK", rt.block_on(conv.cli_dispatch(&body, &mind_types::AccessContext::operator_audit())))
             }
         }
         // A conversation turn. The speaker is the AUTHENTICATED device's bound person; the turn runs
@@ -1309,7 +1309,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 // ARCH-1: Telegram is a REMOTE channel — it mints a Principal, never Operator.
                 // Even the primary over Telegram reads resource-filtered (their own + shared;
                 // other members' private facts stay invisible), and every read is receipted.
-                let ctx = mind_types::AccessContext::Principal(identity.viewer());
+                let ctx = mind_types::AccessContext::principal(identity.viewer(), mind_types::Purpose::conversation(&identity.owner));
                 let work = handle_line_as(&text, &mem2, &conv2, identity, &ctx);
                 tokio::pin!(work);
                 let outcome = loop {

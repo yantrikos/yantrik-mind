@@ -137,7 +137,7 @@ impl super::ConversationEngine {
                 let now = Self::now_ms();
                 let rs = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
+                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
                     .await
                     .unwrap_or_default();
                 let mut stale = 0u32;
@@ -188,7 +188,7 @@ impl super::ConversationEngine {
             // winning and losing belief nodes so confidence scores actually shift, then bank an
             // observability note and emit a COHERENCE tension. UNRESOLVED leaves scores unchanged.
             1 => {
-                let cs = self.memory.conflicts(&mind_types::AccessContext::Operator).await.unwrap_or_default();
+                let cs = self.memory.conflicts(&mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive))).await.unwrap_or_default();
                 // ROTATE through the open set rather than always taking `.first()`. An UNRESOLVED
                 // verdict deliberately leaves both scores unchanged, so the same contradiction stays
                 // at the head of the list and `.first()` would re-judge it EVERY cycle, forever —
@@ -206,7 +206,7 @@ impl super::ConversationEngine {
                         ChatMessage::user(&prompt),
                     ];
                     // PRIVATE-GROUNDED: this prompt carries two of the household's stored beliefs
-                    // VERBATIM (read with AccessContext::Operator — every member's private facts), so
+                    // VERBATIM (an operator-lane read — purpose-filtered now, but still private), so
                     // it must PREFER the private (owned-hardware) lane and only escalate to cloud with
                     // an audit. It was an unscoped `chat()` = a silent Household (cloud) call on every
                     // reconcile tick — the same leak agent_loop already fixed, missed on this path.
@@ -272,7 +272,7 @@ impl super::ConversationEngine {
             _ => {
                 let rs = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 10, kind: None }, &mind_types::AccessContext::Operator)
+                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 10, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
                     .await
                     .unwrap_or_default();
                 if rs.len() < 3 {
@@ -550,7 +550,7 @@ impl super::ConversationEngine {
         let enough: usize = std::env::var("YM_ASK_ENOUGH").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         let known = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
             .await
             .map(|r| r.len())
             .unwrap_or(0);

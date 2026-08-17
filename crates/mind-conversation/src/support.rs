@@ -142,7 +142,7 @@ impl super::ConversationEngine {
             let date_phrase = chrono::DateTime::from_timestamp_millis(when)
                 .map(|t| t.with_timezone(today.offset()).format("%A").to_string())
                 .unwrap_or_else(|| "coming up".into());
-            let gift_hint = self.memory.beliefs_matching(&format!("{person} likes"), &mind_types::AccessContext::Operator).await.ok()
+            let gift_hint = self.memory.beliefs_matching(&format!("{person} likes"), &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive))).await.ok()
                 .and_then(|b| b.first().map(|x| x.statement.clone()));
             let rendered = support_nudge::render(&person, &date_phrase, gift_hint.as_deref());
             if !support_nudge::is_clean(&rendered) {

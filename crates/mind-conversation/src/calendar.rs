@@ -307,7 +307,7 @@ impl super::ConversationEngine {
         // Memories relevant to the event text (semantic recall over the typed store).
         let recalled = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: title.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(mind_types::RecallQuery { text: title.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Conversation)))
             .await
             .unwrap_or_default();
         let mut ctx = String::new();

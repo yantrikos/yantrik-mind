@@ -319,7 +319,7 @@ impl super::ConversationEngine {
         if let Some(q) = member_photo_intent(user_text) {
             return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
         }
-        let recent = self.memory.recent_messages(12, &mind_types::AccessContext::Principal(id.viewer())).await.unwrap_or_default();
+        let recent = self.memory.recent_messages(12, &mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner))).await.unwrap_or_default();
         let convo = if recent.is_empty() {
             "(first conversation — greet them warmly by name, and in ONE short line mention what you can do for them: find family photos ('show me photos of…'), make collages, set reminders ('remind me to…'), and a daily morning brief ('brief me daily'))".to_string()
         } else {

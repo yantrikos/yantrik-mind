@@ -21,7 +21,7 @@ impl super::ConversationEngine {
         let expiry = when + 86_400_000;
         let evidence: Vec<String> = self
             .memory
-            .beliefs_matching(&title, &mind_types::AccessContext::Operator)
+            .beliefs_matching(&title, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
             .await
             .unwrap_or_default()
             .iter()
@@ -187,7 +187,7 @@ impl super::ConversationEngine {
         let expiry = when + 86_400_000;
         let evidence: Vec<String> = self
             .memory
-            .beliefs_matching(&format!("{who} birthday gift"), &mind_types::AccessContext::Operator)
+            .beliefs_matching(&format!("{who} birthday gift"), &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
             .await
             .unwrap_or_default()
             .iter()
@@ -318,7 +318,7 @@ impl super::ConversationEngine {
         let expiry = end + 86_400_000;
         let evidence: Vec<String> = self
             .memory
-            .beliefs_matching(&title, &mind_types::AccessContext::Operator)
+            .beliefs_matching(&title, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
             .await
             .unwrap_or_default()
             .iter()

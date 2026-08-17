@@ -216,7 +216,7 @@ impl super::ConversationEngine {
         // 1. what we already believe near this topic
         let priors = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: topic.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(mind_types::RecallQuery { text: topic.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Research)))
             .await
             .unwrap_or_default();
         let prior_list = if priors.is_empty() {
@@ -689,12 +689,12 @@ impl super::ConversationEngine {
             for _ in 0..12 {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let token = format!("paperkb{key}");
-                if !self.memory.beliefs_matching_n(&token, 3, &mind_types::AccessContext::Operator).await.unwrap_or_default().is_empty() {
+                if !self.memory.beliefs_matching_n(&token, 3, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Research))).await.unwrap_or_default().is_empty() {
                     break;
                 }
             }
             let token = format!("paperkb{key}");
-            let n = self.memory.beliefs_matching_n(&token, 300, &mind_types::AccessContext::Operator).await.unwrap_or_default().len();
+            let n = self.memory.beliefs_matching_n(&token, 300, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Research))).await.unwrap_or_default().len();
             if n > 0 {
                 chosen = Some((key, title, n));
                 break;

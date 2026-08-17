@@ -1038,7 +1038,7 @@ mod tests {
     async fn every_typed_verb_returns_parseable_json() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
-        let ctx = mind_types::AccessContext::Operator;
+        let ctx = mind_types::AccessContext::operator_audit();
         // Drive the ADVERTISED list, so a surface added to TYPED_VERBS without a dispatch arm fails
         // here rather than in the client.
         for verb in TYPED_VERBS {
@@ -1067,7 +1067,7 @@ mod tests {
             1,
         );
         let eng = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
-        let ctx = mind_types::AccessContext::Operator;
+        let ctx = mind_types::AccessContext::operator_audit();
 
         for verb in ["runs_json", "agents_json", "some_future_surface_json"] {
             let out = eng.cli_dispatch(verb, &ctx).await;
@@ -1090,7 +1090,7 @@ mod tests {
     async fn the_handshake_advertises_the_real_surface_list() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
-        let out = eng.cli_dispatch("surfaces", &mind_types::AccessContext::Operator).await;
+        let out = eng.cli_dispatch("surfaces", &mind_types::AccessContext::operator_audit()).await;
         let v: serde_json::Value = serde_json::from_str(&out).expect("handshake must be JSON");
         let listed: Vec<&str> = v["surfaces"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
         assert!(listed.contains(&"pulse"));
@@ -1105,7 +1105,10 @@ mod tests {
     async fn typed_verbs_are_operator_only() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
-        let member = mind_types::AccessContext::Principal(mind_types::Scope::parse("asha"));
+        let member = mind_types::AccessContext::principal(
+            mind_types::Scope::parse("asha"),
+            mind_types::Purpose::new(mind_types::Subject::Household, mind_types::Activity::Conversation),
+        );
         for verb in ["pulse", "funnel_json", "capabilities_json"] {
             let out = eng.cli_dispatch(verb, &member).await;
             assert!(
@@ -1123,7 +1126,7 @@ mod tests {
     async fn pulse_reports_a_real_brain_state() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
-        let p = eng.pulse(&mind_types::AccessContext::Operator).await;
+        let p = eng.pulse(&mind_types::AccessContext::operator_audit()).await;
         assert_eq!(p.brain.provider, "test-provider", "the pulse must name the provider actually serving");
         assert!(!p.brain.private_lane, "no private backend was attached");
         assert!(!p.taken_at.is_empty(), "a snapshot must be stamped so the client can show its age");
@@ -1152,7 +1155,7 @@ mod tests {
         ]);
         mem.profile_set("delegations", &ledger.to_string()).await.unwrap();
 
-        let p = eng.pulse(&mind_types::AccessContext::Operator).await;
+        let p = eng.pulse(&mind_types::AccessContext::operator_audit()).await;
         let failed: Vec<&AttentionItem> =
             p.attention.iter().filter(|a| a.kind == AttentionKind::JobFailed).collect();
 
@@ -1183,7 +1186,7 @@ mod tests {
         ]);
         mem.profile_set("delegations", &ledger.to_string()).await.unwrap();
 
-        let p = eng.pulse(&mind_types::AccessContext::Operator).await;
+        let p = eng.pulse(&mind_types::AccessContext::operator_audit()).await;
         assert_eq!(p.work.jobs_running, 2);
         assert_eq!(p.work.jobs_total, 2);
         let audit = p.work.running.iter().find(|j| j.name == "repo-audit").expect("named in the pulse");

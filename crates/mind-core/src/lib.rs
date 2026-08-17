@@ -73,7 +73,7 @@ pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &Arc<Conversation
         mem,
         conv,
         mind_conversation::TurnIdentity::primary(),
-        &mind_types::AccessContext::Operator,
+        &mind_types::AccessContext::operator_audit(),
     )
     .await
 }
@@ -689,7 +689,7 @@ mod tests {
         ).await.unwrap();
 
         let member_id = mind_conversation::TurnIdentity::new("asha", false);
-        let member_ctx = AccessContext::Principal(member_id.viewer());
+        let member_ctx = AccessContext::principal(member_id.viewer(), mind_types::Purpose::conversation(&member_id.owner));
 
         // :beliefs — filtered list; shared visible, secret absent
         match handle_line_as(":beliefs safe combination", &mem, &conv, member_id.clone(), &member_ctx).await {

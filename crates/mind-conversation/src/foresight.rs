@@ -1239,12 +1239,12 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
         // Semantic recall first, then exact-belief explanation.
         let recalled = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: claim.to_string(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
+            .recall_typed(mind_types::RecallQuery { text: claim.to_string(), top_k: 5, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Foresight)))
             .await
             .unwrap_or_default();
         let mut target: Option<(mind_types::Belief, Vec<mind_types::Evidence>)> = None;
         for r in &recalled {
-            if let Ok(Some(be)) = self.memory.explain_belief(&r.item.text, &mind_types::AccessContext::Operator).await {
+            if let Ok(Some(be)) = self.memory.explain_belief(&r.item.text, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Foresight))).await {
                 target = Some(be);
                 break;
             }
@@ -1270,7 +1270,7 @@ Truth{} I wrongly doubted: {}", if alarms.len() == 1 { "" } else { "s" }, alarms
                 out.push_str(&format!("  · {} (weight {:+.2})\n", excerpt, e.weight * e.polarity));
             }
         }
-        let conflicts = self.memory.conflicts(&mind_types::AccessContext::Operator).await.unwrap_or_default();
+        let conflicts = self.memory.conflicts(&mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Foresight))).await.unwrap_or_default();
         let mine: Vec<String> = conflicts
             .iter()
             .filter(|c| c.belief_a == b.statement || c.belief_b == b.statement)

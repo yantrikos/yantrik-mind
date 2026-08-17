@@ -29,7 +29,7 @@ impl super::ConversationEngine {
         }
         self.researcher.as_ref()?;
         // 1. The user's own recent words are the radar's only antenna.
-        let recent = self.memory.recent_messages(160, &mind_types::AccessContext::Operator).await.ok()?;
+        let recent = self.memory.recent_messages(160, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.ok()?;
         let user_lines: Vec<&str> = recent
             .iter()
             .filter(|(r, t)| r == "user" && t.len() > 12 && !t.starts_with('/'))
@@ -248,7 +248,7 @@ impl super::ConversationEngine {
             for rn in repo_names.iter().take(4) {
                 let alnum: String = rn.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
                 let t = format!("codekb{alnum}");
-                for b in mem.beliefs_matching_n(&t, 30, &mind_types::AccessContext::Operator).await.unwrap_or_default() {
+                for b in mem.beliefs_matching_n(&t, 30, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.unwrap_or_default() {
                     known.push(b.statement.replacen(&t, "", 1));
                 }
             }
@@ -256,7 +256,7 @@ impl super::ConversationEngine {
             let pmap: std::collections::BTreeMap<String, String> = serde_json::from_str(&idx).unwrap_or_default();
             for (pk, _) in pmap.iter().filter(|(pk, _)| pk.as_str() != key2).take(3) {
                 let t = format!("paperkb{pk}");
-                for b in mem.beliefs_matching_n(&t, 10, &mind_types::AccessContext::Operator).await.unwrap_or_default() {
+                for b in mem.beliefs_matching_n(&t, 10, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.unwrap_or_default() {
                     known.push(b.statement.replacen(&t, "", 1));
                 }
             }
@@ -304,7 +304,7 @@ impl super::ConversationEngine {
     pub async fn paper_ask(&self, key: &str, question: &str) -> String {
         let token = format!("paperkb{key}");
         let tag = format!("[paper:{key}]");
-        let facts: Vec<String> = self.memory.beliefs_matching_n(&token, 300, &mind_types::AccessContext::Operator).await.unwrap_or_default()
+        let facts: Vec<String> = self.memory.beliefs_matching_n(&token, 300, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.unwrap_or_default()
             .into_iter().map(|b| b.statement).filter(|st| st.contains(&token)).collect();
         if facts.is_empty() {
             return format!("I haven't studied `{key}` yet — `paper study <url>` first.");
@@ -378,14 +378,14 @@ impl super::ConversationEngine {
     /// goal format. `paper adopt <key> <n>` then queues one — reading becomes shipped code.
     pub async fn paper_adapt(&self, key: &str, repo: &str) -> String {
         let ptoken = format!("paperkb{key}");
-        let pfacts: Vec<String> = self.memory.beliefs_matching_n(&ptoken, 100, &mind_types::AccessContext::Operator).await.unwrap_or_default()
+        let pfacts: Vec<String> = self.memory.beliefs_matching_n(&ptoken, 100, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.unwrap_or_default()
             .into_iter().map(|b| b.statement.replacen(&ptoken, "", 1)).filter(|st| st.contains("[paper:")).collect();
         if pfacts.is_empty() {
             return format!("I haven't studied `{key}` — `paper study <url>` first.");
         }
         let alnum: String = repo.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
         let ctoken = format!("codekb{alnum}");
-        let cfacts: Vec<String> = self.memory.beliefs_matching_n(&ctoken, 200, &mind_types::AccessContext::Operator).await.unwrap_or_default()
+        let cfacts: Vec<String> = self.memory.beliefs_matching_n(&ctoken, 200, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.unwrap_or_default()
             .into_iter().map(|b| b.statement.replacen(&ctoken, "", 1)).collect();
         if cfacts.is_empty() {
             return format!("I haven't studied the `{repo}` codebase — `code study <git url>` first, then adapt.");
@@ -595,7 +595,7 @@ impl super::ConversationEngine {
                 let paper_lines = papers.iter()
                     .map(|(_, t, sm)| format!("- {t}: {}", sm.chars().take(200).collect::<String>()))
                     .collect::<Vec<_>>().join("\n");
-                let mem_facts = self.memory.beliefs_matching(&q, &mind_types::AccessContext::Operator).await.unwrap_or_default();
+                let mem_facts = self.memory.beliefs_matching(&q, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork))).await.unwrap_or_default();
                 let mem_lines = mem_facts.iter().take(8).map(|b| format!("- {}", b.statement)).collect::<Vec<_>>().join("\n");
                 all[&id]["research"] = serde_json::json!({"papers": paper_lines, "memory": mem_lines});
                 all[&id]["stage"] = serde_json::json!("spec");
@@ -1150,7 +1150,7 @@ impl super::ConversationEngine {
         // would silently drop most of the knowledge at answer time.
         let facts: Vec<String> = self
             .memory
-            .beliefs_matching_n(&token, 400, &mind_types::AccessContext::Operator)
+            .beliefs_matching_n(&token, 400, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork)))
             .await
             .unwrap_or_default()
             .into_iter()
@@ -1372,7 +1372,7 @@ impl super::ConversationEngine {
         // already knows THIS project is, so the scan is about HIS work, not a namesake.
         let ident: Vec<String> = self
             .memory
-            .beliefs_matching(&subject, &mind_types::AccessContext::Operator)
+            .beliefs_matching(&subject, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::CodeWork)))
             .await
             .unwrap_or_default()
             .iter()

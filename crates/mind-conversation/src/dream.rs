@@ -202,7 +202,7 @@ impl super::ConversationEngine {
     pub async fn dream(&self) -> String {
         let day = (chrono::Utc::now().timestamp() / 86_400) as usize;
         let (vname, vdesc) = Self::VISIONS[day % Self::VISIONS.len()];
-        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 50, &mind_types::AccessContext::Operator).await
+        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 50, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Dream))).await
             .unwrap_or_default().into_iter()
             .map(|b| format!("- {}", b.statement.replacen("codekbyantrikmind", "", 1)))
             .collect::<Vec<_>>().join("\n").chars().take(5000).collect();
@@ -281,7 +281,7 @@ impl super::ConversationEngine {
             .filter_map(|v| v.get("rating").map(|r| r.to_string()))
             .collect::<Vec<_>>().join("\n")).unwrap_or_default().chars().take(1200).collect();
         // Evidence 5: its own studied architecture — it KNOWS what it is
-        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 60, &mind_types::AccessContext::Operator).await
+        let self_facts: String = self.memory.beliefs_matching_n("codekbyantrikmind", 60, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Dream))).await
             .unwrap_or_default().into_iter()
             .map(|b| format!("- {}", b.statement.replacen("codekbyantrikmind", "", 1)))
             .collect::<Vec<_>>().join("\n").chars().take(6000).collect();
@@ -443,7 +443,7 @@ impl super::ConversationEngine {
             // Compose deterministically: everything the substrate knows about the subject. Evidence
             // that is only an INFERENCE (not observed/told) is labeled so a prepared action never
             // silently rests on the mind's own guesswork (Terra's epistemic-authority protocol).
-            let facts = self.memory.beliefs_matching(title, &mind_types::AccessContext::Operator).await.unwrap_or_default();
+            let facts = self.memory.beliefs_matching(title, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Dream))).await.unwrap_or_default();
             let evidence: Vec<String> = facts.iter().take(6).map(|b| {
                 let tag = if Self::belief_actionable(&b.provenance) { String::new() } else { format!(" [{} — unconfirmed]", Self::epistemic_class(&b.provenance)) };
                 format!("{} ({:.2}){tag}", b.statement, b.confidence)

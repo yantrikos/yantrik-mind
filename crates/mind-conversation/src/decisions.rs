@@ -585,7 +585,7 @@ impl super::ConversationEngine {
                     .to_lowercase();
                     subj.iter().any(|w| hay.contains(w.as_str()))
                 });
-                let recent = self.memory.recent_messages(80, &mind_types::AccessContext::Operator).await.unwrap_or_default();
+                let recent = self.memory.recent_messages(80, &mind_types::AccessContext::operator_audit()).await.unwrap_or_default();
                 let spoken = packed
                     || recent
                         .iter()

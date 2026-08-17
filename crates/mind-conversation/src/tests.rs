@@ -419,7 +419,7 @@ async fn consolidation_distills_beliefs_and_commitments() {
     assert_eq!(n, 2, "1 durable belief + 1 commitment");
     // the belief is recallable
     let r = memarc
-        .recall_typed(mind_types::RecallQuery { text: "terse replies".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
+        .recall_typed(mind_types::RecallQuery { text: "terse replies".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
         .await
         .unwrap();
     assert!(r.iter().any(|x| x.item.text.contains("terse")), "consolidated belief must be recallable");
@@ -453,7 +453,7 @@ async fn consolidation_caps_belief_weight_at_one() {
     }
     conv.consolidate().await;
     let results = memarc
-        .recall_typed(mind_types::RecallQuery { text: "async Rust".into(), top_k: 5, kind: None }, &mind_types::AccessContext::Operator)
+        .recall_typed(mind_types::RecallQuery { text: "async Rust".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
         .await
         .unwrap();
     let belief = results.iter().find(|x| x.item.text.contains("async Rust")).expect("belief must be stored");
@@ -478,7 +478,7 @@ async fn consolidation_extracts_goals_and_preferences_visible_in_reflect() {
     }
     let n = conv.consolidate().await;
     assert_eq!(n, 2, "1 goal + 1 preference");
-    let reflection = memarc.reflect("goals and preferences", &mind_types::AccessContext::Operator).await.unwrap();
+    let reflection = memarc.reflect("goals and preferences", &mind_types::AccessContext::operator_audit()).await.unwrap();
     assert!(
         reflection.goals.iter().any(|g| g.text.contains("async Rust")),
         "goal must appear in reflect: {:?}",
@@ -522,7 +522,7 @@ async fn dmn_associates_a_hypothesis_when_idle() {
     let log = conv.dmn_tick().await;
     assert!(log.iter().any(|l| l.contains("associated")), "associate phase should run: {log:?}");
     let r = memarc
-        .recall_typed(mind_types::RecallQuery { text: "signal over noise".into(), top_k: 8, kind: None }, &mind_types::AccessContext::Operator)
+        .recall_typed(mind_types::RecallQuery { text: "signal over noise".into(), top_k: 8, kind: None }, &mind_types::AccessContext::operator_audit())
         .await
         .unwrap();
     assert!(
@@ -621,12 +621,12 @@ async fn dmn_reconcile_applies_signed_evidence_to_contradicting_beliefs() {
             .unwrap();
     }
     memarc.relate(belief_a_text, belief_b_text, "contradicts", 0.9).await.unwrap();
-    assert!(!memarc.conflicts(&mind_types::AccessContext::Operator).await.unwrap().is_empty(), "contradiction must be detected");
+    assert!(!memarc.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap().is_empty(), "contradiction must be detected");
 
-    let conf_a_before = memarc.explain_belief(belief_a_text, &mind_types::AccessContext::Operator).await.unwrap()
+    let conf_a_before = memarc.explain_belief(belief_a_text, &mind_types::AccessContext::operator_audit()).await.unwrap()
         .map(|(b, _)| b.confidence)
         .expect("belief should exist before reconcile");
-    let conf_b_before = memarc.explain_belief(belief_b_text, &mind_types::AccessContext::Operator).await.unwrap()
+    let conf_b_before = memarc.explain_belief(belief_b_text, &mind_types::AccessContext::operator_audit()).await.unwrap()
         .map(|(b, _)| b.confidence)
         .expect("belief should exist before reconcile");
 
@@ -644,10 +644,10 @@ async fn dmn_reconcile_applies_signed_evidence_to_contradicting_beliefs() {
         "reconcile log must report a winner (not 'unresolved'): {log:?}",
     );
 
-    let conf_a_after = memarc.explain_belief(belief_a_text, &mind_types::AccessContext::Operator).await.unwrap()
+    let conf_a_after = memarc.explain_belief(belief_a_text, &mind_types::AccessContext::operator_audit()).await.unwrap()
         .map(|(b, _)| b.confidence)
         .expect("belief should still exist after reconcile");
-    let conf_b_after = memarc.explain_belief(belief_b_text, &mind_types::AccessContext::Operator).await.unwrap()
+    let conf_b_after = memarc.explain_belief(belief_b_text, &mind_types::AccessContext::operator_audit()).await.unwrap()
         .map(|(b, _)| b.confidence)
         .expect("belief should still exist after reconcile");
 
@@ -737,7 +737,7 @@ async fn agent_loop_reasons_then_answers() {
     let r = conv.agent_loop("hi", &TurnIdentity::primary()).await.unwrap();
     assert!(r.contains("Pranab"), "agent should return its answer: {r}");
     // and the turn is recorded in the transcript
-    let recent = memarc.recent_messages(4, &mind_types::AccessContext::Operator).await.unwrap();
+    let recent = memarc.recent_messages(4, &mind_types::AccessContext::operator_audit()).await.unwrap();
     assert!(recent.iter().any(|(role, t)| role == "assistant" && t.contains("Pranab")));
 }
 
@@ -981,15 +981,15 @@ async fn news_plugin_headlines_and_tracking() {
     }])));
     // on-demand quick headlines on a topic (`news <topic>` is now the in-depth brief; `news
     // headlines <topic>` is the fast list)
-    let h = conv.cli_dispatch("news headlines geopolitics", &mind_types::AccessContext::Operator).await;
+    let h = conv.cli_dispatch("news headlines geopolitics", &mind_types::AccessContext::operator_audit()).await;
     assert!(h.contains("Talks stall in Geneva") && h.contains("Reuters"), "headlines: {h}");
     // tracking: add → list → remove
-    assert!(conv.cli_dispatch("news track geopolitics", &mind_types::AccessContext::Operator).await.contains("Tracking"));
-    assert!(conv.cli_dispatch("news tracking", &mind_types::AccessContext::Operator).await.contains("geopolitics"), "tracked list");
+    assert!(conv.cli_dispatch("news track geopolitics", &mind_types::AccessContext::operator_audit()).await.contains("Tracking"));
+    assert!(conv.cli_dispatch("news tracking", &mind_types::AccessContext::operator_audit()).await.contains("geopolitics"), "tracked list");
     // digest watch primes silently on first call, then dedups identical items (no repeat spam)
     let _ = conv.news_digests_due().await;
     assert!(conv.news_digests_due().await.is_empty(), "deduped after prime");
-    assert!(conv.cli_dispatch("news untrack geopolitics", &mind_types::AccessContext::Operator).await.contains("Stopped"));
+    assert!(conv.cli_dispatch("news untrack geopolitics", &mind_types::AccessContext::operator_audit()).await.contains("Stopped"));
 }
 
 #[test]
@@ -1039,10 +1039,10 @@ async fn markets_and_translate_route_via_cli() {
     let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
         .with_markets(Arc::new(ScriptedMarkets { crypto: "💰 Bitcoin (BTC): $67,000 ▲2%".into(), stock: "📈 Apple (AAPL): $211".into(), price: 200.0 }))
         .with_translator(Arc::new(ScriptedTranslator { text: "🌐 (en→fr) bonjour".into() }));
-    assert!(conv.cli_dispatch("crypto btc", &mind_types::AccessContext::Operator).await.contains("Bitcoin"), "crypto routes");
-    assert!(conv.cli_dispatch("stock AAPL", &mind_types::AccessContext::Operator).await.contains("Apple"), "stock routes");
-    assert!(conv.cli_dispatch("translate french good morning", &mind_types::AccessContext::Operator).await.contains("bonjour"), "translate routes (first token = lang)");
-    assert!(conv.cli_dispatch("translate french", &mind_types::AccessContext::Operator).await.contains("Usage"), "translate without text shows usage");
+    assert!(conv.cli_dispatch("crypto btc", &mind_types::AccessContext::operator_audit()).await.contains("Bitcoin"), "crypto routes");
+    assert!(conv.cli_dispatch("stock AAPL", &mind_types::AccessContext::operator_audit()).await.contains("Apple"), "stock routes");
+    assert!(conv.cli_dispatch("translate french good morning", &mind_types::AccessContext::operator_audit()).await.contains("bonjour"), "translate routes (first token = lang)");
+    assert!(conv.cli_dispatch("translate french", &mind_types::AccessContext::operator_audit()).await.contains("Usage"), "translate without text shows usage");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1052,9 +1052,9 @@ async fn weather_and_wiki_route_via_cli() {
     let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
         .with_weather(Arc::new(ScriptedWeather::new("🌦 London: rain, 14°C")))
         .with_wiki(Arc::new(ScriptedWiki::new("📖 Rust\nA systems language.")));
-    assert!(conv.cli_dispatch("weather london", &mind_types::AccessContext::Operator).await.contains("London: rain"), "weather routes");
-    assert!(conv.cli_dispatch("wiki rust language", &mind_types::AccessContext::Operator).await.contains("systems language"), "wiki routes");
-    assert!(conv.cli_dispatch("calc 6*7", &mind_types::AccessContext::Operator).await.contains("= 42"), "calc routes");
+    assert!(conv.cli_dispatch("weather london", &mind_types::AccessContext::operator_audit()).await.contains("London: rain"), "weather routes");
+    assert!(conv.cli_dispatch("wiki rust language", &mind_types::AccessContext::operator_audit()).await.contains("systems language"), "wiki routes");
+    assert!(conv.cli_dispatch("calc 6*7", &mind_types::AccessContext::operator_audit()).await.contains("= 42"), "calc routes");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1071,7 +1071,7 @@ async fn search_plugin_routes_and_renders() {
         url: "https://rust-lang.org".into(),
         snippet: "a guide".into(),
     }])));
-    let out = conv.cli_dispatch("search rust async", &mind_types::AccessContext::Operator).await;
+    let out = conv.cli_dispatch("search rust async", &mind_types::AccessContext::operator_audit()).await;
     assert!(out.contains("Rust async") && out.contains("https://rust-lang.org"), "search renders results: {out}");
     // not configured → clear message, no confabulation
     let conv2 = ConversationEngine::new(
@@ -1252,12 +1252,12 @@ async fn cli_dispatch_routes_plugins_and_chat() {
         HaEntity { entity_id: "person.pranab".into(), domain: "person".into(), state: "home".into(), friendly_name: "Pranab".into(), attributes: serde_json::json!({}) },
     ])));
     // the home PLUGIN command routes to the HA tool
-    assert!(conv.cli_dispatch("home", &mind_types::AccessContext::Operator).await.contains("Pranab: home"), "home plugin → HA tool");
+    assert!(conv.cli_dispatch("home", &mind_types::AccessContext::operator_audit()).await.contains("Pranab: home"), "home plugin → HA tool");
     // `commands` lists only WIRED plugins — home present, github absent (present-plugin → live-command)
-    let cmds = conv.cli_dispatch("commands", &mind_types::AccessContext::Operator).await;
+    let cmds = conv.cli_dispatch("commands", &mind_types::AccessContext::operator_audit()).await;
     assert!(cmds.contains("ym home") && !cmds.contains("ym github"), "lists only wired plugins: {cmds}");
     // unknown → chat fallback (doesn't error)
-    assert!(!conv.cli_dispatch("hey what's up", &mind_types::AccessContext::Operator).await.is_empty(), "unknown → chat");
+    assert!(!conv.cli_dispatch("hey what's up", &mind_types::AccessContext::operator_audit()).await.is_empty(), "unknown → chat");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2286,7 +2286,7 @@ async fn multi_word_cli_verbs_reach_their_handlers() {
     let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
     let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
-    let ctx = mind_types::AccessContext::Operator;
+    let ctx = mind_types::AccessContext::operator_audit();
 
     // handoff_write: args arrive pipe-separated after the verb.
     let r = conv
@@ -2533,7 +2533,7 @@ async fn dropped_scratch_never_touches_memory() {
     let out = conv.jobs_report_cmd("drop j2").await;
     assert!(out.contains("nothing entered memory"), "{out}");
     let ws = mem
-        .hydrate_working_set("junk", &mind_types::AccessContext::Operator)
+        .hydrate_working_set("junk", &mind_types::AccessContext::operator_audit())
         .await
         .expect("working set");
     assert!(
@@ -2607,7 +2607,7 @@ async fn capability_registry_routes_finance_and_gates_disabled() {
     let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(memarc, pool, "JARVIS");
-    let ctx = mind_types::AccessContext::Operator;
+    let ctx = mind_types::AccessContext::operator_audit();
     // the ym command surface routes through the registry into the same finance behavior
     conv.cli_dispatch("sub add Netflix 15.99 monthly", &ctx).await;
     let money = conv.cli_dispatch("money", &ctx).await;
@@ -2653,7 +2653,7 @@ async fn certification_verdicts_land_on_the_trust_ledger() {
     let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS").with_attestor(ledger.clone());
-    let ctx = mind_types::AccessContext::Operator;
+    let ctx = mind_types::AccessContext::operator_audit();
 
     // A certification lands as a witnessed claim, and the receipt says so.
     let good = r#"{"pack":"ledgered","title":"L","skills":[{"name":"a","instructions":"do a"}],"evals":[{"kind":"skill_exists","name":"a"}]}"#;
@@ -2702,7 +2702,7 @@ async fn pack_lifecycle_install_certify_demote_draft() {
     }
     let engine = Arc::new(RecipeEngine::new(pool.clone(), Arc::new(NoHost), "JARVIS"));
     let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS").with_recipes(engine);
-    let ctx = mind_types::AccessContext::Operator;
+    let ctx = mind_types::AccessContext::operator_audit();
 
     // 1. INSTALL: a pack with an existence eval + a core-tool eval certifies and turns ON.
     let good = r#"{"pack":"tripwatch","title":"Trip watcher","skills":[{"name":"fare check","summary":"check a fare","instructions":"Given a fare, say if it is a deal."}],"evals":[{"kind":"skill_exists","name":"fare check"},{"kind":"tool_contains","tool":"calc","args":{"expression":"2+2"},"expect":"4"}]}"#;

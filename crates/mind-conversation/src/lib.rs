@@ -42,6 +42,7 @@ mod news;
 mod onboarding;
 mod narrative;
 mod pace_ledger;
+mod reflex;
 pub mod pack;
 pub mod scoreboard;
 mod people;
@@ -4541,7 +4542,9 @@ impl ConversationEngine {
                 // Word-boundary match so a short needle (a name) can't purge a belief that merely
                 // contains it as a substring (e.g. "ana" inside "banana" or a parenthetical alias).
                 if word_boundary_contains(&r.item.text.to_lowercase(), &needle) {
-                    if self.memory.forget(&r.item.id).await.unwrap_or(false) {
+                    // Lifecycle: this path IS the privacy right — the tombstone must say so,
+                    // forever distinguishable from a dedup or hygiene pass.
+                    if self.memory.forget_with_reason(&r.item.id, "user-deleted").await.unwrap_or(false) {
                         forgotten += 1;
                         hit = true;
                     }
@@ -5155,6 +5158,34 @@ impl ConversationEngine {
             // the self-build pipeline's own report.
             "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
             "fitness" => self.fitness_report().await,
+            // Belief lifecycle: the tombstone ledger — what was forgotten, and why.
+            "tombstones" | "forgotten" => match self.memory.belief_tombstones().await {
+                Ok(ts) if ts.is_empty() => "No tombstones — nothing has been forgotten with a recorded reason yet.".into(),
+                Ok(ts) => {
+                    let mut out = String::from("TOMBSTONES (what was forgotten, and why — the reason outlives the row):\n");
+                    for (prop, reason, ts_ms) in ts.iter().take(30) {
+                        let when = chrono::DateTime::from_timestamp_millis(*ts_ms as i64)
+                            .map(|d| d.format("%Y-%m-%d").to_string())
+                            .unwrap_or_default();
+                        out.push_str(&format!("- [{reason}] {when} · \"{}\"\n", prop.chars().take(100).collect::<String>()));
+                    }
+                    out
+                }
+                Err(e) => format!("(tombstones error: {e})"),
+            },
+            // The Reflex Arc: drafts, gate states, and fixture attachment.
+            "reflex" => {
+                let mut it = rest.splitn(3, char::is_whitespace);
+                match (it.next().unwrap_or(""), it.next(), it.next()) {
+                    ("", _, _) | ("list", _, _) => self.reflex_report().await,
+                    ("now", _, _) => self.reflex_tick().await,
+                    ("fixture", Some(id), Some(fix)) => match id.parse::<u64>() {
+                        Ok(id) => self.reflex_attach_fixture(id, fix).await,
+                        Err(_) => "Usage: ym reflex fixture <id> <test path>".into(),
+                    },
+                    _ => "Usage: ym reflex · ym reflex now · ym reflex fixture <id> <test path>".into(),
+                }
+            }
             // The nightly self-record: `ym narrative` reads the latest; `now` re-renders.
             "narrative" | "selfrecord" => {
                 if rest.trim() == "now" {

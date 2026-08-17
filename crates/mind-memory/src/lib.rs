@@ -58,7 +58,10 @@ enum Cmd {
     Conflicts { reply: Reply<Vec<Contradiction>> },
     Explain { statement: String, reply: Reply<Option<(Belief, Vec<MEvidence>)>> },
     Relate { src: String, dst: String, rel: String, weight: f64, reply: Reply<()> },
-    Forget { statement: String, reply: Reply<bool> },
+    // Belief lifecycle: every tombstone carries a reason ("user-deleted" must stay
+    // distinguishable from hygiene forever); None = legacy caller → "unspecified".
+    Forget { statement: String, reason: Option<String>, reply: Reply<bool> },
+    Tombstones { reply: Reply<Vec<(String, String, u64)>> },
     Export { reply: Reply<String> },
     // cheap task tier (plain node CRUD — no cognitive ops)
     AddTask { description: String, priority: String, due_ms: Option<u64>, reply: Reply<Task> },
@@ -1144,6 +1147,39 @@ fn list_purpose_grants(db: &YantrikDB) -> std::result::Result<Vec<mind_types::Pu
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Belief-lifecycle storage: the tombstone ledger. One row per forgotten
+/// proposition, carrying WHY — readable after the fact, unlike the row it
+/// marks, so "user-deleted" stays forever distinguishable from dedup/hygiene.
+fn ensure_tombstone_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_belief_tombstone (proposition TEXT PRIMARY KEY, reason TEXT NOT NULL, ts_ms INTEGER NOT NULL)",
+        [],
+    );
+}
+
+fn record_tombstone(db: &YantrikDB, proposition: &str, reason: &str) -> std::result::Result<(), String> {
+    let ts = (now_secs() * 1000.0) as i64;
+    db.conn()
+        .execute(
+            "INSERT INTO mind_belief_tombstone (proposition, reason, ts_ms) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(proposition) DO UPDATE SET reason=excluded.reason, ts_ms=excluded.ts_ms",
+            rusqlite::params![proposition, reason, ts],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn list_tombstones(db: &YantrikDB) -> std::result::Result<Vec<(String, String, u64)>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT proposition, reason, ts_ms FROM mind_belief_tombstone ORDER BY ts_ms DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64)))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 /// The per-read purpose lens (Purpose Gate v1): resolves each item's data OWNER
 /// (from its scope tag — a fact that entered through X's private channel is X's)
 /// and SENSITIVITY (explicit override row, else the deterministic classifier),
@@ -1738,6 +1774,7 @@ impl MemoryHandle {
                 ensure_belief_scope_table(&db);
                 ensure_belief_evidence_version_table(&db);
                 ensure_purpose_tables(&db);
+                ensure_tombstone_table(&db);
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
@@ -1836,12 +1873,22 @@ impl MemoryHandle {
                         Cmd::Relate { src, dst, rel, weight, reply } => {
                             let _ = reply.send(relate(&db, &src, &dst, &rel, weight));
                         }
-                        Cmd::Forget { statement, reply } => {
+                        Cmd::Forget { statement, reason, reply } => {
                             let r = match find_belief(&db, &statement) {
-                                Some(n) => db.tombstone_cognitive_node(n.id).map_err(|e| e.to_string()),
+                                Some(n) => {
+                                    let r = db.tombstone_cognitive_node(n.id).map_err(|e| e.to_string());
+                                    if matches!(r, Ok(true)) {
+                                        // The reason survives the row it marks — that is the point.
+                                        let _ = record_tombstone(&db, &statement, reason.as_deref().unwrap_or("unspecified"));
+                                    }
+                                    r
+                                }
                                 None => Ok(false),
                             };
                             let _ = reply.send(r);
+                        }
+                        Cmd::Tombstones { reply } => {
+                            let _ = reply.send(list_tombstones(&db));
                         }
                         Cmd::Export { reply } => {
                             let beliefs: Vec<Belief> = all_beliefs(&db).iter().map(to_belief_dto).collect();
@@ -2459,16 +2506,22 @@ impl MemoryFacade for MemoryHandle {
         let preferences = if owner_view { self.list_preferences().await.unwrap_or_default() } else { vec![] };
         let beliefs: Vec<Belief> = recalled
             .iter()
-            .map(|r| Belief {
-                id: r.item.id.clone(),
-                statement: r.item.text.clone(),
-                confidence: r.item.confidence,
-                certainty: r.item.certainty,
-                provenance: "recalled".into(),
-                evidence_count: r.item.evidence_count,
-                updated_ms: r.item.updated_ms,
-                status: "active".into(),
-                uncertainty_reason: None,
+            .map(|r| {
+                // Lifecycle: a belief an open conflict names is CONTRADICTED,
+                // and a reflection that hides that is reflecting a fantasy.
+                let contradicted = open_conflicts.iter().any(|c| c.belief_a == r.item.text || c.belief_b == r.item.text);
+                let status = if contradicted { mind_types::BeliefStatus::Contradicted } else { mind_types::BeliefStatus::Active };
+                Belief {
+                    id: r.item.id.clone(),
+                    statement: r.item.text.clone(),
+                    confidence: r.item.confidence,
+                    certainty: r.item.certainty,
+                    provenance: "recalled".into(),
+                    evidence_count: r.item.evidence_count,
+                    updated_ms: r.item.updated_ms,
+                    status: status.as_tag().into(),
+                    uncertainty_reason: None,
+                }
             })
             .collect();
         Ok(Reflection {
@@ -2580,6 +2633,13 @@ impl MemoryFacade for MemoryHandle {
                 ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
             } else {
                 let reason = classify_uncertainty(original_conf, eff, r.item.evidence_count, &r.item.text, &open);
+                // Lifecycle: the status is DERIVED here, where the context to derive
+                // it exists — the same rows that produced the uncertainty reason.
+                let status = match reason {
+                    UncertaintyReason::Contradicted => mind_types::BeliefStatus::Contradicted,
+                    UncertaintyReason::Decayed => mind_types::BeliefStatus::Stale,
+                    UncertaintyReason::Sparse | UncertaintyReason::LowPrior => mind_types::BeliefStatus::Active,
+                };
                 ws.uncertain_beliefs.push(Belief {
                     id: r.item.id.clone(),
                     statement: r.item.text.clone(),
@@ -2588,7 +2648,7 @@ impl MemoryFacade for MemoryHandle {
                     provenance: "recalled".into(),
                     evidence_count: r.item.evidence_count,
                     updated_ms: r.item.updated_ms,
-                    status: "active".into(),
+                    status: status.as_tag().into(),
                     uncertainty_reason: Some(reason),
                 });
             }
@@ -2624,7 +2684,16 @@ impl MemoryFacade for MemoryHandle {
 
     async fn forget(&self, id: &str) -> Result<bool> {
         let statement = id.to_string();
-        self.call(|reply| Cmd::Forget { statement, reply }).await
+        self.call(|reply| Cmd::Forget { statement, reason: None, reply }).await
+    }
+
+    async fn forget_with_reason(&self, id: &str, reason: &str) -> Result<bool> {
+        let (statement, reason) = (id.to_string(), Some(reason.to_string()));
+        self.call(|reply| Cmd::Forget { statement, reason, reply }).await
+    }
+
+    async fn belief_tombstones(&self) -> Result<Vec<(String, String, u64)>> {
+        self.call(|reply| Cmd::Tombstones { reply }).await
     }
 
     async fn export(&self) -> Result<String> {
@@ -3167,6 +3236,42 @@ mod tests {
         assert!(rs.iter().any(|r| r.method == "beliefs_matching" && r.detail.contains("dinner")));
         assert_eq!(receipts::verify_ledger(&ledger_path), Ok(rs.len()), "the receipt chain must verify");
         let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    /// Belief lifecycle (organ #5): a tombstone carries its reason and the reason
+    /// outlives the row — "user-deleted" stays forever distinguishable from
+    /// hygiene — and statuses are DERIVED where the deriving context exists
+    /// (a contradicted belief says so in hydration and reflection).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_tombstones_carry_reasons_and_statuses_are_derived() {
+        use mind_types::MemoryFacade;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let a = "The dentist moved to Elm Street";
+        let b = "The dentist stayed on Oak Avenue";
+        for s in [a, b] {
+            mem.remember_as_belief(BeliefAssertion {
+                statement: s.into(), polarity: 1.0, weight: 2.0, source_event: Some("t".into()), provenance: "told".into(),
+            }).await.unwrap();
+        }
+        mem.relate(a, b, "contradicts", 0.9).await.unwrap();
+
+        // Derived status: reflection marks the conflicted side "contradicted".
+        let ctx = mind_types::AccessContext::operator_audit();
+        let refl = mem.reflect("dentist street", &ctx).await.unwrap();
+        let conflicted: Vec<&Belief> = refl.beliefs.iter().filter(|x| x.statement == a || x.statement == b).collect();
+        assert!(!conflicted.is_empty(), "the conflicted beliefs must reflect");
+        assert!(conflicted.iter().all(|x| x.status == "contradicted"), "reflection must not report a conflicted belief as active: {conflicted:?}");
+
+        // Tombstone with reason: the privacy path records "user-deleted"; a plain
+        // forget records "unspecified" — and both survive as readable rows.
+        assert!(mem.forget_with_reason(a, "user-deleted").await.unwrap());
+        assert!(mem.forget(b).await.unwrap());
+        let ts = mem.belief_tombstones().await.unwrap();
+        assert!(ts.iter().any(|(p, r, _)| p == a && r == "user-deleted"), "{ts:?}");
+        assert!(ts.iter().any(|(p, r, _)| p == b && r == "unspecified"), "{ts:?}");
+        // The rows themselves are gone from recall.
+        let hits = mem.beliefs_matching("dentist", &ctx).await.unwrap();
+        assert!(hits.is_empty(), "tombstoned beliefs must not recall: {hits:?}");
     }
 
     /// Purpose Gate v1 red-team corpus — the vision's own acceptance metric:

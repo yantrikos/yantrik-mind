@@ -1725,6 +1725,19 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             }
         }
 
+        // REFLEX ARC: correction clusters draft gated self-build goals; only a
+        // draft with an attached failing fixture ever reaches the build queue
+        // (no repro, no build). Silent — `ym reflex` shows the drafts.
+        {
+            if conv.reflex_due().await {
+                let conv2 = conv.clone();
+                tokio::spawn(async move {
+                    let report = conv2.reflex_tick().await;
+                    eprintln!("[reflex] {}", report.replace('\n', " | "));
+                });
+            }
+        }
+
         // WORKOPS: paced field-scan of the owner's actual projects (registry-driven, not
         // conversation-derived). Speaks only when the field moved. Detached; treasury-gated.
         {

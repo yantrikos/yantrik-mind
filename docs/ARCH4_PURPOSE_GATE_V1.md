@@ -87,8 +87,24 @@ isolation survives grants. Plus the pure-policy suite in `mind-types::purpose::t
    one policy in force, one forbidden self-claim), persisted with its measured basis, own
    per-date gate in the poll loop, recalled every turn via the telemetry block. `ym narrative`.
    (The weekly `self_report` prose pass remains a letter to the operator, not the self-record.)
-4. **Reflex Arc** — corrections (not just regrets) cluster into `mind-spec::GoalSpec`-typed
-   self-build goals behind the six-condition gate (repro fixture, named module, predicted metric,
-   rollback, post-deploy measurement).
-5. **Belief lifecycle** — wire yantrikdb's `RecordStatus`/`tombstone_reason` through the facade;
-   `Belief.status` is currently hardcoded `"active"`.
+4. **Reflex Arc** — BUILT (`mind-conversation/src/reflex.rs`): correction clusters (deterministic
+   informative-word clustering over the ledger's corrected rows — the half the regret wire never
+   covered) draft `ReflexDraft`s whose six conditions are FIELDS, so the gate is structural: four
+   conditions derive from the cluster (module, predicted metric with baseline, rollback,
+   post-deploy measurement); the fixture is not derivable and must be attached
+   (`ym reflex fixture <id> <test>`) — **no repro, no build** is a hard hold, and held drafts sit
+   visibly in `ym reflex`. Only a fully-open gate writes the single-line contract into
+   `selfbuild-goals.txt` (bounded, dedup-by-subject). Nightly tick, own date key.
+   *Honest v1 limits:* the fixture is named at attach time and verified red by the builder per the
+   goal line, not by the arc itself; goals stay text lines (the bash pipeline is line-oriented) —
+   `mind-spec::GoalSpec` adoption is the pipeline's own refactor.
+5. **Belief lifecycle** — BUILT (typed states + reasons): `BeliefStatus`
+   (active/stale/contradicted/superseded/quarantined/user-deleted) in mind-types; statuses are
+   DERIVED where the deriving context exists (hydration maps uncertainty causes → stale/
+   contradicted; reflection marks conflict members); every tombstone carries a REASON that
+   outlives the row (`mind_belief_tombstone`, `forget_with_reason`, `ym tombstones`) — the
+   `ym forget-belief` privacy path stamps "user-deleted", forever distinguishable from hygiene.
+   *Honest v1 limits:* `superseded`/`quarantined` are representable but no producer sets them yet
+   (supersession needs the research-revision flow wired; quarantine stays human-only per the
+   immune doctrine — its flags remain advisory); `beliefs_matching` still returns "active"
+   statuses (deriving there would cost a conflicts round-trip per read).

@@ -21,8 +21,9 @@ pub use error::{AuthError, MemoryError, MindError, Result};
 pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
 pub use event::{Event, EventBody, EventSource};
 pub use memory::{
-    AccessContext, Belief, BeliefAssertion, Contradiction, Evidence, MemoryFacade, MemoryItem, MemoryKind,
-    Recalled, RecallQuery, Reflection, Scope, Skill, Tension, TensionKind, UncertaintyReason, WorkingSet, PRIMARY,
+    AccessContext, Belief, BeliefAssertion, BeliefStatus, Contradiction, Evidence, MemoryFacade, MemoryItem,
+    MemoryKind, Recalled, RecallQuery, Reflection, Scope, Skill, Tension, TensionKind, UncertaintyReason,
+    WorkingSet, PRIMARY,
 };
 pub use candidate::{Candidate, CandidateKind, ScoreAxes};
 pub use action::{

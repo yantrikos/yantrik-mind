@@ -36,6 +36,49 @@ pub enum UncertaintyReason {
     LowPrior,
 }
 
+/// The belief lifecycle (One Mind vision, organ #5) — the states a belief can
+/// occupy, replacing "deliberate forgetting" with typed transitions. Doctrine:
+/// forgetting is a privacy right first, epistemic hygiene second, character
+/// optimization never — and "acted-against" is NOT evidence of falsehood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BeliefStatus {
+    Active,
+    /// Confidence has decayed materially since last confirmation.
+    Stale,
+    /// An open contradiction names this belief on either side.
+    Contradicted,
+    /// A newer revision replaced it (the old row keeps its history).
+    Superseded,
+    /// Flagged out of active use pending human or new-evidence resolution —
+    /// never set by the immune critic alone (its flags stay advisory).
+    Quarantined,
+    /// The user asked for it to be gone. Tombstoned with that reason.
+    UserDeleted,
+}
+
+impl BeliefStatus {
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            BeliefStatus::Active => "active",
+            BeliefStatus::Stale => "stale",
+            BeliefStatus::Contradicted => "contradicted",
+            BeliefStatus::Superseded => "superseded",
+            BeliefStatus::Quarantined => "quarantined",
+            BeliefStatus::UserDeleted => "user-deleted",
+        }
+    }
+    pub fn parse(tag: &str) -> BeliefStatus {
+        match tag {
+            "stale" => BeliefStatus::Stale,
+            "contradicted" => BeliefStatus::Contradicted,
+            "superseded" => BeliefStatus::Superseded,
+            "quarantined" => BeliefStatus::Quarantined,
+            "user-deleted" => BeliefStatus::UserDeleted,
+            _ => BeliefStatus::Active,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Belief {
     pub id: String,
@@ -45,7 +88,9 @@ pub struct Belief {
     pub provenance: String, // observed/inferred/told/...
     pub evidence_count: u32,
     pub updated_ms: UnixMillis,
-    pub status: String, // active/contradicted/...
+    /// A `BeliefStatus` tag. Derived where the context to derive it exists
+    /// (hydration and reflection set stale/contradicted); "active" elsewhere.
+    pub status: String,
     /// Set when this belief lives in `WorkingSet::uncertain_beliefs`; None for all other uses.
     #[serde(default)]
     pub uncertainty_reason: Option<UncertaintyReason>,
@@ -428,6 +473,18 @@ pub trait MemoryFacade: Send + Sync {
     async fn consolidate(&self) -> Result<usize>;
     /// Privacy: forget a memory by id.
     async fn forget(&self, id: &str) -> Result<bool>;
+    /// Forget WITH the reason on the tombstone — the lifecycle-honest path.
+    /// A deletion whose reason is lost is indistinguishable from a dedup;
+    /// "user-deleted" must stay distinguishable forever. Default: delegates
+    /// to `forget` (reason dropped — real backends override).
+    async fn forget_with_reason(&self, id: &str, _reason: &str) -> Result<bool> {
+        self.forget(id).await
+    }
+    /// Every tombstone on record: (proposition, reason, ts_ms). The audit
+    /// story for deletions — readable after the fact, unlike the row it marks.
+    async fn belief_tombstones(&self) -> Result<Vec<(String, String, u64)>> {
+        Ok(vec![])
+    }
     /// Privacy: export everything (JSON). OPERATOR-INTERNAL: only the owner's eval/backup paths
     /// call this — it must never be wired to a channel/command/tool without an operator check.
     async fn export(&self) -> Result<String>;

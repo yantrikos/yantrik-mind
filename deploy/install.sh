@@ -47,6 +47,28 @@ apt-get update -qq
 apt-get install -y -qq ca-certificates libssl3 qrencode >/dev/null 2>&1 || apt-get install -y -qq ca-certificates openssl qrencode >/dev/null 2>&1 || true
 ok "runtime libraries ready"
 
+# ---- 1b. senses: the media pipeline's own dependencies ----------------------
+# A capability that discovers its tools missing at RUNTIME is a capability that
+# lies about itself the first time it is used. ffmpeg decodes and samples;
+# yt-dlp reaches media behind a URL. Both are declared here so a rebuilt host
+# comes back with its ears and eyes, rather than looking installed and going
+# quiet. Neither is fatal — the mind degrades honestly without them and says
+# which one is absent — so a failed install warns and continues.
+say "Installing media senses (ffmpeg, yt-dlp)"
+apt-get install -y -qq ffmpeg >/dev/null 2>&1 || printf "  ${c_err}!${c_off} ffmpeg install failed — audio/video will report itself unavailable.\n"
+if command -v pip3 >/dev/null 2>&1; then
+  # pip over apt deliberately: YouTube changes shape often and the distro package
+  # goes stale within weeks, which shows up as "could not read that URL".
+  pip3 install --break-system-packages -q -U yt-dlp >/dev/null 2>&1 \
+    || pip3 install -q -U yt-dlp >/dev/null 2>&1 \
+    || printf "  ${c_err}!${c_off} yt-dlp install failed — media links will report itself unavailable.\n"
+else
+  apt-get install -y -qq yt-dlp >/dev/null 2>&1 || printf "  ${c_err}!${c_off} no pip3 and no yt-dlp package — media links will report itself unavailable.\n"
+fi
+command -v ffmpeg >/dev/null 2>&1 && command -v yt-dlp >/dev/null 2>&1 \
+  && ok "media senses ready ($(ffmpeg -version 2>/dev/null | head -1 | cut -d' ' -f3), yt-dlp $(yt-dlp --version 2>/dev/null))" \
+  || printf "  ${c_err}!${c_off} media senses incomplete — the mind will say so when asked to watch something.\n"
+
 # ---- 2. the binary ----------------------------------------------------------
 say "Placing the binary"
 mkdir -p "$APP"

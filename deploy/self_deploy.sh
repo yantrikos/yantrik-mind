@@ -40,6 +40,21 @@ fi
 git -C "$COMPANION" fetch -q origin main && git -C "$COMPANION" reset -q --hard origin/main
 echo "==> self-deploy: companion @ $(git -C "$COMPANION" rev-parse --short HEAD)"
 
+# Senses: the media pipeline's binaries, self-healed like the companion tree above.
+# A running host must not quietly lose its ears because a capability's dependency was
+# installed by hand once. Best-effort — the mind degrades honestly and names what is
+# missing, so a failure here must never abort a deploy that is otherwise good.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "==> self-deploy: installing ffmpeg"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1 || echo "    (ffmpeg install failed — audio/video will report itself unavailable)"
+fi
+if ! command -v yt-dlp >/dev/null 2>&1; then
+  echo "==> self-deploy: installing yt-dlp"
+  pip3 install --break-system-packages -q -U yt-dlp >/dev/null 2>&1 || pip3 install -q -U yt-dlp >/dev/null 2>&1 \
+    || echo "    (yt-dlp install failed — media links will report itself unavailable)"
+fi
+echo "==> self-deploy: senses ffmpeg=$(command -v ffmpeg >/dev/null 2>&1 && echo yes || echo NO) yt-dlp=$(command -v yt-dlp >/dev/null 2>&1 && echo yes || echo NO)"
+
 echo "==> self-deploy: building main @ $COMMIT"
 if ! cargo build --release -p mind-core 2>&1 | tail -3; then
   echo "$(date -u +%FT%TZ) | deploy | ABORT-BUILD | $COMMIT" >> "$EVLOG"

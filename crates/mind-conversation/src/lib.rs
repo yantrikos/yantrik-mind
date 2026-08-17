@@ -5192,6 +5192,12 @@ impl ConversationEngine {
                 let (url, question) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), ""));
                 self.watch_media(url, question).await
             }
+            // `ym learn-watch <url> [focus]` — watch, then reconcile it into memory: what was
+            // OBSERVED becomes a belief, what was CLAIMED becomes a graded prediction.
+            "learn-watch" | "study-video" if !rest.trim().is_empty() => {
+                let (url, focus) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), ""));
+                self.learn_from_watch(url, focus).await
+            }
             "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
             "fitness" => self.fitness_report().await,
             // Belief lifecycle: the tombstone ledger — what was forgotten, and why.

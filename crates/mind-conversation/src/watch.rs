@@ -178,6 +178,146 @@ impl super::ConversationEngine {
         let _ = self.memory.remember_observation(&note, mind_types::ProvenanceCategory::ToolResult).await;
         out
     }
+
+    /// LEARN from what was watched — the step that turns perception into memory that thinks.
+    ///
+    /// `watch_media` records a single observation; observations are never beliefs, so a thing
+    /// watched ten times was no better established than a thing watched once. This routes what was
+    /// perceived through the same reconciler research already uses, with one addition that matters
+    /// more here than anywhere else in the system:
+    ///
+    /// **What was OBSERVED becomes a belief. What was CLAIMED becomes a prediction.**
+    ///
+    /// A broadcast's own description of itself is checkable and can be believed. A trader saying
+    /// "this breaks 110 today", or that some setup works, is not knowledge — it is an assertion
+    /// whose truth arrives later. Absorbing those as beliefs is precisely how watching hours of
+    /// market television turns into confident folklore, because the winners are narrated and the
+    /// losers are silent. Sent to the judgment ledger instead, each one gets a deadline and a
+    /// grade, so the mind ends up knowing whether this source is worth believing rather than
+    /// merely believing it. That is the difference between learning from a stream and being
+    /// trained by one.
+    ///
+    /// Watched facts are also capped in weight: seeing something once on a broadcast is weaker
+    /// evidence than being told it, and repeat viewings accumulate Bayesian evidence on their own.
+    pub async fn learn_from_watch(&self, url: &str, focus: &str) -> String {
+        let perception = self.watch_media(url, focus).await;
+        if perception.contains("I perceived nothing") {
+            return format!("{perception}\n\n(nothing perceived, so nothing learned)");
+        }
+        let seen: String = perception.chars().take(6000).collect();
+        let priors = self
+            .memory
+            .beliefs_matching_n("trading market stream broadcast", 12, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|b| format!("- {} ({:.2})", b.statement, b.confidence))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prior_list = if priors.is_empty() { "(none yet)".to_string() } else { priors };
+
+        let prompt = format!(
+            "You WATCHED a segment of a live broadcast. Below is what was seen on screen and heard, with timestamps.\n\n\
+             PRIOR BELIEFS:\n{prior_list}\n\nWHAT YOU PERCEIVED:\n{seen}\n\n\
+             Separate what you perceived into two kinds, and be strict about the difference:\n\
+             1. FACTS — durable, checkable, third-person statements about the world or about this source that were TRUE AT THE TIME OF WATCHING (e.g. \"TraderTV Live broadcasts weekdays 8:00-16:00 ET with two traders trading real money\"). A price printed on screen at a moment is NOT durable — skip it.\n\
+             2. CLAIMS — forward-looking or strategy assertions that someone MADE and that could later be shown right or wrong (e.g. \"CRWV breaks 110 today\", \"buying the first pullback after a gap works\").\n\
+             NEVER put a prediction, an opinion, or a trading strategy in facts. A fact was true when you watched it; a claim might be true later.\n\
+             Output ONLY JSON:\n\
+             {{\"facts\":[{{\"statement\":\"...\",\"certainty\":0.0-1.0}}], \
+             \"claims\":[{{\"claim\":\"...\",\"confidence\":0.0-1.0,\"resolve_in_days\":1-30}}], \
+             \"revisions\":[{{\"old\":\"<a prior belief above now contradicted>\",\"new\":\"...\",\"certainty\":0.0-1.0}}]}}\n\
+             Empty arrays if none."
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You separate what was observed from what was merely asserted. Output ONLY the JSON object."),
+            ChatMessage::user(&prompt),
+        ];
+        // PRIVATE-GROUNDED: the perception may carry household content, so it takes the private lane.
+        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("{perception}\n\n(could not reconcile what I saw: {e})"),
+        };
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
+        let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+        let obj = match (body.find('{'), body.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &body[s..=e],
+            _ => "{}",
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+
+        let mut learned: Vec<String> = Vec::new();
+        let mut logged: Vec<String> = Vec::new();
+
+        for f in v.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let stmt = f.get("statement").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if stmt.len() < 8 {
+                continue;
+            }
+            // Capped: one viewing of a broadcast is weaker than being told something. Repeat
+            // viewings accumulate their own evidence, which is the point.
+            let cert = f.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.1, 0.6);
+            if self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: stmt.clone(),
+                    polarity: 1.0,
+                    weight: 0.4 + cert,
+                    source_event: Some("watched".into()),
+                    provenance: "watched".into(),
+                })
+                .await
+                .is_ok()
+            {
+                learned.push(stmt);
+            }
+        }
+        for r in v.get("revisions").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let old = r.get("old").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let new = r.get("new").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if old.len() < 8 || new.len() < 8 {
+                continue;
+            }
+            let w = 0.4 + r.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.1, 0.6);
+            let _ = self.memory.remember_as_belief(BeliefAssertion { statement: new.clone(), polarity: 1.0, weight: w, source_event: Some("watched".into()), provenance: "watched".into() }).await;
+            let _ = self.memory.remember_as_belief(BeliefAssertion { statement: old.clone(), polarity: -1.0, weight: w, source_event: Some("watched".into()), provenance: "watched".into() }).await;
+            let _ = self.memory.relate(&new, &old, "contradicts", 0.9).await;
+            learned.push(format!("revised: \"{old}\" → \"{new}\""));
+        }
+        // The claims do NOT become beliefs. They become gradeable predictions.
+        let now = chrono::Utc::now().timestamp_millis();
+        for c in v.get("claims").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let claim = c.get("claim").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if claim.len() < 8 {
+                continue;
+            }
+            let p = c.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.05, 0.95);
+            let days = c.get("resolve_in_days").and_then(|x| x.as_i64()).unwrap_or(7).clamp(1, 30);
+            self.judgment_log("watched", "trading", &claim, p, now + days * 86_400_000, url).await;
+            logged.push(format!("{claim} (p={p:.2}, grades in {days}d)"));
+        }
+
+        let mut out = perception;
+        out.push_str("\n\n── WHAT I LEARNED ──\n");
+        if learned.is_empty() {
+            out.push_str("Nothing durable enough to believe.\n");
+        } else {
+            for l in &learned {
+                out.push_str(&format!("📚 {l}\n"));
+            }
+        }
+        if logged.is_empty() {
+            out.push_str("No forward-looking claims to grade.\n");
+        } else {
+            out.push_str("\n── CLAIMS I DID NOT BELIEVE, BUT WILL GRADE ──\n");
+            for l in &logged {
+                out.push_str(&format!("⚖ {l}\n"));
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

@@ -372,8 +372,14 @@ pub fn transcribe_segments(url: &str, secs: u64) -> anyhow::Result<Vec<Utterance
         anyhow::bail!("could not extract audio: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim());
     }
     // Timestamps KEPT (no `-nt`): they are what lets speech line up with the frames.
-    // `-t 8` uses the box's cores — measured at ~5.5x real time on 60s of audio.
-    let out = run_bounded(&whisper, &["-m", &model, "-f", wav.to_str().unwrap_or("a.wav"), "-np", "-t", "8"])?;
+    //
+    // FOUR THREADS, NOT EIGHT — measured, and the opposite of the obvious choice. On 60s of
+    // audio: `-t 8` finished in 10.9s wall but burned 80.5 CPU-seconds; `-t 4` took 16.9s wall
+    // for 64.8 CPU-seconds. Background listening has a whole 60-second window to finish in, so
+    // wall time is free and total CPU is what actually competes with the mind for the box. More
+    // threads bought latency nobody needed at a 24% premium in cores.
+    let threads = std::env::var("YM_WHISPER_THREADS").unwrap_or_else(|_| "4".into());
+    let out = run_bounded(&whisper, &["-m", &model, "-f", wav.to_str().unwrap_or("a.wav"), "-np", "-t", &threads])?;
     let raw = String::from_utf8_lossy(&out.stdout);
     let segments = parse_whisper_segments(&raw);
     if segments.is_empty() {

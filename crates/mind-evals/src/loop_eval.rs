@@ -395,6 +395,27 @@ pub fn loop_suite() -> Vec<LoopScenario> {
                 Grade::MaxCalls(3),
             ],
         },
+        // 13. EYES ON ITSELF: a question about the mind's own setup is answerable through a real
+        //     measurement tool. Observed live 2026-08-16: with no such tool, the loop recalled
+        //     code-flavoured memories and confidently invented a five-backend failover chain and
+        //     mounted packs that did not exist. `myself` is the measurement; this locks that it is
+        //     always offered and that its observation feeds the next step.
+        LoopScenario {
+            name: "self-configuration is measured via `myself`, not remembered".into(),
+            seeds: vec![],
+            replies: vec![
+                call("myself", serde_json::json!({})),
+                answer("Here's my live setup, straight from the process."),
+            ],
+            native: vec![],
+            turn: "which llm providers are you actually using right now?".into(),
+            grades: vec![
+                Grade::PromptAtContains(0, "myself {}".into()), // always in the core catalog
+                Grade::SchemaAt(0, "myself".into()),            // and always offered natively
+                Grade::PromptAtContains(1, "LIVE SELF-CONFIGURATION".into()), // the measurement fed forward
+                Grade::AnswerContains("live setup".into()),
+            ],
+        },
     ]
 }
 

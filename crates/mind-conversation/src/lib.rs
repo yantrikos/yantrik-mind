@@ -6772,6 +6772,38 @@ impl ConversationEngine {
         false
     }
 
+    /// The live self-configuration — what `myself` serves. Compact on purpose (the work log keeps
+    /// 900 chars of a successful observation) and secret-free by construction: key NAMES only,
+    /// never values, matching the config panel's only-safe-rendering-is-none rule.
+    async fn self_configuration(&self) -> String {
+        let mut s = String::from("LIVE SELF-CONFIGURATION (measured from the running process just now):\n");
+        for (label, key) in [
+            ("cloud model", "YM_MODEL"),
+            ("private lane (owned hardware)", "YM_LOCAL_OLLAMA_MODEL"),
+            ("research lane", "YM_ROLE_RESEARCH"),
+            ("utility lane", "YM_ROLE_UTIL"),
+            ("verify lane", "YM_ROLE_VERIFY"),
+        ] {
+            if let Ok(v) = std::env::var(key) {
+                if !v.trim().is_empty() {
+                    s.push_str(&format!("- {label}: {v}\n"));
+                }
+            }
+        }
+        let keys: Vec<&str> = [
+            "NANOGPT_KEY", "QWEN_API_KEY", "NVIDIA_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY",
+            "OPEN_ROUTER_KEY", "OLLAMA_CLOUD_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY",
+        ]
+        .into_iter()
+        .filter(|k| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false))
+        .collect();
+        if !keys.is_empty() {
+            s.push_str(&format!("- provider keys present (names only): {}\n", keys.join(", ")));
+        }
+        s.push_str(&self.packs_mounted().await);
+        s
+    }
+
     async fn run_agent_tool(&self, tool: &str, args: &serde_json::Value) -> String {
         self.run_agent_tool_as(tool, args, &TurnIdentity::primary()).await
     }
@@ -6820,6 +6852,12 @@ impl ConversationEngine {
         }
         match tool {
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => now_str(),
+            // The mind's EYES ON ITSELF. Observed live 2026-08-16: asked "what LLMs are you
+            // using", the loop had no introspection tool, recalled code-flavoured memories about
+            // its own implementation, and confidently invented a five-backend failover chain and a
+            // list of mounted packs that do not exist. Self-configuration is STATE, and state is
+            // measured, never remembered — this tool is the measurement.
+            "myself" | "my_config" | "my_setup" | "self_config" => self.self_configuration().await,
             // READ-ISOLATED: the recall tool sees only what THIS speaker may (so the agent can't read
             // around the grounding isolation to reach another member's private facts). ARCH-1 slice 2:
             // this is now enforced at the memory boundary — every lane carries the speaker's ctx.
@@ -7581,7 +7619,7 @@ Open reminders you're carrying for them:");
             );
             let mut messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup — providers, models, lanes, mounted packs, keys — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends you don't have. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build."),
                 ChatMessage::user(&prompt),
             ];
             // Mounted pack rules apply to the TOOL-USING path too. Injecting them only into the

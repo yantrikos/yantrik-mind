@@ -21,6 +21,7 @@ pub(crate) const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per st
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
 - now {}: the current date and time\n\
+- myself {}: your LIVE setup — providers, model lanes, keys present, mounted packs. ANY question about your own configuration is answered from THIS, never from memory: your memories about your own code are history, not state\n\
 MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a skill for a task they cover):";
 
 
@@ -259,6 +260,11 @@ fn core_meta_schemas() -> Vec<Value> {
             &[("text", true), ("when", true)],
         ),
         arg_schema("now", "the current date and time", &[]),
+        arg_schema(
+            "myself",
+            "your LIVE configuration, measured from the running process: model lanes and providers, which keys are present, mounted knowledge packs. Answer ANY question about your own setup from THIS — never from memory",
+            &[],
+        ),
         arg_schema(
             "discover_tools",
             "search your tools + skill library for a capability that fits the task",
@@ -558,7 +564,7 @@ mod tests {
     fn tool_schemas_always_include_core_and_exclude_answer() {
         let schemas = tool_schemas("what's the weather in pune?", &catalog());
         let names: HashSet<&str> = schemas.iter().map(|s| s["function"]["name"].as_str().unwrap()).collect();
-        for core in ["recall", "remember", "add_reminder", "now", "discover_tools", "run_skill", "build_capability"] {
+        for core in ["recall", "remember", "add_reminder", "now", "myself", "discover_tools", "run_skill", "build_capability"] {
             assert!(names.contains(core), "core/meta schema '{core}' must always be present");
         }
         assert!(!names.contains("answer"), "answer is not a native tool — text with no call IS the answer");

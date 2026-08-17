@@ -1058,6 +1058,16 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             "qwen3.8-max",
         ),
         "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY", "deepseek/deepseek-chat"),
+        // ── The FREE-TIER lanes (researched 2026-08-16). All OpenAI-compatible. These are for the
+        // household/public lanes ONLY — a private-grounded turn stays on owned hardware regardless
+        // (enforced at the call sites and canary-tested in privacy_tests below). Free tiers move;
+        // the numbers live in the config schema descriptions, not here.
+        // NVIDIA NIM: the deepest free catalog (100+ models, ~40 RPM free).
+        "nim" | "nvidia" => ("https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", "deepseek-ai/deepseek-v4"),
+        // Groq LPU: fastest turnaround per request on a free tier (~30 RPM / 1k RPD).
+        "groq" => ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
+        // Cerebras: highest free throughput (~1M tokens/day at ~2k tok/s).
+        "cerebras" => ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "llama-3.3-70b"),
         "grok" => ("https://api.x.ai/v1", "GROK_API_KEY", "grok-2-latest"),
         // Anthropic direct. Default Sonnet 5 (fast + cheap enough for an
         // always-on brain); swap the model to claude-opus-4-8 or claude-fable-5 (when it un-gates).
@@ -1282,7 +1292,10 @@ impl Router {
     }
 
     /// Read `YM_ROLE_<ROLE>` for each known function; a set+resolvable spec gets its own pool, else
-    /// the role uses `default`. Known roles: chat, research, util, verify, code, consolidate.
+    /// the role uses `default`. The literal env names, for the config schema and for grepping:
+    /// YM_ROLE_CHAT, YM_ROLE_RESEARCH, YM_ROLE_UTIL, YM_ROLE_VERIFY, YM_ROLE_CODE,
+    /// YM_ROLE_CONSOLIDATE. Spec format is `provider:model` per `backend_from_spec` — e.g.
+    /// `nim:deepseek-ai/deepseek-v4`, `groq:llama-3.3-70b-versatile`, `openrouter:<id>:free`.
     pub fn from_env(default: InferencePool, concurrency: usize) -> Self {
         let mut roles = HashMap::new();
         for role in ["chat", "research", "util", "verify", "code", "consolidate"] {

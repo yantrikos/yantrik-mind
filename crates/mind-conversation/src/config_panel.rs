@@ -70,6 +70,11 @@ pub(crate) const SCHEMA: &[Setting] = &[
     Setting { key: "YM_LOCAL_OLLAMA_URL", label: "Private-lane URL", group: "Brain", kind: "string", desc: "Owned-hardware endpoint for private turns. Empty = private turns escalate (audited).", restart: true },
     Setting { key: "YM_LOCAL_OLLAMA_MODEL", label: "Private-lane model", group: "Brain", kind: "string", desc: "Model served on the private lane.", restart: true },
     Setting { key: "YM_VISION_MODEL", label: "Vision model", group: "Brain", kind: "string", desc: "Model for photo understanding.", restart: true },
+    // Free-tier lane routing (researched 2026-08-16). These carry HOUSEHOLD/PUBLIC-lane calls
+    // only; a private-grounded turn stays on owned hardware regardless of what is set here.
+    Setting { key: "YM_ROLE_RESEARCH", label: "Research lane", group: "Brain", kind: "string", desc: "Provider spec for research-role calls, e.g. nim:deepseek-ai/deepseek-v4 (free ~40 RPM), groq:llama-3.3-70b-versatile (free ~30 RPM/1k RPD), cerebras:llama-3.3-70b (free ~1M tok/day). Empty = default brain.", restart: true },
+    Setting { key: "YM_ROLE_UTIL", label: "Utility lane", group: "Brain", kind: "string", desc: "Provider spec for small utility calls (compile, titles). Same format as the research lane.", restart: true },
+    Setting { key: "YM_ROLE_VERIFY", label: "Verify lane", group: "Brain", kind: "string", desc: "Provider spec for verification calls. Same format as the research lane.", restart: true },
     // ── Rhythm ───────────────────────────────────────────────────────────
     Setting { key: "YM_TZ", label: "Timezone", group: "Rhythm", kind: "string", desc: "IANA timezone (e.g. America/Chicago). Governs quiet hours and reminders.", restart: true },
     Setting { key: "YM_QUIET_START", label: "Quiet from", group: "Rhythm", kind: "int", desc: "Hour (0-23, local) when proactive surfaces go quiet.", restart: true },
@@ -111,6 +116,10 @@ pub(crate) const SCHEMA: &[Setting] = &[
     Setting { key: "YM_EMAIL_PASSWORD", label: "Email app password", group: "Channels & keys", kind: "secret", desc: "IMAP/SMTP app password.", restart: true },
     Setting { key: "YM_GITHUB_TOKEN", label: "GitHub token", group: "Channels & keys", kind: "secret", desc: "Self-improvement PRs and repo reads.", restart: true },
     Setting { key: "QWEN_API_KEY", label: "QwenCloud key", group: "Channels & keys", kind: "secret", desc: "Builder + household lane via token-plan.", restart: false },
+    Setting { key: "NVIDIA_API_KEY", label: "NVIDIA NIM key", group: "Channels & keys", kind: "secret", desc: "build.nvidia.com — the free lane with the deepest catalog (~40 RPM).", restart: true },
+    Setting { key: "GROQ_API_KEY", label: "Groq key", group: "Channels & keys", kind: "secret", desc: "console.groq.com — fastest free per-request turnaround.", restart: true },
+    Setting { key: "CEREBRAS_API_KEY", label: "Cerebras key", group: "Channels & keys", kind: "secret", desc: "cloud.cerebras.ai — highest free daily throughput.", restart: true },
+    Setting { key: "OPEN_ROUTER_KEY", label: "OpenRouter key", group: "Channels & keys", kind: "secret", desc: "openrouter.ai — the :free model variety lane (20 RPM; 1k/day after a one-time $10 top-up).", restart: true },
     Setting { key: "CLAUDE_CODE_OAUTH_TOKEN", label: "Claude token", group: "Channels & keys", kind: "secret", desc: "Claude CLI auth for the claude builder/brain.", restart: true },
 ];
 

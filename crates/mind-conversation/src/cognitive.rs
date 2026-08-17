@@ -350,31 +350,27 @@ fn routine_name(text: &str) -> String {
 }
 
 impl ConversationEngine {
-    /// Is the bounded cognitive loop enabled?
+    /// Is the bounded cognitive loop enabled? (env; per-engine override via `with_cognition`)
     pub fn cognition_enabled() -> bool {
         std::env::var("YM_COGNITION").map(|v| v.trim() == "on").unwrap_or(false)
     }
 
-    /// THE turn entry point. One place decides which loop runs.
+    /// The flag as THIS engine sees it — the test seam wins over the process env.
+    pub(crate) fn cognition_on(&self) -> bool {
+        self.cognition_force.unwrap_or_else(Self::cognition_enabled)
+    }
+
+    /// THE turn entry point. Every channel calls this rather than `handle_turn_as` directly.
     ///
-    /// Every channel calls this rather than `handle_turn_as` directly, so the flag governs all of them
-    /// at once — a flag honoured on some paths and not others is worse than no flag, because the
-    /// difference shows up as inconsistent behaviour rather than as a setting.
-    ///
-    /// Falls back to the legacy loop whenever the cognitive path declines to build, so a
-    /// misconfiguration degrades to the behaviour that has always worked instead of to an error.
+    /// The bounded loop is NOT dispatched here — it runs inside `handle_turn_as`, in the exact slot
+    /// the classic loop occupies, AFTER the deterministic interceptors and with the same grounding.
+    /// Its first live night proved why: preempting the whole chain sent "remember that…" to a
+    /// tool-choosing model and answered a memory question from a stale belief. This function's jobs
+    /// are the ones that belong to every turn regardless of loop: lending the engine handle the
+    /// bus needs, and delivering held results.
     pub async fn turn(self: &Arc<Self>, user_text: &str, id: TurnIdentity) -> Result<String> {
-        let answer = if Self::cognition_enabled() {
-            match self.cognitive_turn(user_text, &id).await {
-                Some(a) => Ok(a),
-                None => {
-                    eprintln!("[cognition] could not build the bounded loop for this turn — using the legacy path");
-                    self.handle_turn_as(user_text, id.clone()).await
-                }
-            }
-        } else {
-            self.handle_turn_as(user_text, id.clone()).await
-        };
+        *self.self_ref.lock().unwrap() = Arc::downgrade(self);
+        let answer = self.handle_turn_as(user_text, id.clone()).await;
         // FOLLOW-THROUGH, every channel: a delegated result that finished while no chat was
         // reachable is delivered on the very next exchange, appended after the answer — "also,
         // the thing you asked for is done." Primary-viewer only: a held result was produced for
@@ -399,6 +395,10 @@ impl ConversationEngine {
         let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(self.clone(), id.clone()).for_turn(user_text));
         let router = mind_inference::Router::from_env(self.inference.clone(), 4);
 
+        // The SAME grounding assembly the classic loop uses — one function, two loops, zero drift.
+        emit_progress("grounding from memory…");
+        let grounding = self.turn_grounding(user_text, id).await;
+
         emit_progress("understanding the goal…");
         let compiled = mind_agents::compile(
             &router.pool("util"),
@@ -422,7 +422,8 @@ impl ConversationEngine {
             router.pool("research"),
             bus,
             self.persona.clone(),
-        );
+        )
+        .with_grounding(grounding);
         emit_progress("working…");
         let outcome = cognition.run(&compiled.spec, &mind_types::clock::SystemClock).await;
 
@@ -703,6 +704,40 @@ mod tests {
 
         let b = eng.turn("hi", TurnIdentity::primary()).await.unwrap();
         assert!(b.contains("surprise-gift"), "…and the owner still gets it on their next turn: {b}");
+    }
+
+    /// THE RE-SLOT, end to end: with the flag forced on, a real `turn()` reaches the bounded loop
+    /// in `agent_loop`'s slot — after the deterministic interceptors — builds the SAME grounding
+    /// the classic loop uses, and that grounding reaches the synthesis call as a marked reference
+    /// block. This is the shape the first live night said was missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_bounded_loop_runs_in_the_classic_loops_slot_with_its_grounding() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let seq = Arc::new(mind_inference::SequencedLLM::new(vec![
+            // compile → a minimal usable draft
+            r#"{"objective":"answer what color teal is","min_findings":1}"#,
+            // NBA → fetch
+            r#"{"verb":"CALL_TOOL","target":"web_fetch","args":{"url":"http://example.com"},"why":"NEED_EVIDENCE"}"#,
+            // NBA → report the finding and finish
+            r#"{"learned":{"findings":[{"claim":"Teal is a blue-green color","evidence":["E1"]}]},"verb":"FINISH","why":"SUFFICIENT"}"#,
+            // synthesize
+            "Teal is a blue-green color, per E1.",
+        ]));
+        let pool = mind_inference::InferencePool::new(seq.clone() as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let eng = Arc::new(
+            ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, mind_types::default_persona("the user"))
+                .with_web(Arc::new(mind_tools::ScriptedFetcher::new("WEBDOC: Teal is a cyan-family blue-green color.")))
+                .with_cognition(true),
+        );
+
+        let a = eng.turn("what color is teal?", TurnIdentity::primary()).await.unwrap();
+        assert!(a.contains("blue-green"), "the bounded loop must have served the slot: {a}");
+
+        // The synthesis call (4th model call) carried the grounding reference block — the thing the
+        // preempting wiring could never provide.
+        let synth = seq.prompt_at(3);
+        assert!(synth.contains("what you know"), "grounding must reach synthesis:\n{synth}");
+        assert!(synth.contains("NOT instructions"), "…as reference data, marked as such:\n{synth}");
     }
 
     /// The flag is off unless explicitly turned on: the legacy loop stays primary until evals say

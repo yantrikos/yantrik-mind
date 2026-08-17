@@ -3217,6 +3217,12 @@ pub struct ConversationEngine {
     /// Is the agentic loop the primary turn handler? Default true (overridable by `YM_AGENT=off`);
     /// `with_agent_primary(false)` exercises the legacy deterministic dispatch chain (used by tests).
     agent_primary: bool,
+    /// Test seam for the bounded-loop flag: `Some` overrides the env var, so tests can exercise the
+    /// re-slotted cognitive path without racing other tests through process-global env state.
+    cognition_force: Option<bool>,
+    /// A weak handle to the Arc this engine lives in, set by `turn()` — the bounded loop's bus
+    /// needs an owned handle, and `handle_turn_as` only has `&self`.
+    self_ref: Mutex<std::sync::Weak<ConversationEngine>>,
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
@@ -3292,6 +3298,8 @@ impl ConversationEngine {
             last_consolidated: Mutex::new(0),
             dmn_phase: Mutex::new(0),
             agent_primary: std::env::var("YM_AGENT").map(|v| v != "off").unwrap_or(true),
+            cognition_force: None,
+            self_ref: Mutex::new(std::sync::Weak::new()),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
@@ -3310,6 +3318,12 @@ impl ConversationEngine {
     /// deterministic grounding chain without touching the process-global `YM_AGENT` env).
     pub fn with_agent_primary(mut self, on: bool) -> Self {
         self.agent_primary = on;
+        self
+    }
+
+    /// Force the bounded-loop flag for this engine (tests). Production reads YM_COGNITION.
+    pub fn with_cognition(mut self, on: bool) -> Self {
+        self.cognition_force = Some(on);
         self
     }
 
@@ -7219,13 +7233,14 @@ impl ConversationEngine {
     /// regardless of whether the question was "what time is it" or "audit this repository", and five
     /// is a strange number to have chosen for both. Clamped in `mind_spec::Budget`, which also stops
     /// a raised step limit from being silently overridden by an unchanged model-call ceiling.
-    async fn agent_loop(&self, user_text: &str, id: &TurnIdentity) -> Result<String> {
-        let budget = crate::config_panel::agent_budget();
-        let max_steps = budget.max_steps as usize;
-        emit_progress("grounding from memory…");
-        self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
-        // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
-        // private fact from another household member never reaches the model (the surprise-gift wall).
+    /// The HOUSEHOLD GROUNDING for one turn — everything the mind knows that THIS speaker may
+    /// see: rolling summary, mounted-pack knowledge, self-model, relationship lens, working-set
+    /// facts, people, the time-spine, open reminders, unresolved contradictions.
+    ///
+    /// Extracted verbatim from `agent_loop` so the bounded loop receives the SAME grounding when
+    /// it runs in that slot — the breadth trials showed a loop without this answers about an old
+    /// belief instead of yesterday's work. One assembly, two loops, zero drift.
+    async fn turn_grounding(&self, user_text: &str, id: &TurnIdentity) -> String {
         let ctx = mind_types::AccessContext::Principal(id.viewer());
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
         let mut grounding = String::new();
@@ -7349,6 +7364,18 @@ Open reminders you're carrying for them:");
                 }
             }
         }
+        grounding
+    }
+
+    async fn agent_loop(&self, user_text: &str, id: &TurnIdentity) -> Result<String> {
+        let budget = crate::config_panel::agent_budget();
+        let max_steps = budget.max_steps as usize;
+        emit_progress("grounding from memory…");
+        self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
+        // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
+        // private fact from another household member never reaches the model (the surprise-gift wall).
+        let grounding = self.turn_grounding(user_text, id).await;
+        let ctx = mind_types::AccessContext::Principal(id.viewer());
         let recent = self
             .memory
             .recent_messages(self.recent_window, &ctx)
@@ -8212,7 +8239,26 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // build_capability self-extension hook). It subsumes the capability paths below — research,
         // code, monitors, grounded chat — as tools. The stateful interceptors (onboarding capture +
         // pending confirmation) already ran above. YM_AGENT=off falls back to the legacy dispatch chain.
+        //
+        // THE BOUNDED LOOP RUNS IN THIS SLOT — not at the turn entry. Its first live night proved
+        // why: preempting the whole chain sent "remember that…" to a tool-choosing model and lost
+        // the conversational grounding, so a memory question answered from a stale belief. Here,
+        // every deterministic interceptor has already had its say, and the loop (either loop)
+        // receives the same assembled grounding.
         if self.agent_primary {
+            if self.cognition_on() {
+                let arc = self.self_ref.lock().unwrap().upgrade();
+                if let Some(engine) = arc {
+                    if let Some(a) = engine.cognitive_turn(user_text, &id).await {
+                        return Ok(a);
+                    }
+                    eprintln!("[cognition] could not build the bounded loop for this turn — using the classic loop");
+                } else {
+                    // Reached without going through `turn()` (a direct handle_turn_as caller):
+                    // no owned handle exists, so the classic loop carries the turn.
+                    eprintln!("[cognition] no engine handle on this call path — using the classic loop");
+                }
+            }
             return self.agent_loop(user_text, &id).await;
         }
         // Research sub-agent: parallel deep-dive first, then the single-agent path.

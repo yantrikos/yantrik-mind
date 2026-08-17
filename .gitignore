@@ -16,3 +16,4 @@ clients/voice/
 
 # holds live provider keys — never commit
 .mcp.json
+yt.html

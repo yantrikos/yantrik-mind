@@ -52,8 +52,10 @@ pub enum MediaPlan {
     Transcribe { secs: u64 },
     /// A live broadcast has no end and no finished transcript; sample a window of it instead.
     LiveWindow { secs: u64 },
-    /// Longer than the box can hear without a GPU. Refused with the numbers, not attempted.
-    TooLong { duration_secs: u64, cap_secs: u64 },
+    /// Longer than the box can hear in full, so hear the FIRST `secs` and say so. Refusing a
+    /// three-hour recording outright taught nothing, when thirty minutes of it was available the
+    /// whole time — a partial listen honestly labelled beats a principled silence.
+    PartialListen { secs: u64, of_secs: u64 },
 }
 
 /// Decide before spending anything. Captions beat transcription whenever they exist — they are
@@ -66,7 +68,7 @@ pub fn plan(probe: &MediaProbe, cap_secs: u64, live_window_secs: u64) -> MediaPl
         return MediaPlan::Captions;
     }
     if probe.duration_secs > cap_secs {
-        return MediaPlan::TooLong { duration_secs: probe.duration_secs, cap_secs };
+        return MediaPlan::PartialListen { secs: cap_secs, of_secs: probe.duration_secs };
     }
     MediaPlan::Transcribe { secs: probe.duration_secs.max(1) }
 }
@@ -478,11 +480,12 @@ mod tests {
     }
 
     #[test]
-    fn too_long_is_refused_with_the_numbers_not_attempted() {
-        // The box has no GPU: an 8-hour job is impossible, not slow. Say so before starting.
+    fn a_long_recording_is_partly_heard_not_refused() {
+        // Refusing a 3-hour recording outright taught nothing when 30 minutes of it was
+        // available the whole time. Hear the window; label it honestly.
         assert_eq!(
             plan(&probe_of(28_800, false, false), 1800, 180),
-            MediaPlan::TooLong { duration_secs: 28_800, cap_secs: 1800 }
+            MediaPlan::PartialListen { secs: 1800, of_secs: 28_800 }
         );
         assert_eq!(plan(&probe_of(900, false, false), 1800, 180), MediaPlan::Transcribe { secs: 900 });
     }

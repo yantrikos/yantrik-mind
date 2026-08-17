@@ -7,11 +7,11 @@
 //!
 //! The order of preference is deliberate and it is about honesty as much as cost. Published
 //! captions win whenever they exist, because they are the speaker's actual words rather than a
-//! CPU's guess at them. Local whisper is next, bounded hard, because the box has no GPU and an
-//! eight-hour broadcast is impossible rather than slow — and refusing it with the numbers beats
-//! starting a job that never ends. Frames are sampled for material whose content is on screen: a
-//! trading desk that broadcasts "no commentary" says nothing worth transcribing and shows
-//! everything worth seeing.
+//! CPU's guess at them. Local whisper is next, bounded hard, because the box has no GPU — a
+//! three-hour recording is heard as a labelled opening sample rather than refused, since refusing
+//! it outright taught nothing when thirty minutes of it was available the whole time. Frames are
+//! always sampled, because for material whose information is on screen they carry the content that
+//! the audio does not.
 
 use super::*;
 
@@ -65,7 +65,9 @@ impl super::ConversationEngine {
                     Err(_) => None,
                 }
             }
-            mind_tools::media::MediaPlan::Transcribe { secs } | mind_tools::media::MediaPlan::LiveWindow { secs } => {
+            mind_tools::media::MediaPlan::Transcribe { secs }
+            | mind_tools::media::MediaPlan::LiveWindow { secs }
+            | mind_tools::media::MediaPlan::PartialListen { secs, .. } => {
                 let (u, s) = (url.to_string(), *secs);
                 let live = matches!(plan, mind_tools::media::MediaPlan::LiveWindow { .. });
                 match tokio::task::spawn_blocking(move || mind_tools::media::transcribe_segments(&u, s)).await {
@@ -86,22 +88,21 @@ impl super::ConversationEngine {
                     Err(_) => None,
                 }
             }
-            mind_tools::media::MediaPlan::TooLong { duration_secs, cap_secs } => {
-                out.push_str(&format!(
-                    "🎧 Too long to hear locally: {}m of audio against a {}m cap, and this box has no GPU — whisper runs at about real time, so I'd still be listening hours from now. I can watch a window of it, or you can raise YM_MEDIA_MAX_SECS if you want to spend the time.\n",
-                    duration_secs / 60,
-                    cap_secs / 60
-                ));
-                None
-            }
         };
+        if let mind_tools::media::MediaPlan::PartialListen { secs, of_secs } = &plan {
+            out.push_str(&format!(
+                "   (a {}m sample of a {}m recording — I heard the opening, not the whole thing)\n",
+                secs / 60,
+                of_secs / 60
+            ));
+        }
 
         // ── SEEING ─────────────────────────────────────────────────────────────────────────
         // Always sample frames: for screen-content media this IS the information, and it is the
         // only modality available when the audio is refused or silent.
         let window = match &plan {
             mind_tools::media::MediaPlan::LiveWindow { secs } => *secs,
-            mind_tools::media::MediaPlan::TooLong { cap_secs, .. } => *cap_secs,
+            mind_tools::media::MediaPlan::PartialListen { secs, .. } => *secs,
             mind_tools::media::MediaPlan::Transcribe { secs } => *secs,
             mind_tools::media::MediaPlan::Captions => probe.duration_secs.min(cap).max(60),
         };

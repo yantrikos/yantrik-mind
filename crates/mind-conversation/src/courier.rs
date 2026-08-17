@@ -124,7 +124,7 @@ pub(crate) fn is_retirement(msg: &str) -> bool {
 }
 
 impl super::ConversationEngine {
-    async fn load_threads(&self) -> Vec<serde_json::Value> {
+    pub(crate) async fn load_threads(&self) -> Vec<serde_json::Value> {
         self.memory
             .profile_get("courier_threads")
             .await
@@ -134,7 +134,7 @@ impl super::ConversationEngine {
             .unwrap_or_default()
     }
 
-    async fn save_threads(&self, t: &[serde_json::Value]) {
+    pub(crate) async fn save_threads(&self, t: &[serde_json::Value]) {
         let _ = self
             .memory
             .profile_set("courier_threads", &serde_json::to_string(&t).unwrap_or_default())

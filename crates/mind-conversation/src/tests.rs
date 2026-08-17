@@ -6,6 +6,68 @@ use mind_tools::{ScriptedMailSender, ToolActionExecutor};
 use mind_types::BeliefAssertion;
 use yantrik_ml::LLMBackend;
 
+/// THE DROP REGRESSION (live, 2026-08-17 01:25): "please drop HN reply and rosefield" was
+/// acknowledged in words, no store changed, and the very next reply re-listed both as
+/// "immediate priorities" — because the turn pipeline was add-only and every store that can
+/// resurface an item had its own (or no) close path. A drop must now close the item in EVERY
+/// store, deterministically, before any model sees the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversational_drop_closes_every_store_and_stays_dropped() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("(model must not be needed for a drop)")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    // Seed the stores exactly as the live bug had them: two commitments, plus one item in
+    // every other store that can re-list.
+    mem.add_task("post the HN reply draft to the multi-agent thread", "medium", None).await.unwrap();
+    mem.add_task("check the Rosefield watch order status", "medium", None).await.unwrap();
+    mem.add_task("log the judgment ledger predictions", "medium", None).await.unwrap();
+    conv.save_watches(&[serde_json::json!({"query": "rosefield watch", "best": 199.0})]).await;
+    conv.save_news_topics(&["rosefield".to_string(), "geopolitics".to_string()]).await;
+    conv.save_threads(&[serde_json::json!({"status": "open", "trigger": "rosefield order update", "deliverable": "order status"})]).await;
+    let _ = mem
+        .profile_set("future_nodes", &serde_json::json!([{"label": "HN reply deadline", "when_ms": 4_102_444_800_000i64, "status": "open"}]).to_string())
+        .await;
+
+    // The exact live utterance, through the real turn pipeline.
+    let reply = conv.handle_turn_as("please drop HN reply and rosefield", TurnIdentity::primary()).await.unwrap();
+    assert!(reply.contains("Dropped"), "the drop must be confirmed as performed, not narrated: {reply}");
+
+    // Every store actually closed — this is what "dropped" means.
+    let open = mem.list_tasks(false).await.unwrap();
+    assert!(!open.iter().any(|t| t.description.contains("HN reply") || t.description.contains("Rosefield")),
+        "dropped commitments must leave the open ledger: {open:?}");
+    assert!(open.iter().any(|t| t.description.contains("judgment ledger")), "unrelated commitments survive");
+    assert!(conv.load_watches().await.is_empty(), "the price watch must be gone");
+    assert_eq!(conv.load_news_topics().await, vec!["geopolitics".to_string()], "only the matching topic untracked");
+    let threads = conv.load_threads().await;
+    assert!(threads.iter().all(|t| t["status"] == "dropped"), "the open courier thread must be dropped: {threads:?}");
+    let nodes: Vec<serde_json::Value> = serde_json::from_str(&mem.profile_get("future_nodes").await.unwrap().unwrap()).unwrap();
+    assert!(nodes.iter().all(|n| n["status"] == "dismissed"), "the spine node gets the dismissed status: {nodes:?}");
+
+    // The postfix form from the transcript's second message also grounds.
+    mem.add_task("confirm the Maa Durga family celebration plans", "medium", None).await.unwrap();
+    let reply2 = conv
+        .handle_turn_as("Maa durga family celebration, you can drop this too", TurnIdentity::primary())
+        .await
+        .unwrap();
+    assert!(reply2.contains("Dropped"), "{reply2}");
+    let open2 = mem.list_tasks(false).await.unwrap();
+    assert!(!open2.iter().any(|t| t.description.contains("Maa Durga")), "{open2:?}");
+
+    // And what the next turn GROUNDS on no longer carries the dropped items — the actual
+    // resurrection surface from the live bug.
+    let (personal, _) = conv.open_and_internal_tasks().await;
+    assert!(!personal.iter().any(|t| t.description.contains("HN reply") || t.description.contains("Rosefield") || t.description.contains("Maa Durga")),
+        "grounding must not re-list dropped items: {personal:?}");
+
+    // An utterance the sweep can't ground falls through to the normal pipeline (no hijack).
+    let miss = conv.handle_turn_as("cancel my gym subscription", TurnIdentity::primary()).await.unwrap();
+    assert!(!miss.contains("Dropped:"), "ungrounded drops must not pretend to close anything: {miss}");
+}
+
 /// PRIVACY REGRESSION GUARD (the DMN leak): the default-mode tick reads the household's stored
 /// beliefs with unrestricted Operator access and puts them VERBATIM into the prompt — the associate
 /// phase dumps the top-10 recalled facts. That is private-grounded inference, so it MUST take the

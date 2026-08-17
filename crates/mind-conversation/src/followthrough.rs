@@ -198,6 +198,65 @@ pub fn is_stop_tracking(text: &str) -> bool {
     PHRASES.iter().any(|p| t.contains(p))
 }
 
+/// Extract WHAT to drop from a drop-shaped utterance — the piece whose absence
+/// caused the live 2026-08-17 failure: the mind acknowledged "please drop the HN
+/// reply and rosefield", changed no store, and re-listed both as priorities on
+/// the very next turn. Returns:
+/// - `None` — not a drop utterance (ordinary prose containing "drop" must fall through);
+/// - `Some(vec![])` — a drop whose referent is anaphoric ("drop it") — ask which;
+/// - `Some(subjects)` — the named subjects, split on "and"/commas.
+pub(crate) fn stop_tracking_subjects(text: &str) -> Option<Vec<String>> {
+    let t = text.trim().to_lowercase();
+    // Strip courtesy lead-ins so the verb anchors at the START — "prices may
+    // drop tomorrow" must never fire; only an imperative can.
+    let mut s = t.as_str();
+    loop {
+        let before = s;
+        for p in ["please ", "pls ", "ok ", "okay ", "yes ", "sure ", "can you ", "could you ", "you can ", "let's ", "lets ", "also ", "and "] {
+            s = s.strip_prefix(p).unwrap_or(s);
+        }
+        if s == before {
+            break;
+        }
+    }
+    const VERBS: &[&str] = &["drop ", "untrack ", "stop tracking ", "forget about ", "cancel ", "stop reminding me about ", "stop reminding me of "];
+    let tail = match VERBS.iter().find_map(|v| s.strip_prefix(v)) {
+        Some(x) => x,
+        None => {
+            // The postfix form from the live transcript: "Maa durga family
+            // celebration, you can drop this too" — subject before the comma,
+            // anaphoric object after.
+            if let Some((subject, rest)) = t.split_once(',') {
+                let r = rest.trim();
+                let dropish = ["you can drop", "please drop", "drop", "let's drop", "lets drop", "we can drop"].iter().any(|v| r.starts_with(v));
+                let anaphoric = [" this", " that", " it", " them"].iter().any(|a| r.contains(a)) || r.ends_with("drop");
+                if dropish && anaphoric && subject.trim().len() >= 3 {
+                    return Some(vec![subject.trim().to_string()]);
+                }
+            }
+            return None;
+        }
+    };
+    let tail = tail.trim().trim_end_matches(['.', '!', '?']).trim();
+    let tail = tail.strip_suffix(" too").unwrap_or(tail).trim();
+    if tail.is_empty() || ["it", "that", "this", "them", "these", "those"].contains(&tail) {
+        return Some(vec![]); // a drop with no resolvable referent
+    }
+    let subjects: Vec<String> = tail
+        .split(" and ")
+        .flat_map(|p| p.split(','))
+        .map(|p| p.trim())
+        .map(|p| p.strip_prefix("the ").unwrap_or(p).trim())
+        .filter(|p| p.len() >= 3)
+        .map(|p| p.to_string())
+        .collect();
+    if subjects.is_empty() {
+        Some(vec![])
+    } else {
+        Some(subjects)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +271,33 @@ mod tests {
             priority: "medium".into(),
             due_ms: due.map(|d| d as u64),
         }
+    }
+
+    /// The 2026-08-17 live failure, at the matcher level: these exact utterances
+    /// must resolve to subjects, and ordinary prose containing "drop" must not.
+    #[test]
+    fn drop_utterances_yield_subjects_and_prose_does_not() {
+        // The two messages from the live transcript.
+        assert_eq!(
+            stop_tracking_subjects("please drop HN reply and rosefield"),
+            Some(vec!["hn reply".to_string(), "rosefield".to_string()])
+        );
+        assert_eq!(
+            stop_tracking_subjects("Maa durga family celebration, you can drop this too"),
+            Some(vec!["maa durga family celebration".to_string()])
+        );
+        // Articles stripped; multi-subject via commas too.
+        assert_eq!(
+            stop_tracking_subjects("drop the HN reply, the rosefield watch"),
+            Some(vec!["hn reply".to_string(), "rosefield watch".to_string()])
+        );
+        // Anaphoric drop → Some(empty): the caller asks which.
+        assert_eq!(stop_tracking_subjects("drop it"), Some(vec![]));
+        assert_eq!(stop_tracking_subjects("please drop that"), Some(vec![]));
+        // Ordinary prose must never fire — a false positive silently deletes a commitment.
+        assert_eq!(stop_tracking_subjects("prices may drop tomorrow"), None);
+        assert_eq!(stop_tracking_subjects("the drop in temperature was sharp"), None);
+        assert_eq!(stop_tracking_subjects("what's on my plate today?"), None);
     }
 
     #[test]
@@ -449,6 +535,101 @@ impl super::ConversationEngine {
             1 => format!("Dropped: {}. I will stop bringing it up.", closed[0]),
             n => format!("Dropped {n}: {}. I will stop bringing those up.", closed.join("; ")),
         }
+    }
+
+    /// THE one drop path: close everything matching `needle` across EVERY store
+    /// that can resurface an item — the commitment ledger, courier threads
+    /// (open ones included: TTL expiry was their only exit before), price
+    /// watches, news topics, and forward-spine nodes (the first writer the
+    /// `"dismissed"` filter in `future_fragile` has ever had). A drop that
+    /// closes one store and not the others is how "dropped" resurrects two
+    /// minutes later from a different code path.
+    ///
+    /// Returns human lines naming what closed; empty = nothing matched (the
+    /// caller falls through to the normal pipeline rather than hijacking an
+    /// utterance the sweep couldn't ground).
+    pub async fn drop_sweep(&self, needle: &str) -> Vec<String> {
+        let n = needle.trim().to_lowercase();
+        let mut out = Vec::new();
+        if n.len() < 3 {
+            return out;
+        }
+        // 1. Commitment ledger — the store that re-lists in every grounding.
+        let (open, _) = self.open_and_internal_tasks().await;
+        let mut asked = self.closure_asks().await;
+        for t in open.iter().filter(|t| t.description.to_lowercase().contains(&n)) {
+            if self.memory.complete_task(&t.id).await.unwrap_or(false) {
+                asked.remove(&t.id);
+                out.push(format!("reminder \u{201c}{}\u{201d}", t.description));
+            }
+        }
+        self.set_closure_asks(asked).await;
+        // 2. Courier threads, whatever their status.
+        let mut threads = self.load_threads().await;
+        let mut changed = false;
+        for th in threads.iter_mut() {
+            let is_live = matches!(th.get("status").and_then(|x| x.as_str()), Some("open") | Some("fired"));
+            if is_live && th.to_string().to_lowercase().contains(&n) {
+                th["status"] = serde_json::json!("dropped");
+                let what = th.get("deliverable").or_else(|| th.get("trigger")).and_then(|x| x.as_str()).unwrap_or("thread");
+                out.push(format!("thread \u{201c}{}\u{201d}", what.chars().take(60).collect::<String>()));
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_threads(&threads).await;
+        }
+        // 3. Price watches.
+        let mut watches = self.load_watches().await;
+        let before = watches.len();
+        watches.retain(|w| {
+            let hit = w.get("query").and_then(|x| x.as_str()).map(|s| s.to_lowercase().contains(&n)).unwrap_or(false);
+            if hit {
+                out.push(format!("price watch \u{201c}{}\u{201d}", w.get("query").and_then(|x| x.as_str()).unwrap_or("?")));
+            }
+            !hit
+        });
+        if watches.len() != before {
+            self.save_watches(&watches).await;
+        }
+        // 4. News topics.
+        let mut topics = self.load_news_topics().await;
+        let tbefore = topics.len();
+        topics.retain(|t| {
+            let hit = t.to_lowercase().contains(&n);
+            if hit {
+                out.push(format!("news topic \u{201c}{t}\u{201d}"));
+            }
+            !hit
+        });
+        if topics.len() != tbefore {
+            self.save_news_topics(&topics).await;
+        }
+        // 5. Forward-spine nodes → status "dismissed" (kept, not deleted — the
+        //    spine's history stays; the fragility ranking stops dispatching it).
+        let mut nodes: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("future_nodes")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let mut nchanged = false;
+        for node in nodes.iter_mut() {
+            let dismissed = node.get("status").and_then(|x| x.as_str()) == Some("dismissed");
+            if !dismissed && node.to_string().to_lowercase().contains(&n) {
+                node["status"] = serde_json::json!("dismissed");
+                let label = node.get("label").or_else(|| node.get("title")).and_then(|x| x.as_str()).unwrap_or("future item");
+                out.push(format!("planned item \u{201c}{}\u{201d}", label.chars().take(60).collect::<String>()));
+                nchanged = true;
+            }
+        }
+        if nchanged {
+            let _ = self.memory.profile_set("future_nodes", &serde_json::Value::Array(nodes).to_string()).await;
+        }
+        out
     }
 
     /// Open tasks split personal/internal WITHOUT the staleness filter.

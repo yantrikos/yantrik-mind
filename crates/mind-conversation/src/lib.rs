@@ -3792,7 +3792,10 @@ impl ConversationEngine {
              Beliefs are standalone + third-person (e.g. \"Pranab uses async Rust\"). Goals and \
              preferences are plain text (e.g. \"learn Rust\", \"terse replies\"). Tasks are \
              imperative (e.g. \"send Pranab the Q3 report\"). People facts are about the PERSON, not the \
-             user (e.g. \"enjoys hiking\", \"allergic to nuts\"). Use empty arrays if none.\n\nCONVERSATION:\n{transcript}"
+             user (e.g. \"enjoys hiking\", \"allergic to nuts\"). Use empty arrays if none.\n\
+             NEVER extract a commitment from an utterance where the user is DROPPING, cancelling, or \
+             declining something (\"drop the X\", \"stop tracking Y\") — a drop is the opposite of a \
+             commitment.\n\nCONVERSATION:\n{transcript}"
         );
         let messages = vec![
             ChatMessage::system(&self.persona),
@@ -3853,10 +3856,28 @@ impl ConversationEngine {
         }
         // (3) commitments -> tasks with a resolve-by; the reminder loop pings them when due. They also
         // ride into the working-set as commitments (grounding). Open-ended ones still become tasks.
+        // RESURRECTION GUARD: the transcript being consolidated may be the very conversation where
+        // the user DROPPED an item (it names the item by definition) — and add_task's dedup skips
+        // closed rows, so without this check a dropped commitment comes back as a fresh open row on
+        // the next consolidation pass. A closed task's words veto re-extraction; re-opening takes
+        // an explicit ask (add_reminder), which does not ride through this path.
+        let closed_tasks: Vec<String> = self
+            .memory
+            .list_tasks(true)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.status == "completed" || t.status == "cancelled")
+            .map(|t| t.description.to_lowercase())
+            .collect();
         for item in v.get("commitments").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
             let task = item.get("task").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
             if task.len() < 4 {
                 continue;
+            }
+            let tl = task.to_lowercase();
+            if closed_tasks.iter().any(|c| c.contains(&tl) || tl.contains(c.as_str())) {
+                continue; // was deliberately closed — consolidation must not resurrect it
             }
             let due = item.get("due").and_then(|x| x.as_str()).and_then(parse_due);
             if self.memory.add_task(&task, "medium", due).await.is_ok() {
@@ -4649,7 +4670,16 @@ impl ConversationEngine {
             // investing (portfolio/holding/analyze) dispatches via the capability registry above.
             // Drop a commitment outright. The conversational path (`is_stop_tracking`) routes here too,
             // so "I'm not tracking that anymore" and `ym drop <words>` do the same thing.
-            "drop" | "untrack" | "stop_tracking" if !rest.trim().is_empty() => self.stop_tracking(&rest).await,
+            // The FULL sweep — same close the conversational drop and the agent tool perform,
+            // so the CLI can never close one store while another resurrects the item.
+            "drop" | "untrack" | "stop_tracking" if !rest.trim().is_empty() => {
+                let closed = self.drop_sweep(&rest).await;
+                if closed.is_empty() {
+                    format!("Nothing open matches \u{201c}{}\u{201d} in any store — `ym tasks` lists what I am carrying.", rest.trim())
+                } else {
+                    format!("Dropped: {}.", closed.join("; "))
+                }
+            }
             // --- tasks/reminders: list + complete (clears stale ones) ---
             // `ym tasks consolidate [apply]` is the same handler as the bare verb — the tasks list
             // is where you SEE the duplicates, so it has to be where you can act on them.
@@ -7341,6 +7371,21 @@ impl ConversationEngine {
                 }
             }
             // set_monitor dispatches via the capability registry above.
+            // The counterpart add_reminder never had: close a commitment/watch/thread by name,
+            // across every store, so the model is never again structurally unable to honor
+            // "drop that" and left acknowledging a change it cannot make.
+            "drop_reminder" | "drop_thread" | "stop_tracking" => {
+                let words = s("words");
+                if words.trim().len() < 3 {
+                    return "(name a few words from the item to drop)".to_string();
+                }
+                let closed = self.drop_sweep(&words).await;
+                if closed.is_empty() {
+                    format!("Nothing open matches \u{201c}{}\u{201d} in any store I track.", words.trim())
+                } else {
+                    format!("Dropped: {}.", closed.join("; "))
+                }
+            }
             "add_reminder" => {
                 let text = s("text");
                 if text.len() < 3 {
@@ -7782,7 +7827,7 @@ Open reminders you're carrying for them:");
             );
             let mut messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup — providers, models, lanes, mounted packs, keys — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends you don't have. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build."),
+                ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup — providers, models, lanes, mounted packs, keys — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends you don't have. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build."),
                 ChatMessage::user(&prompt),
             ];
             // Mounted pack rules apply to the TOOL-USING path too. Injecting them only into the
@@ -8291,6 +8336,38 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
+        }
+        // DROP: "please drop X (and Y)" actually closes X and Y in EVERY store — deterministic,
+        // before any model sees the turn. The 2026-08-17 failure this fixes: the model acknowledged
+        // a drop it had no tool to perform, no store changed, and the next turn's grounding
+        // re-listed the dropped items as priorities. Intercept ONLY when the sweep grounds
+        // something (or the referent is anaphoric — then ask); an utterance the sweep can't ground
+        // ("cancel my subscription") falls through to the normal pipeline untouched.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            if let Some(subjects) = followthrough::stop_tracking_subjects(user_text) {
+                let reply = if subjects.is_empty() {
+                    Some("Which one should I drop? Name a few words from it.".to_string())
+                } else {
+                    let mut closed = Vec::new();
+                    for s in &subjects {
+                        closed.extend(self.drop_sweep(s).await);
+                    }
+                    if closed.is_empty() {
+                        None // nothing grounded — not ours to answer
+                    } else {
+                        Some(format!(
+                            "Dropped, everywhere I track things: {}. I will not bring {} up again unless you ask.",
+                            closed.join("; "),
+                            if closed.len() == 1 { "it" } else { "them" }
+                        ))
+                    }
+                };
+                if let Some(reply) = reply {
+                    let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+                    let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+                    return Ok(reply);
+                }
+            }
         }
         // FUTURE-SELF COURIER: close any thread the user just finished, and capture an EXPLICIT new
         // commitment ("when the renewal arrives, compare it with last year"). Capture does not

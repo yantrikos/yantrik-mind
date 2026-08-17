@@ -261,6 +261,11 @@ fn core_meta_schemas() -> Vec<Value> {
             &[("text", true), ("when", true)],
         ),
         arg_schema(
+            "watch",
+            "WATCH or LISTEN to a video/audio URL (YouTube, podcast, stream): reads published captions, hears it with the local speech model, and looks at sampled frames with the local vision model. Use this for ANY media link — never say you cannot watch video without calling it first",
+            &[("url", true), ("question", false)],
+        ),
+        arg_schema(
             "drop_reminder",
             "when they say to drop/cancel/stop tracking something: CLOSE it for real in every store (reminders, threads, watches, planned items) — never just acknowledge a drop in words",
             &[("words", true)],

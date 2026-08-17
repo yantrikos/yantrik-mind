@@ -38,6 +38,9 @@ pub use coder::{render_coder, Coder, CoderResult};
 pub mod quota;
 pub use quota::{quota_report, QuotaReport, QuotaWindow};
 
+pub mod media;
+pub use media::{MediaPlan, MediaProbe};
+
 pub mod workers;
 pub use workers::WorkerPool;
 
@@ -110,6 +113,12 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
         }
     }
+}
+
+/// The SSRF guard, reachable from sibling modules (the media pipeline hands untrusted URLs to
+/// external downloaders and must clear them through the same wall as `fetch`).
+pub(crate) fn ssrf_check_pub(url: &str) -> anyhow::Result<()> {
+    ssrf_check(url)
 }
 
 /// Refuse to fetch internal/private targets (resolves the host first, so a public name that

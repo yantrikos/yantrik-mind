@@ -43,6 +43,7 @@ mod onboarding;
 mod narrative;
 mod pace_ledger;
 mod reflex;
+mod watch;
 pub mod pack;
 pub mod scoreboard;
 mod people;
@@ -5186,6 +5187,11 @@ impl ConversationEngine {
             // The Outer Scoreboard — the one measured "how am I actually doing",
             // segmented, denominator-honest, never one number. `fitness` remains
             // the self-build pipeline's own report.
+            // `ym watch <url> [question]` — eyes and ears on a media link.
+            "watch" | "listen" if !rest.trim().is_empty() => {
+                let (url, question) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), ""));
+                self.watch_media(url, question).await
+            }
             "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
             "fitness" => self.fitness_report().await,
             // Belief lifecycle: the tombstone ledger — what was forgotten, and why.
@@ -7374,6 +7380,16 @@ impl ConversationEngine {
             // The counterpart add_reminder never had: close a commitment/watch/thread by name,
             // across every store, so the model is never again structurally unable to honor
             // "drop that" and left acknowledging a change it cannot make.
+            // EYES AND EARS ON MEDIA: fetch a video/audio URL, read its captions or hear it with
+            // the local speech model, and look at sampled frames with the local vision model.
+            "watch" | "watch_media" | "listen" => {
+                let url = if s("url").trim().is_empty() { s("link") } else { s("url") };
+                let url = if url.trim().is_empty() { mind_tools::first_url(&s("query")).unwrap_or_default() } else { url };
+                if url.trim().is_empty() {
+                    return "(need a media url to watch)".to_string();
+                }
+                self.watch_media(&url, &s("question")).await
+            }
             "drop_reminder" | "drop_thread" | "stop_tracking" => {
                 let words = s("words");
                 if words.trim().len() < 3 {

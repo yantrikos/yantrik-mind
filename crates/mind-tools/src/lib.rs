@@ -44,6 +44,9 @@ pub use media::{MediaPlan, MediaProbe};
 pub mod browser;
 pub use browser::{looks_irreversible, BrowserSession, Observation, PageElement};
 
+pub mod market;
+pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

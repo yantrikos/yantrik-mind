@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Keep the bar watcher alive through the session, and drain what it spools.
+#
+# Two jobs that must not be one. The WATCHER is a long-lived decoder that dies whenever the
+# stream drops or the show ends; the DRAIN turns spooled change-frames into tape entries and must
+# keep running even while the watcher is down, or the last events of a session are lost with it.
+#
+# Single-flight by lockfile: a second supervisor attaching a second decoder to the same stream
+# would double the bandwidth and double-count every event, which is worse than not running at all
+# because the resulting tape would look richer while being wrong.
+set -u
+
+LOCK=/var/lib/yantrik-mind/bar-supervise.lock
+LOG=${YM_BAR_LOG:-/var/lib/yantrik-mind/bar-watch.log}
+TOKEN_FILE=${YM_CONSOLE_TOKEN_FILE:-/var/lib/yantrik-mind/console.token}
+WATCH=${YM_BAR_WATCH_BIN:-/opt/yantrik-mind/bar_watch.sh}
+
+exec 9>"$LOCK" || exit 0
+flock -n 9 || exit 0   # another supervisor owns the session
+
+say() { printf "%s | %s\n" "$(date -u +%FT%TZ)" "$1" >> "$LOG"; }
+
+# Start the watcher if it is not already decoding.
+if ! pgrep -f "bar_watch.sh" >/dev/null 2>&1; then
+  if [ -x "$WATCH" ]; then
+    nohup "$WATCH" >/dev/null 2>&1 &
+    say "supervisor: started the bar watcher"
+  else
+    say "supervisor: watcher missing at $WATCH"
+  fi
+fi
+
+# Drain regardless of the watcher's health — frames already spooled are still evidence.
+T=$(cat "$TOKEN_FILE" 2>/dev/null) || exit 0
+[ -n "$T" ] || exit 0
+OUT=$(printf "bar-drain 12" | timeout 280 curl -s -m 270 -H "Authorization: Bearer $T" \
+        --data-binary @- http://127.0.0.1:8077/cli 2>&1 | head -2 | tr '\n' ' ')
+say "drain: ${OUT:-(no response)}"

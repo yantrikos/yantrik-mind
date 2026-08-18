@@ -496,3 +496,84 @@ impl super::ConversationEngine {
         )
     }
 }
+
+impl super::ConversationEngine {
+    /// Drain the bar-watcher's spool: every frame in it is a moment the position bar CHANGED,
+    /// so each earns the vision call that polling was spending on unchanged screens.
+    ///
+    /// The timestamp recorded is the FRAME's, not the moment vision happened to run. The detector
+    /// saw the change seconds ago; dating the event by when the expensive step got around to it
+    /// would smear every entry and exit by the queue depth, and the whole counterfactual is built
+    /// on those timings being right.
+    pub async fn bar_drain(&self, max_frames: usize) -> String {
+        let spool = std::path::PathBuf::from(
+            std::env::var("YM_BAR_SPOOL").unwrap_or_else(|_| "/var/lib/yantrik-mind/barspool".into()),
+        );
+        let mut frames: Vec<(std::time::SystemTime, std::path::PathBuf)> = match std::fs::read_dir(&spool) {
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "jpg").unwrap_or(false))
+                .filter_map(|p| p.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, p)))
+                .collect(),
+            Err(_) => return "bar-drain: no spool yet (the watcher has not run).".to_string(),
+        };
+        if frames.is_empty() {
+            return "bar-drain: spool empty — no bar changes detected since the last drain.".to_string();
+        }
+        frames.sort_by_key(|(t, _)| *t);
+        let total = frames.len();
+        frames.truncate(max_frames.max(1));
+        let traders: Vec<String> = std::env::var("YM_TAPE_TRADERS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let tape_path = std::path::PathBuf::from(
+            std::env::var("YM_TAPE_PATH").unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
+        );
+        let mut recorded = 0usize;
+        let mut unreadable = 0usize;
+        let mut last = String::new();
+        for (mtime, path) in &frames {
+            let Ok(bytes) = std::fs::read(path) else { continue };
+            let caption = self
+                .analyze_image_bytes(
+                    bytes,
+                    "image/jpeg",
+                    "Read ONLY the traders' position bar. For each trader: name, LONG or SHORT, the ticker, or the words 'no positions'. Copy exactly; do not infer.",
+                )
+                .await;
+            let states = mind_tools::tape::parse_bar_auto(&caption, &traders);
+            let _ = std::fs::remove_file(path);
+            if states.is_empty() {
+                unreadable += 1;
+                continue;
+            }
+            let at_ms = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
+            let sample = mind_tools::tape::TapeSample { at_ms, source: "bar-watch".into(), states: states.clone() };
+            if mind_tools::tape::append_sample(&tape_path, &sample).is_ok() {
+                recorded += 1;
+                last = states
+                    .iter()
+                    .map(|s| match (&s.side, &s.symbol) {
+                        (mind_tools::Side::Flat, _) => format!("{} flat", s.trader),
+                        (side, Some(sym)) => format!("{} {:?} {}", s.trader, side, sym),
+                        (side, None) => format!("{} {:?}", s.trader, side),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+            }
+        }
+        format!(
+            "📼 bar-drain: {recorded} change event(s) recorded{}{} — {} still spooled\n{last}",
+            if unreadable > 0 { format!(", {unreadable} unreadable (dropped, not guessed)") } else { String::new() },
+            if total > frames.len() { format!(", {} deferred to the next drain", total - frames.len()) } else { String::new() },
+            total.saturating_sub(frames.len())
+        )
+    }
+}

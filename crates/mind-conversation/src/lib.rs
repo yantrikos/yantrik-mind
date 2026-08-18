@@ -5212,6 +5212,12 @@ impl ConversationEngine {
             // computes what copying them with a realistic delay would have paid.
             "tape" if !rest.trim().is_empty() => self.tape_sample(rest.trim()).await,
             "shadow" | "counterfactual" => self.shadow_report().await,
+            // `ym bar-drain` turns spooled CHANGE frames into tape entries, dated by when the
+            // change was detected rather than when vision got to it.
+            "bar-drain" | "drain" => {
+                let n: usize = rest.trim().parse().unwrap_or(12);
+                self.bar_drain(n).await
+            }
             "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
             "fitness" => self.fitness_report().await,
             // Belief lifecycle: the tombstone ledger — what was forgotten, and why.

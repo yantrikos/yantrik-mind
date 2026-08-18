@@ -95,7 +95,7 @@ fi
 set +e
 # Helper scripts the builder shells out to. They live as REAL FILES because inline python inside a
 # shell inside ssh does not survive the quoting (a silent failure once lost the whole spend ledger).
-for h in ym-record-spend ym-json-result ym-tape-tick; do
+for h in ym-record-spend ym-json-result ym-tape-tick ym-bar-supervise; do
   [ -f "$(dirname "$0")/bin/$h" ] && install -m 0755 "$(dirname "$0")/bin/$h" "/usr/local/bin/$h" && echo "==> installed /usr/local/bin/$h"
 done
 echo "==> self-deploy: companion components (immune + observatory)"
@@ -106,7 +106,7 @@ fi
 # Browser/vision helper scripts. These are CODE the mind shells out to, so they must ride the
 # deploy like the binary does — a stale driver beside a fresh binary is a capability that reports
 # itself present and behaves like an older version, which is worse than one that is missing.
-for js in browser_agent.js headless_fetch.js headful_fetch.js snap_page.js; do
+for js in browser_agent.js headless_fetch.js headful_fetch.js snap_page.js bar_watch.sh; do
   [ -f "$CLONE/deploy/$js" ] && cp "$CLONE/deploy/$js" "/opt/yantrik-mind/$js" \
     && chown yantrikmind:yantrikmind "/opt/yantrik-mind/$js" 2>/dev/null
 done

@@ -40,6 +40,7 @@ mod mail;
 mod members;
 mod news;
 mod onboarding;
+mod browse;
 mod narrative;
 mod pace_ledger;
 mod reflex;
@@ -4907,6 +4908,12 @@ impl ConversationEngine {
             // `ym draft <to> | <subject> | <body>` — DELIVER INTO THE TOOL: the reply lands in the
             // mailbox as a draft, unsent. Prepared to the last safe inch; the click stays human.
             "draft" | "draft-reply" if !rest.trim().is_empty() => self.draft_email(rest.trim()).await,
+            // `ym browse <url> | <goal>` — drive a live page toward a goal, stopping at anything
+            // irreversible. Full control over what can be undone; a human for what cannot.
+            "browse" | "use-browser" if !rest.trim().is_empty() => {
+                let (u, g) = rest.trim().split_once('|').map(|(a, b)| (a.trim(), b.trim())).unwrap_or((rest.trim(), "explore and report what this page offers"));
+                self.browse_goal(u, g).await
+            }
             "gphotos" | "googlephotos" | "gphoto" => {
                 let a = rest.trim();
                 if a == "auth" || a == "connect" || a == "login" {

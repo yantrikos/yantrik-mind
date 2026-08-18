@@ -41,6 +41,9 @@ pub use quota::{quota_report, QuotaReport, QuotaWindow};
 pub mod media;
 pub use media::{MediaPlan, MediaProbe};
 
+pub mod browser;
+pub use browser::{looks_irreversible, BrowserSession, Observation, PageElement};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

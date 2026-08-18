@@ -53,10 +53,36 @@ impl super::ConversationEngine {
         let heard: Option<String> = match &plan {
             mind_tools::media::MediaPlan::Captions => {
                 let u = url.to_string();
+                let dur = probe.duration_secs;
                 match tokio::task::spawn_blocking(move || mind_tools::media::captions(&u)).await {
                     Ok(Ok(t)) => {
-                        out.push_str("📝 Read the published captions (the speaker's own words).\n");
-                        Some(t)
+                        // WINDOW THE CAPTIONS. Seeking the audio fixed nothing for the case that
+                        // applies to most of YouTube: a captioned recording was still read from
+                        // its first line, which is how four attempts at a three-hour trading show
+                        // all came back with the greeting segment.
+                        if dur > cap {
+                            let off = mind_tools::media::sensible_offset(dur, cap);
+                            let win = mind_tools::media::captions_window(&t, off, cap);
+                            if win.trim().is_empty() {
+                                // Never substitute a different sample and stay quiet about it —
+                                // that is what made a broken window look like a clean read.
+                                out.push_str(&format!(
+                                    "📝 The caption window from {}m in came back EMPTY — reporting nothing rather than quietly serving the opening.\n",
+                                    off / 60
+                                ));
+                                None
+                            } else {
+                                out.push_str(&format!(
+                                    "📝 Read the published captions — the {}m window from {}m in (mid-session, not the opening).\n",
+                                    cap / 60,
+                                    off / 60
+                                ));
+                                Some(win)
+                            }
+                        } else {
+                            out.push_str("📝 Read the published captions (the speaker's own words).\n");
+                            Some(t)
+                        }
                     }
                     Ok(Err(e)) => {
                         out.push_str(&format!("📝 Captions were advertised but unreadable ({e}).\n"));

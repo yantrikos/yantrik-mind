@@ -197,6 +197,16 @@ pub fn captions_to_text(vtt: &str) -> String {
                 let t = start.trim();
                 let hhmmss: Vec<&str> = t.split(':').collect();
                 stamp = match hhmmss.len() {
+                    // KEEP THE HOUR. Formatting hh:mm:ss as mm:ss aliased every caption past the
+                    // first hour onto the first hour, so a window asking for minute 60+ of a
+                    // three-hour show matched nothing at all — and the caller then fell back to
+                    // the whole file, which is how a fourth attempt read the opening again.
+                    3 if hhmmss[0].trim() != "00" => format!(
+                        "{}:{}:{}",
+                        hhmmss[0].trim(),
+                        hhmmss[1],
+                        hhmmss[2].split('.').next().unwrap_or("00")
+                    ),
                     3 => format!("{}:{}", hhmmss[1], hhmmss[2].split('.').next().unwrap_or("00")),
                     2 => format!("{}:{}", hhmmss[0], hhmmss[1].split('.').next().unwrap_or("00")),
                     _ => String::new(),
@@ -667,6 +677,28 @@ mod tests {
         assert!(!mid.contains("see you tomorrow"), "the wind-down must be excluded: {mid}");
         // An empty window is empty, not the whole file.
         assert_eq!(captions_window(text, 10_000, 60), "");
+    }
+
+    /// The hour must survive. Dropping it aliased minute 65 onto minute 5, so a mid-session
+    /// window matched nothing in any recording longer than an hour — every long show read as its
+    /// own opening.
+    #[test]
+    fn captions_past_one_hour_keep_their_hour() {
+        let vtt = "WEBVTT
+
+00:05:00.000 --> 00:05:02.000
+early chatter
+
+01:05:00.000 --> 01:05:02.000
+I am long CRWV here
+";
+        let text = captions_to_text(vtt);
+        assert!(text.contains("[05:00] early chatter"), "{text}");
+        assert!(text.contains("[01:05:00] I am long CRWV here"), "the hour must survive: {text}");
+        // And the window can now actually reach it: 65 minutes in.
+        let win = captions_window(&text, 3900, 600);
+        assert!(win.contains("long CRWV"), "a past-the-hour window must match: {win}");
+        assert!(!win.contains("early chatter"), "{win}");
     }
 
     #[test]

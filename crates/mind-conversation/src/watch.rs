@@ -70,7 +70,16 @@ impl super::ConversationEngine {
             | mind_tools::media::MediaPlan::PartialListen { secs, .. } => {
                 let (u, s) = (url.to_string(), *secs);
                 let live = matches!(plan, mind_tools::media::MediaPlan::LiveWindow { .. });
-                match tokio::task::spawn_blocking(move || mind_tools::media::transcribe_segments(&u, s)).await {
+                // Seek into the MIDDLE of a long recording. Sampling from zero is why two attempts
+                // at a trading broadcast returned greetings and then a sofa: a market show opens
+                // with hellos and closes with the wind-down, and the trading is in between.
+                let offset = match &plan {
+                    mind_tools::media::MediaPlan::PartialListen { secs, of_secs } => {
+                        mind_tools::media::sensible_offset(*of_secs, *secs)
+                    }
+                    _ => 0,
+                };
+                match tokio::task::spawn_blocking(move || mind_tools::media::transcribe_segments_at(&u, s, offset)).await {
                     Ok(Ok(segs)) => {
                         spoken = segs;
                         let t = mind_tools::media::utterances_to_text(&spoken);
@@ -90,10 +99,12 @@ impl super::ConversationEngine {
             }
         };
         if let mind_tools::media::MediaPlan::PartialListen { secs, of_secs } = &plan {
+            let off = mind_tools::media::sensible_offset(*of_secs, *secs);
             out.push_str(&format!(
-                "   (a {}m sample of a {}m recording — I heard the opening, not the whole thing)\n",
+                "   (a {}m sample of a {}m recording, taken from {}m in — mid-session, not the opening)\n",
                 secs / 60,
-                of_secs / 60
+                of_secs / 60,
+                off / 60
             ));
         }
 
@@ -107,7 +118,11 @@ impl super::ConversationEngine {
             mind_tools::media::MediaPlan::Captions => probe.duration_secs.min(cap).max(60),
         };
         let (u, want) = (url.to_string(), frame_budget());
-        let frames = match tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, want, window)).await {
+        let frame_offset = match &plan {
+            mind_tools::media::MediaPlan::PartialListen { secs, of_secs } => mind_tools::media::sensible_offset(*of_secs, *secs),
+            _ => 0,
+        };
+        let frames = match tokio::task::spawn_blocking(move || mind_tools::media::keyframes_at(&u, want, window, frame_offset)).await {
             Ok(Ok(f)) => f,
             Ok(Err(e)) => {
                 out.push_str(&format!("👁 Could not sample frames: {e}.\n"));

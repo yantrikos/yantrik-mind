@@ -347,9 +347,25 @@ pub fn transcribe(url: &str, secs: u64) -> anyhow::Result<String> {
     Ok(utterances_to_text(&transcribe_segments(url, secs)?))
 }
 
+/// Where to start sampling a long recording. Sampling from zero is why two attempts at a trading
+/// broadcast returned greetings and then a sofa: the opening of a market show is hellos and the
+/// end is the wind-down, while everything worth hearing is in the middle. A third of the way in
+/// is a better blind guess than the start, and for anything long it is a much better one.
+pub fn sensible_offset(duration_secs: u64, window_secs: u64) -> u64 {
+    if duration_secs <= window_secs * 2 {
+        return 0; // short enough that the whole thing is the middle
+    }
+    (duration_secs / 3).min(duration_secs.saturating_sub(window_secs))
+}
+
 /// HEAR WITH A CLOCK: the same capture, keeping whisper's own timestamps so speech can be laid
 /// against the frames on one timeline.
 pub fn transcribe_segments(url: &str, secs: u64) -> anyhow::Result<Vec<Utterance>> {
+    transcribe_segments_at(url, secs, 0)
+}
+
+/// Hear `secs` of audio starting `from_secs` into the recording.
+pub fn transcribe_segments_at(url: &str, secs: u64, from_secs: u64) -> anyhow::Result<Vec<Utterance>> {
     crate::ssrf_check_pub(url)?;
     if !have(&ytdlp_bin()) {
         anyhow::bail!("yt-dlp is not installed on this host");
@@ -368,7 +384,7 @@ pub fn transcribe_segments(url: &str, secs: u64) -> anyhow::Result<Vec<Utterance
     // 16 kHz mono is exactly what whisper.cpp wants; -t bounds the work at the source.
     let out = run_bounded(
         &ffmpeg_bin(),
-        &["-y", "-i", &src, "-t", &secs.to_string(), "-vn", "-ar", "16000", "-ac", "1", wav.to_str().unwrap_or("a.wav")],
+        &["-y", "-ss", &from_secs.to_string(), "-i", &src, "-t", &secs.to_string(), "-vn", "-ar", "16000", "-ac", "1", wav.to_str().unwrap_or("a.wav")],
     )?;
     if !wav.exists() {
         anyhow::bail!("could not extract audio: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim());
@@ -399,6 +415,11 @@ pub fn transcribe_segments(url: &str, secs: u64) -> anyhow::Result<Vec<Utterance
 /// on it does. The information on that screen is precisely what a scene detector is built to
 /// ignore. An even interval returns the whole window and gives each frame an exact timestamp.
 pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
+    keyframes_at(url, want, within_secs, 0)
+}
+
+/// Sample frames starting `from_secs` into the recording.
+pub fn keyframes_at(url: &str, want: usize, within_secs: u64, from_secs: u64) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
     crate::ssrf_check_pub(url)?;
     if !have(&ffmpeg_bin()) {
         anyhow::bail!("ffmpeg is not installed on this host");
@@ -418,6 +439,8 @@ pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec
         &ffmpeg_bin(),
         &[
             "-y",
+            "-ss",
+            &from_secs.to_string(),
             "-i",
             &src,
             "-t",
@@ -442,7 +465,7 @@ pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec
     let step = within_secs / (want as u64).max(1);
     for (i, p) in entries.iter().enumerate() {
         if let Ok(bytes) = std::fs::read(p) {
-            frames.push((step * i as u64, bytes));
+            frames.push((from_secs + step * i as u64, bytes));
         }
     }
     if frames.is_empty() {

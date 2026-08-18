@@ -145,6 +145,69 @@ pub fn parse_bar(caption: &str, traders: &[String]) -> Vec<TraderState> {
     out
 }
 
+/// Find the trader names in a bar caption, rather than being told them.
+///
+/// The roster is not configuration: the morning shift and the midday shift are different people,
+/// so a hardcoded list means the recorder silently stops working whenever the show changes hands —
+/// which is exactly what happened the first time this ran live, with the list holding yesterday's
+/// names while the screen showed today's.
+///
+/// The bar's structure is stable even though its cast is not: a name, then LONG/SHORT/positions
+/// close behind it. That shape is what gets matched.
+pub fn discover_traders(caption: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let bytes: Vec<char> = caption.chars().collect();
+    let lower = caption.to_lowercase();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let word: String = bytes[start..i].iter().collect();
+        // Names are 2–12 letters and written in caps or Titlecase on this bar.
+        let plausible = (2..=12).contains(&word.len())
+            && (word.chars().all(|c| c.is_ascii_uppercase())
+                || (word.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+                    && word.chars().skip(1).all(|c| c.is_ascii_lowercase())));
+        if !plausible || NOT_TICKERS.contains(&word.to_uppercase().as_str()) || NOT_NAMES.contains(&word.to_uppercase().as_str()) {
+            continue;
+        }
+        // A trader name has position language close behind it.
+        let win_end = (i + 48).min(lower.len());
+        let after = lower.get(i..win_end).unwrap_or("");
+        if after.contains("long") || after.contains("short") || after.contains("position") {
+            let up = word.to_uppercase();
+            if !found.contains(&up) {
+                found.push(up);
+            }
+        }
+    }
+    found
+}
+
+/// Words that appear beside position language but never name a trader.
+const NOT_NAMES: &[&str] = &[
+    "LONG", "SHORT", "FLAT", "NO", "POSITIONS", "POSITION", "TRADER", "TRADERS", "BAR", "BOTTOM",
+    "SCREEN", "HERE", "THE", "AND", "FOR", "EACH", "BASED", "INFORMATION", "LIVE", "SHOW", "IS",
+    "ON", "AT", "OF", "IN", "TV", "BUY", "SELL", "NONE", "BOTH", "WITH", "HAS", "ARE",
+];
+
+/// Parse the bar, discovering the roster when one is not supplied.
+pub fn parse_bar_auto(caption: &str, hint: &[String]) -> Vec<TraderState> {
+    let mut roster: Vec<String> = hint.to_vec();
+    for t in discover_traders(caption) {
+        if !roster.iter().any(|r| r.eq_ignore_ascii_case(&t)) {
+            roster.push(t);
+        }
+    }
+    parse_bar(caption, &roster)
+}
+
 /// Append a sample to the tape ledger (JSONL). Best-effort: losing a sample must never break the
 /// watch that produced it.
 pub fn append_sample(path: &std::path::Path, sample: &TapeSample) -> std::io::Result<()> {
@@ -273,6 +336,37 @@ mod tests {
         assert_eq!(t[1].kind, "exit");
         assert_eq!(t[1].at_ms, 5000);
         assert_eq!(t[1].symbol.as_deref(), Some("OSHR"), "an exit remembers what was held");
+    }
+
+    /// The REAL caption from the first live run — today's shift was NEAL and JOE while the
+    /// configured roster still held yesterday's CHERIF and OBI, so the recorder read nothing.
+    /// The roster is not configuration; the shift changes and the parser must keep up.
+    #[test]
+    fn traders_are_discovered_from_the_bar_not_configured() {
+        let caption = "Based on the traders' position bar at the bottom:
+                       *   **NEAL**: LONG no positions; SHORT no positions
+                       *   **JOE**: LONG no positions; SHORT no positions";
+        let found = discover_traders(caption);
+        assert!(found.contains(&"NEAL".to_string()), "{found:?}");
+        assert!(found.contains(&"JOE".to_string()), "{found:?}");
+        // Bar furniture and prose must never be mistaken for a person.
+        for junk in ["LONG", "SHORT", "POSITIONS", "TRADERS", "BOTTOM", "BASED"] {
+            assert!(!found.contains(&junk.to_string()), "{junk} is not a trader: {found:?}");
+        }
+        // And with an empty hint the bar still parses to two flat traders.
+        let states = parse_bar_auto(caption, &[]);
+        assert_eq!(states.len(), 2, "{states:?}");
+        assert!(states.iter().all(|s| s.side == Side::Flat), "{states:?}");
+    }
+
+    /// Yesterday's caption must still work — discovery adds to the hint, never replaces it.
+    #[test]
+    fn discovery_also_handles_the_earlier_shift_and_a_held_position() {
+        let held = parse_bar_auto("CHEIF LONG OSHR 0.74", &[]);
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(held[0].trader, "CHEIF");
+        assert_eq!(held[0].side, Side::Long);
+        assert_eq!(held[0].symbol.as_deref(), Some("OSHR"));
     }
 
     #[test]

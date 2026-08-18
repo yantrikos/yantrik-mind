@@ -412,7 +412,9 @@ impl super::ConversationEngine {
                 "Read ONLY the traders' position bar at the bottom. For each trader give: name, LONG or SHORT, the ticker symbol, or the words 'no positions'. Copy the text exactly; do not infer.",
             )
             .await;
-        let states = mind_tools::tape::parse_bar(&caption, &traders);
+        // Discover the roster from the bar; the hint only seeds it. The shift changes and a
+        // configured list would silently stop recording the day it does.
+        let states = mind_tools::tape::parse_bar_auto(&caption, &traders);
         if states.is_empty() {
             return format!("tape: no trader state could be read (kept nothing rather than guessing)\n{}", caption.chars().take(200).collect::<String>());
         }

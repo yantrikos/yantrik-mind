@@ -95,7 +95,7 @@ fi
 set +e
 # Helper scripts the builder shells out to. They live as REAL FILES because inline python inside a
 # shell inside ssh does not survive the quoting (a silent failure once lost the whole spend ledger).
-for h in ym-record-spend ym-json-result; do
+for h in ym-record-spend ym-json-result ym-tape-tick; do
   [ -f "$(dirname "$0")/bin/$h" ] && install -m 0755 "$(dirname "$0")/bin/$h" "/usr/local/bin/$h" && echo "==> installed /usr/local/bin/$h"
 done
 echo "==> self-deploy: companion components (immune + observatory)"

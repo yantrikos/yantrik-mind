@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Sample the traders' position bar into the tape.
+#
+# Cheap by design: one frame, one vision call, one appended line. This runs every few minutes for
+# weeks, so it must never become the reason the box is busy — and it must never retry, because a
+# storm of retries against a live stream is how a cheap sampler turns into a load problem.
+#
+# A failure is recorded and dropped. One missing sample costs almost nothing; the series is what
+# matters, and the series survives gaps far better than it survives invented readings.
+set -u
+TOKEN_FILE=${YM_CONSOLE_TOKEN_FILE:-/var/lib/yantrik-mind/console.token}
+T=$(cat "$TOKEN_FILE" 2>/dev/null) || exit 0
+[ -n "$T" ] || exit 0
+URL="${YM_TAPE_URL:-https://www.youtube.com/@TraderTVLive/live}"
+LOG=${YM_TAPE_TICK_LOG:-/var/lib/yantrik-mind/tape-tick.log}
+
+OUT=$(printf "tape %s" "$URL" \
+  | timeout 300 curl -s -m 290 -H "Authorization: Bearer $T" --data-binary @- \
+      http://127.0.0.1:8077/cli 2>&1 | head -1)
+
+printf "%s | %s\n" "$(date -u +%FT%TZ)" "${OUT:-(no response)}" >> "$LOG"
+
+# Keep the tick log bounded; the tape itself is the durable artefact, this is just breadcrumbs.
+if [ "$(wc -l < "$LOG" 2>/dev/null || echo 0)" -gt 5000 ]; then
+  tail -2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi

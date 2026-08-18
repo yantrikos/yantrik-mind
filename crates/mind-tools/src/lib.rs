@@ -50,6 +50,9 @@ pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, Resolva
 pub mod newsflow;
 pub use newsflow::{peek as peek_headline, peek_batch, Interest, PeekPass, Watchlist};
 
+pub mod tape;
+pub use tape::{parse_bar, transitions, Side, TapeSample, TraderState, Transition};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

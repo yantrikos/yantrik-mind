@@ -47,6 +47,9 @@ pub use browser::{looks_irreversible, BrowserSession, Observation, PageElement};
 pub mod market;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
 
+pub mod newsflow;
+pub use newsflow::{peek as peek_headline, peek_batch, Interest, PeekPass, Watchlist};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

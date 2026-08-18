@@ -5208,6 +5208,10 @@ impl ConversationEngine {
                 let (url, focus) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), ""));
                 self.learn_from_watch(url, focus).await
             }
+            // `ym tape <url>` samples the traders' position bar into the tape; `ym shadow`
+            // computes what copying them with a realistic delay would have paid.
+            "tape" if !rest.trim().is_empty() => self.tape_sample(rest.trim()).await,
+            "shadow" | "counterfactual" => self.shadow_report().await,
             "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
             "fitness" => self.fitness_report().await,
             // Belief lifecycle: the tombstone ledger — what was forgotten, and why.

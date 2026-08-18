@@ -53,6 +53,9 @@ pub use newsflow::{peek as peek_headline, peek_batch, Interest, PeekPass, Watchl
 pub mod tape;
 pub use tape::{parse_bar, transitions, Side, TapeSample, TraderState, Transition};
 
+pub mod shadow;
+pub use shadow::{lag_curve, render_curve, simulate as simulate_shadow, ShadowConfig, ShadowReport};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

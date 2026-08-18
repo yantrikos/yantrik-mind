@@ -381,3 +381,116 @@ mod tests {
         assert!(out.contains("full URL"), "{out}");
     }
 }
+
+impl super::ConversationEngine {
+    /// Sample the position bar once and append it to the tape.
+    ///
+    /// One reading answers nothing; a few thousand answer whether shadowing these traders would
+    /// have paid. So this is deliberately cheap — one frame, one vision call, one line appended —
+    /// because it has to run on a tight cadence for weeks without becoming the reason the box is
+    /// busy.
+    pub async fn tape_sample(&self, url: &str) -> String {
+        let traders: Vec<String> = std::env::var("YM_TAPE_TRADERS")
+            .unwrap_or_else(|_| "CHERIF,CHEIF,OBI,SHARE".into())
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let (u, window) = (url.to_string(), 30u64);
+        let frames = match tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, 1, window)).await {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => return format!("tape: could not sample a frame ({e})"),
+            Err(_) => return "tape: frame task failed".to_string(),
+        };
+        let Some((_, bytes)) = frames.into_iter().next() else {
+            return "tape: no frame returned".to_string();
+        };
+        let caption = self
+            .analyze_image_bytes(
+                bytes,
+                "image/jpeg",
+                "Read ONLY the traders' position bar at the bottom. For each trader give: name, LONG or SHORT, the ticker symbol, or the words 'no positions'. Copy the text exactly; do not infer.",
+            )
+            .await;
+        let states = mind_tools::tape::parse_bar(&caption, &traders);
+        if states.is_empty() {
+            return format!("tape: no trader state could be read (kept nothing rather than guessing)\n{}", caption.chars().take(200).collect::<String>());
+        }
+        let sample = mind_tools::tape::TapeSample {
+            at_ms: chrono::Utc::now().timestamp_millis(),
+            source: url.to_string(),
+            states: states.clone(),
+        };
+        let path = std::path::PathBuf::from(
+            std::env::var("YM_TAPE_PATH").unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
+        );
+        let stored = mind_tools::tape::append_sample(&path, &sample).is_ok();
+        let mut out = String::from("📼 tape: ");
+        out.push_str(
+            &states
+                .iter()
+                .map(|s| match (&s.side, &s.symbol) {
+                    (mind_tools::Side::Flat, _) => format!("{} flat", s.trader),
+                    (side, Some(sym)) => format!("{} {:?} {}", s.trader, side, sym),
+                    (side, None) => format!("{} {:?}", s.trader, side),
+                })
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+        if !stored {
+            out.push_str("  (NOT recorded — the ledger write failed)");
+        }
+        out
+    }
+
+    /// `ym shadow` — the counterfactual over everything recorded so far.
+    pub async fn shadow_report(&self) -> String {
+        let path = std::path::PathBuf::from(
+            std::env::var("YM_TAPE_PATH").unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
+        );
+        let tape = mind_tools::tape::read_tape(&path);
+        if tape.is_empty() {
+            return "No tape recorded yet — nothing to compute. `ym tape <url>` samples the position bar.".to_string();
+        }
+        let trans = mind_tools::tape::transitions(&tape);
+        if trans.is_empty() {
+            return format!(
+                "{} tape sample(s) recorded, but no entry/exit transition yet — every reading so far showed the same state.",
+                tape.len()
+            );
+        }
+        // Price every symbol that appears, over the window the tape covers.
+        let symbols: std::collections::HashSet<String> =
+            trans.iter().filter_map(|t| t.symbol.clone()).collect();
+        let (lo, hi) = (
+            tape.iter().map(|s| s.at_ms).min().unwrap_or(0),
+            tape.iter().map(|s| s.at_ms).max().unwrap_or(0),
+        );
+        let start = chrono::DateTime::from_timestamp_millis(lo - 3_600_000).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default();
+        let end = chrono::DateTime::from_timestamp_millis(hi + 3_600_000).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default();
+        let bars = match tokio::task::spawn_blocking(move || {
+            let client = mind_tools::MarketClient::from_env()?;
+            let mut m = std::collections::HashMap::new();
+            for s in symbols {
+                if let Ok(b) = client.bars(&s, "1Min", &start, &end) {
+                    m.insert(s, b);
+                }
+            }
+            Ok::<_, anyhow::Error>(m)
+        })
+        .await
+        {
+            Ok(Ok(m)) => m,
+            Ok(Err(e)) => return format!("Recorded {} sample(s) and {} transition(s), but I can't price them: {e}", tape.len(), trans.len()),
+            Err(_) => return "The pricing task failed.".to_string(),
+        };
+        let curve = mind_tools::lag_curve(&trans, &bars, &[0, 60, 120, 180, 300, 600], 15.0);
+        format!(
+            "📼 {} sample(s), {} transition(s), {} symbol(s) priced\n\n{}\nEvery leg is lagged, both entry AND exit, with 15bp charged each side.",
+            tape.len(),
+            trans.len(),
+            bars.len(),
+            mind_tools::render_curve(&curve)
+        )
+    }
+}

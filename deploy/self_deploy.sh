@@ -103,6 +103,14 @@ if cargo build --release -p mind-evals 2>&1 | tail -2; then
   cp "$CARGO_TARGET_DIR/release/mind-evals" /opt/yantrik-mind/mind-evals
   chmod 755 /opt/yantrik-mind/mind-evals
 fi
+# Browser/vision helper scripts. These are CODE the mind shells out to, so they must ride the
+# deploy like the binary does — a stale driver beside a fresh binary is a capability that reports
+# itself present and behaves like an older version, which is worse than one that is missing.
+for js in browser_agent.js headless_fetch.js headful_fetch.js snap_page.js; do
+  [ -f "$CLONE/deploy/$js" ] && cp "$CLONE/deploy/$js" "/opt/yantrik-mind/$js" \
+    && chown yantrikmind:yantrikmind "/opt/yantrik-mind/$js" 2>/dev/null
+done
+echo "==> self-deploy: browser helpers synced"
 cp "$CLONE/deploy/immune_trial.sh" /opt/yantrik-mind/immune_trial.sh && chmod 755 /opt/yantrik-mind/immune_trial.sh
 cp "$CLONE/deploy/observatory.py" /opt/yantrik-mind/observatory.py
 for unit in immune-trial.service immune-trial.timer observatory.service; do

@@ -444,3 +444,40 @@ impl super::ConversationEngine {
     }
 
 }
+
+impl super::ConversationEngine {
+    /// `ym draft <to> | <subject> | <body>` — DELIVER INTO THE TOOL.
+    ///
+    /// The prepared reply lands in the operator's own Drafts folder, unsent, where their mail
+    /// client already is: on the phone, in the thread, next to the message it answers. Telling
+    /// someone in chat that a reply "is ready" leaves the work in the assistant; putting it in
+    /// their drafts leaves it one click from done, and the click is the part that must stay human.
+    ///
+    /// This path CANNOT send. It writes through IMAP APPEND, which has no transport to anywhere —
+    /// the limit is structural, not a policy the model could talk its way past, which is exactly
+    /// why it is safe to run unattended when sending is not.
+    pub async fn draft_email(&self, spec: &str) -> String {
+        let Some(mail) = self.mail.clone() else {
+            return "No mailbox is configured (YM_EMAIL + YM_EMAIL_PASSWORD), so I have nowhere to leave a draft.".to_string();
+        };
+        let parts: Vec<&str> = spec.splitn(3, '|').map(|p| p.trim()).collect();
+        let (to, subject, body) = match parts.as_slice() {
+            [to, subject, body] => (*to, *subject, *body),
+            [to, body] => (*to, "", *body),
+            _ => return "Usage: ym draft <to> | <subject> | <body>".to_string(),
+        };
+        if !to.contains('@') {
+            return format!("\"{to}\" doesn't look like an address — usage: ym draft <to> | <subject> | <body>");
+        }
+        if body.len() < 2 {
+            return "Give me something to say in the draft.".to_string();
+        }
+        let subject = if subject.is_empty() { "(no subject)" } else { subject };
+        match mail.save_draft(to, subject, body).await {
+            Ok(where_) => format!(
+                "✉️ Left it in your drafts — {where_}\n   To: {to}\n   Subject: {subject}\n\nIt is written and unsent. Open your mail client and press send when you're happy with it."
+            ),
+            Err(e) => format!("I couldn't leave the draft ({e}) — so it is NOT waiting for you. Nothing was sent either."),
+        }
+    }
+}

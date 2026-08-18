@@ -32,6 +32,17 @@ pub trait MailClient: Send + Sync {
         Ok(vec![])
     }
 
+    /// DELIVER INTO THE TOOL: leave a composed reply in the account's Drafts folder, unsent.
+    ///
+    /// Deliberately part of the READ client rather than the sender: IMAP APPEND writes to a
+    /// folder and has no transport to anywhere, so a backend that can draft still cannot send.
+    /// The capability is bounded by construction, not by policy — which is what makes it safe to
+    /// run unattended when `send` is not. Default: unsupported, and says so.
+    async fn save_draft(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
+        let _ = (to, subject, body);
+        anyhow::bail!("this mail backend cannot leave drafts")
+    }
+
     async fn peek_bodies(&self, ids: &[String], max_chars: usize) -> anyhow::Result<Vec<(String, String)>> {
         let _ = (ids, max_chars);
         Ok(Vec::new())
@@ -254,6 +265,10 @@ impl ImapClient {
 
 #[async_trait]
 impl MailClient for ImapClient {
+    async fn save_draft(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
+        self.append_draft(to, subject, body).await
+    }
+
     async fn inbox(&self, limit: usize) -> anyhow::Result<Vec<EmailMsg>> {
         let (host, port, user, password) =
             (self.host.clone(), self.port, self.user.clone(), self.password.clone());
@@ -442,6 +457,82 @@ impl MailSender for SmtpMailSender {
     }
 }
 
+/// Compose an RFC-5322 message. Split out from the draft path so the wire format is testable
+/// without a mail server — a malformed header is the difference between a draft that opens and
+/// one the client silently refuses to show.
+pub fn compose_rfc822(from: &str, to: &str, subject: &str, body: &str, date_rfc2822: &str, msg_id: &str) -> String {
+    // Header injection guard: a newline in any header field would let composed content forge
+    // headers (a Bcc, a different recipient). Fields are single-line by construction.
+    let clean = |s: &str| {
+        let flattened: String = s.chars().map(|c| if c == '\r' || c == '\n' { ' ' } else { c }).collect();
+        // Collapse the run so a CRLF becomes one space, not two.
+        let mut out = String::with_capacity(flattened.len());
+        let mut prev_space = false;
+        for c in flattened.chars() {
+            if c == ' ' {
+                if !prev_space {
+                    out.push(c);
+                }
+                prev_space = true;
+            } else {
+                out.push(c);
+                prev_space = false;
+            }
+        }
+        out.trim().to_string()
+    };
+    format!(
+        "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nMessage-ID: {}\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\nX-Yantrik-Mind: prepared-draft\r\n\r\n{}",
+        clean(from),
+        clean(to),
+        clean(subject),
+        clean(date_rfc2822),
+        clean(msg_id),
+        body.replace("\r\n", "\n").replace('\n', "\r\n")
+    )
+}
+
+/// The Drafts mailbox name for a host — Gmail namespaces its special folders.
+pub fn drafts_folder_for(host: &str) -> &'static str {
+    if host.contains("gmail") {
+        "[Gmail]/Drafts"
+    } else {
+        "Drafts"
+    }
+}
+
+impl ImapClient {
+    /// The real APPEND. Exposed as an inherent method too so it is callable on a concrete client.
+    ///
+    /// Leaves a fully-composed reply in the account's Drafts folder, unsent, flagged `\Draft`.
+    ///
+    /// This is "prepared to the last safe inch" taken one step further than telling the operator
+    /// about it in chat. The work lands where the work lives — it is in the mailbox, on the phone,
+    /// in the client they already use — and the only thing left is the irreversible click, which
+    /// stays human. Nothing here can send: IMAP APPEND writes to a folder, it has no transport to
+    /// anywhere, so this path is incapable of the outward effect by construction rather than by
+    /// policy. That is why it is safe to let it run unattended when `send` is not.
+    pub async fn append_draft(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
+        let (host, port, user, password) = (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+        let (to, subject, body) = (to.to_string(), subject.to_string(), body.to_string());
+        let date = chrono::Utc::now().to_rfc2822();
+        let msg_id = format!("<{}.{}@yantrik-mind>", chrono::Utc::now().timestamp_millis(), std::process::id());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let folder = drafts_folder_for(&host);
+            let message = compose_rfc822(&user, &to, &subject, &body, &date, &msg_id);
+            let tls = native_tls::TlsConnector::builder().build()?;
+            let client = imap::connect((host.as_str(), port), host.as_str(), &tls)?;
+            let mut session = client.login(&user, &password).map_err(|(e, _)| e)?;
+            let res = session.append_with_flags(folder, message.as_bytes(), &[imap::types::Flag::Draft]);
+            let _ = session.logout();
+            res?;
+            Ok(format!("{folder} ({msg_id})"))
+        })
+        .await?
+    }
+}
+
 /// Records sends instead of performing them — for tests/dry-runs.
 #[derive(Default)]
 pub struct ScriptedMailSender {
@@ -490,6 +581,61 @@ mod tests {
         // Slicing the original at the shifted index would land mid-char and panic.
         let s = "Ω<STYLE>body{}</STYLE>text";
         assert_eq!(strip_block(s, "style"), "Ωtext");
+    }
+
+    /// A draft that a mail client silently refuses to render is worse than no draft at all —
+    /// the operator is told work is waiting and finds an empty folder.
+    #[test]
+    fn a_composed_draft_is_well_formed() {
+        let m = compose_rfc822(
+            "me@example.com",
+            "them@example.com",
+            "Re: the renewal",
+            "First line.\nSecond line.",
+            "Mon, 17 Aug 2026 20:00:00 +0000",
+            "<1@yantrik-mind>",
+        );
+        // Headers, then ONE blank line, then the body — the separator RFC 5322 requires.
+        let (head, body) = m.split_once("\r\n\r\n").expect("headers must be separated from the body");
+        assert!(head.contains("From: me@example.com"), "{head}");
+        assert!(head.contains("To: them@example.com"), "{head}");
+        assert!(head.contains("Subject: Re: the renewal"), "{head}");
+        assert!(head.contains("Content-Type: text/plain; charset=utf-8"), "{head}");
+        // Tagged as ours, so a human (or a later sweep) can tell what wrote it.
+        assert!(head.contains("X-Yantrik-Mind: prepared-draft"), "{head}");
+        // Body lines are CRLF-terminated on the wire, and not doubled.
+        assert_eq!(body, "First line.\r\nSecond line.");
+        assert!(!m.contains("\r\r"), "no doubled carriage returns");
+    }
+
+    /// HEADER INJECTION: composed content is model-written, so a newline in a subject must never
+    /// be able to forge a header — a smuggled Bcc would turn a draft into a disclosure.
+    #[test]
+    fn newlines_cannot_forge_headers() {
+        let m = compose_rfc822(
+            "me@example.com",
+            "them@example.com",
+            "Hello\r\nBcc: attacker@evil.com",
+            "body",
+            "Mon, 17 Aug 2026 20:00:00 +0000",
+            "<1@x>",
+        );
+        let head = m.split("\r\n\r\n").next().unwrap();
+        // The property that matters is not whether the STRING "bcc:" appears — as subject text it
+        // is inert — but whether any header LINE begins with it, which is what would make it a
+        // header the server acts on.
+        assert!(
+            !head.lines().any(|l| l.trim_start().to_lowercase().starts_with("bcc:")),
+            "a forged header line survived: {head}"
+        );
+        assert!(head.contains("Subject: Hello Bcc: attacker@evil.com"), "flattened onto one line: {head}");
+    }
+
+    #[test]
+    fn gmail_drafts_folder_is_namespaced() {
+        // Gmail hides Drafts under the [Gmail] namespace; everyone else uses the plain name.
+        assert_eq!(drafts_folder_for("imap.gmail.com"), "[Gmail]/Drafts");
+        assert_eq!(drafts_folder_for("mail.example.com"), "Drafts");
     }
 
     #[test]

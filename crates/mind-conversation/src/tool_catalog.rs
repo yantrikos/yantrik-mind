@@ -261,6 +261,11 @@ fn core_meta_schemas() -> Vec<Value> {
             &[("text", true), ("when", true)],
         ),
         arg_schema(
+            "draft_email",
+            "when a reply needs writing, LEAVE IT IN THEIR DRAFTS instead of only showing it in chat — it lands in their mailbox unsent, one click from done. This cannot send; the send stays theirs",
+            &[("to", true), ("subject", false), ("body", true)],
+        ),
+        arg_schema(
             "watch",
             "WATCH or LISTEN to a video/audio URL (YouTube, podcast, stream): reads published captions, hears it with the local speech model, and looks at sampled frames with the local vision model. Use this for ANY media link — never say you cannot watch video without calling it first",
             &[("url", true), ("question", false)],

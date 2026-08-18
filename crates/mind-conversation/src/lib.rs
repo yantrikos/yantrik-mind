@@ -4904,6 +4904,9 @@ impl ConversationEngine {
             "briefing" | "brief" | "morning" | "goodmorning" => self.morning_briefing().await,
             "report" | "selfreport" | "weekreview" => self.self_report(false).await,
             "mailsearch" | "findmail" if !rest.trim().is_empty() => self.mail_search_all(rest.trim()).await,
+            // `ym draft <to> | <subject> | <body>` — DELIVER INTO THE TOOL: the reply lands in the
+            // mailbox as a draft, unsent. Prepared to the last safe inch; the click stays human.
+            "draft" | "draft-reply" if !rest.trim().is_empty() => self.draft_email(rest.trim()).await,
             "gphotos" | "googlephotos" | "gphoto" => {
                 let a = rest.trim();
                 if a == "auth" || a == "connect" || a == "login" {
@@ -7388,6 +7391,14 @@ impl ConversationEngine {
             // "drop that" and left acknowledging a change it cannot make.
             // EYES AND EARS ON MEDIA: fetch a video/audio URL, read its captions or hear it with
             // the local speech model, and look at sampled frames with the local vision model.
+            // DELIVER INTO THE TOOL: leave the reply in their mailbox as a draft, never send it.
+            "draft_email" | "draft_reply" => {
+                let (to, subject, body) = (s("to"), s("subject"), s("body"));
+                if to.trim().is_empty() || body.trim().is_empty() {
+                    return "(need at least `to` and `body` to leave a draft)".to_string();
+                }
+                self.draft_email(&format!("{to} | {subject} | {body}")).await
+            }
             "watch" | "watch_media" | "listen" => {
                 let url = if s("url").trim().is_empty() { s("link") } else { s("url") };
                 let url = if url.trim().is_empty() { mind_tools::first_url(&s("query")).unwrap_or_default() } else { url };

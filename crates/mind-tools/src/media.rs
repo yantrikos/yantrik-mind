@@ -233,6 +233,32 @@ pub fn captions_to_text(vtt: &str) -> String {
     out.join("\n")
 }
 
+/// Keep only the caption lines whose `[mm:ss]` anchor falls inside a window.
+///
+/// The captions path bypassed the seek fix entirely: a recording with published captions is read
+/// from its first line, so seeking the AUDIO fixed nothing for the case that actually applies to
+/// most of YouTube. Windowing here is the same correction applied to the other channel — a
+/// three-hour show is not summarised by its first three minutes whichever way you read it.
+pub fn captions_window(text: &str, from_secs: u64, secs: u64) -> String {
+    let (lo, hi) = (from_secs, from_secs.saturating_add(secs));
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix('[') else { continue };
+        let Some((stamp, _)) = rest.split_once(']') else { continue };
+        let parts: Vec<&str> = stamp.split(':').collect();
+        let at = match parts.len() {
+            3 => parts[0].parse::<u64>().unwrap_or(0) * 3600 + parts[1].parse::<u64>().unwrap_or(0) * 60 + parts[2].parse::<u64>().unwrap_or(0),
+            2 => parts[0].parse::<u64>().unwrap_or(0) * 60 + parts[1].parse::<u64>().unwrap_or(0),
+            _ => continue,
+        };
+        if at >= lo && at <= hi {
+            out.push(line);
+        }
+    }
+    out.join("
+")
+}
+
 /// Fetch the publisher's own transcript. Prefers manual captions, falls back to auto.
 pub fn captions(url: &str) -> anyhow::Result<String> {
     crate::ssrf_check_pub(url)?;
@@ -624,6 +650,31 @@ mod tests {
         assert_eq!(u.len(), 1);
         assert_eq!(u[0].text, "real words");
         assert!(parse_whisper_segments("no timestamps at all here").is_empty());
+    }
+
+    /// Three attempts at learning from a three-hour broadcast all read its opening, the third
+    /// because seeking the AUDIO left the captions path untouched. Both channels must window.
+    #[test]
+    fn captions_can_be_windowed_to_mid_session() {
+        let text = "[00:30] hello everyone welcome
+[45:00] I am long CRWV here
+[46:10] taking profit at 110
+[178:00] see you tomorrow";
+        let mid = captions_window(text, 2700, 600); // 45m in, 10m wide
+        assert!(mid.contains("long CRWV"), "the mid-session content must survive: {mid}");
+        assert!(mid.contains("taking profit"), "{mid}");
+        assert!(!mid.contains("hello everyone"), "the opening must be excluded: {mid}");
+        assert!(!mid.contains("see you tomorrow"), "the wind-down must be excluded: {mid}");
+        // An empty window is empty, not the whole file.
+        assert_eq!(captions_window(text, 10_000, 60), "");
+    }
+
+    #[test]
+    fn the_offset_targets_the_middle_and_leaves_short_media_alone() {
+        assert_eq!(sensible_offset(600, 1800), 0, "short enough that the whole thing is the middle");
+        assert_eq!(sensible_offset(10_878, 1800), 3626, "a 181m show is sampled from ~60m in");
+        // Never seeks past the point where the window would run off the end.
+        assert!(sensible_offset(2000, 1800) + 1800 <= 2000);
     }
 
     #[test]

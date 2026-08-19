@@ -626,9 +626,17 @@ mod tests {
             let schemas = tool_schemas(turn, &full);
             let json = serde_json::to_string(&schemas).unwrap();
             println!("{turn:?}: {} schemas, {} chars", schemas.len(), json.len());
-            // core+meta (7) plus a bounded relevant set — never the whole ~60-tool catalog.
+            // core+meta (7) plus the pinned set plus a bounded relevant set — never the whole
+            // catalog, which is now past 40 tools.
+            //
+            // The ceiling moved from 30 to 32 for one reason, stated so the next person can judge
+            // whether it was earned: the three SENSES (quote, watch, browse) are pinned, because a
+            // sense evicted to the name-only tail reads to the model as a capability it does not
+            // have, and it then reports that it cannot do the thing. Three permanent slots is the
+            // price of that, and it is a bound on the always-present set rather than a licence for
+            // the gate to leak.
             assert!(schemas.len() >= 7, "core+meta always present");
-            assert!(schemas.len() <= 30, "schema set is gated, not the full catalog ({} tools)", schemas.len());
+            assert!(schemas.len() <= 32, "schema set is gated, not the full catalog ({} tools)", schemas.len());
         }
     }
 

@@ -364,6 +364,23 @@ impl PluginRegistry {
                 "- quote {symbols}: LIVE price, quote, level or move for a stock, share, index, ticker or crypto — how a market/sector is trading today, up or down, at what level. US equities via Alpaca; Indian listings with the .NS/.BO suffix (RELIANCE.NS, TCS.NS) and indices like ^NSEI (Nifty), ^BSESN (Sensex). CALL THIS for ANY question about what something is worth or how it is doing — never answer a price from memory and never tell the user to run a command instead"),
             PluginSpec::new("media_watch", "Watch media", "Research", ReadOnly, &["watch"], &["listen"],
                 "- watch {url, question?}: WATCH, SEE, HEAR or LISTEN to a video, audio, YouTube link, livestream, broadcast, podcast, talk, interview or recording — reads published captions, hears the speech with the local model, and looks at sampled frames, aligned on one timeline. Works on LIVE streams (samples a window of what is airing NOW). CALL THIS for any media link — never say you cannot watch or hear video"),
+            // THE TRADING DESK, in the mind's own hands.
+            //
+            // These were built as `ym` console commands and left there, so the mind could not reach
+            // any of them. Asked on Telegram whether it could watch live feeds and use the paper
+            // account, it said no and offered to BUILD the tool — correctly, for four of the five,
+            // because an operator command is not a capability. A day of work had produced a trading
+            // desk only its operator could drive.
+            PluginSpec::new("paper_book", "Paper book", "Finance", ReadOnly, &["paper"], &[],
+                "- paper {}: your SANDBOX brokerage account — equity, cash, buying power and every open position, measured live. Use for any question about what you hold or what the account is worth"),
+            PluginSpec::new("market_hunt", "Hunt movers", "Finance", ReadOnly, &["hunt"], &[],
+                "- hunt {act?}: find today's biggest movers, why they moved (company-specific news), filter out the untradeable ones, and form a view. Pass act=true to take a small SANDBOX position on anything convincing. Use when asked what is moving, what to trade, or what looks interesting today"),
+            PluginSpec::new("feed_surf", "Surf feeds", "Research", ReadOnly, &["surf"], &[],
+                "- surf {handles?}: glance at every live feed in the rotation at once — trading desks and market news — and report which ones CHANGED since the last look. Use to check what is happening across several broadcasts rather than one"),
+            PluginSpec::new("copy_desk", "Copy a desk", "Finance", ReadOnly, &["copy_trade"], &[],
+                "- copy_trade {url}: watch a live trading broadcast, read what the traders are actually holding, and mirror any clear directional call as a small SANDBOX position logged as a graded prediction"),
+            PluginSpec::new("source_trust", "Source standing", "Research", ReadOnly, &["sources"], &[],
+                "- sources {}: which information sources have EARNED trust, scored from graded outcomes — who has been right, who has been dropped, and what is still unproven. Use when asked whether a source is reliable or how your own calls have scored"),
             PluginSpec::new("web_drive", "Browse", "Research", ReadOnly, &["browse"], &[],
                 "- browse {url, goal}: OPEN and drive a real website, web page, portal or app in a real browser toward a goal — navigate, click, read, search, sign in, fill forms, check a dashboard. CALL THIS to look something up on a site rather than saying you have no browser. It stops before anything irreversible — it cannot buy, send, pay or delete"),
             PluginSpec::new("gifting", "Gift intelligence", "Shopping", Personal, &["gift_intel"], &[],

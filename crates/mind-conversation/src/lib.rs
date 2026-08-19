@@ -7427,6 +7427,28 @@ impl ConversationEngine {
             }
             // Live prices — the mind was refusing quote questions because this existed in the
             // code and not in its hands.
+            // The trading desk, reachable by the MIND and not only by its operator. A declared
+            // tool with no dispatch arm is worse than an undeclared one: it is advertised, called,
+            // and then falls through to "unknown tool" — the capability appears to exist and fails.
+            "paper" | "paper_book" | "book" => self.paper_book().await,
+            "hunt" | "scan_movers" => {
+                let act = args.get("act").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || args.get("act").and_then(|v| v.as_str()).map(|s| s.eq_ignore_ascii_case("true")).unwrap_or(false);
+                self.hunt(act).await
+            }
+            "surf" | "feeds" => {
+                let spec = args.get("handles").or_else(|| args.get("spec")).and_then(|v| v.as_str()).unwrap_or("");
+                self.surf_feeds(spec).await
+            }
+            "copy_trade" | "copy_desk" => {
+                let url = args.get("url").or_else(|| args.get("link")).and_then(|v| v.as_str()).unwrap_or("");
+                if url.trim().is_empty() {
+                    return "(copy_trade needs the url of a live trading broadcast)".to_string();
+                }
+                let q = args.get("question").and_then(|v| v.as_str()).unwrap_or("what are they trading and which way");
+                self.trade_from_watch(url.trim(), q).await
+            }
+            "sources" | "source_standing" | "trust" => self.source_standing().await,
             "quote" | "price" | "get_quote" | "market_price" => {
                 // Model-authored args arrive under whatever key the model felt like. Reading only
                 // "symbols" meant the tool returned empty and the mind honestly reported that its

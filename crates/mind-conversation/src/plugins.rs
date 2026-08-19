@@ -355,6 +355,17 @@ impl PluginRegistry {
                  - watch_price {query, target?}: start tracking an item's price and ping on a real drop / when it hits a target\n\
                  - watches {}: list what I'm currently price-watching")
                 .requiring(&[Requirement::WebSearch]),
+            // Markets + media. These shipped as dispatch arms and console commands but were never
+            // DECLARED here, so the prose catalog never advertised them — and this module's own
+            // header says what happens then: the model confabulates the capability instead of
+            // calling it. It did exactly that, quoting `ym quote ^NSEI` back as something the
+            // user should run while insisting it had no market-data tool.
+            PluginSpec::new("markets", "Market data", "Research", ReadOnly, &["quote"], &["price"],
+                "- quote {symbols}: LIVE price for one or more symbols — US equities via Alpaca, Indian listings with the .NS/.BO suffix (RELIANCE.NS, TCS.NS) and indices like ^NSEI. Use this for ANY price question rather than answering from memory or refusing"),
+            PluginSpec::new("media_watch", "Watch media", "Research", ReadOnly, &["watch"], &["listen"],
+                "- watch {url, question?}: WATCH or LISTEN to a video/audio link — reads published captions, hears it with the local speech model, and looks at sampled frames. Use for any media URL instead of saying you cannot watch video"),
+            PluginSpec::new("web_drive", "Browse", "Research", ReadOnly, &["browse"], &[],
+                "- browse {url, goal}: drive a real web page toward a goal (navigate, read, fill forms). It stops before anything irreversible — it cannot buy, send or delete"),
             PluginSpec::new("gifting", "Gift intelligence", "Shopping", Personal, &["gift_intel"], &[],
                 "- gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings"),
             PluginSpec::new("people", "People", "People", Personal, &["learn_about", "family", "about_person"], &[],

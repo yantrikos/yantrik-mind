@@ -39,9 +39,24 @@ pub(crate) const SKILL_SECTION: &str = "SKILL LIBRARY (your growing, reusable ca
 
 /// Tools the loop's system prompt names explicitly — always rendered in full (when enabled) so the
 /// prompt's own guidance ("for SHOPPING use `deals`…") never points at an abbreviated entry.
+///
+/// The SENSES are pinned for a different reason. `quote`, `watch` and `browse` are how the mind
+/// perceives the world outside its own memory, and a sense that competes for a top-K slot loses:
+/// on a box with MCP servers attached the catalog runs to well over a hundred lines, so a handful
+/// of matched words decides whether the mind can see. It lost exactly that way — asked "what is
+/// the Nifty trading at", it answered "I don't have a live market-data tool wired up" and offered
+/// to BUILD one, while holding `quote` the whole time. Rewriting the line in the asking vocabulary
+/// was not enough, because relevance is relative: the competition grows every time a server
+/// connects, so any line can be evicted by tools that have nothing to do with the question.
+///
+/// Perception is not a specialist capability to be retrieved on a keyword. It is the precondition
+/// for answering honestly at all — the difference between "I looked" and "I can't". So it does not
+/// compete.
 const PINNED: &[&str] = &[
     "search", "web_fetch", "research", "deals", "watch_price", "learn_about", "family",
     "about_person", "github_repo_items",
+    // the senses
+    "quote", "watch", "browse",
 ];
 
 /// How many relevance-matched (non-pinned) tool lines stay detailed.

@@ -649,7 +649,18 @@ mod tests {
         // actually use ("Nifty", "trading", "watch this video"). Naming the tool rescued it —
         // which is exactly the phrasing a user never uses. So these lines must carry the
         // ASKING vocabulary, and this test is the thing that notices when an edit drops it.
-        let src = PluginRegistry::builtin().enabled_catalog();
+        // Against the builtin catalog alone this passes even with the senses unpinned — which is
+        // exactly why the first version of this test proved nothing. The box runs MCP servers, so
+        // the real catalog is a hundred-odd lines and a sense has to out-rank all of them. The
+        // decoys reproduce that pressure: they deliberately carry the query's own words, because a
+        // competitor that matches nothing cannot evict anything.
+        let mut src = PluginRegistry::builtin().enabled_catalog();
+        for i in 0..80 {
+            src.push_str(&format!(
+                "\n- mcp.decoy.tool_{i} {{q}}: today's live market stock trading news for Nifty and \
+                 Reliance right now — watch this video, open that site, listen to the stream"
+            ));
+        }
         for (asked, tool) in [
             ("what is the Nifty trading at right now", "quote"),
             ("how is this stock doing today", "quote"),
@@ -719,3 +730,4 @@ mod tests {
         assert!(r.handler_for_tool("smart_home").is_some(), "home owns smart_home");
     }
 }
+

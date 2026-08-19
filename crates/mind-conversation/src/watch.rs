@@ -602,6 +602,43 @@ impl super::ConversationEngine {
     /// Exists because the mind was refusing quote questions with "I have no market-data tool
     /// wired up", which was TRUE and was the honest answer to a capability that existed in the
     /// code and not in its hands. The pipeline could price a symbol; the mind could not ask.
+    /// The sandbox book: what the paper account holds and what it is worth.
+    ///
+    /// Reported as MEASURED, like every other number the mind states about the world. The paper
+    /// balance is the copy-trade experiment's readout, so a stale or recalled figure here would not
+    /// be a small inaccuracy — it would be the instrument lying about itself.
+    pub async fn paper_book(&self) -> String {
+        tokio::task::spawn_blocking(|| {
+            let b = match mind_tools::broker::PaperBroker::from_env() {
+                Ok(b) => b,
+                Err(e) => return format!("No paper account reachable: {e}"),
+            };
+            let acct = match b.account() {
+                Ok(a) => a,
+                Err(e) => return format!("Could not read the paper account: {e}"),
+            };
+            let mut out = format!(
+                "📒 Paper account {} ({}) — measured, not recalled\n  equity ${:.2} · cash ${:.2} · buying power ${:.2}\n",
+                acct.account_number, acct.status, acct.equity, acct.cash, acct.buying_power
+            );
+            match b.positions() {
+                Ok(ps) if ps.is_empty() => out.push_str("  no open positions\n"),
+                Ok(ps) => {
+                    for p in ps {
+                        out.push_str(&format!(
+                            "  {} {:+} @ {:.2} · now ${:.2} · unrealised {:+.2}\n",
+                            p.symbol, p.qty, p.avg_entry_price, p.market_value, p.unrealized_pl
+                        ));
+                    }
+                }
+                Err(e) => out.push_str(&format!("  (positions unreadable: {e})\n")),
+            }
+            out
+        })
+        .await
+        .unwrap_or_else(|e| format!("paper book failed: {e}"))
+    }
+
     pub async fn quote_symbols(&self, spec: &str) -> String {
         let syms: Vec<String> = spec
             .split(|c: char| c == ',' || c.is_whitespace())

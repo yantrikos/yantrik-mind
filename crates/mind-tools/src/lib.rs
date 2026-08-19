@@ -45,6 +45,9 @@ pub mod browser;
 pub use browser::{looks_irreversible, BrowserSession, Observation, PageElement};
 
 pub mod market;
+
+/// The mind's hands, sandbox-only: paper orders against the broker's simulated account.
+pub mod broker;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
 
 pub mod newsflow;

@@ -602,6 +602,133 @@ impl super::ConversationEngine {
     /// Exists because the mind was refusing quote questions with "I have no market-data tool
     /// wired up", which was TRUE and was the honest answer to a capability that existed in the
     /// code and not in its hands. The pipeline could price a symbol; the mind could not ask.
+    /// HUNT — the mind's own trade, from its own reading of the tape.
+    ///
+    /// Copying a broadcast borrows someone else's judgment and arrives late to it. This is the
+    /// independent version: what moved, why it moved, is it even tradeable, and only then a view.
+    ///
+    /// The order matters and is not the obvious one. Filtering comes BEFORE the thesis, because a
+    /// model handed FIXX +1378% will happily write a compelling paragraph about it, and no amount of
+    /// good reasoning rescues a symbol that cannot be exited. Eligibility is arithmetic; judgment is
+    /// for the survivors.
+    ///
+    /// Every position is filed as a prediction on the same ledger as any other claim, so a run of
+    /// these is a measurable strategy rather than a sequence of anecdotes.
+    pub async fn hunt(&self, act: bool) -> String {
+        let pull = tokio::task::spawn_blocking(|| mind_tools::hunt::fetch_market(20, 50).map_err(|e| e.to_string()))
+            .await
+            .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+
+        let (movers, news) = match pull {
+            Ok(x) => x,
+            Err(e) => return format!("🎯 Hunt aborted: {e}"),
+        };
+        let bounds = mind_tools::hunt::Bounds::default();
+        let (keep, dropped) = mind_tools::hunt::shortlist(&movers, &bounds);
+
+        let mut out = format!("🎯 HUNT — {} movers scanned, {} tradeable\n", movers.len(), keep.len());
+        if !dropped.is_empty() {
+            out.push_str(&format!("  filtered out {} (the filter IS the strategy here):\n", dropped.len()));
+            for (s, r) in dropped.iter().take(6) {
+                out.push_str(&format!("    · {s}: {r}\n"));
+            }
+        }
+        if keep.is_empty() {
+            out.push_str("\nNothing eligible today. A hunt that finds nothing is a result — the alternative is trading the junk.\n");
+            return out;
+        }
+
+        out.push_str("\n  candidates:\n");
+        let mut brief = String::new();
+        for m in keep.iter().take(6) {
+            let hs = mind_tools::hunt::news_for(&m.symbol, &news);
+            let head = hs.first().map(|h| h.headline.clone()).unwrap_or_else(|| "(no headline — an unexplained move)".into());
+            out.push_str(&format!("    {} {:>8.2} {:+6.2}%  {}\n", m.symbol, m.price, m.percent_change, head.chars().take(70).collect::<String>()));
+            brief.push_str(&format!("- {} at {:.2}, {:+.2}% today. News: {}\n", m.symbol, m.price, m.percent_change, head));
+        }
+
+        let prompt = format!(
+            "You are deciding your OWN trades, not copying anyone. Today's tradeable movers:\n\n{brief}\n\
+             For each, decide whether there is a same-day edge and which way. Be sceptical: a move \
+             that already happened is not an edge, and 'it is going up' is not a thesis. A catalyst \
+             that is fresh and specific (earnings, trial data, guidance, a deal) with the move still \
+             developing is. If none qualify, return an empty array — that is the common and correct \
+             answer.\n\
+             Output ONLY JSON: {{\"trades\":[{{\"symbol\":\"X\",\"side\":\"long\"|\"short\",\
+             \"conviction\":0.0-1.0,\"thesis\":\"one specific sentence\"}}]}}"
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You decide trades from evidence. Output ONLY the JSON object. An empty array is a valid, common answer."),
+            ChatMessage::user(&prompt),
+        ];
+        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("{out}\n(could not form a view: {e})"),
+        };
+        let b_owned = crate::strip_reasoning(&text);
+        let b = b_owned.as_str();
+        let b = b.split("```").find(|s| s.contains('{')).unwrap_or(b);
+        let obj = match (b.find('{'), b.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &b[s..=e],
+            _ => "{}",
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+        let trades = v.get("trades").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        if trades.is_empty() {
+            out.push_str("\n📉 No thesis worth a position today. Declining is the discipline this is supposed to have.\n");
+            return out;
+        }
+
+        let floor: f64 = std::env::var("YM_TRADE_MIN_CONVICTION").ok().and_then(|s| s.parse().ok()).unwrap_or(0.6);
+        let stake: f64 = std::env::var("YM_PAPER_STAKE_USD").ok().and_then(|s| s.parse().ok()).unwrap_or(250.0);
+        let now = chrono::Utc::now().timestamp_millis();
+        out.push_str("\n📈 VIEW:\n");
+        for t in trades.into_iter().take(3) {
+            let sym = t.get("symbol").and_then(|x| x.as_str()).unwrap_or("").trim().to_uppercase();
+            let side = t.get("side").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+            let conv = t.get("conviction").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let thesis = t.get("thesis").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if sym.is_empty() || !matches!(side.as_str(), "long" | "short") {
+                continue;
+            }
+            out.push_str(&format!("  {sym} {side} (conviction {conv:.2}) — {thesis}\n"));
+            // The view is recorded whether or not it is acted on. A thesis that is only logged when
+            // it becomes a trade produces a track record of exactly the trades that were taken,
+            // which is how a strategy grades itself generously.
+            self.judgment_log("hunt", "trading", &format!("{sym} {side}: {thesis}"), conv.clamp(0.05, 0.95), now + 86_400_000, &sym).await;
+            if !act {
+                out.push_str("      (logged as a prediction; not traded — pass `act` to take it)\n");
+                continue;
+            }
+            if conv < floor {
+                out.push_str(&format!("      not taken: conviction {conv:.2} below the {floor:.2} floor\n"));
+                continue;
+            }
+            let (s2, side2) = (sym.clone(), side.clone());
+            let placed = tokio::task::spawn_blocking(move || -> std::result::Result<(f64, f64, String), String> {
+                let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
+                let acct = broker.account().map_err(|e| e.to_string())?;
+                let px = mind_tools::MarketClient::from_env()
+                    .ok()
+                    .and_then(|c| c.last_price(&s2).ok())
+                    .ok_or_else(|| "no live price — refusing to size blind".to_string())?;
+                let qty = (stake / px).floor();
+                mind_tools::broker::check_order(qty, px, acct.equity).map_err(|r| r.to_string())?;
+                let sd = if side2 == "long" { mind_tools::broker::Side::Buy } else { mind_tools::broker::Side::Sell };
+                let ack = broker.submit_market(&s2, qty, sd).map_err(|e| e.to_string())?;
+                Ok((qty, px, format!("{} {}", ack.status, ack.id)))
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+            match placed {
+                Ok((qty, px, ack)) => out.push_str(&format!("      ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}\n")),
+                Err(e) => out.push_str(&format!("      ✗ not filled: {e}\n")),
+            }
+        }
+        out
+    }
+
     /// SURF — look at every live feed in the rotation, not one.
     ///
     /// A person watches one screen because they have one pair of eyes; that limit is not a law of

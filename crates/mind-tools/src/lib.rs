@@ -51,6 +51,9 @@ pub mod broker;
 
 /// Many feeds at once, none of them tuned by hand.
 pub mod surf;
+
+/// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
+pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
 
 pub mod newsflow;

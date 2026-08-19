@@ -621,24 +621,55 @@ impl super::ConversationEngine {
         };
         let mut out = String::from("📡 SURFING the rotation (each feed diffed against its own last look)\n");
         let mut changes: Vec<String> = Vec::new();
+
+        // WHICH feeds are live is asked of all of them AT ONCE. Sequentially this cost one probe's
+        // latency per channel and made "watch many feeds" behave exactly like watching them one at
+        // a time — the limit the whole module exists to remove. Probes are cheap metadata calls, so
+        // there is nothing to stagger.
+        let mut probes = Vec::new();
         for f in feeds.iter().take(6) {
-            let url = mind_tools::surf::live_url(&f.handle);
-            let probe = {
-                let u = url.clone();
-                tokio::task::spawn_blocking(move || mind_tools::media::probe(&u)).await.ok().and_then(|r| r.ok())
-            };
-            let Some(p) = probe else {
-                out.push_str(&format!("  · {} — not live now\n", f.handle));
-                continue;
-            };
-            if !p.is_live {
-                out.push_str(&format!("  · {} — not live now\n", f.handle));
-                continue;
+            let u = mind_tools::surf::live_url(&f.handle);
+            probes.push(tokio::task::spawn_blocking(move || mind_tools::media::probe(&u)));
+        }
+        let mut live: Vec<(&mind_tools::surf::Feed, String, String)> = Vec::new();
+        for (f, h) in feeds.iter().take(6).zip(probes) {
+            match h.await.ok().and_then(|r| r.ok()) {
+                Some(p) if p.is_live => live.push((f, mind_tools::surf::live_url(&f.handle), p.title)),
+                _ => out.push_str(&format!("  · {} — not live now\n", f.handle)),
             }
-            // One look. Deliberately the WHOLE frame and no crop: what makes this work on a channel
-            // nobody tuned is that the vision model is asked what it sees, not where to look.
-            let seen = self.watch_media(&url, "what is on screen: tickers, positions, headlines, levels").await;
-            let digest: String = seen.chars().take(1200).collect();
+        }
+
+        for (f, url, title) in live {
+            let p_title = title;
+            // A GLANCE, not a viewing: one whole frame and one vision call, no audio at all.
+            //
+            // A full watch spends most of its minutes pulling a 180-second audio window and running
+            // whisper over it, and for surfing that is spent on the wrong modality. Today's evidence
+            // is unambiguous: the position banner and the watchlist both came off FRAMES, while the
+            // audio carried commentary — a wedge forming, someone's opinion of a cancer vaccine —
+            // that named no ticker and no direction. Paying five minutes a feed for that reduces a
+            // rotation to one channel again, which is the limit this exists to remove.
+            //
+            // Whole frame, no crop: what makes this work on a channel nobody tuned is that the model
+            // is asked what it SEES rather than told where to look.
+            let u = url.clone();
+            let frame = tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, 1, 20))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .and_then(|f| f.into_iter().next());
+            let digest = match frame {
+                Some((_, bytes)) => {
+                    self.analyze_image_bytes(
+                        bytes,
+                        "image/jpeg",
+                        "List exactly what is on this screen: every ticker symbol, any trader position (LONG/SHORT/flat/no positions) with the trader's name, any price level, and any headline. Copy text exactly; do not infer or explain.",
+                    )
+                    .await
+                }
+                None => String::new(),
+            };
+            let digest: String = digest.chars().take(1200).collect();
             let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
             let before = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
             let moved = mind_tools::surf::changed(&before, &digest);
@@ -647,7 +678,7 @@ impl super::ConversationEngine {
                 "  {} {} — {}\n",
                 if moved { "🔔" } else { "·" },
                 f.handle,
-                p.title.chars().take(60).collect::<String>()
+                p_title.chars().take(60).collect::<String>()
             ));
             if before.is_empty() {
                 out.push_str("      (first look — nothing to diff against yet)\n");

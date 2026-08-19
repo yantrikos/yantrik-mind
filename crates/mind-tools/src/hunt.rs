@@ -192,25 +192,40 @@ pub fn news_url(symbols: &[String], limit: usize) -> String {
     }
 }
 
-/// Fetch today's movers and the news firehose in one call.
+fn alpaca_get(url: String) -> anyhow::Result<serde_json::Value> {
+    let key = std::env::var("ALPACA_KEY_ID").map_err(|_| anyhow::anyhow!("ALPACA_KEY_ID is not set"))?;
+    let sec = std::env::var("ALPACA_SECRET_KEY").map_err(|_| anyhow::anyhow!("ALPACA_SECRET_KEY is not set"))?;
+    Ok(ureq::get(&url)
+        .set("APCA-API-KEY-ID", &key)
+        .set("APCA-API-SECRET-KEY", &sec)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()?
+        .into_json()?)
+}
+
+/// Today's movers.
 ///
 /// The HTTP lives HERE rather than in the caller: this crate already owns the Alpaca credentials
 /// and the data-host rule, and letting the conversation layer make its own requests would put a
 /// second place in the codebase that could address the wrong host.
-pub fn fetch_market(top: usize, news_limit: usize) -> anyhow::Result<(Vec<Mover>, Vec<Headline>)> {
-    let key = std::env::var("ALPACA_KEY_ID").map_err(|_| anyhow::anyhow!("ALPACA_KEY_ID is not set"))?;
-    let sec = std::env::var("ALPACA_SECRET_KEY").map_err(|_| anyhow::anyhow!("ALPACA_SECRET_KEY is not set"))?;
-    let get = |url: String| -> anyhow::Result<serde_json::Value> {
-        Ok(ureq::get(&url)
-            .set("APCA-API-KEY-ID", &key)
-            .set("APCA-API-SECRET-KEY", &sec)
-            .timeout(std::time::Duration::from_secs(30))
-            .call()?
-            .into_json()?)
-    };
-    let movers = parse_movers(&get(movers_url(top))?);
-    let news = parse_news(&get(news_url(&[], news_limit))?);
-    Ok((movers, news))
+pub fn fetch_movers(top: usize) -> anyhow::Result<Vec<Mover>> {
+    Ok(parse_movers(&alpaca_get(movers_url(top))?))
+}
+
+/// News for SPECIFIC symbols — never the general firehose.
+///
+/// The first run asked for the fifty most recent headlines market-wide and then matched the
+/// shortlist against them. Every candidate came back "no headline", and that was an artefact of the
+/// sample rather than a fact about the stock: a general feed is dominated by large caps, so a
+/// $12 name that fell 54% will never appear in it. The pipeline was therefore reporting every
+/// small-cap move as unexplained, which is precisely the input the thesis leans on hardest — a
+/// filter that quietly answers "no catalyst" to every question is worse than no filter, because it
+/// looks like evidence.
+pub fn fetch_news_for(symbols: &[String], limit: usize) -> anyhow::Result<Vec<Headline>> {
+    if symbols.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(parse_news(&alpaca_get(news_url(symbols, limit))?))
 }
 
 #[cfg(test)]

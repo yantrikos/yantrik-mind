@@ -615,16 +615,25 @@ impl super::ConversationEngine {
     /// Every position is filed as a prediction on the same ledger as any other claim, so a run of
     /// these is a measurable strategy rather than a sequence of anecdotes.
     pub async fn hunt(&self, act: bool) -> String {
-        let pull = tokio::task::spawn_blocking(|| mind_tools::hunt::fetch_market(20, 50).map_err(|e| e.to_string()))
+        let pull = tokio::task::spawn_blocking(|| mind_tools::hunt::fetch_movers(20).map_err(|e| e.to_string()))
             .await
             .unwrap_or_else(|e| Err(format!("join failed: {e}")));
 
-        let (movers, news) = match pull {
+        let movers = match pull {
             Ok(x) => x,
             Err(e) => return format!("🎯 Hunt aborted: {e}"),
         };
         let bounds = mind_tools::hunt::Bounds::default();
         let (keep, dropped) = mind_tools::hunt::shortlist(&movers, &bounds);
+
+        // News is asked for THESE symbols, after the shortlist — never the general firehose, which
+        // is dominated by large caps and answers "no catalyst" for every small-cap mover.
+        let syms: Vec<String> = keep.iter().take(6).map(|m| m.symbol.clone()).collect();
+        let news = tokio::task::spawn_blocking(move || mind_tools::hunt::fetch_news_for(&syms, 50))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
 
         let mut out = format!("🎯 HUNT — {} movers scanned, {} tradeable\n", movers.len(), keep.len());
         if !dropped.is_empty() {

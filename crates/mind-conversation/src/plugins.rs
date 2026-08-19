@@ -361,11 +361,11 @@ impl PluginRegistry {
             // calling it. It did exactly that, quoting `ym quote ^NSEI` back as something the
             // user should run while insisting it had no market-data tool.
             PluginSpec::new("market_data", "Market data", "Research", ReadOnly, &["quote"], &["price"],
-                "- quote {symbols}: LIVE price for one or more symbols — US equities via Alpaca, Indian listings with the .NS/.BO suffix (RELIANCE.NS, TCS.NS) and indices like ^NSEI. Use this for ANY price question rather than answering from memory or refusing"),
+                "- quote {symbols}: LIVE price, quote, level or move for a stock, share, index, ticker or crypto — how a market/sector is trading today, up or down, at what level. US equities via Alpaca; Indian listings with the .NS/.BO suffix (RELIANCE.NS, TCS.NS) and indices like ^NSEI (Nifty), ^BSESN (Sensex). CALL THIS for ANY question about what something is worth or how it is doing — never answer a price from memory and never tell the user to run a command instead"),
             PluginSpec::new("media_watch", "Watch media", "Research", ReadOnly, &["watch"], &["listen"],
-                "- watch {url, question?}: WATCH or LISTEN to a video/audio link — reads published captions, hears it with the local speech model, and looks at sampled frames. Use for any media URL instead of saying you cannot watch video"),
+                "- watch {url, question?}: WATCH, SEE, HEAR or LISTEN to a video, audio, YouTube link, livestream, broadcast, podcast, talk, interview or recording — reads published captions, hears the speech with the local model, and looks at sampled frames, aligned on one timeline. Works on LIVE streams (samples a window of what is airing NOW). CALL THIS for any media link — never say you cannot watch or hear video"),
             PluginSpec::new("web_drive", "Browse", "Research", ReadOnly, &["browse"], &[],
-                "- browse {url, goal}: drive a real web page toward a goal (navigate, read, fill forms). It stops before anything irreversible — it cannot buy, send or delete"),
+                "- browse {url, goal}: OPEN and drive a real website, web page, portal or app in a real browser toward a goal — navigate, click, read, search, sign in, fill forms, check a dashboard. CALL THIS to look something up on a site rather than saying you have no browser. It stops before anything irreversible — it cannot buy, send, pay or delete"),
             PluginSpec::new("gifting", "Gift intelligence", "Shopping", Personal, &["gift_intel"], &[],
                 "- gift_intel {name}: study a person's photos for gift intelligence — what they OWN (never re-gift), their style, what's MISSING that complements it, 3 buyable ideas; chain into `deals` for real listings"),
             PluginSpec::new("people", "People", "People", Personal, &["learn_about", "family", "about_person"], &[],
@@ -635,6 +635,35 @@ mod tests {
         // a core (unowned) tool is always enabled
         assert!(r.is_tool_enabled("recall"));
         assert!(r.is_tool_enabled("weather"));
+    }
+
+    #[test]
+    fn a_sense_survives_the_gate_when_the_question_is_asked_in_plain_words() {
+        // The scar: the mind held `quote` and still answered "I don't have a market-data tool
+        // wired in this session" — then quoted `ym quote ^NSEI` back as something to run. It
+        // was not missing the tool; the tool had fallen to the NAME-ONLY tail, and a bare name
+        // with no description reads to the model as a capability it does not have.
+        //
+        // The gate scores literal word overlap, so a line written in the vocabulary of its
+        // implementation ("symbols", "equities") ranks near zero against the words people
+        // actually use ("Nifty", "trading", "watch this video"). Naming the tool rescued it —
+        // which is exactly the phrasing a user never uses. So these lines must carry the
+        // ASKING vocabulary, and this test is the thing that notices when an edit drops it.
+        let src = PluginRegistry::builtin().enabled_catalog();
+        for (asked, tool) in [
+            ("what is the Nifty trading at right now", "quote"),
+            ("how is this stock doing today", "quote"),
+            ("can you watch this YouTube video for me", "watch"),
+            ("listen to this livestream and tell me what they say", "watch"),
+            ("open that website and look it up", "browse"),
+        ] {
+            let (detailed, _tail) = crate::tool_catalog::gate_catalog(asked, &src);
+            assert!(
+                detailed.lines().any(|l| crate::tool_catalog::tool_name_of_line(l) == Some(tool)),
+                "asked in plain words {asked:?} — `{tool}` fell out of the detailed catalog, so the \
+                 mind will report it cannot do this. Put the asking words back in its catalog line."
+            );
+        }
     }
 
     #[test]

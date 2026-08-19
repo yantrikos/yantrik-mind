@@ -798,18 +798,34 @@ impl super::ConversationEngine {
                 .ok()
                 .and_then(|r| r.ok())
                 .and_then(|f| f.into_iter().next());
+            // A CONSTRAINED reading, not a description.
+            //
+            // The first version asked the model to say what it saw and diffed the prose. Three
+            // consecutive passes over the same feed all reported CHANGED, because free text is
+            // never stable: the model picks a different chart to mention, reads a different
+            // headline, rephrases itself. Stripping digits stopped price ticks from counting and
+            // did nothing about the prose itself — the same failure as the scene-detector that fired
+            // 776 times in 25 seconds, one abstraction level up, and just as invisible.
+            //
+            // So the answer is pinned to a closed vocabulary. POSITIONS is a handful of names and
+            // three possible states; a list of tickers is a set of symbols. Those are stable across
+            // two readings of an unchanged screen, and they change exactly when the thing worth
+            // knowing changes.
             let digest = match frame {
                 Some((_, bytes)) => {
                     self.analyze_image_bytes(
                         bytes,
                         "image/jpeg",
-                        "List exactly what is on this screen: every ticker symbol, any trader position (LONG/SHORT/flat/no positions) with the trader's name, any price level, and any headline. Copy text exactly; do not infer or explain.",
+                        "Reply in EXACTLY this form and nothing else, no prose, no explanation:\n\
+                         POSITIONS: name=LONG|SHORT|FLAT[:TICKER] for each trader shown, comma separated, or NONE\n\
+                         TICKERS: every ticker symbol visible, comma separated, or NONE\n\
+                         Copy names and symbols exactly as printed. Omit all prices and numbers.",
                     )
                     .await
                 }
                 None => String::new(),
             };
-            let digest: String = digest.chars().take(1200).collect();
+            let digest: String = digest.chars().take(600).collect();
             let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
             let before = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
             let moved = mind_tools::surf::changed(&before, &digest);

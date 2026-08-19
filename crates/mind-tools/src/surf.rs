@@ -83,23 +83,28 @@ pub fn live_url(handle: &str) -> String {
 /// What survives the stripping is words — LONG, SHORT, flat, a ticker symbol, a trader's name. A
 /// position opening changes those. A price ticking does not.
 pub fn changed(before: &str, after: &str) -> bool {
-    fn words(s: &str) -> Vec<String> {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphabetic())
-            .filter(|w| w.len() >= 3)
-            .map(|w| w.to_string())
-            .collect()
-    }
-    let (a, b) = (words(before), words(after));
+    let (a, b) = (tokens(before), tokens(after));
     if a.is_empty() || b.is_empty() {
         return false; // nothing to compare is not a change; it is a failed look.
     }
-    let sa: std::collections::HashSet<_> = a.iter().collect();
-    let sb: std::collections::HashSet<_> = b.iter().collect();
-    let shared = sa.intersection(&sb).count();
-    let union = sa.union(&sb).count().max(1);
-    // Less than 80% overlap in content words = something on that screen is genuinely different.
-    (shared as f64 / union as f64) < 0.8
+    a != b
+}
+
+/// The stable part of one reading: the set of position states and symbols, uppercased and sorted.
+///
+/// Everything that made prose comparison useless is dropped here. Words shorter than two characters
+/// and the field labels carry no state; numbers are prices and always move. What remains is a closed
+/// vocabulary — LONG, SHORT, FLAT, a trader's name, a ticker — which is identical across two
+/// readings of an unchanged screen and differs exactly when the screen's MEANING differs.
+fn tokens(s: &str) -> std::collections::BTreeSet<String> {
+    const LABELS: &[&str] = &["positions", "tickers", "none", "and", "the"];
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 2 && !LABELS.contains(w))
+        // A token that is all digits is a price or a size, and both move every second.
+        .filter(|w| !w.chars().all(|c| c.is_ascii_digit()))
+        .map(|w| w.to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -117,13 +122,28 @@ mod tests {
     #[test]
     fn a_ticking_price_is_not_a_change_but_a_position_is() {
         // The lesson from the scene-detector that fired every frame: everything on a trading screen
-        // moves, so "different pixels" is not a signal. Only different WORDS are.
-        let flat = "CHERIF LONG SHORT no positions   JOE LONG SHORT no positions   SPY 771.60";
-        let ticked = "CHERIF LONG SHORT no positions   JOE LONG SHORT no positions   SPY 771.94";
-        assert!(!changed(flat, ticked), "a price tick must not read as a state change");
+        // moves, so "different pixels" is not a signal.
+        let flat = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY, QQQ, MRNA";
+        let ticked = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY, QQQ, MRNA";
+        assert!(!changed(flat, ticked), "an unchanged screen must not read as a change");
 
-        let opened = "CHERIF LONG 200 shares AMD   JOE LONG SHORT no positions   SPY 771.94";
+        let opened = "POSITIONS: CHERIF=LONG:AMD, JOE=FLAT\nTICKERS: SPY, QQQ, MRNA";
         assert!(changed(flat, opened), "a trader taking a position IS the signal");
+    }
+
+    #[test]
+    fn the_same_screen_read_twice_is_not_a_transition() {
+        // THE BUG THIS EXISTS FOR. The first version diffed the vision model's PROSE, and three
+        // consecutive passes over one feed all reported CHANGED — free text is never stable, so the
+        // detector fired every time and would have sent the mind to trade on nothing. Only the
+        // closed vocabulary is comparable, so trivial reformatting must read as identical.
+        let a = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY, MRNA, AMD";
+        let b = "POSITIONS:  joe=flat,  cherif=flat\nTICKERS:  amd, spy, mrna";
+        assert!(!changed(a, b), "same state, different order and case — not a transition");
+
+        // And a price appearing or moving inside the reading must not trip it either.
+        let c = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY 771.60, MRNA 137.11, AMD";
+        assert!(!changed(a, c), "prices are not state");
     }
 
     #[test]

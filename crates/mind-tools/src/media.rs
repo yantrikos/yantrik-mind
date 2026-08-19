@@ -120,10 +120,21 @@ fn run_bounded(bin: &str, args: &[&str]) -> anyhow::Result<std::process::Output>
 /// never a kept artifact.
 struct Scratch(PathBuf);
 
+/// Distinguishes concurrent jobs inside ONE process. The path used to be `{pid}_{tag}`, which is
+/// not a per-job name at all: two watches running in the same daemon got the same directory, and
+/// whichever finished first ran `remove_dir_all` on the other's working set. The survivor then read
+/// an empty (or vanished) directory and reported "No such file or directory (os error 2)" — a
+/// message that points at the filesystem rather than at the sibling that deleted it.
+///
+/// Watching several feeds at once is the point of the thing, so overlap is the normal case, not an
+/// edge one; it just happened that early testing only ever ran one watch at a time.
+static JOB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Scratch {
     fn new(tag: &str) -> anyhow::Result<Scratch> {
+        let seq = JOB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        p.push(format!("ym_media_{}_{}", std::process::id(), tag));
+        p.push(format!("ym_media_{}_{}_{}", std::process::id(), tag, seq));
         std::fs::create_dir_all(&p)?;
         Ok(Scratch(p))
     }
@@ -519,6 +530,21 @@ mod tests {
 
     fn probe_of(dur: u64, live: bool, caps: bool) -> MediaProbe {
         MediaProbe { title: "t".into(), uploader: "u".into(), duration_secs: dur, is_live: live, has_captions: caps }
+    }
+
+    #[test]
+    fn concurrent_media_jobs_never_share_a_scratch_directory() {
+        // The scar: two watches in one daemon shared /tmp/ym_media_{pid}_frames, and the first to
+        // finish remove_dir_all'd the second's working set mid-write. The victim reported
+        // "No such file or directory (os error 2)" — which reads as a broken host, not as a
+        // sibling job deleting your files. Watching several feeds at once is the whole point, so
+        // this overlap is the normal case.
+        let a = Scratch::new("frames").unwrap();
+        let b = Scratch::new("frames").unwrap();
+        assert_ne!(a.path(), b.path(), "two concurrent jobs got the same scratch directory");
+        std::fs::write(a.path().join("keep.jpg"), b"x").unwrap();
+        drop(b); // the sibling finishing must not touch our files
+        assert!(a.path().join("keep.jpg").exists(), "a sibling job's Drop deleted our working set");
     }
 
     #[test]

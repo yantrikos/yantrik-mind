@@ -7419,8 +7419,15 @@ impl ConversationEngine {
             }
             // Live prices — the mind was refusing quote questions because this existed in the
             // code and not in its hands.
-            "quote" | "price" => {
-                let q = if s("symbols").trim().is_empty() { s("symbol") } else { s("symbols") };
+            "quote" | "price" | "get_quote" | "market_price" => {
+                // Model-authored args arrive under whatever key the model felt like. Reading only
+                // "symbols" meant the tool returned empty and the mind honestly reported that its
+                // "quote lookup came back empty" — a working capability defeated by a key name.
+                let q = ["symbols", "symbol", "ticker", "tickers", "query", "text", "input", "name"]
+                    .iter()
+                    .map(|k| s(k))
+                    .find(|v| !v.trim().is_empty())
+                    .unwrap_or_default();
                 if q.trim().is_empty() {
                     return "(need a symbol, e.g. SPY or RELIANCE.NS)".to_string();
                 }

@@ -834,7 +834,25 @@ impl super::ConversationEngine {
                 out.push_str("      (first look — nothing to diff against yet)\n");
             } else if moved {
                 changes.push(f.handle.clone());
-                out.push_str("      CHANGED since the last look — this is the thing worth acting on\n");
+                // SHOW THE WORK. Four rounds of fixes to this detector all ended the same way: six
+                // passes, six bells, and no way to tell a real transition from a misread without a
+                // live stream to re-run against. A detector that announces a change and cannot say
+                // WHAT changed is unfalsifiable, and an unfalsifiable signal is the one thing this
+                // must never be — it would send the mind to trade on a rephrasing.
+                let b4 = (lens.reduce)(&before).unwrap_or_default();
+                let now = (lens.reduce)(&digest).unwrap_or_default();
+                let opened: Vec<&String> = now.difference(&b4).collect();
+                let closed: Vec<&String> = b4.difference(&now).collect();
+                out.push_str("      CHANGED since the last look:\n");
+                if !opened.is_empty() {
+                    out.push_str(&format!("        + {}\n", opened.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                }
+                if !closed.is_empty() {
+                    out.push_str(&format!("        - {}\n", closed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                }
+                if opened.is_empty() && closed.is_empty() {
+                    out.push_str("        (nothing added or removed — the reducer is unstable, NOT a real transition)\n");
+                }
             }
         }
         if changes.is_empty() {

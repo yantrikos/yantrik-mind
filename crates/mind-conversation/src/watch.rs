@@ -771,10 +771,10 @@ impl super::ConversationEngine {
             let u = mind_tools::surf::live_url(&f.handle);
             probes.push(tokio::task::spawn_blocking(move || mind_tools::media::probe(&u)));
         }
-        let mut live: Vec<(&mind_tools::surf::Feed, String, String)> = Vec::new();
+        let mut live: Vec<(&mind_tools::surf::Feed, String, String, String)> = Vec::new();
         for (f, h) in feeds.iter().take(6).zip(probes) {
             match h.await.ok().and_then(|r| r.ok()) {
-                Some(p) if p.is_live => live.push((f, mind_tools::surf::live_url(&f.handle), p.title)),
+                Some(p) if p.is_live => live.push((f, mind_tools::surf::live_url(&f.handle), p.title, p.id)),
                 _ => out.push_str(&format!("  · {} — not live now\n", f.handle)),
             }
         }
@@ -783,8 +783,12 @@ impl super::ConversationEngine {
         // then "Wall Street Bounces" the same afternoon, same traders, different id. Following the
         // id would have the mind watching a finished recording while the desk trades on.
 
-        for (f, url, title) in live {
+        for (f, url, title, vid) in live {
             let p_title = title;
+            // Identity is the VIDEO ID, not the title: short, ASCII and stable, where a 103-character
+            // emoji-laden title compared unequal to itself across a storage round trip and reported
+            // a NEW BROADCAST on a stream that had not changed.
+            let p_id = vid;
             // A GLANCE, not a viewing: one whole frame and one vision call, no audio at all.
             //
             // A full watch spends most of its minutes pulling a 180-second audio window and running
@@ -831,7 +835,7 @@ impl super::ConversationEngine {
             let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
             let stored = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
             let (prev_id, before) = stored.split_once('\n').unwrap_or(("", ""));
-            let same_broadcast = !prev_id.is_empty() && prev_id == p_title;
+            let same_broadcast = !prev_id.is_empty() && prev_id == p_id;
             let moved = same_broadcast && mind_tools::surf::changed_by(&lens, before, &digest);
             let _ = self.memory.profile_set(&key, &format!("{p_title}\n{digest}")).await;
             out.push_str(&format!(

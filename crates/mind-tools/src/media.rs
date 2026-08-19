@@ -34,6 +34,10 @@ const PROC_TIMEOUT_SECS: u32 = 300;
 /// What a piece of media IS, before deciding what to do with it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaProbe {
+    /// The platform's id for THIS broadcast. A desk ends one stream and starts another when the
+    /// shift changes, so the id is the only stable answer to "am I still watching the same thing?".
+    /// The title is not: it is long, emoji-laden, and survives a storage round trip imperfectly.
+    pub id: String,
     pub title: String,
     pub uploader: String,
     /// Total seconds; 0 for a live broadcast (it has no end yet).
@@ -181,6 +185,7 @@ pub fn probe_from_json(v: &serde_json::Value) -> MediaProbe {
     let subs = has_speech_tracks(v, "subtitles");
     let auto = has_speech_tracks(v, "automatic_captions");
     MediaProbe {
+        id: v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
         title: v.get("title").and_then(|x| x.as_str()).unwrap_or("(untitled)").to_string(),
         uploader: v.get("uploader").or_else(|| v.get("channel")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
         duration_secs: v.get("duration").and_then(|x| x.as_f64()).unwrap_or(0.0).max(0.0) as u64,
@@ -529,7 +534,7 @@ mod tests {
     use super::*;
 
     fn probe_of(dur: u64, live: bool, caps: bool) -> MediaProbe {
-        MediaProbe { title: "t".into(), uploader: "u".into(), duration_secs: dur, is_live: live, has_captions: caps }
+        MediaProbe { id: "vid".into(), title: "t".into(), uploader: "u".into(), duration_secs: dur, is_live: live, has_captions: caps }
     }
 
     #[test]

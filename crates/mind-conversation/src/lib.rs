@@ -7803,6 +7803,23 @@ Open reminders you're carrying for them:");
         // that ignore the `tools` param fall back to parsing the prose catalog above — so the prose
         // stays authoritative for them and the name-only tail remains reachable via that path.
         let schemas = tool_catalog::tool_schemas(user_text, &gated_src);
+        // WHAT THE MODEL ACTUALLY SEES. Set YM_DUMP_TOOLS=/path to write this turn's rendered tool
+        // surface there. Built after chasing "the mind says it has no market-data tool" through four
+        // wrong theories — enriched wording, pinning, a poisoned sibling plugin, the wrong endpoint —
+        // every one of them reasoning ABOUT the prompt because nothing could show it. A surface the
+        // model reads and no human can print is a surface that gets debugged by guessing.
+        if let Ok(path) = std::env::var("YM_DUMP_TOOLS") {
+            let dump = format!(
+                "=== USER TEXT ===\n{user_text}\n\n=== SCHEMA NAMES ({}) ===\n{}\n\n=== PROSE SURFACE ===\n{tools}\n",
+                schemas.len(),
+                schemas
+                    .iter()
+                    .filter_map(|s| s.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            let _ = std::fs::write(&path, dump);
+        }
         let now = now_str();
         // A generous budget: a publish_page call inlines a full HTML page into the tool args, which
         // easily overflows the default cap → truncated, unparseable JSON. 8000 matches the recipe path.

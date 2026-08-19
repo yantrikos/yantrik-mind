@@ -169,12 +169,39 @@ pub fn parse_news(v: &serde_json::Value) -> Vec<Headline> {
         .collect()
 }
 
+/// A headline tagging more than this many symbols is a market roundup, not a catalyst.
+///
+/// Scoping the news query to the candidates fixed the blank column and revealed a subtler problem:
+/// what came back was "Dow Gains Over 100 Points; Target Posts Upbeat Q2 Earnings" against a stock
+/// down 51%, and "11 Industrials Stocks Moving In Wednesday's Intraday Session" against another
+/// down 33%. Those articles tag a dozen tickers and explain none of them.
+///
+/// This is worse than the blank column was. An empty field is visibly missing information; a
+/// roundup headline sitting next to a candidate READS as the catalyst and gets reasoned about as
+/// one. A genuine company event — trial data, guidance, a deal — names one or two symbols.
+pub const MAX_SYMBOLS_FOR_SPECIFIC: usize = 3;
+
+/// Is this headline ABOUT the stock, rather than a list the stock appears in?
+pub fn is_specific(h: &Headline) -> bool {
+    h.symbols.len() <= MAX_SYMBOLS_FOR_SPECIFIC
+}
+
 /// Headlines that mention this symbol. A mover WITHOUT a headline is not disqualified — it is
 /// flagged, because an unexplained move is a different (and worse-understood) thing than a move with
 /// a known cause, and the difference belongs in the thesis rather than hidden in a filter.
 pub fn news_for<'a>(sym: &str, news: &'a [Headline]) -> Vec<&'a Headline> {
     let s = sym.trim().to_uppercase();
-    news.iter().filter(|h| h.symbols.iter().any(|x| x.trim().to_uppercase() == s)).collect()
+    let mut hits: Vec<&Headline> =
+        news.iter().filter(|h| h.symbols.iter().any(|x| x.trim().to_uppercase() == s)).collect();
+    // Specific first, so a caller taking `.first()` gets the real catalyst when one exists rather
+    // than whichever roundup happened to be most recent.
+    hits.sort_by_key(|h| h.symbols.len());
+    hits
+}
+
+/// The best explanation for this symbol's move, or None if only roundups mention it.
+pub fn catalyst_for<'a>(sym: &str, news: &'a [Headline]) -> Option<&'a Headline> {
+    news_for(sym, news).into_iter().find(|h| is_specific(h))
 }
 
 /// The movers URL on the DATA host. Split out so the shape is testable without a network call.
@@ -306,6 +333,32 @@ mod tests {
         ];
         assert_eq!(news_for("SNOW", &news).len(), 1);
         assert_eq!(news_for("NOW", &news).len(), 0, "SNOW must not match NOW");
+    }
+
+    #[test]
+    fn a_market_roundup_is_not_a_catalyst() {
+        // Real headlines returned against real candidates on the first scoped run. Both tag a long
+        // list of tickers and explain none of them; presenting either as the reason a stock fell
+        // 51% would hand the model a false premise that reads exactly like evidence.
+        let roundup = Headline {
+            symbols: "AAPL MSFT PFSA TGT DOW AMZN NVDA F GM BA".split(' ').map(String::from).collect(),
+            headline: "Dow Gains Over 100 Points; Target Posts Upbeat Q2 Earnings".into(),
+            source: "benzinga".into(),
+            at: "".into(),
+        };
+        let real = Headline {
+            symbols: vec!["PFSA".into()],
+            headline: "PFSA halts trial after safety signal".into(),
+            source: "benzinga".into(),
+            at: "".into(),
+        };
+        assert!(!is_specific(&roundup));
+        assert!(is_specific(&real));
+        // Both mention PFSA, but only one explains it — and the specific one must win even though
+        // the roundup was listed first.
+        let news = vec![roundup, real];
+        assert_eq!(catalyst_for("PFSA", &news).map(|h| h.headline.as_str()), Some("PFSA halts trial after safety signal"));
+        assert_eq!(catalyst_for("TGT", &news), None, "a stock that only appears in a roundup has no catalyst");
     }
 
     #[test]

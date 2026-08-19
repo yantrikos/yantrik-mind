@@ -650,8 +650,12 @@ impl super::ConversationEngine {
         out.push_str("\n  candidates:\n");
         let mut brief = String::new();
         for m in keep.iter().take(6) {
-            let hs = mind_tools::hunt::news_for(&m.symbol, &news);
-            let head = hs.first().map(|h| h.headline.clone()).unwrap_or_else(|| "(no headline — an unexplained move)".into());
+            // Only a SPECIFIC headline counts as a catalyst. A roundup tagging a dozen tickers
+            // sitting beside a candidate reads as the explanation and gets reasoned about as one,
+            // which is a false premise dressed as evidence.
+            let head = mind_tools::hunt::catalyst_for(&m.symbol, &news)
+                .map(|h| h.headline.clone())
+                .unwrap_or_else(|| "(no company-specific news — an unexplained move)".into());
             out.push_str(&format!("    {} {:>8.2} {:+6.2}%  {}\n", m.symbol, m.price, m.percent_change, head.chars().take(70).collect::<String>()));
             brief.push_str(&format!("- {} at {:.2}, {:+.2}% today. News: {}\n", m.symbol, m.price, m.percent_change, head));
         }

@@ -602,6 +602,140 @@ impl super::ConversationEngine {
     /// Exists because the mind was refusing quote questions with "I have no market-data tool
     /// wired up", which was TRUE and was the honest answer to a capability that existed in the
     /// code and not in its hands. The pipeline could price a symbol; the mind could not ask.
+    /// WATCH → TYPED SIGNAL → PAPER POSITION → GRADEABLE PREDICTION.
+    ///
+    /// `learn_from_watch` already turns a broadcast into beliefs and claims. This closes the loop:
+    /// a claim that can be ACTED on becomes a position, and the position is logged as a prediction
+    /// so it is graded like any other. That pairing is the whole point — a trade that is not a
+    /// recorded prediction teaches nothing when it wins or loses, and a prediction with no position
+    /// never meets a fill, a spread or a queue. Neither half alone earns anything.
+    ///
+    /// Every signal that was NOT acted on is reported with the reason. A tape that lists only the
+    /// trades taken looks like a strategy with perfect discipline; the refusals are where the
+    /// selection actually lives, and hiding them is how a backtest flatters itself.
+    pub async fn trade_from_watch(&self, url: &str, focus: &str) -> String {
+        let perception = self.watch_media(url, focus).await;
+        if perception.contains("I perceived nothing") {
+            return format!("{perception}\n\n(nothing perceived, so nothing traded)");
+        }
+        let seen: String = perception.chars().take(6000).collect();
+        let prompt = format!(
+            "You WATCHED a segment of a live trading broadcast. Below is what was seen on screen and heard.\n\n\
+             {seen}\n\n\
+             Extract only ACTIONABLE directional signals — a specific ticker someone is trading or \
+             calling, with a direction. A watchlist name with no stated view is NOT a signal. A \
+             general market comment is NOT a signal. If nobody expressed a direction on a specific \
+             ticker, return an empty array; that is a correct and common answer.\n\
+             Output ONLY JSON:\n\
+             {{\"signals\":[{{\"symbol\":\"TICKER\",\"side\":\"long\"|\"short\",\"conviction\":0.0-1.0,\
+             \"level\":\"the price level or trigger mentioned, or empty\",\"why\":\"one short line, their reasoning\"}}]}}"
+        );
+        let messages = vec![
+            ChatMessage::system(&self.persona),
+            ChatMessage::system("You extract typed trading signals. Output ONLY the JSON object. An empty array is a valid answer."),
+            ChatMessage::user(&prompt),
+        ];
+        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            Ok(r) => r.text,
+            Err(e) => return format!("{perception}\n\n(could not read signals from what I saw: {e})"),
+        };
+        let body_owned = crate::strip_reasoning(&text);
+        let body = body_owned.as_str();
+        let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
+        let obj = match (body.find('{'), body.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &body[s..=e],
+            _ => "{}",
+        };
+        let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
+        let signals = v.get("signals").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        if signals.is_empty() {
+            return format!("{perception}\n\n📈 No actionable directional signal in this window — nothing traded. (A watchlist is not a call.)");
+        }
+
+        // Conviction floor. Acting on everything heard would measure the broadcast's chattiness
+        // rather than its skill.
+        let floor: f64 = std::env::var("YM_TRADE_MIN_CONVICTION").ok().and_then(|s| s.parse().ok()).unwrap_or(0.6);
+        let stake: f64 = std::env::var("YM_PAPER_STAKE_USD").ok().and_then(|s| s.parse().ok()).unwrap_or(250.0);
+
+        let mut acted: Vec<(String, String, f64, f64, String, String)> = Vec::new(); // sym, side, qty, px, why, ack
+        let mut refused: Vec<String> = Vec::new();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        for s in signals.into_iter().take(4) {
+            let sym = s.get("symbol").and_then(|x| x.as_str()).unwrap_or("").trim().trim_start_matches('$').to_uppercase();
+            let side_s = s.get("side").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+            let conv = s.get("conviction").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let why = s.get("why").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let level = s.get("level").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if sym.is_empty() || sym.len() > 8 {
+                refused.push(format!("(unnamed symbol) — no usable ticker"));
+                continue;
+            }
+            if !matches!(side_s.as_str(), "long" | "short") {
+                refused.push(format!("{sym} — no clear direction ({side_s:?})"));
+                continue;
+            }
+            if conv < floor {
+                refused.push(format!("{sym} {side_s} — conviction {conv:.2} below the {floor:.2} floor"));
+                continue;
+            }
+            let sym2 = sym.clone();
+            let side2 = side_s.clone();
+            // Price, sizing, bound-check and submission all happen off the async runtime.
+            let placed = tokio::task::spawn_blocking(move || -> std::result::Result<(f64, f64, String), String> {
+                let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
+                let acct = broker.account().map_err(|e| e.to_string())?;
+                let px = mind_tools::MarketClient::from_env()
+                    .ok()
+                    .and_then(|c| c.last_price(&sym2).ok())
+                    .ok_or_else(|| "no live price — refusing to size a position blind".to_string())?;
+                let qty = (stake / px).floor();
+                // The bound is checked BEFORE the order exists, so a refusal names which limit hit.
+                mind_tools::broker::check_order(qty, px, acct.equity).map_err(|r| r.to_string())?;
+                let side = if side2 == "long" {
+                    mind_tools::broker::Side::Buy
+                } else {
+                    mind_tools::broker::Side::Sell
+                };
+                let ack = broker.submit_market(&sym2, qty, side).map_err(|e| e.to_string())?;
+                Ok((qty, px, format!("{} {}", ack.status, ack.id)))
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+
+            match placed {
+                Ok((qty, px, ack)) => {
+                    // The position IS a prediction, so it is filed as one and graded on the same
+                    // ledger as everything else the mind asserts.
+                    let claim = format!(
+                        "Copy-trade from a live broadcast: {sym} {side_s} entered at {px:.2}{}{} should be profitable",
+                        if level.is_empty() { String::new() } else { format!(" (level {level})") },
+                        if why.is_empty() { String::new() } else { format!(" — {why}") },
+                    );
+                    self.judgment_log("copy_trade", "trading", &claim, conv.clamp(0.05, 0.95), now + 86_400_000, url).await;
+                    acted.push((sym, side_s, qty, px, why, ack));
+                }
+                Err(e) => refused.push(format!("{sym} {side_s} — {e}")),
+            }
+        }
+
+        let mut out = perception;
+        out.push_str("\n\n📈 SIGNALS → PAPER POSITIONS (sandbox account; every fill is also a logged prediction)\n");
+        if acted.is_empty() {
+            out.push_str("  nothing was traded.\n");
+        }
+        for (sym, side, qty, px, why, ack) in &acted {
+            out.push_str(&format!("  ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}{}\n", if why.is_empty() { String::new() } else { format!(" · {why}") }));
+        }
+        if !refused.is_empty() {
+            out.push_str("  not acted on (the refusals are where the selection lives):\n");
+            for r in &refused {
+                out.push_str(&format!("    · {r}\n"));
+            }
+        }
+        out
+    }
+
     /// The sandbox book: what the paper account holds and what it is worth.
     ///
     /// Reported as MEASURED, like every other number the mind states about the world. The paper

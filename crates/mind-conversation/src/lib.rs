@@ -5213,6 +5213,10 @@ impl ConversationEngine {
             "tape" if !rest.trim().is_empty() => self.tape_sample(rest.trim()).await,
             "quote" | "price" | "quotes" if !rest.trim().is_empty() => self.quote_symbols(rest.trim()).await,
             "paper" | "paper-book" | "book" => self.paper_book().await,
+            "copy-trade" | "trade-watch" | "learn-trade" if !rest.trim().is_empty() => {
+                let (u, f) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), "what are they trading and which way"));
+                self.trade_from_watch(u.trim(), f.trim()).await
+            }
             "shadow" | "counterfactual" => self.shadow_report().await,
             // `ym bar-drain` turns spooled CHANGE frames into tape entries, dated by when the
             // change was detected rather than when vision got to it.

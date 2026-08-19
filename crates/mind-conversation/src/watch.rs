@@ -471,11 +471,29 @@ impl super::ConversationEngine {
         let start = chrono::DateTime::from_timestamp_millis(lo - 3_600_000).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default();
         let end = chrono::DateTime::from_timestamp_millis(hi + 3_600_000).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default();
         let bars = match tokio::task::spawn_blocking(move || {
-            let client = mind_tools::MarketClient::from_env()?;
+            // Route per symbol: Alpaca for US equities, Yahoo for Indian listings (and as the
+            // fallback whenever Alpaca has nothing). An NSE symbol handed to Alpaca returns an
+            // empty series, which the counterfactual would then score as "unpriceable" — a real
+            // signal lost to the wrong data source rather than to missing data.
+            let client = mind_tools::MarketClient::from_env().ok();
             let mut m = std::collections::HashMap::new();
             for s in symbols {
-                if let Ok(b) = client.bars(&s, "1Min", &start, &end) {
-                    m.insert(s, b);
+                if mind_tools::is_indian(&s) {
+                    if let Ok(ser) = mind_tools::yahoo_series(&s, "5d", "1m") {
+                        m.insert(s, ser.bars);
+                    }
+                    continue;
+                }
+                let via_alpaca = client.as_ref().and_then(|c| c.bars(&s, "1Min", &start, &end).ok()).filter(|b| !b.is_empty());
+                match via_alpaca {
+                    Some(b) => {
+                        m.insert(s, b);
+                    }
+                    None => {
+                        if let Ok(ser) = mind_tools::yahoo_series(&s, "5d", "1m") {
+                            m.insert(s, ser.bars);
+                        }
+                    }
                 }
             }
             Ok::<_, anyhow::Error>(m)

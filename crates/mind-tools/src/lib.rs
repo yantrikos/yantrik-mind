@@ -56,6 +56,9 @@ pub use tape::{parse_bar, transitions, Side, TapeSample, TraderState, Transition
 pub mod shadow;
 pub use shadow::{lag_curve, render_curve, simulate as simulate_shadow, ShadowConfig, ShadowReport};
 
+pub mod yquote;
+pub use yquote::{is_indian, series as yahoo_series, Series};
+
 pub mod workers;
 pub use workers::WorkerPool;
 

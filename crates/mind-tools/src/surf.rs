@@ -102,8 +102,37 @@ pub fn parse_feeds(spec: &str) -> Vec<Feed> {
 /// The live URL for a handle. YouTube resolves `/live` to whatever that channel is streaming now,
 /// which is why the roster is handles and not video ids: a video id is a broadcast, a handle is a
 /// SOURCE, and the mind should follow sources.
+///
+/// This distinction is not theoretical. TraderTV ran "Moderna Goes Parabolic" and then, the same
+/// afternoon with the same traders, "Wall Street Bounces" under a new id — desks end a stream and
+/// start another when the shift changes. Anything holding the id was left watching a finished
+/// recording while the desk carried on trading.
 pub fn live_url(handle: &str) -> String {
     format!("https://www.youtube.com/{}/live", handle.trim_start_matches('@').trim())
+}
+
+/// A YouTube search URL for live broadcasts matching a query.
+///
+/// The roster is a starting point, not the world. When every desk on it is dark the mind should go
+/// LOOK for one rather than report that nothing is happening — a hand-written list of five handles
+/// is exactly the kind of constant that quietly becomes wrong, and "my roster is empty" is not the
+/// same fact as "no desk is trading".
+pub fn search_live_url(query: &str) -> String {
+    // sp=EgJAAQ%253D%253D is YouTube's "live" search filter.
+    format!(
+        "https://www.youtube.com/results?search_query={}&sp=EgJAAQ%253D%253D",
+        urlencoding::encode(query.trim())
+    )
+}
+
+/// Handles worth searching for when the roster is dark, in priority order.
+pub fn discovery_queries() -> Vec<&'static str> {
+    vec![
+        "live day trading",
+        "stock market live trading",
+        "live trading desk",
+        "market open live",
+    ]
 }
 
 /// Did this feed's state change between two readings, as THIS lens defines state?

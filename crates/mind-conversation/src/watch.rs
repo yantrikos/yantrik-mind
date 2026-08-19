@@ -778,6 +778,10 @@ impl super::ConversationEngine {
                 _ => out.push_str(&format!("  · {} — not live now\n", f.handle)),
             }
         }
+        // A handle is followed rather than a video id precisely because a desk ENDS one broadcast
+        // and starts another when the shift changes — TraderTV ran "Moderna Goes Parabolic" and
+        // then "Wall Street Bounces" the same afternoon, same traders, different id. Following the
+        // id would have the mind watching a finished recording while the desk trades on.
 
         for (f, url, title) in live {
             let p_title = title;
@@ -820,18 +824,29 @@ impl super::ConversationEngine {
                 None => String::new(),
             };
             let digest: String = digest.chars().take(600).collect();
+            // The stored look is stamped with the BROADCAST it came from. When a desk restarts its
+            // stream, the previous reading describes a different broadcast — often a different
+            // shift with different traders — and diffing across that seam compares two unrelated
+            // screens. That is a transition the mind would report and act on, and it never happened.
             let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
-            let before = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
-            let moved = mind_tools::surf::changed_by(&lens, &before, &digest);
-            let _ = self.memory.profile_set(&key, &digest).await;
+            let stored = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
+            let (prev_id, before) = stored.split_once('\n').unwrap_or(("", ""));
+            let same_broadcast = !prev_id.is_empty() && prev_id == p_title;
+            let moved = same_broadcast && mind_tools::surf::changed_by(&lens, before, &digest);
+            let _ = self.memory.profile_set(&key, &format!("{p_title}\n{digest}")).await;
             out.push_str(&format!(
                 "  {} {} — {}\n",
                 if moved { "🔔" } else { "·" },
                 f.handle,
                 p_title.chars().take(60).collect::<String>()
             ));
-            if before.is_empty() {
+            if prev_id.is_empty() {
                 out.push_str("      (first look — nothing to diff against yet)\n");
+            } else if !same_broadcast {
+                out.push_str(&format!(
+                    "      NEW BROADCAST (was \"{}\") — seeded, not a position change\n",
+                    prev_id.chars().take(40).collect::<String>()
+                ));
             } else if moved {
                 changes.push(f.handle.clone());
                 // SHOW THE WORK. Four rounds of fixes to this detector all ended the same way: six

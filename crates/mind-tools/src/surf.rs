@@ -83,28 +83,72 @@ pub fn live_url(handle: &str) -> String {
 /// What survives the stripping is words — LONG, SHORT, flat, a ticker symbol, a trader's name. A
 /// position opening changes those. A price ticking does not.
 pub fn changed(before: &str, after: &str) -> bool {
-    let (a, b) = (tokens(before), tokens(after));
-    if a.is_empty() || b.is_empty() {
-        return false; // nothing to compare is not a change; it is a failed look.
+    let (a, b) = (exposure(before), exposure(after));
+    match (a, b) {
+        // A failed look is not a transition. Treating an unreadable frame as "everything changed"
+        // would manufacture a signal out of a broken frame grab.
+        (None, _) | (_, None) => false,
+        (Some(x), Some(y)) => x != y,
     }
-    a != b
 }
 
-/// The stable part of one reading: the set of position states and symbols, uppercased and sorted.
+/// What the screen says anyone is HOLDING — the only part of it that is a signal.
 ///
-/// Everything that made prose comparison useless is dropped here. Words shorter than two characters
-/// and the field labels carry no state; numbers are prices and always move. What remains is a closed
-/// vocabulary — LONG, SHORT, FLAT, a trader's name, a ticker — which is identical across two
-/// readings of an unchanged screen and differs exactly when the screen's MEANING differs.
-fn tokens(s: &str) -> std::collections::BTreeSet<String> {
-    const LABELS: &[&str] = &["positions", "tickers", "none", "and", "the"];
-    s.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 2 && !LABELS.contains(w))
-        // A token that is all digits is a price or a size, and both move every second.
-        .filter(|w| !w.chars().all(|c| c.is_ascii_digit()))
-        .map(|w| w.to_string())
-        .collect()
+/// Two readings of one unchanged broadcast, captured to settle this rather than guessed at:
+///
+///   POSITIONS: CHERIF=FLAT, JOE=FLAT
+///   TICKERS: TSM, TCHN, AAPL, PENT, UNH, DOGEUSDT, DXY, PLTR, DELL, BRK-B, COST, HOLO, ZS
+///
+///   POSITIONS: LONG=FLAT:CHERIF, SHORT=FLAT:CHERIF, LONG=FLAT:JOE, SHORT=FLAT:JOE
+///   TICKERS: BRK-B, COST, HOLO, ZS, RDDT, HIMS, SLV
+///
+/// Nothing happened between them, and almost everything differs. The TICKER list differs because
+/// the tape SCROLLS — those symbols are a conveyor belt, not a state, and no amount of care in the
+/// comparison can make them stable. The POSITIONS line differs because the model read the LONG and
+/// SHORT button labels as trader names the second time; the wording of a reading is not reliable
+/// even when the format is pinned.
+///
+/// What both readings agree on is that nobody holds anything. So the comparison is reduced to
+/// exactly that: the set of non-flat exposures. Everyone flat is one state; CHERIF long AMD is
+/// another. Names, labels, ordering, and the whole scrolling tape are discarded, because a change in
+/// any of them is not news and this detector exists to fire only on news.
+pub fn exposure(reading: &str) -> Option<std::collections::BTreeSet<String>> {
+    let line = reading
+        .lines()
+        .find(|l| l.trim().to_uppercase().starts_with("POSITIONS"))
+        .unwrap_or("");
+    if line.trim().is_empty() {
+        return None; // no positions field at all — a failed or malformed look.
+    }
+    let up = line.to_uppercase();
+    let mut held = std::collections::BTreeSet::new();
+    // Each comma-separated entry may name a state and, if held, a symbol.
+    for part in up.split(',') {
+        let has_long = part.contains("LONG");
+        let has_short = part.contains("SHORT");
+        // FLAT anywhere in the entry means this entry reports no exposure, whatever else it says —
+        // which is what makes "LONG=FLAT:CHERIF" read correctly as flat rather than as a long.
+        if part.contains("FLAT") || part.contains("NO POSITION") || part.contains("NONE") {
+            continue;
+        }
+        if !has_long && !has_short {
+            continue;
+        }
+        // The symbol is the token that is not a state word and not a name we can identify; take
+        // any alphabetic run of 1-5 chars that is not a state word.
+        let sym = part
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .map(|t| t.trim())
+            .find(|t| {
+                !t.is_empty()
+                    && t.len() <= 5
+                    && !matches!(*t, "LONG" | "SHORT" | "FLAT" | "POSITIONS" | "NONE")
+                    && t.chars().any(|c| c.is_ascii_alphabetic())
+            })
+            .unwrap_or("?");
+        held.insert(format!("{}:{}", if has_long { "LONG" } else { "SHORT" }, sym));
+    }
+    Some(held)
 }
 
 #[cfg(test)]
@@ -132,18 +176,42 @@ mod tests {
     }
 
     #[test]
-    fn the_same_screen_read_twice_is_not_a_transition() {
-        // THE BUG THIS EXISTS FOR. The first version diffed the vision model's PROSE, and three
-        // consecutive passes over one feed all reported CHANGED — free text is never stable, so the
-        // detector fired every time and would have sent the mind to trade on nothing. Only the
-        // closed vocabulary is comparable, so trivial reformatting must read as identical.
-        let a = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY, MRNA, AMD";
-        let b = "POSITIONS:  joe=flat,  cherif=flat\nTICKERS:  amd, spy, mrna";
-        assert!(!changed(a, b), "same state, different order and case — not a transition");
+    fn two_real_readings_of_one_unchanged_broadcast_are_not_a_transition() {
+        // THE BUG THIS EXISTS FOR, pinned with the ACTUAL readings that exposed it. Nothing
+        // happened on that stream between these two looks, and three consecutive passes all
+        // reported CHANGED — which would have sent the mind to trade on nothing.
+        //
+        // Note how little the two agree on: the tape scrolled to an entirely different set of
+        // symbols, and the model read the LONG/SHORT button labels as trader names the second time.
+        // Only one thing is common to both, and it happens to be the only thing that matters —
+        // nobody is holding anything.
+        let r1 = "POSITIONS: CHERIF=FLAT, JOE=FLAT\n\
+                  TICKERS: TSM, TCHN, AAPL, PENT, UNH, DOGEUSDT, DXY, PLTR, DELL, BRK-B, COST, HOLO, ZS";
+        let r2 = "POSITIONS: LONG=FLAT:CHERIF, SHORT=FLAT:CHERIF, LONG=FLAT:JOE, SHORT=FLAT:JOE\n\
+                  TICKERS: BRK-B, COST, HOLO, ZS, RDDT, HIMS, SLV";
+        assert_eq!(exposure(r1), Some(Default::default()), "everyone flat is no exposure");
+        assert_eq!(exposure(r2), Some(Default::default()), "'LONG=FLAT:CHERIF' is flat, not a long");
+        assert!(!changed(r1, r2), "the scrolling tape and a mislabelled name are not a transition");
+    }
 
-        // And a price appearing or moving inside the reading must not trip it either.
-        let c = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY 771.60, MRNA 137.11, AMD";
-        assert!(!changed(a, c), "prices are not state");
+    #[test]
+    fn someone_actually_taking_a_position_still_fires() {
+        // The detector must not have been made deaf by being made quiet.
+        let flat = "POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: SPY, MRNA";
+        let long_amd = "POSITIONS: CHERIF=LONG:AMD, JOE=FLAT\nTICKERS: SPY, MRNA, AMD";
+        assert!(changed(flat, long_amd), "flat -> long AMD is the whole point");
+        assert!(changed(long_amd, flat), "and closing it is a transition too");
+
+        // A different trader taking the same side of a DIFFERENT name is also news.
+        let short_zs = "POSITIONS: CHERIF=LONG:AMD, JOE=SHORT:ZS\nTICKERS: SPY";
+        assert!(changed(long_amd, short_zs));
+    }
+
+    #[test]
+    fn a_malformed_reading_is_a_failed_look_not_a_transition() {
+        // An unreadable frame must never manufacture a signal.
+        assert_eq!(exposure("I cannot make out this image."), None);
+        assert!(!changed("POSITIONS: CHERIF=FLAT", "I cannot make out this image."));
     }
 
     #[test]

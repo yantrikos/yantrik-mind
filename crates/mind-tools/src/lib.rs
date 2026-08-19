@@ -55,6 +55,9 @@ pub mod surf;
 /// The trading lens for the generic surfer.
 pub mod desk;
 
+/// Find sources, judge them, and spend attention on the ones that earn it.
+pub mod scout;
+
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};

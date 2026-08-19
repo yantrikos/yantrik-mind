@@ -93,8 +93,16 @@ pub fn parse_feeds(spec: &str) -> Vec<Feed> {
         .filter(|s| !s.is_empty())
         .map(|s| {
             let h = if s.starts_with('@') { s.to_string() } else { format!("@{s}") };
-            // An operator-named feed gets the generic lens unless the roster says otherwise.
-            Feed { handle: h, why: "named by the operator".into(), lens: "headlines".into() }
+            // Inherit the lens the ROSTER gives this handle. Naming a feed on the command line used
+            // to force the generic headline lens onto it, so `surf @TraderTVLive` diffed scrolling
+            // news copy on a trading desk and reported a change every single pass. Four fixes to the
+            // desk reducer all failed for the same reason: the desk lens was never running.
+            let lens = default_feeds()
+                .into_iter()
+                .find(|f| f.handle.eq_ignore_ascii_case(&h))
+                .map(|f| f.lens)
+                .unwrap_or_else(|| "headlines".into());
+            Feed { handle: h, why: "named by the operator".into(), lens }
         })
         .collect()
 }

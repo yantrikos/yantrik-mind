@@ -595,3 +595,56 @@ impl super::ConversationEngine {
         )
     }
 }
+
+impl super::ConversationEngine {
+    /// `ym quote SYM[,SYM…]` — live prices, routed per symbol.
+    ///
+    /// Exists because the mind was refusing quote questions with "I have no market-data tool
+    /// wired up", which was TRUE and was the honest answer to a capability that existed in the
+    /// code and not in its hands. The pipeline could price a symbol; the mind could not ask.
+    pub async fn quote_symbols(&self, spec: &str) -> String {
+        let syms: Vec<String> = spec
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(|s| s.trim().trim_start_matches('$').to_uppercase())
+            .filter(|s| !s.is_empty() && s.len() <= 12)
+            .take(8)
+            .collect();
+        if syms.is_empty() {
+            return "Which symbols? e.g. `ym quote SPY, RELIANCE.NS, ^NSEI`".to_string();
+        }
+        let lines = tokio::task::spawn_blocking(move || {
+            let client = mind_tools::MarketClient::from_env().ok();
+            let mut out: Vec<String> = Vec::new();
+            for s in syms {
+                // Indian listings and indices go to Yahoo; US equities try Alpaca first.
+                if !mind_tools::is_indian(&s) {
+                    if let Some(px) = client.as_ref().and_then(|c| c.last_price(&s).ok()) {
+                        out.push(format!("  {s}: {px:.2} USD (Alpaca)"));
+                        continue;
+                    }
+                }
+                match mind_tools::yahoo_series(&s, "1d", "1m") {
+                    Ok(ser) => match ser.bars.last() {
+                        Some(b) => {
+                            let first = ser.bars.first().map(|f| f.close).unwrap_or(b.close);
+                            let chg = if first > 0.0 { (b.close - first) / first * 100.0 } else { 0.0 };
+                            out.push(format!(
+                                "  {}: {:.2} {} ({:+.2}% on the session, {} bars, {})",
+                                ser.symbol, b.close, ser.currency, chg, ser.bars.len(), ser.exchange_tz
+                            ));
+                        }
+                        None => out.push(format!("  {s}: no bars returned (market may be closed with no session data)")),
+                    },
+                    Err(e) => out.push(format!("  {s}: unavailable — {e}")),
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
+        if lines.is_empty() {
+            return "No quotes came back — reporting nothing rather than guessing.".to_string();
+        }
+        format!("💹 Quotes (measured, not recalled):\n{}", lines.join("\n"))
+    }
+}

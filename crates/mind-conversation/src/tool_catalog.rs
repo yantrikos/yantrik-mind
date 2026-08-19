@@ -266,6 +266,16 @@ fn core_meta_schemas() -> Vec<Value> {
             &[("to", true), ("subject", false), ("body", true)],
         ),
         arg_schema(
+            "quote",
+            "live market price for one or more symbols — US equities via Alpaca, Indian listings via the .NS/.BO suffix (e.g. RELIANCE.NS) and indices like ^NSEI. Use this for ANY price question rather than answering from memory",
+            &[("symbols", true)],
+        ),
+        arg_schema(
+            "browse",
+            "drive a real web page toward a goal (navigate, read, fill forms). It stops before anything irreversible — it cannot buy, send or delete",
+            &[("url", true), ("goal", true)],
+        ),
+        arg_schema(
             "watch",
             "WATCH or LISTEN to a video/audio URL (YouTube, podcast, stream): reads published captions, hears it with the local speech model, and looks at sampled frames with the local vision model. Use this for ANY media link — never say you cannot watch video without calling it first",
             &[("url", true), ("question", false)],

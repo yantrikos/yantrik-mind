@@ -5211,6 +5211,7 @@ impl ConversationEngine {
             // `ym tape <url>` samples the traders' position bar into the tape; `ym shadow`
             // computes what copying them with a realistic delay would have paid.
             "tape" if !rest.trim().is_empty() => self.tape_sample(rest.trim()).await,
+            "quote" | "price" | "quotes" if !rest.trim().is_empty() => self.quote_symbols(rest.trim()).await,
             "shadow" | "counterfactual" => self.shadow_report().await,
             // `ym bar-drain` turns spooled CHANGE frames into tape entries, dated by when the
             // change was detected rather than when vision got to it.
@@ -7415,6 +7416,15 @@ impl ConversationEngine {
                     return "(need at least `to` and `body` to leave a draft)".to_string();
                 }
                 self.draft_email(&format!("{to} | {subject} | {body}")).await
+            }
+            // Live prices — the mind was refusing quote questions because this existed in the
+            // code and not in its hands.
+            "quote" | "price" => {
+                let q = if s("symbols").trim().is_empty() { s("symbol") } else { s("symbols") };
+                if q.trim().is_empty() {
+                    return "(need a symbol, e.g. SPY or RELIANCE.NS)".to_string();
+                }
+                self.quote_symbols(&q).await
             }
             "watch" | "watch_media" | "listen" => {
                 let url = if s("url").trim().is_empty() { s("link") } else { s("url") };

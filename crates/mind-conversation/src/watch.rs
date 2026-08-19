@@ -811,24 +811,18 @@ impl super::ConversationEngine {
             // three possible states; a list of tickers is a set of symbols. Those are stable across
             // two readings of an unchanged screen, and they change exactly when the thing worth
             // knowing changes.
+            // The LENS supplies both the question and what counts as a change. Surfing is not a
+            // trading feature — a desk is watched for who is holding what, a news channel for which
+            // headlines are up — so the roster names the lens and this loop stays domain-free.
+            let lens = mind_tools::surf::lens_named(&f.lens);
             let digest = match frame {
-                Some((_, bytes)) => {
-                    self.analyze_image_bytes(
-                        bytes,
-                        "image/jpeg",
-                        "Reply in EXACTLY this form and nothing else, no prose, no explanation:\n\
-                         POSITIONS: name=LONG|SHORT|FLAT[:TICKER] for each trader shown, comma separated, or NONE\n\
-                         TICKERS: every ticker symbol visible, comma separated, or NONE\n\
-                         Copy names and symbols exactly as printed. Omit all prices and numbers.",
-                    )
-                    .await
-                }
+                Some((_, bytes)) => self.analyze_image_bytes(bytes, "image/jpeg", lens.prompt).await,
                 None => String::new(),
             };
             let digest: String = digest.chars().take(600).collect();
             let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
             let before = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
-            let moved = mind_tools::surf::changed(&before, &digest);
+            let moved = mind_tools::surf::changed_by(&lens, &before, &digest);
             let _ = self.memory.profile_set(&key, &digest).await;
             out.push_str(&format!(
                 "  {} {} — {}\n",

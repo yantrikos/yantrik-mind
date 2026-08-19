@@ -28,6 +28,7 @@ MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a sk
 
 /// Standing rule appended after the detailed section, never gated.
 pub(crate) const NEVER_RULE: &str = "- NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly\n\
+- NEVER say a capability is missing, unwired, unavailable or 'not connected this turn' when a tool listed above covers it, and NEVER tell the user to go run a `ym` command themselves — that tool is YOURS and calling it is your job. If a listed tool fits the question, CALL IT; you may only report an inability after a call actually failed, and then say what failed\n\
 - an mcp.* integration write always pauses for the user's ok; read-only integrations run instantly";
 
 /// The skill meta-tools — the escape hatch of the gated catalog; never gated.

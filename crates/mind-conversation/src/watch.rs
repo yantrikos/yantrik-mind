@@ -769,7 +769,15 @@ impl super::ConversationEngine {
             .iter()
             .filter_map(|r| {
                 let src = r.get("source").and_then(|x| x.as_str()).unwrap_or("(unknown)").to_string();
-                match r.get("outcome").and_then(|x| x.as_bool()) {
+                // The ledger writes an outcome as 1/0, not true/false. Reading it with as_bool()
+                // returned None for every graded row, so this reported "803 claims, 0 graded" — the
+                // mind looked as though it had never learned from a single outcome in its life. The
+                // reader was wrong, not the ledger, and it is worth noticing that the false version
+                // was entirely believable.
+                let outcome = r
+                    .get("outcome")
+                    .and_then(|x| x.as_bool().or_else(|| x.as_i64().map(|n| n != 0)));
+                match outcome {
                     Some(o) => Some((src, o)),
                     None => {
                         *pending.entry(src).or_default() += 1;

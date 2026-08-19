@@ -48,6 +48,9 @@ pub mod market;
 
 /// The mind's hands, sandbox-only: paper orders against the broker's simulated account.
 pub mod broker;
+
+/// Many feeds at once, none of them tuned by hand.
+pub mod surf;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
 
 pub mod newsflow;

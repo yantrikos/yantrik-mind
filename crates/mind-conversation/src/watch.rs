@@ -602,6 +602,70 @@ impl super::ConversationEngine {
     /// Exists because the mind was refusing quote questions with "I have no market-data tool
     /// wired up", which was TRUE and was the honest answer to a capability that existed in the
     /// code and not in its hands. The pipeline could price a symbol; the mind could not ask.
+    /// SURF — look at every live feed in the rotation, not one.
+    ///
+    /// A person watches one screen because they have one pair of eyes; that limit is not a law of
+    /// markets, it is a fact about people. The mind's version of an edge is not seeing one feed
+    /// better, it is seeing five at once and noticing which one just changed.
+    ///
+    /// So this checks what is live across the roster, looks at each, and — crucially — DIFFS each
+    /// reading against the last one stored for that feed. A single look at a trading desk is nearly
+    /// worthless: a trader who is flat tells you nothing, as this afternoon demonstrated twice. The
+    /// signal is the transition, and a transition needs a memory of the previous look, which is why
+    /// each sighting is stored under the feed's own key.
+    pub async fn surf_feeds(&self, spec: &str) -> String {
+        let feeds = if spec.trim().is_empty() {
+            mind_tools::surf::default_feeds()
+        } else {
+            mind_tools::surf::parse_feeds(spec)
+        };
+        let mut out = String::from("📡 SURFING the rotation (each feed diffed against its own last look)\n");
+        let mut changes: Vec<String> = Vec::new();
+        for f in feeds.iter().take(6) {
+            let url = mind_tools::surf::live_url(&f.handle);
+            let probe = {
+                let u = url.clone();
+                tokio::task::spawn_blocking(move || mind_tools::media::probe(&u)).await.ok().and_then(|r| r.ok())
+            };
+            let Some(p) = probe else {
+                out.push_str(&format!("  · {} — not live now\n", f.handle));
+                continue;
+            };
+            if !p.is_live {
+                out.push_str(&format!("  · {} — not live now\n", f.handle));
+                continue;
+            }
+            // One look. Deliberately the WHOLE frame and no crop: what makes this work on a channel
+            // nobody tuned is that the vision model is asked what it sees, not where to look.
+            let seen = self.watch_media(&url, "what is on screen: tickers, positions, headlines, levels").await;
+            let digest: String = seen.chars().take(1200).collect();
+            let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
+            let before = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
+            let moved = mind_tools::surf::changed(&before, &digest);
+            let _ = self.memory.profile_set(&key, &digest).await;
+            out.push_str(&format!(
+                "  {} {} — {}\n",
+                if moved { "🔔" } else { "·" },
+                f.handle,
+                p.title.chars().take(60).collect::<String>()
+            ));
+            if before.is_empty() {
+                out.push_str("      (first look — nothing to diff against yet)\n");
+            } else if moved {
+                changes.push(f.handle.clone());
+                out.push_str("      CHANGED since the last look — this is the thing worth acting on\n");
+            }
+        }
+        if changes.is_empty() {
+            out.push_str("\nNothing changed across the rotation. That is a real observation, not a failure — \
+                          most looks at most feeds should be quiet, and a surfer that always finds something \
+                          is finding noise.\n");
+        } else {
+            out.push_str(&format!("\nChanged: {}. Run `ym copy-trade <url>` on those.\n", changes.join(", ")));
+        }
+        out
+    }
+
     /// WATCH → TYPED SIGNAL → PAPER POSITION → GRADEABLE PREDICTION.
     ///
     /// `learn_from_watch` already turns a broadcast into beliefs and claims. This closes the loop:

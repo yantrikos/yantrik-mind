@@ -360,7 +360,7 @@ impl PluginRegistry {
             // header says what happens then: the model confabulates the capability instead of
             // calling it. It did exactly that, quoting `ym quote ^NSEI` back as something the
             // user should run while insisting it had no market-data tool.
-            PluginSpec::new("markets", "Market data", "Research", ReadOnly, &["quote"], &["price"],
+            PluginSpec::new("market_data", "Market data", "Research", ReadOnly, &["quote"], &["price"],
                 "- quote {symbols}: LIVE price for one or more symbols — US equities via Alpaca, Indian listings with the .NS/.BO suffix (RELIANCE.NS, TCS.NS) and indices like ^NSEI. Use this for ANY price question rather than answering from memory or refusing"),
             PluginSpec::new("media_watch", "Watch media", "Research", ReadOnly, &["watch"], &["listen"],
                 "- watch {url, question?}: WATCH or LISTEN to a video/audio link — reads published captions, hears it with the local speech model, and looks at sampled frames. Use for any media URL instead of saying you cannot watch video"),

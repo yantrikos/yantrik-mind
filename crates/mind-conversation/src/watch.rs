@@ -742,6 +742,78 @@ impl super::ConversationEngine {
         out
     }
 
+    /// SOURCES — who has earned attention, from the record rather than the impression.
+    ///
+    /// Reads the judgment ledger the mind already keeps, rolls the GRADED rows up by source, and
+    /// reports where each one stands. This is the step that makes trust a measurement instead of a
+    /// type: claims were already logged with their origin and graded later, but nothing joined those
+    /// two facts, so a source could be wrong indefinitely without anything noticing.
+    ///
+    /// Pending claims are excluded and counted separately. A prediction whose deadline has not
+    /// arrived is not a wrong prediction, and folding the two together would quietly punish whoever
+    /// makes the longest-horizon calls.
+    pub async fn source_standing(&self) -> String {
+        let led: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if led.is_empty() {
+            return "📚 No judgment ledger yet — nothing has been claimed, so nothing can be trusted.".to_string();
+        }
+        let mut pending: std::collections::BTreeMap<String, u32> = Default::default();
+        let graded: Vec<(String, bool)> = led
+            .iter()
+            .filter_map(|r| {
+                let src = r.get("source").and_then(|x| x.as_str()).unwrap_or("(unknown)").to_string();
+                match r.get("outcome").and_then(|x| x.as_bool()) {
+                    Some(o) => Some((src, o)),
+                    None => {
+                        *pending.entry(src).or_default() += 1;
+                        None
+                    }
+                }
+            })
+            .collect();
+        let tallied = mind_tools::scout::tally(graded.iter().map(|(s, o)| (s.as_str(), *o)));
+
+        let mut out = format!(
+            "📚 SOURCE STANDING — {} claims logged, {} graded\n",
+            led.len(),
+            graded.len()
+        );
+        if tallied.is_empty() {
+            out.push_str("  nothing graded yet: every source is unproven, which is a fact about the ledger, not about them\n");
+        }
+        for (src, rec) in &tallied {
+            let st = mind_tools::scout::standing(rec);
+            let hit = if rec.graded > 0 { rec.correct as f64 / rec.graded as f64 * 100.0 } else { 0.0 };
+            out.push_str(&format!(
+                "  {:<28} {}/{} correct ({hit:.0}%) — {}\n",
+                src,
+                rec.correct,
+                rec.graded,
+                match st {
+                    mind_tools::scout::Standing::Trusted => "TRUSTED (act on it)",
+                    mind_tools::scout::Standing::Dropped => "DROPPED (stop spending attention)",
+                    mind_tools::scout::Standing::Provisional if rec.graded < mind_tools::scout::MIN_GRADED =>
+                        "provisional (too few calls to judge)",
+                    mind_tools::scout::Standing::Provisional => "provisional (no edge over a coin flip)",
+                }
+            ));
+        }
+        if !pending.is_empty() {
+            out.push_str("  awaiting their deadline (not counted against anyone):\n");
+            for (src, n) in pending.iter().take(8) {
+                out.push_str(&format!("    {src}: {n}\n"));
+            }
+        }
+        out
+    }
+
     /// SURF — look at every live feed in the rotation, not one.
     ///
     /// A person watches one screen because they have one pair of eyes; that limit is not a law of
@@ -994,7 +1066,11 @@ impl super::ConversationEngine {
                         if level.is_empty() { String::new() } else { format!(" (level {level})") },
                         if why.is_empty() { String::new() } else { format!(" — {why}") },
                     );
-                    self.judgment_log("copy_trade", "trading", &claim, conv.clamp(0.05, 0.95), now + 86_400_000, url).await;
+                    // Attribute the claim to the SOURCE, not to the mechanism. Logging every copied trade
+                    // under "copy_trade" would pool a good desk and a bad one into one meaningless
+                    // record, and the whole point of a record is to tell them apart.
+                    let src = mind_tools::scout::source_label(url);
+                    self.judgment_log(&src, "trading", &claim, conv.clamp(0.05, 0.95), now + 86_400_000, url).await;
                     acted.push((sym, side_s, qty, px, why, ack));
                 }
                 Err(e) => refused.push(format!("{sym} {side_s} — {e}")),

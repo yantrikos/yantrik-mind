@@ -134,6 +134,51 @@ pub fn standing(r: &Record) -> Standing {
     }
 }
 
+/// A stable, human-readable name for whatever produced a claim.
+///
+/// Records are only useful if two claims from the same desk land under the same key. A raw watch URL
+/// does not do that: a desk restarts its stream several times a day, so `watch?v=…` would file every
+/// shift as a brand-new source that never accumulates a record and is therefore never trusted or
+/// dropped. The CHANNEL is the thing with a reputation.
+pub fn source_label(url: &str) -> String {
+    let u = url.trim();
+    if let Some(rest) = u.split("youtube.com/").nth(1) {
+        let seg = rest.trim_start_matches('/');
+        if let Some(handle) = seg.strip_prefix('@') {
+            let name = handle.split(['/', '?', '&']).next().unwrap_or(handle);
+            return format!("@{name}");
+        }
+    }
+    // Not a channel URL — fall back to the host, which at least groups by publisher.
+    u.split("://")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .map(|h| h.trim_start_matches("www.").to_string())
+        .unwrap_or_else(|| "(unknown source)".into())
+}
+
+/// Roll graded claims up into a record per source.
+///
+/// This is the join that makes the whole thing a learning loop rather than a set of types. Claims
+/// already go to the judgment ledger stamped with where they came from; grading already marks them
+/// right or wrong. Without this step those two facts never meet, and "trust" stays a struct that is
+/// constructed and never updated — the shape of learning with none of it happening.
+///
+/// UNGRADED claims are excluded rather than counted as failures. A prediction whose deadline has not
+/// arrived is not a wrong prediction, and treating pending as wrong would punish exactly the sources
+/// that make long-horizon calls.
+pub fn tally<'a>(graded: impl Iterator<Item = (&'a str, bool)>) -> std::collections::BTreeMap<String, Record> {
+    let mut out: std::collections::BTreeMap<String, Record> = Default::default();
+    for (source, correct) in graded {
+        let e = out.entry(source.trim().to_string()).or_default();
+        e.graded += 1;
+        if correct {
+            e.correct += 1;
+        }
+    }
+    out
+}
+
 /// Rank candidates for attention: checkable form first, then audience as a weak prior.
 ///
 /// Viewers are used ONLY to break ties. A large audience is evidence about production values and
@@ -197,6 +242,44 @@ mod tests {
         assert_eq!(standing(&Record { graded: 20, correct: 14 }), Standing::Trusted);
         assert_eq!(standing(&Record { graded: 20, correct: 10 }), Standing::Provisional, "a coin flip is not an edge");
         assert_eq!(standing(&Record { graded: 20, correct: 6 }), Standing::Dropped);
+    }
+
+    #[test]
+    fn a_reputation_belongs_to_the_channel_not_to_one_broadcast() {
+        // A desk restarts its stream several times a day. Filing claims under the video URL would
+        // give every shift a fresh, empty record — so no source would ever accumulate enough graded
+        // calls to be trusted OR dropped, and the whole ledger would stay permanently provisional.
+        assert_eq!(source_label("https://www.youtube.com/@TraderTVLive/live"), "@TraderTVLive");
+        assert_eq!(source_label("https://youtube.com/@BearBullTraders/live?x=1"), "@BearBullTraders");
+        // A bare video URL has no channel in it; grouping by host is the honest fallback.
+        assert_eq!(source_label("https://www.youtube.com/watch?v=NpZf5vWGVw8"), "youtube.com");
+    }
+
+    #[test]
+    fn trust_is_computed_from_the_ledger_the_mind_already_keeps() {
+        // The join that turns types into learning: claims are logged with their source and graded
+        // later; this is where those two facts finally meet.
+        let rows = vec![
+            ("@TraderTVLive", true),
+            ("@TraderTVLive", true),
+            ("@TraderTVLive", false),
+            ("@SomeGuru", false),
+            ("@SomeGuru", false),
+        ];
+        let t = tally(rows.into_iter());
+        assert_eq!(t["@TraderTVLive"], Record { graded: 3, correct: 2 });
+        assert_eq!(t["@SomeGuru"], Record { graded: 2, correct: 0 });
+        // Neither has enough calls to be rated yet, and saying so is the correct answer.
+        assert_eq!(standing(&t["@SomeGuru"]), Standing::Provisional);
+    }
+
+    #[test]
+    fn a_pending_claim_is_not_a_failed_one() {
+        // Only GRADED claims reach tally. Counting pending predictions as wrong would punish the
+        // sources that make longer-horizon calls, which is precisely backwards.
+        let graded_only = vec![("@A", true)];
+        let t = tally(graded_only.into_iter());
+        assert_eq!(t["@A"].graded, 1, "a source with one graded call and nine pending has ONE record");
     }
 
     #[test]

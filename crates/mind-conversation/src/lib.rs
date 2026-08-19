@@ -5214,6 +5214,7 @@ impl ConversationEngine {
             "quote" | "price" | "quotes" if !rest.trim().is_empty() => self.quote_symbols(rest.trim()).await,
             "paper" | "paper-book" | "book" => self.paper_book().await,
             "surf" | "feeds" | "rotation" => self.surf_feeds(rest.trim()).await,
+            "sources" | "standing" | "trust" => self.source_standing().await,
             "hunt" | "scan" => self.hunt(rest.trim().eq_ignore_ascii_case("act")).await,
             "copy-trade" | "trade-watch" | "learn-trade" if !rest.trim().is_empty() => {
                 let (u, f) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), "what are they trading and which way"));

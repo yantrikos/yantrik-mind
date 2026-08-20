@@ -21,6 +21,7 @@ Push-to-talk: Enter to start, Enter to stop, reply is spoken back.
 """
 import io
 import os
+import threading
 import sys
 import urllib.parse
 
@@ -39,6 +40,7 @@ SR = 16000
 
 _whisper = None
 _kokoro = None
+_turn_no = [0]
 
 
 def whisper():
@@ -86,12 +88,72 @@ def play(samples, sr):
         sd.wait()
 
 
+# Lines said while the answer is still coming. Rendered ONCE at startup: the model's first token
+# lands about a second after you stop talking, and a caller starts to think the line dropped at
+# roughly that point. Synthesising a hold line on demand would put it in the same queue as the
+# answer, which is the one place it must never be.
+_HOLDS = ["Mm.", "One sec.", "Hang on.", "Let me look.", "Right, checking."]
+_hold_cache = []
+_stop_speaking = threading.Event()
+
+
+def prerender_holds():
+    """Pay the synthesis cost at boot so the gap later costs nothing."""
+    for h in _HOLDS:
+        try:
+            _hold_cache.append(kokoro().create(h, voice=VOICE, speed=1.05))
+        except Exception:
+            pass
+
+
+def play_hold(n: int):
+    if _hold_cache:
+        s, sr = _hold_cache[n % len(_hold_cache)]
+        play(s, sr)
+
+
+def sentences(text: str):
+    """Split into pieces that can be spoken as they are ready.
+
+    The FIRST piece is deliberately short. The gap before any sound is where a conversation dies,
+    and a listener forgives a brief opening clause far more readily than silence. It is also the
+    unit of interruption: a reply synthesised as one block cannot be stopped, because by then the
+    audio exists and is already playing.
+    """
+    out, cur = [], ""
+    for w in text.split():
+        cur = (cur + " " + w).strip()
+        limit = 60 if not out else 180
+        if (w.endswith((".", "!", "?")) and len(cur) >= 12) or len(cur) >= limit:
+            out.append(cur)
+            cur = ""
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
 def speak(text: str):
+    """Speak in pieces, stopping the moment an interruption is signalled."""
+    _stop_speaking.clear()
+    # The server composes for the ear when told the channel is voice; this is a last-ditch tidy for
+    # anything that still arrives with markup, NOT a substitute for asking for speech.
     spoken = text.replace("**", "").replace("`", "").replace("•", ",").replace("#", "")
-    if len(spoken) > 1200:
-        spoken = spoken[:1200].rsplit(".", 1)[0] + "."
-    samples, sr = kokoro().create(spoken, voice=VOICE, speed=1.05)
-    play(samples, sr)
+    for piece in sentences(spoken):
+        if _stop_speaking.is_set():
+            break
+        try:
+            samples, sr = kokoro().create(piece, voice=VOICE, speed=1.05)
+        except Exception:
+            break
+        if _stop_speaking.is_set():
+            # An interruption during synthesis must not still play, or you talk and are answered
+            # over anyway.
+            break
+        play(samples, sr)
+
+
+def interrupt():
+    _stop_speaking.set()
 
 
 def turn_local(audio: np.ndarray):
@@ -101,7 +163,18 @@ def turn_local(audio: np.ndarray):
         print("(heard nothing)")
         return
     print(f"you: {transcript}")
-    r = requests.post(CHAT_URL, data=transcript.encode(), headers={"Content-Type": "text/plain"}, timeout=150)
+    # Declare the channel so the reply is COMPOSED for the ear — short, answer first, no markup —
+    # rather than a written briefing with its bullets stripped off afterwards.
+    holder = threading.Thread(target=play_hold, args=(_turn_no[0],), daemon=True)
+    holder.start()
+    r = requests.post(
+        CHAT_URL,
+        data=transcript.encode(),
+        headers={"Content-Type": "text/plain", "X-YM-Voice": "1"},
+        timeout=150,
+    )
+    holder.join(timeout=3)
+    _turn_no[0] += 1
     reply = r.text.strip()
     print(f"ym : {reply[:500]}")
     speak(reply)
@@ -123,6 +196,9 @@ def turn_server(audio: np.ndarray):
 
 def main():
     print(f"ym voice [{MODE}] → {'brain ' + CHAT_URL if MODE == 'local' else SIDECAR_URL}  (Ctrl+C quits)")
+    if MODE == "local":
+        print("(warming the voice…)")
+        prerender_holds()   # pay it once here, never in the middle of a conversation
     while True:
         audio = record()
         if len(audio) < SR // 2:

@@ -611,7 +611,11 @@ fn ctl_handle(
                 _ => authed.chat_person().to_string(),              // bound person (member, or operator-self)
             };
             let fast = head.lines().any(|l| l.to_ascii_lowercase().starts_with("x-ym-fast:") && l.contains('1'));
-            let ident = mind_conversation::TurnIdentity::new(effective_person, false).rendering_rich(rich);
+            // The client declares that this reply will be SPOKEN, exactly as it declares rich
+            // rendering. Never inferred: the same handler serves a terminal, a chat window and a
+            // voice client, and guessing would read markdown aloud to one of them.
+            let voice = head.lines().any(|l| l.to_ascii_lowercase().starts_with("x-ym-voice:") && l.contains('1'));
+            let ident = mind_conversation::TurnIdentity::new(effective_person, false).rendering_rich(rich).speaking(voice);
             let r = if fast {
                 rt.block_on(conv.fast_reply(&body, ident))
             } else {

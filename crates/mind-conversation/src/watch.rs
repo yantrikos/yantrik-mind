@@ -679,7 +679,17 @@ impl super::ConversationEngine {
             ChatMessage::system("You decide trades from evidence. Output ONLY the JSON object. An empty array is a valid, common answer."),
             ChatMessage::user(&prompt),
         ];
-        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+        // GREEDY, not sampled. Two runs over the SAME candidates, minutes apart, disagreed
+        // completely: one returned MRNA short at 0.85 conviction and WMT short at 0.75, each with a
+        // written thesis; the other returned nothing at all. Same prices, same headlines, same
+        // prompt. That is the sampler talking, not judgment.
+        //
+        // It breaks the part that matters most: a view that flips between identical inputs cannot be
+        // graded, because the ledger would be scoring a coin toss and reporting it as skill. And it
+        // removes a temptation that is hard to see from the inside — with a variable decision,
+        // re-running the hunt until it agrees with you looks exactly like more analysis.
+        let decide = GenerationConfig { temperature: 0.0, ..GenerationConfig::default() };
+        let text = match self.inference.chat_grounded(messages, decide).await {
             Ok(r) => r.text,
             Err(e) => return format!("{out}\n(could not form a view: {e})"),
         };

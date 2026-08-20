@@ -662,11 +662,15 @@ impl super::ConversationEngine {
 
         let prompt = format!(
             "You are deciding your OWN trades, not copying anyone. Today's tradeable movers:\n\n{brief}\n\
-             For each, decide whether there is a same-day edge and which way. Be sceptical: a move \
-             that already happened is not an edge, and 'it is going up' is not a thesis. A catalyst \
-             that is fresh and specific (earnings, trial data, guidance, a deal) with the move still \
-             developing is. If none qualify, return an empty array — that is the common and correct \
-             answer.\n\
+             For each, decide whether there is a same-day edge and which way.\n\
+             A FRESH, SPECIFIC, COMPANY-LEVEL catalyst with the move still under way IS an edge, and \
+             it is the case you are here for: an earnings reaction, guidance, trial data, a deal, an \
+             analyst action that is moving the stock. Name the direction and take it.\n\
+             NOT an edge: a move with no explanation, a move that has already fully played out, an \
+             index or leveraged ETF drifting with the market, or 'it is going up'.\n\
+             Judge each name on its own. An empty array is right when nothing has a catalyst — but \
+             it is an answer, not a safe default, and passing on a clean setup costs as much as \
+             taking a bad one.\n\
              Output ONLY JSON: {{\"trades\":[{{\"symbol\":\"X\",\"side\":\"long\"|\"short\",\
              \"conviction\":0.0-1.0,\"thesis\":\"one specific sentence\"}}]}}"
         );

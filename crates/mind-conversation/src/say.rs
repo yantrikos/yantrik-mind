@@ -76,7 +76,19 @@ impl super::ConversationEngine {
         // second model pass to "fix" a long answer costs another second of the listener's time and
         // sometimes changes the facts; naming the fault is how the register gets better instead.
         let faults = mind_tools::flow::faults(&answer, 1);
-        let spoken = self.say_aloud(&answer).await;
+        // BUT the mouth still honours the budget, because the instruction alone does not.
+        //
+        // Measured after the word limit was added: "what is the Nifty at" came back as thirteen
+        // words that simply stop — the target exactly — while "what is in my paper account" came
+        // back at seventy with a closing offer. The rule binds when the answer is a fact and
+        // dissolves when the question invites elaboration.
+        //
+        // So the voice speaks whole sentences up to the budget and stops. Not a rewrite and not a
+        // truncation mid-word: complete thoughts, then silence. The full text still goes to the
+        // transcript, so nothing is lost — it just is not monologued at someone who only asked what
+        // the Nifty was doing.
+        let to_say = mind_tools::speech::within_budget(&answer, 45);
+        let spoken = self.say_aloud(&to_say).await;
         if faults.is_empty() {
             spoken
         } else {

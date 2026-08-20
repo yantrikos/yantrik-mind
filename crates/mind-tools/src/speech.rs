@@ -143,6 +143,61 @@ fn is_pictograph(c: char) -> bool {
         0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0xFE00..=0xFE0F | 0x1F000..=0x1F2FF | 0x2190..=0x21FF)
 }
 
+/// The opening of a reply, cut at a whole sentence, within a word budget.
+///
+/// The instruction alone does not hold. Measured after a hard forty-word limit was added to the
+/// spoken register: "what is the Nifty at" came back as thirteen words that simply stop, and "what
+/// is in my paper account" came back at seventy with a closing offer. The rule binds when the answer
+/// is a fact and dissolves when the question invites elaboration.
+///
+/// So the mouth enforces what the prompt requests. This is NOT a rewrite — no second model pass, no
+/// paraphrase, nothing that could change a number — and NOT a truncation mid-word. It is whole
+/// sentences up to the budget, then silence. The full text still reaches the transcript, so nothing
+/// is lost; it simply is not monologued at someone who asked a one-line question.
+///
+/// A single sentence longer than the budget is spoken in full rather than cut: half a sentence is
+/// worse than a long one, because the listener is left waiting for a verb.
+pub fn within_budget(text: &str, max_words: usize) -> String {
+    let spoken = to_spoken(text);
+    let mut out: Vec<&str> = Vec::new();
+    let mut words = 0usize;
+    for sentence in split_sentences(&spoken) {
+        let n = sentence.split_whitespace().count();
+        if !out.is_empty() && words + n > max_words {
+            break;
+        }
+        words += n;
+        out.push(sentence);
+    }
+    if out.is_empty() {
+        return spoken;
+    }
+    let joined = out.join(" ");
+    // Reborrow: `out` holds slices of `spoken`, so build the owned string before it drops.
+    joined
+}
+
+/// Sentence boundaries, kept simple — an abbreviation is a smaller error than a wrong split.
+fn split_sentences(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let b = s.as_bytes();
+    for i in 0..b.len() {
+        if matches!(b[i], b'.' | b'!' | b'?') {
+            let end = i + 1;
+            let is_end = end >= b.len() || b[end] == b' ';
+            if is_end && end - start > 1 {
+                out.push(s[start..end].trim());
+                start = end;
+            }
+        }
+    }
+    if start < s.len() && !s[start..].trim().is_empty() {
+        out.push(s[start..].trim());
+    }
+    out.into_iter().filter(|x| !x.is_empty()).collect()
+}
+
 /// Split into chunks that can be spoken as soon as they exist.
 ///
 /// The FIRST chunk is deliberately allowed to be short: it is the difference between a reply that
@@ -213,6 +268,34 @@ mod tests {
         // A feed says RELIANCE.NS; a person says Reliance. Spelled out, it becomes "dot N S".
         assert_eq!(to_spoken("HDFCBANK.NS is flat"), "HDFCBANK is flat.");
         assert!(to_spoken("watching TATAMOTORS.BO today").contains("TATAMOTORS "));
+    }
+
+    #[test]
+    fn the_budget_stops_at_a_whole_thought_not_mid_word() {
+        // The real over-long reply, verbatim. The register asked for forty words and got seventy,
+        // so the mouth honours what the prompt requested.
+        let long = "You're sitting on cash — $10,000 in the account, all of it uninvested, with no open positions. Buying power is $40,000, so you've got room for up to 4x leverage if you want to deploy. Given the RELIANCE and INFY threads you've been tracking, the account is ready for a first entry whenever you set a thesis. Want me to pull a fresh RELIANCE quote and sketch a position size?";
+        let said = within_budget(long, 45);
+        assert!(said.split_whitespace().count() <= 50, "{} words: {said}", said.split_whitespace().count());
+        assert!(said.ends_with('.'), "stops at a full stop, never mid-word: {said}");
+        assert!(said.contains("10,000"), "the ANSWER survives — it is the first sentence: {said}");
+        assert!(!said.contains("Want me to"), "the trailing offer is not reached: {said}");
+    }
+
+    #[test]
+    fn a_short_answer_is_left_exactly_as_it_is() {
+        // The measured good case: thirteen words that simply stop. The budget must not touch it.
+        let good = "Nifty is at twenty-four thousand two hundred fifteen, flat on the session.";
+        assert_eq!(within_budget(good, 45), to_spoken(good));
+    }
+
+    #[test]
+    fn one_very_long_sentence_is_spoken_whole_rather_than_halved() {
+        // Half a sentence is worse than a long one — the listener is left waiting for a verb.
+        let one = "The reason the account shows ten thousand dollars of buying power despite having no positions at all is that the broker extends four times leverage on a cash balance of that size.";
+        let said = within_budget(one, 10);
+        assert!(said.split_whitespace().count() > 10, "a lone long sentence is not cut: {said}");
+        assert!(said.ends_with('.'));
     }
 
     #[test]

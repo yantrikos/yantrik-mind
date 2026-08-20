@@ -674,9 +674,23 @@ impl super::ConversationEngine {
              Output ONLY JSON: {{\"trades\":[{{\"symbol\":\"X\",\"side\":\"long\"|\"short\",\
              \"conviction\":0.0-1.0,\"thesis\":\"one specific sentence\"}}]}}"
         );
+        // NO PERSONA on this call, and the reason is measured rather than stylistic.
+        //
+        // With the persona attached the hunt declined the same candidates twice at temperature 0.
+        // The identical prompt without it returned "BULL long, 0.65 — Rosenblatt's target raise
+        // supports the current move". The persona is built around caution: measured data, never a
+        // guess, say when you cannot see the number. That is exactly right for talking to a person
+        // about their life and it suppresses an analytical judgment, because forming a view on
+        // incomplete evidence is what analysis IS.
+        //
+        // The judgment is still bounded — filters upstream, conviction floor and position cap
+        // downstream, every view logged to the ledger whether taken or not. The caution lives in
+        // the machinery, where it can be measured, rather than in a voice telling the model to
+        // hesitate.
         let messages = vec![
-            ChatMessage::system(&self.persona),
-            ChatMessage::system("You decide trades from evidence. Output ONLY the JSON object. An empty array is a valid, common answer."),
+            ChatMessage::system(
+                "You are a trading analyst. Decide from the evidence given. Output ONLY the JSON                  object. An empty array is a valid answer when nothing has a catalyst.",
+            ),
             ChatMessage::user(&prompt),
         ];
         // GREEDY, not sampled. Two runs over the SAME candidates, minutes apart, disagreed

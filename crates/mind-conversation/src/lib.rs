@@ -45,6 +45,7 @@ mod narrative;
 mod pace_ledger;
 mod reflex;
 mod watch;
+mod say;
 pub mod pack;
 pub mod scoreboard;
 mod people;
@@ -87,6 +88,21 @@ enum CodeLang {
 
 /// Who is speaking this turn + whether the channel is shared — drives memory read-isolation so a
 /// private fact from one household member never leaks to another (the group-chat moat).
+/// What the model is told when its reply will be HEARD.
+///
+/// Both halves of it were measured rather than guessed. The REGISTER exists because the mind's real
+/// replies are chat-shaped: read aloud, one of them opens "Two things I'm carrying for you right
+/// now, colon, dash, asterisk asterisk RELIANCE price". The FLOW rules exist because that same reply
+/// runs 39 seconds and ends, as every one of them does, by handing back a two-part question — in a
+/// chat window that is thorough; spoken, every answer arrives wrapped in a menu.
+const VOICE_NOTE: &str = "SPOKEN CHANNEL: this reply is read aloud by a synthesiser. Nothing you write is seen, so markdown, tables, code fences, bullet points, emoji and symbols like ^ or % are heard as noise or as punctuation. Say it the way you would to someone next to you.
+- Put the answer in the FIRST sentence. A listener cannot skim you.
+- Keep the whole turn to a couple of sentences. If there is more, say the important part and let them ask for the rest.
+- Speak numbers naturally: 'twenty four thousand and fifty' not '24,053.30'; 'down about a quarter percent' not '-0.27%'; 'the Nifty' not '^NSEI'.
+- Do NOT open with an agenda ('two things I'm carrying', 'here's the state') — open with the answer.
+- Do NOT end every turn by offering to do something. Most turns should simply stop.
+- Use 'it' and 'that' for things already mentioned rather than naming them again.";
+
 #[derive(Clone, Debug)]
 pub struct TurnIdentity {
     /// The speaker's person id ("primary", or a registered member's slug).
@@ -100,19 +116,35 @@ pub struct TurnIdentity {
     /// so guessing from the endpoint would put mermaid source into a Telegram message as raw text.
     /// Defaults to false, which means every existing caller keeps getting plain prose.
     pub rich: bool,
+    /// True when this reply will be SPOKEN ALOUD rather than displayed.
+    ///
+    /// Mutually exclusive with `rich` by nature: a listener cannot see a table, and markdown read
+    /// aloud is punctuation. Declared by the client exactly as `rich` is — the server never infers
+    /// it, because the same handlers serve a terminal, a phone call and a chat window.
+    pub voice: bool,
 }
 
 impl TurnIdentity {
     /// The primary member, private context — the `ym` CLI + every legacy single-user path.
     pub fn primary() -> Self {
-        Self { owner: mind_types::PRIMARY.to_string(), shared: false, rich: false }
+        Self { owner: mind_types::PRIMARY.to_string(), shared: false, rich: false, voice: false }
     }
     pub fn new(owner: impl Into<String>, shared: bool) -> Self {
-        Self { owner: owner.into(), shared, rich: false }
+        Self { owner: owner.into(), shared, rich: false, voice: false }
     }
     /// Declare that this turn's reply will be RENDERED, not printed.
     pub fn rendering_rich(mut self, rich: bool) -> Self {
         self.rich = rich;
+        self
+    }
+    /// This turn will be heard, not read.
+    pub fn speaking(mut self, voice: bool) -> Self {
+        self.voice = voice;
+        if voice {
+            // A spoken channel cannot render anything, so the formatting licence is withdrawn
+            // rather than left to fight with the speech instruction.
+            self.rich = false;
+        }
         self
     }
     /// The formatting licence for this channel, or None when the reply is going somewhere that would
@@ -123,6 +155,12 @@ impl TurnIdentity {
     /// drawing a flowchart for "what time is it". So each construct is tied to the condition that
     /// earns it, and the last line makes plain prose the default.
     pub fn format_note(&self) -> Option<&'static str> {
+        // SPEECH wins over rendering. The two instructions are contradictory — one grants tables and
+        // fenced code, the other says a listener cannot see any of it — and a model handed both
+        // produces a reply that reads its own markup aloud.
+        if self.voice {
+            return Some(VOICE_NOTE);
+        }
         if !self.rich {
             return None;
         }
@@ -5214,6 +5252,7 @@ impl ConversationEngine {
             "quote" | "price" | "quotes" if !rest.trim().is_empty() => self.quote_symbols(rest.trim()).await,
             "paper" | "paper-book" | "book" => self.paper_book().await,
             "surf" | "feeds" | "rotation" => self.surf_feeds(rest.trim()).await,
+            "say" | "speak" if !rest.trim().is_empty() => self.say_aloud(rest.trim()).await,
             "sources" | "standing" | "trust" => self.source_standing().await,
             "hunt" | "scan" => self.hunt(rest.trim().eq_ignore_ascii_case("act")).await,
             "copy-trade" | "trade-watch" | "learn-trade" if !rest.trim().is_empty() => {

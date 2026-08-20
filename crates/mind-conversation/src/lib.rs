@@ -101,7 +101,8 @@ const VOICE_NOTE: &str = "SPOKEN CHANNEL: this reply is read aloud by a synthesi
 - Speak numbers naturally: 'twenty four thousand and fifty' not '24,053.30'; 'down about a quarter percent' not '-0.27%'; 'the Nifty' not '^NSEI'.
 - Do NOT open with an agenda ('two things I'm carrying', 'here's the state') — open with the answer.
 - Do NOT end every turn by offering to do something. Most turns should simply stop.
-- Use 'it' and 'that' for things already mentioned rather than naming them again.";
+- Use 'it' and 'that' for things already mentioned rather than naming them again.
+- NEVER ask permission to look something up. Looking is free and undoes nothing — a price, a page, a stream, a filing. Look, then say what you found. 'Do you want me to check?' spends a whole turn to arrive back where you started, and in speech that is two turns and a wait. Ask first ONLY before something that changes the world: sending, buying, deleting.";
 
 #[derive(Clone, Debug)]
 pub struct TurnIdentity {

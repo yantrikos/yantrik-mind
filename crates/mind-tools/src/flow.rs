@@ -52,12 +52,21 @@ pub fn is_a_breath(text: &str) -> bool {
 pub fn ends_with_an_offer(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     let tail: String = t.chars().rev().take(140).collect::<String>().chars().rev().collect();
+    // The list is what real replies actually end with, extended each time one slips through. It
+    // missed "Want to start there?" on the very first live sample — the checker was written from
+    // the forms I remembered rather than the forms the mind uses, which is the same mistake as
+    // testing a filter against invented data.
     tail.contains("want me to")
+        || tail.contains("want to start")
         || tail.contains("shall i")
         || tail.contains("would you like")
         || tail.contains("do you want")
         || tail.contains("should i")
-        || (tail.ends_with('?') && (tail.contains(" or ") || tail.contains("let me know")))
+        || tail.contains("let me know")
+        || tail.contains("if you want")
+        // Any trailing question that hands the turn back. A genuine clarifying question is rare;
+        // a habitual sign-off question is what this exists to catch, and both end the same way.
+        || tail.trim_end().ends_with('?')
 }
 
 /// Does it open by restating the question or announcing an agenda?
@@ -147,6 +156,17 @@ now, or shall I re-pull a live RELIANCE quote first?";
         let f = faults(REAL_REPLY, 1);
         assert!(f.iter().any(|x| x.contains("too long")), "{f:?}");
         assert!(f.iter().any(|x| x.contains("offer")), "it ends with a two-part offer: {f:?}");
+    }
+
+    #[test]
+    fn the_sign_off_question_that_slipped_through_is_caught() {
+        // From the first live voice reply. The checker knew "want me to" and "do you want" and had
+        // never met "Want to start there?" — written from the forms I remembered instead of the
+        // forms the mind actually uses.
+        assert!(ends_with_an_offer("If you give me your one entry rule, I can frame the first test trade. Want to start there?"));
+        assert!(ends_with_an_offer("It's flat. Let me know if you want Reliance too."));
+        // A turn that simply stops is the target.
+        assert!(!ends_with_an_offer("Twenty four thousand and fifty three, down about a quarter percent."));
     }
 
     #[test]

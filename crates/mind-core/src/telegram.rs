@@ -503,12 +503,45 @@ fn ctl_handle(
     let path = first.next().unwrap_or("/");
     let path = path.split('?').next().unwrap_or(path);
 
-    let send = |stream: &mut std::net::TcpStream, status: &str, reply: &str| {
+    // SAY THE SHORT VERSION, SEND THE LONG ONE.
+    //
+    // A tool-backed answer is long by nature — the Walmart pull came back as a balance sheet, a list
+    // of what was missing, and a caveat about the scrape. That is right on a screen and ninety-five
+    // seconds of talking. A person says the headline and hands over the document; nobody reads a
+    // filing aloud.
+    //
+    // So the body stays complete and the SPOKEN line rides in a header. The client speaks the header
+    // and shows the body. Nothing is lost, nothing is monologued, and the split is decided once here
+    // instead of by every client guessing at a summary.
+    let send_spoken = |stream: &mut std::net::TcpStream, status: &str, reply: &str, spoken: Option<&str>| {
+        // A header value cannot contain a newline: a folded value would close the header block
+        // early and the rest of the summary would be read as the body.
+        let extra = spoken
+            .map(|sp| {
+                let flat = sp.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("X-YM-Spoken: {}
+
+", flat.chars().take(400).collect::<String>())
+            })
+            .unwrap_or_default();
         let resp = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            "HTTP/1.1 {status}
+
+Content-Type: text/plain; charset=utf-8
+
+{extra}Content-Length: {}
+
+Connection: close
+
+
+
+{reply}",
             reply.len()
         );
         let _ = stream.write_all(resp.as_bytes());
+    };
+    let send = |stream: &mut std::net::TcpStream, status: &str, reply: &str| {
+        send_spoken(stream, status, reply, None);
     };
 
     // ── HTTP request-smuggling / ambiguity hardening (sol #10): reject duplicate framing/auth ──
@@ -622,6 +655,12 @@ fn ctl_handle(
                 rt.block_on(conv.turn(&body, ident))
             }
             .unwrap_or_else(|e| format!("(error: {e})"));
+            // The spoken half: whole sentences up to a breath. The screen still gets everything.
+            if voice {
+                let spoken = mind_tools::speech::within_budget(&r, 45);
+                send_spoken(&mut stream, "200 OK", &r, Some(&spoken));
+                return;
+            }
             ("200 OK", r)
         }
         // STREAMING conversation turn: same auth/identity rules as /chat, but the response is

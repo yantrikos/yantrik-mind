@@ -67,6 +67,9 @@ pub mod speech;
 /// The shape and timing of a spoken turn.
 pub mod flow;
 
+/// A mouth that stays open, and knows when to stop talking.
+pub mod voice;
+
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};

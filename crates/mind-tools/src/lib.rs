@@ -76,6 +76,9 @@ pub mod heard;
 /// Recognising a price question, and what it is about.
 pub mod asked;
 
+/// Noticing when the mind has just claimed it cannot do something.
+pub mod refusal;
+
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};

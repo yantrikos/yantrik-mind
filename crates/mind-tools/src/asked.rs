@@ -120,9 +120,22 @@ pub fn symbols_in(text: &str) -> Vec<String> {
     // A bare ticker said as a word — "what's MRNA at" — when it is not in the spoken map.
     for w in text.split_whitespace() {
         let c = w.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
-        if c.len() >= 2 && c.len() <= 5 && c.chars().all(|ch| ch.is_ascii_uppercase()) {
+        // All-caps words that are not tickers. "TCS is at 2297.50 INR" yielded a quote request for
+        // the Indian rupee, because INR is three capital letters like any small-cap symbol.
+        const NOT_TICKERS: &[&str] = &[
+            "INR", "USD", "EUR", "GBP", "JPY", "AM", "PM", "ET", "IST", "UTC", "OK", "AI", "CEO",
+            "IPO", "ETF", "GDP", "CPI", "FED", "RBI", "USA", "UK", "TV", "API",
+        ];
+        if c.len() >= 2
+            && c.len() <= 5
+            && c.chars().all(|ch| ch.is_ascii_uppercase())
+            && !NOT_TICKERS.contains(&c)
+        {
             let sym = c.to_string();
-            if !found.iter().any(|(_, s)| *s == sym) {
+            // "TCS" also resolves through the spoken map to TCS.NS; keeping both quotes the same
+            // company twice, once with the wrong exchange.
+            let already = found.iter().any(|(_, s)| *s == sym || s.starts_with(&format!("{sym}.")));
+            if !already {
                 found.push((usize::MAX, sym));
             }
         }
@@ -136,6 +149,60 @@ pub fn symbols_in(text: &str) -> Vec<String> {
     }
     out.truncate(4);
     out
+}
+
+/// Is this turn agreeing to something just offered, rather than asking something new?
+///
+/// The mind said "Want me to pull the Nifty 50 to compare?" and the person said "yes please" — a
+/// turn containing no ticker, no price word and nothing to resolve. So the symbol lookup found
+/// nothing, the grounding stayed empty, and the mind answered that it had no market data, one turn
+/// after offering to fetch it.
+///
+/// An offer creates a referent. "Yes" points at it.
+pub fn is_agreement(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_matches(|c: char| !c.is_alphanumeric() && c != ' ');
+    if t.split_whitespace().count() > 4 {
+        return false;
+    }
+    [
+        "yes", "yes please", "yeah", "yep", "sure", "ok", "okay", "please", "go ahead", "do it",
+        "please do", "sounds good", "go for it", "yes do", "alright",
+    ]
+    .iter()
+    .any(|a| t == *a || t.starts_with(&format!("{a} ")))
+}
+
+/// Symbols for THIS turn, falling back to what was just being discussed.
+///
+/// `recent` is the conversation so far, newest last. When the current turn names nothing and is a
+/// bare agreement, the referent is whatever the previous turn was about — which is exactly the
+/// situation an offer creates.
+pub fn symbols_with_context(text: &str, recent: &[String]) -> Vec<String> {
+    let here = symbols_in(text);
+    if !here.is_empty() || !is_agreement(text) {
+        return here;
+    }
+    for line in recent.iter().rev().take(4) {
+        // An agreement points at what was OFFERED, not at everything the line mentioned. The real
+        // case: "TCS is at 2297.50, down 0.30 percent. Want me to pull the Nifty 50 to compare?" —
+        // "yes please" means the Nifty, and answering with TCS again would be answering the part
+        // that was already finished.
+        let lower = line.to_lowercase();
+        let offer_at = ["want me to", "shall i", "should i", "would you like", "want to see"]
+            .iter()
+            .filter_map(|p| lower.find(p))
+            .min();
+        let scope = match offer_at {
+            Some(i) => &line[i..],
+            None => line.as_str(),
+        };
+        let s = symbols_in(scope);
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -182,6 +249,36 @@ mod tests {
         assert!(!is_price_question("open the door"));
         // The weaker signal still exists for callers that want it.
         assert!(has_price_words("how is your day going"), "'how is' is a price WORD; naming is what decides");
+    }
+
+    #[test]
+    fn yes_please_means_the_thing_that_was_just_offered() {
+        // Verbatim. The mind offered to pull the Nifty, the person agreed, and the next turn had no
+        // ticker in it — so nothing resolved and the mind said it had no market data, one turn after
+        // offering to fetch it.
+        let recent = vec![
+            "user: what's TCS at".to_string(),
+            "assistant: TCS is at 2297.50 INR, down 0.30 percent. Want me to pull the Nifty 50 to compare?".to_string(),
+        ];
+        assert!(is_agreement("yes please"));
+        assert_eq!(symbols_with_context("yes please", &recent), vec!["^NSEI"]);
+    }
+
+    #[test]
+    fn a_new_question_ignores_the_old_referent() {
+        // Context is a fallback, never an override: naming something new must win.
+        let recent = vec!["assistant: want me to pull the Nifty 50?".to_string()];
+        assert_eq!(symbols_with_context("what's reliance at", &recent), vec!["RELIANCE.NS"]);
+        // And a non-agreement with no symbol resolves to nothing rather than the last thing seen.
+        assert_eq!(symbols_with_context("what did you mean by that", &recent), Vec::<String>::new());
+    }
+
+    #[test]
+    fn agreement_is_short_by_definition() {
+        assert!(is_agreement("sure"));
+        assert!(is_agreement("go ahead"));
+        assert!(!is_agreement("yes but only if the market is open and you can get a real quote"),
+                "a long sentence is a statement, not a bare agreement");
     }
 
     #[test]

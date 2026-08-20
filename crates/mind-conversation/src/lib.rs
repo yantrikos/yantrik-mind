@@ -8470,8 +8470,32 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // So when the question NAMES something quotable, the number is fetched and handed over in
         // the grounding. No tool loop, no extra model round trip to decide, and nothing left to
         // promise: the answer is already in the prompt.
-        if mind_tools::asked::is_price_question(user_text) {
-            let syms = mind_tools::asked::symbols_in(user_text);
+        // WHAT IT CAN DO. The fast path reaches no tool, and it concluded from that it HAS no
+        // tools — asked "you can watch the live streaming, right?" it answered "No, I can't
+        // actually watch live video streams", having spent the afternoon watching a trading desk
+        // and reading positions off the screen.
+        //
+        // Denying a capability is not caution, it is a false statement about itself, and it ends
+        // the conversation: the person stops asking. So the fast path is TOLD what the mind can do,
+        // and told to hand the question over rather than answer it with a no.
+        grounding.push_str(
+            "
+
+WHAT YOU CAN DO (all of this is built, deployed and used — never say you cannot):
+             - watch live video and streams (YouTube included): you read the screen and hear the audio
+             - pull live prices for stocks, indices and crypto, US and Indian
+             - browse real web pages, scan market movers, read your paper trading account
+             If something needs one of those and you cannot do it in THIS reply, say you will need a
+             moment and to ask again — never say you lack the ability.
+",
+        );
+
+        let ctx_lines: Vec<String> = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect();
+        if mind_tools::asked::is_price_question(user_text)
+            || !mind_tools::asked::symbols_with_context(user_text, &ctx_lines).is_empty()
+        {
+            // "yes please" carries no ticker. The referent is whatever was just offered.
+            let syms = mind_tools::asked::symbols_with_context(user_text, &ctx_lines);
             if !syms.is_empty() {
                 let quotes = tokio::task::spawn_blocking(move || {
                     let mut lines = Vec::new();
@@ -8535,6 +8559,38 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             Ok(r) => r.text.trim().to_string(),
             Err(_) => "Sorry — I couldn't think of a reply just now. Say that again?".to_string(),
         };
+
+        // ESCALATE RATHER THAN REFUSE.
+        //
+        // This path reaches no tool, and it concluded from that that it HAS no capabilities. One
+        // live conversation produced four false refusals in four consecutive turns: no market feed
+        // (it has quote), cannot watch video (it watched a trading desk that afternoon), no access
+        // to Walmart's figures (it has search and web_fetch), twice.
+        //
+        // Earlier fixes here added the missing DATA one domain at a time — prices, then a note that
+        // it can watch video. That cannot keep up: the next question was Walmart's debt, and the one
+        // after would have been something else. So the fast path is allowed to fail and the failure
+        // is caught: a refusal is not delivered, the question is re-run where the tools are.
+        //
+        // The cost is the wait, paid only in the case that was otherwise a dead end. A person will
+        // forgive twenty seconds far sooner than being told no four times in a row — a wrong answer
+        // gets corrected, a refusal ends the subject.
+        if mind_tools::refusal::sounds_like_refusal(&reply) {
+            emit_progress("that needs a tool — taking the long way round");
+            if let Ok(full) = self.agent_loop(user_text, &id).await {
+                if !mind_tools::refusal::sounds_like_refusal(&full) {
+                    let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
+                    let _ = self.memory.append_message_scoped("assistant", &full, scope).await;
+                    return Ok(full);
+                }
+                // The tool path ALSO refused. That is a real inability, and it gets said — the
+                // escalation exists to stop false noes, not to forbid honest ones.
+                let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
+                let _ = self.memory.append_message_scoped("assistant", &full, scope).await;
+                return Ok(full);
+            }
+        }
+
         let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
         let _ = self.memory.append_message_scoped("assistant", &reply, scope).await;
         Ok(reply)

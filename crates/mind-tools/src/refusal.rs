@@ -108,14 +108,51 @@ pub fn is_a_dead_end(reply: &str) -> bool {
     sounds_like_refusal(reply) || sounds_like_promise(reply)
 }
 
+/// Filler that slips between the words a pattern is looking for.
+///
+/// The list had "i don't have access" and the reply said "I don't ACTUALLY have access" — one
+/// adverb, and the refusal sailed through. That was the third time in one day that a hand-written
+/// list of phrasings missed a real example, so the phrasings are normalised away before matching
+/// rather than being enumerated more thoroughly.
+const FILLER: &[&str] = &[
+    "actually", "really", "currently", "right now", "at the moment", "just", "quite", "truly",
+    "unfortunately", "sorry but", "i'm sorry but", "i am sorry but", "at present", "as of now",
+];
+
+/// Strip filler and collapse whitespace, so a pattern matches the sentence's SHAPE.
+fn normalised(reply: &str) -> String {
+    let mut r = reply.to_lowercase();
+    for f in FILLER {
+        r = r.replace(f, " ");
+    }
+    r = r.replace("cannot", "can not").replace("n't", " not");
+    r.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Did this reply refuse on the grounds of a missing capability?
 ///
 /// Deliberately narrow: it must be about the MIND's ability, not about the world. "The market is
 /// closed" and "that company does not report until Tuesday" are facts, and escalating them to a
 /// tool loop would spend thirty seconds re-confirming something already true.
 pub fn sounds_like_refusal(reply: &str) -> bool {
-    let r = reply.to_lowercase();
-    REFUSAL_MARKS.iter().any(|m| r.contains(m))
+    let r = normalised(reply);
+    if REFUSAL_MARKS.iter().any(|m| r.contains(&normalised(m))) {
+        return true;
+    }
+    // The general shape, for phrasings nobody listed: a negated ability verb near a fetching verb.
+    // "i do not have access", "i can not pull", "i do not have live data" all reduce to this.
+    let negated = ["i do not have", "i can not", "i am not able", "i have no"];
+    let object = [
+        "access", "data", "feed", "tool", "pull", "check", "look", "fetch", "watch", "browse",
+        "real-time", "realtime", "live", "figures", "numbers", "quote",
+    ];
+    negated.iter().any(|n| {
+        r.find(n).is_some_and(|i| {
+            let after = &r[i + n.len()..];
+            let window: String = after.chars().take(40).collect();
+            object.iter().any(|o| window.contains(o))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -133,6 +170,19 @@ mod tests {
         ] {
             assert!(sounds_like_refusal(r), "missed a real refusal: {r}");
         }
+    }
+
+    #[test]
+    fn one_adverb_must_not_let_a_refusal_through() {
+        // Live, after the first version of this file shipped. The list held "i don't have access";
+        // the reply said "I don't ACTUALLY have access" and was delivered as an answer.
+        assert!(sounds_like_refusal(
+            "I'm sorry, but I don't actually have access to real-time financial data to pull Walmart's specific earnings or debt figures right now."
+        ));
+        // And phrasings nobody wrote down, caught by shape rather than by listing.
+        assert!(sounds_like_refusal("I have no access to that feed."));
+        assert!(sounds_like_refusal("I am not able to check those numbers."));
+        assert!(sounds_like_refusal("I do not currently have live data for that."));
     }
 
     #[test]

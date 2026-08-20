@@ -64,6 +64,9 @@ pub mod banter;
 /// Turning a written reply into something a person can listen to.
 pub mod speech;
 
+/// The shape and timing of a spoken turn.
+pub mod flow;
+
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};

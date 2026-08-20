@@ -33,6 +33,8 @@ pub struct Mover {
     pub symbol: String,
     pub price: f64,
     pub percent_change: f64,
+    /// Price x shares. The only honest measure of whether a position can be got out of.
+    pub dollar_volume: f64,
 }
 
 /// A headline attached to a symbol.
@@ -48,6 +50,8 @@ pub struct Headline {
 /// rather than present a filtered list as if it were the whole market.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reject {
+    /// Too little money changing hands to get back out of.
+    TooThin { dollars: f64 },
     /// Under the price floor: spreads on these are a larger edge than any thesis.
     TooCheap { price: f64 },
     /// A warrant, right or unit — not the common stock, and usually barely traded.
@@ -61,6 +65,7 @@ pub enum Reject {
 impl std::fmt::Display for Reject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::TooThin { dollars } => write!(f, "only ${:.0}m traded — too thin to leave a position in", dollars / 1e6),
             Self::TooCheap { price } => write!(f, "${price:.2} — under the price floor; the spread would be the trade"),
             Self::NotCommonStock => write!(f, "warrant/right/unit, not common stock"),
             Self::MoveExhausted { pct } => write!(f, "{pct:+.0}% — the news already happened; what is left is a coin flip on the fade"),
@@ -103,6 +108,10 @@ pub fn tradeable(m: &Mover, b: &Bounds) -> Result<(), Reject> {
     if m.price < b.min_price {
         return Err(Reject::TooCheap { price: m.price });
     }
+    // Zero means the caller had no volume figure, not that nothing traded — only judge when known.
+    if m.dollar_volume > 0.0 && m.dollar_volume < MIN_DOLLAR_VOLUME {
+        return Err(Reject::TooThin { dollars: m.dollar_volume });
+    }
     let mag = m.percent_change.abs();
     if mag < b.min_move_pct {
         return Err(Reject::TooQuiet { pct: m.percent_change });
@@ -142,6 +151,7 @@ pub fn parse_movers(v: &serde_json::Value) -> Vec<Mover> {
                 symbol,
                 price: q.get("price").and_then(|x| x.as_f64()).unwrap_or(0.0),
                 percent_change: q.get("percent_change").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                dollar_volume: 0.0,
             });
         }
     }
@@ -204,6 +214,57 @@ pub fn catalyst_for<'a>(sym: &str, news: &'a [Headline]) -> Option<&'a Headline>
     news_for(sym, news).into_iter().find(|h| is_specific(h))
 }
 
+/// The LIQUID universe: what is actually being traded in size today.
+///
+/// The movers endpoint ranks by percentage, which on any given day means microcaps on binary news —
+/// live, mid-session, it returned TNON -41%, MRNX -37%, RDAC -32%, none of them tradeable and the
+/// mind rightly declined all four. Ranking by share VOLUME is no better: a 64-cent stock trading 76
+/// million shares is $49m of flow, while Apple trading 30 million is $9 billion.
+///
+/// Dollar volume is the measure that means anything, because it is the one that decides whether a
+/// position can be got back out of. The same market, the same minute, filtered this way: MRNA -18%
+/// on $3.4bn, WMT -9% on $2.4bn, MSTR +7% on $1.5bn. That is a day-trading universe; the other was
+/// a lottery.
+pub fn actives_url(top: usize) -> String {
+    format!(
+        "https://data.alpaca.markets/v1beta1/screener/stocks/most-actives?by=volume&top={}",
+        top.clamp(1, 100)
+    )
+}
+
+/// Snapshots carry the last price and the previous close, so today's move needs no extra call.
+pub fn snapshots_url(symbols: &[String]) -> String {
+    format!("https://data.alpaca.markets/v2/stocks/snapshots?symbols={}", symbols.join(","))
+}
+
+/// Turn a snapshot batch into movers, given the share volumes from the actives call.
+pub fn parse_snapshots(v: &serde_json::Value, volumes: &std::collections::BTreeMap<String, f64>) -> Vec<Mover> {
+    let mut out = Vec::new();
+    let Some(obj) = v.as_object() else { return out };
+    for (sym, d) in obj {
+        let day = d.get("dailyBar");
+        let prev = d.get("prevDailyBar");
+        let price = day.and_then(|x| x.get("c")).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let prev_close = prev.and_then(|x| x.get("c")).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        if price <= 0.0 || prev_close <= 0.0 {
+            continue;
+        }
+        let vol = volumes.get(sym).copied().unwrap_or(0.0);
+        out.push(Mover {
+            symbol: sym.clone(),
+            price,
+            percent_change: (price / prev_close - 1.0) * 100.0,
+            dollar_volume: price * vol,
+        });
+    }
+    // Most traded first — the deepest book is the easiest to leave.
+    out.sort_by(|a, b| b.dollar_volume.partial_cmp(&a.dollar_volume).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// Least dollar volume worth considering. Below this a position moves the price on the way out.
+pub const MIN_DOLLAR_VOLUME: f64 = 50_000_000.0;
+
 /// The movers URL on the DATA host. Split out so the shape is testable without a network call.
 pub fn movers_url(top: usize) -> String {
     format!("https://data.alpaca.markets/v1beta1/screener/stocks/movers?top={}", top.clamp(1, 50))
@@ -236,7 +297,35 @@ fn alpaca_get(url: String) -> anyhow::Result<serde_json::Value> {
 /// and the data-host rule, and letting the conversation layer make its own requests would put a
 /// second place in the codebase that could address the wrong host.
 pub fn fetch_movers(top: usize) -> anyhow::Result<Vec<Mover>> {
+    // The LIQUID universe first. Percentage movers are microcaps on binary news — four consecutive
+    // live hunts drew from that list and the mind declined every one, correctly. Ranking by dollar
+    // volume the same minute gave MRNA -18% on $3.4bn and WMT -9% on $2.4bn: things a person could
+    // actually trade.
+    if let Ok(actives) = fetch_actives(top.max(40)) {
+        if !actives.is_empty() {
+            return Ok(actives);
+        }
+    }
+    // Falls back to the percentage list rather than returning nothing — a thin universe beats no
+    // universe, and the filters will still reject what cannot be traded.
     Ok(parse_movers(&alpaca_get(movers_url(top))?))
+}
+
+/// The most-traded names, with today's move and dollar volume attached.
+pub fn fetch_actives(top: usize) -> anyhow::Result<Vec<Mover>> {
+    let list = alpaca_get(actives_url(top))?;
+    let mut volumes = std::collections::BTreeMap::new();
+    let mut syms: Vec<String> = Vec::new();
+    for a in list.get("most_actives").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+        let Some(sym) = a.get("symbol").and_then(|x| x.as_str()) else { continue };
+        volumes.insert(sym.to_string(), a.get("volume").and_then(|x| x.as_f64()).unwrap_or(0.0));
+        syms.push(sym.to_string());
+    }
+    if syms.is_empty() {
+        return Ok(Vec::new());
+    }
+    syms.truncate(60);
+    Ok(parse_snapshots(&alpaca_get(snapshots_url(&syms))?, &volumes))
 }
 
 /// News for SPECIFIC symbols — never the general firehose.
@@ -260,7 +349,29 @@ mod tests {
     use super::*;
 
     fn m(sym: &str, price: f64, pct: f64) -> Mover {
-        Mover { symbol: sym.into(), price, percent_change: pct }
+        // Zero volume = "not known", which the filter deliberately does not judge.
+        Mover { symbol: sym.into(), price, percent_change: pct, dollar_volume: 0.0 }
+    }
+
+    #[test]
+    fn share_volume_is_not_liquidity_but_dollar_volume_is() {
+        // Both were in the live most-actives list at the same minute. HUIZ traded 65 MILLION shares
+        // and MMA 76 million — more than Walmart — and neither is a position anyone could leave.
+        let huiz = Mover { symbol: "HUIZ".into(), price: 2.24, percent_change: 30.0, dollar_volume: 2.24 * 65_036_594.0 };
+        let mma = Mover { symbol: "MMA".into(), price: 0.64, percent_change: 25.0, dollar_volume: 0.64 * 76_228_431.0 };
+        let wmt = Mover { symbol: "WMT".into(), price: 104.16, percent_change: -8.96, dollar_volume: 2.4e9 };
+        let b = Bounds::default();
+        assert!(matches!(tradeable(&huiz, &b), Err(Reject::TooCheap { .. })));
+        assert!(matches!(tradeable(&mma, &b), Err(Reject::TooCheap { .. })));
+        assert!(tradeable(&wmt, &b).is_ok(), "Walmart down 9 percent on 2.4 billion dollars is the trade");
+    }
+
+    #[test]
+    fn a_liquid_name_on_a_thin_day_is_still_refused() {
+        // Price alone does not make a position exitable — a $40 stock with $8m of flow will move on
+        // the way out.
+        let thin = Mover { symbol: "QUIET".into(), price: 40.0, percent_change: 6.0, dollar_volume: 8_000_000.0 };
+        assert!(matches!(tradeable(&thin, &Bounds::default()), Err(Reject::TooThin { .. })));
     }
 
     #[test]

@@ -70,6 +70,12 @@ pub mod flow;
 /// A mouth that stays open, and knows when to stop talking.
 pub mod voice;
 
+/// Did the transcriber hear a person, or the room?
+pub mod heard;
+
+/// Recognising a price question, and what it is about.
+pub mod asked;
+
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};

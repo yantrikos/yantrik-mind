@@ -693,7 +693,18 @@ fn ctl_handle(
         "/transcribe" => {
             let bytes = body_raw.clone();
             match rt.block_on(async move { tokio::task::spawn_blocking(move || transcribe_bytes_blocking(&bytes)).await.ok().flatten() }) {
-                Some(text) => ("200 OK", text),
+                // Whisper narrates the room when there is no speech: [BLANK_AUDIO], [MUSIC
+                // PLAYING], (metal clanging). Those are notes ABOUT the recording, and a live
+                // session spent three turns answering them — "what's clanging?" — and stored each
+                // one as something the person had said. Filtered HERE rather than in a client, so
+                // every caller gets it and no one has to remember.
+                Some(text) => match mind_tools::heard::as_turn(&text) {
+                    Some(words) => ("200 OK", words),
+                    // 204: heard, nothing said. Distinct from 422 (could not transcribe at all) —
+                    // silence and failure are different facts, and a client should not apologise
+                    // for a quiet room.
+                    None => ("204 No Content", String::new()),
+                },
                 None => ("422 Unprocessable Entity", "(nothing transcribable)".to_string()),
             }
         }

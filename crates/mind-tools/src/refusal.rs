@@ -61,6 +61,53 @@ const REFUSAL_MARKS: &[&str] = &[
     "i can't fetch",
 ];
 
+/// Phrases in which the mind promises to do the work rather than doing it.
+///
+/// Catching refusals made the model switch to deferring instead: "I can pull Walmart's earnings for
+/// you, just give me a moment to access that data." On a path with no tools there IS no moment —
+/// nothing happens after the reply is sent, so the person waits for something that will never
+/// arrive. It is the same dead end in a friendlier voice, and worse than a refusal, because a
+/// refusal at least tells them to look elsewhere.
+const PROMISE_MARKS: &[&str] = &[
+    "give me a moment",
+    "give me a sec",
+    "just a moment",
+    "one moment",
+    "let me pull",
+    "let me grab",
+    "let me check",
+    "let me look",
+    "let me fetch",
+    "i'll pull",
+    "i'll grab",
+    "i'll check",
+    "i'll look",
+    "i'll fetch",
+    "i will pull",
+    "i will check",
+    "pulling that",
+    "pulling the",
+    "fetching",
+    "hang on while",
+    "bear with me",
+    "coming right up",
+    "on it",
+];
+
+/// Is this reply deferring the work instead of doing it?
+pub fn sounds_like_promise(reply: &str) -> bool {
+    let r = reply.to_lowercase();
+    PROMISE_MARKS.iter().any(|m| r.contains(m))
+}
+
+/// A reply that does not actually answer: it either refuses, or promises to answer later.
+///
+/// Both end the same way for the person — nothing they asked for — so both must be caught before
+/// the reply is delivered.
+pub fn is_a_dead_end(reply: &str) -> bool {
+    sounds_like_refusal(reply) || sounds_like_promise(reply)
+}
+
 /// Did this reply refuse on the grounds of a missing capability?
 ///
 /// Deliberately narrow: it must be about the MIND's ability, not about the world. "The market is
@@ -86,6 +133,29 @@ mod tests {
         ] {
             assert!(sounds_like_refusal(r), "missed a real refusal: {r}");
         }
+    }
+
+    #[test]
+    fn a_promise_is_a_dead_end_too() {
+        // What the model said the moment refusals were caught. There is no "moment" — nothing runs
+        // after the reply is sent.
+        for p in [
+            "I can pull Walmart's latest earnings and debt figures for you, just give me a moment to access that data.",
+            "Pulling the Nifty 50 and Sensex now. Give me a second to grab those quotes.",
+            "Sure, let me check that for you.",
+            "I'll grab those numbers now.",
+        ] {
+            assert!(sounds_like_promise(p), "missed a promise: {p}");
+            assert!(is_a_dead_end(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn an_answer_that_happens_to_contain_a_verb_is_not_a_promise() {
+        // "I checked" is done; "I'll check" is not. The tense is the whole difference.
+        assert!(!is_a_dead_end("I checked and there's nothing new since this morning."));
+        assert!(!is_a_dead_end("Nifty's at 24,211, up a hair — 0.08% so far today."));
+        assert!(!is_a_dead_end("Walmart doesn't report until the 21st."));
     }
 
     #[test]

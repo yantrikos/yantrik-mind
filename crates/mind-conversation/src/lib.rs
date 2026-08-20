@@ -8485,8 +8485,9 @@ WHAT YOU CAN DO (all of this is built, deployed and used — never say you canno
              - watch live video and streams (YouTube included): you read the screen and hear the audio
              - pull live prices for stocks, indices and crypto, US and Indian
              - browse real web pages, scan market movers, read your paper trading account
-             If something needs one of those and you cannot do it in THIS reply, say you will need a
-             moment and to ask again — never say you lack the ability.
+             NEVER say you lack the ability, and NEVER say you will go and fetch something: there is
+             no later, this reply is all there is. Answer from what you have been given above, or say
+             plainly that you do not know it yet.
 ",
         );
 
@@ -8575,10 +8576,10 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // The cost is the wait, paid only in the case that was otherwise a dead end. A person will
         // forgive twenty seconds far sooner than being told no four times in a row — a wrong answer
         // gets corrected, a refusal ends the subject.
-        if mind_tools::refusal::sounds_like_refusal(&reply) {
+        if mind_tools::refusal::is_a_dead_end(&reply) {
             emit_progress("that needs a tool — taking the long way round");
             if let Ok(full) = self.agent_loop(user_text, &id).await {
-                if !mind_tools::refusal::sounds_like_refusal(&full) {
+                if !mind_tools::refusal::is_a_dead_end(&full) {
                     let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
                     let _ = self.memory.append_message_scoped("assistant", &full, scope).await;
                     return Ok(full);

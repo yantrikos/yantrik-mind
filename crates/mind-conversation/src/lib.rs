@@ -7786,65 +7786,6 @@ FROM A MOUNTED KNOWLEDGE PACK (third-party reference, not the household's own fa
         let people = self.load_people_profiles().await;
         grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
 
-        // THE MARKET LAYER — same medicine as the people layer above, for the same disease.
-        //
-        // The fast path reaches no tool by construction, so asked "let's see how the Indian market
-        // is doing" it said it had no live data, was told it has yfinance, agreed, promised — "give
-        // me a second to grab those quotes" — and delivered nothing, because there was nothing it
-        // could call. A refusal is at least honest; a promise makes the person wait for something
-        // that was never coming.
-        //
-        // So when the question NAMES something quotable, the number is fetched and handed over in
-        // the grounding. No tool loop, no extra model round trip to decide, and nothing left to
-        // promise: the answer is already in the prompt.
-        if mind_tools::asked::is_price_question(user_text) {
-            let syms = mind_tools::asked::symbols_in(user_text);
-            if !syms.is_empty() {
-                let quotes = tokio::task::spawn_blocking(move || {
-                    let mut lines = Vec::new();
-                    for sym in syms {
-                        // Indian listings and indices go to Yahoo; US names try Alpaca first — the
-                        // same routing `quote` uses, so voice and text cannot disagree on a price.
-                        let px = if mind_tools::is_indian(&sym) {
-                            None
-                        } else {
-                            mind_tools::MarketClient::from_env().ok().and_then(|c| c.last_price(&sym).ok())
-                        };
-                        match px {
-                            Some(p) => lines.push(format!("{sym}: {p:.2} (measured just now)")),
-                            None => match mind_tools::yquote::series(&sym, "1d", "5m") {
-                                Ok(sr) if !sr.bars.is_empty() => {
-                                    let last = sr.bars.last().unwrap();
-                                    let first = sr.bars.first().unwrap();
-                                    let pct = if first.close > 0.0 { (last.close / first.close - 1.0) * 100.0 } else { 0.0 };
-                                    lines.push(format!(
-                                        "{sym}: {:.2} {} ({:+.2}% on the session, measured just now)",
-                                        last.close, sr.currency, pct
-                                    ));
-                                }
-                                // Say WHICH symbol could not be read. "I could not get a price" with
-                                // no name sends the person back to guessing what failed.
-                                _ => lines.push(format!("{sym}: no price available right now")),
-                            },
-                        }
-                    }
-                    lines
-                })
-                .await
-                .unwrap_or_default();
-                if !quotes.is_empty() {
-                    grounding.push_str(&format!(
-                        "
-
-LIVE PRICES (already fetched — state these; do NOT say you will go and get them):
-{}
-",
-                        quotes.join("
-")
-                    ));
-                }
-            }
-        }
         // The time-spine + open threads — so answers CONNECT to what's coming, not just what's stored
         // (a birthday answer should carry the gift plan + its deadline without being asked).
         let spine = self.upcoming_spine(7).await;
@@ -8517,6 +8458,66 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // that stored" about someone the mind knows. Verified live on 2026-08-11.
         let people = self.load_people_profiles().await;
         grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
+
+        // THE MARKET LAYER — same medicine as the people layer above, for the same disease.
+        //
+        // The fast path reaches no tool by construction, so asked "let's see how the Indian market
+        // is doing" it said it had no live data, was told it has yfinance, agreed, promised — "give
+        // me a second to grab those quotes" — and delivered nothing, because there was nothing it
+        // could call. A refusal is at least honest; a promise makes the person wait for something
+        // that was never coming.
+        //
+        // So when the question NAMES something quotable, the number is fetched and handed over in
+        // the grounding. No tool loop, no extra model round trip to decide, and nothing left to
+        // promise: the answer is already in the prompt.
+        if mind_tools::asked::is_price_question(user_text) {
+            let syms = mind_tools::asked::symbols_in(user_text);
+            if !syms.is_empty() {
+                let quotes = tokio::task::spawn_blocking(move || {
+                    let mut lines = Vec::new();
+                    for sym in syms {
+                        // Indian listings and indices go to Yahoo; US names try Alpaca first — the
+                        // same routing `quote` uses, so voice and text cannot disagree on a price.
+                        let px = if mind_tools::is_indian(&sym) {
+                            None
+                        } else {
+                            mind_tools::MarketClient::from_env().ok().and_then(|c| c.last_price(&sym).ok())
+                        };
+                        match px {
+                            Some(p) => lines.push(format!("{sym}: {p:.2} (measured just now)")),
+                            None => match mind_tools::yquote::series(&sym, "1d", "5m") {
+                                Ok(sr) if !sr.bars.is_empty() => {
+                                    let last = sr.bars.last().unwrap();
+                                    let first = sr.bars.first().unwrap();
+                                    let pct = if first.close > 0.0 { (last.close / first.close - 1.0) * 100.0 } else { 0.0 };
+                                    lines.push(format!(
+                                        "{sym}: {:.2} {} ({:+.2}% on the session, measured just now)",
+                                        last.close, sr.currency, pct
+                                    ));
+                                }
+                                // Say WHICH symbol could not be read. "I could not get a price" with
+                                // no name sends the person back to guessing what failed.
+                                _ => lines.push(format!("{sym}: no price available right now")),
+                            },
+                        }
+                    }
+                    lines
+                })
+                .await
+                .unwrap_or_default();
+                if !quotes.is_empty() {
+                    grounding.push_str(&format!(
+                        "
+
+LIVE PRICES (already fetched — state these; do NOT say you will go and get them):
+{}
+",
+                        quotes.join("
+")
+                    ));
+                }
+            }
+        }
         let recent_text: String = recent.iter().map(|(r, t)| format!("{r}: {t}")).collect::<Vec<_>>().join("\n");
         let prompt = format!(
             "{grounding}\n\nRecent conversation:\n{recent_text}\n\nUser (speaking aloud): {user_text}\n\n\

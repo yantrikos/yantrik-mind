@@ -519,23 +519,11 @@ fn ctl_handle(
         let extra = spoken
             .map(|sp| {
                 let flat = sp.split_whitespace().collect::<Vec<_>>().join(" ");
-                format!("X-YM-Spoken: {}
-
-", flat.chars().take(400).collect::<String>())
+                format!("X-YM-Spoken: {}\r\n", flat.chars().take(400).collect::<String>())
             })
             .unwrap_or_default();
         let resp = format!(
-            "HTTP/1.1 {status}
-
-Content-Type: text/plain; charset=utf-8
-
-{extra}Content-Length: {}
-
-Connection: close
-
-
-
-{reply}",
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
             reply.len()
         );
         let _ = stream.write_all(resp.as_bytes());

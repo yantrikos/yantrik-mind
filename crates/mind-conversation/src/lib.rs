@@ -97,7 +97,7 @@ enum CodeLang {
 /// chat window that is thorough; spoken, every answer arrives wrapped in a menu.
 const VOICE_NOTE: &str = "SPOKEN CHANNEL: this reply is read aloud by a synthesiser. Nothing you write is seen, so markdown, tables, code fences, bullet points, emoji and symbols like ^ or % are heard as noise or as punctuation. Say it the way you would to someone next to you.
 - Put the answer in the FIRST sentence. A listener cannot skim you.
-- Keep the whole turn to a couple of sentences. If there is more, say the important part and let them ask for the rest.
+- HARD LIMIT: 40 words for the whole turn. Not a target, a limit. 'Keep it short' produced a fifty-second answer in testing; a number gets followed. If the answer will not fit, say the part that matters and stop — they can ask for the rest.
 - Speak numbers naturally: 'twenty four thousand and fifty' not '24,053.30'; 'down about a quarter percent' not '-0.27%'; 'the Nifty' not '^NSEI'.
 - Do NOT open with an agenda ('two things I'm carrying', 'here's the state') — open with the answer.
 - Do NOT end every turn by offering to do something. Most turns should simply stop.
@@ -7993,10 +7993,23 @@ Open reminders you're carrying for them:");
             // licence as a direct reply. Inserted at index 1 — after the persona, ahead of the work
             // log and any tool output, which are reference data the model is told not to obey.
             if let Some(note) = id.format_note() {
-                messages.insert(1, ChatMessage::system(format!(
-                    "{note}
+                if id.voice {
+                    // A SPOKEN constraint goes LAST, not at index 1. A style instruction buried
+                    // under grounding, a work log and tool output is diluted by everything that
+                    // follows it: the first live test produced a perfect opening sentence and then
+                    // fifty seconds of talking, because the rule was read long before the model
+                    // decided how much to write. Recency is what makes a constraint bind.
+                    //
+                    // The JSON/diagram clause is deliberately dropped here — telling a spoken reply
+                    // how to escape a mermaid diagram is contradictory noise in a channel that
+                    // cannot render one.
+                    messages.push(ChatMessage::system(note.to_string()));
+                } else {
+                    messages.insert(1, ChatMessage::system(format!(
+                        "{note}
 The answer travels inside a JSON string, so newlines and quotes must be                      escaped (\n, \\\"). If you cannot emit a diagram as valid JSON, write the prose instead."
-                )));
+                    )));
+                }
             }
             // PRIVATE-GROUNDED: this turn carries the speaker's private memory grounding, so it must
             // PREFER the private (owned-hardware) lane and only escalate to cloud with an audit —

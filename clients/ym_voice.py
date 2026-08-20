@@ -22,6 +22,7 @@ Push-to-talk: Enter to start, Enter to stop, reply is spoken back.
 import io
 import os
 import threading
+import time
 import sys
 import urllib.parse
 
@@ -64,7 +65,82 @@ def kokoro():
     return _kokoro
 
 
+# ── CONTINUOUS LISTENING ──────────────────────────────────────────────────────────────────────
+# Push-to-talk means turn-taking belongs to a key, not to the conversation, and it also means the
+# barge-in machinery has no trigger: you can only interrupt while not holding the button.
+#
+# The whole difficulty is deciding when a person has FINISHED. Cut too early and you talk over them
+# mid-thought, which is the rudest failure a listener can have; wait too long and every reply lands
+# late. People pause mid-sentence to think, so the threshold is silence measured AFTER speech has
+# actually started, not a global timer.
+#
+# Two numbers, and they are asymmetric on purpose. START needs sustained sound so a cough or a door
+# does not open a turn. END needs a pause long enough to be a full stop rather than a breath —
+# roughly 700ms, which is above the ~200ms gap inside a sentence and below the point where a caller
+# thinks the line died.
+SILENCE_RMS = float(os.environ.get("YM_VAD_SILENCE", "0.012"))
+SPEECH_START_MS = int(os.environ.get("YM_VAD_START_MS", "180"))
+SPEECH_END_MS = int(os.environ.get("YM_VAD_END_MS", "700"))
+MAX_UTTERANCE_S = float(os.environ.get("YM_VAD_MAX_S", "30"))
+
+
+def rms(block) -> float:
+    return float(np.sqrt(np.mean(np.square(block))) or 0.0)
+
+
+def listen_until_done(on_speech_start=None) -> np.ndarray:
+    """Wait for speech, record it, and return when the speaker stops.
+
+    `on_speech_start` fires the moment sound begins — that is the barge-in hook: the mind may be
+    mid-sentence, and the person starting to talk is the signal to shut up.
+    """
+    block_ms = 30
+    frames_needed_start = max(1, SPEECH_START_MS // block_ms)
+    frames_needed_end = max(1, SPEECH_END_MS // block_ms)
+    chunks, loud_run, quiet_run, started = [], 0, 0, False
+    fired = False
+    stream = sd.InputStream(samplerate=SR, channels=1, dtype="float32",
+                            blocksize=int(SR * block_ms / 1000))
+    stream.start()
+    try:
+        t_start = time.time()
+        while True:
+            block, _ = stream.read(int(SR * block_ms / 1000))
+            level = rms(block)
+            if level >= SILENCE_RMS:
+                loud_run += 1
+                quiet_run = 0
+                if started:
+                    chunks.append(block.copy())
+                elif loud_run >= frames_needed_start:
+                    started = True
+                    chunks.append(block.copy())
+                    if on_speech_start and not fired:
+                        fired = True
+                        on_speech_start()   # you started talking: stop talking
+            else:
+                loud_run = 0
+                if started:
+                    chunks.append(block.copy())
+                    quiet_run += 1
+                    if quiet_run >= frames_needed_end:
+                        break
+            if started and time.time() - t_start > MAX_UTTERANCE_S:
+                break
+    finally:
+        stream.stop()
+        stream.close()
+    return np.concatenate(chunks).flatten() if chunks else np.zeros(1, dtype="float32")
+
+
 def record() -> np.ndarray:
+    if os.environ.get("YM_PUSH_TO_TALK") == "1":
+        return record_ptt()
+    print("🎙️  listening… (just talk; Ctrl+C quits)")
+    return listen_until_done(on_speech_start=interrupt)
+
+
+def record_ptt() -> np.ndarray:
     input("🎙️  Enter to START talking…")
     chunks = []
     stream = sd.InputStream(samplerate=SR, channels=1, dtype="float32", callback=lambda d, *_: chunks.append(d.copy()))

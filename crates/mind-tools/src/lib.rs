@@ -61,6 +61,9 @@ pub mod scout;
 /// What to say while the answer is still being fetched.
 pub mod banter;
 
+/// Turning a written reply into something a person can listen to.
+pub mod speech;
+
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};

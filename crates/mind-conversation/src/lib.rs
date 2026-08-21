@@ -8267,8 +8267,29 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // have that result in the work log — stop and compose the answer instead of refetching.
             let call_sig = format!("{tool}|{args}");
             if call_sig == last_call {
-                eprintln!("[agent] step {step}: repeated {tool} call — answering from the work log");
-                break;
+                // NUDGE, do not end the turn. This used to `break`, which killed every multi-step
+                // request at its first repeat: asked for three package download counts, the loop
+                // fetched the first, re-requested the SAME url at step 1, and stopped — returning
+                // one number and correctly refusing to invent the other two. The refusal was right;
+                // the stopping was not. Every real routine is multi-step (the metrics run alone
+                // touches ~25 endpoints), so a loop that halts on the first repeat cannot do any of
+                // them.
+                //
+                // The right behaviour already existed eight lines below, for repeats of ANY earlier
+                // call: say the result is already in hand and let the model move on. A model that
+                // genuinely has nothing left to do still stops, via the barren counter — which is
+                // the guard that belongs here, since it counts wasted steps rather than assuming
+                // the first one is fatal.
+                eprintln!("[agent] step {step}: repeated {tool} call — nudging it onward");
+                scratch.push_str(&format!(
+                    "
+[{step}] {tool} -> (you just called this with these exact arguments; the result                      is directly above. Do NOT call it again. If the request named several targets,                      move to the next one you have not fetched yet; otherwise answer.)"
+                ));
+                barren += 1;
+                if barren >= MAX_BARREN_STEPS {
+                    break;
+                }
+                continue;
             }
             // …and if it is identical to ANY earlier call this turn, not just the last one. A model
             // that alternates A, B, A, B never trips the last-call check but learns nothing after the

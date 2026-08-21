@@ -234,6 +234,15 @@ impl InferencePool {
         self.private.is_some()
     }
 
+    /// The private lane, so another pool can be given the SAME one.
+    ///
+    /// Role pools are built from a provider spec and start with no private lane at all. That is not
+    /// a policy — it is an omission, and it is invisible: the startup banner reports the DEFAULT
+    /// pool's lane as active while every role pool quietly has none.
+    pub fn private_lane(&self) -> Option<(Arc<dyn LLMBackend>, Arc<str>)> {
+        self.private.clone()
+    }
+
     pub fn provider(&self) -> &str {
         &self.provider
     }
@@ -417,8 +426,19 @@ impl InferencePool {
                 // auto-closes the moment YM_LOCAL_OLLAMA_URL / YM_PRIVATE_PROVIDERS names a local lane.
                 PRIVACY_ESCALATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
-                    "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — no owned-hardware private lane configured; set YM_LOCAL_OLLAMA_URL to keep private context home",
-                    self.provider
+                    // Say which condition actually failed. This line used to name YM_LOCAL_OLLAMA_URL
+                    // unconditionally — including when that variable WAS set and the real gap was an
+                    // empty YM_PRIVATE_PROVIDERS, or a role pool that never inherited a lane. A
+                    // colleague spent hours on it and wrote the refusal up as a policy decision;
+                    // a component that misreports why it failed sends everyone downstream to the
+                    // wrong place.
+                    "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — this pool has NO private lane. Local URL set: {}. Allowlist (YM_PRIVATE_PROVIDERS): {}. If both look right, this is a ROLE pool (YM_ROLE_*) that did not inherit the default's lane.",
+                    self.provider,
+                    if std::env::var("YM_LOCAL_OLLAMA_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) { "yes" } else { "NO" },
+                    match std::env::var("YM_PRIVATE_PROVIDERS") {
+                        Ok(v) if !v.trim().is_empty() => v,
+                        _ => "EMPTY".to_string(),
+                    }
                 );
                 self.chat_scoped_tools(messages, config, PrivacyScope::Household, tools).await
             }
@@ -1341,7 +1361,20 @@ impl Router {
             if let Ok(spec) = std::env::var(&var) {
                 if !spec.trim().is_empty() {
                     if let Some(be) = backend_from_spec(&spec) {
-                        roles.insert(role.to_string(), InferencePool::new(be, concurrency));
+                        // INHERIT the default's private lane. Without this a configured role has
+                        // none, so every private-grounded call it serves escalates to the household
+                        // lane and is then refused for not being on the allowlist — landing on the
+                        // scripted backend, which returns four characters and chooses no tool.
+                        //
+                        // That is exactly how the planner died: YM_ROLE_UTIL is set, the planner
+                        // asks for pool("util"), and the goal came back as "I couldn't turn that
+                        // into steps — rephrase it as concrete actions". The phrasing was never the
+                        // problem; the pool had no brain to think with.
+                        let mut pool = InferencePool::new(be, concurrency);
+                        if let Some((backend, label)) = default.private_lane() {
+                            pool = pool.with_private_backend(backend, &label);
+                        }
+                        roles.insert(role.to_string(), pool);
                     } else {
                         eprintln!("[router] {var}={spec:?} — unknown provider or missing key; using default");
                     }

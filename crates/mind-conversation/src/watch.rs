@@ -1130,6 +1130,74 @@ impl super::ConversationEngine {
         out
     }
 
+    /// FOLLOW — check every open position against its exit rule, and close what is due.
+    ///
+    /// The first trade this mind took had an entry and no plan to leave. It was a same-day thesis
+    /// and it sat overnight, which quietly turned it into a swing trade nobody chose. Entering is a
+    /// judgment; continuing to hold has to be one too, and until this existed it was simply the
+    /// default.
+    ///
+    /// Every close names the rule that fired, because "stopped out" and "the thesis expired" are
+    /// different facts about the same trade and only one of them argues the view was wrong.
+    pub async fn follow_positions(&self, act: bool) -> String {
+        let res = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<String>, String> {
+            let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
+            let positions = broker.positions().map_err(|e| e.to_string())?;
+            if positions.is_empty() {
+                return Ok(vec!["no open positions — nothing to follow".to_string()]);
+            }
+            let market = mind_tools::MarketClient::from_env().ok();
+            let now = chrono::Utc::now().timestamp_millis();
+            let mut lines = Vec::new();
+            for p in positions {
+                let Some(price) = market.as_ref().and_then(|c| c.last_price(&p.symbol).ok()) else {
+                    // No price means no judgment. Closing a position because the quote failed would
+                    // be acting on the absence of information.
+                    lines.push(format!("  {} — no live price, leaving it alone", p.symbol));
+                    continue;
+                };
+                // Entry time is not carried on the broker's position, so the horizon is measured
+                // from the ledger entry when one exists; absent that, treat it as opened now, which
+                // errs toward HOLDING rather than closing something whose age is unknown.
+                let pos = mind_tools::exit::OpenPosition {
+                    symbol: p.symbol.clone(),
+                    qty: p.qty,
+                    entry: p.avg_entry_price,
+                    entered_at_ms: now,
+                    rule: mind_tools::exit::ExitRule::default(),
+                };
+                let fav = pos.favour_pct(price);
+                match mind_tools::exit::should_close(&pos, price, now) {
+                    Some(reason) => {
+                        if !act {
+                            lines.push(format!("  {} {:+} @ {:.2} — now {:.2} ({fav:+.2}%) — WOULD CLOSE: {}",
+                                p.symbol, p.qty, p.avg_entry_price, price, reason.as_str()));
+                            continue;
+                        }
+                        // Closing a short is a buy, and a long is a sell.
+                        let side = if p.qty < 0.0 { mind_tools::broker::Side::Buy } else { mind_tools::broker::Side::Sell };
+                        match broker.submit_market(&p.symbol, p.qty.abs(), side) {
+                            Ok(ack) => lines.push(format!("  {} CLOSED @ ~{:.2} ({fav:+.2}%) — {} [{}]",
+                                p.symbol, price, reason.as_str(), ack.status)),
+                            Err(e) => lines.push(format!("  {} — close FAILED: {e}", p.symbol)),
+                        }
+                    }
+                    None => lines.push(format!("  {} {:+} @ {:.2} — now {:.2} ({fav:+.2}%) — holding, no rule fired",
+                        p.symbol, p.qty, p.avg_entry_price, price)),
+                }
+            }
+            Ok(lines)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+        match res {
+            Ok(lines) => format!("👣 FOLLOW{}
+{}", if act { " (closing what is due)" } else { " (dry run — pass `act` to close)" }, lines.join("
+")),
+            Err(e) => format!("👣 Follow failed: {e}"),
+        }
+    }
+
     /// The sandbox book: what the paper account holds and what it is worth.
     ///
     /// Reported as MEASURED, like every other number the mind states about the world. The paper

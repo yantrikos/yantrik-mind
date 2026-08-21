@@ -81,6 +81,9 @@ pub mod refusal;
 
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
+
+/// The half of a trade that was missing: when to close it.
+pub mod exit;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
 
 pub mod newsflow;

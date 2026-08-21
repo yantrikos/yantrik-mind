@@ -5276,6 +5276,7 @@ impl ConversationEngine {
             "tape" if !rest.trim().is_empty() => self.tape_sample(rest.trim()).await,
             "quote" | "price" | "quotes" if !rest.trim().is_empty() => self.quote_symbols(rest.trim()).await,
             "paper" | "paper-book" | "book" => self.paper_book().await,
+            "follow" | "manage" => self.follow_positions(rest.trim().eq_ignore_ascii_case("act")).await,
             "surf" | "feeds" | "rotation" => self.surf_feeds(rest.trim()).await,
             "say" | "speak" if !rest.trim().is_empty() => self.say_aloud(rest.trim()).await,
             "sources" | "standing" | "trust" => self.source_standing().await,

@@ -5228,7 +5228,31 @@ impl ConversationEngine {
                             None => format!("(the plan ran but didn't park on the schedule: {})", out.error.unwrap_or_else(|| "unknown".into())),
                         }
                     }
-                    None => "I couldn't turn that goal into steps — rephrase it as concrete actions (read X, fetch Y, compose Z, notify me).".to_string(),
+                    None => {
+                        // SAY WHICH FAILED. `plan` returns None for every reason — a dead backend, a
+                        // reply that would not parse, or a goal too abstract to decompose — and this
+                        // line used to assert the last one. It told the marketing workspace to
+                        // rephrase a perfectly concrete goal while the planning lane was serving
+                        // four characters from a canned backend; they lost hours and wrote the
+                        // refusal up as a policy decision only the owner could make.
+                        //
+                        // The planner can just look. If the lane it would have used is the scripted
+                        // stand-in, that is the answer, and it is a config fault rather than the
+                        // user's sentence.
+                        let lane = mind_inference::Router::from_env(self.inference.clone(), 4).pool("util");
+                        if lane.provider() == "scripted" || !lane.has_private_lane() {
+                            format!(
+                                "I couldn't plan that, and it is not your phrasing — my planning lane is '{}'                                  with{} a private backend, so nothing was actually thinking. That is a                                  configuration fault on my side (YM_ROLE_UTIL / YM_PRIVATE_PROVIDERS), not                                  a problem with the goal.",
+                                lane.provider(),
+                                if lane.has_private_lane() { "" } else { "OUT" }
+                            )
+                        } else {
+                            format!(
+                                "I couldn't turn that into steps. The planner is alive ('{}'), so this is the                                  goal being too abstract for me — try naming the actions (read X, fetch Y,                                  notify me). Goal as I received it: {goal}",
+                                lane.provider()
+                            )
+                        }
+                    }
                 }
             }
             "jobs" | "board" | "delegations" => self.jobs_report_cmd(&rest).await,

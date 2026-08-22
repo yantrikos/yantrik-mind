@@ -77,6 +77,15 @@ CONSOLE_TOKEN="$(cat "$CONSOLE_TOKEN_FILE" 2>/dev/null || true)"
 if printf "now" | curl -s -m 20 -H "Authorization: Bearer ${CONSOLE_TOKEN}" --data-binary @- http://127.0.0.1:8077/cli | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
   echo "$(date -u +%FT%TZ) | deploy | DEPLOYED | $COMMIT health-ok" >> "$EVLOG"
   echo "==> self-deploy OK @ $COMMIT"
+  # COMPLETION CHECK. The health probe only proves the process answers; it said "ok" through every
+  # failure of 2026-08-20/21, including weeks in which the planner had no model behind it and every
+  # multi-step task died at step one. Unit suites were green throughout. So the deploy also asks
+  # whether the mind can still FINISH things, and records the answer next to the deploy line.
+  if [ -x "$CLONE/deploy/e2e_check.sh" ] || [ -f "$CLONE/deploy/e2e_check.sh" ]; then
+    E2E=$(YM_E2E_HOST=localhost YM_E2E_KEY=/root/.ssh/id_ed25519 bash "$CLONE/deploy/e2e_check.sh" 2>&1 | tail -1)
+    echo "$(date -u +%FT%TZ) | deploy | E2E | $COMMIT $E2E" >> "$EVLOG"
+    echo "==> e2e: $E2E"
+  fi
 else
   echo "==> HEALTH PROBE FAILED — rolling back to previous binary"
   systemctl stop yantrik-mind || true

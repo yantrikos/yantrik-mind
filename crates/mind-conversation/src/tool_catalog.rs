@@ -112,6 +112,32 @@ fn score(query: &HashSet<String>, line: &str, name: &str) -> usize {
     overlap + named
 }
 
+// Evidence-blend constants, module-level so the flip recorder can state the EXACT numbers a
+// decision used (policy identity: same formula, same caps, reproducible from the record).
+pub(crate) const EVIDENCE_WEIGHT: f64 = 1.5;
+pub(crate) const SAMPLE_CAP: u64 = 20;
+pub(crate) const RANKING_POLICY_ID: &str = "capability-ranking-v1";
+pub(crate) const RANKING_FORMULA_VERSION: u32 = 1;
+pub(crate) const RANKING_FORMULA: &str = "bonus = 1.5 * (rate - 0.5) * min(n,20)/20";
+
+/// Raw semantic score for one line against a query — exposed so a recorded disagreement can
+/// carry the semantic numbers that produced it, not just the winner.
+pub(crate) fn score_of(query: &str, line: &str) -> usize {
+    let name = tool_name_of_line(line).unwrap_or("");
+    score(&tokenize(query), line, name)
+}
+
+/// Stable short fingerprint of a catalog snapshot — when descriptions change, old cohort
+/// records remain attributable to the catalog they ranked against.
+pub(crate) fn catalog_fingerprint(catalog: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in catalog.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// Split the gated catalog into (detailed section, name-only tail) for this message.
 /// Input is any mix of tool lines ("- name {…}: …"); header/rule lines are dropped (the caller
 /// re-adds the standing rules). Pinned tools and the TOP_K scored > 0 stay detailed; the rest
@@ -414,8 +440,6 @@ pub(crate) fn search_lines_with_evidence(
     top_n: usize,
     track: &[(String, f64, u64)],
 ) -> Vec<String> {
-    const EVIDENCE_WEIGHT: f64 = 1.5;
-    const SAMPLE_CAP: u64 = 20;
     let q = tokenize(query);
     let required = if q.len() >= 2 { 2 } else { 1 };
     let mut scored: Vec<(f64, &str)> = catalog

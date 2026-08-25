@@ -153,3 +153,14 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Decision | **KEEP** — and stop here. No AttentionBoard, no policy tuning, until these two loops close on live evidence. |
 
 *Phase-2 final state: 891/0 · tag `cognitive-closure-v1` · ledger entries E.0–E.C2: six KEEP, one REVISE-to-simpler, zero unproven claims carried forward.*
+
+---
+
+## E.C3 — Policy identity on disagreement records + the shadow-safe predicate (final pre-freeze addition)
+
+| Field | Entry |
+|---|---|
+| Change 1 | Every `selection_flipped` event now carries full POLICY IDENTITY, so "Y improved on X" stays attributable when anything changes: `policy=capability-ranking-v1/1`, build commit (`YM_BUILD_COMMIT`, else unknown), formula version + verbatim formula, semantic scores for BOTH picks, reliability rate/n/bonus for both, and an FNV fingerprint of the catalog snapshot ranked against. Module-level constants (`RANKING_*`, `EVIDENCE_WEIGHT`, `SAMPLE_CAP`) are shared by ranker and recorder — one source of truth. |
+| Change 2 — terminology correction | Shadow-eligibility is **shadow-safe / observationally safe**, a policy predicate — NOT "read-only". Candidate conditions: no external mutation · no user-visible effect · no irreversible effect · bounded cost · bounded resource use · same privacy/purpose authorization · no additional disclosure. A technically-read-only paid API query, rate-limited endpoint, inbox fetch with audit effects, or large crawl is NOT shadow-safe. Reserved experiment identity for future shadow runs: `experiment_id` · `baseline_policy_id` · `candidate_policy_id` · `request_trace_id` · `real_pick` · `shadow_pick`. Not built — no shadow runs exist yet. |
+| Metric | mind-conversation 391/0 with enriched records; workspace unchanged elsewhere. Committed post-baseline (the tag remains the frozen comparison point; this commit is instrumentation for evidence collection, not behavior change). |
+| Decision | **KEEP — and FREEZE.** No further architecture until the two protected loops close on live data: (a) learned-vs-legacy outcome delta Y > X over the disagreement cohort, (b) self-build baseline→candidate metric vectors with constraints-not-weights promotion. The next meaningful number is not 892 tests; it is **Y > X**. |

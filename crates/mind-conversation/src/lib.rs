@@ -7693,6 +7693,23 @@ impl ConversationEngine {
                             .map(String::from);
                         if let (Some(legacy), Some(selected)) = (&legacy_first, &new_first) {
                             if legacy != selected && track.iter().any(|(t, _, n)| *n > 0 && (t == legacy || t == selected)) {
+                                // POLICY IDENTITY: every disagreement carries the exact policy
+                                // version, formula, semantic scores, reliability evidence, and
+                                // catalog fingerprint that produced it — otherwise a future
+                                // formula change turns "Y improved on X" into unattributable
+                                // soup. (Build commit rides YM_BUILD_COMMIT when deploy sets it.)
+                                let row_of = |name: &str| track.iter().find(|(t, _, _)| t == name);
+                                let bonus_of = |row: Option<&(String, f64, u64)>| match row {
+                                    Some((_, r, n)) if *n > 0 => tool_catalog::EVIDENCE_WEIGHT
+                                        * (*r - 0.5)
+                                        * ((*n).min(tool_catalog::SAMPLE_CAP) as f64 / tool_catalog::SAMPLE_CAP as f64),
+                                    _ => 0.0,
+                                };
+                                let sem_of = |pick: &str| lines.iter().find(|l| crate::tool_catalog::tool_name_of_line(l) == Some(pick))
+                                    .map(|l| tool_catalog::score_of(&q, l))
+                                    .unwrap_or(0);
+                                let sel_row = row_of(selected);
+                                let leg_row = row_of(legacy);
                                 self.recorder.record({
                                     let mut e = mind_observability::DecisionEvent::span(
                                         format!("sel-{}", mind_observability::now_ms()),
@@ -7703,10 +7720,33 @@ impl ConversationEngine {
                                     e.chosen = Some(selected.clone());
                                     e.rejected = vec![format!("{legacy} (legacy semantic-only ranking)")];
                                     e.trigger = Some("reliability evidence changed the ranking".into());
-                                    e.confidence = track
-                                        .iter()
-                                        .find(|(t, _, _)| t == selected)
-                                        .map(|(_, r, _)| *r);
+                                    e.confidence = sel_row.map(|(_, r, _)| *r);
+                                    e.policy = vec![
+                                        format!(
+                                            "policy={}/{} commit={} formula=ver{} ({})",
+                                            tool_catalog::RANKING_POLICY_ID,
+                                            tool_catalog::RANKING_FORMULA_VERSION,
+                                            std::env::var("YM_BUILD_COMMIT").unwrap_or_else(|_| "unknown".into()),
+                                            tool_catalog::RANKING_FORMULA_VERSION,
+                                            tool_catalog::RANKING_FORMULA,
+                                        ),
+                                        format!(
+                                            "semantic: {}={} legacy={} · catalog_fnv={:016x}",
+                                            selected,
+                                            sem_of(selected),
+                                            sem_of(legacy),
+                                            tool_catalog::catalog_fingerprint(&src)
+                                        ),
+                                        format!(
+                                            "evidence: {selected} rate={:.2} n={} bonus={:+.3} | {legacy} rate={:.2} n={} bonus={:+.3}",
+                                            sel_row.map(|(_, r, _)| *r).unwrap_or(0.5),
+                                            sel_row.map(|(_, _, n)| *n).unwrap_or(0),
+                                            bonus_of(sel_row),
+                                            leg_row.map(|(_, r, _)| *r).unwrap_or(0.5),
+                                            leg_row.map(|(_, _, n)| *n).unwrap_or(0),
+                                            bonus_of(leg_row),
+                                        ),
+                                    ];
                                     e.lesson = Some("policy disagreement logged — grade me when this goal's outcome arrives".into());
                                     e
                                 });

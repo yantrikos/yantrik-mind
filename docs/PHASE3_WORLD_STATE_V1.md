@@ -258,3 +258,41 @@ Methodology, all the way through:
   Phase 3A: event histories earn situation-model semantics.
   Phase 3B: situation histories earn attention policy.
   Phase 4: failed executive choices earn counterfactual machinery.
+ 
+# Final engineering rules + scorecard lock (2026-08-25) - DESIGN CLOSED
+
+**E1 - Derivations are registered, never eager.** Only RegisteredDerivationRule {id, version,
+consumes, produces, evaluator} may create durable derived state - demand-driven or explicitly
+registered. No unrestricted rule engine; Phase 3A must not become home-built Prolog.
+
+**E2 - Ingestion identity vs semantic corroboration.** Same source_event_id = duplicate = no new
+transition. DIFFERENT source_event_id asserting the same proposition = CORROBORATING EVIDENCE -
+kept as independent sources (email-71 Thursday + calendar-92 Thursday are two witnesses). Never
+collapse at ingestion; confidence and contradiction resolution depend on it later.
+
+**E3 - The oracle is DUMB.** Fixtures declare expected states EXPLICITLY per checkpoint
+(Known Thursday / Known delayed / Waiting / Conflicted[Room4, Zoom]) - the oracle does NOT run a
+twin transition algorithm, or implementation bug == oracle bug and everything passes. Manual
+authoring of 75 events' expectations is the point: genuinely independent ground truth.
+
+## 3A Scorecard - locked; hard constraints, never averaged
+
+Hard constraints (=0 tolerance, correctness properties): knowledge-time leakage | purpose leakage |
+replay divergence | duplicate semantic duplication.
+Dimensions kept SEPARATE (no headline number): current-state precision · current-state recall ·
+false-current rate · unknown correctness · conflict accuracy · supersession correctness · stale
+accuracy · lineage accuracy · bi-temporal correctness · duplicate idempotency · out-of-order
+correctness · replay equality · derivation invalidation · purpose isolation.
+
+## Next coding-agent instruction (verbatim)
+
+"Implement ONLY the Phase 3A red oracle harness described in the frozen contract. Do not implement
+world-state production code. Establish today's baseline failures at all specified checkpoints,
+including bi-temporal leakage, duplicates, out-of-order delivery, restart/replay, derivation
+invalidation, conflicts, unknown/stale state and Purpose Gate cases. Record the baseline in the
+experimental ledger. Stop after the baseline exists and report exactly which semantics the
+existing architecture cannot represent."
+
+Arc: cognitive-closure-v1 -> 3A "What is my situation?" -> 3B "What deserves attention?" ->
+Phase 4 "What happens if A vs B?" -> later "Where am I systematically weak, and can I improve?"
+Freeze the architecture; let the red tests argue with it.

@@ -139,3 +139,17 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Decision | **KEEP** |
 
 **The milestone, stated precisely:** Yantrik can now show, from persisted evidence — *this goal needed a tool → I predicted from my own track record → I acted → I observed → I was wrong/right by this much (brier) → my estimate updated → my next choice CHANGED (flip recorded) → the changed choice's goal contribution gets graded → and I cannot merge self-modifications that lack this exact epistemic contract.* What remains before the claim "learned behavior measurably performs better": accumulate the live Y-vs-X delta from the cohort — the instrumentation for which now exists by construction.
+
+---
+
+## E.C2 — Proxy honesty, cohort report, and the frozen baseline
+
+| Field | Entry |
+|---|---|
+| Change 1 — terminology discipline | Today's `contributed` verdict renamed **`evidence_used`**: rung three of the ladder (execution → semantic → **evidence_utilized** → goal_contribution → goal_outcome), written into `tool_outcome.rs` as design law. Citing is not causing; letting rung three masquerade as causal contribution teaches "my search gets cited, therefore my search causes goals" — precisely the proxy optimization this architecture forbids. Rung 4 arrives only via disagreement-cohort/shadow comparison; rung 5 only where ExpectedOutcomes exist. |
+| Change 2 — cohort report | `ym why flips`: frequency by legacy→learned pair + by chosen-prior band with n≥10 backing called out. Outcome join pending trace linkage; the table exists so accumulation starts now. |
+| Change 3 — baseline frozen | Commit `60a5cab`, annotated tag **`cognitive-closure-v1`**: Yantrik before broader autonomous arbitration, but after the first closed experiential-learning loop. 891 tests / 0 failures. Every future architecture experiment (AttentionBoard, adaptive capability policies, deeper self-build) now has something concrete to beat. |
+| Next protected loops (spec'd, not built) | **(a) Changed-choice → better-outcome:** shadow-execute legacy picks for READ-ONLY tools only (learned→B real, legacy→A shadow, no external side effects; mutating tools never shadowed), then report Y vs X overall / disagreements-only / by confidence / by tool-pair. **(b) Self-build → measure:** autonomous promotion requires baseline-vs-candidate metric vectors over pinned scenarios — target metric improves by threshold AND protected dimensions (security/policy/memory/quality floor) non-regressing AND resources within bounds. **Protected invariants are constraints, not weights: no scalar fitness may compensate for violating one.** |
+| Decision | **KEEP** — and stop here. No AttentionBoard, no policy tuning, until these two loops close on live evidence. |
+
+*Phase-2 final state: 891/0 · tag `cognitive-closure-v1` · ledger entries E.0–E.C2: six KEEP, one REVISE-to-simpler, zero unproven claims carried forward.*

@@ -131,3 +131,74 @@ Phase 3B — Executive cognition (separate milestone):
 Arc: Phase 2 taught *“was my action a good choice?”* → Phase 3 teaches *“what situation am I
 actually in?”* → executive asks *“what deserves attention?”* → counterfactuals ask *“what
 situation would I create?”*. Experience → situation → attention → imagination.
+ 
+# Phase 3A authorized - five implementation invariants (2026-08-25)
+
+**I1 - Stable entity identity.** Transitions target stable `entity_id`s, never free-form names.
+Minimal: `EntityRef { entity_id, entity_type_hint?, aliases[], source_refs[] }`. Alias resolution
+is evidence-backed; ambiguous identity STAYS ambiguous (no silent merges of Alice / Alice Smith /
+alice@example.com; no silent split of two Johns).
+
+**I2 - Bi-temporal query API.** A1 through to the surface:
+`WorldQuery { valid_at /* world time */, known_at /* knowledge time */, access_context }`.
+"What was true Aug 20" is NOT "what had Yantrik LEARNED by Aug 20". Later information must never
+leak backward into past cognition - this is what makes future regret/counterfactual evaluation fair.
+
+**I3 - Derivation invalidation (hard 3A test).** When a source transition is retracted or
+superseded, dependent derivations lose their warrant: find dependents via lineage, re-evaluate,
+then retain / supersede / retract. No zombie conclusions whose evidence no longer exists.
+
+**I4 - Conflict is never secretly ranking.** .91 > .87 does NOT turn Conflicted into Known.
+Conflicts persist until an explicit NAMED deterministic resolution rule justifies choosing
+(e.g., carrier-delivered-scan > estimated-delivery email). Confidence is not authority.
+
+**I5 - Derived knowledge inherits privacy conservatively.** provenance_scope,
+purpose_constraints, subject scope and sensitivity derive from lineage: Private(A) + Private(B)
+means derived C stays protected. Computation must not launder restricted information into
+unrestricted world state.
+
+## Engine shape (small on purpose)
+
+Authoritative sources -> events -> normalize/identify -> typed transitions -> THE transition log ->
+{replay | derivations} -> materialized world view -> Purpose Gate -> WorldQuery.
+NO WorldBrain. NO world-model LLM loop. NO ten managers. Intelligence comes from correct state
+evolution. LLM-proposed consequences enter only as candidate hypotheses (A10).
+
+## Red benchmark (built FIRST, brutal by design)
+
+~75 events with Oracle(t), deliberately including: normal changes, duplicates, late events,
+out-of-order, corrections, contradictions, retractions, expiration, entity ambiguity, restart,
+snapshot loss, derived-state invalidation, purpose-denied queries, unknown states, stale states.
+Checkpointed at t=10/25/37 --RESTART-- 38/52/75 (a break at event 17 must not be accidentally
+corrected by event 43).
+
+**Precision beats recall in 3A:** current-state precision, false-current rate, false-obligation
+rate and false-risk rate outrank recall. Architectural principle: UNKNOWN IS PREFERABLE TO
+INVENTED CERTAINTY. "I don't know whether it was delivered" is useful; "it's delayed until Monday"
+after Saturday delivery happened is dangerous.
+
+**Knowledge-time non-leakage test (validates all of A1):** delay occurred Aug 20; decision D made
+Aug 20 without knowledge; informing email arrives Aug 22.
+Query(valid_at=Aug20, known_at=Aug20) => Unknown.
+Query(valid_at=Aug20, known_at=Aug22) => Known(delayed).
+Decision D may never be graded using facts learned two days later.
+
+**Situation inference vs executive judgment, separated religiously:** "deadline in 18h and
+document unresolved" is 3A. "This deserves interrupting the user" is 3B. Derived facts stay
+disentangled from prior actions so 3B receives a trustworthy situation.
+
+## Surfaces
+
+ym world now                    CURRENT / STALE / CONFLICTED sections - evidence rendering
+ym world diff <time|transition> + moved Tue->Thu / - Tuesday prep urgency / + delivered / ! overdue
+ym world why <state-id>         lineage tree: rule <- state <- transition <- email msg-492
+
+Evidence rendering, never LLM narration.
+
+## Success, stated
+
+After 3A Yantrik can say: "X used to be true, Y replaced it, Z is unresolved, Q is stale, this
+conflict exists because of these two events, and this was all I knew at the time." Then 3B asks
+the genuinely Jarvis question over that trustworthy situation - and counterfactuals become
+simulation over the real model: WorldState(now) apply-A vs apply-B. Every additional primitive
+beyond these five is earned from failing scenarios, exactly as Phase 2 earned its architecture.

@@ -339,3 +339,42 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Integration status (unchanged, and the main risk) | `arbitrate()` has no caller outside `mind-proactive` and `mind-evals`. `mind-world` and `mind-proactive` are reachable only from `mind-evals`. The live gate on every proactive send is still `proactive_receptivity_ok()` at five call sites in `mind-core/src/telegram.rs`. Two proactive systems exist; the principled one does not run. The benchmark can reach 37/37 with no observable change to the mind. |
 | Result | Workspace 950 passed / 0 failed. EX1 10/10, EX2 6/6, EX3 6/6, EX4 4/4, coverage 26/37 held. Overall intentional red retained. |
 | Decision | KEEP. Before EX5, wire ONE live decision - whether to send a proactive beat - through `arbitrate()` with a ResourceContextView built from the real organs. One decision, real inputs, live path. It converts the 3B investment from potential into something observable, and tests whether the abstraction survives perception at one call site rather than after set arbitration is built on top of it. |
+
+## E.R2 - the learning chain was recording on a loop that does not run (continues E.L1 / E.T1 / E.R1)
+
+| Field | Entry |
+|---|---|
+| Hypothesis | E.L1 declared the first closed learning chain (tool calls carrying empirical priors, graded after). If the recorder is genuinely closed, a live box should show `tool_predicted` / `tool_observed` pairs accumulating. It showed none. |
+| Baseline | Zero recorder events on the deployed box despite months of tool calls. The emit sites live in `EngineBus::call`, owned by the BOUNDED COGNITIVE LOOP - and `YM_COGNITION` defaults to `false`, so that loop never runs. The classic `agent_loop` serves every real turn and had no emit sites. The chain was declared closed on a path nobody executes. |
+| Correction to an overstatement | First reading was "the bandit was dark too". It was not. Tool reliability updates in `guards::post`, which BOTH loops call, so selection had been learning all along. Only the recorder events were missing. Recording the wrong scope of a defect is itself a defect. |
+| Rejected fix | Setting `YM_COGNITION=on` was tried on the box and REGRESSED quality: asked the time it answered "I don't have a clock tool in this run" while holding `now`, and a paper-account question returned nothing. Reverted. Turning on the loop that had the instrumentation was not the same as instrumenting the loop that runs. |
+| Change | `empirical_prior_for`, `record_tool_prediction`, `record_tool_observation` extracted as shared `ConversationEngine` methods and wired into the classic `agent_loop` around `run_agent_tool_as`. |
+| Actual metric | Live on the box: `tool_predicted quote - empirical prior n=24 - confidence 0.96`; `tool_observed verdict ok - prediction_error 0.038 - brier 0.0015`. Calibration bands populated: 80-90pct n=1 predicted 0.83 observed 1.00 (underconfident); 90-100pct n=2 predicted 0.96 observed 1.00 brier 0.002. Workspace 917/0 at the slice. |
+| Decision | KEEP. Standing lesson: an instrumented code path proves nothing until you verify it is the path that executes. |
+
+## E.P1 - grading ran only when a human typed it
+
+| Field | Entry |
+|---|---|
+| Hypothesis | A trading claim that records a view is worth recording only if it gets scored without anyone deciding to score it. |
+| Baseline | `grade` existed solely as a console command. Six hunt claims sat "awaiting their deadline" for five days because nobody typed it. Zero trades had ever been graded. |
+| Change | `grade_due_trades()` joined the idle tick in `proactive.rs:dmn_tick`, alongside `fitness_grade_due()` which exists for the identical reason (a merged PR was never looked at again after CI went green). Logs only when something actually resolves - a tick that narrates its no-ops buries the lines that matter. |
+| Verified, not assumed | Checked the horizon was not itself broken: all six open claims were 0.5-1.9h old against an 8h horizon, i.e. genuinely not due. No clock defect. Tick confirmed firing on the box every ~5 min once idle past 600s. |
+| Actual metric | Workspace 917/0. Deployed 77dc66c. |
+| Decision | KEEP. |
+
+## E.P2 - the engagement rate was not miscalibrated, it was measured on a subsample that deleted its own failures
+
+| Field | Entry |
+|---|---|
+| Hypothesis under test | `proactive` stood at 43pct over 279 graded claims. Two candidate explanations: bad calibration, or a send threshold set too low. |
+| Baseline | Neither. Calibration was FINE - mean predicted 41.8pct against observed 42.9pct, tracking band by band (0.2-0.3 -> 0.34, 0.3-0.4 -> 0.39, 0.4-0.5 -> 0.46, 0.6-0.7 -> 0.65). Brier 0.243 against 0.245 for always predicting the base rate: honest, and carrying almost no discrimination. |
+| Actual defect | `resolve_proactive` held ONE outstanding send in a scalar profile key while `judgment_log` recorded a claim per send. Any beat going out before the previous resolved orphaned it permanently: 650 of 932 claims stuck past a 90-minute deadline, the oldest by 46 days, ~2/3 of every single day since 10 July. |
+| Why the loss was biased, not merely large | An IGNORED send occupies the slot for its full 90 minutes and is easy to clobber; an ENGAGED one clears on the next user turn. Failures were therefore preferentially destroyed. A sampling rule that drops the failures is worse than no measurement, because it still looks like one - and this measurement gates every proactive send. |
+| Change 1 (forward) | Pending is now a bounded list. A user turn answers every beat whose window still contains it; an expired window answers itself; anything else stays pending. Legacy bare-integer form still read, so the send in flight at upgrade is not dropped by the fix for dropping sends. |
+| Change 2 (recovery) | 628 orphans settled from the transcript record. Method VALIDATED FIRST against the 280 claims whose outcome is known: reconstruction agrees on 277 (98.9pct). Claims outside the transcript's span deliberately left pending - the box runs for weeks while the person is away, so silence after the last recorded turn is the NORMAL state, and grading it "ignored" would manufacture the exact bias being repaired. That rule is a pure function so it can be tested against a clock and a transcript that never existed. |
+| A wrong diagnosis, recorded | First backfill reported "SETTLED 650"; the ledger kept 24. Diagnosed as a lost update (single JSON blob under read-modify-write) and that reasoning was committed. It was wrong. `judgment_log` stamps `t` with its OWN clock read, after an awaited profile read, while `ref` was stamped by the caller before it - so keying the repair on `t` matched only rows where the millisecond did not tick over. 24 of 650 is a wrong join, not a partial write. Falsified by the honest reporting added in the same commit ("ledger accepted 0 of 626"). |
+| Actual metric | Measured on the graded third 42.9pct. Reconstructed over all 932 claims 31.3pct. After settling: ledger accepted 628 of 628, second run idempotent, source standing reads 292/932 = 31pct - matching the offline reconstruction. |
+| Regression found in the fix | Correcting the data would have MUTED the mind. The gate was an absolute `receptivity >= 0.35`, tuned against the inflated scale; on honest data four of five time bins sit at 23-31pct (Night 82, EarlyMorning 30, Midday 31, Evening 23, Afternoon 26) and only Night survives. A data-quality repair must not covertly change how talkative the thing is - that is a product decision. Gate moved to `(baseline * 0.6).clamp(0.10, 0.35)`: is this moment materially worse than how this person responds in general, which is what "dead zone" always meant and, unlike a constant, survives the scale moving again. |
+| Backfill deliberately excluded | Personality and bond nudges. Those are live relationship steps; 650 replayed at once (+0.05 engaged / -0.03 ignored) would have pinned proactivity to the floor. World model transitions only - 2239 total, verified in the `world_transition_model` meta blob. |
+| Decision | KEEP. Open and NOT decided here: `sources` labels proactive "DROPPED (stop spending attention)". Nothing reads that verdict so no behaviour changed, but it is a category error - the mind's own engagement prediction is not an untrustworthy information source. |

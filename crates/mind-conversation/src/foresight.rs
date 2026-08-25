@@ -1092,6 +1092,44 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let _ = self.memory.profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap_or_default()).await;
     }
 
+    /// Grade MANY pending predictions in a single read-modify-write.
+    ///
+    /// The ledger is one JSON blob, so every grade is a full read-mutate-write of the whole thing.
+    /// Doing that 650 times in a loop is not just slow — it loses. The live service grades and logs
+    /// on its own schedule with the same read-modify-write, so one service write lands on a copy
+    /// read before the loop started and rolls back every grade applied since. The first run of the
+    /// backfill wrote 650 and kept 24, which is exactly what a single lost update looks like.
+    ///
+    /// One write cannot be half-clobbered. It can still lose to a concurrent writer, but it loses
+    /// all-or-nothing and the caller can see that it did.
+    pub(crate) async fn judgment_grade_many(&self, verdicts: &[(String, bool)]) -> usize {
+        if verdicts.is_empty() {
+            return 0;
+        }
+        let by_ref: std::collections::HashMap<&str, bool> =
+            verdicts.iter().map(|(r, o)| (r.as_str(), *o)).collect();
+        let mut led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut n = 0usize;
+        for r in led.iter_mut() {
+            // Same immutability rule as the single-row path: only ever fills a NULL outcome.
+            if !r.get("outcome").map(|o| o.is_null()).unwrap_or(false) {
+                continue;
+            }
+            let Some(o) = r.get("ref").and_then(|x| x.as_str()).and_then(|k| by_ref.get(k)) else {
+                continue;
+            };
+            r["outcome"] = serde_json::json!(if *o { 1 } else { 0 });
+            r["outcome_at"] = serde_json::json!(now);
+            n += 1;
+        }
+        if n > 0 {
+            let _ = self.memory.profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap_or_default()).await;
+        }
+        n
+    }
+
     /// Grade a pending prediction by its subject_ref (binary outcome). Immutable once graded.
     pub(crate) async fn judgment_grade(&self, subject_ref: &str, outcome: bool) {
         let mut led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()

@@ -782,9 +782,15 @@ impl super::ConversationEngine {
         let (verdicts, skipped) = settle_plan(&orphans, &turns, last_turn, now);
         let engaged = verdicts.iter().filter(|(_, e)| *e).count() as u32;
         let ignored = verdicts.len() as u32 - engaged;
+        let mut wrote = 0usize;
         if act {
+            // ONE ledger write for all of them. Per-claim writes lost to the live service's own
+            // read-modify-write of the same blob: the first run applied 650 grades and kept 24.
+            let refs: Vec<(String, bool)> = verdicts.iter().map(|(s, e)| (s.to_string(), *e)).collect();
+            wrote = self.judgment_grade_many(&refs).await;
+            // The world model takes its own row per transition, so there is nothing to batch and
+            // nothing to clobber.
             for (sent, e) in &verdicts {
-                self.judgment_grade(&sent.to_string(), *e).await;
                 let _ = self.memory.record_proactive_outcome_backfill(*sent, *e).await;
             }
         }
@@ -792,11 +798,15 @@ impl super::ConversationEngine {
         format!(
             "🕰️  {} {} orphaned engagement claim(s) from the transcript{}
   engaged {engaged} · ignored {ignored} → {:.1}% (the surviving third read 42.9%)
-  {skipped} left pending — deadline not passed, or outside the transcript's span",
+  {skipped} left pending — deadline not passed, or outside the transcript's span{}",
             if act { "SETTLED" } else { "would settle" },
             n,
             if act { "" } else { " — pass `act` to write" },
             if n > 0 { 100.0 * engaged as f64 / n as f64 } else { 0.0 },
+            // Report what the ledger actually took, not what was decided. A repair that reports its
+            // intent instead of its effect is how the first run looked like it had written 650.
+            if act { format!("
+  ledger accepted {wrote} of {n}") } else { String::new() },
         )
     }
 

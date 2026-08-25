@@ -129,7 +129,7 @@ fn scenario() -> (Vec<WEvent>, Vec<Expect>) {
         e("iam:k1", "iam", Kind::Assert, day(20, 8), day(20, 8), "deploy-key", "status", "active-v1"),
         e("iam:k2", "iam", Kind::Supersede, day(23, 8), day(23, 9), "deploy-key", "status", "rotated-v2"),
         e("iam:k1-late", "iam-old", Kind::Assert, day(20, 8), day(24, 9), "deploy-key", "status", "active-v1"),
-        e("iam:k3", "security", Kind::Retract, day(26, 16), day(26, 17), "deploy-key", "status", "revoked"),
+        e("iam:k3", "iam", Kind::Supersede, day(26, 16), day(26, 17), "deploy-key", "status", "revoked-compromised"),
         e("iam:k4", "iam", Kind::Assert, day(28, 8), day(28, 8), "deploy-key", "status", "issued-v3"),
 
         // Payroll: pending → cleared with SMS corroboration
@@ -411,14 +411,16 @@ async fn phase3a_red_baseline() {
             })
         });
 
-    // Alice document arc — honest open-world semantics: week-one claims were never superseded,
-    // so the upload JOINS a conflict instead of replacing it; the global retract still wins
-    // while absolutely latest; expiry ends the window; post-expiry confirmation re-opens it.
+    // Alice document arc — post-amendment semantics: cloud-drive's retraction withdraws only
+    // ITS OWN upload claim; the week-one promise/email conflict keeps speaking.
     let alice_upload = matches!(
         log.state_at("alice.document", "status", &opq(day(26, 10))),
         StateAt::Conflicted(ref c) if c.len() == 3 && c.contains(&"attachment-uploaded".to_string())
     );
-    let alice_withdrawn = matches!(log.state_at("alice.document", "status", &opq(day(26, 15))), StateAt::Unknown);
+    let alice_withdrawn = matches!(
+        log.state_at("alice.document", "status", &opq(day(26, 15))),
+        StateAt::Conflicted(ref c) if c.len() == 2 && c.contains(&"promised-by-Wednesday".to_string())
+    );
     let alice_expired = log.state_at("alice.document", "status", &opq(day(27, 18))) == StateAt::Expired;
     let alice_revived_post_expiry = matches!(
         log.state_at("alice.document", "status", &opq(day(28, 11))),
@@ -455,8 +457,8 @@ async fn phase3a_red_baseline() {
     // Authority: late weak sources must NOT resurrect superseded values (two different arcs)
     let authority_no_resurrection = log.state_at("package", "status", &opq(day(26, 14))) == StateAt::Known("delivered-Saturday".into());
     let iam_no_resurrection = log.state_at("deploy-key", "status", &opq(day(24, 10))) == StateAt::Known("rotated-v2".into())
-        && matches!(log.state_at("deploy-key", "status", &opq(day(27, 9))), StateAt::Unknown)
-        && log.state_at("deploy-key", "status", &opq(day(28, 9))) == StateAt::Known("issued-v3".into()); // revoke then re-issue revives
+        && log.state_at("deploy-key", "status", &opq(day(27, 9))) == StateAt::Known("revoked-compromised".into())
+        && log.state_at("deploy-key", "status", &opq(day(28, 9))) == StateAt::Known("issued-v3".into()); // rotation lifecycle via supersessions
 
     // Duplicate idempotency under messiness (three arcs, ids re-delivered days apart)
     let tr = log.transitions();
@@ -551,7 +553,11 @@ async fn phase3a_red_baseline() {
         && matches!(
             log.state_at("defense.sched", "slot", &opq(day(28, 11))),
             StateAt::Conflicted(ref c) if c.contains(&"Thursday".to_string()) && c.contains(&"Friday".to_string())
-        ); // C's Friday conflicts; B's later retract is scored at checkpoint t8 below
+        ) // C's Friday conflicts
+        && matches!(
+            log.state_at("defense.sched", "slot", &opq(day(29, 11))),
+            StateAt::Conflicted(ref c) if c.contains(&"Thursday".to_string()) && c.contains(&"Friday".to_string())
+        ); // B withdrew ONLY itself: A/C/D keep the conflict alive (E.W8 amendment proven)
 
     // ── Asymmetric freshness windows (#8): intersection decides warrant ──────────────────
     let advisory_intersection_ok =
@@ -608,7 +614,7 @@ async fn phase3a_red_baseline() {
             ("visa_status", "attr", Val::Unknown), ("trip_ready", "attr", Val::Unknown), ("travel.dossier", "attr", Val::Unknown)]),
         ("t5_paid", day(27, 11), vec![
             ("expense.april", "status", Val::Known("paid")), ("travel.dossier", "attr", Val::Known("complete")),
-            ("deploy-key", "status", Val::Unknown)]),
+            ("deploy-key", "status", Val::Known("revoked-compromised"))]),
         ("t6_advisory", day(27, 20), vec![
             ("travel.advisory", "attr", Val::Known("advisory")), ("defense.sched", "slot", Val::Known("Thursday"))]),
         // ---- RESTART boundary sits between ops:deadline (d27,17) and here ----
@@ -618,9 +624,9 @@ async fn phase3a_red_baseline() {
             ("alice.document", "status", Val::Conflicted(&["sent-yesterday", "attachment-uploaded", "confirmed-received-by-ops"])),
             ("deploy-key", "status", Val::Known("issued-v3")), ("package", "status", Val::Known("delivered-Saturday"))]),
         ("t8_late_retraction", day(29, 11), vec![
-            // CURRENT semantics: latest global Retract silences the whole proposition.
-            // EVIDENCE #2 for per-source retraction granularity (see ledger before 3B).
-            ("defense.sched", "slot", Val::Unknown),
+            // E.W8 amendment landed: B's retraction withdrew only B; A keeps Thursday alive,
+            // C+D keep Friday — the honest outcome is a live two-value conflict.
+            ("defense.sched", "slot", Val::Conflicted(&["Thursday", "Friday"])),
             ("travel.advisory", "attr", Val::Unknown)]), // marine long stale; window aged too by now
     ];
     let mut checkpoints_green = 0usize;

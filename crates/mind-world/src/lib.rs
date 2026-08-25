@@ -287,25 +287,40 @@ impl WorldLog {
         if relevant.is_empty() {
             return StateAt::Unknown;
         }
-        relevant.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
+                relevant.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
         match relevant.last().unwrap().kind {
             Kind::Expire => return StateAt::Expired,
-            Kind::Retract => return StateAt::Unknown,
             _ => {}
         }
         // A SUPERSEDE at world-time T retires every earlier-occurred claim of this proposition,
-        // WHATEVER source emitted it — otherwise a stale email from the same source as the
+        // WHATEVER source emitted it - otherwise a stale email from the same source as the
         // correction could keep a dead value alive through per-source bucketing.
         let latest_supersede = relevant
             .iter()
             .filter(|t| t.kind == Kind::Supersede)
             .map(|t| t.occurred_at)
             .max();
-        // Per-source newest claim (each witness speaks once).
+        // PHASE 3A.1 (E.W8 amendment, earned by two independent fixture instances):
+        // RETRACT withdraws ITS OWN SOURCE's contribution to this proposition - evidence
+        // identity, not global erasure. A source whose LATEST action here is a retraction
+        // is silent; independent witnesses keep speaking; a source may speak again later.
+        // Historical cuts are honored automatically because relevance is knowledge-filtered.
+        let mut latest_action: std::collections::HashMap<&str, &WorldTransition> =
+            std::collections::HashMap::new();
+        for t in &relevant {
+            let e = latest_action.entry(t.source_id.as_str()).or_insert(t);
+            if (t.occurred_at, t.recorded_seq) >= ((*e).occurred_at, (*e).recorded_seq) {
+                *e = t;
+            }
+        }
+        // Per-source newest claim (each live witness speaks once).
         let mut per_source: std::collections::HashMap<&str, &WorldTransition> = std::collections::HashMap::new();
         for t in &relevant {
             match t.kind {
                 Kind::Assert | Kind::Supersede => {
+                    if latest_action.get(t.source_id.as_str()).map(|la| la.kind) == Some(Kind::Retract) {
+                        continue; // this witness has withdrawn itself
+                    }
                     if let Some(sup) = latest_supersede {
                         if t.kind == Kind::Assert && t.occurred_at < sup {
                             continue; // retired by the later supersession
@@ -319,7 +334,9 @@ impl WorldLog {
                 _ => {}
             }
         }
-        let mut claims: Vec<&WorldTransition> = per_source.values().copied().collect();
+        if per_source.is_empty() {
+            return StateAt::Unknown; // every witness withdrew; nothing warrants a value
+        }        let mut claims: Vec<&WorldTransition> = per_source.values().copied().collect();
         claims.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
         // Collapse same-value witnesses; differing remaining values = live conflict.
         // Found by the W7 adversarial month (classified MISSING SEMANTIC before fixing):
@@ -791,6 +808,72 @@ mod compound_chain_tests {
         // history at its own cut still answers through the chain
         assert_eq!(log2.derived_state("trip_ready", &q(base(22))), StateAt::Known("go".into()));
         assert_eq!(log2.lineage_of("trip_ready"), Some(("trip-ready", 1, &[(("visa_status".into()), ("status".into())), (("itinerary".into()), ("status".into()))][..])));
+    }
+}
+
+
+#[cfg(test)]
+mod retraction_targeting_tests {
+    use super::*;
+
+    /// PHASE 3A.1 RED SPEC - RETRACT is evidence-targeted: it withdraws ITS OWN SOURCE's
+    /// contribution to a proposition; it must never silence independent witnesses.
+    fn q(kn: i64) -> WorldQuery {
+        WorldQuery { valid_at: kn, known_at: kn, access: mind_types::AccessContext::operator_audit() }
+    }
+
+    #[test]
+    fn one_witness_withdrawal_leaves_others_in_conflict() {
+        let log = WorldLog::replay(&[
+            wev("a:X", Kind::Assert, base(10), base(10), "m", "X"),
+            wev("b:X", Kind::Assert, base(10) + 100, base(10) + 200, "m", "X"),
+            wev("c:Y", Kind::Assert, base(11), base(12), "m", "Y"),
+            wev("d:Y", Kind::Assert, base(11) + 100, base(13), "m", "Y"),
+            wev("b:ret", Kind::Retract, base(14), base(15), "m", "withdrawn"),
+        ]).with_freshness_ms(i64::MAX);
+        matches!(log.state_at("m", "status", &q(base(16))), StateAt::Conflicted(ref c) if c.len() == 2);
+    }
+
+    #[test]
+    fn pair_where_one_withdraws_still_known_via_other() {
+        let log = WorldLog::replay(&[
+            wev("a:X", Kind::Assert, base(10), base(10), "p", "X"),
+            wev("b:X", Kind::Assert, base(10) + 100, base(11), "p", "X"),
+            wev("b:ret", Kind::Retract, base(13), base(14), "p", "withdrawn"),
+        ]).with_freshness_ms(i64::MAX);
+        assert_eq!(log.state_at("p", "status", &q(base(15))), StateAt::Known("X".into()));
+    }
+
+    #[test]
+    fn solo_source_retracting_goes_unknown() {
+        let log = WorldLog::replay(&[
+            wev("a:X", Kind::Assert, base(10), base(10), "s", "X"),
+            wev("a:ret", Kind::Retract, base(12), base(13), "s", "withdrawn"),
+        ]).with_freshness_ms(i64::MAX);
+        matches!(log.state_at("s", "status", &q(base(14))), StateAt::Unknown);
+    }
+
+    #[test]
+    fn participation_is_bitemporal_around_the_retraction() {
+        let log = WorldLog::replay(&[
+            wev("a:X", Kind::Assert, base(10), base(10), "h", "X"),
+            wev("b:X", Kind::Assert, base(11), base(12), "h", "X"),
+            wev("b:ret", Kind::Retract, base(12) + 500, base(20), "h", "withdrawn"),
+        ]).with_freshness_ms(i64::MAX);
+        // before B's retraction is KNOWN: B participates
+        matches!(log.state_at("h", "status", &q(base(15))), StateAt::Known(_));
+        // after it is known: B silent, A alone still warrants X
+        assert_eq!(log.state_at("h", "status", &q(base(25))), StateAt::Known("X".into()));
+    }
+
+    #[test]
+    fn source_may_speak_again_after_its_own_retraction() {
+        let log = WorldLog::replay(&[
+            wev("a:X", Kind::Assert, base(10), base(10), "r", "X"),
+            wev("a:ret", Kind::Retract, base(12), base(13), "r", "withdrawn"),
+            wev("a:Y", Kind::Assert, base(15), base(16), "r", "Y"),
+        ]).with_freshness_ms(i64::MAX);
+        assert_eq!(log.state_at("r", "status", &q(base(17))), StateAt::Known("Y".into()));
     }
 }
 

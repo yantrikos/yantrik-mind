@@ -306,7 +306,7 @@ impl crate::ConversationEngine {
             claim_ref: None,
             experiment_id: EXPERIMENT_ID.into(),
             executive_policy: EXECUTIVE_POLICY.into(),
-            build_commit: option_env!("YM_BUILD_COMMIT").unwrap_or("unknown").to_string(),
+            build_commit: env!("YM_BUILD_COMMIT").to_string(),
             call_site: CALL_SITE.into(),
         }, carry);
         self.ex4_save(&list).await;
@@ -533,22 +533,42 @@ mod tests {
         assert!(!m.wake_when.is_empty());
     }
 
-    /// The disagreement this site actually exposes: the legacy chain at the digest has NO
-    /// quiet-hours check (unlike the anticipate path), so it can speak at 3am. The executive
-    /// defers. That is a real policy difference, not a re-derivation of the legacy boolean.
+    /// KNOWN LIMITATION, pinned deliberately: at THIS site the two policies agree by construction.
+    ///
+    /// I first read the digest gate as having no quiet-hours check and claimed it would expose a
+    /// real disagreement. Wrong: `idle_ok` includes `!in_quiet_hours_now()` one level above the
+    /// gate I was reading, so the shadow can only ever run with `quiet_hours == false`. Both
+    /// policies then consume the SAME receptivity boolean, so the verdicts match in every case:
+    ///
+    ///   no data        -> legacy sends,  executive ACT      (unknown is not "unreceptive")
+    ///   rate >= floor  -> legacy sends,  executive ACT
+    ///   rate <  floor  -> legacy drops,  executive MONITOR
+    ///
+    /// So EX4-LIVE-A earns REACHABLE and SHADOWED here — its stated goal — and the disagreement
+    /// column will be zero forever. What the executive still adds is a REASON and a WAKE CONDITION
+    /// where legacy has a silent boolean. A site that can genuinely disagree has to be chosen
+    /// before any comparison means anything; that is EX4-LIVE-C's problem, not this slice's.
     #[test]
-    fn the_executive_defers_in_quiet_hours_where_this_site_legacy_does_not_look() {
-        let quiet = candidate_for_digest(0, true, Some(8 * 3_600_000), Some(true));
-        assert_eq!(
-            mind_proactive::arbitrate(&quiet).posture,
-            Posture::Monitor,
-            "receptive but asleep: the executive still defers"
-        );
-        let awake = candidate_for_digest(0, false, None, Some(true));
-        assert_eq!(
-            mind_proactive::arbitrate(&awake).posture,
-            Posture::Act,
-            "awake and receptive: the executive would speak, agreeing with legacy"
-        );
+    fn at_this_site_the_two_policies_agree_by_construction() {
+        // quiet_hours is structurally false here: idle_ok already excluded it.
+        for (receptive, want, legacy_would_send) in [
+            (None, Posture::Act, true),
+            (Some(true), Posture::Act, true),
+            (Some(false), Posture::Monitor, false),
+        ] {
+            let c = candidate_for_digest(0, false, None, receptive);
+            let d = mind_proactive::arbitrate(&c);
+            assert_eq!(d.posture, want, "receptive={receptive:?}");
+            let exec_would_send = d.posture == Posture::Act;
+            assert_eq!(
+                exec_would_send, legacy_would_send,
+                "the verdicts cannot differ at this site — both read the same boolean"
+            );
+        }
+
+        // And the thing it DOES add over a silent drop: a named reason and something to wake on.
+        let d = mind_proactive::arbitrate(&candidate_for_digest(0, false, None, Some(false)));
+        assert_eq!(d.reason_code, "user_unavailable");
+        assert!(!d.monitor.as_ref().expect("a deferral must say what it waits for").wake_when.is_empty());
     }
 }

@@ -140,7 +140,7 @@ fn situations() -> Vec<Situation> {
         let _ = days;
         v.push(sit);
     };
-    curve("event_prep_T21d", 21, Posture::Ignore, "too far; acting now is premature planning", [0, 1, 3], false, false);
+    curve("event_prep_T21d", 21, Posture::Monitor, "window known but unopened: scheduled reconsideration", [1, 0, 3], false, false);
     curve("weather_T14d", 14, Posture::Monitor, "uncertain signal; watch for confidence", [1, 0, 3], false, false);
     curve("weather_T10d_decision", 10, Posture::Monitor, "decision deadline approaching; still low confidence", [1, 0, 2], false, false);
     curve("prep_T2d_internal", 2, Posture::Act, "act internally without interrupting (reserve equipment)", [2, 1, 0], false, false);
@@ -327,6 +327,7 @@ async fn phase3b_red_executive_baseline() {
             useful_action_available: false, internal_capability: true, blocked: false,
             waiting_on_someone: false, intervention_window_open: false,
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
         };
         match id {
             "stale_eta_after_delivered" | "flight_refunded_auto" | "key_rotated_old_alert" | "meeting_note_minuted" => {
@@ -392,6 +393,57 @@ async fn phase3b_red_executive_baseline() {
     }
     println!("EX1 SCOPE: {ex1_correct}/{ex1_total} GREEN {}", if ex1_failures.is_empty() { String::new() } else { format!("{ex1_failures:?}") });
 
+    // ── EX2: temporal escalation — SIX curve decisions from ONE unchanged situation ─────
+    // Only now_ms differs across evaluations; no new events, no priority scores.
+    const EX2_SCOPE: &[&str] = &[
+        "event_prep_T21d", "weather_T14d", "weather_T10d_decision",
+        "prep_T2d_internal", "warn_T4h_interrupt", "recovery_T_plus_1h",
+    ];
+    let d2 = 30 * DAY;
+    let ex2_now = |id: &str| match id {
+        "event_prep_T21d" => d2 - 21 * DAY,
+        "weather_T14d" => d2 - 14 * DAY,
+        "weather_T10d_decision" => d2 - 10 * DAY,
+        "prep_T2d_internal" => d2 - 2 * DAY,
+        "warn_T4h_interrupt" => d2 - 4 * 3_600_000,
+        _ => d2 + 3_600_000, // recovery_T_plus_1h
+    };
+    let mut ex2_total = 0usize;
+    let mut ex2_correct = 0usize;
+    let mut ex2_failures: Vec<String> = Vec::new();
+    for sit in &sits {
+        if !EX2_SCOPE.contains(&sit.id) {
+            continue;
+        }
+        ex2_total += 1;
+        let cand = mind_proactive::ExecutiveCandidate {
+            candidate_id: sit.id.into(), source_ref: format!("world:{}", sit.id), now_ms: ex2_now(sit.id),
+            urgency: 2, deadline_at_ms: Some(d2), already_resolved: false,
+            useful_action_available: true, internal_capability: true, blocked: false,
+            waiting_on_someone: false, intervention_window_open: false,
+            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            intervention_not_before_ms: Some(d2 - 9 * DAY),
+            intervention_by_ms: Some(d2),
+            interrupt_lead_ms: Some(4 * 3_600_000),
+        };
+        let dec = mind_proactive::arbitrate(&cand);
+        let got = match dec.posture {
+            mind_proactive::Posture::Ignore => Posture::Ignore,
+            mind_proactive::Posture::Monitor => Posture::Monitor,
+            mind_proactive::Posture::Act => Posture::Act,
+        };
+        let mut ok = got == sit.want && dec.requires_user_interrupt == sit.requires_user_interrupt;
+        if got == Posture::Monitor {
+            ok = ok && dec.monitor.as_ref().map(|m| !m.wake_when.is_empty()).unwrap_or(false);
+        }
+        // recovery must never masquerade as ordinary action
+        if sit.late_recovery {
+            ok = ok && dec.reason_code == "deadline_missed_recovery";
+        }
+        if ok { ex2_correct += 1; } else { ex2_failures.push(format!("{} got {:?}/{}", sit.id, dec.posture, dec.reason_code)); }
+    }
+    println!("EX2 SCOPE: {ex2_correct}/{ex2_total} GREEN {}", if ex2_failures.is_empty() { String::new() } else { format!("{ex2_failures:?}") });
+
     // Retires when the executive seam earns full coverage — same discipline as E.W0.
     assert_eq!(
         total - unrep, total,
@@ -401,7 +453,12 @@ async fn phase3b_red_executive_baseline() {
         ex1_correct, ex1_total,
         "EX1 scope regressed ({ex1_correct}/{ex1_total}) — posture semantics must hold while coverage expands"
     );
+    assert_eq!(
+        ex2_correct, ex2_total,
+        "EX2 scope regressed ({ex2_correct}/{ex2_total}) — temporal escalation must hold while coverage expands"
+    );
 }
+
 
 
 

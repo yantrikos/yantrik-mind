@@ -59,6 +59,12 @@ pub struct ExecutiveCandidate {
     pub interruption_cost: u8,
     pub risk: u8,
     pub confidence: f32,
+    /// EX2: when useful action BECOMES justified. None = unknown (never invented).
+    pub intervention_not_before_ms: Option<i64>,
+    /// EX2: last moment the action is still preventative. None falls back to deadline.
+    pub intervention_by_ms: Option<i64>,
+    /// EX2: remaining-time threshold under which the user must be interrupted.
+    pub interrupt_lead_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +111,51 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
     let horizon = c.deadline_at_ms.map(|d| d - c.now_ms);
     let near_deadline = horizon.map(|h| h <= 2 * DAY_MS).unwrap_or(false);
 
+    // ── EX2 TEMPORAL ESCALATION (E.EX2): explicit window times govern when present.
+    // Posture monotonicity is NOT guaranteed; justification at each evaluation time is.
+    if let Some(d) = c.deadline_at_ms {
+        if c.intervention_not_before_ms.is_none() && c.intervention_by_ms.is_none() && !c.intervention_window_open {
+            // We know WHEN it must be done, not WHEN acting helps: do not invent a window.
+            return dec(
+                Posture::Monitor,
+                false,
+                "insufficient_timing_basis",
+                Some(MonitorPlan {
+                    review_at_ms: None,
+                    wake_when: vec![
+                        WakeCondition::StateChangeOf(format!("intervention_window:{}", c.candidate_id)),
+                        WakeCondition::DeadlineWithin(DAY_MS),
+                    ],
+                }),
+            );
+        }
+        if let Some(nb) = c.intervention_not_before_ms {
+            if c.now_ms < nb {
+                return dec(
+                    Posture::Monitor,
+                    false,
+                    "too_early_wake_scheduled",
+                    Some(MonitorPlan {
+                        review_at_ms: Some(nb),
+                        wake_when: vec![WakeCondition::DeadlineWithin(DAY_MS), WakeCondition::StateChangeOf(c.source_ref.clone())],
+                    }),
+                );
+            }
+        }
+        if let Some(by) = c.intervention_by_ms {
+            if c.now_ms > by {
+                let reason = if c.now_ms > d { "deadline_missed_recovery" } else { "preventative_window_missed" };
+                return dec(Posture::Act, !c.internal_capability || c.now_ms > d, reason, None);
+            }
+        }
+        if c.useful_action_available && (c.intervention_window_open || c.intervention_not_before_ms.is_some() || c.intervention_by_ms.is_some()) {
+            let interrupt = !c.internal_capability
+                || c.interrupt_lead_ms.map(|lead| d - c.now_ms <= lead).unwrap_or(false);
+            let reason = if interrupt { "user_action_required" } else { "prepare_internally" };
+            return dec(Posture::Act, interrupt, reason, None);
+        }
+    }
+
     // 2. No justified intervention YET + a future trigger exists: intentional waiting.
     if !c.intervention_window_open || !c.useful_action_available {
         let mut wakes = vec![WakeCondition::DeadlineWithin(DAY_MS)];
@@ -138,6 +189,7 @@ mod ex1_tests {
             useful_action_available: false, internal_capability: false, blocked: false,
             waiting_on_someone: false, intervention_window_open: false,
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.9,
+            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
         }
     }
 
@@ -195,3 +247,84 @@ mod ex1_tests {
         assert!(d.monitor.unwrap().wake_when.iter().any(|w| matches!(w, WakeCondition::SourceFresh(_))));
     }
 }
+
+#[cfg(test)]
+mod ex2_temporal_tests {
+    use super::*;
+
+    /// PHASE 3B EX2 RED SPEC - same unchanged situation; ONLY evaluation time moves.
+    /// deadline=D; useful window opens D-14d... wait: opens D-9d, closes D; user-interrupt
+    /// lead 4h. Posture must be independently justified at every instant (#justification,
+    /// not monotonicity).
+    fn cand(now_ms: i64) -> ExecutiveCandidate {
+        let d = 30 * DAY_MS;
+        ExecutiveCandidate {
+            candidate_id: "curve".into(), source_ref: "world:event".into(), now_ms,
+            urgency: 2, deadline_at_ms: Some(d), already_resolved: false,
+            useful_action_available: true, internal_capability: true, blocked: false,
+            waiting_on_someone: false, intervention_window_open: false,
+            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            intervention_not_before_ms: Some(d - 9 * DAY_MS),
+            intervention_by_ms: Some(d),
+            interrupt_lead_ms: Some(4 * 3_600_000),
+        }
+    }
+
+    #[test]
+    fn boundaries_are_exact() {
+        let d = 30 * DAY_MS;
+        let nb = d - 9 * DAY_MS;
+        // 1ms before window opens -> still waiting
+        assert_eq!(arbitrate(&cand(nb - 1)).posture, Posture::Monitor);
+        // at the exact opening ms -> justified intervention begins
+        assert_eq!(arbitrate(&cand(nb)).posture, Posture::Act);
+        // 1ms before interrupt lead -> internal
+        let di = arbitrate(&cand(d - 4 * 3_600_000 - 1));
+        assert_eq!(di.posture, Posture::Act);
+        assert!(!di.requires_user_interrupt);
+        // at the interrupt lead -> user needed
+        let dii = arbitrate(&cand(d - 4 * 3_600_000));
+        assert_eq!(dii.posture, Posture::Act);
+        assert!(dii.requires_user_interrupt);
+        // at deadline: window edge, recovery not yet claimed
+        let dd = arbitrate(&cand(d));
+        assert_eq!(dd.posture, Posture::Act);
+        // 1ms past deadline: recovery, never ordinary act
+        let dr = arbitrate(&cand(d + 1));
+        assert_eq!(dr.posture, Posture::Act);
+        assert_eq!(dr.reason_code, "deadline_missed_recovery");
+        assert!(dr.requires_user_interrupt);
+    }
+
+    #[test]
+    fn preventative_window_missed_but_deadline_alive() {
+        let d = 30 * DAY_MS;
+        let mut c = cand(d - 2 * 3_600_000);
+        c.intervention_by_ms = Some(d - 6 * 3_600_000); // preventative prep closed earlier today
+        let r = arbitrate(&c);
+        assert_eq!(r.reason_code, "preventative_window_missed");
+    }
+
+    #[test]
+    fn missing_window_data_is_never_invented() {
+        let mut c = cand(0);
+        c.intervention_not_before_ms = None;
+        c.intervention_by_ms = None;
+        c.intervention_window_open = false;
+        let r = arbitrate(&c);
+        assert_eq!(r.posture, Posture::Monitor);
+        assert_eq!(r.reason_code, "insufficient_timing_basis");
+        assert!(r.monitor.unwrap().wake_when.iter()
+            .any(|w| matches!(w, WakeCondition::StateChangeOf(s) if s.contains("intervention_window"))));
+    }
+
+    #[test]
+    fn justification_over_monotonicity() {
+        // MONITOR early, then the issue resolves: posture legitimately REVERSES to IGNORE.
+        assert_eq!(arbitrate(&cand(0)).posture, Posture::Monitor);
+        let mut done = cand(5 * DAY_MS);
+        done.already_resolved = true;
+        assert_eq!(arbitrate(&done).posture, Posture::Ignore);
+    }
+}
+

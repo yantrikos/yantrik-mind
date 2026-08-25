@@ -115,6 +115,23 @@ pub trait Bus: Send + Sync {
     fn is_terminal(&self, _tool: &str, _obs: &str) -> bool {
         false
     }
+
+    /// Declare the run's flight-recorder trace id, BEFORE any tool call.
+    ///
+    /// This is what makes tool spans CHILDREN of the cognitive run instead of orphan traces —
+    /// so `ym why run-…` can later answer "did this tool call contribute to this goal?" rather
+    /// than only "what did each tool do in isolation". Default no-op: a bus without a recorder
+    /// simply has nothing to declare.
+    fn declare_trace(&self, _trace_id: &str) {}
+
+    /// Grade GOAL CONTRIBUTION at run completion: for every tool whose evidence entered the
+    /// capsule, did a finding actually CITE it?
+    ///
+    /// This is the third success kind — execution and semantics say the call worked; only the
+    /// contract verdict says it MATTERED. Contributors are `(tool_name, contributed)` pairs;
+    /// `met` is the contract's own verdict. Called once per completed (non-delivered) run.
+    /// Default no-op.
+    async fn grade_goal(&self, _trace_id: &str, _goal: &str, _met: bool, _contributors: &[(String, bool)]) {}
 }
 
 /// A stable signature for one tool call.

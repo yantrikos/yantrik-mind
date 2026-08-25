@@ -66,6 +66,9 @@ pub struct Outcome {
     /// A question for the user, when the run stopped needing one.
     pub question: Option<String>,
     pub trace: Vec<Step>,
+    /// The flight-recorder trace id this run declared — every tool span it caused parents under
+    /// it, so one ym why run-… reconstructs the whole causal path.
+    pub trace_id: String,
 }
 
 impl Outcome {
@@ -115,6 +118,10 @@ impl Cognition {
     /// Run a compiled goal to an answer.
     pub async fn run(&self, spec: &GoalSpec, clock: &dyn Clock) -> Outcome {
         let started: UnixMillis = clock.now_ms();
+        // One trace id per run — every tool span this run causes parents under it, so the
+        // flight recorder can reconstruct which calls served which goal.
+        let trace_id = format!("run-{}", clock.now_ms().max(1));
+        self.bus.declare_trace(&trace_id);
         let mut capsule = Capsule::new(&spec.id, &spec.goal);
         let mut trace: Vec<Step> = Vec::new();
         let mut next_evidence = 1u32;
@@ -363,7 +370,7 @@ impl Cognition {
         // the contract's verdict says nothing about a run whose answer was the tool's output, so
         // recording met/unmet against a followed approach would teach a lie either way.
         if let Some(raw) = delivered {
-            return Outcome { answer: raw, capsule, verdict, stopped_because, verified: None, question: None, trace };
+            return Outcome { answer: raw, capsule, verdict, stopped_because, verified: None, question: None, trace, trace_id };
         }
         let mut verified = None;
         let mut answer = if question.is_some() {
@@ -402,6 +409,24 @@ impl Cognition {
         for p in &procedures {
             self.bus.record_procedure_outcome(&p.name, verdict.met).await;
         }
+        // GOAL CONTRIBUTION: which tools' evidence did a finding actually CITE? The contract
+        // verdict is the goal-level outcome; this grades the third success kind at the only
+        // place it becomes observable — run completion.
+        if !delivered.is_some() {
+            let cited: std::collections::HashSet<&str> = capsule
+                .findings
+                .iter()
+                .flat_map(|f| f.evidence.iter().map(String::as_str))
+                .collect();
+            let mut by_tool: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+            for ev in &capsule.evidence {
+                let entry = by_tool.entry(ev.source.as_str()).or_insert(false);
+                *entry |= cited.contains(ev.id.as_str());
+            }
+            let contributors: Vec<(String, bool)> =
+                by_tool.into_iter().map(|(t, c)| (t.to_string(), c)).collect();
+            self.bus.grade_goal(&trace_id, &spec.goal, verdict.met, &contributors).await;
+        }
         // A run that SUCCEEDED with nothing to guide it is exactly the one worth remembering — next
         // time this shape of goal appears, the reasoning is already done. Only banked on success, and
         // only when there was no procedure, so the library grows from what worked rather than from
@@ -410,7 +435,7 @@ impl Cognition {
             self.bus.bank_procedure(&spec.goal, &spec.goal, &capsule.completed).await;
         }
 
-        Outcome { answer, capsule, verdict, stopped_because, verified, question, trace }
+        Outcome { answer, capsule, verdict, stopped_because, verified, question, trace, trace_id }
     }
 
     /// Perform one action through the bus.
@@ -933,3 +958,4 @@ mod tests {
         assert!(out.trace[0].ok);
     }
 }
+

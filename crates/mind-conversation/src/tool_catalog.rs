@@ -385,17 +385,61 @@ pub(crate) fn compact_recent(msgs: &[(String, String)]) -> String {
 
 /// Top catalog lines matching a discover_tools query — the escape hatch that turns a name-only
 /// (or forgotten) tool back into a fully-described one on demand.
+///
+/// A multi-word query must clear TWO distinct content-word overlaps before a line counts as a
+/// fit. One overlap is coincidence, not relevance: when the catalog started speaking in the words
+/// people ask in (81b42b0), "zzqx warp drive" began surfacing `browse` on the strength of the
+/// single word "drive" in "OPEN and drive a real website" — telling the model an unrelated tool
+/// "may fit", and (on the cognitive loop) feeding that non-answer in as evidence, which reset the
+/// stall counter every step so three fruitless searches read as progress. Naming the tool itself
+/// still qualifies on its own, and a one-word query keeps the old bar, or nothing would ever be
+/// found.
+///
+/// EXPERIENCE JOINS THE RANKING here (`search_lines_with_evidence`): among lines that already
+/// cleared the relevance bar, measured reliability breaks near-ties — the closure doctrine
+/// demands a learning signal affect a future decision, and this IS the decision surface for
+/// tool discovery. The bonus is deliberately bounded (±0.75) and gated on sample size: it can
+/// flip a close call toward the tool that has actually been working, but can never resurrect a
+/// weak-word fit or out-shout a large relevance gap. No history = no bonus = pure semantics,
+/// exactly the pre-evidence behavior.
 pub(crate) fn search_lines(query: &str, catalog: &str, top_n: usize) -> Vec<String> {
+    search_lines_with_evidence(query, catalog, top_n, &[])
+}
+
+/// Evidence-weighted variant. `track` is the per-tool bandit record `(name, rate, observations)`
+/// from `tool_track_record()`.
+pub(crate) fn search_lines_with_evidence(
+    query: &str,
+    catalog: &str,
+    top_n: usize,
+    track: &[(String, f64, u64)],
+) -> Vec<String> {
+    const EVIDENCE_WEIGHT: f64 = 1.5;
+    const SAMPLE_CAP: u64 = 20;
     let q = tokenize(query);
-    let mut scored: Vec<(usize, &str)> = catalog
+    let required = if q.len() >= 2 { 2 } else { 1 };
+    let mut scored: Vec<(f64, &str)> = catalog
         .lines()
         .filter_map(|line| {
             let name = tool_name_of_line(line)?;
             let s = score(&q, line, name);
-            (s > 0).then_some((s, line))
+            if s < required {
+                return None;
+            }
+            // Experience bonus: only for lines that already earned their place. Shrunk by
+            // sample size so two lucky failures don't outrank twenty honest observations.
+            let bonus = track
+                .iter()
+                .find(|(t, _, _)| t == name)
+                .filter(|(_, _, n)| *n > 0)
+                .map(|(_, rate, n)| {
+                    EVIDENCE_WEIGHT * (rate - 0.5) * ((*n).min(SAMPLE_CAP) as f64 / SAMPLE_CAP as f64)
+                })
+                .unwrap_or(0.0);
+            Some((s as f64 + bonus, line))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.into_iter().take(top_n).map(|(_, l)| l.trim().to_string()).collect()
 }
 
@@ -647,6 +691,104 @@ mod tests {
             hits.iter().any(|l| l.contains("watch_price")),
             "discover_tools must surface watch_price for a price-drop ask: {hits:?}"
         );
+    }
+
+    /// THE 81b42b0 REGRESSION. A multi-word query whose only overlap with a line is one weak
+    /// description word ("drive" in browse's "OPEN and drive a real website") must NOT read as a
+    /// fit — the honest answer is "(no tool or saved skill matches)". Surfacing an unrelated tool
+    /// lies to the model twice: once in the prompt ("Native tools that may fit"), once in the
+    /// capsule (the non-answer became evidence and reset the cognitive loop's stall counter).
+    #[test]
+    fn one_weak_word_overlap_is_not_a_fit() {
+        for q in ["zzqx warp drive", "zzqx warp drive one", "quantum flux capacitor"] {
+            let hits = search_lines(q, &catalog(), 6);
+            assert!(
+                !hits.iter().any(|l| l.contains("browse")),
+                "'{q}' must not surface browse on a single weak word: {hits:?}"
+            );
+            assert!(hits.is_empty(), "'{q}' has no real fit; got {hits:?}");
+        }
+    }
+
+    /// The bar moved for MULTI-word queries only: a single distinctive word still finds its tool,
+    /// or discovery would be amnesiac exactly when the ask is sharpest.
+    #[test]
+    fn a_single_word_still_finds_its_tool() {
+        let hits = search_lines("weather", &catalog(), 6);
+        assert!(
+            hits.iter().any(|l| l.starts_with("- weather") || l.contains("weather {")),
+            "one-word discovery must still work: {hits:?}"
+        );
+    }
+
+    /// Naming the tool outright always clears the bar, whatever else the query says.
+    #[test]
+    fn naming_the_tool_always_qualifies() {
+        let hits = search_lines("zzqx watch_price warp", &catalog(), 6);
+        assert!(
+            hits.iter().any(|l| l.contains("watch_price")),
+            "an explicit tool name is a fit by itself: {hits:?}"
+        );
+    }
+
+    // ── THE CLOSURE EXPERIMENT: experience must change the decision ────────────────────────────
+
+    fn two_tool_catalog() -> String {
+        // alpha_search clears THREE token overlaps; beta_finder only TWO — semantics prefer alpha.
+        "- alpha_search {query}: search the internal alpha indexes\n\
+         - beta_finder {query}: search across beta indexes\n"
+            .to_string()
+    }
+
+    fn rows(pairs: &[(&str, f64, u64)]) -> Vec<(String, f64, u64)> {
+        pairs.iter().map(|(n, r, c)| (n.to_string(), *r, *c)).collect()
+    }
+
+    /// BASELINE: with no history, pure semantics decide — alpha first.
+    #[test]
+    fn without_evidence_semantics_alone_rank_the_candidates() {
+        let hits = search_lines("search internal indexes", &two_tool_catalog(), 4);
+        let first = hits.first().unwrap();
+        assert!(first.contains("alpha_search"), "baseline order is semantic: {hits:?}");
+    }
+
+    /// THE FLIP: alpha holds the semantic edge, but twenty observations say it fails 80% of the
+    /// time while beta succeeds 95%. The ranking must invert — this is "Yantrik behaves
+    /// differently because it learned", proven deterministically. The live outcome delta
+    /// (success rate after the join vs before) is the box-side metric that decides KEEP.
+    #[test]
+    fn measured_history_overturns_a_semantic_edge() {
+        let track = rows(&[("alpha_search", 0.2, 20), ("beta_finder", 0.95, 20)]);
+        let hits = search_lines_with_evidence("search internal indexes", &two_tool_catalog(), 4, &track);
+        assert!(
+            hits.first().unwrap().contains("beta_finder"),
+            "strong sampled history must beat a one-token semantic edge: {hits:?}"
+        );
+    }
+
+    /// The influence is BOUNDED by design on three axes:
+    /// (1) evidence never rescues a below-bar fit (G.0's rule survives);
+    /// (2) tiny samples barely move anything (two lucky wins ≠ knowledge);
+    /// (3) even a full-weight bonus cannot out-shout a whole-token relevance gap.
+    #[test]
+    fn evidence_is_bounded_and_cannot_dominate_relevance() {
+        // (1) perfect history, zero relevance bar met: still excluded.
+        let track = rows(&[("browse", 1.0, 100)]);
+        let hits = search_lines_with_evidence("quantum flux capacitor", &catalog(), 6, &track);
+        assert!(!hits.iter().any(|l| l.contains("browse")), "evidence must not bypass the relevance bar");
+
+        // (2+3) gamma has ONE more overlap than beta AND beta carries perfect history — but at
+        // n=2 the bonus is ~0.075, so semantics hold. At n=20 the bonus is capped at 0.75,
+        // still under a 1.0 gap — semantics STILL hold. History breaks close calls; it does not
+        // outrank the catalog.
+        let cat = "- gamma_grep {query}: grep gamma content everywhere\n\
+                   - beta_finder {query}: search across beta indexes\n";
+        let small_n = rows(&[("beta_finder", 1.0, 2)]);
+        let hits = search_lines_with_evidence("grep query everywhere", cat, 4, &small_n);
+        assert!(hits.first().unwrap().contains("gamma_grep"), "n=2 must not overturn semantics: {hits:?}");
+        let big_n = rows(&[("beta_finder", 1.0, 20)]);
+        let hits = search_lines_with_evidence("grep query everywhere", cat, 4, &big_n);
+        assert!(hits.first().unwrap().contains("gamma_grep"), "the bonus is capped under one token of relevance: {hits:?}");
     }
 }
 

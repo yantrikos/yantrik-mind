@@ -823,6 +823,23 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                 // (it contributes nothing, same as the calibration belief).
                 let jref = format!("prediction:{}", preds[i].get("id").and_then(|x| x.as_i64()).unwrap_or(0));
                 self.judgment_grade(&jref, verd == "hit").await;
+                // FLIGHT RECORDER: the prediction→verdict PAIR under one trace — made-confidence
+                // vs outcome is the atom of "did Yantrik understand what it was doing".
+                self.recorder.record({
+                    let mut e = mind_observability::DecisionEvent::new(&jref, "prediction_graded");
+                    e.actor = Some("foresight".into());
+                    e.goal = Some(claim.clone());
+                    e.trigger = Some(format!("resolve-by reached ({resolve_by})"));
+                    e.predicted = Some(format!("{claim} · threshold: {threshold}"));
+                    e.confidence = Some(raw);
+                    e.outcome = Some(if why.is_empty() { "graded".into() } else { why.clone() });
+                    e.verdict = Some(verd.clone());
+                    e.lesson = Some(match verd.as_str() {
+                        "hit" => format!("{domain} calibration +0.7 evidence"),
+                        _ => format!("{domain} calibration −0.7 evidence"),
+                    });
+                    e
+                });
             }
             // Feed the verdict back into the subject's living CHARACTER MODEL, so the next forecast
             // reasons over its own graded track record (a MISS corrects the character read — the

@@ -176,6 +176,21 @@ impl super::ConversationEngine {
             self.node_tick(node_id, criterion, true).await;
         }
         self.ledger_sent("packet", &format!("prepared: {title}")).await;
+        // FLIGHT RECORDER: the packet's own id IS its trace — creation and resolution share it,
+        // so `ym why pkt:<hex>` reconstructs proposed→decided from persisted evidence.
+        self.recorder.record({
+            let mut e = mind_observability::DecisionEvent::new(&id, "packet_created");
+            e.actor = Some("proactive".into());
+            e.goal = Some(title.to_string());
+            e.trigger = Some(format!("{node_id}{}", satisfies.map(|s| format!(" ({s})")).unwrap_or_default()));
+            e.evidence_ids = evidence.clone();
+            e.chosen = Some(kind.to_string());
+            e.confidence = Some(confidence);
+            e.policy = vec![format!(
+                "confirmation_required={confirmation_required} provenance=inferred expiry_ms={expiry_ms}"
+            )];
+            e
+        });
         id
     }
 
@@ -216,6 +231,19 @@ impl super::ConversationEngine {
             if live && exp < now {
                 p["status"] = serde_json::json!("expired");
                 changed = true;
+                // FLIGHT RECORDER: expiry is an outcome too — the charter counts it in the
+                // acceptance denominator, and silence about it would flatter the numbers.
+                self.recorder.record({
+                    let mut e = mind_observability::DecisionEvent::new(
+                        p.get("id").and_then(|x| x.as_str()).unwrap_or("pkt:?"),
+                        "packet_expired",
+                    );
+                    e.actor = Some("proactive".into());
+                    e.goal = p.get("title").and_then(|x| x.as_str()).map(String::from);
+                    e.trigger = Some("expiry passed with no owner word".into());
+                    e.verdict = Some("expired".into());
+                    e
+                });
                 // an expired packet no longer vouches for readiness
                 if let (Some(nid), Some(c)) = (
                     p.get("node_id").and_then(|x| x.as_str()).map(String::from),
@@ -311,6 +339,22 @@ impl super::ConversationEngine {
             }
         }
         self.save_packets(&store).await;
+        // FLIGHT RECORDER: same trace as packet_created — the pair answers "what was predicted,
+        // what actually happened" for every human word on prepared work.
+        self.recorder.record({
+            let mut e = mind_observability::DecisionEvent::new(&id, "packet_resolved");
+            e.actor = Some("proactive".into());
+            e.goal = Some(title.clone());
+            e.trigger = Some(if approve { "owner approved" } else { "owner rejected" }.into());
+            e.outcome = if why.trim().is_empty() { None } else { Some(why.trim().to_string()) };
+            e.verdict = Some(if approve { "confirmed" } else { "rejected" }.into());
+            e.lesson = if approve {
+                Some("packet acceptance — emissary class earns standing".into())
+            } else {
+                Some("packet rejection — recorded as correction for the replay lab".into())
+            };
+            e
+        });
         if approve {
             self.ledger_resolve(true).await;
             format!("✅ Confirmed: {title}. I'll act within the packet's bounds — nothing beyond it.")
@@ -688,4 +732,73 @@ impl super::ConversationEngine {
         out
     }
 
+}
+ 
+#[cfg(test)]
+mod flight_recorder_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn engine_with_recorder(tag: &str) -> (Arc<ConversationEngine>, std::path::PathBuf) {
+        let mut p = std::env::temp_dir();
+        p.push(format!("ym_flight_{tag}_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let eng = Arc::new(ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            mind_types::default_persona("the user"),
+        )
+        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))));
+        (eng, p)
+    }
+
+    /// THE WIRING PROOF: a packet's creation and the owner's word on it land under ONE trace,
+    /// and `why` reconstructs predicted-vs-actual from persisted evidence — not narration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn packet_lifecycle_is_reconstructable_from_the_flight_recorder() {
+        let (eng, path) = engine_with_recorder("pkt");
+        let id = eng
+            .packet_add(
+                "node:birthday",
+                Some("gift shortlist ready"),
+                "checklist",
+                "Gift shortlist for the birthday",
+                "1. book; 2. wrap",
+                "window opened, preparable",
+                vec!["E1".into(), "E2".into()],
+                0.7,
+                false,
+                i64::MAX,
+            )
+            .await;
+        assert!(id.starts_with("pkt:"), "{id}");
+
+        // The creation event is already on disk under the packet's own trace.
+        let events = eng.recorder().read_trace(&id);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "packet_created");
+        assert_eq!(events[0].evidence_ids, vec!["E1".to_string(), "E2".to_string()]);
+
+        // The owner rejects it: same trace gains the resolution with its why.
+        eng.packet_decide("1", false, "wrong occasion").await;
+        let events = eng.recorder().read_trace(&id);
+        assert_eq!(events.len(), 2, "create + resolve share one trace");
+        assert_eq!(events[1].kind, "packet_resolved");
+        assert_eq!(events[1].verdict.as_deref(), Some("rejected"));
+        assert_eq!(events[1].outcome.as_deref(), Some("wrong occasion"));
+
+        // And `ym why <prefix>` renders it human-readably from persisted evidence only.
+        let rendered = eng.why(&id);
+        for needle in ["packet_created", "packet_resolved", "verdict: rejected", "outcome: wrong occasion", "confidence 0.70"] {
+            assert!(rendered.contains(needle), "rendered trace must contain '{needle}':\n{rendered}");
+        }
+        // Chain integrity survives real writes through the wiring.
+        assert_eq!(mind_observability::verify_log(&path), Ok(2));
+        let _ = std::fs::remove_file(&path);
+    }
 }

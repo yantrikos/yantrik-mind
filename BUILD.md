@@ -35,7 +35,12 @@ Plus a `Clock` seam (deterministic time). Reuse yantrik-ml `ChatMessage`/`Genera
 **DAG (acyclic):** governance(leaf) ← memory ← {perception, inference} ← {cortex, instincts, tools} ← {proactive, conversation, evolution} ← core. Back-edges are review-blocks.
 
 ## Concurrency rules (non-negotiable — forced by ground truth)
-- **Memory = single-owner actor.** YantrikDB is `!Sync` (RefCell + rusqlite Connection). One dedicated thread owns it; the facade is an async mpsc+oneshot client. **Mitigate head-of-line blocking now:** priority lanes (Interactive≫CommitmentDue≫Background≫Bulk); no heavy work inside the actor (snapshot→compute outside→commit); bounded requests; read-cache outside; **ban the `memory→inference→memory` cycle** (legal: `cortex → memory snapshot → inference → memory commit`). Instrument queue depth.
+- **Memory = single-owner actor.** YantrikDB is `!Sync` (RefCell + rusqlite Connection). One dedicated thread owns it; the facade is an async mpsc+oneshot client.
+  **Invariants (2026-08-24 revision — specify PROPERTIES, not mechanisms):**
+  1. *Interactive memory operations must not materially delay while background maintenance executes* (measured SLO: a live read issued mid-bulk completes in <10% of the bulk op's wall time).
+  2. *Causal ordering and read-your-writes are preserved regardless of scheduling*: same-caller commands complete in issue order; every state-mutating command a later read could depend on is visible to it.
+  Implementations satisfy these however they can. The prescribed priority-lane mechanism (Interactive≫CommitmentDue≫Background≫Bulk) was **built and falsified by measurement** (see `docs/PHASE2_EXPERIMENT_LEDGER.md` E.1): lanes reorder queued work but cannot preempt a running command, and an in-flight VACUUM stalled a live read for 65ms of its 70ms duration WITH lanes in place. What works: (a) heavy self-contained operations run OFF the actor thread (snapshot opens its own read-only connection); (b) a single FIFO preserves causal transparency; (c) backlog depth + high-water gauges (`MemoryHandle::backlog_depth`) are the tripwire that justifies moving the next heavy command off-thread. Do not reintroduce lanes without a measured pile-up they demonstrably fix.
+  Also: no heavy compute inside the actor (detect outside → commit small batch on-actor); bounded requests; read-cache outside; **ban the `memory→inference→memory` cycle** (legal: `cortex → memory snapshot → inference → memory commit`).
 - **Inference = bounded blocking pool + semaphore** (permits=1 for a local single-model backend); all calls via `spawn_blocking`. Cost/latency governance lives in this queue.
 - **Perception = one async bus** fed by a bridge task draining yantrik-os's crossbeam; delivery-critical events on a separate at-least-once mpsc (off the lossy broadcast).
 - **`mind-core` holds only `Arc<dyn Trait>` handles + the loop — zero domain state** (≤8 fields). The mechanical guard against a new god-object.
@@ -59,5 +64,6 @@ Injectable `ScriptedLLM` (LLMBackend) → ~90% of orchestration is deterministic
 
 ## Conventions
 - Edition 2021, `version.workspace`/`edition.workspace`. Common deps in root `[workspace.dependencies]`.
+- **Learning-signal closure (2026-08-24):** *a learning signal is not considered closed until it affects a future decision.* Bandits, posteriors, calibration curves, procedure ledgers and quarantine states are instrumentation, not learning, while they only record. Every signal must name the decision surface it feeds (tool ranking, prompt evidence, planning weights, quarantine recall) and carry a measured before/after for that surface. A ledger that grows without changing behavior is dead weight with a hash chain.
 - New crate that must reach memory → depend on `mind-types` and take a `MemoryFacade`, never `yantrikdb-core` directly (except inside `mind-memory`).
 - Keep the DAG acyclic; keep `mind-core` stateless.

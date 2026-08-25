@@ -279,6 +279,11 @@ pub async fn handle_line_as(
             Err(e) => Outcome::Said(format!("(error: {e})")),
         };
     }
+    // FLIGHT RECORDER read side: `:why <trace-prefix>` reconstructs a decision's causal path
+    // from the persisted hash-chained log; bare `:why` shows the last few recorded events.
+    if let Some(prefix) = t.strip_prefix(":why").map(str::trim) {
+        return Outcome::Said(conv.why(prefix));
+    }
     if let Some(desc) = t.strip_prefix(":task ") {
         return match mem.add_task(desc.trim(), "medium", None).await {
             Ok(task) => Outcome::Said(format!("added task [{}]: {}", task.id, task.description)),
@@ -368,6 +373,10 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     };
 
     let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
+        // The cognitive flight recorder: every meaningful decision lands in a hash-chained
+        // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
+        // is sticky-silent, never a turn-killer.
+        .with_recorder(Arc::new(mind_observability::DecisionLog::for_db(mem.db_path())))
         .with_web(Arc::new(mind_tools::HttpFetcher::new()))
         .with_searcher(searcher.clone()) // SearXNG (or DDG) — the discovery half of research
         .with_news(Arc::new(mind_tools::GoogleNews::new())) // keyless news, always on

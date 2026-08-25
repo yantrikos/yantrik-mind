@@ -36,6 +36,47 @@
 //! `(github not configured)` is a status line. Length and shape decide whether the words are ABOUT
 //! the call or merely IN the content — without that rule, every substring list eventually
 //! misclassifies real content, which is how the old one failed.
+//!
+//! # Three kinds of success (design contract — do not collapse them)
+//!
+//! The five-way outcome grades INVOCATION quality. It must never harden into the definition of
+//! capability, because the questions hide inside "did it work" form a LADDER, each rung needing
+//! more evidence than the last:
+//!
+//! ```text
+//! execution_success      → the tool ran and honored its contract   (Outcome, today)
+//!       ↓
+//! semantic_success       → the output carried substance for the ask (Empty vs Ok; recorded)
+//!       ↓
+//! evidence_utilized      → a finding actually CITED the output      (tool_goal_graded, today —
+//!                                                                    a PROXY: citing is not causing)
+//!       ↓
+//! goal_contribution      → the cited output materially advanced the objective
+//!                          (needs counterfactual/shadow comparison — pending)
+//!       ↓
+//! goal_outcome           → the user's objective itself succeeded    (ExpectedOutcomes — pending)
+//! ```
+//!
+//! Terminology discipline: today's `evidence_used` verdict is rung THREE. Letting it masquerade
+//! as causal contribution teaches "my search gets cited, therefore my search causes goals" —
+//! exactly the proxy optimization this architecture exists to prevent. Rung 4 arrives only via
+//! the policy-disagreement cohort / shadow comparison; rung 5 only where ExpectedOutcomes exist.
+//!
+//! Likewise, failure sources separate rather than average. `Unavailable` and `Denied` are
+//! excluded from reliability because they answer DIFFERENT questions — and each is still
+//! evidence:
+//!
+//! ```text
+//! P(action succeeds) ≈ P(available | context)
+//!                    × P(permitted | available)   ← Denied feeds this
+//!                    × P(success | permitted, available)   ← Ok/Empty/Failed feed this
+//! ```
+//!
+//! Today the availability term is handled structurally (`ready_capabilities` refuses absent
+//! clients before planning; the compiler turns gaps into refusals), and Denied/Unavailable
+//! events accumulate in the flight recorder for context-conditioned rates. Do not fold them
+//! back into the success rate to "use more data" — that re-teaches exactly the lie this module
+//! replaced.
 
 /// What a tool call actually did. Deliberately not a boolean: the four non-Ok cases call for
 /// different responses and must not be averaged together.

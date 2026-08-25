@@ -73,7 +73,7 @@ pub(crate) fn unmet_conditions(d: &ReflexDraft) -> Vec<&'static str> {
 pub(crate) fn goal_line(d: &ReflexDraft) -> String {
     let brief: Vec<String> = d.evidence.iter().take(3).map(|e| e.chars().take(90).collect()).collect();
     format!(
-        "REFLEX ({} corrections on \"{}\"): the owner had to correct these answers: {}. \
+        "REFLEX HYPOTHESIS ({} corrections on \"{}\"): the owner had to correct these answers: {}. \
          Fix in {}. Fixture {} — verify it is RED before the fix and green after; abort if it does not reproduce. \
          Predicted metric: {}. Rollback: {}. Post-deploy measurement: {}.",
         d.evidence.len(),
@@ -221,6 +221,22 @@ impl super::ConversationEngine {
                 if Self::enqueue_reflex_goal(d) {
                     d.status = "queued".into();
                     out.push(format!("queued #{} \"{}\" into the self-build queue", d.id, d.subject));
+                    // FLIGHT RECORDER: an improvement hypothesis entered the build queue — with
+                    // its evidence chain and predicted movement, so post-deploy grading has a
+                    // baseline to answer against.
+                    self.recorder.record({
+                        let mut e =
+                            mind_observability::DecisionEvent::new(format!("reflex-{}-{}", d.id, now_ms), "reflex_enqueued");
+                        e.actor = Some("reflex".into());
+                        e.goal = Some(d.subject.clone());
+                        e.trigger = Some("six-condition gate fully open".into());
+                        e.evidence_ids = d.evidence.clone();
+                        e.chosen = d.fixture.clone();
+                        e.predicted = Some(d.metric.clone());
+                        e.confidence = Some(0.5);
+                        e.lesson = Some(format!("rollback if: {}", d.rollback));
+                        e
+                    });
                 }
             }
         }

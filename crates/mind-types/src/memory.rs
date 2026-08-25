@@ -635,6 +635,13 @@ pub trait MemoryFacade: Send + Sync {
     async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
         Ok(vec![])
     }
+    /// Actor command-queue backlog as (queued_or_running, high_water_since_spawn).
+    /// Default zeros keep fake/inert facades honest ("no queue" is the truthful report for a
+    /// facade that has one). The real actor reports live gauges; surfaces use this to show
+    /// whether memory work is outrunning the single-owner actor.
+    fn backlog_depth(&self) -> (usize, usize) {
+        (0, 0)
+    }
     /// Feed a proactive send's fate (engaged vs ignored) into the engine's WORLD MODEL (per-time-bin
     /// engagement learning), personality feedback, and bond progression.
     async fn record_proactive_outcome(&self, _sent_ms: i64, _engaged: bool) -> Result<()> {

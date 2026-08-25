@@ -3786,3 +3786,93 @@ fn generated_schemas_type_their_text_arguments() {
     assert!(req.as_array().unwrap().iter().any(|r| r == "repo"), "repo stays required");
     assert!(!req.as_array().unwrap().iter().any(|r| r == "limit"), "limit? stays optional");
 }
+ 
+// ── CONTINUITY CAPTURE: loop-independence (ARCH-5 §E.6, Phase-2 §4) ─────────────────────────
+//
+// Invariant under test: deterministic continuity capture (taught beliefs, spoken commitments)
+// must not depend on which reasoning loop answered the turn. This block used to live BELOW the
+// `agent_primary` early-return — dead code under default config — so capture depended on the
+// model choosing the remember/add_reminder tools. It now sits above the fork, shared by every
+// path by construction; these fixtures pin that to both sides of the fork.
+
+fn capture_engine(agent_primary: bool) -> (MemoryHandle, ConversationEngine) {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    // The scripted model is deliberately USELESS — it never calls add_reminder or remember.
+    // If capture still happens, it happened deterministically, not via prompt compliance.
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("Noted.")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+        pool,
+        mind_types::default_persona("the user"),
+    )
+    .with_agent_primary(agent_primary);
+    (mem, conv)
+}
+
+/// THE DEFAULT PATH (agent loop answers). A spoken commitment must become an open task even
+/// though the model did nothing to record it — this is the exact turn shape the old placement
+/// silently dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn commitment_is_captured_on_the_default_agent_path() {
+    let (mem, conv) = capture_engine(true);
+    let _ = conv.handle_turn("remind me to call the dentist tomorrow").await.unwrap();
+    let tasks = mem.list_tasks(false).await.unwrap();
+    assert!(
+        tasks.iter().any(|t| t.description.contains("call the dentist")),
+        "a spoken commitment must survive the default loop without model cooperation: {tasks:?}"
+    );
+    let t = tasks.iter().find(|t| t.description.contains("dentist")).unwrap();
+    assert!(t.due_ms.is_some(), "tomorrow implies a due date");
+}
+
+/// Same path, taught-belief half: "remember that X" becomes a typed belief without the model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn taught_belief_is_captured_on_the_default_agent_path() {
+    let (mem, conv) = capture_engine(true);
+    let _ = conv.handle_turn("remember that the garage code is 4417").await.unwrap();
+    let ctx = mind_types::AccessContext::operator_audit();
+    let hits = mem.beliefs_matching_n("garage", 5, &ctx).await.unwrap();
+    assert!(
+        hits.iter().any(|b| b.statement.contains("garage code is 4417")),
+        "an explicitly-taught fact must become a belief on the default loop: {hits:?}"
+    );
+}
+
+/// THE PAIRED FIXTURE: identical turns through the LEGACY dispatch chain (agent_primary=false)
+/// produce the same durable continuity effects as the default path — the two loops cannot
+/// disagree about what the mind was told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_effects_are_identical_across_loops() {
+    for primary in [true, false] {
+        let (mem, conv) = capture_engine(primary);
+        let _ = conv.handle_turn("remind me to renew the passport next week").await.unwrap();
+        let _ = conv.handle_turn("remember that Pranab prefers terse replies").await.unwrap();
+        let tasks = mem.list_tasks(false).await.unwrap();
+        let ctx = mind_types::AccessContext::operator_audit();
+        let beliefs = mem.beliefs_matching_n("terse", 5, &ctx).await.unwrap();
+        assert!(
+            tasks.iter().any(|t| t.description.contains("renew the passport")) && t_due(tasks.iter().find(|t| t.description.contains("passport"))),
+            "agent_primary={primary}: commitment must be captured"
+        );
+        assert!(
+            beliefs.iter().any(|b| b.statement.contains("prefers terse replies")),
+            "agent_primary={primary}: taught belief must be captured"
+        );
+    }
+}
+
+fn t_due(t: Option<&mind_types::Task>) -> bool {
+    t.map(|t| t.due_ms.is_some()).unwrap_or(false)
+}
+
+/// IDEMPOTENCY: the same spoken promise twice leaves ONE open task (add_task dedup), not two —
+/// hoisting capture above the fork must not turn routing changes into duplicate reminders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_commitment_does_not_duplicate_tasks() {
+    let (mem, conv) = capture_engine(true);
+    let _ = conv.handle_turn("remind me to water the plants tonight").await.unwrap();
+    let _ = conv.handle_turn("remind me to water the plants tonight").await.unwrap();
+    let tasks = mem.list_tasks(false).await.unwrap();
+    let n = tasks.iter().filter(|t| t.description.contains("water the plants")).count();
+    assert_eq!(n, 1, "dedup must hold across repeated turns: {tasks:?}");
+}

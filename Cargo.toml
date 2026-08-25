@@ -11,7 +11,12 @@ edition = "2021"
 [workspace.dependencies]
 # common
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: f64 -> text -> f64 must be EXACT, because the hash-chained ledgers
+# (read receipts, immune trials, flight recorder) sign serialized events. Without this
+# feature serde_json's fast float formatter can drift 1 ulp on re-serialization, which
+# silently breaks every later hash in a chain (found by the tool-call learning-chain test,
+# 2026-08-24: brier 0.11111111111111113 verified as ...112).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

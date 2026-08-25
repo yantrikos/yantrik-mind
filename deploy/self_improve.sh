@@ -154,6 +154,22 @@ if [ "${YM_AUTOMERGE:-0}" = "1" ]; then
     echo "auto-merge BLOCKED: self-authored change touches crates/mind-evals (the judge) — human-review-only (eval custody)"; AUTOMERGE=0
     echo "$(date -u +%FT%TZ) | build | EVAL-CUSTODY-DRAFT | $GOAL" >> "$EVLOG"
   fi
+  # EPISTEMIC-LEDGER GATE: Yantrik cannot modify itself under a lower epistemic standard than the
+  # one it uses to learn about its tools (BUILD.md learning-signal closure doctrine / PHASE2 ledger).
+  # An automerge candidate's GOAL must carry the falsifiable contract — what is claimed
+  # (hypothesis), how success will be measured (predicted metric), and when to undo (rollback).
+  # Missing any => draft for human. A PR without these fields is simply ineligible for autonomous
+  # promotion; the pressure lands on the goal generators (reflex lines already qualify).
+  if [ "$AUTOMERGE" = "1" ]; then
+    GLOW=$(printf '%s' "$GOAL" | tr '[:upper:]' '[:lower:]')
+    if ! printf '%s' "$GLOW" | grep -q 'hypoth' \
+       || ! printf '%s' "$GLOW" | grep -q 'metric' \
+       || ! printf '%s' "$GLOW" | grep -q 'rollback'; then
+      echo "auto-merge BLOCKED: goal lacks its experimental-ledger contract (hypothesis / predicted metric / rollback) — draft for human"
+      echo "$(date -u +%FT%TZ) | build | EPISTEMY-DRAFT | $GOAL" >> "$EVLOG"
+      AUTOMERGE=0
+    fi
+  fi
   if [ "$files_changed" -gt 10 ] || [ "$lines_changed" -gt 400 ]; then
     echo "auto-merge BLOCKED: diff too large ($files_changed files / $lines_changed lines) — draft for human"; AUTOMERGE=0
   fi

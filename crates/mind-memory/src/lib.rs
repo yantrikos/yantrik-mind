@@ -14,8 +14,9 @@ use std::collections::HashMap;
 pub mod receipts;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use rusqlite::OptionalExtension;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use mind_types::{
     AuthError, Belief, BeliefAssertion, Contradiction, Evidence as MEvidence, MemoryFacade,
@@ -131,6 +132,27 @@ enum Cmd {
     #[cfg(test)]
     ForceInsertGoalPref { kind: String, text: String, reply: Reply<()> },
 }
+
+// ── actor scheduling doctrine (measured 2026-08-24) ──────────────────────────
+//
+// The actor owns ONE YantrikDB on ONE thread (`!Sync` substrate), so it cannot serve two
+// commands at once, and NO queue arrangement changes that. Priority lanes were built and
+// measured here: an in-flight bulk command stalled an interactive read for 65ms of its 70ms
+// duration WITH lanes in place — lanes reorder QUEUED work, nothing preempts a RUNNING
+// command, and forcing every command back through one FIFO changed nothing once the real fix
+// landed. The real fix is the one that measured out:
+//
+//   1. A command that does not need actor state must not occupy the actor. SnapshotTo opens
+//      its own read-only connection and runs off-thread; live reads now complete in <10% of
+//      a running snapshot's wall time.
+//   2. Everything else stays FIFO — simple, causally transparent (same-caller ordering by
+//      await; read-your-writes by construction).
+//
+// If a future command stalls turns the way VACUUM INTO did, the pattern to copy is #1:
+// make it self-contained or split it into an off-thread detect phase plus a small
+// actor-applied commit phase. Do NOT reintroduce lanes for it — that was the measured dead
+// end. Candidates if ever needed (all currently fast enough on production-scale data):
+// Export (~whole-store read), RetroDedupStore (~pairwise scan), SealCraftPack.
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
 
@@ -1722,9 +1744,45 @@ fn relate(db: &YantrikDB, src: &str, dst: &str, rel: &str, weight: f64) -> std::
 
 // ── the actor + handle ───────────────────────────────────────────────────────
 
+/// Backlog gauge for the single command queue: current depth (queued + running) and the
+/// high-water mark since spawn. The hwm is the tripwire that says "something outran the actor"
+/// without needing to catch it in the act — the signal that would justify splitting a heavy
+/// command off-thread per the scheduling doctrine at the top of this file.
+#[derive(Default)]
+struct BacklogGauge {
+    depth: std::sync::atomic::AtomicUsize,
+    high_water: std::sync::atomic::AtomicUsize,
+}
+
+impl BacklogGauge {
+    fn on_send(&self) {
+        let d = self.depth.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.high_water.fetch_max(d, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn on_done(&self) {
+        self.depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn snapshot(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (self.depth.load(SeqCst), self.high_water.load(SeqCst))
+    }
+}
+
+/// Public snapshot of the actor's queue state, for operator surfaces and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BacklogDepth {
+    pub queued_or_running: usize,
+    /// Worst backlog since spawn — the number that says "consolidation outran the actor".
+    pub high_water: usize,
+}
+
 #[derive(Clone)]
 pub struct MemoryHandle {
     tx: mpsc::UnboundedSender<Cmd>,
+    /// Where the store lives (":memory:" for scratch minds) — surfaced so wiring like the
+    /// flight recorder can sit beside the same DB without re-reading env.
+    db_path: String,
+    gauge: std::sync::Arc<BacklogGauge>,
     /// ARCH-1 slice 2: every principal read is receipted into a hash-chained ledger.
     receipts: std::sync::Arc<receipts::ReadReceiptLedger>,
     /// Authorization state recorded at spawn time; checked by restricted operations.
@@ -1747,12 +1805,16 @@ impl MemoryHandle {
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
+        let gauge = std::sync::Arc::new(BacklogGauge::default());
+        // The actor thread keeps its own gauge handle; the outer one goes on the returned Self.
+        let thread_gauge = std::sync::Arc::clone(&gauge);
         let path = db_path.to_string();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
 
         std::thread::Builder::new()
             .name("mind-memory".into())
             .spawn(move || {
+                let gauge = thread_gauge;
                 let db = match YantrikDB::new(&path, dim) {
                     Ok(d) => { let _ = ready_tx.send(Ok(())); d }
                     Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
@@ -1778,6 +1840,9 @@ impl MemoryHandle {
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
+                // THE PUMP: one FIFO, drained in arrival order. Causally transparent by
+                // construction (see the scheduling doctrine at the top of this file for why
+                // this stayed a single queue, and which escape hatch exists for heavy commands).
                 while let Some(cmd) = rx.blocking_recv() {
                     match cmd {
                         Cmd::Record { text, reply } => {
@@ -1895,7 +1960,31 @@ impl MemoryHandle {
                             let _ = reply.send(serde_json::to_string(&beliefs).map_err(|e| e.to_string()));
                         }
                         Cmd::SnapshotTo { dest, reply } => {
-                            let _ = reply.send(snapshot_db_to(&path, &dest));
+                            // Self-contained BY CONSTRUCTION: snapshot_db_to opens its OWN
+                            // read-only connection and touches no actor state, so running it
+                            // here would stall every lane behind a whole-file VACUUM (measured:
+                            // a live read waited 65ms of a 70ms copy). Off-thread it goes; the
+                            // actor keeps serving commands while the copy runs.
+                            type SnapshotReply = tokio::sync::oneshot::Sender<std::result::Result<(), String>>;
+                            let reply_cell: std::sync::Arc<std::sync::Mutex<Option<SnapshotReply>>> =
+                                std::sync::Arc::new(std::sync::Mutex::new(Some(reply)));
+                            let live = path.clone();
+                            let dest2 = dest.clone();
+                            let cell = std::sync::Arc::clone(&reply_cell);
+                            let spawned = std::thread::Builder::new()
+                                .name("mind-memory-snapshot".into())
+                                .spawn(move || {
+                                    if let Some(r) = cell.lock().unwrap().take() {
+                                        let _ = r.send(snapshot_db_to(&live, &dest2));
+                                    }
+                                });
+                            if spawned.is_err() {
+                                // Thread spawn itself failed (process pathology): run inline
+                                // rather than dropping the caller's reply.
+                                if let Some(r) = reply_cell.lock().unwrap().take() {
+                                    let _ = r.send(snapshot_db_to(&path, &dest));
+                                }
+                            }
                         }
                         Cmd::AddTask { description, priority, due_ms, reply } => {
                             let _ = reply.send(add_task(&db, &mut alloc, &description, &priority, due_ms));
@@ -2276,6 +2365,9 @@ impl MemoryHandle {
                             let _ = reply.send(r);
                         }
                     }
+                    // The command is finished — its queue slot frees only now, so depth counts
+                    // queued + running work.
+                    gauge.on_done();
                 }
             })
             .map_err(|e| MindError::Memory(format!("spawn actor: {e}")))?;
@@ -2283,6 +2375,8 @@ impl MemoryHandle {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 tx,
+                db_path: db_path.to_string(),
+                gauge,
                 receipts: std::sync::Arc::new(receipts::ReadReceiptLedger::for_db(db_path)),
                 device_auth: device_authorization,
             }),
@@ -2358,10 +2452,24 @@ impl MemoryHandle {
 
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
         let (reply, rx) = oneshot::channel();
+        self.gauge.on_send();
         self.tx.send(make(reply)).map_err(|_| MindError::Memory("memory actor is gone".into()))?;
         rx.await
             .map_err(|_| MindError::Memory("memory actor dropped the reply".into()))?
             .map_err(MindError::Memory)
+    }
+
+    /// Current backlog as (queued_or_running, high_water_since_spawn). A climbing high-water
+    /// mark is the alarm that the mind is asking more of memory than one thread can serve — the
+    /// signal that would justify moving a heavy command off-thread per the scheduling doctrine.
+    pub fn backlog_depth(&self) -> BacklogDepth {
+        let (queued_or_running, high_water) = self.gauge.snapshot();
+        BacklogDepth { queued_or_running, high_water }
+    }
+
+    /// Where this handle's store lives (":memory:" for scratch minds).
+    pub fn db_path(&self) -> &str {
+        &self.db_path
     }
 
     /// Point-in-time snapshot of the live database into `dest` (a path that
@@ -2863,6 +2971,11 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
         self.call(|reply| Cmd::ToolTrackRecord { reply }).await
+    }
+    fn backlog_depth(&self) -> (usize, usize) {
+        // Inherent method wins resolution over this trait method, so this reads the live gauge.
+        let d = MemoryHandle::backlog_depth(self);
+        (d.queued_or_running, d.high_water)
     }
     async fn record_proactive_outcome(&self, sent_ms: i64, engaged: bool) -> Result<()> {
         self.call(move |reply| Cmd::RecordProactiveOutcome { sent_ms, engaged, reply }).await
@@ -4246,3 +4359,145 @@ mod tests {
     }
 
 }
+ 
+#[cfg(test)]
+mod actor_ordering_tests {
+    use super::*;
+
+    /// READ-YOUR-WRITES THROUGH THE SINGLE QUEUE: a transcript write followed by a bulk read of
+    /// the same table must observe the write. This is the causality the consolidation cursor
+    /// depends on, and the property a naive two-lane design could have broken (kept from the
+    /// lane experiment as the permanent regression lock for whatever scheduling comes later).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bulk_read_sees_every_prior_write() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message_scoped("user", "the garage code is 4417", mind_types::Scope::Private("primary".into())).await.unwrap();
+        let rows = mem.messages_since(0, 50).await.unwrap();
+        assert!(
+            rows.iter().any(|(_, _, t)| t.contains("4417")),
+            "a bulk read must observe a prior write: {rows:?}"
+        );
+    }
+
+    /// Same-caller ordering: writes issued before a bulk window are visible inside it; writes
+    /// issued after are not required to be. Deterministic per caller — await-per-command is
+    /// the ordering guarantee, independent of any future queue arrangement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_caller_ordering_is_deterministic() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        for i in 0..5 {
+            mem.append_message_scoped("user", &format!("msg {i}"), mind_types::Scope::Private("primary".into())).await.unwrap();
+        }
+        let rows = mem.messages_since(0, 50).await.unwrap();
+        let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "bulk window returns ascending ids");
+        assert_eq!(rows.len(), 5);
+        // A write AFTER the consumed window must not retro-appear in it.
+        mem.append_message_scoped("user", "later msg", mind_types::Scope::Private("primary".into())).await.unwrap();
+        assert!(!rows.iter().any(|(_, _, t)| t.contains("later msg")));
+    }
+
+    /// Under concurrent load nothing is lost, every reply arrives exactly once, and the backlog
+    /// gauge drains back to zero — the actor's termination and accounting discipline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_load_loses_nothing_and_drains_to_zero() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let mut joins = Vec::new();
+        for w in 0..8isize {
+            let m = mem.clone();
+            joins.push(tokio::spawn(async move {
+                for i in 0..25 {
+                    let txt = format!("worker {w} message {i}");
+                    m.append_message_scoped("user", &txt, mind_types::Scope::Private("primary".into())).await.unwrap();
+                }
+            }));
+        }
+        for _ in 0..10 {
+            let _ = mem.messages_since(0, 100).await.unwrap();
+            let _ = mem.recent_messages(5, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        }
+        for j in joins {
+            j.await.unwrap();
+        }
+        let all = mem.messages_since(0, 10_000).await.unwrap();
+        assert_eq!(all.len(), 200, "every write must land exactly once");
+        let d = mem.backlog_depth();
+        assert!(d.high_water >= 1, "the queue was exercised: {d:?}");
+        assert_eq!(d.queued_or_running, 0, "backlog must drain to zero: {d:?}");
+    }
+}
+
+
+
+ 
+#[cfg(test)]
+mod lane_experiment {
+    use super::*;
+
+    /// LATENCY EXPERIMENT (#[ignore]: seeds a large store; run with `cargo test -p mind-memory
+    /// experiment_bulk -- --ignored --nocapture`). Demonstrates the property the lanes exist
+    /// for: while a bulk command (snapshot copy) is IN FLIGHT, an interactive read issued
+    /// mid-flight completes in a fraction of the bulk op's duration. Run once against the
+    /// two-lane pump and once against a forced single-FIFO classification (Cmd::lane() ->
+    /// always Interactive) to record both sides of the comparison in the experiment ledger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn experiment_bulk_op_does_not_delay_live_reads() {
+        let dir = std::env::temp_dir().join(format!("ym_lane_exp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("exp.db").to_string_lossy().to_string();
+        let mem = MemoryHandle::spawn(&db_path, 8).unwrap();
+
+        // Seed transcript rows until a snapshot copy clears ~80ms (bounded calibration).
+        let body = "x".repeat(300);
+        let mut batches = 0u32;
+        loop {
+            for i in 0..500 {
+                mem.append_message_scoped("user", &format!("{batches}:{i} {body}"), mind_types::Scope::Private("primary".into())).await.unwrap();
+            }
+            batches += 1;
+            let t0 = std::time::Instant::now();
+            let probe = dir.join(format!("probe_{batches}.db"));
+            mem.snapshot_to(probe.to_string_lossy().to_string()).await.unwrap();
+            if t0.elapsed() >= std::time::Duration::from_millis(80) || batches >= 40 {
+                break;
+            }
+        }
+
+        // Start the bulk op; wait until its destination file appears (= copy genuinely running).
+        let dest_path = dir.join("final.db");
+        let m2 = mem.clone();
+        let bg = tokio::spawn(async move {
+            let t = std::time::Instant::now();
+            m2.snapshot_to(dest_path.to_string_lossy().to_string()).await.unwrap();
+            t.elapsed()
+        });
+        let dest = dir.join("final.db");
+        let mut waited = std::time::Duration::ZERO;
+        while !dest.exists() && waited < std::time::Duration::from_secs(5) {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            waited += std::time::Duration::from_millis(2);
+        }
+        assert!(dest.exists(), "bulk op never started");
+
+        let t0 = std::time::Instant::now();
+        let _ = mem.recent_messages(10, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        let interactive_dt = t0.elapsed();
+        let bg_dt = bg.await.unwrap();
+
+        println!(
+            "EXPERIMENT seed_batches={batches} interactive_read={interactive_dt:?} background_total={bg_dt:?}"
+        );
+        assert!(
+            interactive_dt < bg_dt / 2,
+            "live read serialized behind bulk op: interactive {interactive_dt:?} vs bg {bg_dt:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+

@@ -3277,6 +3277,11 @@ pub struct ConversationEngine {
     packs_path: Option<String>,
     /// Where trust claims get witnessed (Weft). None = the mind certifies unattested and says so.
     attestor: Option<Arc<dyn mind_governance::weft::Attestor>>,
+    /// The cognitive flight recorder (ARCH-5 §G.4): observes meaningful decisions into a
+    /// hash-chained append-only log keyed by trace_id. Disabled by default (eval harnesses);
+    /// the real engine wires one beside its DB via `with_recorder`. It OBSERVES — every
+    /// authoritative store stays exactly that.
+    recorder: Arc<mind_observability::DecisionLog>,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -3395,6 +3400,7 @@ impl ConversationEngine {
             packs: Mutex::new(Vec::new()),
             packs_path: None,
             attestor: None,
+            recorder: Arc::new(mind_observability::DecisionLog::disabled()),
             scan_mail: Vec::new(),
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -4180,6 +4186,34 @@ impl ConversationEngine {
     pub fn with_attestor(mut self, a: Arc<dyn mind_governance::weft::Attestor>) -> Self {
         self.attestor = Some(a);
         self
+    }
+
+    /// Wire the cognitive flight recorder. `DecisionLog::record` is fail-sticky and cannot fail
+    /// its caller, so every emit site below logs unconditionally.
+    pub fn with_recorder(mut self, r: Arc<mind_observability::DecisionLog>) -> Self {
+        self.recorder = r;
+        self
+    }
+
+    /// Recorder access for modules that log their own decisions (packets, reflex, foresight).
+    pub fn recorder(&self) -> &Arc<mind_observability::DecisionLog> {
+        &self.recorder
+    }
+
+    /// `ym why [trace-prefix]` — reconstruct a decision's causal path from the persisted
+    /// flight recorder. Reads ONLY the log; every line was recorded when the decision happened,
+    /// so nothing here is reconstructed after the fact.
+    pub fn why(&self, prefix: &str) -> String {
+        let events = self.recorder.read_trace(prefix);
+        if events.is_empty() {
+            if prefix.is_empty() {
+                "No decisions recorded yet — the flight recorder fills as cognition runs.".into()
+            } else {
+                format!("No recorded events under trace '{prefix}'.")
+            }
+        } else {
+            mind_observability::render_trace(&events)
+        }
     }
 
     /// Wire the Weft attestor from the environment (`YM_WEFT_URL` + `YM_WEFT_KEY`), if both are
@@ -5293,6 +5327,31 @@ impl ConversationEngine {
                 self.bar_drain(n).await
             }
             "scoreboard" | "board" => self.outer_scoreboard(14).await.render(),
+            // FLIGHT RECORDER read side: `ym why <trace-prefix>` reconstructs a decision's causal
+            // path from the persisted hash-chained log; bare `ym why` shows the last few events;
+            // `ym why calibration` grades predicted-vs-observed by confidence band.
+            "why" => {
+                let prefix = rest.trim();
+                if prefix == "calibration" {
+                    return mind_observability::render_calibration(&self.recorder.read_trace(""));
+                }
+                if prefix == "contribution" {
+                    return mind_observability::render_goal_contribution(&self.recorder.read_trace(""));
+                }
+                if prefix == "flips" {
+                    return mind_observability::render_policy_flips(&self.recorder.read_trace(""));
+                }
+                let events = self.recorder.read_trace(prefix);
+                if events.is_empty() {
+                    if prefix.is_empty() {
+                        "No decisions recorded yet — the flight recorder fills as cognition runs.".into()
+                    } else {
+                        format!("No recorded events under trace '{prefix}'.")
+                    }
+                } else {
+                    mind_observability::render_trace(&events)
+                }
+            }
             "fitness" => self.fitness_report().await,
             // Belief lifecycle: the tombstone ledger — what was forgotten, and why.
             "tombstones" | "forgotten" => match self.memory.belief_tombstones().await {
@@ -6488,6 +6547,7 @@ impl ConversationEngine {
             lines.push("ym device list · ym device pair <name> --person <slug>|--operator · ym device revoke <id>   paired-device trust".to_string());
         }
         lines.push("ym proposals             pending research proposals (shadow mode; read-only)".to_string());
+        lines.push("ym why [trace-prefix]    reconstruct a decision's causal path (flight recorder)".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -7610,10 +7670,61 @@ impl ConversationEngine {
                 let q = s("query");
                 // The escape hatch of the retrieval-gated catalog: search the FULL native/plugin/MCP
                 // tool set (not just the skill library), so a tool abbreviated to name-only in the
-                // loop prompt gets its full description back on demand.
+                // loop prompt gets its full description back on demand. Ranking carries MEASURED
+                // reliability (the closure doctrine: history must change this decision) — among
+                // equally-relevant lines, the one that has actually been working ranks first.
+                let track = self.memory.tool_track_record().await.unwrap_or_default();
                 let native = {
                     let src = format!("{}\n{}", tool_catalog::CORE_HEAD, self.catalog_source());
-                    tool_catalog::search_lines(&q, &src, 6)
+                    let mut lines = tool_catalog::search_lines_with_evidence(&q, &src, 6, &track);
+                    // COUNTERFACTUAL RECORD: when measured history CHANGED the top pick vs the
+                    // legacy semantic-only ranking, say so — selected vs what-would-have-been.
+                    // Across many decisions this builds the policy-disagreement cohort: "when my
+                    // learned policy overruled my old policy, how often was it right?" — graded
+                    // later by the outcomes that arrive under the trace.
+                    {
+                        let legacy_first = tool_catalog::search_lines(&q, &src, 1)
+                            .first()
+                            .and_then(|l| crate::tool_catalog::tool_name_of_line(l))
+                            .map(String::from);
+                        let new_first = lines
+                            .first()
+                            .and_then(|l| crate::tool_catalog::tool_name_of_line(l))
+                            .map(String::from);
+                        if let (Some(legacy), Some(selected)) = (&legacy_first, &new_first) {
+                            if legacy != selected && track.iter().any(|(t, _, n)| *n > 0 && (t == legacy || t == selected)) {
+                                self.recorder.record({
+                                    let mut e = mind_observability::DecisionEvent::span(
+                                        format!("sel-{}", mind_observability::now_ms()),
+                                        None,
+                                        "selection_flipped",
+                                    );
+                                    e.object_id = Some(format!("discover:{}", q));
+                                    e.chosen = Some(selected.clone());
+                                    e.rejected = vec![format!("{legacy} (legacy semantic-only ranking)")];
+                                    e.trigger = Some("reliability evidence changed the ranking".into());
+                                    e.confidence = track
+                                        .iter()
+                                        .find(|(t, _, _)| t == selected)
+                                        .map(|(_, r, _)| *r);
+                                    e.lesson = Some("policy disagreement logged — grade me when this goal's outcome arrives".into());
+                                    e
+                                });
+                            }
+                        }
+                    }
+                    // Say the evidence out loud, so the model choosing between near-ties sees WHY
+                    // one ranks above another — measured history, never a vibe.
+                    for l in lines.iter_mut() {
+                        if let Some(name) = crate::tool_catalog::tool_name_of_line(l) {
+                            if let Some((_, rate, n)) = track.iter().find(|(t, _, _)| t == name) {
+                                if *n >= 3 {
+                                    l.push_str(&format!(" · measured ok {:.0}% (n={n})", rate * 100.0));
+                                }
+                            }
+                        }
+                    }
+                    lines
                 };
                 let mut out = String::new();
                 if !native.is_empty() {
@@ -8926,6 +9037,52 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // the conversational grounding, so a memory question answered from a stale belief. Here,
         // every deterministic interceptor has already had its say, and the loop (either loop)
         // receives the same assembled grounding.
+        // ── DETERMINISTIC CONTINUITY CAPTURE — loop-independent by construction. ──────────────
+        // An explicitly-taught fact and a spoken commitment are recorded HERE, before the
+        // reasoning-loop fork, because WHICH loop answered must never decide WHETHER the mind
+        // remembers. This block used to live below the `agent_primary` early-return — dead
+        // under default config — so "remember that X" survived only if the model chose the
+        // remember tool, and "remind me to X tomorrow" only if it chose add_reminder: prompt
+        // compliance standing in for a guarantee. Idempotency does not lean on running once:
+        // beliefs are proposition-keyed (re-teaching = evidence update, not a duplicate row)
+        // and add_task dedups jaccard/cosine against open tasks.
+        if let Some(stmt) = Self::extract_taught_belief(user_text) {
+            match self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: stmt.clone(),
+                    polarity: 1.0,
+                    weight: 1.5,
+                    source_event: Some("chat".into()),
+                    provenance: "told".into(),
+                })
+                .await
+            {
+                Ok(b) => self.recorder.record({
+                    let mut e = mind_observability::DecisionEvent::span(format!("belief:{}", b.id), None, "belief_taught");
+                    e.object_id = Some(format!("belief:{}", b.id));
+                    e.goal = Some(stmt);
+                    e.trigger = Some("explicit teaching intent in user turn".into());
+                    e.verdict = Some("captured".into());
+                    e
+                }),
+                Err(_) => (), // capture must never fail the turn; memory already warned
+            }
+        }
+        if let Some((desc, due_ms)) = Self::extract_commitment(user_text) {
+            if let Ok(t) = self.memory.add_task(&desc, "medium", due_ms).await {
+                // The task's own id is the object trace: reminder_loop nudges, follow-through
+                // and completion can later parent onto it (`ym why task:<id>`).
+                self.recorder.record({
+                    let mut e = mind_observability::DecisionEvent::span(format!("task:{}", t.id), None, "commitment_captured");
+                    e.object_id = Some(format!("task:{}", t.id));
+                    e.goal = Some(desc);
+                    e.trigger = Some("spoken commitment pattern in user turn".into());
+                    e.verdict = Some("captured".into());
+                    e
+                });
+            }
+        }
         if self.agent_primary {
             if self.cognition_on() {
                 let arc = self.self_ref.lock().unwrap().upgrade();
@@ -9151,23 +9308,9 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             return Ok(reply);
         }
         // The mind learns from conversation: an explicitly-taught fact becomes a typed belief,
-        // available to ground this very turn and every future one.
-        if let Some(stmt) = Self::extract_taught_belief(user_text) {
-            let _ = self
-                .memory
-                .remember_as_belief(BeliefAssertion {
-                    statement: stmt,
-                    polarity: 1.0,
-                    weight: 1.5,
-                    source_event: Some("chat".into()),
-                    provenance: "told".into(),
-                })
-                .await;
-        }
-        // A spoken commitment becomes a cheap open task (with a due date if one was implied).
-        if let Some((desc, due_ms)) = Self::extract_commitment(user_text) {
-            let _ = self.memory.add_task(&desc, "medium", due_ms).await;
-        }
+        // available to ground this very turn and every future one. (CAPTURE MOVED ABOVE THE
+        // LOOP FORK — it must not depend on which reasoning loop answered; see the continuity-
+        // capture block before the agent_primary branch.)
         // Read-only tool use. Both web + mail follow the same rule: success → an UNTRUSTED grounding
         // block; failure → a TRUSTED note so the model says it couldn't, never confabulates.
         let mut web_page: Option<(String, String)> = None;

@@ -30,11 +30,18 @@ pub struct EngineBus {
     /// Per-turn guard-pipeline state — the same `guards::GuardState` the legacy loop keeps, so
     /// the unavailable-ban and the egress provenance behave identically on both paths.
     guard_state: std::sync::Mutex<crate::guards::GuardState>,
+    /// The run's flight-recorder trace, declared by the loop before its first call. Tool
+    /// prediction/observation events become spans UNDER this trace instead of orphans.
+    trace_root: std::sync::Mutex<Option<String>>,
 }
 
 impl EngineBus {
     pub fn new(engine: Arc<ConversationEngine>, identity: TurnIdentity) -> Self {
-        Self { engine, identity, user_text: String::new(), guard_state: std::sync::Mutex::new(Default::default()) }
+        Self { engine, identity, user_text: String::new(), guard_state: std::sync::Mutex::new(Default::default()), trace_root: std::sync::Mutex::new(None) }
+    }
+
+    fn current_trace(&self) -> Option<String> {
+        self.trace_root.lock().unwrap().clone()
     }
 
     /// Carry the user's literal request so per-call guards can distinguish "the user typed this
@@ -43,6 +50,31 @@ impl EngineBus {
         self.user_text = user_text.to_string();
         self
     }
+
+    /// The tool's own measured success rate — the ONLY confidence this loop predicts with.
+    /// The bandit stores a Beta(1,1)-smoothed posterior per tool (`alpha/(alpha+beta)`), so
+    /// the mean is already shrunk toward 0.5 while observations are few — one honest prior,
+    /// not two stacked ones. `n` rides along so events can declare how much history stands
+    /// behind the number.
+    async fn empirical_prior(&self, tool: &str) -> EmpiricalPrior {
+        let row = self
+            .engine
+            .memory
+            .tool_track_record()
+            .await
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|(t, _, _)| t == tool));
+        match row {
+            Some((_, rate, n)) if n > 0 => EmpiricalPrior { rate, n },
+            _ => EmpiricalPrior { rate: 0.5, n: 0 }, // uninformed prior — honestly labeled in the event
+        }
+    }
+}
+
+/// Shrunken empirical prior for one tool, plus the sample count it came from.
+struct EmpiricalPrior {
+    rate: f64,
+    n: u64,
 }
 
 #[async_trait::async_trait]
@@ -89,21 +121,89 @@ impl Bus for EngineBus {
     }
 
     async fn call(&self, tool: &str, args: &Value) -> anyhow::Result<String> {
-        // THE GUARD PIPELINE — the same `guards::pre`/`guards::post` the legacy loop runs, then
-        // dispatch through the same path (plugin enablement, egress broker, read isolation all
-        // apply unchanged). This closes what used to be a documented gap on this path: egress
-        // clean-authoring with per-turn external provenance now runs here too, which was one of
-        // the stated reasons YM_COGNITION stayed off. A guard added to the pipeline reaches both
-        // loops by construction — the classifier fork, the terminal-list fork and the missing
-        // tripwire were all children of the two-copies disease this ends.
+        // ── THE CLOSED LEARNING CHAIN, one tool call wide (Phase-2 §2). ────────────────────────
+        // PREDICTION first — from the EMPIRICAL PRIOR only: the tool's own measured track record
+        // (the bandit's Beta(1,1)-smoothed posterior). The model's confidence is NOT consulted
+        // and not invented. Events are spans UNDER the run's declared trace (declare_trace), so
+        // `ym why run-…` reconstructs which calls served which goal.
+        let trace = self.current_trace().unwrap_or_else(|| format!("toolcall-{}", mind_observability::now_ms()));
+        let prior = self.empirical_prior(tool).await;
+        let object_id = format!("{}:{}", tool, signature(tool, args));
+        let predicted = {
+            let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_predicted");
+            e.object_id = Some(object_id.clone());
+            e.goal = Some(self.user_text.chars().take(120).collect());
+            e.chosen = Some(tool.to_string());
+            e.predicted = Some(format!("tool {tool} returns usable output"));
+            e.confidence = Some(prior.rate);
+            e.policy = vec![format!("empirical prior n={}{}", prior.n, if prior.n < 5 { " (low-N shrinkage)" } else { "" })];
+            let id = e.event_id.clone();
+            self.engine.recorder().record(e);
+            id
+        };
+
         let clean = match crate::guards::pre(&self.engine, &self.guard_state, &self.identity, &self.user_text, tool, args.clone(), "bus").await {
             crate::guards::PreVerdict::Proceed(a) => a,
-            crate::guards::PreVerdict::Refuse { msg, .. } => anyhow::bail!("{msg}"),
+            crate::guards::PreVerdict::Refuse { msg, .. } => {
+                // A refusal is the SAFETY machinery observed, not the tool observed: no
+                // prediction error is computed (counts_toward_reliability is None for Denied),
+                // but the chain still records what happened.
+                self.engine.recorder().record({
+                    let mut e = mind_observability::DecisionEvent::span(&trace, predicted.as_deref(), "tool_observed");
+                    e.object_id = Some(object_id);
+                    e.outcome = Some(msg.chars().take(160).collect());
+                    e.verdict = Some("denied".into());
+                    e.lesson = Some("refusal recorded; excluded from reliability by design — feeds P(permitted | context), not P(success)".into());
+                    e
+                });
+                anyhow::bail!("{msg}");
+            }
         };
         let out = self.engine.run_agent_tool_as(tool, &clean, &self.identity).await;
         // ONE definition of "worked": the five-way outcome, recorded and classified in `post`.
         // An empty result is the tool WORKING; the capsule sees it as a barren step, not a break.
-        match crate::guards::post(&self.engine, &self.guard_state, tool, &out).await {
+        let verdict = crate::guards::post(&self.engine, &self.guard_state, tool, &out).await;
+        // ── REAL OUTCOME + BRIER LOSS → the bandit update happens inside `post`; here we persist
+        // the pair so calibration is auditable per call and bucketable by confidence later.
+        {
+            let success: Option<f64> = match verdict {
+                crate::tool_outcome::Outcome::Ok | crate::tool_outcome::Outcome::Empty => Some(1.0),
+                crate::tool_outcome::Outcome::Failed => Some(0.0),
+                // Unavailable/Denied say nothing about whether the tool WOULD have worked — they
+                // feed availability/permission learning, not capability accuracy.
+                _ => None,
+            };
+            let semantic = match verdict {
+                // Ok carried substance; Empty ran fine and found nothing — execution succeeded,
+                // semantics did not. The distinction the three-success design asks for.
+                crate::tool_outcome::Outcome::Ok => Some(true),
+                crate::tool_outcome::Outcome::Empty => Some(false),
+                _ => None,
+            };
+            let mut e = mind_observability::DecisionEvent::span(&trace, predicted.as_deref(), "tool_observed");
+            e.object_id = Some(object_id);
+            e.outcome = Some(out.chars().take(160).collect());
+            e.verdict = Some(verdict.badge().into());
+            e.semantic_success = semantic;
+            match success {
+                Some(s) => {
+                    e.brier = Some((prior.rate - s).powi(2));
+                    e.prediction_error = Some(s - prior.rate);
+                    e.lesson = Some(match verdict {
+                        crate::tool_outcome::Outcome::Failed =>
+                            format!("prior said {:.2}, it broke — future estimate for {tool} drops", prior.rate),
+                        crate::tool_outcome::Outcome::Empty =>
+                            "ran fine, found nothing — execution held, semantics did not".into(),
+                        _ => format!("estimate held within band (prior {:.2})", prior.rate),
+                    });
+                }
+                None => {
+                    e.lesson = Some(format!("{}: excluded from reliability (capability gap or gate)", verdict.badge()));
+                }
+            }
+            self.engine.recorder().record(e);
+        }
+        match verdict {
             crate::tool_outcome::Outcome::Ok | crate::tool_outcome::Outcome::Empty => Ok(out),
             _ => anyhow::bail!("{out}"),
         }
@@ -190,6 +290,26 @@ impl Bus for EngineBus {
     /// a published URL or delegation ack is delivered verbatim on both paths, never synthesized.
     fn is_terminal(&self, tool: &str, obs: &str) -> bool {
         self.engine.terminal_delivery(tool, obs)
+    }
+
+    /// The loop declares its run trace before acting; every tool span lands under it.
+    fn declare_trace(&self, trace_id: &str) {
+        *self.trace_root.lock().unwrap() = Some(trace_id.to_string());
+    }
+
+    /// Run-completion grading of the THIRD success kind: did this tool's evidence advance the
+    /// goal? Recorded per tool under the run's trace; aggregated by `ym why contribution`.
+    async fn grade_goal(&self, trace_id: &str, goal: &str, met: bool, contributors: &[(String, bool)]) {
+        for (tool, contributed) in contributors {
+            let mut g = mind_observability::DecisionEvent::span(trace_id, None, "tool_goal_graded");
+            g.object_id = Some(format!("tool:{tool}"));
+            g.goal = Some(goal.to_string());
+            g.trigger = Some("run completion — contract evaluated".into());
+            g.verdict = Some(if *contributed { "evidence_used" } else { "ran_unused" }.into());
+            g.semantic_success = Some(*contributed);
+            g.policy = vec![format!("goal_met={met}")];
+            self.engine.recorder().record(g);
+        }
     }
 
     /// Remembered approaches, from BOTH kinds of procedural memory this mind keeps.
@@ -408,6 +528,9 @@ impl ConversationEngine {
     /// Returns `None` when the loop cannot be built (no recipe engine for grounding, say), so the
     /// caller falls back to the legacy path rather than degrading silently.
     pub async fn cognitive_turn(self: &Arc<Self>, user_text: &str, id: &TurnIdentity) -> Option<String> {
+        // The run's trace id is minted inside Cognition::run (and declared to the bus, so tool
+        // spans parent under it); the compile-time refusal below still mints its own.
+        let trace_id = format!("run-{}", mind_observability::now_ms());
         let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(self.clone(), id.clone()).for_turn(user_text));
         let router = mind_inference::Router::from_env(self.inference.clone(), 4);
 
@@ -427,6 +550,17 @@ impl ConversationEngine {
         // A goal needing something this mind does not have is said plainly, before any work. The old
         // loop would have improvised around the gap and reported something that sounded like progress.
         if !compiled.spec.is_runnable() {
+            self.recorder.record({
+                let mut e = mind_observability::DecisionEvent::new(&trace_id, "cognitive_run_refused");
+                e.actor = Some("cognition".into());
+                e.subject = Some(id.owner.clone());
+                e.goal = Some(user_text.to_string());
+                e.trigger = Some("capability missing at compile time".into());
+                e.rejected = compiled.spec.missing_capabilities.clone();
+                e.outcome = Some("refused up front rather than improvising around the gap".into());
+                e.verdict = Some("refused".into());
+                e
+            });
             return Some(format!(
                 "{} Set it up and ask me again \u{2014} I did not want to guess around it.",
                 compiled.notes.join(" ")
@@ -442,6 +576,39 @@ impl ConversationEngine {
         .with_grounding(grounding);
         emit_progress("working…");
         let outcome = cognition.run(&compiled.spec, &mind_types::clock::SystemClock).await;
+
+        // ── FLIGHT RECORDER: the run's causal path from persisted state — what was known
+        // (evidence ids), why it stopped (chosen), where it hit walls (failures), the budget
+        // story (policy line), and derived confidence. Same trace the loop declared, so every
+        // tool span this run caused sits beneath this completion event.
+        {
+            let mut e = mind_observability::DecisionEvent::new(&outcome.trace_id, "cognitive_run");
+            e.actor = Some("cognition".into());
+            e.subject = Some(id.owner.clone());
+            e.goal = Some(compiled.spec.goal.clone());
+            e.trigger = Some("interactive user request".into());
+            e.evidence_ids = outcome.capsule.evidence.iter().map(|ev| ev.id.clone()).collect();
+            e.chosen = Some(outcome.stopped_because.map(|r| r.describe().to_string()).unwrap_or_else(|| "completed".into()));
+            e.rejected = outcome.capsule.failures.iter().take(4).cloned().collect();
+            e.policy = vec![format!(
+                "steps={} model_calls={} barren={} failures={}",
+                outcome.capsule.progress.steps,
+                outcome.capsule.progress.model_calls,
+                outcome.capsule.progress.barren_steps,
+                outcome.capsule.progress.failures
+            )];
+            e.confidence = Some(outcome.capsule.confidence);
+            e.verdict = Some(match (outcome.complete(), outcome.verified) {
+                (true, Some(true)) => "complete+verified".into(),
+                (true, _) => "complete".into(),
+                (_, Some(false)) => "partial+unverified".into(),
+                (false, _) => "partial".into(),
+            });
+            e.lesson = outcome.capsule.contradictions.first().map(|c| format!("contradiction surfaced: {c}"));
+            self.recorder.record(e);
+            // GOAL CONTRIBUTION is graded by the run itself (Bus::grade_goal) — the run owns
+            // its capsule and its contract verdict; the turn wrapper must not duplicate it.
+        }
 
         // The trace is real execution, so it is safe to narrate — every line corresponds to a tool
         // call that happened.
@@ -806,3 +973,176 @@ mod tests {
         }
     }
 }
+ 
+#[cfg(test)]
+mod learning_chain_tests {
+    use super::*;
+    use mind_memory::MemoryHandle;
+
+    /// THE FIRST CLOSED LEARNING CHAIN, one tool call wide, proven end to end:
+    /// predict (empirical prior only) → act → observe (five-way) → prediction error → lesson.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_tool_call_leaves_a_predict_observe_pair_with_its_error() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("ym_chain_calc_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let engine = Arc::new(
+            ConversationEngine::new(
+                Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+                pool,
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
+        );
+        let bus = EngineBus::new(engine.clone(), TurnIdentity::primary());
+        // The loop declares its run trace; every tool span must land UNDER it as children.
+        Bus::declare_trace(&bus, "run-test");
+
+        // CALL 1: pure compute succeeds. No history exists yet → the prior is the honest
+        // uninformed 0.5, labeled low-N in the event.
+        let r = Bus::call(&bus, "calc", &serde_json::json!({ "expr": "6*7" })).await;
+        assert!(r.is_ok());
+        let events = mind_observability::read_events(&p);
+        assert_eq!(events.len(), 2, "predict + observe per call: {events:?}");
+        assert_eq!(events[0].kind, "tool_predicted");
+        assert_eq!(events[0].trace_id, "run-test", "spans root under the declared run trace");
+        assert!(events[0].event_id.is_some());
+        assert_eq!(events[0].confidence, Some(0.5), "uninformed prior before any data");
+        assert!(events[0].policy[0].contains("n=0"), "sample size is stated, not hidden");
+        assert_eq!(events[1].kind, "tool_observed");
+        assert_eq!(events[1].trace_id, "run-test");
+        assert_eq!(
+            events[1].parent_event_id.as_deref(),
+            events[0].event_id.as_deref(),
+            "the observation parents to ITS prediction — a causal pair, not two labels"
+        );
+        assert_eq!(events[1].verdict.as_deref(), Some("ok"));
+        assert_eq!(events[1].semantic_success, Some(true));
+        assert_eq!(events[1].brier, Some(0.25), "(0.5 − 1)² — the calibration metric, not just signed error");
+        assert_eq!(events[1].prediction_error, Some(0.5), "success minus 0.5 prior");
+
+        // CALL 2: same tool again — the bandit now holds ONE success, so the empirical prior
+        // must have MOVED (shrunken): (1*1+1)/(1+2) = 2/3.
+        let _ = Bus::call(&bus, "calc", &serde_json::json!({ "expr": "6*8" })).await;
+        let events = mind_observability::read_events(&p);
+        let pred2 = events.iter().rev().find(|e| e.kind == "tool_predicted").unwrap();
+        assert!(
+            (pred2.confidence.unwrap() - 2.0 / 3.0).abs() < 1e-9,
+            "the prior must learn from observed history: got {}", pred2.confidence.unwrap()
+        );
+        assert!(pred2.policy[0].contains("n=1"), "sample size travels with the number");
+        assert!(pred2.policy[0].contains("low-N"), "one observation is still declared small");
+
+        // CHAIN INTEGRITY on disk through real traffic.
+        assert_eq!(mind_observability::verify_log(&p), Ok(events.len()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A capability gap is OBSERVED but does not count as a wrong prediction: Unavailable is
+    /// excluded from reliability by design, so there is no error number to grade — the event
+    /// says why instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unavailable_capability_records_no_false_prediction_error() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("ym_chain_unavail_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let engine = Arc::new(
+            ConversationEngine::new(
+                Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+                pool,
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
+        );
+        let bus = EngineBus::new(engine, TurnIdentity::primary());
+
+        let r = Bus::call(&bus, "github_repo_items", &serde_json::json!({ "repo": "acme/x" })).await;
+        assert!(r.is_err(), "unconfigured capability must surface as a dead end");
+
+        let events = mind_observability::read_events(&p);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].verdict.as_deref(), Some("unavailable"));
+        assert_eq!(events[1].prediction_error, None, "no error number without a meaningful outcome class");
+        assert!(events[1].lesson.as_ref().unwrap().contains("excluded from reliability"));
+        let _ = std::fs::remove_file(&p);
+    }
+}
+ 
+#[cfg(test)]
+mod goal_contribution_tests {
+    use super::*;
+    use mind_agents::Cognition;
+    use mind_memory::MemoryHandle;
+    use mind_spec::goal::GoalSpec;
+
+    /// THE THIRD SUCCESS KIND, graded end to end: a run whose finding CITED the fetch's
+    /// evidence marks that tool `contributed`; the contract verdict is the goal-level outcome.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_completed_run_grades_its_tools_goal_contribution() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("ym_contrib_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let seq = Arc::new(mind_inference::SequencedLLM::new(vec![
+            r#"{"verb":"CALL_TOOL","target":"web_fetch","args":{"url":"http://example.com"},"why":"NEED_EVIDENCE"}"#.to_string(),
+            r#"{"learned":{"findings":[{"claim":"Teal is a blue-green color","evidence":["E1"]}]},"verb":"FINISH","why":"SUFFICIENT"}"#.to_string(),
+            "Teal is a blue-green color, per E1.".to_string(),
+        ]));
+        let pool = mind_inference::InferencePool::new(seq.clone() as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let engine = Arc::new(
+            ConversationEngine::new(
+                Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+                pool.clone(),
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p)))
+            .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
+                "WEBDOC: Teal is a cyan-family blue-green color.",
+            ))),
+        );
+        let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(engine, TurnIdentity::primary()).for_turn("what color is teal?"));
+        let spec = GoalSpec {
+            contract: mind_spec::goal::Contract {
+                requirements: vec![],
+                completion: mind_spec::goal::CompletionCriteria { min_findings: 1, require_full_coverage: false, ..Default::default() },
+                output: mind_spec::goal::OutputContract::default(),
+            },
+            budget: mind_spec::goal::Budget { max_steps: 6, max_model_calls: 12, max_wall_ms: 60_000, max_usd: None },
+            ..GoalSpec::simple("what color is teal?")
+        };
+        let cognition = Cognition::new(pool.clone(), pool, bus, "JARVIS");
+        let out = cognition.run(&spec, &mind_types::clock::SystemClock).await;
+        assert!(out.complete(), "the scenario must meet its contract for grading to mean anything");
+
+        // The completion event plus one goal grade per evidence-producing tool (web_fetch).
+        let events = mind_observability::read_events(&p);
+        let grades: Vec<_> = events.iter().filter(|e| e.kind == "tool_goal_graded").collect();
+        assert_eq!(grades.len(), 1, "one producing tool, one grade: {grades:?}");
+        assert_eq!(grades[0].object_id.as_deref(), Some("tool:web_fetch"));
+        assert_eq!(grades[0].verdict.as_deref(), Some("evidence_used"), "its evidence was cited by the finding");
+        assert!(grades[0].policy.iter().any(|l| l.contains("goal_met=true")));
+        assert_eq!(grades[0].trace_id, out.trace_id, "the grade lives under the same run trace");
+
+        // The report turns the ledger into the richer capability sentence.
+        let report = mind_observability::render_goal_contribution(&events);
+        assert!(report.contains("web_fetch"), "{report}");
+        assert!(report.contains("too few runs to rank") || report.contains("1/1"), "young numbers are declared young: {report}");
+        assert_eq!(mind_observability::verify_log(&p), Ok(events.len()));
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
+

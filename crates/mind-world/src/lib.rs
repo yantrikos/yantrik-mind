@@ -322,10 +322,19 @@ impl WorldLog {
         let mut claims: Vec<&WorldTransition> = per_source.values().copied().collect();
         claims.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
         // Collapse same-value witnesses; differing remaining values = live conflict.
+        // Found by the W7 adversarial month (classified MISSING SEMANTIC before fixing):
+        // agreeing witnesses RE-VERIFY the proposition, so a value is represented by its
+        // FRESHEST observation — a new corroborator must be able to un-stale a fact.
+        // Ranking is untouched (I4): this only chooses the representative of EQUAL values.
         let mut distinct: Vec<&WorldTransition> = Vec::new();
         for c in &claims {
-            if !distinct.iter().any(|x| x.value == c.value) {
-                distinct.push(c);
+            match distinct.iter_mut().find(|x| x.value == c.value) {
+                Some(slot) => {
+                    if c.observed_at > slot.observed_at {
+                        *slot = *c;
+                    }
+                }
+                None => distinct.push(c),
             }
         }
         if distinct.len() == 1 {

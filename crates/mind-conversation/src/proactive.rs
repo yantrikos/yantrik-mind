@@ -660,10 +660,27 @@ impl super::ConversationEngine {
 
     /// Mark that a proactive message just went out — the world model's engagement resolver picks
     /// it up: a user reply within 90 min = ENGAGED; silence past the window = IGNORED (resolved by
-    /// the poll loop). Last send wins; one outstanding ledger entry at a time.
+    /// the poll loop).
+    ///
+    /// This used to hold ONE send ("last send wins"), while the ledger below logged EVERY send. So
+    /// a second beat going out before the first resolved silently orphaned the first claim, and
+    /// nothing could ever grade it: 650 of 932 claims sat permanently pending, some 46 days past a
+    /// 90-minute deadline. The loss was not just volume. It was BIASED — an ignored send stays in
+    /// the slot for the full 90 minutes and is therefore easy to clobber, while an engaged one
+    /// clears on the next user turn, so ignored claims were preferentially destroyed and the
+    /// surviving 30% read higher than the truth. A sampling rule that drops the failures is worse
+    /// than no measurement, because it looks like a measurement.
     pub async fn note_proactive_sent(&self) {
         let now = chrono::Utc::now().timestamp_millis();
-        let _ = self.memory.profile_set("proactive_pending", &now.to_string()).await;
+        let mut pend = self.proactive_pending().await;
+        pend.push(now);
+        // Bounded: the resolver retires entries within 90 minutes, so this holds a handful. The cap
+        // exists so a resolver outage cannot grow it without limit.
+        if pend.len() > 64 {
+            let cut = pend.len() - 64;
+            pend.drain(..cut);
+        }
+        self.set_proactive_pending(&pend).await;
         // JUDGMENT LEDGER: a proactive send IS a falsifiable prediction — "the recipient engages
         // within the window". p = the learned engagement rate (improvable). Graded on resolve. This
         // is the mandatory-eligibility auto-log (Terra's anti-gaming rule): no opt-in, no post-hoc p.
@@ -675,27 +692,50 @@ impl super::ConversationEngine {
     /// Resolve the outstanding proactive send, if any. `via_user_turn`: the user just spoke —
     /// engaged iff within the window. Otherwise (tick path) only resolves STALE entries as ignored.
     pub async fn resolve_proactive(&self, via_user_turn: bool) {
-        let Some(sent_ms) = self
-            .memory
-            .profile_get("proactive_pending")
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse::<i64>().ok())
-        else {
+        let pend = self.proactive_pending().await;
+        if pend.is_empty() {
             return;
-        };
-        let now = chrono::Utc::now().timestamp_millis();
-        let within = now - sent_ms <= 90 * 60_000;
-        if via_user_turn {
-            let _ = self.memory.record_proactive_outcome(sent_ms, within).await;
-            self.judgment_grade(&sent_ms.to_string(), within).await; // grade the engagement prediction
-            let _ = self.memory.profile_set("proactive_pending", "").await;
-        } else if !within {
-            let _ = self.memory.record_proactive_outcome(sent_ms, false).await;
-            self.judgment_grade(&sent_ms.to_string(), false).await;
-            let _ = self.memory.profile_set("proactive_pending", "").await;
         }
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut still: Vec<i64> = Vec::new();
+        for sent_ms in pend {
+            let within = now - sent_ms <= 90 * 60_000;
+            // Decide every send that CAN be decided, not just the newest. A user turn answers each
+            // outstanding beat whose window still contains it; a window that has run out answers
+            // itself. Anything else is genuinely undecided and stays pending.
+            let outcome = match (via_user_turn, within) {
+                (true, w) => Some(w),
+                (false, false) => Some(false),
+                (false, true) => None,
+            };
+            match outcome {
+                Some(o) => {
+                    let _ = self.memory.record_proactive_outcome(sent_ms, o).await;
+                    self.judgment_grade(&sent_ms.to_string(), o).await;
+                }
+                None => still.push(sent_ms),
+            }
+        }
+        self.set_proactive_pending(&still).await;
+    }
+
+    /// The outstanding proactive sends. Reads the legacy single-integer form too, so the upgrade
+    /// does not drop the one send that happens to be in flight when the new binary starts.
+    async fn proactive_pending(&self) -> Vec<i64> {
+        let raw = self.memory.profile_get("proactive_pending").await.ok().flatten().unwrap_or_default();
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        if let Ok(v) = serde_json::from_str::<Vec<i64>>(raw) {
+            return v;
+        }
+        raw.parse::<i64>().map(|n| vec![n]).unwrap_or_default()
+    }
+
+    async fn set_proactive_pending(&self, v: &[i64]) {
+        let s = if v.is_empty() { String::new() } else { serde_json::to_string(v).unwrap_or_default() };
+        let _ = self.memory.profile_set("proactive_pending", &s).await;
     }
 
     /// Gate for OPTIONAL proactive beats: false only when the learned world model says this moment

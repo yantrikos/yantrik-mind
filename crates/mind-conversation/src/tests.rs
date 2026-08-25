@@ -3876,3 +3876,64 @@ async fn repeated_commitment_does_not_duplicate_tasks() {
     let n = tasks.iter().filter(|t| t.description.contains("water the plants")).count();
     assert_eq!(n, 1, "dedup must hold across repeated turns: {tasks:?}");
 }
+
+/// A SECOND proactive beat must not erase the first one's pending claim.
+///
+/// The resolver held one send in a scalar key while the ledger logged every send, so any beat
+/// that went out before the previous resolved orphaned it permanently: 650 of 932 live claims
+/// were stuck past a 90-minute deadline, the oldest by 46 days. Worse than the volume, the loss
+/// was biased — an ignored send occupies the slot for the full window and is easy to clobber,
+/// an engaged one clears on the next user turn — so the survivors over-reported engagement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_outstanding_proactive_send_gets_graded_not_just_the_last() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("(no model needed to resolve a claim)")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+
+    // Three beats go out back to back, as they do on a quiet day.
+    conv.note_proactive_sent().await;
+    conv.note_proactive_sent().await;
+    conv.note_proactive_sent().await;
+
+    let pending_claims = |led: &str| -> usize {
+        serde_json::from_str::<Vec<serde_json::Value>>(led)
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| {
+                r.get("source").and_then(|s| s.as_str()) == Some("proactive")
+                    && r.get("outcome").map(|o| o.is_null()).unwrap_or(false)
+            })
+            .count()
+    };
+    let led = mem.profile_get("judgment_ledger").await.unwrap().unwrap_or_default();
+    assert_eq!(pending_claims(&led), 3, "each send logs its own claim");
+
+    // The user speaks. Every beat still inside its window is answered by that turn — under the old
+    // scalar this graded exactly one and abandoned the other two.
+    conv.resolve_proactive(true).await;
+
+    let led = mem.profile_get("judgment_ledger").await.unwrap().unwrap_or_default();
+    assert_eq!(pending_claims(&led), 0, "no claim may be left unresolvable: {led}");
+}
+
+/// The upgrade must not drop a send that was in flight under the old single-integer format.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_legacy_single_pending_send_still_resolves() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("(no model needed)")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+
+    // Old format: a bare millisecond timestamp, well past the 90-minute window.
+    let stale = chrono::Utc::now().timestamp_millis() - 4 * 60 * 60_000;
+    mem.profile_set("proactive_pending", &stale.to_string()).await.unwrap();
+    conv.resolve_proactive(false).await;
+
+    let left = mem.profile_get("proactive_pending").await.unwrap().unwrap_or_default();
+    assert!(left.trim().is_empty(), "a stale legacy send must resolve as ignored, got {left:?}");
+}

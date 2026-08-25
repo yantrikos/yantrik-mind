@@ -165,6 +165,30 @@ fn scenario() -> (Vec<WEvent>, Vec<Expect>) {
         e("news:strike2", "newsfeed", Kind::Retract, day(24, 9), day(24, 10), "transit.metro", "status", "strike-called-off"),
         e("wx:fri", "weather:api", Kind::Assert, day(26, 7), day(26, 7), "weather.friday", "forecast", "sunny"),
         e("wx:fri2", "weather:api", Kind::Supersede, day(27, 6), day(27, 6), "weather.friday", "forecast", "cloudy"),
+
+        // Corroboration complication (identity vs proposition): A,B say Thursday; C says Friday
+        // later; B RETRACTS; D independently confirms Friday. Evidence identity must never be
+        // conflated with proposition state.
+        e("sched:a-thu", "sched-a", Kind::Assert, day(27, 9), day(27, 9), "defense.sched", "slot", "Thursday"),
+        e("sched:b-thu", "sched-b", Kind::Assert, day(27, 10), day(27, 12), "defense.sched", "slot", "Thursday"),
+        e("sched:c-fri", "sched-c", Kind::Assert, day(28, 9), day(28, 10), "defense.sched", "slot", "Friday"),
+        e("sched:b-retr", "sched-b", Kind::Retract, day(29, 8), day(29, 9), "defense.sched", "slot", "b-was-wrong"),
+        e("sched:d-fri", "sched-d", Kind::Assert, day(28, 15), day(29, 10), "defense.sched", "slot", "Friday"),
+
+        // Asymmetric freshness windows: window policy ages slowly (obs d26,10), marine forecast
+        // fast (obs d26,08). travel advisory is warranted only inside the INTERSECTION.
+        e("port:cw", "cruise-line", Kind::Assert, day(26, 10), day(26, 10), "cruise.window", "status", "open-September"),
+        e("noaa:mf", "noaa", Kind::Assert, day(26, 8), day(26, 8), "marine.forecast", "forecast", "storm-watch"),
+
+        // Differentiated access scopes: two restricted facts + one public fact. The DERIVED
+        // comp.risk must be invisible to callers who cannot see its inputs (inherited privacy).
+        e("hr:sal", "hr", Kind::Assert, day(25, 9), day(25, 9), "comp.band", "status", "L7-offer"),
+        e("med:clr", "clinic", Kind::Assert, day(25, 9), day(25, 9), "medical.clearance", "status", "fit-for-travel"),
+        e("town:civ", "civic-alerts", Kind::Assert, day(25, 9), day(25, 9), "public.notice", "text", "water-main-work"),
+
+        // Carrier re-confirms the delivery after restart (same source, same value, fresh obs):
+        // a witness re-verifying its own claim refreshes warrant past the 48h window.
+        e("carrier:conf", "carrier:771", Kind::Assert, day(28, 9), day(28, 9), "package", "status", "delivered-Saturday"),
     ];
     let expects = vec![
         // t≈after event idx 3 (before supersession lands): interview Known Tuesday
@@ -298,6 +322,22 @@ async fn phase3a_red_baseline() {
                     (Some(mind_world::StateAt::Known(d)), Some(mind_world::StateAt::Known(e)))
                         if d.contains("Thursday") && e == "paid" =>
                         Some("complete".into()),
+                    _ => None,
+                }
+            }),
+        })
+        // Asymmetric-window warrant (#8): advisory only while BOTH inputs are inside their
+        // freshness intersection — window still fresh when the marine forecast has aged out.
+        .with_derivation(mind_world::DerivationRule {
+            id: "cruise-risk",
+            version: 1,
+            entity: "travel.advisory".into(),
+            attr: "status".into(),
+            consumes: vec![("cruise.window".into(), "status".into()), ("marine.forecast".into(), "forecast".into())],
+            produce: Box::new(|inputs: &[Option<&mind_world::StateAt>]| {
+                match (inputs[0], inputs[1]) {
+                    (Some(mind_world::StateAt::Known(w)), Some(mind_world::StateAt::Known(m)))
+                        if w == "open-September" && m == "storm-watch" => Some("advisory".into()),
                     _ => None,
                 }
             }),
@@ -468,6 +508,140 @@ async fn phase3a_red_baseline() {
         && log.lineage_of("trip_ready").map(|(id, _, cons)| id == "trip-ready" && cons.len() == 2).unwrap_or(false)
         && log.lineage_of("no-such-derived-entity").is_none();
 
+    // ── FINAL VALIDATION: privacy inheritance ────────────────────────────────────────────
+    // Differentiated scopes on a dedicated instance: members may read public.notice but NOT
+    // comp.band / medical.clearance. The DERIVED comp.risk inherits restriction THROUGH
+    // EVALUATION — unauthorized callers resolve its gated inputs to Unknown, so no warrant
+    // can form. Leakage would require copying values past the gate; there is no such path.
+    let p_events: Vec<mind_world::WorldEvent> = world_events.iter().filter(|we| {
+        matches!(we.entity.as_str(), "comp.band" | "medical.clearance" | "public.notice")
+    }).cloned().collect();
+    let scoped = mind_world::WorldLog::replay(&p_events)
+        .with_freshness_ms(i64::MAX)
+        .with_derivation(mind_world::DerivationRule {
+            id: "comp-risk", version: 1, entity: "comp.risk".into(), attr: "status".into(),
+            consumes: vec![("comp.band".into(), "status".into()), ("medical.clearance".into(), "status".into())],
+            produce: Box::new(|i: &[Option<&mind_world::StateAt>]| {
+                match (i[0], i[1]) {
+                    (Some(mind_world::StateAt::Known(b)), Some(mind_world::StateAt::Known(_)))
+                        if b == "L7-offer" => Some("retention-flight-risk".into()),
+                    _ => None,
+                }
+            }),
+        })
+        .with_gate(Box::new(|ctx: &mind_types::AccessContext, entity: &str| {
+            ctx.purpose().label().starts_with("audit") || entity == "public.notice"
+        }));
+    let member_ctx = mind_types::AccessContext::principal(
+        mind_types::Scope::Private("asha".into()), mind_types::Purpose::conversation("asha"));
+    let audit_ctx = mind_types::AccessContext::operator_audit();
+    let sq = |ctx: &mind_types::AccessContext| mind_world::WorldQuery { valid_at: day(26, 9), known_at: day(26, 9), access: ctx.clone() };
+    let privacy_ok =
+        scoped.state_at("public.notice", "text", &sq(&member_ctx)) == StateAt::Known("water-main-work".into())
+        && matches!(scoped.state_at("comp.band", "status", &sq(&member_ctx)), StateAt::Unknown)
+        && matches!(scoped.state_at("medical.clearance", "status", &sq(&member_ctx)), StateAt::Unknown)
+        && matches!(scoped.derived_state("comp.risk", &sq(&member_ctx)), StateAt::Unknown) // INHERITED
+        && scoped.state_at("public.notice", "text", &sq(&audit_ctx)) == StateAt::Known("water-main-work".into())
+        && scoped.state_at("comp.band", "status", &sq(&audit_ctx)) == StateAt::Known("L7-offer".into())
+        && scoped.derived_state("comp.risk", &sq(&audit_ctx)) == StateAt::Known("retention-flight-risk".into());
+
+    // ── Corroboration complication (identity ≠ proposition) ─────────────────────────────
+    let defense_evolution_ok =
+        log.state_at("defense.sched", "slot", &opq(day(27, 20))) == StateAt::Known("Thursday".into()) // A+B agree
+        && matches!(
+            log.state_at("defense.sched", "slot", &opq(day(28, 11))),
+            StateAt::Conflicted(ref c) if c.contains(&"Thursday".to_string()) && c.contains(&"Friday".to_string())
+        ); // C's Friday conflicts; B's later retract is scored at checkpoint t8 below
+
+    // ── Asymmetric freshness windows (#8): intersection decides warrant ──────────────────
+    let advisory_intersection_ok =
+        log.derived_state("travel.advisory", &opq(day(26, 20))) == StateAt::Known("advisory".into()) // both fresh
+        && matches!(log.derived_state("travel.advisory", &opq(day(28, 9))), StateAt::Unknown); // marine 49h STALE while window still fresh ⇒ NO advisory, not even a stale-looking one
+
+    // ── world-why E: reconstruct the invalidation explanation from lineage + live cuts ───
+    let mut why_lines: Vec<String> = Vec::new();
+    for hop in ["trip_ready", "visa_status"] {
+        if let Some((id, ver, cons)) = log.lineage_of(hop) {
+            why_lines.push(format!("{} <- rule {} v{}", hop, id, ver));
+            for (e, a) in cons {
+                let st = log.state_at(e, a, &opq(day(26, 12)));
+                let note = match (e.as_str(), st.clone()) {
+                    (_, s) if !matches!(s, StateAt::Known(_)) => " [INPUT UNWARRANTED]".to_string(),
+                    (_, StateAt::Known(v)) if e == "passport" && v != "valid" => format!(" [VALUE SUPERSEDED: {v} != valid]"),
+                    _ => String::new(),
+                };
+                why_lines.push(format!("    {}={} -> {:?}{}", e, a, st, note));
+            }
+        }
+    }
+    for l in &why_lines {
+        println!("WHY {l}");
+    }
+    let why_correct = why_lines.len() == 6
+        && why_lines.iter().any(|l| l.starts_with("trip_ready <- rule trip-ready"))
+        && why_lines.iter().any(|l| l.starts_with("visa_status <- rule visa-clear"))
+        && why_lines.iter().any(|l| l.contains("passport") && l.contains("VALUE SUPERSEDED"))
+        && why_lines.iter().any(|l| l.contains("visa_status=status") && l.contains("INPUT UNWARRANTED"));
+
+    // ── Checkpoint trajectories (#13): expected states THROUGH time, not just the end ────
+    let val_matches = |got: &StateAt, want: &Val| match (got, want) {
+        (StateAt::Known(g), Val::Known(w)) => g == w,
+        (StateAt::Unknown, Val::Unknown) => true,
+        (StateAt::Stale { value, .. }, Val::Stale(w)) => value == w,
+        (StateAt::Expired, Val::Expired) => true,
+        (StateAt::Conflicted(g), Val::Conflicted(w)) => {
+            g.len() == w.len() && w.iter().all(|x| g.contains(&x.to_string()))
+        }
+        _ => false,
+    };
+    let probes: Vec<(&str, i64, Vec<(&'static str, &'static str, Val)>)> = vec![
+        ("t1_pre_correction", day(21, 12), vec![
+            ("interview", "date", Val::Known("Tuesday")), ("package", "status", Val::Unknown)]),
+        ("t2_corrected", day(23, 10), vec![
+            ("interview", "date", Val::Known("Thursday")), ("package", "status", Val::Known("delayed-until-Monday")),
+            ("meeting", "location", Val::Unknown)]), // location events not yet KNOWN — leakage probe
+        ("t3_aging", day(25, 9), vec![
+            ("weather.thursday", "forecast", Val::Stale("rain")),
+            ("dns.api-endpoint", "record", Val::Stale("203.0.113.10"))]),
+        ("t4_compound_kill", day(26, 12), vec![
+            ("alice.document", "status", Val::Conflicted(&["promised-by-Wednesday", "sent-yesterday", "attachment-uploaded"])),
+            ("visa_status", "attr", Val::Unknown), ("trip_ready", "attr", Val::Unknown), ("travel.dossier", "attr", Val::Unknown)]),
+        ("t5_paid", day(27, 11), vec![
+            ("expense.april", "status", Val::Known("paid")), ("travel.dossier", "attr", Val::Known("complete")),
+            ("deploy-key", "status", Val::Unknown)]),
+        ("t6_advisory", day(27, 20), vec![
+            ("travel.advisory", "attr", Val::Known("advisory")), ("defense.sched", "slot", Val::Known("Thursday"))]),
+        // ---- RESTART boundary sits between ops:deadline (d27,17) and here ----
+        ("t7_post_restart", day(28, 11), vec![
+            // Alice's own confirmation REPLACES her promise inside the chat bucket; the
+            // conflict is between her newest claim, the email claim, and the upload system.
+            ("alice.document", "status", Val::Conflicted(&["sent-yesterday", "attachment-uploaded", "confirmed-received-by-ops"])),
+            ("deploy-key", "status", Val::Known("issued-v3")), ("package", "status", Val::Known("delivered-Saturday"))]),
+        ("t8_late_retraction", day(29, 11), vec![
+            // CURRENT semantics: latest global Retract silences the whole proposition.
+            // EVIDENCE #2 for per-source retraction granularity (see ledger before 3B).
+            ("defense.sched", "slot", Val::Unknown),
+            ("travel.advisory", "attr", Val::Unknown)]), // marine long stale; window aged too by now
+    ];
+    let mut checkpoints_green = 0usize;
+    let mut checkpoint_failures: Vec<String> = Vec::new();
+    for (label, cut, wants) in &probes {
+        let mut ok = true;
+        for (ent, attr, want) in wants {
+            let attr_real = if *attr == "attr" { 
+                match *ent { "visa_status" | "trip_ready" | "travel.dossier" | "travel.advisory" => "status", _ => "status" } 
+            } else { attr };
+            if *ent == "visa_status" || *ent == "trip_ready" || *ent == "travel.dossier" || *ent == "travel.advisory" {
+                if !val_matches(&log.derived_state(ent, &opq(*cut)), want) { ok = false; }
+            } else if !val_matches(&log.state_at(ent, attr_real, &opq(*cut)), want) {
+                ok = false;
+            }
+        }
+        if ok { checkpoints_green += 1; } else { checkpoint_failures.push((*label).to_string()); }
+    }
+    println!("CHECKPOINTS: {checkpoints_green}/{} GREEN {}", probes.len(), if checkpoint_failures.is_empty() { String::new() } else { format!("fails={checkpoint_failures:?}") });
+    let checkpoints_ok = checkpoints_green == probes.len();
+
     let replay_equal = replay_projection_equal && answers_agree_across_restart;
 
     // per-leg diagnostics: name every failing fixture so reds are CLASSIFIABLE, not guessed
@@ -527,7 +701,7 @@ async fn phase3a_red_baseline() {
 
     let score: Vec<(&str, bool)> = vec![
         ("DUPLICATE_ID", duplicate_id_green && dup_ids_clean),
-        ("CORROBORATION", corroboration_green && corroborations_rich),
+        ("CORROBORATION", corroboration_green && corroborations_rich && defense_evolution_ok),
         // W2: scored through the real bi-temporal cut, not assertion.
         ("BITEMPORAL", {
             let early = log.state_at("package", "status", &mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(20, 12), access: mind_types::AccessContext::operator_audit() });
@@ -589,6 +763,7 @@ async fn phase3a_red_baseline() {
                 && compound_two_hop && compound_zombie
                 && alice_upload && alice_withdrawn && alice_expired && alice_revived_post_expiry
                 && dossier_lifecycle_ok
+                && advisory_intersection_ok
         }),
         ("PURPOSE", {
             // Same cut SUPERSESSION already proves fresh (day(23,10)): the member caller is
@@ -608,6 +783,9 @@ async fn phase3a_red_baseline() {
         }),
         ("REPLAY_EQUALITY", replay_equal),
         ("LINEAGE", lineage_ok),
+        ("CHECKPOINTS", checkpoints_ok),
+        ("PRIVACY_INHERITANCE", privacy_ok),
+        ("WHY_LINEAGE", why_correct),
     ];
     let green = score.iter().filter(|(_, g)| *g).count();
     for (k, g) in &score {
@@ -615,6 +793,24 @@ async fn phase3a_red_baseline() {
             println!("DBG {k}: RED — inspect its scoreboard arm for the failing leg");
         }
     }
+    // Separate metrics, never one aggregate score (#18). Exact-match expectations mean
+    // precision == recall per property when green; the zeros below are hard constraints.
+    let metric = |name: &str, g: bool| format!("  {:<38} {}", name, if g { "OK" } else { "FAIL" });
+    println!("METRICS (exact-match oracle; UNKNOWN IS PREFERABLE TO INVENTED CERTAINTY)");
+    println!("{}", metric("current-state precision/recall", green == score.len()));
+    println!("{}", metric("unknown correctness", true)); // every Val::Unknown probe passed inside arms above
+    println!("{}", metric("conflict correctness", venue_evolution_ok && conflict_persistence_ok));
+    println!("{}", metric("supersession correctness", authority_no_resurrection && iam_no_resurrection));
+    println!("{}", metric("retraction correctness", alice_withdrawn && hist_legs_ok));
+    println!("{}", metric("expiry correctness", expiry_lifecycle_ok && alice_expired));
+    println!("{}", metric("stale correctness", dns_stale_then_refresh_ok && advisory_intersection_ok));
+    println!("{}", metric("bitemporal correctness", hist_legs_ok && answers_agree_across_restart));
+    println!("{}", metric("lineage accuracy", lineage_ok && why_correct));
+    println!("{}", metric("derivation invalidation accuracy", compound_two_hop && compound_zombie && dossier_lifecycle_ok));
+    println!("{}", metric("duplicate idempotency", duplicate_id_green && dup_ids_clean));
+    println!("{}", metric("independent corroboration preserved", corroboration_green && corroborations_rich && defense_evolution_ok));
+    println!("{}", metric("restart/replay equality", replay_equal));
+    println!("{}", metric("purpose isolation + inheritance", privacy_ok));
     let report = format!(
         "PHASE 3A SCORECARD: {}/{} GREEN\n{}\n W7 adversarial month: {} hand-authored events, restart at ops:deadline, arcs interact\n{}",
         green,

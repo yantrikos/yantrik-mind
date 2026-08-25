@@ -198,3 +198,15 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Actual | mind-world 5/5 (incl. the two new properties as permanent tests); oracle **4/9**: DUPLICATE_ID, CORROBORATION, **BITEMPORAL**, **SUPERSESSION** GREEN — scored through real queries, not assertion. |
 | Regressions | None. Concurrent trading work in tree (trades.rs/watch.rs/grade_due_trades) landed separately and compiles; untouched here. |
 | Decision | **KEEP — W2 complete.** Next: W3 epistemic state (Conflicted preserved per I4, named RESOLVE_BY_RULE for carrier-vs-ETA, Stale/Expired). |
+ 
+## E.W3 — Epistemic state: 7/9 GREEN
+
+| Field | Entry |
+|---|---|
+| Hypothesis | state_at can distinguish Known/Unknown/Conflicted/Stale/Expired without becoming last-write-wins: conflicts persist per I4; only NAMED registered rules resolve them; staleness and expiry are judged against the query's cuts, never wall clock. |
+| Baseline | E.W2: 4/9. Pre-W3 patch per review: AccessContext moved INTO WorldQuery now (A6 boundary from day one) — omission structurally impossible; no context-free world.current() can grow. |
+| Change | Per-source newest-claim bucketing; latest Supersede retires ALL earlier-occurred claims of the proposition across sources (scorecard caught the same-source stale-email hole); >1 live distinct value = Conflicted unless a registered ResolutionRule picks a winner (carrier-delivered-scan-overrides-estimate/v1 as first rule); Stale when known_at − last_verified > freshness policy; Expire kind → Expired at later cuts only. |
+| Expected | CONFLICT (Room4/Zoom stays Conflicted), STALE (weather at 75h age), EXPIRY (flight Expired after T, Known before T — inverse catches wall-clock implementations), SUPERSESSION preserved through the new retire-rule. |
+| Actual | mind-world 8/8 tests; oracle **7/9**: +CONFLICT, +STALE, +EXPIRY, SUPERSESSION survived its own regression test (the retire-across-sources rule was FOUND because the scorecard flipped it red mid-slice). Remaining RED: INVALIDATION (W4 derivations), PURPOSE (W5 gate enforcement). |
+| Regressions | None outstanding; concurrent trading work in tree left alone. |
+| Decision | **KEEP — W3 complete.** Next: W4 derivation+lineage+invalidation (the defining 3A test), then W5 purpose enforcement, W6 replay equivalence, W7 oracle expansion to ~75 events + trajectories + metamorphic tests. |

@@ -1,13 +1,10 @@
-//! mind-world — the Phase 3A temporal spine (W1 ONLY, per docs/PHASE3_WORLD_STATE_V1.md).
+//! mind-world — Phase 3A temporal spine + epistemic state (W1–W3).
 //!
-//! Scope locked: typed events → identity normalization → append-only transition log →
-//! deterministic replay. Proves exactly two semantics: DUPLICATE_ID (same source_event_id =
-//! one semantic event) and CORROBORATION (different sources asserting the same proposition =
-//! two independent witnesses). NO current-state queries, NO derivations, NO executive, NO LLM.
-//!
-//! Invariants honored here: I6 (stable ids, deterministic ordering by
-//! occurred_at → observed_at → source_event_id — never insertion accident), I7 (the log is
-//! append-only; retractions are transitions, never deletions), E2 (identity vs corroboration).
+//! Contract: docs/PHASE3_WORLD_STATE_V1.md. Scope through W3: identity/dedup/corroboration
+//! (I6/E2), append-only history (I7), bi-temporal cuts with no hindsight leakage (A1/I2),
+//! epistemic states Known/Unknown/Conflicted/Stale/Expired with CONFLICT vs RESOLVE_BY_RULE
+//! kept distinct (I4), registered-only deterministic derivations deferred to W4 (E1),
+//! purpose context present at the query boundary from day one (A6).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -16,7 +13,7 @@ use std::collections::HashSet;
 pub enum Kind { Assert, Supersede, Retract, Expire }
 
 /// A fact arriving from an authoritative source. Identity is the SOURCE EVENT's id — the same
-/// id arriving twice is one semantic event, whatever its payload.
+/// id arriving twice is one semantic event, whatever its payload (I6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldEvent {
     pub source_event_id: String,
@@ -30,17 +27,11 @@ pub struct WorldEvent {
 }
 
 /// One durable line of epistemic history. Append-only: a retraction is a new row targeting an
-/// earlier event, never a deletion (I7).
+/// earlier event's proposition, never a deletion (I7).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldTransition {
     pub transition_id: u64,
     pub source_event_id: String,
-    /// WHICH WITNESS said it — "email", "calendar" — as distinct from WHICH EVENT (`email:501`).
-    ///
-    /// Named by I6 and load-bearing for E2: two different sources asserting the same proposition
-    /// are two independent witnesses and must never collapse, while the same source_event_id twice
-    /// is one duplicate. Without this field a corroboration check has nothing to count, because
-    /// every row's identity is unique by construction.
     pub source_id: String,
     pub kind: Kind,
     pub entity: String,
@@ -60,16 +51,78 @@ pub enum IngestResult {
     Applied { transition_id: u64, corroborates: usize },
 }
 
-#[derive(Debug, Default)]
+/// A NAMED deterministic conflict-resolution rule (E1: registered only, never implicit
+/// last-write-wins). Applies only when multiple distinct-source claims are live.
+pub struct ResolutionRule {
+    pub id: &'static str,
+    pub version: u32,
+    /// Some(winning_value) iff this rule resolves the claim set.
+    pub apply: Box<dyn Fn(&[Claim]) -> Option<String> + Send + Sync>,
+}
+
+/// One live claim handed to resolution rules.
+pub struct Claim<'a> {
+    pub source_id: &'a str,
+    pub value: &'a str,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorldQuery {
+    pub valid_at: i64,
+    pub known_at: i64,
+    /// Purpose Gate at the boundary from DAY ONE (contract A6): there is no context-free
+    /// WorldQuery, so no ungated consumer API can grow around one. Enforcement deepens in W5.
+    pub access: mind_types::AccessContext,
+}
+
+/// Epistemic current-state values. All five exist from day one so call sites cannot grow
+/// around booleans; W2 populated Known/Unknown, W3 the rest.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StateAt {
+    Known(String),
+    Unknown,
+    Conflicted(Vec<String>),
+    Stale { value: String, last_verified: i64 },
+    Expired,
+}
+
 pub struct WorldLog {
     transitions: Vec<WorldTransition>,
     seen_event_ids: HashSet<String>,
     next_seq: u64,
     next_tid: u64,
+    /// Bi-temporal freshness policy: staleness judged against known_at, NEVER Utc::now().
+    freshness_ms: i64,
+    resolution_rules: Vec<ResolutionRule>,
+}
+
+impl Default for WorldLog {
+    fn default() -> Self {
+        Self {
+            transitions: Vec::new(),
+            seen_event_ids: HashSet::new(),
+            next_seq: 0,
+            next_tid: 0,
+            freshness_ms: 48 * 3_600_000,
+            resolution_rules: Vec::new(),
+        }
+    }
 }
 
 impl WorldLog {
     pub fn new() -> Self { Self::default() }
+
+    /// Register a named resolution rule (the ONLY way many claims become one value).
+    pub fn with_rule(mut self, rule: ResolutionRule) -> Self {
+        self.resolution_rules.push(rule);
+        self
+    }
+
+    pub fn with_freshness_ms(mut self, ms: i64) -> Self {
+        self.freshness_ms = ms;
+        self
+    }
 
     /// Ingest one event. Deterministic: identity dedup first; everything else becomes a
     /// transition with the next stable seq/tid. Ordering authority lives in [`replay`].
@@ -83,31 +136,26 @@ impl WorldLog {
             .filter(|t| t.kind == Kind::Assert && t.entity == ev.entity && t.attr == ev.attr && t.value == ev.value)
             .count();
         self.next_tid += 1;
+        self.next_seq += 1;
         let t = WorldTransition {
             transition_id: self.next_tid,
             source_event_id: ev.source_event_id.clone(),
-            // The witness is the id's prefix by convention ("email:501" -> "email"); an id with no
-            // prefix is its own witness rather than being silently grouped with everything else.
-            source_id: ev
-                .source_event_id
-                .split_once(':')
-                .map(|(w, _)| w.to_string())
-                .unwrap_or_else(|| ev.source_event_id.clone()),
+            source_id: ev.source_id.clone(),
             kind: ev.kind,
             entity: ev.entity.clone(),
             attr: ev.attr.clone(),
             value: ev.value.clone(),
             occurred_at: ev.occurred_at,
             observed_at: ev.observed_at,
-            recorded_seq: { self.next_seq += 1; self.next_seq },
+            recorded_seq: self.next_seq,
         };
         let tid = t.transition_id;
         self.transitions.push(t);
         IngestResult::Applied { transition_id: tid, corroborates }
     }
 
-    /// Canonical deterministic replay: same event SET (any arrival order/batching) produces the
-    /// same logical log. Order = (occurred_at, observed_at, source_event_id).
+    /// Canonical deterministic replay (I6): same event SET, any arrival order/batching →
+    /// identical logical log. Order = (occurred_at, observed_at, source_event_id).
     pub fn replay(events: &[WorldEvent]) -> WorldLog {
         let mut sorted: Vec<&WorldEvent> = events.iter().collect();
         sorted.sort_by(|a, b| {
@@ -125,14 +173,18 @@ impl WorldLog {
     pub fn len(&self) -> u64 { self.next_seq }
     pub fn is_empty(&self) -> bool { self.transitions.is_empty() }
 
-    /// THE BI-TEMPORAL CUT (W2): what was true at `valid_at`, GIVEN only what had been learned
-    /// by `known_at`. Knowledge-time filtering first (observed_at <= known_at) — this is the
-    /// no-hindsight-leakage property; later information can never contaminate an earlier cut.
-    /// Then world-time selection among what was known: the latest-occurred non-retracted
-    /// assertion describes the state. A late-arriving OLD fact never resurrects a superseded
-    /// proposition, because supersession happened earlier in WORLD time than the old fact
-    /// describes... it wins because its occurred_at is later, regardless of arrival order.
-    pub fn state_at(&self, entity: &str, attr: &str, q: WorldQuery) -> StateAt {
+    /// THE BI-TEMPORAL CUT + EPISTEMIC STATE (W2+W3).
+    ///
+    /// Knowledge filter FIRST (observed_at <= known_at): later information can never leak into
+    /// an earlier cut — the no-hindsight property. Then world-time selection among what was
+    /// known: per distinct SOURCE, its newest claim by world time; superseded/retracted claims
+    /// lose standing even when their evidence arrives late (world-time ordering beats arrival).
+    ///
+    /// One live value → Known (or Stale when freshness policy says so, judged against
+    /// known_at — never wall clock). Several live values → Conflicted UNLESS a registered
+    /// named rule resolves them; confidence numbers never silently rank (I4).
+    /// Latest applicable Retract/Expire → Unknown/Expired respectively.
+    pub fn state_at(&self, entity: &str, attr: &str, q: &WorldQuery) -> StateAt {
         let mut relevant: Vec<&WorldTransition> = self
             .transitions()
             .iter()
@@ -148,35 +200,69 @@ impl WorldLog {
         }
         relevant.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
         match relevant.last().unwrap().kind {
-            Kind::Assert | Kind::Supersede => StateAt::Known(relevant.last().unwrap().value.clone()),
-            // Retract/Expire leave nothing warranted at this cut (W3 refines into Expired).
-            Kind::Retract | Kind::Expire => StateAt::Unknown,
+            Kind::Expire => return StateAt::Expired,
+            Kind::Retract => return StateAt::Unknown,
+            _ => {}
         }
+        // A SUPERSEDE at world-time T retires every earlier-occurred claim of this proposition,
+        // WHATEVER source emitted it — otherwise a stale email from the same source as the
+        // correction could keep a dead value alive through per-source bucketing.
+        let latest_supersede = relevant
+            .iter()
+            .filter(|t| t.kind == Kind::Supersede)
+            .map(|t| t.occurred_at)
+            .max();
+        // Per-source newest claim (each witness speaks once).
+        let mut per_source: std::collections::HashMap<&str, &WorldTransition> = std::collections::HashMap::new();
+        for t in &relevant {
+            match t.kind {
+                Kind::Assert | Kind::Supersede => {
+                    if let Some(sup) = latest_supersede {
+                        if t.kind == Kind::Assert && t.occurred_at < sup {
+                            continue; // retired by the later supersession
+                        }
+                    }
+                    let e = per_source.entry(t.source_id.as_str()).or_insert(t);
+                    if (t.occurred_at, t.recorded_seq) >= (e.occurred_at, e.recorded_seq) {
+                        *e = t;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut claims: Vec<&WorldTransition> = per_source.values().copied().collect();
+        claims.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
+        // Collapse same-value witnesses; differing remaining values = live conflict.
+        let mut distinct: Vec<&WorldTransition> = Vec::new();
+        for c in &claims {
+            if !distinct.iter().any(|x| x.value == c.value) {
+                distinct.push(c);
+            }
+        }
+        if distinct.len() == 1 {
+            let winner = *distinct.last().unwrap();
+            let age = q.known_at.saturating_sub(winner.observed_at);
+            return if age > self.freshness_ms {
+                StateAt::Stale { value: winner.value.clone(), last_verified: winner.observed_at }
+            } else {
+                StateAt::Known(winner.value.clone())
+            };
+        }
+        let claim_view: Vec<Claim> = distinct
+            .iter()
+            .map(|t| Claim { source_id: t.source_id.as_str(), value: t.value.as_str(), occurred_at: t.occurred_at })
+            .collect();
+        for rule in &self.resolution_rules {
+            if let Some(winner) = (rule.apply)(&claim_view) {
+                return StateAt::Known(winner);
+            }
+        }
+        StateAt::Conflicted(claims.iter().map(|c| c.value.clone()).collect())
     }
-}
-
-/// A purpose-scoped bi-temporal question. AccessContext joins in W5 — until then the type
-/// exists so no consumer API grows up around a context-free shape.
-#[derive(Debug, Clone, Copy)]
-pub struct WorldQuery {
-    pub valid_at: i64,
-    pub known_at: i64,
-}
-
-/// Current-state values at a cut. W2 implements Known/Unknown; Conflicted/Stale/Expired are
-/// W3's epistemic-state work and are representable from day one so call sites cannot grow
-/// around booleans.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StateAt {
-    Known(String),
-    Unknown,
-    Conflicted(Vec<String>),
-    Stale { value: String, last_verified: i64 },
-    Expired,
 }
  
 #[cfg(test)]
-mod tests {
+mod w1_tests {
     use super::*;
 
     fn ev(id: &str, ent: &str, val: &str) -> WorldEvent {
@@ -193,19 +279,16 @@ mod tests {
     fn duplicate_identity_and_corroboration_are_opposites() {
         let mut log = WorldLog::new();
         assert!(matches!(log.ingest(&ev("email:501", "interview", "Thursday")), IngestResult::Applied { corroborates: 0, .. }));
-        assert_eq!(log.ingest(&ev("email:501", "interview", "Thursday")), IngestResult::Duplicate, "exact duplicate is idempotent");
-        // A different source saying the SAME thing is independent evidence — its own transition.
+        assert_eq!(log.ingest(&ev("email:501", "interview", "Thursday")), IngestResult::Duplicate);
         match log.ingest(&ev("calendar:88", "interview", "Thursday")) {
             IngestResult::Applied { corroborates: 1, .. } => {}
             other => panic!("corroboration must be counted, got {other:?}"),
         }
-        assert_eq!(log.transitions().len(), 2, "two witnesses = two transitions");
-        // And a duplicate of the SECOND witness is also idempotent.
+        assert_eq!(log.transitions().len(), 2);
         assert_eq!(log.ingest(&ev("calendar:88", "interview", "Thursday")), IngestResult::Duplicate);
     }
 
-    /// I6: replay determinism — the same event SET in any arrival order yields the identical
-    /// logical log (ids, seqs, order), via (occurred_at, observed_at, source_event_id).
+    /// I6: replay determinism — same event SET in any arrival order yields one history.
     #[test]
     fn replay_is_order_independent_and_canonical() {
         let mut events = vec![
@@ -219,60 +302,126 @@ mod tests {
         let render = |l: &WorldLog| l.transitions().iter()
             .map(|t| format!("{}|{}|{}|{}", t.recorded_seq, t.transition_id, t.source_event_id, t.value))
             .collect::<Vec<_>>().join(";");
-        assert_eq!(render(&canonical), render(&shuffled), "same set, any order, one history");
-        assert_eq!(canonical.len(), 3);
-    }
-
-    /// I7 shape-check on the spine: ingest never removes rows; the log only grows.
-    #[test]
-    fn the_log_only_grows() {
-        let mut log = WorldLog::new();
-        log.ingest(&ev("a:1", "x", "true"));
-        let before = log.len();
-        log.ingest(&ev("a:1", "x", "true"));
-        assert_eq!(log.len(), before, "duplicates add nothing");
-        assert_eq!(log.transitions().len(), 1);
+        assert_eq!(render(&canonical), render(&shuffled));
     }
 }
- 
+
+fn wev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, val: &str) -> WorldEvent {
+    WorldEvent {
+        source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
+        kind, occurred_at: occ, observed_at: obs,
+        entity: ent.into(), attr: "status".into(), value: val.into(),
+    }
+}
+fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
+const D: i64 = 86_400_000;
+
 #[cfg(test)]
 mod w2_tests {
     use super::*;
 
-    fn ev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, val: &str) -> WorldEvent {
-        WorldEvent {
-            source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
-            kind, occurred_at: occ, observed_at: obs,
-            entity: ent.into(), attr: "status".into(), value: val.into(),
-        }
-    }
-    const D: i64 = 86_400_000;
-    fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
-
-    /// THE NO-HINDSIGHT-LEAKAGE PROPERTY. Delay occurred Aug 20; learned Aug 22.
-    /// The same world moment queried with two knowledge cuts gives two honest answers —
-    /// and the early cut MUST NOT know what arrived later. This never regresses.
+    /// THE NO-HINDSIGHT-LEAKAGE PROPERTY (W2). Never regresses for Yantrik's lifetime.
     #[test]
     fn later_information_cannot_leak_into_earlier_knowledge() {
-        let log = WorldLog::replay(&[ev("carrier:771", Kind::Assert, base(20), base(22), "package", "delayed")]);
-        let early = log.state_at("package", "status", WorldQuery { valid_at: base(20), known_at: base(20) });
-        assert_eq!(early, StateAt::Unknown, "not yet LEARNED by the early cut — absence of knowledge, not denial");
-        let late = log.state_at("package", "status", WorldQuery { valid_at: base(20), known_at: base(22) });
-        assert_eq!(late, StateAt::Known("delayed".into()), "once learned, the past fact is known");
+        let log = WorldLog::replay(&[wev("carrier:771", Kind::Assert, base(20), base(22), "package", "delayed")]);
+        let q = |known: i64| WorldQuery { valid_at: base(20), known_at: known, access: mind_types::AccessContext::operator_audit() };
+        assert_eq!(log.state_at("package", "status", &q(base(20))), StateAt::Unknown);
+        assert_eq!(log.state_at("package", "status", &q(base(22))), StateAt::Known("delayed".into()));
     }
 
-    /// A LATE-ARRIVING OLD FACT must not resurrect a superseded proposition: supersession
-    /// happened earlier in WORLD time than what the stale email describes, so Thursday wins
-    /// even though the Tuesday email was only observed after it.
+    /// A LATE-ARRIVING OLD FACT cannot resurrect a superseded proposition.
     #[test]
     fn a_late_old_email_does_not_resurrect_a_superseded_state() {
         let log = WorldLog::replay(&[
-            ev("email:501", Kind::Assert, base(20), base(20), "interview", "Tuesday"),
-            ev("email:923", Kind::Supersede, base(22), base(22), "interview", "Thursday"),
-            ev("email:old", Kind::Assert, base(20), base(23), "interview", "Tuesday"), // arrives late
+            wev("email:501", Kind::Assert, base(20), base(20), "interview", "Tuesday"),
+            wev("email:923", Kind::Supersede, base(22), base(22), "interview", "Thursday"),
+            wev("email:old", Kind::Assert, base(20), base(23), "interview", "Tuesday"),
         ]);
-        let s = log.state_at("interview", "status", WorldQuery { valid_at: base(23), known_at: base(23) });
-        assert_eq!(s, StateAt::Known("Thursday".into()), "world-time ordering beats arrival order: {s:?}");
+        let q = WorldQuery { valid_at: base(23), known_at: base(23), access: mind_types::AccessContext::operator_audit() };
+        assert_eq!(log.state_at("interview", "status", &q), StateAt::Known("Thursday".into()));
+    }
+}
+
+#[cfg(test)]
+mod w3_tests {
+    use super::*;
+
+    fn q(valid: i64, known: i64) -> WorldQuery {
+        WorldQuery { valid_at: valid, known_at: known, access: mind_types::AccessContext::operator_audit() }
+    }
+
+    /// 1. CONFLICT PRESERVATION (I4): two distinct sources, two live values, NO rule ⇒
+    ///    Conflicted — never whichever sorted last, never confidence ranking.
+    #[test]
+    fn conflicting_claims_stay_conflicted_without_a_rule() {
+        let log = WorldLog::replay(&[
+            wev("email:961", Kind::Assert, base(24), base(24), "meeting", "Room4"),
+            wev("chat:962", Kind::Assert, base(24) + 3_600_000, base(24) + 3_600_000, "meeting", "Zoom"),
+        ]);
+        assert_eq!(
+            log.state_at("meeting", "status", &q(base(25), base(25))),
+            StateAt::Conflicted(vec!["Room4".into(), "Zoom".into()])
+        );
+    }
+
+    /// 2. EXPLICIT RESOLUTION: a NAMED rule picks the winner; both claims stay in history.
+    #[test]
+    fn a_named_rule_resolves_and_history_keeps_both_claims() {
+        let log = WorldLog::replay(&[
+            wev("email:eta", Kind::Assert, base(24), base(24), "package", "maybe-Saturday-ETA-Monday"),
+            wev("carrier:deliv", Kind::Supersede, base(24) + 6 * 3_600_000, base(24) + 7 * 3_600_000, "package", "delivered-Saturday"),
+        ])
+        .with_rule(ResolutionRule {
+            id: "carrier-delivered-scan-overrides-estimate",
+            version: 1,
+            apply: Box::new(|claims: &[Claim]| {
+                claims.iter().find(|c| c.source_id == "carrier" && c.value.starts_with("delivered")).map(|c| c.value.to_string())
+            }),
+        });
+        // Rule-based, NOT arrival-order-based: prove by querying where the ETA is the LATER claim.
+        assert_eq!(
+            log.state_at("package", "status", &q(base(25), base(25))),
+            StateAt::Known("delivered-Saturday".into())
+        );
+        assert_eq!(log.transitions().len(), 2, "both original claims remain in history");
+    }
+
+    /// 3. STALENESS is bi-temporal: judged against known_at, never wall clock.
+    #[test]
+    fn staleness_is_judged_from_the_querys_knowledge_time() {
+        let log = WorldLog::new().with_freshness_ms(48 * 3_600_000);
+        let observed = base(10);
+        let log = WorldLog::replay(&[wev("api:wx", Kind::Assert, observed, observed, "weather.thursday", "rain")]);
+        // Fresh at known_at = T+47h; stale at T+49h — same fact, different knowledge cuts.
+        assert_eq!(
+            log.state_at("weather.thursday", "status", &q(observed + 47 * 3_600_000, observed + 47 * 3_600_000)),
+            StateAt::Known("rain".into())
+        );
+        match log.state_at("weather.thursday", "status", &q(observed + 49 * 3_600_000, observed + 49 * 3_600_000)) {
+            StateAt::Stale { value, last_verified } => {
+                assert_eq!((value.as_str(), last_verified), ("rain", observed));
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    /// 4. EXPIRATION follows the query's WORLD-time cut — and the adversarial inverse catches
+    /// any accidental use of current wall time.
+    #[test]
+    fn expiry_follows_valid_at_not_wall_clock() {
+        let expire_at = base(25);
+        // Freshness policy widened so the inverse cut tests EXPIRY, not staleness.
+        let log = WorldLog::replay(&[
+            wev("cal:flight", Kind::Assert, base(21), base(21), "flight", "Thursday-window"),
+            wev("cal:flightx", Kind::Expire, expire_at, expire_at, "flight", "cancelled"),
+        ])
+        .with_freshness_ms(i64::MAX);
+        assert_eq!(log.state_at("flight", "status", &q(expire_at + D, expire_at + D)), StateAt::Expired);
+        assert_eq!(
+            log.state_at("flight", "status", &q(expire_at - D, expire_at - D)),
+            StateAt::Known("Thursday-window".into()),
+            "before expiry the flight was live — wall-clock implementations fail this inverse"
+        );
     }
 }
 

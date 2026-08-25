@@ -176,17 +176,33 @@ async fn phase3a_red_baseline() {
         ("CORROBORATION", corroboration_green),
         // W2: scored through the real bi-temporal cut, not assertion.
         ("BITEMPORAL", {
-            let early = log.state_at("package", "status", mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(20, 12) });
-            let late = log.state_at("package", "status", mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(22, 13) });
+            let early = log.state_at("package", "status", &mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(20, 12), access: mind_types::AccessContext::operator_audit() });
+            let late = log.state_at("package", "status", &mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(22, 13), access: mind_types::AccessContext::operator_audit() });
             early == mind_world::StateAt::Unknown && late == mind_world::StateAt::Known("delayed-until-Monday".into())
         }),
         ("SUPERSESSION", {
-            log.state_at("interview", "date", mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10) })
+            log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10), access: mind_types::AccessContext::operator_audit() })
                 == mind_world::StateAt::Known("Thursday".into())
         }),
-        ("CONFLICT", false),
-        ("STALE", false),
-        ("EXPIRY", false),
+        // W3: scored through the real epistemic-state semantics.
+        ("CONFLICT", {
+            matches!(
+                log.state_at("meeting", "location", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() }),
+                mind_world::StateAt::Conflicted(ref c) if c.len() == 2
+            )
+        }),
+        ("STALE", {
+            matches!(
+                log.state_at("weather.thursday", "forecast", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() }),
+                mind_world::StateAt::Stale { .. }
+            )
+        }),
+        ("EXPIRY", {
+            log.state_at("flight", "window", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() })
+                == mind_world::StateAt::Expired
+                && log.state_at("flight", "window", &mind_world::WorldQuery { valid_at: day(21, 12), known_at: day(21, 12), access: mind_types::AccessContext::operator_audit() })
+                    == mind_world::StateAt::Known("Thursday-1300-1600".into()) // inverse: before expiry it was live
+        }),
         ("INVALIDATION", false),
         ("PURPOSE", false),
     ];
@@ -203,3 +219,4 @@ async fn phase3a_red_baseline() {
 
 
 }
+

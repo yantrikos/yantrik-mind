@@ -296,3 +296,40 @@ existing architecture cannot represent."
 Arc: cognitive-closure-v1 -> 3A "What is my situation?" -> 3B "What deserves attention?" ->
 Phase 4 "What happens if A vs B?" -> later "Where am I systematically weak, and can I improve?"
 Freeze the architecture; let the red tests argue with it.
+ 
+# Implementation slices (ratified 2026-08-25) — vertical, one semantic at a time
+
+Oracle converts from monolithic intentional RED to INDIVIDUALLY SCORED cases:
+  BITEMPORAL | DUPLICATE_ID | CORROBORATION | SUPERSESSION | CONFLICT | STALE | EXPIRY |
+  INVALIDATION | PURPOSE   (each RED/GREEN; ledger tracks n/9 per slice)
+
+W1 temporal spine: WorldEvent{source_event_id, source_id, occurred_at, observed_at, entity_id,
+  evidence ref} + WorldTransition{transition_id, kind, entity, key, value, valid_from/until,
+  observed_at, recorded_seq, reason, evidence_refs} -> append-only log -> deterministic replay.
+  Proves ONLY: DUPLICATE_ID (email:501 twice = one semantic event) and CORROBORATION
+  (email:501 + calendar:88 = two witnesses). No derivations/executive/risk/waiting/LLM.
+W2 bi-temporal cuts: WorldQuery{valid_at, known_at} answers assert/supersede state; the
+  knowledge-leakage pair goes GREEN and never regresses for Yantrik's lifetime.
+W3 epistemic state: Known/Unknown/Conflicted/Stale/Expired. Room4-vs-Zoom stays CONFLICTED;
+  carrier case resolves via RESOLVE_BY_RULE (named authority rule) — distinct operation from CONFLICT.
+W4 lineage + zombie-killing: RegisteredDerivationRule only; superseded source propagates warrant
+  loss to dependents while historical `why` still renders. The temporal epistemic graph test.
+W5 purpose boundary BEFORE any consumer: no context-free world.current() survives; only
+  world.query(WorldQuery) through the Purpose Gate.
+W6 replay equivalence: S1 == S2 == S3 for uninterrupted vs restart-split vs snapshot-rebuild;
+  canonical LOGICAL serialization equal (not page bytes). Contract's "byte-equivalent" means
+  deterministic semantics, not identical storage layout.
+
+Anti-overfitting: expand oracle at ~6/9 GREEN (not after 9/9) with metamorphic tests:
+duplicate-invariance H vs H+dup(e7); arrival-order invariance preserving knowledge times;
+restart invariance replay(H)==replay(prefix)+restart+replay(suffix); retraction preservation.
+Alice-document scenario: represent via five primitives + START_WAIT; if grotesque, RECORD the
+awkwardness — Expectation earns itself only from repeated representational pain.
+
+NEXT SESSION OPENS WITH W1 VERBATIM: "Begin W1 only. Implement the smallest typed-event ->
+typed-transition -> append-only-log -> deterministic-replay spine needed to make event identity,
+exact duplicate idempotency, and corroborating independent evidence representable. Do not
+implement derivations, AttentionBoard, Expectation, executive behavior, risk reasoning, or LLM
+synthesis. Convert the W0 oracle into individually scored semantics and record exactly which
+expectations move UNREPRESENTABLE->PASS. Stop once W1's pre-registered expectations pass and run
+the full regression suite." Ledger entry E.W1 follows the standard format.

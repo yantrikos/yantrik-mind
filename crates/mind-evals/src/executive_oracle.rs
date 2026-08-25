@@ -111,12 +111,16 @@ fn situations() -> Vec<Situation> {
         "price dropped on watched item; threshold for worthwhile buy not reached; no deadline",
         Posture::Monitor, "potentially relevant; evidence insufficient to act", [1, 0, 2]));
     // ── C. ACT: expiring intervention window ──
-    v.push(s("passport_window_open", "C-act",
+    let mut pp = s("passport_window_open", "C-act",
         "passport expires before booked international trip; renewal lead time approaching minimum safe window; high confidence",
-        Posture::Act, "intervention window open; cost of inaction exceeds intervention", [3, 2, 0]));
-    v.push(s("doc_due_2h_dependency", "C-act",
+        Posture::Act, "intervention window open; cost of inaction exceeds intervention", [3, 2, 0]);
+    pp.requires_user_interrupt = true; // only Pranab can renew a passport
+    v.push(pp);
+    let mut dd = s("doc_due_2h_dependency", "C-act",
         "document due in 2 hours; still unresolved; meeting depends on it; responsible party known; wait already elapsed",
-        Posture::Act, "dependency failure; window closing", [3, 2, 0]));
+        Posture::Act, "dependency failure; window closing", [3, 2, 0]);
+    dd.requires_user_interrupt = true; // the responsible party must be reached
+    v.push(dd);
     // ── D/E folded above; ── F. IGNORE: resolved ──
     v.push(s("flight_refunded_auto", "F-resolved",
         "flight risk detected earlier; ticket already cancelled and refunded automatically",
@@ -301,17 +305,103 @@ async fn phase3b_red_executive_baseline() {
     println!("  correct_silence={correct_silence} unnecessary_action={unnecessary_action} missed_intervention={missed_intervention}");
     println!("  confusion (rows=actual I/M/A, cols=pred I/M/A/UNREPRESENTABLE):");
     for (i, r) in matrix.iter().enumerate() {
-        println!("    {:?}: {:?}  total={}", ["I", "M", "A"][i], r, r.iter().sum::<usize>());
+        println!("    {:?}: {:?}  total={}", ["I", "M", "A", "UNREP"][i], r, r.iter().sum::<usize>());
     }
     println!("  capability verification: executive choice abstraction ABSENT; central arbitration ABSENT;");
     println!("    silence credit ABSENT; monitor semantics ABSENT; cross-organ prioritization ABSENT;");
     println!("    mind-proactive pipeline+commitment ledger: doc-comment stub only; belief-recall fragments only.");
+
+    // ── EX1: posture semantics earned for TEN decisions (E.EX1) ─────────────────────────
+    const DAY: i64 = 86_400_000;
+    // Production mapping uses OBSERVABLE fixture facts ONLY; outcome tables stay oracle-side.
+    const EX1_SCOPE: &[&str] = &[
+        "stale_eta_after_delivered", "flight_refunded_auto", "key_rotated_old_alert", "meeting_note_minuted",
+        "weather_T14d", "weather_T10d_decision",
+        "doc_due_2h_dependency", "passport_window_open", "prep_T2d_internal", "warn_T4h_interrupt",
+    ];
+    let ex1_candidate = |id: &str| -> mind_proactive::ExecutiveCandidate {
+        use mind_proactive::ExecutiveCandidate;
+        let mut c = ExecutiveCandidate {
+            candidate_id: id.into(), source_ref: format!("world:{id}"), now_ms: 0,
+            urgency: 1, deadline_at_ms: None, already_resolved: false,
+            useful_action_available: false, internal_capability: true, blocked: false,
+            waiting_on_someone: false, intervention_window_open: false,
+            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+        };
+        match id {
+            "stale_eta_after_delivered" | "flight_refunded_auto" | "key_rotated_old_alert" | "meeting_note_minuted" => {
+                c.already_resolved = true;
+            }
+            "weather_T14d" | "weather_T10d_decision" => {
+                c.deadline_at_ms = Some(if id.ends_with("14d") { 14 * DAY } else { 10 * DAY });
+                c.urgency = 1;
+            }
+            "doc_due_2h_dependency" => {
+                c.deadline_at_ms = Some(2 * 3_600_000);
+                c.useful_action_available = true;
+                c.intervention_window_open = true;
+                c.internal_capability = false; // needs the responsible party, i.e. the user's channel
+                c.urgency = 3;
+            }
+            "passport_window_open" => {
+                c.deadline_at_ms = Some(30 * DAY);
+                c.useful_action_available = true;
+                c.intervention_window_open = true; // renewal lead-time window is open NOW
+                c.internal_capability = false;     // only Pranab can renew a passport
+                c.urgency = 3;
+            }
+            "prep_T2d_internal" | "warn_T4h_interrupt" => {
+                c.useful_action_available = true;
+                c.intervention_window_open = true;
+                c.internal_capability = id == "prep_T2d_internal";
+                c.urgency = if id.starts_with("warn") { 3 } else { 2 };
+            }
+            other => unreachable!("EX1 scope drift: {other}"),
+        }
+        c
+    };
+    let mut ex1_total = 0usize;
+    let mut ex1_correct = 0usize;
+    let mut ex1_failures: Vec<String> = Vec::new();
+    for sit in &sits {
+        if !EX1_SCOPE.contains(&sit.id) {
+            continue;
+        }
+        ex1_total += 1;
+        let cand = ex1_candidate(sit.id);
+        let d = mind_proactive::arbitrate(&cand);
+        let got_posture = match d.posture {
+            mind_proactive::Posture::Ignore => Posture::Ignore,
+            mind_proactive::Posture::Monitor => Posture::Monitor,
+            mind_proactive::Posture::Act => Posture::Act,
+        };
+        let mut ok = got_posture == sit.want;
+        // MONITOR must answer "what would cause me to reconsider?"
+        if got_posture == Posture::Monitor {
+            ok = ok && d.monitor.as_ref().map(|m| !m.wake_when.is_empty() || m.review_at_ms.is_some()).unwrap_or(false);
+        }
+        // ACT interrupt flag must match the authored expectation (#6)
+        if got_posture == Posture::Act {
+            ok = ok && d.requires_user_interrupt == sit.requires_user_interrupt;
+        }
+        if ok {
+            ex1_correct += 1;
+        } else {
+            ex1_failures.push(format!("{} got {:?}/{:?} want {:?}", sit.id, d.posture, d.reason_code, sit.want));
+        }
+    }
+    println!("EX1 SCOPE: {ex1_correct}/{ex1_total} GREEN {}", if ex1_failures.is_empty() { String::new() } else { format!("{ex1_failures:?}") });
 
     // Retires when the executive seam earns full coverage — same discipline as E.W0.
     assert_eq!(
         total - unrep, total,
         "PHASE 3B baseline still RED by design ({unrep}/{total} UNREPRESENTABLE) — builds the failure record that earns the smallest executive seam"
     );
+    assert_eq!(
+        ex1_correct, ex1_total,
+        "EX1 scope regressed ({ex1_correct}/{ex1_total}) — posture semantics must hold while coverage expands"
+    );
 }
+
 
 

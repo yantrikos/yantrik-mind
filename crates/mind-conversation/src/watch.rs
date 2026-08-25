@@ -1223,7 +1223,50 @@ impl super::ConversationEngine {
     /// Every close names the rule that fired, because "stopped out" and "the thesis expired" are
     /// different facts about the same trade and only one of them argues the view was wrong.
     pub async fn follow_positions(&self, act: bool) -> String {
-        let book = self.open_trade_book().await;
+        // ADOPT what we find. A position with no record fell back to "opened now" on every pass,
+        // so its horizon restarted every time it was looked at and it could never age out — a
+        // permanent orphan, which is exactly what the WMT short became: opened before this record
+        // existed, five days old, and still reading as brand new.
+        //
+        // We cannot know when an unrecorded position opened. We do know when we FIRST SAW it, and
+        // ageing from first sight is honest and terminates; the alternative is a position that is
+        // never due by construction. Adoption is stamped once and then never moves.
+        let mut book = self.open_trade_book().await;
+        {
+            let known: Vec<String> = book.iter().map(|t| t.symbol.to_uppercase()).collect();
+            let live = tokio::task::spawn_blocking(|| {
+                mind_tools::broker::PaperBroker::from_env().ok().and_then(|b| b.positions().ok())
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+            let stamp = chrono::Utc::now().timestamp_millis();
+            let mut adopted = false;
+            for p in live {
+                if known.contains(&p.symbol.to_uppercase()) {
+                    continue;
+                }
+                mind_tools::trades::upsert(
+                    &mut book,
+                    mind_tools::trades::OpenTrade {
+                        symbol: p.symbol.clone(),
+                        qty: p.qty,
+                        entry: p.avg_entry_price,
+                        opened_at_ms: stamp,
+                        judgment_ref: p.symbol.clone(),
+                        thesis: "adopted — opened before trades were recorded; ageing from first sight".into(),
+                    },
+                );
+                adopted = true;
+            }
+            if adopted {
+                let _ = self
+                    .memory
+                    .profile_set("open_trades", &mind_tools::trades::render_book(&book))
+                    .await;
+            }
+        }
         let res = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<String>, String> {
             let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
             let positions = broker.positions().map_err(|e| e.to_string())?;

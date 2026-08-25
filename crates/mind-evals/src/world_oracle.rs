@@ -619,9 +619,9 @@ async fn phase3a_red_baseline() {
             ("travel.advisory", "attr", Val::Known("advisory")), ("defense.sched", "slot", Val::Known("Thursday"))]),
         // ---- RESTART boundary sits between ops:deadline (d27,17) and here ----
         ("t7_post_restart", day(28, 11), vec![
-            // Alice's own confirmation REPLACES her promise inside the chat bucket; the
-            // conflict is between her newest claim, the email claim, and the upload system.
-            ("alice.document", "status", Val::Conflicted(&["sent-yesterday", "attachment-uploaded", "confirmed-received-by-ops"])),
+            // Alice's own confirmation replaces her promise inside the chat bucket, and the
+            // cloud upload was withdrawn by its own retraction: a two-value conflict remains.
+            ("alice.document", "status", Val::Conflicted(&["sent-yesterday", "confirmed-received-by-ops"])),
             ("deploy-key", "status", Val::Known("issued-v3")), ("package", "status", Val::Known("delivered-Saturday"))]),
         ("t8_late_retraction", day(29, 11), vec![
             // E.W8 amendment landed: B's retraction withdrew only B; A keeps Thursday alive,
@@ -645,6 +645,9 @@ async fn phase3a_red_baseline() {
         }
         if ok { checkpoints_green += 1; } else { checkpoint_failures.push((*label).to_string()); }
     }
+    println!("DBGX t7alice={:?} t8def={:?}",
+        log.state_at("alice.document", "status", &opq(day(28, 11))),
+        log.state_at("defense.sched", "slot", &opq(day(29, 11))));
     println!("CHECKPOINTS: {checkpoints_green}/{} GREEN {}", probes.len(), if checkpoint_failures.is_empty() { String::new() } else { format!("fails={checkpoint_failures:?}") });
     let checkpoints_ok = checkpoints_green == probes.len();
 

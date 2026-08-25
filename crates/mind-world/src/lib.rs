@@ -372,7 +372,9 @@ impl WorldLog {
                 return StateAt::Known(winner);
             }
         }
-        StateAt::Conflicted(claims.iter().map(|c| c.value.clone()).collect())
+        // Conflict breadth = DISTINCT live values (E.W8 fix): corroborating witnesses of the
+        // same value must not inflate how wide a disagreement looks.
+        StateAt::Conflicted(distinct.iter().map(|t| t.value.clone()).collect())
     }
 }
  
@@ -877,3 +879,21 @@ mod retraction_targeting_tests {
     }
 }
 
+
+
+#[cfg(test)]
+mod conflict_breadth_tests {
+    use super::*;
+
+    /// E.W8 fix: two witnesses agreeing on Y against one X = TWO live values, not three.
+    #[test]
+    fn corroboration_does_not_inflate_conflict_breadth() {
+        let log = WorldLog::replay(&[
+            wev("a:X", Kind::Assert, base(10), base(10), "k", "status"),
+            wev("c:Y", Kind::Assert, base(11), base(12), "k", "status"),
+            wev("d:Y", Kind::Assert, base(12), base(13), "k", "status"),
+        ]).with_freshness_ms(i64::MAX);
+        matches!(log.state_at("k", "status", &WorldQuery { valid_at: base(14), known_at: base(14), access: mind_types::AccessContext::operator_audit() }),
+            StateAt::Conflicted(ref c) if c.len() == 2);
+    }
+}

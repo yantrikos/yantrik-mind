@@ -112,6 +112,19 @@ impl super::ConversationEngine {
         // this existed a merged PR was never looked at again after CI went green — the loop could not
         // tell whether anything it built ever helped.
         log.extend(self.fitness_grade_due().await);
+        // TRADING CLAIMS THAT HAVE COME DUE. Same reason as the line above: a prediction nobody
+        // returns to is not a prediction, it is a note. Six hunt claims sat "awaiting their
+        // deadline" for five days because grading existed only as a command someone had to
+        // remember to type — and the whole argument for recording a view is that it gets scored
+        // without anyone deciding to score it.
+        {
+            let graded = self.grade_due_trades().await;
+            // Only log when something actually resolved; the common case is "nothing due", and a
+            // tick that narrates its own no-ops buries the lines that matter.
+            if graded.contains("->") {
+                log.push(format!("[dmn] {}", graded.replace(char::from(10), " ")));
+            }
+        }
         // FUTURE-SELF COURIER: expire what aged out, and fire any promise whose trigger a recent
         // observation has satisfied — this is what produces `told`-stamped prepared work for the
         // calibrated knock (which, before the courier existed, had no eligible supply at all).

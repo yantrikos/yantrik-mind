@@ -304,7 +304,34 @@ impl InferencePool {
         tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
             let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
-            backend.chat(&messages, &config, tools_ref)
+            // BACKPRESSURE IS NOT AN OUTAGE.
+            //
+            // The endpoint answers 429 when more calls arrive than it has slots. That is the server
+            // saying "wait", and it was being treated as a dead lane: for a PRIVATE turn the policy
+            // is fail-closed, so one burst of load made the mind unable to think at all, and the log
+            // said "local lane down" about an endpoint that answered 200 and completed a prompt
+            // seconds later. Found live on 2026-08-25 with permits set to 6 against a 4-slot
+            // cluster, so a burst did not merely risk this — it guaranteed it.
+            //
+            // Short bounded backoff: the wait is what the server asked for, and a private turn has
+            // nowhere else to go. Anything that is not a rate limit fails immediately, because
+            // retrying a real error just delays the truth.
+            let mut wait_ms = 400;
+            for attempt in 0..3 {
+                match backend.chat(&messages, &config, tools_ref) {
+                    Ok(r) => return Ok(r),
+                    Err(e) => {
+                        let rate_limited = format!("{e:#}").contains("429");
+                        if !rate_limited || attempt == 2 {
+                            return Err(e);
+                        }
+                        eprintln!("[infer] 429 from the model endpoint — backing off {wait_ms}ms (attempt {})", attempt + 1);
+                        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                        wait_ms *= 3;
+                    }
+                }
+            }
+            unreachable!("the loop returns on every path")
         })
         .await?
     }
@@ -416,9 +443,20 @@ impl InferencePool {
                     // or the body was rejected, so every diagnosis had to be done by black-box
                     // probing from outside. A fail-closed path is exactly where the reason must
                     // survive, because it is the path that ends the turn.
-                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {e:#}");
+                    // Name the condition. "Local lane down" was printed about an endpoint that
+                    // answered 200 and completed a prompt seconds later; the actual cause was a 429
+                    // after the retries were exhausted, which is a load problem with a different
+                    // fix (fewer permits, more slots) than an outage.
+                    let detail = format!("{e:#}");
+                    let (why, hint) = if detail.contains("429") {
+                        ("the local lane is RATE LIMITING (429 after retries)",
+                         "reduce YM_INFER_PERMITS below the endpoint's slot count, or add slots")
+                    } else {
+                        ("the local lane is unreachable", "check YM_LOCAL_OLLAMA_URL and the endpoint")
+                    };
+                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {why}: {detail}");
                     return Err(anyhow::anyhow!(
-                        "private inference unavailable — refusing to route private context to a cloud provider (local lane down)"
+                        "private inference unavailable — {why}; refusing to route private context to a cloud provider. Fix: {hint}"
                     ));
                 }
                 // No local private lane configured (the documented interim gap): escalate to the

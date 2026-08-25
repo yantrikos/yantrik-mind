@@ -8085,6 +8085,9 @@ Open reminders you're carrying for them:");
         // Consecutive steps that may return nothing new before the loop stops asking and composes.
         // Two, not one: a single repeat can be a legitimate re-check, three in a row cannot.
         const MAX_BARREN_STEPS: usize = 2;
+        // One trace per turn, so every tool span in this run parents under the same id and
+        // `ym why <trace>` reconstructs which calls served which goal.
+        let run_trace = format!("run-{}", mind_observability::now_ms());
         let mut scratch = String::new();
         let mut last_call = String::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -8465,11 +8468,31 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // "using web_search…" does not distinguish a search for the user's own name from a
             // search for a stock ticker, and that difference is the whole reason to open the fold.
             emit_detail(&args_summary(&args));
+            // THE LEARNING CHAIN, on the loop that actually runs. The prediction comes from the
+            // tool's own measured track record, never the model's opinion of itself; the
+            // observation carries the Brier loss against it. Both were written only into the
+            // bounded loop's bus, which is OFF by default, so on the live box nothing was ever
+            // recorded. The bandit was always fed (guards::post, below, which both loops call) —
+            // what was missing is the evidence of what had been predicted, which is exactly what
+            // `ym why calibration` reads.
+            let (prior_rate, prior_n) = self.empirical_prior_for(&tool).await;
+            let object_id = format!("{tool}:{}", mind_agents::bus::signature(&tool, &args));
+            let predicted =
+                self.record_tool_prediction(&run_trace, &tool, user_text, prior_rate, prior_n, &object_id);
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
             eprintln!("[agent] step {step}: {tool} -> {}", obs.chars().take(120).collect::<String>().replace('\n', " "));
             // The pipeline's post side: reliability ledger, unavailable set, egress provenance —
             // and the five-way outcome for this loop's own rendering.
             let outcome = guards::post(self, &guard_state, &tool, &obs).await;
+            self.record_tool_observation(
+                &run_trace,
+                predicted.as_deref(),
+                &tool,
+                &object_id,
+                outcome,
+                &obs,
+                prior_rate,
+            );
             // …and what came back. The badge carries the classifier's five-way distinction rather
             // than a tick or a cross, because "found nothing" and "the tool broke" are the two the
             // operator most needs told apart and they look identical in a spinner.

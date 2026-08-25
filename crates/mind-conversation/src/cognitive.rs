@@ -480,6 +480,111 @@ impl ConversationEngine {
         self.cognition_force.unwrap_or_else(Self::cognition_enabled)
     }
 
+    /// Record the tool-call learning chain for ONE call: the empirical prediction before, and the
+    /// observed outcome after.
+    ///
+    /// Extracted so BOTH loops share one definition. The chain was written inside `EngineBus`, which
+    /// only the bounded cognitive loop uses - and that loop is OFF by default (`YM_COGNITION`), so on
+    /// the live box every prediction/observation event was dark while the classic loop carried every
+    /// real turn. The bandit itself was never affected: it updates in `guards::post`, which both
+    /// loops call, so reliability learning and discover_tools ranking were live throughout. What was
+    /// missing was the RECORD of what had been predicted and how wrong it turned out - `ym why
+    /// calibration` had nothing to read.
+    ///
+    /// Copying the block into the classic loop was the other option and the wrong one: two copies of
+    /// a scoring rule drift, and then the calibration numbers depend on which loop happened to run.
+    /// The tool's measured track record, on the ENGINE so both loops read the same number.
+    ///
+    /// The bandit stores a Beta(1,1)-smoothed posterior per tool, so the mean is already shrunk
+    /// toward 0.5 while observations are few — one honest prior, never two stacked (an earlier
+    /// version added a second shrinkage layer and got 5/9 where 2/3 was correct; its own test
+    /// caught it).
+    pub(crate) async fn empirical_prior_for(&self, tool: &str) -> (f64, u64) {
+        let row = self
+            .memory
+            .tool_track_record()
+            .await
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|(t, _, _)| t == tool));
+        match row {
+            Some((_, rate, n)) if n > 0 => (rate, n),
+            _ => (0.5, 0), // uninformed — labelled as such in the event
+        }
+    }
+
+    pub(crate) fn record_tool_prediction(
+        &self,
+        trace: &str,
+        tool: &str,
+        goal: &str,
+        prior_rate: f64,
+        prior_n: u64,
+        object_id: &str,
+    ) -> Option<String> {
+        let mut e = mind_observability::DecisionEvent::span(trace, None, "tool_predicted");
+        e.object_id = Some(object_id.to_string());
+        e.goal = Some(goal.chars().take(120).collect());
+        e.chosen = Some(tool.to_string());
+        e.predicted = Some(format!("tool {tool} returns usable output"));
+        e.confidence = Some(prior_rate);
+        e.policy = vec![format!(
+            "empirical prior n={prior_n}{}",
+            if prior_n < 5 { " (low-N shrinkage)" } else { "" }
+        )];
+        let id = e.event_id.clone();
+        self.recorder().record(e);
+        id
+    }
+
+    /// The observed half: five-way verdict, Brier loss and the lesson, parented to the prediction.
+    pub(crate) fn record_tool_observation(
+        &self,
+        trace: &str,
+        parent: Option<&str>,
+        tool: &str,
+        object_id: &str,
+        verdict: crate::tool_outcome::Outcome,
+        out: &str,
+        prior_rate: f64,
+    ) {
+        use crate::tool_outcome::Outcome;
+        // Unavailable/Denied say nothing about whether the tool WOULD have worked: they feed
+        // availability and permission learning, never capability accuracy.
+        let success: Option<f64> = match verdict {
+            Outcome::Ok | Outcome::Empty => Some(1.0),
+            Outcome::Failed => Some(0.0),
+            _ => None,
+        };
+        // Ok carried substance; Empty ran fine and found nothing - execution succeeded, semantics
+        // did not. That distinction is what stops "it ran" hardening into "it worked".
+        let semantic = match verdict {
+            Outcome::Ok => Some(true),
+            Outcome::Empty => Some(false),
+            _ => None,
+        };
+        let mut e = mind_observability::DecisionEvent::span(trace, parent, "tool_observed");
+        e.object_id = Some(object_id.to_string());
+        e.outcome = Some(out.chars().take(160).collect());
+        e.verdict = Some(verdict.badge().into());
+        e.semantic_success = semantic;
+        match success {
+            Some(s) => {
+                e.brier = Some((prior_rate - s).powi(2));
+                e.prediction_error = Some(s - prior_rate);
+                e.lesson = Some(match verdict {
+                    Outcome::Failed => format!("prior said {prior_rate:.2}, it broke - future estimate for {tool} drops"),
+                    Outcome::Empty => "ran fine, found nothing - execution held, semantics did not".into(),
+                    _ => format!("estimate held within band (prior {prior_rate:.2})"),
+                });
+            }
+            None => {
+                e.lesson = Some(format!("{}: excluded from reliability (capability gap or gate)", verdict.badge()));
+            }
+        }
+        self.recorder().record(e);
+    }
+
+
     /// THE turn entry point. Every channel calls this rather than `handle_turn_as` directly.
     ///
     /// The bounded loop is NOT dispatched here — it runs inside `handle_turn_as`, in the exact slot

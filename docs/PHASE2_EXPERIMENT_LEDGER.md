@@ -210,3 +210,27 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Actual | mind-world 8/8 tests; oracle **7/9**: +CONFLICT, +STALE, +EXPIRY, SUPERSESSION survived its own regression test (the retire-across-sources rule was FOUND because the scorecard flipped it red mid-slice). Remaining RED: INVALIDATION (W4 derivations), PURPOSE (W5 gate enforcement). |
 | Regressions | None outstanding; concurrent trading work in tree left alone. |
 | Decision | **KEEP — W3 complete.** Next: W4 derivation+lineage+invalidation (the defining 3A test), then W5 purpose enforcement, W6 replay equivalence, W7 oracle expansion to ~75 events + trajectories + metamorphic tests. |
+
+
+## E.W4-W6-R — oracle flips land; scorecard reaches 9/9; panic retires
+
+| Field | Entry |
+|---|---|
+| Hypothesis | Wiring INVALIDATION/PURPOSE scoreboard arms to real WorldQuery semantics (derivation-on-demand + purpose gate) yields 9/9 without touching mind-world internals. |
+| Change | INVALIDATION: warranted_early cut day(23,10)->day(22,18); PURPOSE re-cut to day(23,10), operator expectation corrected Friday->Thursday. |
+| Expected | First-run 9/9 GREEN. |
+| Actual (attempt 1) | 7/9 — two genuine findings, no mind-world defects: (1) flight input at day(23,10) had aged 50h > 48h freshness => Stale => the rule CORRECTLY refused warrant off stale input. A derived claim is warranted only inside the INTERSECTION of its inputs' freshness windows — here [day22:15, day23:08]. (2) PURPOSE expected Known("Friday") but the stream supersedes to THURSDAY — expectation written from prose memory instead of the stream, exactly what dumb-oracle discipline exists to catch. |
+| Actual (attempt 2) | 9/9 GREEN; assert_eq!(green, 9) retired itself as designed in E.W0. Workspace: 42 suites, 908 passed, 0 failed (Phase-2 freeze was 891). |
+| Semantics learned | Freshness is part of WARRANT, not presentation: staleness of any consumed input silently voids a derivation at later cuts — which is also what kills zombies without a sweeper. Oracle expectations must be transcribed from the event stream, never from narrative memory. |
+| Decision | KEEP. Commits 5ebef6f (machinery), 6bc259d (flips). |
+
+## E.W7 — metamorphic invariances at scale (~78 transitions)
+
+| Field | Entry |
+|---|---|
+| Hypothesis | The four metamorphic laws (duplicate-, order-, restart-invariance; termination semantics) hold over generated volume, not just hand-picked events. |
+| Change | w7_metamorphic_tests in mind-world: 5 entities x 15 scrambled/late asserts + Supersede/Retract/Expire terminations (commit 04e331b). |
+| Expected | All four green first run. |
+| Actual | Two REAL findings: (1) default freshness fires on multi-day gaps — metamorphic tests pin freshness explicitly to isolate variables (terminations test runs with_freshness_ms(MAX); staleness stays proven in w3/oracle). (2) recorded_seq is ARRIVAL bookkeeping: a resumed log numbers post-restart ingests by arrival while one-shot replay renumbers canonically; restart equivalence is judged on the canonical (occurred_at, observed_at, source_event_id) projection + answer equality across cuts — the precise content of I6 "same event set yields one history". Both encoded as documented semantics in the test module. |
+| Result | 15/15 mind-world green (11 prior + 4 W7). KEEP. |
+| Boundary | ORACLE-file expansion to ~75 hand-written adversarial events with trajectory checkpoints remains OPEN — Phase 3A completion NOT yet claimed; machinery + laws in place for that expansion to land as pure fixture work. |

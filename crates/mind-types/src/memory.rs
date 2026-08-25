@@ -434,10 +434,24 @@ pub struct PackHit {
     pub namespace: String,
 }
 
-/// One candidate row as pack recall SAW it, before the floor: what an operator needs to tell
-/// "off-coverage" from "the wall is too strict for this embedder" — a withheld row at 0.53 and a
-/// withheld row at 0.12 are different findings. An instrument for `ym pack probe`; never a
-/// prompt input.
+/// What pack recall DID with a candidate row — the same judgement, in the same order, that
+/// decides what reaches a turn, so the probe never claims a reachability recall would not grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PackDisposition {
+    /// Reached the turn.
+    Cleared,
+    /// Similarity under the pack's floor in force.
+    WithheldFloor,
+    /// Over the publisher's per-pack `recommended_top_k`.
+    WithheldPackCap,
+    /// Cleared everything but arrived after the turn's overall limit was filled.
+    WithheldLimit,
+}
+
+/// One candidate row as pack recall SAW it, with what happened to it: what an operator needs to
+/// tell "off-coverage" from "the wall is too strict for this embedder" — a withheld row at 0.53
+/// and a withheld row at 0.12 are different findings — and a floor-withheld row from a capped one.
+/// An instrument for `ym pack probe`; never a prompt input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PackProbe {
     pub pack_id: String,
@@ -447,8 +461,13 @@ pub struct PackProbe {
     pub similarity: f64,
     /// The floor in force for this row's pack.
     pub floor: f64,
-    /// Whether the row would have reached a turn.
-    pub cleared: bool,
+    pub disposition: PackDisposition,
+}
+
+impl PackProbe {
+    pub fn cleared(&self) -> bool {
+        self.disposition == PackDisposition::Cleared
+    }
 }
 
 #[async_trait]

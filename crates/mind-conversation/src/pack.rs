@@ -637,19 +637,25 @@ impl super::ConversationEngine {
                 format!("🔍 The engine returned no attributable pack rows for “{query}” — nothing to floor.\n   in force: {floors}")
             }
             Ok(rows) => {
-                let cleared = rows.iter().filter(|r| r.cleared).count();
+                use mind_types::memory::PackDisposition as D;
+                let count = |d: D| rows.iter().filter(|r| r.disposition == d).count();
                 let mut out = format!(
-                    "🔍 “{query}” — {cleared} row(s) would reach a turn, {} withheld by the floor\n",
-                    rows.len() - cleared
+                    "🔍 “{query}” — {} row(s) would reach a turn · withheld: {} by the floor, {} by a pack's top_k, {} beyond the turn's limit\n",
+                    count(D::Cleared),
+                    count(D::WithheldFloor),
+                    count(D::WithheldPackCap),
+                    count(D::WithheldLimit)
                 );
                 for r in &rows {
+                    let (mark, why) = match r.disposition {
+                        D::Cleared => ("✓", format!("sim {:.2} ≥ {:.2}", r.similarity, r.floor)),
+                        D::WithheldFloor => ("✗", format!("sim {:.2} < {:.2}", r.similarity, r.floor)),
+                        D::WithheldPackCap => ("✗", format!("sim {:.2} ≥ {:.2} but over the pack's top_k", r.similarity, r.floor)),
+                        D::WithheldLimit => ("✗", format!("sim {:.2} ≥ {:.2} but beyond the turn's limit", r.similarity, r.floor)),
+                    };
                     out.push_str(&format!(
-                        "  {} [{}] sim {:.2} {} {:.2} · score {:.2} · {}\n",
-                        if r.cleared { "✓" } else { "✗" },
+                        "  {mark} [{}] {why} · score {:.2} · {}\n",
                         r.pack_id,
-                        r.similarity,
-                        if r.cleared { "≥" } else { "<" },
-                        r.floor,
                         r.score,
                         r.text.chars().take(100).collect::<String>().replace('\n', " ")
                     ));

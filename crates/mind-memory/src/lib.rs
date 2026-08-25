@@ -678,29 +678,52 @@ impl PackCandidate {
 /// retires this; the lifecycle registry, ARCH-6 P.7, will refuse the second mount outright.) Rows
 /// without any pack stamp are host rows and never pass, whatever namespace they sit in.
 fn floor_pack_hits(candidates: Vec<PackCandidate>, routes: &[PackRoute], want: usize) -> (Vec<mind_types::memory::PackHit>, usize) {
+    let (judged, ambiguous) = judge_pack_candidates(candidates, routes, want);
+    let hits = judged
+        .into_iter()
+        .filter(|j| j.disposition == mind_types::memory::PackDisposition::Cleared)
+        .map(|j| mind_types::memory::PackHit {
+            pack_id: j.route.pack_id.clone(),
+            rid: j.candidate.rid,
+            text: j.candidate.text,
+            score: j.candidate.score,
+            similarity: j.candidate.similarity,
+            namespace: j.candidate.namespace,
+        })
+        .collect();
+    (hits, ambiguous)
+}
+
+/// A candidate after judgement: the route it belongs to and what recall did with it.
+struct Judged<'r> {
+    route: &'r PackRoute,
+    candidate: PackCandidate,
+    disposition: mind_types::memory::PackDisposition,
+}
+
+/// The ONE judgement, in rank order: floor first (a row under its pack's floor is withheld by the
+/// floor whatever else is true), then the publisher's per-pack cap, then the turn's overall limit.
+/// Recall keeps the `Cleared` rows; the probe reports every row with its disposition, so what the
+/// operator reads as "would reach a turn" is exactly what a turn would have received.
+fn judge_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [PackRoute], want: usize) -> (Vec<Judged<'r>>, usize) {
+    use mind_types::memory::PackDisposition as D;
     let (resolved, ambiguous) = resolve_pack_candidates(candidates, routes);
     let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut out = Vec::new();
-    for (route, c) in resolved {
-        if out.len() >= want {
-            break;
-        }
-        if !(c.similarity >= route.floor) {
-            continue;
-        }
-        let n = taken.entry(route.pack_id.clone()).or_insert(0);
-        if route.cap.is_some_and(|cap| *n >= cap) {
-            continue;
-        }
-        *n += 1;
-        out.push(mind_types::memory::PackHit {
-            pack_id: route.pack_id.clone(),
-            rid: c.rid,
-            text: c.text,
-            score: c.score,
-            similarity: c.similarity,
-            namespace: c.namespace,
-        });
+    let mut cleared = 0usize;
+    let mut out = Vec::with_capacity(resolved.len());
+    for (route, candidate) in resolved {
+        let disposition = if !(candidate.similarity >= route.floor) {
+            D::WithheldFloor
+        } else if route.cap.is_some_and(|cap| taken.get(&route.pack_id).copied().unwrap_or(0) >= cap) {
+            D::WithheldPackCap
+        } else if cleared >= want {
+            D::WithheldLimit
+        } else {
+            *taken.entry(route.pack_id.clone()).or_insert(0) += 1;
+            cleared += 1;
+            D::Cleared
+        };
+        out.push(Judged { route, candidate, disposition });
     }
     (out, ambiguous)
 }
@@ -736,6 +759,8 @@ fn resolve_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [Pack
 /// asked for.
 const PACK_OVERFETCH: usize = 4;
 const PACK_FETCH_MAX: usize = 64;
+/// The most rows a probe renders, however large the ask — an operator instrument, not a dump.
+const PACK_PROBE_MAX: usize = 48;
 
 /// Pack evidence for a query: one NAMESPACE-SCOPED recall per distinct pack namespace, overfetched,
 /// then `floor_pack_hits`.
@@ -753,7 +778,9 @@ fn recall_from_mounted_packs(
     query: &str,
     top_k: usize,
 ) -> std::result::Result<Vec<mind_types::memory::PackHit>, String> {
-    let want = top_k.max(1);
+    // Bound the PUBLIC ask before any arithmetic touches it: `clamp(want, MAX)` with want > MAX
+    // panics, and a panic here takes the memory actor thread with it (Codex's review of 9aea6a6).
+    let want = top_k.clamp(1, PACK_FETCH_MAX);
     let (candidates, routes) = collect_pack_candidates(db, manifests, query, want)?;
     let (hits, ambiguous) = floor_pack_hits(candidates, &routes, want);
     if ambiguous > 0 {
@@ -766,28 +793,29 @@ fn recall_from_mounted_packs(
 }
 
 /// `ym pack probe`: the same candidates recall judges, every one attributed, with the floor it was
-/// measured against and whether it cleared. Ranked by the engine's composite; at most 3× `top_k`
-/// rows so a withheld pack still shows its best few.
+/// measured against and the disposition recall gave it. Ranked by the engine's composite; at most
+/// 3× `top_k` rows, bounded by `PACK_PROBE_MAX`, so a withheld pack still shows its best few.
 fn probe_mounted_packs(
     db: &YantrikDB,
     manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
     query: &str,
     top_k: usize,
 ) -> std::result::Result<Vec<mind_types::memory::PackProbe>, String> {
-    let want = top_k.max(1);
+    let want = top_k.clamp(1, PACK_FETCH_MAX);
+    let limit = want.saturating_mul(3).min(PACK_PROBE_MAX);
     let (candidates, routes) = collect_pack_candidates(db, manifests, query, want)?;
-    let (resolved, _ambiguous) = resolve_pack_candidates(candidates, &routes);
-    Ok(resolved
+    let (judged, _ambiguous) = judge_pack_candidates(candidates, &routes, want);
+    Ok(judged
         .into_iter()
-        .take(want * 3)
-        .map(|(route, c)| mind_types::memory::PackProbe {
-            pack_id: route.pack_id.clone(),
-            rid: c.rid,
-            text: c.text,
-            score: c.score,
-            similarity: c.similarity,
-            floor: route.floor,
-            cleared: c.similarity >= route.floor,
+        .take(limit)
+        .map(|j| mind_types::memory::PackProbe {
+            pack_id: j.route.pack_id.clone(),
+            rid: j.candidate.rid,
+            text: j.candidate.text,
+            score: j.candidate.score,
+            similarity: j.candidate.similarity,
+            floor: j.route.floor,
+            disposition: j.disposition,
         })
         .collect())
 }
@@ -800,6 +828,7 @@ fn collect_pack_candidates(
     query: &str,
     want: usize,
 ) -> std::result::Result<(Vec<PackCandidate>, Vec<PackRoute>), String> {
+    debug_assert!((1..=PACK_FETCH_MAX).contains(&want), "callers bound want before collecting");
     let routes: Vec<PackRoute> = db
         .mounted_packs()
         .into_iter()
@@ -825,10 +854,13 @@ fn collect_pack_candidates(
         *routes_in_ns.entry(r.namespace.as_str()).or_insert(0) += 1;
     }
     for (namespace, n_routes) in routes_in_ns {
+        // `want` is already within [1, PACK_FETCH_MAX], so the bound below can never fall under
+        // it; written without `clamp` so no future change to the bound can reintroduce the panic.
         let k = want
             .saturating_mul(PACK_OVERFETCH)
             .saturating_mul(n_routes)
-            .clamp(want, PACK_FETCH_MAX);
+            .min(PACK_FETCH_MAX)
+            .max(want);
         let rs = db
             .recall(
                 &embedding,
@@ -3442,6 +3474,35 @@ mod tests {
         assert_eq!(eff(Some(-0.2)), WALL);
     }
 
+    /// The probe's dispositions are recall's own judgement in recall's own order: floor, then the
+    /// publisher's per-pack cap, then the turn's limit — so a row the probe calls cleared is a row
+    /// a turn would have received, and a withheld row says why (Codex's review of 9aea6a6).
+    #[test]
+    fn probe_dispositions_mirror_recall_selection() {
+        use mind_types::memory::PackDisposition as D;
+        let routes = vec![
+            route("yantrik/a@1.0.0", "a", "ns_a", 0.5, Some(1)),
+            route("yantrik/b@1.0.0", "b", "ns_b", 0.5, None),
+        ];
+        let cands = vec![
+            cand("a1", "ns_a", Some("a"), 0.9, 0.9),
+            cand("a2", "ns_a", Some("a"), 0.9, 0.8), // over a's cap of 1
+            cand("b1", "ns_b", Some("b"), 0.9, 0.7),
+            cand("b2", "ns_b", Some("b"), 0.9, 0.6), // cleared everything, but the turn takes 2
+            cand("b3", "ns_b", Some("b"), 0.1, 0.5), // under the floor — reported as such, not as "limit"
+        ];
+        let (judged, ambiguous) = judge_pack_candidates(cands.clone(), &routes, 2);
+        assert_eq!(ambiguous, 0);
+        let got: Vec<(&str, D)> = judged.iter().map(|j| (j.candidate.rid.as_str(), j.disposition)).collect();
+        assert_eq!(
+            got,
+            vec![("a1", D::Cleared), ("a2", D::WithheldPackCap), ("b1", D::Cleared), ("b2", D::WithheldLimit), ("b3", D::WithheldFloor)]
+        );
+        // And recall returns exactly the Cleared rows, in the same order.
+        let (hits, _) = floor_pack_hits(cands, &routes, 2);
+        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["a1", "b1"]);
+    }
+
     /// A row stamped with a name no route carries is never credited to the route that owns its
     /// namespace — even when that route is the only one there.
     #[test]
@@ -3542,8 +3603,17 @@ mod tests {
         // "off-coverage" from "too strict" without guessing.
         let probe = mem.probe_packs(rows[0], 5).await.unwrap();
         assert_eq!(probe.len(), 2, "every attributed candidate, cleared or not: {probe:?}");
-        assert!(probe[0].cleared && probe[0].text.starts_with("Typography"), "{probe:?}");
-        assert!(!probe[1].cleared && probe[1].similarity < 0.9 && probe[1].floor == 0.9, "{probe:?}");
+        assert!(probe[0].cleared() && probe[0].text.starts_with("Typography"), "{probe:?}");
+        assert_eq!(probe[1].disposition, mind_types::memory::PackDisposition::WithheldFloor, "{probe:?}");
+        assert!(probe[1].similarity < 0.9 && probe[1].floor == 0.9, "{probe:?}");
+
+        // An absurd ask must not panic the actor (usize::MAX once reached `clamp(want, 64)` with
+        // want > 64, which panics) and must come back bounded.
+        let huge = mem.recall_from_packs(rows[0], usize::MAX).await.unwrap();
+        assert_eq!(huge.len(), 1, "bounded, and still just the verbatim row: {huge:?}");
+        let huge_probe = mem.probe_packs(rows[0], usize::MAX).await.unwrap();
+        assert!(huge_probe.len() <= 48 && huge_probe.len() == 2, "{huge_probe:?}");
+        assert!(mem.mounted_packs().await.is_ok(), "the actor is still alive after the absurd asks");
 
         // The brief shows the operator the floor in force and the identity to key evidence on.
         let briefs = mem.mounted_packs().await.unwrap();

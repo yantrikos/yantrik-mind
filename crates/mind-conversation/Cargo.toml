@@ -23,5 +23,5 @@ chrono = { version = "0.4", features = ["clock"] }
 chrono-tz = "0.10"
 
 [dev-dependencies]
-mind-memory = { workspace = true }
+mind-memory = { workspace = true, features = ["fixtures"] }
 

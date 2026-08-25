@@ -13,3 +13,8 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 async-trait = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+# Sealed-pack fixtures for downstream crates' tests (`mind_memory::fixtures`). Never on in a
+# production build: only dev-dependencies enable it.
+fixtures = []

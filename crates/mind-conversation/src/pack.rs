@@ -601,6 +601,53 @@ mod tests {
 }
 
 impl super::ConversationEngine {
+    /// `ym pack probe <query>` — the pack evidence a turn on this query would receive, hit by hit,
+    /// with the similarity each cleared and the floors it was measured against.
+    ///
+    /// When nothing clears, the floors in force are named rather than an empty line returned:
+    /// "no evidence" and "evidence withheld" are different answers, and the second is the one the
+    /// attach-harm measurement (PACKS.md §5b) exists to produce.
+    pub async fn packs_probe(&self, query: &str) -> String {
+        let packs = match self.memory.mounted_packs().await {
+            Ok(p) => p,
+            Err(e) => return format!("(couldn't read mounted packs: {e})"),
+        };
+        if packs.is_empty() {
+            return "No knowledge packs mounted — nothing to probe.".to_string();
+        }
+        let floors = packs
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} floor {}",
+                    p.id,
+                    p.recommended_min_similarity
+                        .map(|f| format!("{f:.2}"))
+                        .unwrap_or_else(|| format!("{:.2} (default)", mind_types::memory::DEFAULT_PACK_SIMILARITY_FLOOR))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        match self.memory.recall_from_packs(query, 5).await {
+            Err(e) => format!("(pack recall failed: {e})"),
+            Ok(hits) if hits.is_empty() => format!("🔍 Nothing cleared the floor for “{query}” — withheld, not absent.\n   in force: {floors}"),
+            Ok(hits) => {
+                let mut out = format!("🔍 {} pack hit(s) would reach a turn on “{query}”\n", hits.len());
+                for h in &hits {
+                    out.push_str(&format!(
+                        "  [{}] sim {:.2} · score {:.2} · {}\n",
+                        h.pack_id,
+                        h.similarity,
+                        h.score,
+                        h.text.chars().take(100).collect::<String>().replace('\n', " ")
+                    ));
+                }
+                out.push_str(&format!("   in force: {floors}"));
+                out
+            }
+        }
+    }
+
     /// `ym pack mounted` — the knowledge packs attached right now.
     ///
     /// Reports trust verbatim rather than as a tick: "Signed" means the signature verified AND the
@@ -618,7 +665,7 @@ impl super::ConversationEngine {
                 let mut out = format!("📦 {} knowledge pack(s) mounted\n", packs.len());
                 for p in &packs {
                     out.push_str(&format!(
-                        "  {} {}@{} · {} · {} rows · trust: {} · {}\n",
+                        "  {} {}@{} · {} · {} rows · trust: {} · {}\n      floor {} · {} coverage topic(s){}\n",
                         if p.trust.contains("Signed") { "🔏" } else { "•" },
                         p.name,
                         p.version,
@@ -627,7 +674,15 @@ impl super::ConversationEngine {
                         p.trust,
                         // The distinction the unmount-that-wasn't bug hid: an adopted pack
                         // returns on every restart, a mounted one dies with the process.
-                        if p.installed { "adopted (returns on restart; `disown` removes)" } else { "this run only" }
+                        if p.installed { "adopted (returns on restart; `disown` removes)" } else { "this run only" },
+                        // The floor IN FORCE, and whose number it is: a publisher-measured floor
+                        // and a default the host fell back to are different evidence.
+                        match p.recommended_min_similarity {
+                            Some(f) => format!("{f:.2} (publisher-measured)"),
+                            None => format!("{:.2} (default — the pack declares none)", mind_types::memory::DEFAULT_PACK_SIMILARITY_FLOOR),
+                        },
+                        p.coverage.len(),
+                        p.recommended_top_k.map(|k| format!(" · top_k {k}")).unwrap_or_default(),
                     ));
                 }
                 out

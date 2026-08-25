@@ -3542,6 +3542,32 @@ async fn pack_recall_is_scoped_and_returns_nothing_when_no_pack_is_mounted() {
     assert!(hits.is_empty(), "with no pack mounted this must return nothing, got: {hits:?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grounding_labels_pack_evidence_with_the_pack_id_and_keeps_it_out_of_memory() {
+    // A pack claim in the grounding must say WHICH pack made it — the identity every later belief,
+    // grade or correction keys on — and must sit under the third-party heading, never inside the
+    // household's own memory block. Tested on a REAL sealed pack, not a mock facade.
+    let dir = std::env::temp_dir().join(format!("ym_conv_p1_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pack = dir.join("label.ydbpack");
+    let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+    let id = mind_memory::fixtures::seal_fixture_pack(pack.to_str().unwrap(), "label-craft", "label_craft", &[row], Some(0.0), None)
+        .unwrap();
+    let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+    mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
+
+    let grounding = conv.turn_grounding("what contrast does body text need?", &TurnIdentity::primary()).await;
+    let heading = grounding.find("FROM A MOUNTED KNOWLEDGE PACK").expect(&format!("no pack block in: {grounding}"));
+    let label = grounding.find(&format!("[{id}]")).expect(&format!("the hit must carry its pack id: {grounding}"));
+    assert!(label > heading, "the labelled hit sits under the third-party heading");
+    if let Some(mem_block) = grounding.find("<<memory>>") {
+        assert!(heading > mem_block || grounding[mem_block..heading].contains(">>"), "pack evidence must not read as the household's own memory");
+    }
+    let _ = std::fs::remove_file(&pack);
+}
+
 #[test]
 fn the_page_recipe_carries_mounted_pack_rules_into_the_author_step() {
     // The page chain runs on the RecipeEngine, which builds its OWN messages and never sees the

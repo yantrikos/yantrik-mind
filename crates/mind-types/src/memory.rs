@@ -363,7 +363,7 @@ impl Skill {
 /// `trust` is carried verbatim from the engine rather than reduced to a boolean: "Signed" and
 /// "Unsigned" mean integrity-proven-and-identity-known versus integrity-proven-only, and collapsing
 /// that distinction is what would let a re-signed pack borrow someone else's reputation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackBrief {
     pub id: String,
     pub name: String,
@@ -377,6 +377,46 @@ pub struct PackBrief {
     /// process-local mount that vanishes with the process. The distinction an operator needs
     /// before trusting that `unmount` actually removed anything.
     pub installed: bool,
+    /// The sealed corpus digest (`blake3:…`): the identity that survives a rename or a re-sign,
+    /// and the key any local evidence about this pack must be stored under — a re-sealed pack
+    /// must never inherit its predecessor's track record.
+    pub content_digest: Option<String>,
+    /// What the publisher says the pack covers, verbatim from the manifest. Routing input, and
+    /// the only thing a host can match a need against without mounting.
+    pub coverage: Vec<String>,
+    /// Retrieval settings the publisher MEASURED for this corpus (`sweep_retrieval.py`), or None
+    /// when the pack predates them. The floor is the one the consumer must apply — see
+    /// `recall_from_packs`; the engine signs it and does not apply it.
+    pub recommended_top_k: Option<u32>,
+    pub recommended_min_similarity: Option<f64>,
+    /// The publisher's Ed25519 public key (hex) when the pack is signed. Identity, not trust:
+    /// `trust` says whether THIS host recognises the key.
+    pub signer: Option<String>,
+}
+
+/// The similarity floor applied to a pack whose manifest declares none.
+///
+/// `sweep_retrieval.py`'s default, and the value three published packs settled near (0.55–0.65).
+/// The floor is not cosmetic: the substrate measured unconditional top-5 injection taking a
+/// control set from 12/12 to 5/12 (`yantrikdb/docs/PACKS.md` §5b), and one pack's notes record
+/// records at 0.565–0.569 being injected into "what is 17 multiplied by 23?" until the floor
+/// moved to 0.6. A pack that declares its own measured floor overrides this.
+pub const DEFAULT_PACK_SIMILARITY_FLOOR: f64 = 0.55;
+
+/// One row recalled from a mounted knowledge pack, with the identity lineage needs: WHICH pack
+/// (`pack_id` = `origin@version`) and WHICH record (`rid`) said it.
+///
+/// `similarity` is the raw cosine the floor is applied to. `score` is the engine's composite
+/// (importance, recency, trust tier folded in) — it ranks hits and must never gate them: a
+/// high-importance row with weak similarity is exactly the attach-harm case the floor exists for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackHit {
+    pub pack_id: String,
+    pub rid: String,
+    pub text: String,
+    pub score: f64,
+    pub similarity: f64,
+    pub namespace: String,
 }
 
 #[async_trait]
@@ -553,12 +593,17 @@ pub trait MemoryFacade: Send + Sync {
     async fn mounted_packs(&self) -> Result<Vec<PackBrief>> {
         Ok(Vec::new())
     }
-    /// Recall from MOUNTED PACKS ONLY — never the host's own memories.
+    /// Recall from MOUNTED PACKS ONLY — never the host's own memories — floored and identified.
     ///
     /// Scoped deliberately. The engine's text recall is unscoped and would return every namespace in
     /// the database, including other household members' private facts; it would "work" for packs
-    /// while quietly defeating read-isolation. This returns `(text, score)` for pack rows alone.
-    async fn recall_from_packs(&self, _query: &str, _top_k: usize) -> Result<Vec<(String, f64)>> {
+    /// while quietly defeating read-isolation.
+    ///
+    /// Every hit has cleared its pack's own similarity floor (`recommended_min_similarity`, else
+    /// [`DEFAULT_PACK_SIMILARITY_FLOOR`]) and carries the pack id and record id it came from. The
+    /// floor is on SIMILARITY, not on the composite score — the composite folds in importance and
+    /// trust, which is how a confident, irrelevant row gets injected into an arithmetic question.
+    async fn recall_from_packs(&self, _query: &str, _top_k: usize) -> Result<Vec<PackHit>> {
         Ok(Vec::new())
     }
     /// The constitution + coverage block the engine assembles for the system prompt, or None when

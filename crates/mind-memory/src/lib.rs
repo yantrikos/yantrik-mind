@@ -105,7 +105,7 @@ enum Cmd {
     /// pre-filtered (see `seal_learned_pack`) — the actor only does the parts that need the db.
     SealCraftPack { dest: String, name: String, version: String, texts: Vec<String>, reply: Reply<u64> },
     PackContext { reply: Reply<Option<String>> },
-    RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<(String, f64)>> },
+    RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackHit>> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
@@ -574,6 +574,224 @@ fn seal_craft_pack(
         let _ = db.forget(rid);
     }
     sealed
+}
+
+/// The manifest fields the mind reads, lifted out of the engine's `PackManifest` by NAME through
+/// serde rather than as struct fields ON PURPOSE: every optional manifest field is
+/// `#[serde(default)]`, so this compiles against any engine version that has the required fields
+/// — the deployment box's engine copy lags the local one, and a struct-field read of a field the
+/// box's engine does not have yet is a build break there and nowhere else (the seal path learned
+/// this first; see `seal_craft_pack`). A field the engine lacks reads as None, never as a lie.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+struct ManifestView {
+    #[serde(default)]
+    content_digest: Option<String>,
+    #[serde(default)]
+    coverage: Vec<String>,
+    #[serde(default)]
+    recommended_top_k: Option<u32>,
+    #[serde(default)]
+    recommended_min_similarity: Option<f64>,
+    #[serde(default)]
+    publisher_pubkey: Option<String>,
+}
+
+impl ManifestView {
+    fn of(m: &yantrikdb_core::PackManifest) -> Self {
+        serde_json::to_value(m).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+    }
+}
+
+/// A mounted pack's manifest, read from its file on first use and cached by path.
+///
+/// A manifest that cannot be read is reported once and treated as absent — the pack then gets the
+/// default floor rather than no floor. Never a reason to skip the pack: the engine already vetted
+/// the file at mount, so an unreadable manifest here is a race with a replaced file, not a bad pack.
+fn cached_manifest<'a>(
+    cache: &'a mut std::collections::HashMap<String, ManifestView>,
+    path: &str,
+) -> Option<&'a ManifestView> {
+    if !cache.contains_key(path) {
+        match YantrikDB::read_manifest(path) {
+            Ok(m) => {
+                cache.insert(path.to_string(), ManifestView::of(&m));
+            }
+            Err(e) => {
+                tracing::warn!(path, error = %e, "pack manifest unreadable — default floor applies");
+                return None;
+            }
+        }
+    }
+    cache.get(path)
+}
+
+/// Where one mounted pack's rows live and how its publisher said to retrieve them.
+#[derive(Debug, Clone, PartialEq)]
+struct PackRoute {
+    pack_id: String,
+    name: String,
+    namespace: String,
+    /// Similarity below this is withheld — the publisher's measured floor, else the default.
+    floor: f64,
+    /// At most this many rows from this pack per query, when the publisher measured one.
+    cap: Option<usize>,
+}
+
+/// One engine recall result reduced to what the floor and the identity resolution need.
+#[derive(Debug, Clone, PartialEq)]
+struct PackCandidate {
+    rid: String,
+    text: String,
+    score: f64,
+    similarity: f64,
+    namespace: String,
+    /// The pack NAME the engine stamped on the hit (`why_retrieved: "pack:<name>"`), or None for
+    /// a row the engine did not attribute to any pack — i.e. a host row that happens to share a
+    /// namespace. Those are refused here regardless of namespace.
+    pack_name: Option<String>,
+}
+
+impl PackCandidate {
+    fn from_engine(r: yantrikdb_core::RecallResult) -> Self {
+        let pack_name = r
+            .why_retrieved
+            .iter()
+            .find_map(|w| w.strip_prefix("pack:").map(str::to_string));
+        Self { rid: r.rid, text: r.text, score: r.score, similarity: r.scores.similarity, namespace: r.namespace, pack_name }
+    }
+}
+
+/// The pure half of pack recall: floor on SIMILARITY, resolve each row to its pack, honour the
+/// publisher's per-pack cap, rank by the engine's composite, return at most `want` — plus the
+/// number of rows DROPPED AS AMBIGUOUS, which the caller must surface.
+///
+/// Identity resolution: a row belongs to the route whose namespace it lives in; when two mounted
+/// packs share a namespace, the engine's `pack:<name>` stamp breaks the tie. When even the name
+/// collides — two versions or two re-seals of one pack mounted at once — the row is ABSTAINED
+/// from, never handed to whichever manifest was iterated first: a hit attributed to the wrong
+/// version would key that version's evidence and floor on another's rows. (The engine's
+/// structured provenance in core 0.18 retires this; the lifecycle registry, ARCH-6 P.7, will
+/// refuse the second mount outright.) A row nothing claims is dropped, and rows without any pack
+/// stamp are host rows and never pass, whatever namespace they sit in.
+fn floor_pack_hits(candidates: Vec<PackCandidate>, routes: &[PackRoute], want: usize) -> (Vec<mind_types::memory::PackHit>, usize) {
+    let mut ranked = candidates;
+    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    let mut ambiguous = 0usize;
+    for c in ranked {
+        if out.len() >= want {
+            break;
+        }
+        let Some(stamp) = c.pack_name.as_deref() else { continue };
+        let route = {
+            let in_ns: Vec<&PackRoute> = routes.iter().filter(|r| r.namespace == c.namespace).collect();
+            match in_ns.len() {
+                0 => continue,
+                1 => in_ns[0],
+                _ => {
+                    let named: Vec<&&PackRoute> = in_ns.iter().filter(|r| r.name == stamp).collect();
+                    match named.len() {
+                        1 => named[0],
+                        0 => continue,
+                        _ => {
+                            ambiguous += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        };
+        if !(c.similarity >= route.floor) {
+            continue;
+        }
+        let n = taken.entry(route.pack_id.clone()).or_insert(0);
+        if route.cap.is_some_and(|cap| *n >= cap) {
+            continue;
+        }
+        *n += 1;
+        out.push(mind_types::memory::PackHit {
+            pack_id: route.pack_id.clone(),
+            rid: c.rid,
+            text: c.text,
+            score: c.score,
+            similarity: c.similarity,
+            namespace: c.namespace,
+        });
+    }
+    (out, ambiguous)
+}
+
+/// Pack evidence for a query: one NAMESPACE-SCOPED recall per mounted pack, then `floor_pack_hits`.
+///
+/// One recall per pack rather than one mixed recall post-filtered: in a mixed pool the host's own
+/// rows (and every other pack's) consume the candidate slots before the floor ever sees a pack row,
+/// so a relevant pack fact could be starved out by irrelevant household rows that outrank it on
+/// recency. Reinforcement is skipped — reading a publisher's corpus must not teach the host's
+/// learned weights anything about the household.
+fn recall_from_mounted_packs(
+    db: &YantrikDB,
+    manifests: &mut std::collections::HashMap<String, ManifestView>,
+    query: &str,
+    top_k: usize,
+) -> std::result::Result<Vec<mind_types::memory::PackHit>, String> {
+    let want = top_k.max(1);
+    let routes: Vec<PackRoute> = db
+        .mounted_packs()
+        .into_iter()
+        .filter_map(|p| {
+            let namespace = p.namespace.clone()?;
+            let m = cached_manifest(manifests, &p.path);
+            Some(PackRoute {
+                pack_id: p.pack_id,
+                name: p.name,
+                namespace,
+                floor: m
+                    .and_then(|m| m.recommended_min_similarity)
+                    .unwrap_or(mind_types::memory::DEFAULT_PACK_SIMILARITY_FLOOR),
+                cap: m.and_then(|m| m.recommended_top_k).map(|k| k.max(1) as usize),
+            })
+        })
+        .collect();
+    if routes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let embedding = db.embed(query).map_err(|e| e.to_string())?;
+    let mut candidates: Vec<PackCandidate> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for r in &routes {
+        if !seen.insert(r.namespace.as_str()) {
+            continue;
+        }
+        let k = r.cap.map_or(want, |cap| cap.min(want)).max(1);
+        let rs = db
+            .recall(
+                &embedding,
+                k,
+                None,        // time_window
+                None,        // memory_type
+                false,       // include_consolidated
+                false,       // expand_entities
+                Some(query), // query_text (keyword lanes)
+                true,        // skip_reinforce — a publisher's corpus teaches the host nothing
+                Some(r.namespace.as_str()),
+                None,        // domain
+                None,        // source
+                None,        // certainty_min
+                None,        // order — relevance
+                false,       // include_superseded
+            )
+            .map_err(|e| e.to_string())?;
+        candidates.extend(rs.into_iter().map(PackCandidate::from_engine));
+    }
+    let (hits, ambiguous) = floor_pack_hits(candidates, &routes, want);
+    if ambiguous > 0 {
+        tracing::warn!(
+            ambiguous,
+            "pack rows withheld: more than one mounted pack claims their namespace AND name (two versions mounted at once?) — unmount one"
+        );
+    }
+    Ok(hits)
 }
 
 /// Would exporting this text carry a distinctive personal value out of the household?
@@ -1854,6 +2072,13 @@ impl MemoryHandle {
                 let mut alloc = db.load_node_id_allocator().unwrap_or_else(|_| NodeIdAllocator::new());
                 let zero = vec![0.0f32; dim];
                 let meta = serde_json::json!({});
+                // Mounted-pack manifests, read from the pack files and cached by path. The engine's
+                // `PackInfo` does not yet carry the signed retrieval settings or the digest
+                // (substrate ask ARCH-6 §C.2.1, queued for core 0.18); until it does, the manifest is
+                // the only place the floor lives. Cleared on every mount/unmount so a replaced file
+                // is re-read rather than served stale.
+                let mut pack_manifests: std::collections::HashMap<String, ManifestView> =
+                    std::collections::HashMap::new();
                 // THE PUMP: one FIFO, drained in arrival order. Causally transparent by
                 // construction (see the scheduling doctrine at the top of this file for why
                 // this stayed a single queue, and which escape hatch exists for heavy commands).
@@ -2038,16 +2263,19 @@ impl MemoryHandle {
                             // against both indexes — mounting across embedding spaces returns
                             // plausible-looking, meaningless results. That refusal is surfaced, never
                             // forced: `allow_unverified_embedder` is deliberately not exposed here.
+                            pack_manifests.clear();
                             let _ = reply.send(
                                 db.mount_pack(&path).map_err(|e| e.to_string()),
                             );
                         }
                         Cmd::InstallPack { path, reply } => {
+                            pack_manifests.clear();
                             let _ = reply.send(
                                 db.install_pack(&path).map_err(|e| e.to_string()),
                             );
                         }
                         Cmd::UnmountPack { id, reply } => {
+                            pack_manifests.clear();
                             let _ = reply.send(
                                 db.unmount_pack(&id).map(|_| ()).map_err(|e| e.to_string()),
                             );
@@ -2059,6 +2287,7 @@ impl MemoryHandle {
                             // The engine removes the durably-installed file AND unmounts; a plain
                             // unmount is process-local and the pack silently returns on restart —
                             // the A/B-contamination bug this verb exists to end.
+                            pack_manifests.clear();
                             let _ = reply.send(db.uninstall_pack(&id).map_err(|e| e.to_string()));
                         }
                         Cmd::SealCraftPack { dest, name, version, texts, reply } => {
@@ -2069,17 +2298,25 @@ impl MemoryHandle {
                             let packs = db
                                 .mounted_packs()
                                 .into_iter()
-                                .map(|p| mind_types::memory::PackBrief {
-                                    id: p.pack_id,
-                                    name: p.name,
-                                    version: p.version,
-                                    origin: p.origin,
-                                    trust: format!("{:?}", p.trust),
-                                    rows: p.rows as u64,
-                                    namespace: p.namespace.clone(),
-                                    // A file living in the engine's install dir comes back on every
-                                    // open; anything else is this process's transient mount.
-                                    installed: pack_dir.as_deref().map(|d| p.path.starts_with(d)).unwrap_or(false),
+                                .map(|p| {
+                                    let m = cached_manifest(&mut pack_manifests, &p.path);
+                                    mind_types::memory::PackBrief {
+                                        id: p.pack_id,
+                                        name: p.name,
+                                        version: p.version,
+                                        origin: p.origin,
+                                        trust: format!("{:?}", p.trust),
+                                        rows: p.rows as u64,
+                                        namespace: p.namespace.clone(),
+                                        // A file living in the engine's install dir comes back on
+                                        // every open; anything else is this process's transient mount.
+                                        installed: pack_dir.as_deref().map(|d| p.path.starts_with(d)).unwrap_or(false),
+                                        content_digest: m.and_then(|m| m.content_digest.clone()),
+                                        coverage: m.map(|m| m.coverage.clone()).unwrap_or_default(),
+                                        recommended_top_k: m.and_then(|m| m.recommended_top_k),
+                                        recommended_min_similarity: m.and_then(|m| m.recommended_min_similarity),
+                                        signer: m.and_then(|m| m.publisher_pubkey.clone()),
+                                    }
                                 })
                                 .collect();
                             let _ = reply.send(Ok(packs));
@@ -2088,30 +2325,7 @@ impl MemoryHandle {
                             let _ = reply.send(Ok(db.pack_context()));
                         }
                         Cmd::RecallFromPacks { query, top_k, reply } => {
-                            // The engine's text recall spans EVERY namespace, so the results are
-                            // filtered down to the mounted packs' own namespaces before anything is
-                            // returned. Recalling unscoped would have worked for packs and exposed
-                            // every private household namespace at the same time.
-                            let ns: std::collections::HashSet<String> = db
-                                .mounted_packs()
-                                .into_iter()
-                                .filter_map(|p| p.namespace)
-                                .collect();
-                            if ns.is_empty() {
-                                let _ = reply.send(Ok(Vec::new()));
-                                continue;
-                            }
-                            let hits = db
-                                .recall_text(&query, top_k.max(1) * 4)
-                                .map(|rs| {
-                                    rs.into_iter()
-                                        .filter(|r| ns.contains(&r.namespace))
-                                        .take(top_k.max(1))
-                                        .map(|r| (r.text, r.score))
-                                        .collect::<Vec<_>>()
-                                })
-                                .map_err(|e| e.to_string());
-                            let _ = reply.send(hits);
+                            let _ = reply.send(recall_from_mounted_packs(&db, &mut pack_manifests, &query, top_k));
                         }
                         Cmd::StoreGoalPref { kind, text, reply } => {
                             let _ = reply.send(store_goal_pref(&db, &kind, &text));
@@ -2949,7 +3163,7 @@ impl MemoryFacade for MemoryHandle {
     async fn pack_context(&self) -> Result<Option<String>> {
         self.call(|reply| Cmd::PackContext { reply }).await
     }
-    async fn recall_from_packs(&self, query: &str, top_k: usize) -> Result<Vec<(String, f64)>> {
+    async fn recall_from_packs(&self, query: &str, top_k: usize) -> Result<Vec<mind_types::memory::PackHit>> {
         let query = query.to_string();
         self.call(|reply| Cmd::RecallFromPacks { query, top_k, reply }).await
     }
@@ -3032,9 +3246,231 @@ impl MemoryFacade for MemoryHandle {
     }
 }
 
+/// Sealed-pack fixtures shared with downstream crates' tests (`features = ["fixtures"]`), built the
+/// way `packs/build.py` builds a real pack so pack behaviour is tested against real artifacts rather
+/// than mocks. Not part of the runtime surface.
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixtures {
+    use super::*;
+
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Seal `rows` into `dest` as pack `name` (origin `yantrik-mind-test/<name>`, version 0.1.0)
+    /// under `namespace`, carrying the given publisher retrieval settings. Returns the pack id.
+    /// Built with the same bundled embedder a 64-dim host uses, so it mounts on
+    /// `MemoryHandle::spawn(_, 64)`; the staging database is removed win or lose.
+    pub fn seal_fixture_pack(
+        dest: &str,
+        name: &str,
+        namespace: &str,
+        rows: &[&str],
+        recommended_min_similarity: Option<f64>,
+        recommended_top_k: Option<u32>,
+    ) -> std::result::Result<String, String> {
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = std::env::temp_dir().join(format!("ym_fixture_{}_{name}_{n}.db", std::process::id()));
+        let staging_s = staging.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&staging);
+        let sealed = (|| {
+            let db = YantrikDB::new(&staging_s, 64).map_err(|e| e.to_string())?;
+            if !db.has_embedder() {
+                return Err("fixture host has no embedder — the engine's bundled-embedder feature is off".to_string());
+            }
+            let meta = serde_json::json!({ "source": "fixture" });
+            for r in rows {
+                db.record_text(r, "semantic", 0.6, 0.0, 604_800.0, &meta, namespace, 0.9, "general", "document", None)
+                    .map_err(|e| e.to_string())?;
+            }
+            let embedder = match db.embedder_identity() {
+                Ok(Some((ename, digest, dim))) => serde_json::json!({ "name": ename, "digest": digest, "dim": dim }),
+                _ => serde_json::json!({ "name": null, "digest": null, "dim": db.embedding_dim() }),
+            };
+            let manifest: yantrikdb_core::PackManifest = serde_json::from_value(serde_json::json!({
+                "name": name,
+                "version": "0.1.0",
+                "origin": format!("yantrik-mind-test/{name}"),
+                "description": "test fixture",
+                "embedder": embedder,
+                "namespace": namespace,
+                "constitution": ["Fixture rule: say which fixture row you used."],
+                "coverage": rows.iter().map(|r| r.chars().take(60).collect::<String>()).collect::<Vec<_>>(),
+                "recommended_top_k": recommended_top_k,
+                "recommended_min_similarity": recommended_min_similarity,
+            }))
+            .map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(dest);
+            let m = db.seal_pack(dest, &manifest, Some(namespace)).map_err(|e| e.to_string())?;
+            Ok(m.pack_id())
+        })();
+        let _ = std::fs::remove_file(&staging);
+        let _ = std::fs::remove_file(format!("{staging_s}-wal"));
+        let _ = std::fs::remove_file(format!("{staging_s}-shm"));
+        sealed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn route(pack_id: &str, name: &str, ns: &str, floor: f64, cap: Option<usize>) -> PackRoute {
+        PackRoute { pack_id: pack_id.into(), name: name.into(), namespace: ns.into(), floor, cap }
+    }
+    fn cand(rid: &str, ns: &str, stamp: Option<&str>, similarity: f64, score: f64) -> PackCandidate {
+        PackCandidate {
+            rid: rid.into(),
+            text: format!("row {rid}"),
+            score,
+            similarity,
+            namespace: ns.into(),
+            pack_name: stamp.map(str::to_string),
+        }
+    }
+
+    /// The floor is on SIMILARITY, never on the composite: a row the engine ranks first on
+    /// importance/trust still stays out when its similarity is under the pack's floor.
+    #[test]
+    fn pack_floor_gates_on_similarity_not_on_the_composite_score() {
+        let routes = vec![route("yantrik/a@1.0.0", "a", "ns_a", 0.6, None)];
+        let (hits, ambiguous) = floor_pack_hits(
+            vec![
+                cand("confident-noise", "ns_a", Some("a"), 0.41, 0.95), // best composite, weak similarity
+                cand("relevant", "ns_a", Some("a"), 0.72, 0.60),
+            ],
+            &routes,
+            5,
+        );
+        assert_eq!(ambiguous, 0);
+        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["relevant"]);
+        assert_eq!(hits[0].pack_id, "yantrik/a@1.0.0");
+        assert_eq!(hits[0].similarity, 0.72);
+    }
+
+    /// Host rows never pass, even from inside a pack's namespace; an unclaimed namespace never passes.
+    #[test]
+    fn pack_recall_refuses_host_rows_and_unknown_namespaces() {
+        let routes = vec![route("yantrik/a@1.0.0", "a", "ns_a", 0.0, None)];
+        let (hits, _) = floor_pack_hits(
+            vec![
+                cand("host-row-in-pack-ns", "ns_a", None, 0.99, 0.99),
+                cand("row-in-private-ns", "private:asha", Some("a"), 0.99, 0.99),
+                cand("pack-row", "ns_a", Some("a"), 0.70, 0.70),
+            ],
+            &routes,
+            5,
+        );
+        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["pack-row"]);
+    }
+
+    /// The collision the name stamp cannot break: two VERSIONS (or two re-seals) of one pack
+    /// mounted at once share namespace and name. Their rows are abstained from and counted —
+    /// never handed to whichever manifest came first — while a differently-named pack in the same
+    /// namespace still resolves.
+    #[test]
+    fn two_mounted_versions_of_one_pack_make_their_rows_ambiguous_not_misattributed() {
+        let routes = vec![
+            route("yantrik/a@1.0.0", "a", "ns_a", 0.0, None),
+            route("yantrik/a@2.0.0", "a", "ns_a", 0.0, None),
+            route("yantrik/b@1.0.0", "b", "ns_a", 0.0, None),
+        ];
+        let (hits, ambiguous) = floor_pack_hits(
+            vec![
+                cand("a-row-1", "ns_a", Some("a"), 0.9, 0.9),
+                cand("a-row-2", "ns_a", Some("a"), 0.9, 0.8),
+                cand("b-row", "ns_a", Some("b"), 0.9, 0.7),
+            ],
+            &routes,
+            5,
+        );
+        assert_eq!(ambiguous, 2, "both of pack a's rows are unattributable");
+        assert_eq!(
+            hits.iter().map(|h| (h.rid.as_str(), h.pack_id.as_str())).collect::<Vec<_>>(),
+            vec![("b-row", "yantrik/b@1.0.0")]
+        );
+    }
+
+    /// Two versions of one pack share a namespace: the engine's name stamp breaks the tie, a row
+    /// nothing claims is dropped rather than guessed, and the publisher's cap holds per pack.
+    #[test]
+    fn pack_identity_is_resolved_by_stamp_and_capped_per_pack() {
+        let routes = vec![
+            route("yantrik/a@1.0.0", "a", "ns_a", 0.0, Some(1)),
+            route("yantrik/a-next@2.0.0", "a-next", "ns_a", 0.0, Some(1)),
+        ];
+        let (hits, ambiguous) = floor_pack_hits(
+            vec![
+                cand("a1", "ns_a", Some("a"), 0.9, 0.9),
+                cand("a2", "ns_a", Some("a"), 0.9, 0.8), // over a's cap of 1
+                cand("n1", "ns_a", Some("a-next"), 0.9, 0.7),
+                cand("orphan", "ns_a", Some("someone-else"), 0.9, 0.6),
+            ],
+            &routes,
+            5,
+        );
+        assert_eq!(ambiguous, 0, "an orphan is unclaimed, not ambiguous");
+        let ids: Vec<(&str, &str)> = hits.iter().map(|h| (h.rid.as_str(), h.pack_id.as_str())).collect();
+        assert_eq!(ids, vec![("a1", "yantrik/a@1.0.0"), ("n1", "yantrik/a-next@2.0.0")]);
+    }
+
+    /// P.1 on a REAL sealed pack: a verbatim query clears a strict floor and carries its identity;
+    /// an unrelated question is withheld — the 12/12 → 5/12 attach-harm case, closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mounted_pack_is_floored_on_similarity_and_names_itself() {
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p1_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let strict = dir.join("strict.ydbpack");
+        let rows = [
+            "Typography — set body text on a modular scale with a measure of 45 to 75 characters per line.",
+            "Spacing — derive every gap in a layout from one base unit so the page reads as a system.",
+        ];
+        let id = fixtures::seal_fixture_pack(strict.to_str().unwrap(), "strict-craft", "strict_craft", &rows, Some(0.9), Some(4)).unwrap();
+        assert_eq!(id, "yantrik-mind-test/strict-craft@0.1.0");
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.mount_pack(strict.to_str().unwrap()).await.unwrap();
+
+        let hits = mem.recall_from_packs(rows[0], 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "the verbatim row and not its sibling: {hits:?}");
+        assert_eq!(hits[0].pack_id, id);
+        assert!(!hits[0].rid.is_empty());
+        assert!(hits[0].similarity >= 0.9, "verbatim similarity {}", hits[0].similarity);
+        assert_eq!(hits[0].namespace, "strict_craft");
+        assert!(hits[0].text.starts_with("Typography"));
+
+        let none = mem.recall_from_packs("what is seventeen multiplied by twenty three", 5).await.unwrap();
+        assert!(none.is_empty(), "noise cleared a 0.9 floor: {none:?}");
+
+        // The brief shows the operator the floor in force and the identity to key evidence on.
+        let briefs = mem.mounted_packs().await.unwrap();
+        assert_eq!(briefs.len(), 1);
+        assert_eq!(briefs[0].id, id);
+        assert_eq!(briefs[0].recommended_min_similarity, Some(0.9));
+        assert_eq!(briefs[0].recommended_top_k, Some(4));
+        assert!(briefs[0].content_digest.as_deref().unwrap_or("").starts_with("blake3:"), "{:?}", briefs[0].content_digest);
+        assert_eq!(briefs[0].coverage.len(), 2);
+        assert_eq!(briefs[0].signer, None, "an unsigned fixture has no signer");
+        let _ = std::fs::remove_file(&strict);
+    }
+
+    /// A pack that declares no floor gets the DEFAULT floor — never no floor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pack_without_a_declared_floor_is_still_floored() {
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p1_default_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("nofloor.ydbpack");
+        let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+        fixtures::seal_fixture_pack(pack.to_str().unwrap(), "nofloor", "nofloor_ns", &[row], None, None).unwrap();
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
+        let briefs = mem.mounted_packs().await.unwrap();
+        assert_eq!(briefs[0].recommended_min_similarity, None, "the pack declares none…");
+        let hits = mem.recall_from_packs(row, 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "…yet a verbatim query still lands: {hits:?}");
+        let none = mem.recall_from_packs("remind me to call the plumber on tuesday", 5).await.unwrap();
+        assert!(none.is_empty(), "…and the default floor still withholds noise: {none:?}");
+        let _ = std::fs::remove_file(&pack);
+    }
 
     /// Test context: a member speaking for themselves in a live conversation —
     /// the standard channel shape (Purpose Gate v1 requires every read to say

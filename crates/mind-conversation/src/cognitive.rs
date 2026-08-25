@@ -348,12 +348,13 @@ impl Bus for EngineBus {
         // measured — the local outcome ledger has never seen it run — so a proven local procedure
         // outranks it at selection, which is exactly right.
         if let Ok(hits) = self.engine.memory.recall_from_packs(goal, limit).await {
-            for (text, _score) in hits {
+            for hit in hits {
+                let text = hit.text;
                 let (when, steps) = split_routine(&text);
                 if steps.len() >= 2 {
                     out.push(Procedure {
                         name: routine_name(&text),
-                        when: if when.is_empty() { "from a mounted pack".to_string() } else { format!("{when} [from a mounted pack]") },
+                        when: if when.is_empty() { format!("from pack {}", hit.pack_id) } else { format!("{when} [from pack {}]", hit.pack_id) },
                         steps,
                         kind: ProcedureKind::Instructions,
                         reliability: Prior::declared(0.5),

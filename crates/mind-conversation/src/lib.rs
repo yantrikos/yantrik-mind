@@ -6307,8 +6307,12 @@ impl ConversationEngine {
                         }
                     }
                     "mounted" | "knowledge" => self.packs_mounted().await,
+                    // The floor, observed: the pack evidence a turn on this query would carry, hit
+                    // by hit, with the similarity each cleared. A floor that exists only in tests
+                    // is a floor nobody has seen on the live path.
+                    "probe" | "recall" if !parg.is_empty() => self.packs_probe(&parg).await,
                     "" | "list" | "ls" => self.pack_list().await,
-                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted".to_string(),
+                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query>".to_string(),
                 }
             }
             "plugins" => self.plugins.lock().unwrap().render_list(),
@@ -7911,9 +7915,10 @@ impl ConversationEngine {
 
 FROM A MOUNTED KNOWLEDGE PACK (third-party reference, not the household's own facts):
 ");
-                for (text, _score) in hits {
-                    grounding.push_str(&format!("- {}
-", text.chars().take(400).collect::<String>()));
+                for hit in hits {
+                    // The pack id rides with the claim so a later belief, grade or correction can say
+                    // WHICH publisher's WHICH record it came from — the identity lineage is built on.
+                    grounding.push_str(&format!("- [{}] {}\n", hit.pack_id, hit.text.chars().take(400).collect::<String>()));
                 }
             }
         }

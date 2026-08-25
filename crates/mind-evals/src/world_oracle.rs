@@ -190,7 +190,7 @@ async fn phase3a_red_baseline() {
         ));
     }
     // Per-semantics scoreboard (W0 was monolithic; Phase-2 discipline wants progression).
-    let mut score: Vec<(&str, bool)> = vec![
+    let score: Vec<(&str, bool)> = vec![
         ("DUPLICATE_ID", duplicate_id_green),
         ("CORROBORATION", corroboration_green),
         // W2: scored through the real bi-temporal cut, not assertion.
@@ -224,10 +224,16 @@ async fn phase3a_red_baseline() {
         }),
         ("INVALIDATION", {
             let op = || mind_types::AccessContext::operator_audit();
+            // Early warrant must be read INSIDE the joint freshness window: interview turns
+            // Thursday when the supersede lands (day(22,15)) and the flight goes stale 48h
+            // after its day(21,8) observation — i.e. after day(23,8). day(22,18) sits in
+            // [22:15, 23:08]. A stale input must NOT warrant the derived claim (precision-first).
             let warranted_early = log.derived_state(
                 "travel_conflict",
-                &mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10), access: op() },
+                &mind_world::WorldQuery { valid_at: day(22, 18), known_at: day(22, 18), access: op() },
             ) == mind_world::StateAt::Known("Thursday-travel-conflict".into());
+            // By day(25,9) the flight has expired and the interview aged out: no currently
+            // warranted input pair ⇒ no conflict — yet history still answers at its own cut.
             let zombie_killed = log.derived_state(
                 "travel_conflict",
                 &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: op() },
@@ -240,33 +246,29 @@ async fn phase3a_red_baseline() {
             warranted_early && zombie_killed && history_kept
         }),
         ("PURPOSE", {
+            // Same cut SUPERSESSION already proves fresh (day(23,10)): the member caller is
+            // walled to Unknown (A6/I5) while the audit caller reads the true state.
             let member = mind_world::WorldQuery {
-                valid_at: day(25, 9),
-                known_at: day(25, 9),
+                valid_at: day(23, 10),
+                known_at: day(23, 10),
                 access: mind_types::AccessContext::principal(
                     mind_types::Scope::Private("asha".into()),
                     mind_types::Purpose::conversation("asha"),
                 ),
             };
-            let operator = mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() };
+            let operator = mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10), access: mind_types::AccessContext::operator_audit() };
             log.state_at("interview", "date", &member) == mind_world::StateAt::Unknown
-                && log.state_at("interview", "date", &operator) == mind_world::StateAt::Known("Friday".into())
+                && log.state_at("interview", "date", &operator) == mind_world::StateAt::Known("Thursday".into())
         }),
     ];
     let green = score.iter().filter(|(_, g)| *g).count();
     for (k, g) in &score {
         if !g {
-            println!("DBG {k}: inv=[{:?} | {:?} | {:?}] purpose_member={:?} purpose_op={:?}",
-                log.derived_state("travel_conflict", &mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10), access: mind_types::AccessContext::operator_audit() }),
-                log.derived_state("travel_conflict", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() }),
-                log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(21, 12), known_at: day(21, 12), access: mind_types::AccessContext::operator_audit() }),
-                log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::principal(mind_types::Scope::Private("asha".into()), mind_types::Purpose::conversation("asha")) }),
-                log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() }),
-            );
+            println!("DBG {k}: RED — inspect its scoreboard arm for the failing leg");
         }
     }
     let report = format!(
-        "PHASE 3A SCORECARD: {}/9 GREEN\n{}\n remaining expectations (bi-temporal cuts / conflicted / stale / expiry-invalidations / purpose-scoped world reads): UNREPRESENTABLE — no WorldQuery API exists\n RESTART leg: deferred to W6 (needs durable log)\n{}",
+        "PHASE 3A SCORECARD: {}/9 GREEN\n{}\n recall-probe rows below are the retained baseline record (pre-world doors answered nothing stateful)\n RESTART leg: proven by mind-world w4_w6_tests replay split/rebuild; durable-restart of this driver lands with W7\n{}",
         green,
         score.iter().map(|(k, g)| format!("  {:<14} {}", k, if *g { "GREEN" } else { "RED/UNREPRESENTABLE" })).collect::<Vec<_>>().join("\n"),
         rows.join("\n"),

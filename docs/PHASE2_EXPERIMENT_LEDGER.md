@@ -293,3 +293,14 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Classified findings | ORACLE_ERROR x2 fixed in fixtures: doc_due_2h_dependency and passport_window_open left requires_user_interrupt=false contradicting their own facts ("only Pranab can renew"); the seam correctly demanded interrupt - oracle wrong, production right. No new EXECUTIVE_SEMANTIC_MISSING beyond E.EX0 catalogue; no WORLD_STATE_DEFECT. Boundary type conversion (oracle Posture vs proactive Posture) kept explicit at the scoring edge to preserve the isolation wall. |
 | Result | mind-proactive 5/5; gated oracle: EX1 10/10 GREEN, overall red by design; workspace 42 suites / 935 passed / 0 failed ungated (a gate-variable leak in my own chained command caused one false failure - re-ran clean). |
 | Decision | KEEP (commit b1300b4). Roadmap unchanged: EX2 temporal escalation -> EX3 commitments as a VIEW over authoritative organs (no new registry) -> EX4 resource/receptivity -> EX5 set arbitration -> EX6 outcome measurement -> EX7 adversarial executive trajectory -> executive-control-v1; then shadow mode beside live behavior before any real action wiring. STOP: nothing beyond EX1 built. |
+
+
+## E.EX3 - obligations outrank opportunities; waits honor grace; 6 more decisions earned (22/37)
+
+| Field | Entry |
+|---|---|
+| Red spec first | ex3_commitment_tests failed structurally (no CommitmentView, no obligation fields) before implementation. |
+| Change | CommitmentView = NORMALIZED VIEW referencing authoritative organs (ref_id + source_organ) - the executive owns NO obligation registry. ExecutiveCandidate += commitment / converging_obligation_due_ms (observable environment fact) / wait_grace_until_ms. Deterministic rules: fulfilled -> IGNORE(commitment_fulfilled); converging + actionable + internal -> ACT(obligation_deadline_converging); distant -> MONITOR(commitment_tracked, wake scheduled); optional opportunity while an obligation converges elsewhere -> IGNORE(yields_to_commitment); waiting_on_someone with grace alive -> MONITOR(waiting_grace_open) EVEN IF a window technically exists; grace elapsed -> ACT(dependency_wait_elapsed). |
+| Seam correction during RED->GREEN | Initial ladder let intervention_window_open override an alive grace period; the red test caught it - grace now governs its own phase. Production forced the semantic precision, not the benchmark bending. |
+| Result | mind-proactive 13/13; EX3 SCOPE 6/6 GREEN; EX1 10/10 and EX2 6/6 held; overall red honestly retained at 15/37; workspace 42 suites / 943 passed / 0 failed. Fixture amendments: two L-wait ACT cases gained requires_user_interrupt=true per their own facts (same class as E.EX1 corrections). |
+| Decision | KEEP (commit 9565f32). Coverage 22/37. Next: EX4 resource/receptivity, then EX5 set arbitration, EX6 outcome measurement, EX7 adversarial trajectory -> executive-control-v1, then shadow mode. STOP: nothing beyond EX3 built. |

@@ -202,3 +202,59 @@ conflict exists because of these two events, and this was all I knew at the time
 the genuinely Jarvis question over that trustworthy situation - and counterfactuals become
 simulation over the real model: WorldState(now) apply-A vs apply-B. Every additional primitive
 beyond these five is earned from failing scenarios, exactly as Phase 2 earned its architecture.
+ 
+# Phase 3A final invariants - then DESIGN FROZEN (2026-08-25)
+
+**I6 - Event identity and replay determinism.** Every source event/transition carries stable
+identity: source_event_id, transition_id, source_id, occurred_at, observed_at, recorded_seq.
+Replaying the same authoritative transition set produces BYTE-EQUIVALENT logical world state,
+independent of ingestion batching or restart. Duplicate ingestion = same source_event_id means NO
+second semantic transition (identity match, never fuzzy strings). Simultaneous/ambiguous
+transitions resolve by a declared deterministic ordering rule - never insertion accident.
+
+**I7 - Retraction is append-only.** The wrong transition stays: tr-83 RETRACT target=tr-41
+reason=carrier_correction. The log describes epistemic history ("what did we believe?" AND "why
+did we stop believing it?"), not merely today's surviving facts.
+
+**I8 - Rule evolution must not rewrite history.** Historical derived transitions are IMMUTABLE
+evidence of what the system actually derived under the rule version available at the time. A new
+overlap-rule/v2 produces new transitions; it never silently reinterprets historical cognition.
+"What did Yantrik infer THEN" vs "what would it infer NOW from the same evidence" are different
+questions with different answers - the foundation for regret without hindsight bias once
+self-improvement changes rules.
+
+## FIRST DELIVERABLE: the red oracle harness. Nothing else.
+
+Before any mind-world module exists, implement only:
+  Scenario { events[], checkpoints[]{valid_at, known_at, expected facts}, expected conflicts[],
+             expected unknowns[], expected stale[], expected lineage[], access cases[] }
+Scored against TODAY'S system - which must fail, or be explicitly incapable of answering.
+That failure record IS the Phase 3 baseline.
+
+FORBIDDEN simultaneously: implementing the world model alongside the benchmark and declaring it
+green. No Expectation primitive. No AttentionBoard. No planner changes. No ontology. No LLM
+situation synthesizer. Design frozen at I1-I8.
+
+## Benchmark grades TRAJECTORIES, not answers
+
+Not "package=delivered at t75" but the whole path:
+  t10 expected-Friday -> t25 delayed-Monday -> t37 Conflicted(...) -> RESTART ->
+  t52 delivered-Saturday -> t75 delivered-Saturday
+and the transitions that produced each: ASSERT / SUPERSEDE / RESOLVE. Correct finals reached by
+wrong paths score as failures.
+
+Hardest defining test = I3 derivation invalidation: interview Thu + flight Thu => conflict;
+correction to Friday => conflict becomes NO-LONGER-WARRANTED while `world why old-conflict` still
+renders the full lineage with its invalidation reason. Epistemic history, not deletion.
+
+Done-state shape (no autonomous actions anywhere in it):
+  ym world now      CURRENT/WAITING/CONFLICTED/STALE with known-since, valid-from, source per fact
+  ym world why interview.date   SUPERSEDE tr-918 <- email:923; replaced Tuesday <- ASSERT tr-412 <- email:501
+  ym world at --valid 2026-08-20 --known 2026-08-20   package.delay = UNKNOWN
+Every part of "what situation am I in?" carries provenance. That alone is very Jarvis-like.
+
+Methodology, all the way through:
+  Phase 2: experience earned learning mechanisms.
+  Phase 3A: event histories earn situation-model semantics.
+  Phase 3B: situation histories earn attention policy.
+  Phase 4: failed executive choices earn counterfactual machinery.

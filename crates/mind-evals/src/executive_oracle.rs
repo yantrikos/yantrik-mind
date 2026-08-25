@@ -331,6 +331,7 @@ async fn phase3b_red_executive_baseline() {
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
             intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
             commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
         };
         match id {
             "stale_eta_after_delivered" | "flight_refunded_auto" | "key_rotated_old_alert" | "meeting_note_minuted" => {
@@ -429,6 +430,7 @@ async fn phase3b_red_executive_baseline() {
             intervention_by_ms: Some(d2),
             interrupt_lead_ms: Some(4 * 3_600_000),
             commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
         };
         let dec = mind_proactive::arbitrate(&cand);
         let got = match dec.posture {
@@ -469,6 +471,7 @@ async fn phase3b_red_executive_baseline() {
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
             intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
             commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
         };
         match sit.id {
             "form_90min_promise" => {
@@ -522,6 +525,25 @@ async fn phase3b_red_executive_baseline() {
         if ok { ex3_correct += 1; } else { ex3_failures.push(format!("{} got {:?}/{} want {:?}", sit.id, dec.posture, dec.reason_code, sit.want)); }
     }
     println!("EX3 SCOPE: {ex3_correct}/{ex3_total} GREEN {}", if ex3_failures.is_empty() { String::new() } else { format!("{ex3_failures:?}") });
+    const EX4_SCOPE: &[&str] = &["refresh_network_down","user_sleeping_low_urgency","low_urg_during_meeting","same_item_user_free"];
+    let mut ex4_total = 0usize; let mut ex4_correct = 0usize; let mut ex4_failures: Vec<String> = Vec::new();
+    for sit in &sits {
+        if !EX4_SCOPE.contains(&sit.id) { continue; }
+        ex4_total += 1;
+        let mut cand = mind_proactive::ExecutiveCandidate { candidate_id: sit.id.into(), source_ref: format!("world:{}", sit.id), now_ms: 0, urgency: 1, deadline_at_ms: Some(48*3_600_000), already_resolved: false, useful_action_available: true, internal_capability: true, blocked: false, waiting_on_someone: false, intervention_window_open: true, execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95, intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None, commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None, resources: Some(mind_proactive::ResourceContextView { network_available: true, capability_available: true, budget_available: true, user_receptive: Some(true), quiet_hours: false, quiet_hours_end_ms: None }) };
+        match sit.id {
+            "refresh_network_down" => cand.resources.as_mut().unwrap().network_available = false,
+            "user_sleeping_low_urgency" => { cand.internal_capability = false; let r = cand.resources.as_mut().unwrap(); r.user_receptive = Some(false); r.quiet_hours = true; r.quiet_hours_end_ms = Some(8*3_600_000); },
+            "low_urg_during_meeting" => { cand.internal_capability = false; cand.resources.as_mut().unwrap().user_receptive = Some(false); },
+            _ => {}
+        }
+        let dec4 = mind_proactive::arbitrate(&cand);
+        let got4 = match dec4.posture { mind_proactive::Posture::Ignore => Posture::Ignore, mind_proactive::Posture::Monitor => Posture::Monitor, mind_proactive::Posture::Act => Posture::Act };
+        let mut ok4 = got4 == sit.want && dec4.requires_user_interrupt == sit.requires_user_interrupt;
+        if got4 == Posture::Monitor { ok4 = ok4 && dec4.monitor.as_ref().map(|m| !m.wake_when.is_empty()).unwrap_or(false); }
+        if ok4 { ex4_correct += 1; } else { ex4_failures.push(format!("{} got {:?}", sit.id, dec4.reason_code)); }
+    }
+    println!("EX4 SCOPE: {ex4_correct}/{ex4_total} GREEN {}", if ex4_failures.is_empty() { String::new() } else { format!("{ex4_failures:?}") });
 
     // Retires when the executive seam earns full coverage — same discipline as E.W0.
     assert_eq!(

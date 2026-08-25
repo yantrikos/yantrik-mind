@@ -71,6 +71,21 @@ pub struct ExecutiveCandidate {
     pub converging_obligation_due_ms: Option<i64>,
     /// EX3: waiting on someone; until this instant their grace is respected.
     pub wait_grace_until_ms: Option<i64>,
+    /// EX4: normalized VIEW over authoritative resource/receptivity state.
+    pub resources: Option<ResourceContextView>,
+}
+
+/// EX4 doctrine: resource failure changes EXECUTABILITY, not importance;
+/// receptivity changes DELIVERY STRATEGY, not world truth. View only - no registry.
+#[derive(Clone, Debug)]
+pub struct ResourceContextView {
+    pub network_available: bool,
+    pub capability_available: bool,
+    pub budget_available: bool,
+    /// None = receptivity unknown / not needed.
+    pub user_receptive: Option<bool>,
+    pub quiet_hours: bool,
+    pub quiet_hours_end_ms: Option<i64>,
 }
 
 /// Normalized view referencing an authoritative organ (task store / promise ledger).
@@ -99,13 +114,61 @@ const DAY_MS: i64 = 86_400_000;
 /// THE SEAM. Total, deterministic, side-effect-free. Rules ordered; failures earn nuance.
 pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
     let ev_refs = vec![c.source_ref.clone()];
-    let dec = |posture, interrupt, reason, monitor| ExecutiveDecision {
-        candidate_id: c.candidate_id.clone(),
-        posture,
-        requires_user_interrupt: interrupt,
-        reason_code: reason,
-        monitor,
-        evidence_refs: ev_refs.clone(),
+    let dec = |posture, interrupt, reason, monitor| {
+        let mut d = ExecutiveDecision {
+            candidate_id: c.candidate_id.clone(),
+            posture,
+            requires_user_interrupt: interrupt,
+            reason_code: reason,
+            monitor,
+            evidence_refs: ev_refs.clone(),
+        };
+        // EX4 conditioning pass: condition the JUSTIFIED posture on executability/delivery.
+        if d.posture == Posture::Act {
+            if let Some(r) = &c.resources {
+                let block = if !r.capability_available {
+                    Some(("capability_unavailable", WakeCondition::StateChangeOf("capability".into())))
+                } else if !r.budget_available {
+                    Some(("budget_unavailable", WakeCondition::StateChangeOf("budget".into())))
+                } else if !r.network_available {
+                    Some(("resource_unavailable", WakeCondition::StateChangeOf("network".into())))
+                } else {
+                    None
+                };
+                if let Some((rc, wake)) = block {
+                    d.posture = Posture::Monitor;
+                    d.requires_user_interrupt = false;
+                    d.reason_code = rc;
+                    d.monitor = Some(MonitorPlan { review_at_ms: None, wake_when: vec![wake] });
+                    return d;
+                }
+                if d.requires_user_interrupt {
+                    let imminent = c.deadline_at_ms
+                        .map(|dl| c.urgency >= 3 && dl - c.now_ms <= c.interrupt_lead_ms.unwrap_or(4 * 3_600_000))
+                        .unwrap_or(false);
+                    if !imminent {
+                        if r.quiet_hours {
+                            d.posture = Posture::Monitor;
+                            d.reason_code = "quiet_hours";
+                            d.monitor = Some(MonitorPlan {
+                                review_at_ms: r.quiet_hours_end_ms,
+                                wake_when: vec![WakeCondition::StateChangeOf("receptivity".into())],
+                            });
+                        } else if r.user_receptive == Some(false) {
+                            d.posture = Posture::Monitor;
+                            d.reason_code = "user_unavailable";
+                            d.monitor = Some(MonitorPlan {
+                                review_at_ms: None,
+                                wake_when: vec![WakeCondition::StateChangeOf("receptivity".into())],
+                            });
+                        }
+                    } else {
+                        d.reason_code = "critical_window_override";
+                    }
+                }
+            }
+        }
+        d
     };
 
     // 1. Examined, nothing warrants revisiting: silence IS the decision.
@@ -247,6 +310,7 @@ mod ex1_tests {
             waiting_on_someone: false, intervention_window_open: false,
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.9,
             commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
             intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
         }
     }
@@ -326,6 +390,7 @@ mod ex2_temporal_tests {
             intervention_by_ms: Some(d),
             interrupt_lead_ms: Some(4 * 3_600_000),
             commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
         }
     }
 
@@ -403,6 +468,7 @@ mod ex3_commitment_tests {
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
             intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
             commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
         }
     }
 
@@ -467,5 +533,105 @@ mod ex3_commitment_tests {
     }
 }
 
+
+
+
+#[cfg(test)]
+mod ex4_resource_tests {
+    use super::*;
+
+    /// PHASE 3B EX4 RED SPEC - resource failure changes EXECUTABILITY, not importance;
+    /// receptivity changes DELIVERY STRATEGY, not world truth. No monotonic assumption.
+    fn res(net: bool, cap: bool, budget: bool, receptive: Option<bool>, quiet: bool) -> ResourceContextView {
+        ResourceContextView {
+            network_available: net, capability_available: cap, budget_available: budget,
+            user_receptive: receptive, quiet_hours: quiet, quiet_hours_end_ms: None,
+        }
+    }
+    fn cand() -> ExecutiveCandidate {
+        ExecutiveCandidate {
+            candidate_id: "r".into(), source_ref: "world:r".into(), now_ms: 0,
+            urgency: 2, deadline_at_ms: Some(48 * 3_600_000), already_resolved: false,
+            useful_action_available: true, internal_capability: true, blocked: false,
+            waiting_on_someone: false, intervention_window_open: true,
+            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            resources: None,
+        }
+    }
+
+    #[test]
+    fn capability_loss_demotes_act_to_monitor_with_wake() {
+        let mut c = cand();
+        c.resources = Some(res(false, false, true, None, false));
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Monitor);
+        assert_eq!(d.reason_code, "capability_unavailable");
+        assert!(d.monitor.unwrap().wake_when.iter().any(|w| matches!(w, WakeCondition::StateChangeOf(s) if s.contains("capability"))));
+    }
+
+    #[test]
+    fn budget_loss_demotes_but_need_persists() {
+        let mut c = cand();
+        c.resources = Some(res(true, true, false, None, false));
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Monitor);
+        assert_eq!(d.reason_code, "budget_unavailable");
+    }
+
+    #[test]
+    fn network_return_restores_act_no_monotonicity() {
+        let mut down = cand();
+        down.resources = Some(res(false, true, true, None, false));
+        assert_eq!(arbitrate(&down).posture, Posture::Monitor);
+        let mut up = cand();
+        up.resources = Some(res(true, true, true, None, false));
+        up.internal_capability = false;
+        let d = arbitrate(&up);
+        assert_eq!(d.posture, Posture::Act);
+        assert!(d.requires_user_interrupt);
+    }
+
+    #[test]
+    fn unreceptive_user_leaves_internal_action_alone() {
+        let mut c = cand();
+        c.resources = Some(res(true, true, true, Some(false), true));
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Act);
+        assert!(!d.requires_user_interrupt);
+    }
+
+    #[test]
+    fn user_only_action_with_unreceptive_user_defers() {
+        let mut c = cand();
+        c.internal_capability = false;
+        c.urgency = 1;
+        c.resources = Some(res(true, true, true, Some(false), false));
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Monitor);
+        assert_eq!(d.reason_code, "user_unavailable");
+    }
+
+    #[test]
+    fn quiet_hours_defer_non_urgent_but_critical_window_overrides() {
+        let mut soft = cand();
+        soft.internal_capability = false;
+        soft.urgency = 1;
+        soft.deadline_at_ms = Some(20 * 3_600_000);
+        soft.resources = Some(res(true, true, true, Some(false), true));
+        assert_eq!(arbitrate(&soft).reason_code, "quiet_hours");
+        let mut crit = cand();
+        crit.internal_capability = false;
+        crit.urgency = 3;
+        crit.deadline_at_ms = Some(20 * 60_000);
+        crit.interrupt_lead_ms = Some(4 * 3_600_000);
+        crit.resources = Some(res(true, true, true, Some(false), true));
+        let d = arbitrate(&crit);
+        assert_eq!(d.posture, Posture::Act);
+        assert_eq!(d.reason_code, "critical_window_override");
+        assert!(d.requires_user_interrupt);
+    }
+}
 
 

@@ -304,3 +304,13 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Seam correction during RED->GREEN | Initial ladder let intervention_window_open override an alive grace period; the red test caught it - grace now governs its own phase. Production forced the semantic precision, not the benchmark bending. |
 | Result | mind-proactive 13/13; EX3 SCOPE 6/6 GREEN; EX1 10/10 and EX2 6/6 held; overall red honestly retained at 15/37; workspace 42 suites / 943 passed / 0 failed. Fixture amendments: two L-wait ACT cases gained requires_user_interrupt=true per their own facts (same class as E.EX1 corrections). |
 | Decision | KEEP (commit 9565f32). Coverage 22/37. Next: EX4 resource/receptivity, then EX5 set arbitration, EX6 outcome measurement, EX7 adversarial trajectory -> executive-control-v1, then shadow mode. STOP: nothing beyond EX3 built. |
+
+
+## E.EX4 - resource/receptivity conditioning; executability vs importance separated (IN PROGRESS at commit time)
+
+| Field | Entry |
+|---|---|
+| Delivered | ResourceContextView (network/capability/budget/user_receptive/quiet_hours) as normalized VIEW; conditioning pass inside arbitrate(): justified ACT demotes to MONITOR(capability_unavailable/budget_unavailable/resource_unavailable, each with StateChangeOf wake) when resources block; user-interrupt ACTs defer on quiet_hours or user_unavailable UNLESS urgency>=3 within interrupt lead => critical_window_override keeps ACT+interrupt. Internal acts immune to receptivity. Doctrine encoded: resource failure changes executability not importance; receptivity changes delivery strategy not truth. mind-proactive 19/19 incl six RED-first ex4 tests (demote-with-wake, budget persistence, network-return restores ACT - no monotonicity, internal-immune, user-only defers, quiet-vs-critical boundary). |
+| Oracle | EX4 SCOPE wired for 4 J/K situations: refresh_network_down GREEN; same_item_user_free GREEN; user_sleeping_low_urgency and low_urg_during_meeting postures CORRECT (both MONITOR as wanted) but flagged by my strict checker - discrepancy is at reason-code/wake level (quiet_hours vs user_unavailable precedence when both apply) - OPEN classification next session: ORACLE_ERROR likely (fixture sets both signals simultaneously; real contexts rarely do). Postures themselves are right. |
+| Result | EX1 10/10 EX2 6/6 EX3 6/6 held; overall intentional red retained; coverage claim stays 22/37 until the two flagged cases classify green. Workspace full run NOT re-executed this slice (context budget); mind-proactive 19/19 and prior suites green at last full run. |
+| Decision | CONTINUE next session: classify the two flags, finish EX4, then EX5 set arbitration earns executive attention proper. STOP now. |

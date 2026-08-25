@@ -403,6 +403,21 @@ pub struct PackBrief {
 /// moved to 0.6. A pack that declares its own measured floor overrides this.
 pub const DEFAULT_PACK_SIMILARITY_FLOOR: f64 = 0.55;
 
+/// The floor in force for a pack: the HOST WALL, raised by a valid publisher-measured floor and
+/// never lowered by one.
+///
+/// A manifest is publisher data. It may make the host stricter about its own corpus (a pack that
+/// measured 0.65 gets 0.65), but a declared 0.0 — sloppy or hostile — must not reopen the
+/// attach-harm the wall exists to close: pack rules never outrank host policy, and this is the
+/// first place that hierarchy is a number rather than a sentence. Non-finite or out-of-range
+/// declarations are ignored, with the same result. (Codex's review of P.1.)
+pub fn effective_pack_floor(declared: Option<f64>) -> f64 {
+    match declared {
+        Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f.max(DEFAULT_PACK_SIMILARITY_FLOOR),
+        _ => DEFAULT_PACK_SIMILARITY_FLOOR,
+    }
+}
+
 /// One row recalled from a mounted knowledge pack, with the identity lineage needs: WHICH pack
 /// (`pack_id` = `origin@version`) and WHICH record (`rid`) said it.
 ///
@@ -417,6 +432,23 @@ pub struct PackHit {
     pub score: f64,
     pub similarity: f64,
     pub namespace: String,
+}
+
+/// One candidate row as pack recall SAW it, before the floor: what an operator needs to tell
+/// "off-coverage" from "the wall is too strict for this embedder" — a withheld row at 0.53 and a
+/// withheld row at 0.12 are different findings. An instrument for `ym pack probe`; never a
+/// prompt input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackProbe {
+    pub pack_id: String,
+    pub rid: String,
+    pub text: String,
+    pub score: f64,
+    pub similarity: f64,
+    /// The floor in force for this row's pack.
+    pub floor: f64,
+    /// Whether the row would have reached a turn.
+    pub cleared: bool,
 }
 
 #[async_trait]
@@ -604,6 +636,11 @@ pub trait MemoryFacade: Send + Sync {
     /// floor is on SIMILARITY, not on the composite score — the composite folds in importance and
     /// trust, which is how a confident, irrelevant row gets injected into an arithmetic question.
     async fn recall_from_packs(&self, _query: &str, _top_k: usize) -> Result<Vec<PackHit>> {
+        Ok(Vec::new())
+    }
+    /// The operator's view of the same recall: every attributed candidate, cleared or withheld, with
+    /// the floor it was measured against. Read-only instrument; nothing here reaches a prompt.
+    async fn probe_packs(&self, _query: &str, _top_k: usize) -> Result<Vec<PackProbe>> {
         Ok(Vec::new())
     }
     /// The constitution + coverage block the engine assembles for the system prompt, or None when

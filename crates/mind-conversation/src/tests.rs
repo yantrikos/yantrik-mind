@@ -3551,14 +3551,16 @@ async fn grounding_labels_pack_evidence_with_the_pack_id_and_keeps_it_out_of_mem
     std::fs::create_dir_all(&dir).unwrap();
     let pack = dir.join("label.ydbpack");
     let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
-    let id = mind_memory::fixtures::seal_fixture_pack(pack.to_str().unwrap(), "label-craft", "label_craft", &[row], Some(0.0), None)
+    let id = mind_memory::fixtures::seal_fixture_pack(pack.to_str().unwrap(), "label-craft", "label_craft", &[row], None, None)
         .unwrap();
     let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
     mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
     let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
 
-    let grounding = conv.turn_grounding("what contrast does body text need?", &TurnIdentity::primary()).await;
+    // The row itself as the question: similarity ~1.0 clears the host wall without relying on the
+    // small bundled embedder's paraphrase reach, which is not what this test measures.
+    let grounding = conv.turn_grounding(row, &TurnIdentity::primary()).await;
     let heading = grounding.find("FROM A MOUNTED KNOWLEDGE PACK").expect(&format!("no pack block in: {grounding}"));
     let label = grounding.find(&format!("[{id}]")).expect(&format!("the hit must carry its pack id: {grounding}"));
     assert!(label > heading, "the labelled hit sits under the third-party heading");

@@ -106,6 +106,7 @@ enum Cmd {
     SealCraftPack { dest: String, name: String, version: String, texts: Vec<String>, reply: Reply<u64> },
     PackContext { reply: Reply<Option<String>> },
     RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackHit>> },
+    ProbePacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackProbe>> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
@@ -602,27 +603,28 @@ impl ManifestView {
     }
 }
 
-/// A mounted pack's manifest, read from its file on first use and cached by path.
+/// A mounted pack's manifest, read from its file on first use and cached by path — the FAILURE
+/// too: an unreadable manifest is warned about once and remembered as `None` until the next
+/// mount/unmount clears the cache, so a pack with a bad manifest costs one line, not one per recall.
 ///
-/// A manifest that cannot be read is reported once and treated as absent — the pack then gets the
-/// default floor rather than no floor. Never a reason to skip the pack: the engine already vetted
-/// the file at mount, so an unreadable manifest here is a race with a replaced file, not a bad pack.
+/// An unreadable manifest makes the pack get the host wall rather than no floor. Never a reason to
+/// skip the pack: the engine already vetted the file at mount, so an unreadable manifest here is a
+/// race with a replaced file, not a bad pack.
 fn cached_manifest<'a>(
-    cache: &'a mut std::collections::HashMap<String, ManifestView>,
+    cache: &'a mut std::collections::HashMap<String, Option<ManifestView>>,
     path: &str,
 ) -> Option<&'a ManifestView> {
     if !cache.contains_key(path) {
-        match YantrikDB::read_manifest(path) {
-            Ok(m) => {
-                cache.insert(path.to_string(), ManifestView::of(&m));
-            }
+        let read = match YantrikDB::read_manifest(path) {
+            Ok(m) => Some(ManifestView::of(&m)),
             Err(e) => {
-                tracing::warn!(path, error = %e, "pack manifest unreadable — default floor applies");
-                return None;
+                tracing::warn!(path, error = %e, "pack manifest unreadable — the host wall applies until it is remounted");
+                None
             }
-        }
+        };
+        cache.insert(path.to_string(), read);
     }
-    cache.get(path)
+    cache.get(path).and_then(|m| m.as_ref())
 }
 
 /// Where one mounted pack's rows live and how its publisher said to retrieve them.
@@ -665,43 +667,24 @@ impl PackCandidate {
 /// publisher's per-pack cap, rank by the engine's composite, return at most `want` — plus the
 /// number of rows DROPPED AS AMBIGUOUS, which the caller must surface.
 ///
-/// Identity resolution: a row belongs to the route whose namespace it lives in; when two mounted
-/// packs share a namespace, the engine's `pack:<name>` stamp breaks the tie. When even the name
-/// collides — two versions or two re-seals of one pack mounted at once — the row is ABSTAINED
-/// from, never handed to whichever manifest was iterated first: a hit attributed to the wrong
-/// version would key that version's evidence and floor on another's rows. (The engine's
-/// structured provenance in core 0.18 retires this; the lifecycle registry, ARCH-6 P.7, will
-/// refuse the second mount outright.) A row nothing claims is dropped, and rows without any pack
-/// stamp are host rows and never pass, whatever namespace they sit in.
+/// Identity resolution: a row is attributed only to the route that matches BOTH its namespace and
+/// the engine's `pack:<name>` stamp — in every case, not only when a namespace is shared, because a
+/// row stamped with a name no route carries is a pack this host did not route (a pack sealed without
+/// a namespace, say, whose rows landed in another pack's) and must not be credited to the pack that
+/// happens to own the namespace. When the stamp selects more than one route — two versions or two
+/// re-seals of one pack mounted at once — the row is ABSTAINED from and counted, never handed to
+/// whichever manifest was iterated first: a hit attributed to the wrong version would key that
+/// version's evidence and floor on another's rows. (The engine's structured provenance in core 0.18
+/// retires this; the lifecycle registry, ARCH-6 P.7, will refuse the second mount outright.) Rows
+/// without any pack stamp are host rows and never pass, whatever namespace they sit in.
 fn floor_pack_hits(candidates: Vec<PackCandidate>, routes: &[PackRoute], want: usize) -> (Vec<mind_types::memory::PackHit>, usize) {
-    let mut ranked = candidates;
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let (resolved, ambiguous) = resolve_pack_candidates(candidates, routes);
     let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut out = Vec::new();
-    let mut ambiguous = 0usize;
-    for c in ranked {
+    for (route, c) in resolved {
         if out.len() >= want {
             break;
         }
-        let Some(stamp) = c.pack_name.as_deref() else { continue };
-        let route = {
-            let in_ns: Vec<&PackRoute> = routes.iter().filter(|r| r.namespace == c.namespace).collect();
-            match in_ns.len() {
-                0 => continue,
-                1 => in_ns[0],
-                _ => {
-                    let named: Vec<&&PackRoute> = in_ns.iter().filter(|r| r.name == stamp).collect();
-                    match named.len() {
-                        1 => named[0],
-                        0 => continue,
-                        _ => {
-                            ambiguous += 1;
-                            continue;
-                        }
-                    }
-                }
-            }
-        };
         if !(c.similarity >= route.floor) {
             continue;
         }
@@ -722,20 +705,101 @@ fn floor_pack_hits(candidates: Vec<PackCandidate>, routes: &[PackRoute], want: u
     (out, ambiguous)
 }
 
-/// Pack evidence for a query: one NAMESPACE-SCOPED recall per mounted pack, then `floor_pack_hits`.
+/// Attribute each candidate to the ONE route matching its namespace and stamp, ranked by the
+/// engine's composite; returns the attributed pairs and the count abstained as ambiguous. The
+/// identity half of `floor_pack_hits`, shared with the probe so the operator sees exactly the rows
+/// recall would have judged.
+fn resolve_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [PackRoute]) -> (Vec<(&'r PackRoute, PackCandidate)>, usize) {
+    let mut ranked = candidates;
+    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = Vec::new();
+    let mut ambiguous = 0usize;
+    for c in ranked {
+        let Some(stamp) = c.pack_name.as_deref() else { continue };
+        let named: Vec<&'r PackRoute> =
+            routes.iter().filter(|r| r.namespace == c.namespace && r.name == stamp).collect();
+        match named.len() {
+            1 => out.push((named[0], c)),
+            0 => continue,
+            _ => ambiguous += 1,
+        }
+    }
+    (out, ambiguous)
+}
+
+/// How many candidates to pull per namespace, as a multiple of what the caller wants, and the cap
+/// on that. The engine's namespace filter admits every row in the namespace — host rows that share
+/// it and every pack sharing it — and they compete for the same slots before the stamp filter can
+/// drop them. Overfetching bounds how many such rows it takes to crowd a pack row out; it does NOT
+/// make crowding impossible, and this code does not claim it does. The proof arrives with the
+/// engine's allowlist recall (`recall_from_packs_for`, core 0.18), which searches only the packs
+/// asked for.
+const PACK_OVERFETCH: usize = 4;
+const PACK_FETCH_MAX: usize = 64;
+
+/// Pack evidence for a query: one NAMESPACE-SCOPED recall per distinct pack namespace, overfetched,
+/// then `floor_pack_hits`.
 ///
-/// One recall per pack rather than one mixed recall post-filtered: in a mixed pool the host's own
-/// rows (and every other pack's) consume the candidate slots before the floor ever sees a pack row,
-/// so a relevant pack fact could be starved out by irrelevant household rows that outrank it on
-/// recency. Reinforcement is skipped — reading a publisher's corpus must not teach the host's
-/// learned weights anything about the household.
+/// Per namespace rather than one mixed recall post-filtered: in a fully mixed pool the household's
+/// own rows consume the candidate slots before the floor ever sees a pack row. The namespace filter
+/// removes the household's rows from the pool unless they share the pack's namespace; for those
+/// and for packs sharing a namespace, `PACK_OVERFETCH` sized by the number of routes in the
+/// namespace mitigates crowding (see its doc for what it cannot prove). Reinforcement is skipped —
+/// reading a publisher's corpus must not teach the host's learned weights anything about the
+/// household.
 fn recall_from_mounted_packs(
     db: &YantrikDB,
-    manifests: &mut std::collections::HashMap<String, ManifestView>,
+    manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
     query: &str,
     top_k: usize,
 ) -> std::result::Result<Vec<mind_types::memory::PackHit>, String> {
     let want = top_k.max(1);
+    let (candidates, routes) = collect_pack_candidates(db, manifests, query, want)?;
+    let (hits, ambiguous) = floor_pack_hits(candidates, &routes, want);
+    if ambiguous > 0 {
+        tracing::warn!(
+            ambiguous,
+            "pack rows withheld: more than one mounted pack claims their namespace AND name (two versions mounted at once?) — unmount one"
+        );
+    }
+    Ok(hits)
+}
+
+/// `ym pack probe`: the same candidates recall judges, every one attributed, with the floor it was
+/// measured against and whether it cleared. Ranked by the engine's composite; at most 3× `top_k`
+/// rows so a withheld pack still shows its best few.
+fn probe_mounted_packs(
+    db: &YantrikDB,
+    manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    query: &str,
+    top_k: usize,
+) -> std::result::Result<Vec<mind_types::memory::PackProbe>, String> {
+    let want = top_k.max(1);
+    let (candidates, routes) = collect_pack_candidates(db, manifests, query, want)?;
+    let (resolved, _ambiguous) = resolve_pack_candidates(candidates, &routes);
+    Ok(resolved
+        .into_iter()
+        .take(want * 3)
+        .map(|(route, c)| mind_types::memory::PackProbe {
+            pack_id: route.pack_id.clone(),
+            rid: c.rid,
+            text: c.text,
+            score: c.score,
+            similarity: c.similarity,
+            floor: route.floor,
+            cleared: c.similarity >= route.floor,
+        })
+        .collect())
+}
+
+/// The shared front half of recall and probe: routes for every mounted pack with a namespace, and
+/// one overfetched, namespace-scoped, reinforcement-free engine recall per distinct namespace.
+fn collect_pack_candidates(
+    db: &YantrikDB,
+    manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    query: &str,
+    want: usize,
+) -> std::result::Result<(Vec<PackCandidate>, Vec<PackRoute>), String> {
     let routes: Vec<PackRoute> = db
         .mounted_packs()
         .into_iter()
@@ -746,24 +810,25 @@ fn recall_from_mounted_packs(
                 pack_id: p.pack_id,
                 name: p.name,
                 namespace,
-                floor: m
-                    .and_then(|m| m.recommended_min_similarity)
-                    .unwrap_or(mind_types::memory::DEFAULT_PACK_SIMILARITY_FLOOR),
+                floor: mind_types::memory::effective_pack_floor(m.and_then(|m| m.recommended_min_similarity)),
                 cap: m.and_then(|m| m.recommended_top_k).map(|k| k.max(1) as usize),
             })
         })
         .collect();
     if routes.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), routes));
     }
     let embedding = db.embed(query).map_err(|e| e.to_string())?;
     let mut candidates: Vec<PackCandidate> = Vec::new();
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut routes_in_ns: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for r in &routes {
-        if !seen.insert(r.namespace.as_str()) {
-            continue;
-        }
-        let k = r.cap.map_or(want, |cap| cap.min(want)).max(1);
+        *routes_in_ns.entry(r.namespace.as_str()).or_insert(0) += 1;
+    }
+    for (namespace, n_routes) in routes_in_ns {
+        let k = want
+            .saturating_mul(PACK_OVERFETCH)
+            .saturating_mul(n_routes)
+            .clamp(want, PACK_FETCH_MAX);
         let rs = db
             .recall(
                 &embedding,
@@ -774,7 +839,7 @@ fn recall_from_mounted_packs(
                 false,       // expand_entities
                 Some(query), // query_text (keyword lanes)
                 true,        // skip_reinforce — a publisher's corpus teaches the host nothing
-                Some(r.namespace.as_str()),
+                Some(namespace),
                 None,        // domain
                 None,        // source
                 None,        // certainty_min
@@ -784,14 +849,7 @@ fn recall_from_mounted_packs(
             .map_err(|e| e.to_string())?;
         candidates.extend(rs.into_iter().map(PackCandidate::from_engine));
     }
-    let (hits, ambiguous) = floor_pack_hits(candidates, &routes, want);
-    if ambiguous > 0 {
-        tracing::warn!(
-            ambiguous,
-            "pack rows withheld: more than one mounted pack claims their namespace AND name (two versions mounted at once?) — unmount one"
-        );
-    }
-    Ok(hits)
+    Ok((candidates, routes))
 }
 
 /// Would exporting this text carry a distinctive personal value out of the household?
@@ -2077,7 +2135,7 @@ impl MemoryHandle {
                 // (substrate ask ARCH-6 §C.2.1, queued for core 0.18); until it does, the manifest is
                 // the only place the floor lives. Cleared on every mount/unmount so a replaced file
                 // is re-read rather than served stale.
-                let mut pack_manifests: std::collections::HashMap<String, ManifestView> =
+                let mut pack_manifests: std::collections::HashMap<String, Option<ManifestView>> =
                     std::collections::HashMap::new();
                 // THE PUMP: one FIFO, drained in arrival order. Causally transparent by
                 // construction (see the scheduling doctrine at the top of this file for why
@@ -2326,6 +2384,9 @@ impl MemoryHandle {
                         }
                         Cmd::RecallFromPacks { query, top_k, reply } => {
                             let _ = reply.send(recall_from_mounted_packs(&db, &mut pack_manifests, &query, top_k));
+                        }
+                        Cmd::ProbePacks { query, top_k, reply } => {
+                            let _ = reply.send(probe_mounted_packs(&db, &mut pack_manifests, &query, top_k));
                         }
                         Cmd::StoreGoalPref { kind, text, reply } => {
                             let _ = reply.send(store_goal_pref(&db, &kind, &text));
@@ -3167,6 +3228,10 @@ impl MemoryFacade for MemoryHandle {
         let query = query.to_string();
         self.call(|reply| Cmd::RecallFromPacks { query, top_k, reply }).await
     }
+    async fn probe_packs(&self, query: &str, top_k: usize) -> Result<Vec<mind_types::memory::PackProbe>> {
+        let query = query.to_string();
+        self.call(|reply| Cmd::ProbePacks { query, top_k, reply }).await
+    }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {
         // Unscoped append = primary's private context (single-user default; never leaks to a member).
@@ -3362,6 +3427,38 @@ mod tests {
         assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["pack-row"]);
     }
 
+    /// The floor is a wall the publisher may raise and never lower (Codex's review): a declared 0.0
+    /// — sloppy or hostile — and a non-finite or out-of-range declaration all land on the host wall;
+    /// a declared 0.7 is honoured because it is stricter.
+    #[test]
+    fn a_declared_floor_raises_the_wall_and_never_lowers_it() {
+        use mind_types::memory::{effective_pack_floor as eff, DEFAULT_PACK_SIMILARITY_FLOOR as WALL};
+        assert_eq!(eff(None), WALL);
+        assert_eq!(eff(Some(0.0)), WALL);
+        assert_eq!(eff(Some(0.30)), WALL);
+        assert_eq!(eff(Some(0.70)), 0.70);
+        assert_eq!(eff(Some(f64::NAN)), WALL);
+        assert_eq!(eff(Some(1.5)), WALL);
+        assert_eq!(eff(Some(-0.2)), WALL);
+    }
+
+    /// A row stamped with a name no route carries is never credited to the route that owns its
+    /// namespace — even when that route is the only one there.
+    #[test]
+    fn a_wrong_stamp_is_never_credited_to_the_only_route_in_its_namespace() {
+        let routes = vec![route("yantrik/a@1.0.0", "a", "ns_a", 0.0, None)];
+        let (hits, ambiguous) = floor_pack_hits(
+            vec![
+                cand("stamped-for-someone-else", "ns_a", Some("zzz"), 0.99, 0.99),
+                cand("stamped-for-a", "ns_a", Some("a"), 0.70, 0.70),
+            ],
+            &routes,
+            5,
+        );
+        assert_eq!(ambiguous, 0, "unclaimed is not ambiguous");
+        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["stamped-for-a"]);
+    }
+
     /// The collision the name stamp cannot break: two VERSIONS (or two re-seals) of one pack
     /// mounted at once share namespace and name. Their rows are abstained from and counted —
     /// never handed to whichever manifest came first — while a differently-named pack in the same
@@ -3440,6 +3537,14 @@ mod tests {
         let none = mem.recall_from_packs("what is seventeen multiplied by twenty three", 5).await.unwrap();
         assert!(none.is_empty(), "noise cleared a 0.9 floor: {none:?}");
 
+        // The probe shows BOTH rows: the verbatim one cleared, its sibling withheld with the
+        // similarity it reached and the floor it was measured against — the operator can tell
+        // "off-coverage" from "too strict" without guessing.
+        let probe = mem.probe_packs(rows[0], 5).await.unwrap();
+        assert_eq!(probe.len(), 2, "every attributed candidate, cleared or not: {probe:?}");
+        assert!(probe[0].cleared && probe[0].text.starts_with("Typography"), "{probe:?}");
+        assert!(!probe[1].cleared && probe[1].similarity < 0.9 && probe[1].floor == 0.9, "{probe:?}");
+
         // The brief shows the operator the floor in force and the identity to key evidence on.
         let briefs = mem.mounted_packs().await.unwrap();
         assert_eq!(briefs.len(), 1);
@@ -3452,7 +3557,66 @@ mod tests {
         let _ = std::fs::remove_file(&strict);
     }
 
-    /// A pack that declares no floor gets the DEFAULT floor — never no floor.
+    /// A REAL sealed pack declaring a 0.0 floor cannot lower the host wall: the brief shows what it
+    /// declared, and arithmetic noise is still withheld.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pack_declaring_a_zero_floor_is_still_held_to_the_host_wall() {
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p1_zero_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("zero.ydbpack");
+        let row = "Motion — animate only transform and opacity so the compositor does the work.";
+        fixtures::seal_fixture_pack(pack.to_str().unwrap(), "zero-floor", "zero_floor_ns", &[row], Some(0.0), None).unwrap();
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
+        let briefs = mem.mounted_packs().await.unwrap();
+        assert_eq!(briefs[0].recommended_min_similarity, Some(0.0), "the declaration is shown, not hidden…");
+        let hits = mem.recall_from_packs(row, 5).await.unwrap();
+        assert_eq!(hits.len(), 1, "…a verbatim query still lands: {hits:?}");
+        let none = mem.recall_from_packs("what is seventeen multiplied by twenty three", 5).await.unwrap();
+        assert!(none.is_empty(), "…and the host wall still withholds noise despite the declared 0.0: {none:?}");
+        let _ = std::fs::remove_file(&pack);
+    }
+
+    /// Crowding, mitigated: HOST rows planted in the pack's own namespace compete in the same
+    /// engine pool. With six near-verbatim host rows and want=3, the pack row must still surface
+    /// (the pure filter then drops the host rows, which carry no pack stamp). This proves the
+    /// overfetch bounds crowding at this scale; it does not prove crowding impossible — see
+    /// `PACK_OVERFETCH`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_rows_sharing_the_namespace_do_not_starve_pack_evidence_at_this_scale() {
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p1_crowd_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("crowd.ydbpack");
+        let host_db = dir.join("crowd_host.db");
+        let _ = std::fs::remove_file(&host_db);
+        let row = "Focus — every interactive control needs a visible focus ring that is not the browser default.";
+        fixtures::seal_fixture_pack(pack.to_str().unwrap(), "crowd-craft", "crowd_ns", &[row], None, None).unwrap();
+        {
+            // Six host rows in the PACK'S namespace, each a near-verbatim copy of the query.
+            let db = YantrikDB::new(host_db.to_str().unwrap(), 64).unwrap();
+            let meta = serde_json::json!({});
+            for i in 0..6 {
+                db.record_text(
+                    &format!("{row} (household note {i})"),
+                    "semantic", 0.9, 0.0, 604_800.0, &meta, "crowd_ns", 0.9, "general", "user", None,
+                )
+                .unwrap();
+            }
+        }
+        let mem = MemoryHandle::spawn(host_db.to_str().unwrap(), 64).unwrap();
+        mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
+        let hits = mem.recall_from_packs(row, 3).await.unwrap();
+        assert_eq!(hits.len(), 1, "the pack row must survive six crowding host rows: {hits:?}");
+        assert_eq!(hits[0].pack_id, "yantrik-mind-test/crowd-craft@0.1.0");
+        assert!(!hits[0].text.contains("household note"), "a host row can never be a pack hit");
+        drop(mem);
+        let _ = std::fs::remove_file(&pack);
+        let _ = std::fs::remove_file(&host_db);
+    }
+
+    /// A pack that declares no floor gets the host wall — never no floor.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pack_without_a_declared_floor_is_still_floored() {
         use mind_types::MemoryFacade;

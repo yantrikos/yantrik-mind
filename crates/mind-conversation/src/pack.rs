@@ -600,6 +600,17 @@ mod tests {
     }
 }
 
+/// The floor in force for a pack, and whose number it is — rendered the same way everywhere an
+/// operator can see it, so "0.55" never has to be guessed at.
+fn floor_in_force(declared: Option<f64>) -> String {
+    let eff = mind_types::memory::effective_pack_floor(declared);
+    match declared {
+        Some(d) if (d - eff).abs() < f64::EPSILON => format!("{eff:.2} (publisher-measured)"),
+        Some(d) => format!("{eff:.2} (host wall; the pack declared {d:.2}, which cannot lower it)"),
+        None => format!("{eff:.2} (host wall; the pack declares none)"),
+    }
+}
+
 impl super::ConversationEngine {
     /// `ym pack probe <query>` — the pack evidence a turn on this query would receive, hit by hit,
     /// with the similarity each cleared and the floors it was measured against.
@@ -617,29 +628,30 @@ impl super::ConversationEngine {
         }
         let floors = packs
             .iter()
-            .map(|p| {
-                format!(
-                    "{} floor {}",
-                    p.id,
-                    p.recommended_min_similarity
-                        .map(|f| format!("{f:.2}"))
-                        .unwrap_or_else(|| format!("{:.2} (default)", mind_types::memory::DEFAULT_PACK_SIMILARITY_FLOOR))
-                )
-            })
+            .map(|p| format!("{} floor {}", p.id, floor_in_force(p.recommended_min_similarity)))
             .collect::<Vec<_>>()
             .join(" · ");
-        match self.memory.recall_from_packs(query, 5).await {
-            Err(e) => format!("(pack recall failed: {e})"),
-            Ok(hits) if hits.is_empty() => format!("🔍 Nothing cleared the floor for “{query}” — withheld, not absent.\n   in force: {floors}"),
-            Ok(hits) => {
-                let mut out = format!("🔍 {} pack hit(s) would reach a turn on “{query}”\n", hits.len());
-                for h in &hits {
+        match self.memory.probe_packs(query, 5).await {
+            Err(e) => format!("(pack probe failed: {e})"),
+            Ok(rows) if rows.is_empty() => {
+                format!("🔍 The engine returned no attributable pack rows for “{query}” — nothing to floor.\n   in force: {floors}")
+            }
+            Ok(rows) => {
+                let cleared = rows.iter().filter(|r| r.cleared).count();
+                let mut out = format!(
+                    "🔍 “{query}” — {cleared} row(s) would reach a turn, {} withheld by the floor\n",
+                    rows.len() - cleared
+                );
+                for r in &rows {
                     out.push_str(&format!(
-                        "  [{}] sim {:.2} · score {:.2} · {}\n",
-                        h.pack_id,
-                        h.similarity,
-                        h.score,
-                        h.text.chars().take(100).collect::<String>().replace('\n', " ")
+                        "  {} [{}] sim {:.2} {} {:.2} · score {:.2} · {}\n",
+                        if r.cleared { "✓" } else { "✗" },
+                        r.pack_id,
+                        r.similarity,
+                        if r.cleared { "≥" } else { "<" },
+                        r.floor,
+                        r.score,
+                        r.text.chars().take(100).collect::<String>().replace('\n', " ")
                     ));
                 }
                 out.push_str(&format!("   in force: {floors}"));
@@ -675,12 +687,10 @@ impl super::ConversationEngine {
                         // The distinction the unmount-that-wasn't bug hid: an adopted pack
                         // returns on every restart, a mounted one dies with the process.
                         if p.installed { "adopted (returns on restart; `disown` removes)" } else { "this run only" },
-                        // The floor IN FORCE, and whose number it is: a publisher-measured floor
-                        // and a default the host fell back to are different evidence.
-                        match p.recommended_min_similarity {
-                            Some(f) => format!("{f:.2} (publisher-measured)"),
-                            None => format!("{:.2} (default — the pack declares none)", mind_types::memory::DEFAULT_PACK_SIMILARITY_FLOOR),
-                        },
+                        // The floor IN FORCE, and whose number it is: a publisher-measured floor,
+                        // the host wall holding against a lower declaration, and the wall applied
+                        // because the pack declares none are three different pieces of evidence.
+                        floor_in_force(p.recommended_min_similarity),
                         p.coverage.len(),
                         p.recommended_top_k.map(|k| format!(" · top_k {k}")).unwrap_or_default(),
                     ));

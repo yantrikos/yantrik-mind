@@ -764,34 +764,45 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        let orphans: Vec<(i64, i64)> = led
+        // Key on `ref`, NOT on `t`. A claim's identity is the ref its author chose; `t` is stamped
+        // separately inside judgment_log, after an awaited read, so the two differ by however many
+        // milliseconds that read took. Matching on `t` grades only the rows where the clock happened
+        // not to tick in between — 24 of 650 on the live ledger, which looks like a partial write
+        // and is actually a wrong join.
+        let orphans: Vec<(String, i64, i64)> = led
             .iter()
             .filter(|r| r.get("source").and_then(|x| x.as_str()) == Some("proactive"))
             .filter(|r| r.get("outcome").map(|o| o.is_null()).unwrap_or(false))
-            .filter_map(|r| Some((r.get("t")?.as_i64()?, r.get("grade_due")?.as_i64()?)))
+            .filter_map(|r| {
+                let rf = r.get("ref")?.as_str()?.to_string();
+                // The ref IS the send time for this source; fall back to `t` if it ever is not.
+                let sent = rf.parse::<i64>().ok().or_else(|| r.get("t")?.as_i64())?;
+                Some((rf, sent, r.get("grade_due")?.as_i64()?))
+            })
             .collect();
         if orphans.is_empty() {
             return "no orphaned engagement claims — nothing to settle".to_string();
         }
-        let earliest = orphans.iter().map(|(t, _)| *t).min().unwrap_or(0);
+        let earliest = orphans.iter().map(|(_, t, _)| *t).min().unwrap_or(0);
         let turns = self.memory.user_turn_times(earliest).await.unwrap_or_default();
         let Some(&last_turn) = turns.last() else {
             return format!("{} orphaned claims, but no transcript to settle them against", orphans.len());
         };
         let now = chrono::Utc::now().timestamp_millis();
-        let (verdicts, skipped) = settle_plan(&orphans, &turns, last_turn, now);
+        let windows: Vec<(i64, i64)> = orphans.iter().map(|(_, s, d)| (*s, *d)).collect();
+        let (verdicts, skipped) = settle_plan(&windows, &turns, last_turn, now);
         let engaged = verdicts.iter().filter(|(_, e)| *e).count() as u32;
         let ignored = verdicts.len() as u32 - engaged;
         let mut wrote = 0usize;
         if act {
-            // ONE ledger write for all of them. Per-claim writes lost to the live service's own
-            // read-modify-write of the same blob: the first run applied 650 grades and kept 24.
-            let refs: Vec<(String, bool)> = verdicts.iter().map(|(s, e)| (s.to_string(), *e)).collect();
+            // ONE ledger write for all of them — it is a single JSON blob, so each grade otherwise
+            // rewrites the whole thing.
+            let refs: Vec<(String, bool)> =
+                verdicts.iter().map(|(i, e)| (orphans[*i].0.clone(), *e)).collect();
             wrote = self.judgment_grade_many(&refs).await;
-            // The world model takes its own row per transition, so there is nothing to batch and
-            // nothing to clobber.
-            for (sent, e) in &verdicts {
-                let _ = self.memory.record_proactive_outcome_backfill(*sent, *e).await;
+            // The world model takes its own row per transition, binned on send time.
+            for (i, e) in &verdicts {
+                let _ = self.memory.record_proactive_outcome_backfill(orphans[*i].1, *e).await;
             }
         }
         let n = engaged + ignored;
@@ -891,18 +902,18 @@ impl super::ConversationEngine {
 /// while looking like thoroughness.
 ///
 /// `turns` must be ascending. Returns (settled verdicts, count left pending).
-pub(crate) fn settle_plan(orphans: &[(i64, i64)], turns: &[i64], last_turn: i64, now: i64) -> (Vec<(i64, bool)>, usize) {
+pub(crate) fn settle_plan(orphans: &[(i64, i64)], turns: &[i64], last_turn: i64, now: i64) -> (Vec<(usize, bool)>, usize) {
     const WINDOW_MS: i64 = 90 * 60_000;
     let mut out = Vec::new();
     let mut skipped = 0usize;
-    for &(sent, due) in orphans {
+    for (i, &(sent, due)) in orphans.iter().enumerate() {
         if due > now || sent + WINDOW_MS > last_turn {
             skipped += 1;
             continue;
         }
         // Engaged iff the FIRST user turn after the send lands inside the window.
         let next = turns.partition_point(|&t| t <= sent);
-        out.push((sent, turns.get(next).is_some_and(|&t| t - sent <= WINDOW_MS)));
+        out.push((i, turns.get(next).is_some_and(|&t| t - sent <= WINDOW_MS)));
     }
     (out, skipped)
 }

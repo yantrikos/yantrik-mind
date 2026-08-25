@@ -3965,12 +3965,14 @@ fn the_backfill_settles_only_what_the_record_can_answer() {
         last,
         now,
     );
-    let got: std::collections::HashMap<i64, bool> = v.into_iter().collect();
+    // Verdicts come back as indices into the input, so a claim is settled under the identity it
+    // was logged with rather than one re-derived from a timestamp.
+    let got: std::collections::HashMap<usize, bool> = v.into_iter().collect();
     assert_eq!(skipped, 2, "the live one and the uncovered one must both stay pending: {got:?}");
-    assert!(!got.contains_key(&(now - 30 * m)), "a claim inside its deadline is not unanswered");
-    assert!(!got.contains_key(&(190 * m)), "a window past the last recorded turn is not evidence");
-    assert_eq!(got.get(&(-10 * m)), Some(&true), "a turn 10m into the window is engagement");
-    assert_eq!(got.get(&(100 * m)), Some(&false), "the next turn is 100m out — that is ignored");
+    assert!(!got.contains_key(&3), "a claim inside its deadline is not unanswered");
+    assert!(!got.contains_key(&4), "a window past the last recorded turn is not evidence");
+    assert_eq!(got.get(&1), Some(&true), "a turn 10m into the window is engagement");
+    assert_eq!(got.get(&2), Some(&false), "the next turn is 100m out — that is ignored");
     // A turn at the exact instant of the send is not a reply TO it — the next one is 200m out.
     assert_eq!(got.get(&0), Some(&false), "the window must open strictly after the send");
 }
@@ -4000,4 +4002,40 @@ async fn backfill_dry_run_writes_nothing() {
     assert!(report.contains("would settle"), "a dry run must say so: {report}");
     let after = mem.profile_get("judgment_ledger").await.unwrap().unwrap_or_default();
     assert_eq!(after, before, "a dry run must leave the ledger byte-identical");
+}
+
+/// A claim must be settled by the `ref` it was logged under, never by its `t`.
+///
+/// `judgment_log` stamps `t` with its OWN clock read, after an awaited profile read, while `ref`
+/// was stamped by the caller before it. So the two routinely differ by a few milliseconds. Keying
+/// the repair on `t` matched only the rows where the clock happened not to tick in between — 24 of
+/// 650 on the live ledger. That reads as a partial write and is actually a wrong join, which is
+/// why the report states what the ledger ACCEPTED rather than what was decided.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_is_settled_by_its_ref_even_when_t_disagrees() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("(no model needed)")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let sent = now - 10 * 60 * 60_000;
+    let led = serde_json::json!([{
+        // t is 7ms later than ref — exactly what an awaited read between the two stamps costs.
+        "t": sent + 7, "source": "proactive", "domain": "engagement",
+        "claim": "recipient engages within 90m", "p": 0.4,
+        "outcome": serde_json::Value::Null, "outcome_at": serde_json::Value::Null,
+        "grade_due": sent + 90 * 60_000, "ref": sent.to_string(),
+    }]);
+    mem.profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap()).await.unwrap();
+    mem.append_message("user", "here").await.unwrap();
+
+    let report = conv.backfill_proactive_grades(true).await;
+    assert!(report.contains("ledger accepted 1 of 1"), "the ref must match despite t: {report}");
+
+    let after: Vec<serde_json::Value> =
+        serde_json::from_str(&mem.profile_get("judgment_ledger").await.unwrap().unwrap()).unwrap();
+    assert!(!after[0]["outcome"].is_null(), "the claim must actually be graded: {after:?}");
 }

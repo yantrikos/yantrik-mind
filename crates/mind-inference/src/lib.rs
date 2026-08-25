@@ -321,11 +321,19 @@ impl InferencePool {
                 match backend.chat(&messages, &config, tools_ref) {
                     Ok(r) => return Ok(r),
                     Err(e) => {
-                        let rate_limited = format!("{e:#}").contains("429");
-                        if !rate_limited || attempt == 2 {
+                        // TRANSIENT means the server is temporarily unable, not that the request is
+                        // wrong. 429 is "wait"; 502/503/504 are a gateway or a worker hiccuping.
+                        // Measured on the box: three identical completions in a row returned 200,
+                        // 200, and then 502 {"error":"backend desktop error"} — the endpoint is
+                        // flaky, not down. Retrying only the 429 left every such blip fatal, and
+                        // because a private turn fails CLOSED by design it had nowhere to fall back
+                        // to: one hiccup and the mind could not think.
+                        let detail = format!("{e:#}");
+                        let transient = ["429", "502", "503", "504"].iter().any(|c| detail.contains(c));
+                        if !transient || attempt == 2 {
                             return Err(e);
                         }
-                        eprintln!("[infer] 429 from the model endpoint — backing off {wait_ms}ms (attempt {})", attempt + 1);
+                        eprintln!("[infer] transient model-endpoint error — backing off {wait_ms}ms (attempt {}): {detail}", attempt + 1);
                         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
                         wait_ms *= 3;
                     }
@@ -451,6 +459,10 @@ impl InferencePool {
                     let (why, hint) = if detail.contains("429") {
                         ("the local lane is RATE LIMITING (429 after retries)",
                          "reduce YM_INFER_PERMITS below the endpoint's slot count, or add slots")
+                    } else if ["502", "503", "504"].iter().any(|c| detail.contains(c)) {
+                        // Distinct from unreachable: the gateway answered, its worker did not.
+                        ("the local lane is FLAKY (gateway error after retries)",
+                         "the endpoint is up but its backend is failing intermittently — check the model host")
                     } else {
                         ("the local lane is unreachable", "check YM_LOCAL_OLLAMA_URL and the endpoint")
                     };

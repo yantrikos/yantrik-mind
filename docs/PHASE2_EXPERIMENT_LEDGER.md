@@ -174,3 +174,15 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Baseline result | **0/9 representable — every expectation FAIL:UNREPRESENTABLE.** No typed-transition ingestion seam (events fed via transcript as the only door). Restart leg impossible on :memory:, no durable world snapshot exists. Bi-temporal cuts: NO API. Conflicted/stale/expired representation: NONE. Purpose-scoped world reads: absent (scope wall exists; world-cut does not). HARD CONSTRAINTS unmeasurable: knowledge-time leakage · purpose leakage at world layer · replay divergence. |
 | Semantics today's architecture cannot represent | current-state cuts at (valid_at, known_at); Unknown/Conflicted/Stale/Expired as first-class values; supersession-with-reason over free-form names; duplicate-by-identity vs corroboration distinction; derived-lineage invalidation; purpose-scoped entity queries; replay-equivalent persistence of world state. |
 | Decision | RED BY DESIGN, pinned by an intentional panic that retires only when the world model answers these checkpoints. Suite remains green ungated (env `YM_WORLD_3A=1` runs the oracle). Phase 3A implementation may now begin — earning each semantic against this baseline. |
+ 
+## E.W1 — Temporal spine (mind-world) — 2/9 GREEN
+
+| Field | Entry |
+|---|---|
+| Hypothesis | The smallest typed-event → typed-transition → append-only-log → deterministic-replay spine makes DUPLICATE_ID and CORROBORATION representable without any current-state semantics. |
+| Baseline | W0: 0/9, all UNREPRESENTABLE. |
+| Change | New crate `mind-world` (W1 scope only): WorldEvent{source_event_id, source_id, kind, occurred_at, observed_at, entity, attr, value} → WorldLog.ingest (identity dedup via source_event_id; corroboration = count of prior independent witnesses of same proposition; stable transition_id + recorded_seq) → WorldLog.replay with canonical order (occurred_at, observed_at, source_event_id) per I6. Append-only by construction (I7 shape). Oracle converted from monolithic RED to a 9-case scoreboard. |
+| Expected | DUPLICATE_ID GREEN (email:501 twice = one transition); CORROBORATION GREEN (distinct sources survive as separate witnesses); other 7 stay RED/UNREPRESENTABLE. |
+| Actual | mind-world 3/3 tests green; oracle **2/9** — DUPLICATE_ID ✅, CORROBORATION ✅ after its own check forced an E2 refinement: the LATE stale email (email:old-late) is a THIRD independent Tuesday witness, so corroboration had to be scored as distinct-SOURCES-preserved, not exact row lists. Exactly the kind of semantic sharpening the slice process exists to produce. Remaining 7 RED/UNREPRESENTABLE (no WorldQuery API yet). Ungated suite unaffected (env-gated oracle). |
+| Regressions | None from this slice. NOTE: unrelated concurrent edits appeared in the working tree during this slice (trades.rs, watch.rs, a `grade_due_trades` call without definition) — not mine, left untouched, excluded from this commit; they currently break `cargo test -p mind-conversation` until their author completes them. |
+| Decision | **KEEP — W1 complete.** Next: W2 bi-temporal cuts (the no-hindsight-leakage property), only after the tree is quiet again. |

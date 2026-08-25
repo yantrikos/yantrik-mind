@@ -578,6 +578,12 @@ pub trait MemoryFacade: Send + Sync {
     /// OPERATOR-INTERNAL: only system paths (compaction, research sync) may call this — it is not
     /// reachable from any channel/command/tool. Gets a ctx param when those paths are ctx-threaded.
     async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>>;
+    /// Wall-clock times (ms) of USER turns at or after `since_ms`, ascending. The record of when
+    /// the person actually spoke — the only honest way to settle an engagement claim after its
+    /// window has closed. OPERATOR-INTERNAL, same as `messages_since`. Default: no record.
+    async fn user_turn_times(&self, _since_ms: i64) -> Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
 
     // ── Purpose Gate v1 (the read-boundary purpose policy; defaults = inert for fakes) ──
     /// Explicitly tag a belief's sensitivity class by canonical proposition —
@@ -645,6 +651,13 @@ pub trait MemoryFacade: Send + Sync {
     /// Feed a proactive send's fate (engaged vs ignored) into the engine's WORLD MODEL (per-time-bin
     /// engagement learning), personality feedback, and bond progression.
     async fn record_proactive_outcome(&self, _sent_ms: i64, _engaged: bool) -> Result<()> {
+        Ok(())
+    }
+    /// Same world-model transition as `record_proactive_outcome`, WITHOUT the personality and
+    /// bond nudges. For settling claims whose window closed long ago: the engagement record is
+    /// historical fact worth learning from, but replaying six weeks of relationship steps in one
+    /// batch is not what those nudges mean — 650 of them at once would bury the trait they move.
+    async fn record_proactive_outcome_backfill(&self, _sent_ms: i64, _engaged: bool) -> Result<()> {
         Ok(())
     }
     /// Predicted engagement rate for a proactive send RIGHT NOW (None until the world model has

@@ -72,6 +72,8 @@ enum Cmd {
     AppendMessage { role: String, text: String, scope: String, reply: Reply<()> },
     RecentMessages { limit: usize, viewer: Option<String>, reply: Reply<Vec<(String, String)>> },
     MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
+    UserTurnTimes { since_ms: i64, reply: Reply<Vec<i64>> },
+    RecordProactiveOutcomeBackfill { sent_ms: i64, engaged: bool, reply: Reply<()> },
     RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
     RecordEpisode { label: String, reply: Reply<()> },
     RecordToolOutcome { tool: String, ok: bool, reply: Reply<()> },
@@ -1722,6 +1724,17 @@ fn recent_messages(db: &YantrikDB, limit: usize, viewer: Option<&str>) -> std::r
     Ok(v)
 }
 
+fn user_turn_times(db: &YantrikDB, since_ms: i64) -> std::result::Result<Vec<i64>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT CAST(ts * 1000 AS INTEGER) FROM mind_transcript WHERE role = 'user' AND ts * 1000 >= ?1 ORDER BY ts ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![since_ms], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 fn messages_since(db: &YantrikDB, after_id: i64, limit: usize) -> std::result::Result<Vec<(i64, String, String)>, String> {
     let conn = db.conn();
     let mut stmt = conn
@@ -2317,6 +2330,17 @@ impl MemoryHandle {
                         }
                         Cmd::MessagesSince { after_id, limit, reply } => {
                             let _ = reply.send(messages_since(&db, after_id, limit));
+                        }
+                        Cmd::UserTurnTimes { since_ms, reply } => {
+                            let _ = reply.send(user_turn_times(&db, since_ms));
+                        }
+                        Cmd::RecordProactiveOutcomeBackfill { sent_ms, engaged, reply } => {
+                            // World model ONLY. Deliberately no personality/bond feedback: see the
+                            // trait doc — those are live relationship steps, not replayable history.
+                            let feats = StateFeatures::discretize(sent_ms as f64 / 1000.0, 0.5, 0.0, 0.0, 0);
+                            let outcome = if engaged { WmOutcome::Accepted } else { WmOutcome::Ignored };
+                            let r = db.record_transition(feats, WmAction::SendNotification, outcome).map_err(|e| e.to_string());
+                            let _ = reply.send(r);
                         }
                         Cmd::RecordTension { kind, pressure, about, reply } => {
                             let now = std::time::SystemTime::now()
@@ -2979,6 +3003,12 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn record_proactive_outcome(&self, sent_ms: i64, engaged: bool) -> Result<()> {
         self.call(move |reply| Cmd::RecordProactiveOutcome { sent_ms, engaged, reply }).await
+    }
+    async fn record_proactive_outcome_backfill(&self, sent_ms: i64, engaged: bool) -> Result<()> {
+        self.call(move |reply| Cmd::RecordProactiveOutcomeBackfill { sent_ms, engaged, reply }).await
+    }
+    async fn user_turn_times(&self, since_ms: i64) -> Result<Vec<i64>> {
+        self.call(move |reply| Cmd::UserTurnTimes { since_ms, reply }).await
     }
     async fn proactive_receptivity(&self) -> Result<Option<f64>> {
         self.call(|reply| Cmd::ProactiveReceptivity { reply }).await

@@ -3937,3 +3937,67 @@ async fn a_legacy_single_pending_send_still_resolves() {
     let left = mem.profile_get("proactive_pending").await.unwrap().unwrap_or_default();
     assert!(left.trim().is_empty(), "a stale legacy send must resolve as ignored, got {left:?}");
 }
+
+/// The rule that decides which orphaned claims the transcript can settle.
+///
+/// The case that matters is the last one: the box runs for weeks while the person is away, so
+/// silence after the final recorded turn is NORMAL. Reading it as "ignored" would grade hundreds
+/// of claims failed on missing evidence — manufacturing the exact bias the repair exists to undo,
+/// while looking like thoroughness.
+#[test]
+fn the_backfill_settles_only_what_the_record_can_answer() {
+    let m = 60_000i64;
+    let w = 90 * m;
+    let now = 1_000_000_000i64;
+    // The person spoke at t=0 and t=200m, then went quiet. The transcript ends there.
+    let turns = [0i64, 200 * m];
+    let last = 200 * m;
+
+    let turn_at_send = (0i64, w); // the only turn inside is the one AT the send instant
+    let just_before = (-10 * m, -10 * m + w); // turn at t=0 falls 10m into the window
+    let unanswered = (100 * m, 100 * m + w); // next turn is 100m later, outside the window
+    let still_live = (now - 30 * m, now + 60 * m); // deadline has not passed
+    let past_record = (190 * m, 190 * m + w); // window runs past the last recorded turn
+
+    let (v, skipped) = super::proactive::settle_plan(
+        &[turn_at_send, just_before, unanswered, still_live, past_record],
+        &turns,
+        last,
+        now,
+    );
+    let got: std::collections::HashMap<i64, bool> = v.into_iter().collect();
+    assert_eq!(skipped, 2, "the live one and the uncovered one must both stay pending: {got:?}");
+    assert!(!got.contains_key(&(now - 30 * m)), "a claim inside its deadline is not unanswered");
+    assert!(!got.contains_key(&(190 * m)), "a window past the last recorded turn is not evidence");
+    assert_eq!(got.get(&(-10 * m)), Some(&true), "a turn 10m into the window is engagement");
+    assert_eq!(got.get(&(100 * m)), Some(&false), "the next turn is 100m out — that is ignored");
+    // A turn at the exact instant of the send is not a reply TO it — the next one is 200m out.
+    assert_eq!(got.get(&0), Some(&false), "the window must open strictly after the send");
+}
+
+/// A dry run must not touch the ledger. The default is to show, not to write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backfill_dry_run_writes_nothing() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("(no model needed)")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    let now = chrono::Utc::now().timestamp_millis();
+    let sent = now - 10 * 60 * 60_000;
+    let led = serde_json::json!([{
+        "t": sent, "source": "proactive", "domain": "engagement",
+        "claim": "recipient engages within 90m", "p": 0.4,
+        "outcome": serde_json::Value::Null, "outcome_at": serde_json::Value::Null,
+        "grade_due": sent + 90 * 60_000, "ref": sent.to_string(),
+    }]);
+    let before = serde_json::to_string(&led).unwrap();
+    mem.profile_set("judgment_ledger", &before).await.unwrap();
+    mem.append_message("user", "hello").await.unwrap();
+
+    let report = conv.backfill_proactive_grades(false).await;
+    assert!(report.contains("would settle"), "a dry run must say so: {report}");
+    let after = mem.profile_get("judgment_ledger").await.unwrap().unwrap_or_default();
+    assert_eq!(after, before, "a dry run must leave the ledger byte-identical");
+}

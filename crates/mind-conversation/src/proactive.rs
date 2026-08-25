@@ -738,6 +738,68 @@ impl super::ConversationEngine {
         let _ = self.memory.profile_set("proactive_pending", &s).await;
     }
 
+    /// SETTLE the engagement claims that were orphaned before the pending list existed.
+    ///
+    /// While `proactive_pending` held a single send, a second beat going out before the first
+    /// resolved destroyed the first claim's only route to a grade. That left 650 of 932 claims
+    /// permanently pending — and destroyed them SELECTIVELY, because an ignored send occupies the
+    /// slot for its full 90 minutes while an engaged one clears on the next user turn. The third
+    /// that survived read 42.9% engagement; the whole record reads 31.3%. The hour-by-hour map that
+    /// decides WHEN to speak was distorted worst of all: 07:00 looked like 100% receptive on the
+    /// survivors and is 38% on the full record, 19:00 looked like 100% and is 43%.
+    ///
+    /// A closed window can still be settled honestly, because the transcript records when the
+    /// person actually spoke. That is evidence, not a guess: checked against the 280 claims whose
+    /// outcome IS recorded, reconstructing from the transcript agrees on 277 of them.
+    ///
+    /// Only settles claims whose deadline has passed and that fall inside the transcript's span.
+    /// Outside it, silence in the record means "not recorded", not "not engaged" — and grading a
+    /// missing record as a failure would manufacture exactly the bias this repairs.
+    pub async fn backfill_proactive_grades(&self, act: bool) -> String {
+        let led: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let orphans: Vec<(i64, i64)> = led
+            .iter()
+            .filter(|r| r.get("source").and_then(|x| x.as_str()) == Some("proactive"))
+            .filter(|r| r.get("outcome").map(|o| o.is_null()).unwrap_or(false))
+            .filter_map(|r| Some((r.get("t")?.as_i64()?, r.get("grade_due")?.as_i64()?)))
+            .collect();
+        if orphans.is_empty() {
+            return "no orphaned engagement claims — nothing to settle".to_string();
+        }
+        let earliest = orphans.iter().map(|(t, _)| *t).min().unwrap_or(0);
+        let turns = self.memory.user_turn_times(earliest).await.unwrap_or_default();
+        let Some(&last_turn) = turns.last() else {
+            return format!("{} orphaned claims, but no transcript to settle them against", orphans.len());
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let (verdicts, skipped) = settle_plan(&orphans, &turns, last_turn, now);
+        let engaged = verdicts.iter().filter(|(_, e)| *e).count() as u32;
+        let ignored = verdicts.len() as u32 - engaged;
+        if act {
+            for (sent, e) in &verdicts {
+                self.judgment_grade(&sent.to_string(), *e).await;
+                let _ = self.memory.record_proactive_outcome_backfill(*sent, *e).await;
+            }
+        }
+        let n = engaged + ignored;
+        format!(
+            "🕰️  {} {} orphaned engagement claim(s) from the transcript{}
+  engaged {engaged} · ignored {ignored} → {:.1}% (the surviving third read 42.9%)
+  {skipped} left pending — deadline not passed, or outside the transcript's span",
+            if act { "SETTLED" } else { "would settle" },
+            n,
+            if act { "" } else { " — pass `act` to write" },
+            if n > 0 { 100.0 * engaged as f64 / n as f64 } else { 0.0 },
+        )
+    }
+
     /// Gate for OPTIONAL proactive beats: false only when the learned world model says this moment
     /// is a dead zone (<35% engagement). True until there's real data — never guess-gate.
     pub async fn proactive_receptivity_ok(&self) -> bool {
@@ -805,4 +867,32 @@ impl super::ConversationEngine {
         out
     }
 
+}
+
+/// Decide which orphaned engagement claims the transcript can honestly settle, and how.
+///
+/// Pure so the rule can be tested against a clock and a transcript that never existed. Two claims
+/// are deliberately NOT settled:
+///   - one whose 90-minute deadline has not passed — it is still live, not unanswered;
+///   - one whose window runs past the last recorded turn — the transcript simply does not cover it.
+/// The second is the one that matters. The box runs for weeks while the person is away, so silence
+/// after the final recorded turn is the NORMAL state, and reading it as "ignored" would grade
+/// hundreds of claims failed on missing evidence — manufacturing the exact bias this repairs,
+/// while looking like thoroughness.
+///
+/// `turns` must be ascending. Returns (settled verdicts, count left pending).
+pub(crate) fn settle_plan(orphans: &[(i64, i64)], turns: &[i64], last_turn: i64, now: i64) -> (Vec<(i64, bool)>, usize) {
+    const WINDOW_MS: i64 = 90 * 60_000;
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+    for &(sent, due) in orphans {
+        if due > now || sent + WINDOW_MS > last_turn {
+            skipped += 1;
+            continue;
+        }
+        // Engaged iff the FIRST user turn after the send lands inside the window.
+        let next = turns.partition_point(|&t| t <= sent);
+        out.push((sent, turns.get(next).is_some_and(|&t| t - sent <= WINDOW_MS)));
+    }
+    (out, skipped)
 }

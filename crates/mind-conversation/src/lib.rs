@@ -5312,6 +5312,10 @@ impl ConversationEngine {
             "paper" | "paper-book" | "book" => self.paper_book().await,
             "follow" | "manage" => self.follow_positions(rest.trim().eq_ignore_ascii_case("act")).await,
             "grade" | "settle" => self.grade_due_trades().await,
+            // One-shot repair for engagement claims orphaned by the old single-slot resolver.
+            "backfill-engagement" | "settle-engagement" => {
+                self.backfill_proactive_grades(rest.trim().eq_ignore_ascii_case("act")).await
+            }
             "surf" | "feeds" | "rotation" => self.surf_feeds(rest.trim()).await,
             "say" | "speak" if !rest.trim().is_empty() => self.say_aloud(rest.trim()).await,
             "sources" | "standing" | "trust" => self.source_standing().await,

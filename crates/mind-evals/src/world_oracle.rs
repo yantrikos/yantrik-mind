@@ -135,6 +135,24 @@ async fn phase3a_red_baseline() {
     // RESTART leg: a second handle on the same path would be the persistence probe; :memory: makes
     // it impossible TODAY — itself a baseline finding (recorded below).
 
+    // ── W1 SEMANTICS, scored individually through the temporal spine ─────────────────────────
+    let world_events: Vec<mind_world::WorldEvent> = events.iter().map(|e| mind_world::WorldEvent {
+        source_event_id: e.id.to_string(), source_id: e.source.split(':').next().unwrap_or("?").to_string(),
+        kind: match e.kind { Kind::Assert => mind_world::Kind::Assert, Kind::Supersede => mind_world::Kind::Supersede, Kind::Retract => mind_world::Kind::Retract, Kind::Expire => mind_world::Kind::Expire },
+        occurred_at: e.occurred_at, observed_at: e.observed_at,
+        entity: e.entity.to_string(), attr: e.attr.to_string(), value: e.value.to_string(),
+    }).collect();
+    let log = mind_world::WorldLog::replay(&world_events);
+    let interview_rows: Vec<_> = log.transitions().iter().filter(|t| t.entity == "interview").collect();
+    let duplicate_id_green = interview_rows.iter().filter(|t| t.source_event_id == "email:501").count() == 1;
+    // E2: corroboration = DISTINCT SOURCES preserved as separate rows for one proposition
+    // (the late stale email is a third independent witness — nothing may collapse them).
+    let tuesday_sources: std::collections::HashSet<&str> = interview_rows
+        .iter()
+        .filter(|t| t.value == "Tuesday")
+        .filter_map(|t| t.source_id.as_str())
+        .collect();
+    let corroboration_green = tuesday_sources.contains("email") && tuesday_sources.contains("calendar");
     let mut rows = Vec::new();
     for x in &expects {
         let got = probe(&mem, x).await;
@@ -152,14 +170,28 @@ async fn phase3a_red_baseline() {
             x.valid_at, x.known_at, x.entity, x.attr, match &x.want { Val::Known(v) => v.to_string(), Val::Unknown => "UNKNOWN".into(), Val::Conflicted(c) => format!("{c:?}"), Val::Stale(v) => format!("STALE({v})") }, verdict
         ));
     }
-    let unrepresentable = rows.iter().filter(|r| r.contains("UNREPRESENTABLE")).count();
+    // Per-semantics scoreboard (W0 was monolithic; Phase-2 discipline wants progression).
+    let mut score: Vec<(&str, bool)> = vec![
+        ("DUPLICATE_ID", duplicate_id_green),
+        ("CORROBORATION", corroboration_green),
+        ("BITEMPORAL", false),
+        ("SUPERSESSION", false),
+        ("CONFLICT", false),
+        ("STALE", false),
+        ("EXPIRY", false),
+        ("INVALIDATION", false),
+        ("PURPOSE", false),
+    ];
+    let green = score.iter().filter(|(_, g)| *g).count();
     let report = format!(
-        "PHASE 3A RED BASELINE\n events fed via transcript (no typed-transition seam): {}\n RESTART leg: IMPOSSIBLE on :memory:, no durable world snapshot exists\n bi-temporal cuts: NO API\n conflicted/stale/expired representation: NONE\n purpose-scoped entity reads: beliefs only (scope wall exists; world-cut does not)\n{}\n SCORE: {}/{} expectations representable-through-existing-doors (all WEAK), {} flatly UNREPRESENTABLE\n HARD CONSTRAINTS: knowledge-time leakage UNMEASURABLE · purpose leakage at world layer UNMEASURABLE · replay divergence UNMEASURABLE",
-        events.len(), rows.join("\n"), rows.len() - unrepresentable, rows.len(), unrepresentable
+        "PHASE 3A SCORECARD: {}/9 GREEN\n{}\n remaining expectations (bi-temporal cuts / conflicted / stale / expiry-invalidations / purpose-scoped world reads): UNREPRESENTABLE — no WorldQuery API exists\n RESTART leg: deferred to W6 (needs durable log)\n{}",
+        green,
+        score.iter().map(|(k, g)| format!("  {:<14} {}", k, if *g { "GREEN" } else { "RED/UNREPRESENTABLE" })).collect::<Vec<_>>().join("\n"),
+        rows.join("\n"),
     );
     println!("{report}");
-    // The baseline is RED by definition: assert so the run leaves a visible scar until 3A turns it green.
-    panic!("PHASE 3A BASELINE IS RED BY DESIGN — see printed report; this panic retires when the world model answers these checkpoints");
+    assert_eq!(green, 9, "PHASE 3A baseline still RED by design ({green}/9) — each slice turns its case GREEN; this retires at 9/9");
+
+
+
 }
-
-

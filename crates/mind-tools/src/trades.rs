@@ -31,6 +31,23 @@ pub struct OpenTrade {
     /// The thesis, kept for the exit report — a close that cannot say what it was betting on is
     /// a number without a reason.
     pub thesis: String,
+    /// Was capital committed, or is this a VIEW recorded only to be graded?
+    ///
+    /// The learning rate is the binding constraint on ever knowing whether this works. To tell a
+    /// 55% edge from luck takes ~780 graded calls: at one trade a day that is two years, at six a
+    /// day it is four months. `hunt` sees six to fourteen tradeable names a session and takes at
+    /// most one, so grading only the taken ones throws away most of the evidence available.
+    ///
+    /// A view costs no capital and carries no risk, and grades identically against the tape. Kept
+    /// in the same book because they must be graded by the same code — a separate path would drift,
+    /// and then the cheap evidence would be the untrustworthy kind.
+    #[serde(default = "yes")]
+    pub staked: bool,
+}
+
+/// serde default for records written before views existed: those were all real positions.
+fn yes() -> bool {
+    true
 }
 
 impl OpenTrade {
@@ -93,6 +110,7 @@ mod tests {
             opened_at_ms: opened,
             judgment_ref: "WMT".into(),
             thesis: "weakest US sales growth since 2020 — further downside".into(),
+            staked: true,
         }
     }
 
@@ -131,6 +149,27 @@ mod tests {
         assert!(parse_book("{corrupt").is_empty());
         let book = vec![wmt(5)];
         assert_eq!(parse_book(&render_book(&book)), book);
+    }
+
+    #[test]
+    fn a_view_grades_exactly_like_a_trade_but_risks_nothing() {
+        // The whole point of views: six a day instead of one, at zero capital, graded by the same
+        // code. Direction still lives in the sign of qty, so nothing about scoring changes.
+        let view = OpenTrade { qty: -1.0, staked: false, ..wmt(0) };
+        assert!(!view.staked);
+        assert!(view.is_short());
+        assert!(!view.was_right(105.44), "graded on the tape exactly as a real short would be");
+        assert!(view.was_right(99.0));
+    }
+
+    #[test]
+    fn an_old_record_without_the_field_is_a_real_position() {
+        // Records written before views existed were all staked; defaulting them to "view" would
+        // quietly drop real positions out of position management.
+        let old = r#"[{"symbol":"WMT","qty":-2.0,"entry":103.75,"opened_at_ms":1,"judgment_ref":"WMT","thesis":"t"}]"#;
+        let book = parse_book(old);
+        assert_eq!(book.len(), 1);
+        assert!(book[0].staked, "a pre-views record is a real position, not a view");
     }
 
     #[test]

@@ -668,9 +668,16 @@ impl super::ConversationEngine {
              analyst action that is moving the stock. Name the direction and take it.\n\
              NOT an edge: a move with no explanation, a move that has already fully played out, an \
              index or leveraged ETF drifting with the market, or 'it is going up'.\n\
-             Judge each name on its own. An empty array is right when nothing has a catalyst — but \
-             it is an answer, not a safe default, and passing on a clean setup costs as much as \
-             taking a bad one.\n\
+             Give a view on EVERY name listed, not only the ones worth trading. A view is a \
+             directional call graded against the tape whether or not money is committed, and it is \
+             free evidence: telling a real edge from luck takes hundreds of graded calls, so a \
+             session that grades one name learns almost nothing while a session that grades all of \
+             them learns six times faster.
+\
+             Set conviction HONESTLY - that is what decides whether a view becomes a position. Low \
+             conviction is a fine answer and still worth recording; what is NOT allowed is omitting \
+             a name because you are unsure. If you truly cannot pick a direction, say side 'none'.
+\
              Output ONLY JSON: {{\"trades\":[{{\"symbol\":\"X\",\"side\":\"long\"|\"short\",\
              \"conviction\":0.0-1.0,\"thesis\":\"one specific sentence\"}}]}}"
         );
@@ -725,7 +732,10 @@ impl super::ConversationEngine {
         let stake: f64 = std::env::var("YM_PAPER_STAKE_USD").ok().and_then(|s| s.parse().ok()).unwrap_or(250.0);
         let now = chrono::Utc::now().timestamp_millis();
         out.push_str("\n📈 VIEW:\n");
-        for t in trades.into_iter().take(3) {
+        // EVERY candidate, not the top three. A view costs no capital, so a cap only buys a
+        // slower answer to whether any of this works.
+        let mut views = 0usize;
+        for t in trades.into_iter() {
             let sym = t.get("symbol").and_then(|x| x.as_str()).unwrap_or("").trim().to_uppercase();
             let side = t.get("side").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
             let conv = t.get("conviction").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -738,8 +748,35 @@ impl super::ConversationEngine {
             // it becomes a trade produces a track record of exactly the trades that were taken,
             // which is how a strategy grades itself generously.
             self.judgment_log("hunt", "trading", &format!("{sym} {side}: {thesis}"), conv.clamp(0.05, 0.95), now + 86_400_000, &sym).await;
+            // RECORD THE VIEW so it can actually be resolved. Logging a claim states what was
+            // believed; without a reference price and a clock nothing can ever grade it, which is
+            // how six hunt predictions sat unresolved days past their deadline.
+            //
+            // The reference price is fetched even when no position is taken: grading runs against
+            // the tape from THIS moment, and a view with no entry mark is ungradeable later.
+            let ref_sym = sym.clone();
+            let ref_px = tokio::task::spawn_blocking(move || {
+                mind_tools::MarketClient::from_env().ok().and_then(|c| c.last_price(&ref_sym).ok())
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(px) = ref_px {
+                self.record_open_trade(mind_tools::trades::OpenTrade {
+                    symbol: sym.clone(),
+                    // Direction lives in the sign; magnitude 1 marks a view, not a size.
+                    qty: if side == "long" { 1.0 } else { -1.0 },
+                    entry: px,
+                    opened_at_ms: now,
+                    judgment_ref: sym.clone(),
+                    thesis: thesis.clone(),
+                    staked: false,
+                })
+                .await;
+                views += 1;
+            }
             if !act {
-                out.push_str("      (logged as a prediction; not traded — pass `act` to take it)\n");
+                out.push_str("      (view recorded and gradeable; not traded — pass `act` to take it)\n");
                 continue;
             }
             if conv < floor {
@@ -777,6 +814,7 @@ impl super::ConversationEngine {
                         opened_at_ms: now,
                         judgment_ref: sym.clone(),
                         thesis: thesis.clone(),
+                        staked: true,
                     })
                     .await;
                     out.push_str(&format!("      ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}
@@ -784,6 +822,16 @@ impl super::ConversationEngine {
                 }
                 Err(e) => out.push_str(&format!("      ✗ not filled: {e}\n")),
             }
+        }
+        if views > 0 {
+            // Say the learning rate out loud. Telling a 55% edge from luck takes several hundred
+            // graded calls: at one a day that is years, at six a day it is months. The number of
+            // views recorded IS the rate at which the honest answer arrives.
+            out.push_str(&format!(
+                "
+{views} view(s) recorded and gradeable - `ym grade` resolves them against the tape when due.
+"
+            ));
         }
         out
     }
@@ -839,7 +887,8 @@ impl super::ConversationEngine {
             let right = t.was_right(price);
             self.judgment_grade(&t.judgment_ref, right).await;
             lines.push(format!(
-                "  {} {} — entry {:.2}, now {:.2} ({:+.2}%) -> {}",
+                "  {}{} {} — entry {:.2}, now {:.2} ({:+.2}%) -> {}",
+                if t.staked { "" } else { "(view) " },
                 t.symbol,
                 if t.is_short() { "short" } else { "long" },
                 t.entry,
@@ -1256,6 +1305,7 @@ impl super::ConversationEngine {
                         opened_at_ms: stamp,
                         judgment_ref: p.symbol.clone(),
                         thesis: "adopted — opened before trades were recorded; ageing from first sight".into(),
+                        staked: true,
                     },
                 );
                 adopted = true;

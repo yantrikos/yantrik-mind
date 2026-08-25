@@ -592,3 +592,109 @@ mod w4_w6_tests {
     }
 }
 
+
+#[cfg(test)]
+mod w7_metamorphic_tests {
+    use super::*;
+
+    /// W7 volume stream: ~78 transitions, generated so scale is cheap. Five entities of 15
+    /// out-of-order/late-arriving asserts each, plus one Supersede, one Retract, one Expire
+    /// landing AFTER all volume (so each termination dominates its own entity cleanly).
+    fn stream() -> Vec<WorldEvent> {
+        let mut v = Vec::new();
+        for (i, ent) in ["alpha", "beta", "gamma", "delta", "epsilon"].iter().enumerate() {
+            for k in 0..15_i64 {
+                let late = if k % 3 == 0 { 3_600_000 } else { 0 }; // every third arrives late
+                v.push(wev(
+                    &format!("src{}:{}", i, k), Kind::Assert,
+                    base(10 + k) + k * 1000, base(10 + k) + late,
+                    ent, &format!("v{k}"),
+                ));
+            }
+        }
+        v.push(wev("src0:sup", Kind::Supersede, base(30), base(30), "alpha", "final-alpha"));
+        v.push(wev("src1:ret", Kind::Retract, base(30), base(30), "beta", "withdrawn"));
+        v.push(wev("src2:exp", Kind::Expire, base(30), base(30), "gamma", "terminated"));
+        v
+    }
+
+    fn render(l: &WorldLog) -> String {
+        l.transitions().iter()
+            .map(|t| format!("{}|{}|{}|{:?}|{}|{}", t.recorded_seq, t.transition_id, t.source_event_id, t.kind, t.occurred_at, t.value))
+            .collect::<Vec<_>>().join(";")
+    }
+    fn q(kn: i64) -> WorldQuery {
+        WorldQuery { valid_at: kn, known_at: kn, access: mind_types::AccessContext::operator_audit() }
+    }
+
+    /// Canonical identity of a history: transitions projected through the replay sort key
+    /// (occurred_at, observed_at, source_event_id). recorded_seq/transition_id are ARRIVAL
+    /// bookkeeping — a resumed log numbers post-restart events by arrival, which is correct
+    /// knowledge-time bookkeeping, so equivalence must be judged HERE, not on raw seq.
+    fn canonical(l: &WorldLog) -> String {
+        let mut rows: Vec<(i64, i64, String)> = l.transitions().iter()
+            .map(|t| (t.occurred_at, t.observed_at, format!("{}|{:?}|{}", t.source_event_id, t.kind, t.value)))
+            .collect();
+        rows.sort();
+        rows.iter().map(|r| format!("{}|{}|{}", r.0, r.1, r.2)).collect::<Vec<_>>().join(";")
+    }
+
+    /// Metamorphic H ≅ H+dup(e): identity dedup makes duplicate ingestion invisible —
+    /// same canonical history, same answers.
+    #[test]
+    fn duplicate_ingestion_changes_nothing() {
+        let s = stream();
+        let h1 = WorldLog::replay(&s);
+        let mut s2 = s.clone();
+        s2.push(s[7].clone()); // re-deliver an arbitrary mid-stream event
+        let h2 = WorldLog::replay(&s2);
+        assert_eq!(render(&h1), render(&h2));
+        for kn in [base(16), base(22), base(32)] {
+            assert_eq!(h1.state_at("delta", "status", &q(kn)), h2.state_at("delta", "status", &q(kn)));
+        }
+    }
+
+    /// Metamorphic arrival-order invariance over VOLUME (w1 proved it on 3 events).
+    #[test]
+    fn arrival_order_never_matters_at_scale() {
+        let mut s = stream();
+        let canonical = WorldLog::replay(&s);
+        s.reverse();
+        assert_eq!(render(&canonical), render(&WorldLog::replay(&s)));
+    }
+
+    /// Metamorphic restart invariance over VOLUME: split ingestion + resume == one-shot replay.
+    #[test]
+    fn restart_rebuild_equals_uninterrupted_at_scale() {
+        let s = stream();
+        let (head, tail) = s.split_at(s.len() / 2);
+        let mut resumed = WorldLog::replay(head);
+        for e in tail {
+            resumed.ingest(e);
+        }
+        let whole = WorldLog::replay(&s);
+        assert_eq!(canonical(&resumed), canonical(&whole));
+        // and the two logs ANSWER identically everywhere that matters
+        for kn in [base(18), base(26), base(32)] {
+            for ent in ["alpha", "beta", "gamma", "delta", "epsilon"] {
+                assert_eq!(resumed.state_at(ent, "status", &q(kn)), whole.state_at(ent, "status", &q(kn)));
+            }
+        }
+    }
+
+    /// Termination semantics at scale + I6 append-only: the retracting row SURVIVES in the log
+    /// while the present reads dead and the pre-retraction past still answers.
+    #[test]
+    fn terminations_kill_present_preserve_past_and_rows() {
+        // freshness pinned OFF: this test isolates termination semantics, not staleness policy
+        let log = WorldLog::replay(&stream()).with_freshness_ms(i64::MAX);
+        matches!(log.state_at("beta", "status", &q(base(32))), StateAt::Unknown);
+        matches!(log.state_at("gamma", "status", &q(base(32))), StateAt::Expired);
+        assert_eq!(log.state_at("alpha", "status", &q(base(32))), StateAt::Known("final-alpha".into()));
+        // before the terminations were observed, the newest plain asserts answered
+        assert_eq!(log.state_at("beta", "status", &q(base(29))), StateAt::Known("v14".into()));
+        assert_eq!(log.state_at("gamma", "status", &q(base(29))), StateAt::Known("v14".into()));
+        assert!(log.transitions().iter().any(|t| t.entity == "beta" && t.kind == Kind::Retract));
+        assert!(log.transitions().iter().any(|t| t.entity == "gamma" && t.kind == Kind::Expire));
+    }
+}

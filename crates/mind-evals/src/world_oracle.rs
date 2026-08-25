@@ -150,7 +150,7 @@ async fn phase3a_red_baseline() {
     let tuesday_sources: std::collections::HashSet<&str> = interview_rows
         .iter()
         .filter(|t| t.value == "Tuesday")
-        .filter_map(|t| t.source_id.as_str())
+        .map(|t| t.source_id.as_str())
         .collect();
     let corroboration_green = tuesday_sources.contains("email") && tuesday_sources.contains("calendar");
     let mut rows = Vec::new();

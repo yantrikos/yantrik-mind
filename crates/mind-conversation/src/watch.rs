@@ -763,11 +763,94 @@ impl super::ConversationEngine {
             .await
             .unwrap_or_else(|e| Err(format!("join failed: {e}")));
             match placed {
-                Ok((qty, px, ack)) => out.push_str(&format!("      ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}\n")),
+                Ok((qty, px, ack)) => {
+                    // RECORD THE TRADE, not just the order. A broker position carries no entry
+                    // time and no link to the prediction it was betting on, so without this the
+                    // horizon rule can never come due (every position reads as brand new) and the
+                    // prediction can never be graded (nothing knows which position resolves it).
+                    // Both failures ran live for five days on the WMT short.
+                    let signed = if side == "long" { qty } else { -qty };
+                    self.record_open_trade(mind_tools::trades::OpenTrade {
+                        symbol: sym.clone(),
+                        qty: signed,
+                        entry: px,
+                        opened_at_ms: now,
+                        judgment_ref: sym.clone(),
+                        thesis: thesis.clone(),
+                    })
+                    .await;
+                    out.push_str(&format!("      ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}
+"));
+                }
                 Err(e) => out.push_str(&format!("      ✗ not filled: {e}\n")),
             }
         }
         out
+    }
+
+    /// Persist a trade record beside the broker position.
+    pub(crate) async fn record_open_trade(&self, t: mind_tools::trades::OpenTrade) {
+        let raw = self.memory.profile_get("open_trades").await.ok().flatten().unwrap_or_default();
+        let mut book = mind_tools::trades::parse_book(&raw);
+        mind_tools::trades::upsert(&mut book, t);
+        let _ = self.memory.profile_set("open_trades", &mind_tools::trades::render_book(&book)).await;
+    }
+
+    pub(crate) async fn open_trade_book(&self) -> Vec<mind_tools::trades::OpenTrade> {
+        let raw = self.memory.profile_get("open_trades").await.ok().flatten().unwrap_or_default();
+        mind_tools::trades::parse_book(&raw)
+    }
+
+    /// GRADE what has come due — the other half of logging a prediction.
+    ///
+    /// Six `hunt` predictions sat "awaiting their deadline" days after a 24-hour deadline had
+    /// passed, because nothing ever graded a trading claim. The ledger recorded what the mind
+    /// believed and never found out whether it was right: logged, expired, silent. A trust score
+    /// built on that is a score of predictions nobody checked.
+    ///
+    /// Graded on DIRECTION against the tape. The claim was "this should be profitable", so a
+    /// position that moved the predicted way was a correct read even if the exit was mistimed.
+    pub async fn grade_due_trades(&self) -> String {
+        let book = self.open_trade_book().await;
+        if book.is_empty() {
+            return "no open trades on record to grade".to_string();
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let horizon = mind_tools::exit::ExitRule::default().horizon_ms;
+        let mut lines: Vec<String> = Vec::new();
+        for t in book {
+            if now.saturating_sub(t.opened_at_ms) < horizon {
+                lines.push(format!("  {} — inside its horizon, not due yet", t.symbol));
+                continue;
+            }
+            let sym = t.symbol.clone();
+            let price = tokio::task::spawn_blocking(move || {
+                mind_tools::MarketClient::from_env().ok().and_then(|c| c.last_price(&sym).ok())
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(price) = price else {
+                // No price is not a verdict. Grading against a failed quote would record a guess
+                // as an outcome, which is worse than leaving the claim pending.
+                lines.push(format!("  {} — no price, cannot grade honestly", t.symbol));
+                continue;
+            };
+            let right = t.was_right(price);
+            self.judgment_grade(&t.judgment_ref, right).await;
+            lines.push(format!(
+                "  {} {} — entry {:.2}, now {:.2} ({:+.2}%) -> {}",
+                t.symbol,
+                if t.is_short() { "short" } else { "long" },
+                t.entry,
+                price,
+                t.favour_pct(price),
+                if right { "RIGHT" } else { "WRONG" }
+            ));
+        }
+        format!("⚖️  GRADED WHAT CAME DUE
+{}", lines.join("
+"))
     }
 
     /// SOURCES — who has earned attention, from the record rather than the impression.
@@ -1140,6 +1223,7 @@ impl super::ConversationEngine {
     /// Every close names the rule that fired, because "stopped out" and "the thesis expired" are
     /// different facts about the same trade and only one of them argues the view was wrong.
     pub async fn follow_positions(&self, act: bool) -> String {
+        let book = self.open_trade_book().await;
         let res = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<String>, String> {
             let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
             let positions = broker.positions().map_err(|e| e.to_string())?;
@@ -1156,14 +1240,21 @@ impl super::ConversationEngine {
                     lines.push(format!("  {} — no live price, leaving it alone", p.symbol));
                     continue;
                 };
-                // Entry time is not carried on the broker's position, so the horizon is measured
-                // from the ledger entry when one exists; absent that, treat it as opened now, which
-                // errs toward HOLDING rather than closing something whose age is unknown.
+                // Entry time comes from OUR record, not the broker's position — the broker has
+                // none, so before this every position read as zero seconds old and the horizon
+                // rule could never come due. A same-day thesis ran for five days that way.
+                // Absent a record we still fall back to "opened now", which errs toward HOLDING
+                // rather than closing something whose age is genuinely unknown.
+                let opened = book
+                    .iter()
+                    .find(|t| t.symbol.eq_ignore_ascii_case(&p.symbol))
+                    .map(|t| t.opened_at_ms)
+                    .unwrap_or(now);
                 let pos = mind_tools::exit::OpenPosition {
                     symbol: p.symbol.clone(),
                     qty: p.qty,
                     entry: p.avg_entry_price,
-                    entered_at_ms: now,
+                    entered_at_ms: opened,
                     rule: mind_tools::exit::ExitRule::default(),
                 };
                 let fav = pos.favour_pct(price);

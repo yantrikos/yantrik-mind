@@ -35,6 +35,13 @@ pub struct WorldEvent {
 pub struct WorldTransition {
     pub transition_id: u64,
     pub source_event_id: String,
+    /// WHICH WITNESS said it — "email", "calendar" — as distinct from WHICH EVENT (`email:501`).
+    ///
+    /// Named by I6 and load-bearing for E2: two different sources asserting the same proposition
+    /// are two independent witnesses and must never collapse, while the same source_event_id twice
+    /// is one duplicate. Without this field a corroboration check has nothing to count, because
+    /// every row's identity is unique by construction.
+    pub source_id: String,
     pub kind: Kind,
     pub entity: String,
     pub attr: String,
@@ -79,6 +86,13 @@ impl WorldLog {
         let t = WorldTransition {
             transition_id: self.next_tid,
             source_event_id: ev.source_event_id.clone(),
+            // The witness is the id's prefix by convention ("email:501" -> "email"); an id with no
+            // prefix is its own witness rather than being silently grouped with everything else.
+            source_id: ev
+                .source_event_id
+                .split_once(':')
+                .map(|(w, _)| w.to_string())
+                .unwrap_or_else(|| ev.source_event_id.clone()),
             kind: ev.kind,
             entity: ev.entity.clone(),
             attr: ev.attr.clone(),

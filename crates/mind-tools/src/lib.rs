@@ -84,6 +84,9 @@ pub mod hunt;
 
 /// The half of a trade that was missing: when to close it.
 pub mod exit;
+
+/// The record linking a position to the prediction that opened it.
+pub mod trades;
 pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
 
 pub mod newsflow;

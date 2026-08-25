@@ -3346,6 +3346,10 @@ pub struct ConversationEngine {
     /// What the mind last answered (head only), so the NEXT user message can grade it — the
     /// turn-level reward channel. See `grade_previous_turn`.
     last_turn_answer: Mutex<Option<String>>,
+    /// The pack evidence THIS turn surfaced (primary lane only), carried to the answer (was it
+    /// used?) and to the next message (was the answer accepted?) — the three rungs of a knowledge
+    /// pack's local ladder. Replaced by every grounding, taken by every grade. ARCH-6 P.2.
+    turn_packs: Mutex<Vec<crate::pace_ledger::TurnPackEvidence>>,
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
@@ -3425,6 +3429,7 @@ impl ConversationEngine {
             cognition_force: None,
             self_ref: Mutex::new(std::sync::Weak::new()),
             last_turn_answer: Mutex::new(None),
+            turn_packs: Mutex::new(Vec::new()),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
@@ -5341,14 +5346,19 @@ impl ConversationEngine {
             // `ym why calibration` grades predicted-vs-observed by confidence band.
             "why" => {
                 let prefix = rest.trim();
+                // Reports read EVERY event. `read_trace("")` is the last ten — which is what the
+                // three reports below were silently computing over until P.2 noticed.
                 if prefix == "calibration" {
-                    return mind_observability::render_calibration(&self.recorder.read_trace(""));
+                    return mind_observability::render_calibration(&self.recorder.read_all());
                 }
                 if prefix == "contribution" {
-                    return mind_observability::render_goal_contribution(&self.recorder.read_trace(""));
+                    return mind_observability::render_goal_contribution(&self.recorder.read_all());
                 }
                 if prefix == "flips" {
-                    return mind_observability::render_policy_flips(&self.recorder.read_trace(""));
+                    return mind_observability::render_policy_flips(&self.recorder.read_all());
+                }
+                if prefix == "packs" {
+                    return mind_observability::render_pack_evidence(&self.recorder.read_all());
                 }
                 let events = self.recorder.read_trace(prefix);
                 if events.is_empty() {
@@ -6311,8 +6321,11 @@ impl ConversationEngine {
                     // by hit, with the similarity each cleared. A floor that exists only in tests
                     // is a floor nobody has seen on the live path.
                     "probe" | "recall" if !parg.is_empty() => self.packs_probe(&parg).await,
+                    // Every pack's local ladder from both witnesses — the SQL counters and a
+                    // recount of the flight recorder — side by side.
+                    "stats" | "evidence" => self.packs_stats().await,
                     "" | "list" | "ls" => self.pack_list().await,
-                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query>".to_string(),
+                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query> · stats".to_string(),
                 }
             }
             "plugins" => self.plugins.lock().unwrap().render_list(),
@@ -6560,7 +6573,7 @@ impl ConversationEngine {
             lines.push("ym device list · ym device pair <name> --person <slug>|--operator · ym device revoke <id>   paired-device trust".to_string());
         }
         lines.push("ym proposals             pending research proposals (shadow mode; read-only)".to_string());
-        lines.push("ym why [trace-prefix]    reconstruct a decision's causal path (flight recorder)".to_string());
+        lines.push("ym why [trace-prefix]    reconstruct a decision's causal path (flight recorder) · ym why calibration|contribution|flips|packs".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -7885,7 +7898,7 @@ impl ConversationEngine {
     /// Extracted verbatim from `agent_loop` so the bounded loop receives the SAME grounding when
     /// it runs in that slot — the breadth trials showed a loop without this answers about an old
     /// belief instead of yesterday's work. One assembly, two loops, zero drift.
-    async fn turn_grounding(&self, user_text: &str, id: &TurnIdentity) -> String {
+    async fn turn_grounding(&self, user_text: &str, id: &TurnIdentity, trace: &str) -> String {
         let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
         let mut grounding = String::new();
@@ -7909,19 +7922,49 @@ impl ConversationEngine {
         //
         // Labelled third-party and kept OUT of the memory block on purpose: these are a publisher's
         // claims, not things the household told the mind, and the two must not read alike.
+        // Only the primary's turns carry evidence on to the used/graded rungs: a member's message
+        // must not grade the owner's packs, nor the reverse (the lane rule `turn` already uses).
+        let primary_lane = matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY);
+        let mut surfaced: Vec<crate::pace_ledger::TurnPackEvidence> = Vec::new();
         if let Ok(hits) = self.memory.recall_from_packs(user_text, 5).await {
             if !hits.is_empty() {
-                grounding.push_str("
-
-FROM A MOUNTED KNOWLEDGE PACK (third-party reference, not the household's own facts):
-");
-                for hit in hits {
+                grounding.push_str("\n\nFROM A MOUNTED KNOWLEDGE PACK (third-party reference, not the household's own facts):\n");
+                let mut by_pack: std::collections::BTreeMap<String, Vec<&mind_types::memory::PackHit>> = Default::default();
+                for hit in &hits {
                     // The pack id rides with the claim so a later belief, grade or correction can say
                     // WHICH publisher's WHICH record it came from — the identity lineage is built on.
                     grounding.push_str(&format!("- [{}] {}\n", hit.pack_id, hit.text.chars().take(400).collect::<String>()));
+                    by_pack.entry(hit.pack_id.clone()).or_default().push(hit);
+                }
+                // SURFACED — rung one of the pack's local ladder — on the flight recorder (the
+                // hash-chained witness) and in mind_pack_stats (the SQL witness) both. Emitted HERE,
+                // on the grounding every loop shares, so the default path records it too: E.R2's
+                // recorder went dark for a month because its emit sites lived on a loop that was off.
+                for (pack_id, phits) in by_pack {
+                    let mut ev = mind_observability::DecisionEvent::span(trace, None, "pack_surfaced");
+                    ev.object_id = Some(format!("pack:{pack_id}"));
+                    ev.evidence_ids = phits.iter().map(|h| h.rid.clone()).collect();
+                    ev.candidates = phits.iter().map(|h| format!("{}@{:.2}", h.rid, h.similarity)).collect();
+                    ev.confidence = phits.iter().map(|h| h.similarity).fold(None, |m: Option<f64>, s| Some(m.map_or(s, |m| m.max(s))));
+                    ev.goal = Some(user_text.chars().take(160).collect());
+                    let surfaced_event_id = ev.event_id.clone();
+                    self.recorder.record(ev);
+                    let _ = self.memory.record_pack_event(&pack_id, mind_types::memory::PackEvent::Surfaced).await;
+                    if primary_lane {
+                        surfaced.push(crate::pace_ledger::TurnPackEvidence {
+                            pack_id,
+                            trace: trace.to_string(),
+                            text: phits.iter().map(|h| h.text.as_str()).collect::<Vec<_>>().join("\n"),
+                            surfaced_event_id,
+                            used: None,
+                            used_event_id: None,
+                        });
+                    }
                 }
             }
         }
+        // Replace, never append: a stale turn's packs must not be graded by this turn's next message.
+        *self.turn_packs.lock().unwrap() = surfaced;
         // Self-referential turn -> the instrument panel (fixes introspection myopia).
         if is_self_referential(user_text) {
             grounding.push_str(&self.self_model_block().await);
@@ -8021,7 +8064,11 @@ Open reminders you're carrying for them:");
         self.seed_capabilities().await; // idempotent: ensure the base capability skills exist + are runnable
         // READ-ISOLATION: the grounding + recent context are scoped to what THIS speaker may see, so a
         // private fact from another household member never reaches the model (the surprise-gift wall).
-        let grounding = self.turn_grounding(user_text, id).await;
+        // One trace per turn, so every pack row surfaced and every tool span in this run parents
+        // under the same id and `ym why <trace>` reconstructs which evidence served which goal.
+        // Minted BEFORE grounding: the pack_surfaced events are the turn's first decisions.
+        let run_trace = format!("run-{}", mind_observability::now_ms());
+        let grounding = self.turn_grounding(user_text, id, &run_trace).await;
         let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let recent = self
             .memory
@@ -8098,9 +8145,6 @@ Open reminders you're carrying for them:");
         // Consecutive steps that may return nothing new before the loop stops asking and composes.
         // Two, not one: a single repeat can be a legitimate re-check, three in a row cannot.
         const MAX_BARREN_STEPS: usize = 2;
-        // One trace per turn, so every tool span in this run parents under the same id and
-        // `ym why <trace>` reconstructs which calls served which goal.
-        let run_trace = format!("run-{}", mind_observability::now_ms());
         let mut scratch = String::new();
         let mut last_call = String::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already

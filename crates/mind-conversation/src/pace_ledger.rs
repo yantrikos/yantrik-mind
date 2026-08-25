@@ -68,6 +68,28 @@ impl super::ConversationEngine {
         let prev = self.last_turn_answer.lock().unwrap().take();
         let Some(prev) = prev else { return };
         let corrected = reads_as_correction(user_text);
+        // Rung three for whatever pack evidence the graded answer had surfaced: the grade of the
+        // answer is the grade of its evidence, for want of anything finer. Censoring stays explicit
+        // — a pack whose answer never came (`used == None`) is not graded, and a turn that surfaced
+        // nothing grades nothing.
+        let packs = std::mem::take(&mut *self.turn_packs.lock().unwrap());
+        for p in packs {
+            let Some(used) = p.used else { continue };
+            let mut ev = mind_observability::DecisionEvent::span(&p.trace, p.used_event_id.as_deref(), "pack_evidence_graded");
+            ev.object_id = Some(format!("pack:{}", p.pack_id));
+            ev.verdict = Some(if corrected { "corrected" } else { "accepted" }.to_string());
+            ev.semantic_success = Some(used);
+            ev.outcome = Some(
+                if corrected {
+                    "the next message read as a correction"
+                } else {
+                    "the next message did not read as a correction (tacit acceptance — weaker evidence)"
+                }
+                .to_string(),
+            );
+            self.recorder.record(ev);
+            let _ = self.memory.record_pack_event(&p.pack_id, mind_types::memory::PackEvent::Graded { good: !corrected }).await;
+        }
         let mut g: serde_json::Value = self
             .memory
             .profile_get("turn_grades")
@@ -95,9 +117,26 @@ impl super::ConversationEngine {
         let _ = self.memory.profile_set("turn_grades", &g.to_string()).await;
     }
 
-    /// Remember what was just said, so the NEXT message can grade it.
-    pub(crate) fn note_turn_answer(&self, answer: &str) {
+    /// Remember what was just said, so the NEXT message can grade it — and judge whether the answer
+    /// USED the pack evidence this turn surfaced (rung two of a pack's local ladder).
+    pub(crate) async fn note_turn_answer(&self, answer: &str) {
         *self.last_turn_answer.lock().unwrap() = Some(answer.chars().take(300).collect());
+        let mut packs = std::mem::take(&mut *self.turn_packs.lock().unwrap());
+        for p in packs.iter_mut() {
+            let (used, share) = evidence_used(&p.text, answer);
+            let mut ev = mind_observability::DecisionEvent::span(&p.trace, p.surfaced_event_id.as_deref(), "pack_evidence_used");
+            ev.object_id = Some(format!("pack:{}", p.pack_id));
+            ev.verdict = Some(if used { "used" } else { "unused" }.to_string());
+            ev.confidence = Some(share);
+            ev.lesson = Some("proxy: the share of the surfaced rows' informative words that reappear in the reply — not causal use".to_string());
+            p.used_event_id = ev.event_id.clone();
+            p.used = Some(used);
+            self.recorder.record(ev);
+            if used {
+                let _ = self.memory.record_pack_event(&p.pack_id, mind_types::memory::PackEvent::Used).await;
+            }
+        }
+        *self.turn_packs.lock().unwrap() = packs;
     }
 
     /// Log a user correction — the most valuable signal there is. The lesson is permanent.
@@ -168,4 +207,58 @@ impl super::ConversationEngine {
         m
     }
 
+}
+
+/// The pack evidence one turn surfaced, carried from grounding to the answer to the next message.
+#[derive(Debug, Clone)]
+pub(crate) struct TurnPackEvidence {
+    pub(crate) pack_id: String,
+    pub(crate) trace: String,
+    /// The surfaced rows' text, for the used-proxy.
+    pub(crate) text: String,
+    pub(crate) surfaced_event_id: Option<String>,
+    pub(crate) used: Option<bool>,
+    pub(crate) used_event_id: Option<String>,
+}
+
+/// Did the reply USE the evidence? A PROXY, deliberately cheap and deterministic: the share of the
+/// evidence's informative words (five letters or more) that reappear in the reply. `(true, share)`
+/// when at least three reappear and they are a quarter or more of the evidence's vocabulary. It
+/// cannot see paraphrase and it cannot see causation — a reply can restate a row it would have
+/// written anyway. It is named as a proxy everywhere it is reported, and P.5 will not learn from
+/// it until the grade rung has enough rows to say whether it predicts anything.
+pub(crate) fn evidence_used(evidence: &str, reply: &str) -> (bool, f64) {
+    fn informative(s: &str) -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 5)
+            .map(str::to_string)
+            .collect()
+    }
+    let ev = informative(evidence);
+    if ev.is_empty() {
+        return (false, 0.0);
+    }
+    let rp = informative(reply);
+    let shared = ev.iter().filter(|w| rp.contains(*w)).count();
+    let share = shared as f64 / ev.len() as f64;
+    (shared >= 3 && share >= 0.25, share)
+}
+
+#[cfg(test)]
+mod evidence_proxy_tests {
+    use super::evidence_used;
+
+    #[test]
+    fn the_used_proxy_needs_real_overlap_and_says_how_much() {
+        let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+        let (used, share) = evidence_used(row, "For body text you want contrast of at least 4.5:1 against the background so it stays readable.");
+        assert!(used && share >= 0.25, "share {share}");
+        let (unused, share2) = evidence_used(row, "I don't know.");
+        assert!(!unused && share2 == 0.0);
+        // One shared word is not use, however long it is.
+        let (thin, _) = evidence_used(row, "the background matters");
+        assert!(!thin);
+        assert_eq!(evidence_used("", "anything"), (false, 0.0));
+    }
 }

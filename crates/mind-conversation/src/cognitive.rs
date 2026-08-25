@@ -605,7 +605,7 @@ impl ConversationEngine {
         let answer = self.handle_turn_as(user_text, id.clone()).await;
         if let Ok(a) = &answer {
             if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
-                self.note_turn_answer(a);
+                self.note_turn_answer(a).await;
             }
         }
         // FOLLOW-THROUGH, every channel: a delegated result that finished while no chat was
@@ -642,7 +642,7 @@ impl ConversationEngine {
 
         // The SAME grounding assembly the classic loop uses — one function, two loops, zero drift.
         emit_progress("grounding from memory…");
-        let grounding = self.turn_grounding(user_text, id).await;
+        let grounding = self.turn_grounding(user_text, id, &trace_id).await;
 
         emit_progress("understanding the goal…");
         let compiled = mind_agents::compile(

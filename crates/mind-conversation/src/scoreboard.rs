@@ -49,6 +49,17 @@ pub struct ToolPanel {
     pub n: u64,
 }
 
+/// One knowledge pack's local ladder — counts only; every rate needs its own
+/// denominator said aloud, and `graded < used` is censoring, not failure.
+#[derive(Debug, Clone)]
+pub struct PackPanel {
+    pub pack_id: String,
+    pub surfaced: u64,
+    pub used: u64,
+    pub graded: u64,
+    pub good: u64,
+}
+
 /// The joined board. Panels stay separate; there is deliberately no method
 /// that reduces this struct to one score.
 #[derive(Debug, Clone, Default)]
@@ -60,6 +71,8 @@ pub struct Scoreboard {
     /// Brier-skill bucketing built to defeat "the questions got easier").
     pub judgment: Option<String>,
     pub tools: Vec<ToolPanel>,
+    /// Knowledge packs' local ladders (ARCH-6 P.2), empty when no pack evidence has reached a turn.
+    pub packs: Vec<PackPanel>,
     /// World-model receptivity prediction, if it has enough transitions to speak.
     pub receptivity: Option<f64>,
     /// Segmentation axes the vision asks for that nothing measures yet. Said
@@ -114,9 +127,15 @@ impl Scoreboard {
             domains,
             judgment,
             tools: tools.into_iter().map(|(tool, rate, n)| ToolPanel { tool, rate, n }).collect(),
+            packs: Vec::new(),
             receptivity,
             not_instrumented: NOT_INSTRUMENTED,
         }
+    }
+
+    pub(crate) fn with_packs(mut self, packs: Vec<PackPanel>) -> Scoreboard {
+        self.packs = packs;
+        self
     }
 
     /// Deterministic rendering — every line traceable to a measured row. The
@@ -151,6 +170,18 @@ impl Scoreboard {
             out.push_str("\nTOOLS (measured reliability, worst first):\n");
             for t in self.tools.iter().take(10) {
                 out.push_str(&format!("  {} — {:.0}% over {} runs\n", t.tool, t.rate * 100.0, t.n));
+            }
+        }
+        // 3b) Pack evidence — a knowledge pack's local ladder, counts with their denominators.
+        if !self.packs.is_empty() {
+            out.push_str(
+                "\nPACK EVIDENCE (surfaced → used [word-overlap proxy] → graded by your next message → accepted; graded is a subset of used — the rest is censored, not failed):\n",
+            );
+            for p in self.packs.iter().take(10) {
+                out.push_str(&format!(
+                    "  {}: {} surfaced · {} used · {} graded → {} accepted\n",
+                    p.pack_id, p.surfaced, p.used, p.graded, p.good
+                ));
             }
         }
         // 4) Proactive domains — the self-selected denominator, labeled as such.
@@ -225,7 +256,15 @@ impl super::ConversationEngine {
             .filter(|(_, _, n)| *n >= 2)
             .collect();
         let receptivity = self.memory.proactive_receptivity().await.ok().flatten();
-        Scoreboard::from_parts(window_days, grades, stats, paces, judgment, tools, receptivity)
+        let packs = self
+            .memory
+            .pack_stats()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| PackPanel { pack_id: s.pack_id, surfaced: s.surfaced, used: s.used, graded: s.graded, good: s.good })
+            .collect();
+        Scoreboard::from_parts(window_days, grades, stats, paces, judgment, tools, receptivity).with_packs(packs)
     }
 }
 
@@ -253,6 +292,19 @@ mod tests {
             vec![("web_search".into(), 0.62, 21)],
             Some(0.4),
         )
+    }
+
+    /// The pack panel is counts with denominators in the heading, and it is absent — not zeros —
+    /// when no pack evidence has reached a turn.
+    #[test]
+    fn pack_panel_is_counts_with_denominators_or_absent() {
+        let without = board().render();
+        assert!(!without.contains("PACK EVIDENCE"), "{without}");
+        let with = board()
+            .with_packs(vec![PackPanel { pack_id: "yantrik/web-craft@0.3.0".into(), surfaced: 12, used: 5, graded: 4, good: 3 }])
+            .render();
+        assert!(with.contains("yantrik/web-craft@0.3.0: 12 surfaced · 5 used · 4 graded → 3 accepted"), "{with}");
+        assert!(with.contains("censored, not failed"), "{with}");
     }
 
     #[test]

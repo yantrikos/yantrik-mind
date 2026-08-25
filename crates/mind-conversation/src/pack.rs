@@ -612,6 +612,56 @@ fn floor_in_force(declared: Option<f64>) -> String {
 }
 
 impl super::ConversationEngine {
+    /// `ym pack stats` — every pack's local ladder from BOTH witnesses, side by side: the SQL
+    /// counters in `mind_pack_stats` and a recount of the flight recorder. Both are written by the
+    /// same code path, so agreement is not proof of truth — but disagreement is proof of a defect
+    /// in the instrument, and an instrument defect must be found here before it is found in a
+    /// decision (Doctrine 3, the cheap form: two mechanisms reading persisted state).
+    pub async fn packs_stats(&self) -> String {
+        let table = match self.memory.pack_stats().await {
+            Ok(t) => t,
+            Err(e) => return format!("(couldn't read pack stats: {e})"),
+        };
+        let recorder = mind_observability::pack_evidence_counts(&self.recorder.read_all());
+        if table.is_empty() && recorder.is_empty() {
+            return "No pack evidence recorded yet — rows appear when a mounted pack's evidence reaches a turn.".to_string();
+        }
+        let mut out = String::from(
+            "PACK EVIDENCE — two witnesses (SQL counters | flight-recorder recount), each as surfaced / used [proxy] / graded / accepted\n",
+        );
+        let mut ids: std::collections::BTreeSet<String> = table.iter().map(|t| t.pack_id.clone()).collect();
+        ids.extend(recorder.keys().cloned());
+        for id in ids {
+            let t = table.iter().find(|t| t.pack_id == id);
+            let r = recorder.get(&id);
+            let sql = t
+                .map(|t| format!("{} / {} / {} / {}", t.surfaced, t.used, t.graded, t.good))
+                .unwrap_or_else(|| "— / — / — / —".to_string());
+            let rec = r
+                .map(|c| format!("{} / {} / {} / {}", c.surfaced, c.used, c.graded(), c.good))
+                .unwrap_or_else(|| "— / — / — / —".to_string());
+            let agree = match (t, r) {
+                (Some(t), Some(c)) => {
+                    (t.surfaced as usize, t.used as usize, t.graded as usize, t.good as usize) == (c.surfaced, c.used, c.graded(), c.good)
+                }
+                _ => false,
+            };
+            out.push_str(&format!(
+                "  {id}: {sql} | {rec} {}\n",
+                if agree {
+                    "✓ witnesses agree"
+                } else {
+                    "⚠ witnesses DISAGREE — an instrument defect or a reset recorder; trust neither until explained"
+                }
+            ));
+            if let Some(d) = t.and_then(|t| t.content_digest.as_deref()) {
+                out.push_str(&format!("      evidence keyed to {}…\n", d.chars().take(20).collect::<String>()));
+            }
+        }
+        out.push_str("  (`ym why packs` for the denominators and the selective-observation audit)");
+        out
+    }
+
     /// `ym pack probe <query>` — the pack evidence a turn on this query would receive, hit by hit,
     /// with the similarity each cleared and the floors it was measured against.
     ///

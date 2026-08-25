@@ -470,6 +470,32 @@ impl PackProbe {
     }
 }
 
+/// One thing that happened to a pack's evidence in a turn — the three rungs of the only ladder a
+/// knowledge pack can climb locally: it was SURFACED into a turn, the reply USED it (a proxy, see
+/// `pack_evidence_used`), and the person's next message GRADED the reply that used it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PackEvent {
+    Surfaced,
+    Used,
+    Graded { good: bool },
+}
+
+/// A pack's local track record — counts, never a rate, because every rate here needs its own
+/// denominator said aloud: `used` is out of `surfaced`, `graded` is out of `used`, and `good` is
+/// out of `graded`. `graded < used` is CENSORING (no next message, or not the primary's turn), not
+/// failure. Keyed by the pack's content digest underneath: a re-sealed pack starts from zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackStats {
+    pub pack_id: String,
+    pub content_digest: Option<String>,
+    pub surfaced: u64,
+    pub used: u64,
+    pub graded: u64,
+    pub good: u64,
+    pub first_ms: i64,
+    pub last_ms: i64,
+}
+
 #[async_trait]
 pub trait MemoryFacade: Send + Sync {
     // ── ARCH-1 (slice 2) + Purpose Gate v1: EVERY personal-data read carries an
@@ -660,6 +686,14 @@ pub trait MemoryFacade: Send + Sync {
     /// The operator's view of the same recall: every attributed candidate, cleared or withheld, with
     /// the floor it was measured against. Read-only instrument; nothing here reaches a prompt.
     async fn probe_packs(&self, _query: &str, _top_k: usize) -> Result<Vec<PackProbe>> {
+        Ok(Vec::new())
+    }
+    /// Count one rung of a pack's local ladder (the SQL witness beside the flight recorder's).
+    async fn record_pack_event(&self, _pack_id: &str, _event: PackEvent) -> Result<()> {
+        Ok(())
+    }
+    /// Every pack's local track record, most-surfaced first.
+    async fn pack_stats(&self) -> Result<Vec<PackStats>> {
         Ok(Vec::new())
     }
     /// The constitution + coverage block the engine assembles for the system prompt, or None when

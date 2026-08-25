@@ -3560,7 +3560,7 @@ async fn grounding_labels_pack_evidence_with_the_pack_id_and_keeps_it_out_of_mem
 
     // The row itself as the question: similarity ~1.0 clears the host wall without relying on the
     // small bundled embedder's paraphrase reach, which is not what this test measures.
-    let grounding = conv.turn_grounding(row, &TurnIdentity::primary()).await;
+    let grounding = conv.turn_grounding(row, &TurnIdentity::primary(), "run-p1-test").await;
     let heading = grounding.find("FROM A MOUNTED KNOWLEDGE PACK").expect(&format!("no pack block in: {grounding}"));
     let label = grounding.find(&format!("[{id}]")).expect(&format!("the hit must carry its pack id: {grounding}"));
     assert!(label > heading, "the labelled hit sits under the third-party heading");
@@ -3568,6 +3568,99 @@ async fn grounding_labels_pack_evidence_with_the_pack_id_and_keeps_it_out_of_mem
         assert!(heading > mem_block || grounding[mem_block..heading].contains(">>"), "pack evidence must not read as the household's own memory");
     }
     let _ = std::fs::remove_file(&pack);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pack_evidence_climbs_surfaced_used_graded_on_two_witnesses() {
+    // ARCH-6 P.2, end to end on a REAL sealed pack: grounding surfaces a row (rung one), the answer
+    // uses it or not (rung two, a named proxy), the next message grades the answer (rung three).
+    // Every rung lands on the hash-chained flight recorder AND in mind_pack_stats, and the two
+    // witnesses must agree.
+    let dir = std::env::temp_dir().join(format!("ym_p2_chain_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pack = dir.join("chain.ydbpack");
+    let log = dir.join("chain.decisions.jsonl");
+    let _ = std::fs::remove_file(&log);
+    let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+    let id = mind_memory::fixtures::seal_fixture_pack(pack.to_str().unwrap(), "chain-craft", "chain_craft", &[row], None, None).unwrap();
+    let handle = MemoryHandle::spawn(":memory:", 64).unwrap();
+    handle.mount_pack(pack.to_str().unwrap()).await.unwrap();
+    let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
+        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
+    let who = TurnIdentity::primary();
+
+    // Turn one: surfaced → used → accepted.
+    let g = conv.turn_grounding(row, &who, "run-p2-one").await;
+    assert!(g.contains(&format!("[{id}]")), "{g}");
+    conv.note_turn_answer("For body text you want contrast of at least 4.5 to 1 against the background so it stays readable.").await;
+    conv.grade_previous_turn("thanks, that is exactly what I needed").await;
+    // Turn two: surfaced → unused → corrected.
+    conv.turn_grounding(row, &who, "run-p2-two").await;
+    conv.note_turn_answer("I don't know.").await;
+    conv.grade_previous_turn("no, that's wrong — it needs contrast").await;
+
+    let events = conv.recorder().read_all();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["pack_surfaced", "pack_evidence_used", "pack_evidence_graded", "pack_surfaced", "pack_evidence_used", "pack_evidence_graded"],
+        "{kinds:?}"
+    );
+    let obj = format!("pack:{id}");
+    assert!(events.iter().all(|e| e.object_id.as_deref() == Some(obj.as_str())), "{events:?}");
+    assert_eq!(events[0].trace_id, "run-p2-one");
+    assert_eq!(events[0].evidence_ids.len(), 1, "the surfaced rid travels: {:?}", events[0]);
+    assert_eq!(events[1].parent_event_id, events[0].event_id, "used parents under surfaced");
+    assert_eq!(events[1].verdict.as_deref(), Some("used"));
+    assert_eq!(events[2].parent_event_id, events[1].event_id, "graded parents under used");
+    assert_eq!((events[2].verdict.as_deref(), events[2].semantic_success), (Some("accepted"), Some(true)));
+    assert_eq!(events[4].verdict.as_deref(), Some("unused"));
+    assert_eq!((events[5].verdict.as_deref(), events[5].semantic_success), (Some("corrected"), Some(false)));
+
+    // Witness one: the SQL counters. Witness two: the recorder recount. They agree, and say so.
+    let stats = mem.pack_stats().await.unwrap();
+    assert_eq!((stats[0].surfaced, stats[0].used, stats[0].graded, stats[0].good), (2, 1, 2, 1), "{stats:?}");
+    let counts = mind_observability::pack_evidence_counts(&events);
+    let c = &counts[&id];
+    assert_eq!((c.surfaced, c.used, c.graded(), c.good), (2, 1, 2, 1));
+    let report = conv.packs_stats().await;
+    assert!(report.contains("witnesses agree"), "{report}");
+    let board = conv.outer_scoreboard(14).await.render();
+    assert!(board.contains(&format!("{id}: 2 surfaced · 1 used · 2 graded → 1 accepted")), "{board}");
+    let _ = std::fs::remove_file(&pack);
+    let _ = std::fs::remove_file(&log);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_members_turn_surfaces_pack_evidence_but_does_not_carry_it_to_the_grade() {
+    // The lane rule: a member's message must not grade the owner's packs, nor the reverse. A
+    // member turn still records SURFACED (it happened), but nothing is carried to the used or
+    // graded rungs.
+    let dir = std::env::temp_dir().join(format!("ym_p2_lane_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pack = dir.join("lane.ydbpack");
+    let log = dir.join("lane.decisions.jsonl");
+    let _ = std::fs::remove_file(&log);
+    let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+    mind_memory::fixtures::seal_fixture_pack(pack.to_str().unwrap(), "lane-craft", "lane_craft", &[row], None, None).unwrap();
+    let handle = MemoryHandle::spawn(":memory:", 64).unwrap();
+    handle.mount_pack(pack.to_str().unwrap()).await.unwrap();
+    let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
+        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
+    let member = TurnIdentity::new("asha", false);
+    conv.turn_grounding(row, &member, "run-p2-member").await;
+    conv.note_turn_answer(row).await;
+    conv.grade_previous_turn("thanks").await;
+    let kinds: Vec<String> = conv.recorder().read_all().into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, vec!["pack_surfaced".to_string()], "{kinds:?}");
+    let stats = mem.pack_stats().await.unwrap();
+    assert_eq!((stats[0].surfaced, stats[0].used, stats[0].graded), (1, 0, 0), "{stats:?}");
+    let _ = std::fs::remove_file(&pack);
+    let _ = std::fs::remove_file(&log);
 }
 
 #[test]

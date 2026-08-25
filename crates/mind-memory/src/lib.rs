@@ -107,6 +107,8 @@ enum Cmd {
     PackContext { reply: Reply<Option<String>> },
     RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackHit>> },
     ProbePacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackProbe>> },
+    RecordPackEvent { pack_id: String, event: mind_types::memory::PackEvent, reply: Reply<()> },
+    PackStats { reply: Reply<Vec<mind_types::memory::PackStats>> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
@@ -1298,6 +1300,113 @@ fn ensure_skills_table(db: &YantrikDB) {
     );
 }
 
+/// A knowledge pack's LOCAL track record (ARCH-6 P.2): the SQL witness beside the flight
+/// recorder's events. Counts only — every rate needs its denominator said aloud at render time.
+fn ensure_pack_stats_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_pack_stats \
+         (pack_id TEXT PRIMARY KEY, content_digest TEXT, \
+          surfaced INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0, \
+          graded INTEGER NOT NULL DEFAULT 0, good INTEGER NOT NULL DEFAULT 0, \
+          first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL)",
+        [],
+    );
+}
+
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Count one rung for a pack. The row is keyed by pack id but OWNED by the content digest: a pack
+/// re-sealed under the same id (same version, new rows) must not inherit the old rows' record, so
+/// a digest change resets the counters before counting. A pack whose digest is unknown (manifest
+/// unreadable, or not mounted right now) is counted under its id without a reset — better a
+/// record that says "digest unknown" than a rung lost.
+fn record_pack_event(
+    db: &YantrikDB,
+    manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    pack_id: &str,
+    event: mind_types::memory::PackEvent,
+) -> std::result::Result<(), String> {
+    use mind_types::memory::PackEvent;
+    use rusqlite::OptionalExtension;
+    let now = now_ms_i64();
+    let digest: Option<String> = db
+        .mounted_packs()
+        .into_iter()
+        .find(|p| p.pack_id == pack_id)
+        .and_then(|p| cached_manifest(manifests, &p.path).and_then(|m| m.content_digest.clone()));
+    let conn = db.conn();
+    let existing: Option<Option<String>> = conn
+        .query_row("SELECT content_digest FROM mind_pack_stats WHERE pack_id = ?1", [pack_id], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match existing {
+        None => {
+            conn.execute(
+                "INSERT INTO mind_pack_stats (pack_id, content_digest, surfaced, used, graded, good, first_ms, last_ms) \
+                 VALUES (?1, ?2, 0, 0, 0, 0, ?3, ?3)",
+                rusqlite::params![pack_id, digest, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Some(old) if digest.is_some() && old != digest => {
+            conn.execute(
+                "UPDATE mind_pack_stats SET content_digest = ?2, surfaced = 0, used = 0, graded = 0, good = 0, \
+                 first_ms = ?3, last_ms = ?3 WHERE pack_id = ?1",
+                rusqlite::params![pack_id, digest, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        _ => {}
+    }
+    let (column, good) = match event {
+        PackEvent::Surfaced => ("surfaced", false),
+        PackEvent::Used => ("used", false),
+        PackEvent::Graded { good } => ("graded", good),
+    };
+    conn.execute(
+        &format!("UPDATE mind_pack_stats SET {column} = {column} + 1, last_ms = ?2 WHERE pack_id = ?1"),
+        rusqlite::params![pack_id, now],
+    )
+    .map_err(|e| e.to_string())?;
+    if good {
+        conn.execute("UPDATE mind_pack_stats SET good = good + 1 WHERE pack_id = ?1", [pack_id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn pack_stats(db: &YantrikDB) -> std::result::Result<Vec<mind_types::memory::PackStats>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare(
+            "SELECT pack_id, content_digest, surfaced, used, graded, good, first_ms, last_ms \
+             FROM mind_pack_stats ORDER BY surfaced DESC, pack_id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(mind_types::memory::PackStats {
+                pack_id: r.get(0)?,
+                content_digest: r.get(1)?,
+                surfaced: r.get::<_, i64>(2)?.max(0) as u64,
+                used: r.get::<_, i64>(3)?.max(0) as u64,
+                graded: r.get::<_, i64>(4)?.max(0) as u64,
+                good: r.get::<_, i64>(5)?.max(0) as u64,
+                first_ms: r.get(6)?,
+                last_ms: r.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 fn ensure_goals_prefs_table(db: &YantrikDB) {
     let conn = db.conn();
     let _ = conn.execute(
@@ -2153,6 +2262,7 @@ impl MemoryHandle {
                 }
                 ensure_transcript_table(&db);
                 ensure_skills_table(&db);
+                ensure_pack_stats_table(&db);
                 ensure_goals_prefs_table(&db);
                 ensure_tensions_table(&db);
                 ensure_belief_scope_table(&db);
@@ -2419,6 +2529,12 @@ impl MemoryHandle {
                         }
                         Cmd::ProbePacks { query, top_k, reply } => {
                             let _ = reply.send(probe_mounted_packs(&db, &mut pack_manifests, &query, top_k));
+                        }
+                        Cmd::RecordPackEvent { pack_id, event, reply } => {
+                            let _ = reply.send(record_pack_event(&db, &mut pack_manifests, &pack_id, event));
+                        }
+                        Cmd::PackStats { reply } => {
+                            let _ = reply.send(pack_stats(&db));
                         }
                         Cmd::StoreGoalPref { kind, text, reply } => {
                             let _ = reply.send(store_goal_pref(&db, &kind, &text));
@@ -3264,6 +3380,13 @@ impl MemoryFacade for MemoryHandle {
         let query = query.to_string();
         self.call(|reply| Cmd::ProbePacks { query, top_k, reply }).await
     }
+    async fn record_pack_event(&self, pack_id: &str, event: mind_types::memory::PackEvent) -> Result<()> {
+        let pack_id = pack_id.to_string();
+        self.call(|reply| Cmd::RecordPackEvent { pack_id, event, reply }).await
+    }
+    async fn pack_stats(&self) -> Result<Vec<mind_types::memory::PackStats>> {
+        self.call(|reply| Cmd::PackStats { reply }).await
+    }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {
         // Unscoped append = primary's private context (single-user default; never leaks to a member).
@@ -3684,6 +3807,43 @@ mod tests {
         drop(mem);
         let _ = std::fs::remove_file(&pack);
         let _ = std::fs::remove_file(&host_db);
+    }
+
+    /// P.2's SQL witness: rungs count, and a pack re-sealed under the SAME id starts from zero —
+    /// evidence belongs to the rows that earned it, which the content digest names.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pack_stats_count_rungs_and_reset_when_the_pack_is_resealed() {
+        use mind_types::memory::PackEvent as E;
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p2_stats_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("stats.ydbpack");
+        let id = fixtures::seal_fixture_pack(pack.to_str().unwrap(), "stats-craft", "stats_ns", &["Row one — the first sealing."], None, None).unwrap();
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
+        let digest1 = mem.mounted_packs().await.unwrap()[0].content_digest.clone();
+        assert!(digest1.is_some());
+        for e in [E::Surfaced, E::Surfaced, E::Used, E::Graded { good: true }, E::Graded { good: false }] {
+            mem.record_pack_event(&id, e).await.unwrap();
+        }
+        let s = mem.pack_stats().await.unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].surfaced, s[0].used, s[0].graded, s[0].good), (2, 1, 2, 1), "{s:?}");
+        assert_eq!(s[0].content_digest, digest1);
+        assert!(s[0].last_ms >= s[0].first_ms);
+
+        // Re-seal under the same id with different rows, remount, count once more.
+        mem.unmount_pack(&id).await.unwrap();
+        let id2 = fixtures::seal_fixture_pack(pack.to_str().unwrap(), "stats-craft", "stats_ns", &["Row two — a different corpus, same id."], None, None).unwrap();
+        assert_eq!(id, id2, "same origin@version");
+        mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
+        let digest2 = mem.mounted_packs().await.unwrap()[0].content_digest.clone();
+        assert_ne!(digest1, digest2, "different rows, different digest");
+        mem.record_pack_event(&id, E::Surfaced).await.unwrap();
+        let s = mem.pack_stats().await.unwrap();
+        assert_eq!((s[0].surfaced, s[0].used, s[0].graded, s[0].good), (1, 0, 0, 0), "the old rows' record did not carry over: {s:?}");
+        assert_eq!(s[0].content_digest, digest2);
+        let _ = std::fs::remove_file(&pack);
     }
 
     /// A pack that declares no floor gets the host wall — never no floor.

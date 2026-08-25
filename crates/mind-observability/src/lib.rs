@@ -302,6 +302,16 @@ impl DecisionLog {
         self.path.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// EVERY recorded event, in order — what a report must read. `read_trace("")` is "the last
+    /// few decisions" for a bare `ym why`, and a calibration or utilisation report computed over
+    /// the last ten events is a number wearing a report's name.
+    pub fn read_all(&self) -> Vec<DecisionEvent> {
+        match self.trace_path() {
+            Some(p) => read_events(&p),
+            None => Vec::new(),
+        }
+    }
+
     /// Every event under a trace-id prefix, in recorded order — the raw material for `ym why`.
     pub fn read_trace(&self, prefix: &str) -> Vec<DecisionEvent> {
         let Some(p) = self.trace_path() else { return vec![] };
@@ -486,6 +496,98 @@ pub fn render_goal_contribution(events: &[DecisionEvent]) -> String {
     out
 }
 
+/// One pack's local ladder, recounted from the flight recorder — the witness that fails
+/// independently of the SQL counters in `mind_pack_stats` (Doctrine 3: two mechanisms, one truth).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackCounts {
+    pub surfaced: usize,
+    pub used: usize,
+    pub unused: usize,
+    /// Graded rows split by whether the reply had used the evidence — the split Doctrine 2 needs:
+    /// if grading happens more often after a used row than an unused one (or the reverse), the
+    /// observation of outcomes is selective and every rate below is a rate on a biased sample.
+    pub graded_used: usize,
+    pub graded_unused: usize,
+    pub good: usize,
+}
+
+impl PackCounts {
+    pub fn graded(&self) -> usize {
+        self.graded_used + self.graded_unused
+    }
+}
+
+/// Per-pack counts from `pack_surfaced` / `pack_evidence_used` / `pack_evidence_graded` events.
+pub fn pack_evidence_counts(events: &[DecisionEvent]) -> std::collections::BTreeMap<String, PackCounts> {
+    let mut rows: std::collections::BTreeMap<String, PackCounts> = Default::default();
+    for e in events {
+        let Some(pack) = e.object_id.as_deref().and_then(|o| o.strip_prefix("pack:")) else { continue };
+        let row = rows.entry(pack.to_string()).or_default();
+        match e.kind.as_str() {
+            "pack_surfaced" => row.surfaced += 1,
+            "pack_evidence_used" => match e.verdict.as_deref() {
+                Some("used") => row.used += 1,
+                _ => row.unused += 1,
+            },
+            "pack_evidence_graded" => {
+                match e.semantic_success {
+                    Some(true) => row.graded_used += 1,
+                    _ => row.graded_unused += 1,
+                }
+                if e.verdict.as_deref() == Some("accepted") {
+                    row.good += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// `ym why packs` — every pack's local ladder with its denominators, the censoring rate, and the
+/// Doctrine 2 audit ABOVE the rates: whether outcomes were observed as often for used evidence as
+/// for unused. A rate printed under a selective-observation warning is a rate the reader has been
+/// told not to trust.
+pub fn render_pack_evidence(events: &[DecisionEvent]) -> String {
+    let rows = pack_evidence_counts(events);
+    if rows.is_empty() {
+        return "No pack evidence recorded yet — rows appear when a mounted pack's evidence reaches a turn.".into();
+    }
+    let mut out = String::from(
+        "PACK EVIDENCE (flight recorder; per pack: surfaced → used [word-overlap proxy, not causal use] → graded by the next message → accepted [tacit; weaker than a correction]):\n",
+    );
+    for (pack, c) in &rows {
+        let graded = c.graded();
+        let p_used = if c.used > 0 { Some(c.graded_used as f64 / c.used as f64) } else { None };
+        let p_unused = if c.unused > 0 { Some(c.graded_unused as f64 / c.unused as f64) } else { None };
+        let audit = match (p_used, p_unused) {
+            (Some(a), Some(b)) if c.used >= 5 && c.unused >= 5 && (a - b).abs() >= 0.15 => format!(
+                "  ⚠ SELECTIVE OBSERVATION: P(graded | used) = {:.0}% vs P(graded | unused) = {:.0}% — the rates below stand on a biased sample\n",
+                a * 100.0,
+                b * 100.0
+            ),
+            (Some(a), Some(b)) if c.used >= 5 && c.unused >= 5 => {
+                format!("  observation audit: P(graded | used) = {:.0}% vs P(graded | unused) = {:.0}% — comparable\n", a * 100.0, b * 100.0)
+            }
+            _ => "  observation audit: too few rows on one side to compare (needs ≥5 used and ≥5 unused)\n".to_string(),
+        };
+        out.push_str(&format!(
+            "  {pack}: surfaced {} · used {} of {} surfaced · graded {} of {} used · accepted {} of {} graded · censored {} of {} surfaced never graded\n",
+            c.surfaced,
+            c.used,
+            c.surfaced,
+            c.graded_used,
+            c.used,
+            c.good,
+            graded,
+            c.surfaced.saturating_sub(graded),
+            c.surfaced
+        ));
+        out.push_str(&audit);
+    }
+    out
+}
+
 /// POLICY-DISAGREEMENT cohort report: every recorded `selection_flipped` — the cases where the
 /// learned reliability ranking overruled the legacy semantic-only ranking. These are the only
 /// decisions where the two policies differ, so they are where a policy improvement (or rot)
@@ -588,6 +690,49 @@ pub fn render_trace(events: &[DecisionEvent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ym why packs`: counts per pack with their denominators, censoring said aloud, and the
+    /// selective-observation audit ABOVE the rates.
+    #[test]
+    fn pack_evidence_report_keeps_denominators_and_audits_observation() {
+        let mk = |kind: &str, verdict: Option<&str>, sem: Option<bool>| {
+            let mut e = DecisionEvent::new("run-t", kind);
+            e.object_id = Some("pack:yantrik/x@1.0.0".into());
+            e.verdict = verdict.map(String::from);
+            e.semantic_success = sem;
+            e
+        };
+        let mut ev = Vec::new();
+        for _ in 0..10 {
+            ev.push(mk("pack_surfaced", None, None));
+        }
+        for _ in 0..6 {
+            ev.push(mk("pack_evidence_used", Some("used"), None));
+        }
+        for _ in 0..4 {
+            ev.push(mk("pack_evidence_used", Some("unused"), None));
+        }
+        // Every USED row got graded (4 accepted, 2 corrected); no UNUSED row did.
+        for _ in 0..4 {
+            ev.push(mk("pack_evidence_graded", Some("accepted"), Some(true)));
+        }
+        for _ in 0..2 {
+            ev.push(mk("pack_evidence_graded", Some("corrected"), Some(true)));
+        }
+        let counts = pack_evidence_counts(&ev);
+        let c = &counts["yantrik/x@1.0.0"];
+        assert_eq!((c.surfaced, c.used, c.unused, c.graded_used, c.graded_unused, c.good), (10, 6, 4, 6, 0, 4));
+        let r = render_pack_evidence(&ev);
+        assert!(r.contains("used 6 of 10 surfaced"), "{r}");
+        assert!(r.contains("accepted 4 of 6 graded"), "{r}");
+        assert!(r.contains("censored 4 of 10 surfaced never graded"), "{r}");
+        assert!(r.contains("too few rows on one side"), "unused=4 cannot support the audit yet: {r}");
+        // A fifth unused row lets the audit speak — and what it says is: selective.
+        ev.push(mk("pack_evidence_used", Some("unused"), None));
+        let r2 = render_pack_evidence(&ev);
+        assert!(r2.contains("SELECTIVE OBSERVATION"), "{r2}");
+        assert!(render_pack_evidence(&[]).contains("No pack evidence"));
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();

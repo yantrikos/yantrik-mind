@@ -29,6 +29,8 @@ mod dream;
 mod egress_planning;
 mod emissary;
 mod emotion;
+mod ex4_shadow;
+pub use ex4_shadow::LegacyOutcome;
 mod code;
 mod festivals;
 mod finance;
@@ -5312,6 +5314,8 @@ impl ConversationEngine {
             "paper" | "paper-book" | "book" => self.paper_book().await,
             "follow" | "manage" => self.follow_positions(rest.trim().eq_ignore_ascii_case("act")).await,
             "grade" | "settle" => self.grade_due_trades().await,
+            // EX4-LIVE-A: what the shadowed executive would have done, and what it cannot see.
+            "ex4" | "shadow" | "ex4-live" => self.ex4_report().await,
             // One-shot repair for engagement claims orphaned by the old single-slot resolver.
             "backfill-engagement" | "settle-engagement" => {
                 self.backfill_proactive_grades(rest.trim().eq_ignore_ascii_case("act")).await

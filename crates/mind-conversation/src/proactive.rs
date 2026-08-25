@@ -670,7 +670,11 @@ impl super::ConversationEngine {
     /// clears on the next user turn, so ignored claims were preferentially destroyed and the
     /// surviving 30% read higher than the truth. A sampling rule that drops the failures is worse
     /// than no measurement, because it looks like a measurement.
-    pub async fn note_proactive_sent(&self) {
+    /// Returns the judgment-ledger `ref` this send was logged under, so a caller can join to
+    /// the engagement outcome later. Returned rather than recomputed: `judgment_log` stamps its
+    /// own `t` after an awaited read, so a timestamp-derived join matches only the rows where
+    /// the millisecond happened not to tick over (see ledger E.P2).
+    pub async fn note_proactive_sent(&self) -> String {
         let now = chrono::Utc::now().timestamp_millis();
         let mut pend = self.proactive_pending().await;
         pend.push(now);
@@ -687,6 +691,7 @@ impl super::ConversationEngine {
         let p_raw = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.5);
         let p = self.shrunk_judgment_p("engagement", p_raw).await;
         self.judgment_log("proactive", "engagement", "recipient engages within 90m", p, now + 90 * 60_000, &now.to_string()).await;
+        now.to_string()
     }
 
     /// Resolve the outstanding proactive send, if any. `via_user_turn`: the user just spoke —

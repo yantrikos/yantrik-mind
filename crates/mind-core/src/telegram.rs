@@ -379,6 +379,33 @@ fn is_quiet_hour(hour: u32, start: u32, end: u32) -> bool {
     }
 }
 
+/// Milliseconds from now until quiet hours end, or None if not in them.
+///
+/// The executive needs a review time for a quiet-hours MONITOR; a deferral that cannot say when it
+/// would reconsider is indistinguishable from a drop. Same tz handling as `in_quiet_hours_now`.
+fn quiet_hours_end_in_ms() -> Option<i64> {
+    use chrono::Timelike;
+    if !in_quiet_hours_now() {
+        return None;
+    }
+    let end: u32 = std::env::var("YM_QUIET_END").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    let utc = chrono::Utc::now();
+    let local = if let Some(tz) = std::env::var("YM_TZ").ok().and_then(|n| n.trim().parse::<chrono_tz::Tz>().ok()) {
+        utc.with_timezone(&tz).naive_local()
+    } else {
+        let off: i64 = std::env::var("YM_TZ_OFFSET_MINUTES").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        (utc + chrono::Duration::minutes(off)).naive_utc()
+    };
+    let (h, m) = (local.hour() as i64, local.minute() as i64);
+    let end_h = end as i64;
+    // Quiet hours wrap midnight (e.g. 22 -> 7), so "hours until end" is modular.
+    let mut hours = end_h - h;
+    if hours <= 0 {
+        hours += 24;
+    }
+    Some(hours * 3_600_000 - m * 60_000)
+}
+
 fn in_quiet_hours_now() -> bool {
     use chrono::Timelike;
     let start = std::env::var("YM_QUIET_START").ok().and_then(|s| s.parse().ok()).unwrap_or(22);
@@ -2071,15 +2098,51 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                 }
             }
-            if !spoke && idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 && conv.proactive_receptivity_ok().await {
-                if let Some(msg) = conv.proactive_digest().await {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                        eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());
-                        conv.note_proactive_sent().await;
-                        spoke = true;
+            // EX4-LIVE-A ELIGIBLE CUT. The preconditions below decide whether a proactive
+            // decision is even DUE; only past them does "should I speak now?" exist as a question.
+            // The executive shadow runs here — after them, before the receptivity gate branches —
+            // so both SEND and DECLINE are recorded, and precondition declines (which mean "there
+            // was nothing due", not "we chose silence") never enter the comparison at all.
+            if !spoke && idle_ok && now.saturating_sub(last_digest) >= pd_secs * 1000 {
+                // SHADOW ONLY. The return value must never reach control flow: the legacy gate
+                // below stays authoritative for every send. Keyed on `last_digest` so the ~144
+                // re-evaluations an hour that a suppressed opportunity produces collapse into one
+                // record instead of drowning the sample (ledger E.D4).
+                let _shadow = conv
+                    .ex4_shadow_decide(last_digest as i64, in_quiet_hours_now(), quiet_hours_end_in_ms())
+                    .await;
+                if conv.proactive_receptivity_ok().await {
+                    if let Some(msg) = conv.proactive_digest().await {
+                        if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                            eprintln!("[proactive] surfaced a digest ({} chars)", msg.len());
+                            let claim = conv.note_proactive_sent().await;
+                            conv.ex4_shadow_note_legacy(
+                                last_digest as i64,
+                                mind_conversation::LegacyOutcome::Sent,
+                                Some(claim),
+                            ).await;
+                            spoke = true;
+                        }
+                    } else {
+                        // Gate passed and there was nothing to say — a real third case here, and
+                        // not a policy disagreement in either direction.
+                        conv.ex4_shadow_note_legacy(
+                            last_digest as i64,
+                            mind_conversation::LegacyOutcome::NothingToSay,
+                            None,
+                        ).await;
                     }
+                    last_digest = now; // reset cadence whether or not we spoke (never hammer)
+                } else {
+                    // Declined. `proactive_digest()` never ran, so whether there was anything to
+                    // say is unknown by construction — and cannot be cheaply discovered, because
+                    // that call discharges the tensions it renders. Outcome stays CENSORED.
+                    conv.ex4_shadow_note_legacy(
+                        last_digest as i64,
+                        mind_conversation::LegacyOutcome::DeclinedByReceptivity,
+                        None,
+                    ).await;
                 }
-                last_digest = now; // reset cadence whether or not we spoke (never hammer)
             }
             // Asking is NORMAL conversation, not a rare scheduled event — so the ask-drive gets its
             // own LIGHT gate (a 2-min lull, not the 10-min deep-idle the heavier surfaces use).

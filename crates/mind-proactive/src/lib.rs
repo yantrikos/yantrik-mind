@@ -149,6 +149,7 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
                     if !imminent {
                         if r.quiet_hours {
                             d.posture = Posture::Monitor;
+                            d.requires_user_interrupt = false;
                             d.reason_code = "quiet_hours";
                             d.monitor = Some(MonitorPlan {
                                 review_at_ms: r.quiet_hours_end_ms,
@@ -156,6 +157,7 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
                             });
                         } else if r.user_receptive == Some(false) {
                             d.posture = Posture::Monitor;
+                            d.requires_user_interrupt = false;
                             d.reason_code = "user_unavailable";
                             d.monitor = Some(MonitorPlan {
                                 review_at_ms: None,
@@ -611,6 +613,8 @@ mod ex4_resource_tests {
         let d = arbitrate(&c);
         assert_eq!(d.posture, Posture::Monitor);
         assert_eq!(d.reason_code, "user_unavailable");
+        // delivery strategy must actually move: a deferred interrupt is not pending
+        assert!(!d.requires_user_interrupt);
     }
 
     #[test]
@@ -619,8 +623,12 @@ mod ex4_resource_tests {
         soft.internal_capability = false;
         soft.urgency = 1;
         soft.deadline_at_ms = Some(20 * 3_600_000);
-        soft.resources = Some(res(true, true, true, Some(false), true));
-        assert_eq!(arbitrate(&soft).reason_code, "quiet_hours");
+        // ISOLATED pin: quiet hours only - receptivity left unknown
+        soft.resources = Some(res(true, true, true, None, true));
+        let dsoft = arbitrate(&soft);
+        assert_eq!(dsoft.posture, Posture::Monitor);
+        assert_eq!(dsoft.reason_code, "quiet_hours");
+        assert!(!dsoft.requires_user_interrupt);
         let mut crit = cand();
         crit.internal_capability = false;
         crit.urgency = 3;
@@ -630,6 +638,29 @@ mod ex4_resource_tests {
         let d = arbitrate(&crit);
         assert_eq!(d.posture, Posture::Act);
         assert_eq!(d.reason_code, "critical_window_override");
+        assert!(d.requires_user_interrupt);
+    }
+
+    #[test]
+    fn wake_causes_reconsideration_not_automatic_action() {
+        // While blocked: Monitor every time (pure function, no hidden state).
+        let mut blocked = cand();
+        blocked.internal_capability = false;
+        blocked.resources = Some(res(false, true, true, None, false));
+        let m1 = arbitrate(&blocked);
+        let m2 = arbitrate(&blocked);
+        assert_eq!(m1.reason_code, "resource_unavailable");
+        assert_eq!(m1.posture, Posture::Monitor);
+        assert_eq!(m2.posture, Posture::Monitor);
+        assert!(!m1.requires_user_interrupt && !m2.requires_user_interrupt);
+        // The wake firing means RE-EVALUATION against current facts - which then
+        // independently justifies ACT because the resource is now available.
+        let mut restored = blocked.clone();
+        restored.resources.as_mut().unwrap().network_available = true;
+        let d = arbitrate(&restored);
+        assert_eq!(d.posture, Posture::Act);
+        // re-evaluation independently re-derives the reason - nothing was remembered
+        assert_eq!(d.reason_code, "user_action_required");
         assert!(d.requires_user_interrupt);
     }
 }

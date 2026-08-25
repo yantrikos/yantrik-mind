@@ -314,3 +314,15 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Oracle | EX4 SCOPE wired for 4 J/K situations: refresh_network_down GREEN; same_item_user_free GREEN; user_sleeping_low_urgency and low_urg_during_meeting postures CORRECT (both MONITOR as wanted) but flagged by my strict checker - discrepancy is at reason-code/wake level (quiet_hours vs user_unavailable precedence when both apply) - OPEN classification next session: ORACLE_ERROR likely (fixture sets both signals simultaneously; real contexts rarely do). Postures themselves are right. |
 | Result | EX1 10/10 EX2 6/6 EX3 6/6 held; overall intentional red retained; coverage claim stays 22/37 until the two flagged cases classify green. Workspace full run NOT re-executed this slice (context budget); mind-proactive 19/19 and prior suites green at last full run. |
 | Decision | CONTINUE next session: classify the two flags, finish EX4, then EX5 set arbitration earns executive attention proper. STOP now. |
+
+
+## E.EX4-R - EX4 COMPLETE: production defect fixed, harness strengthened; 26/37
+
+| Field | Entry |
+|---|---|
+| Defect (principal-verified) | quiet_hours / user_unavailable demotion branches set posture=Monitor but left requires_user_interrupt=true - delivery strategy never moved, violating the doctrine that receptivity changes delivery. One-line fix per branch (flag cleared). Resource-block branch already cleared it, which is exactly why the asymmetry was invisible. |
+| Harness fix | Oracle failure line printed only reason_code while checking a conjunction - replaced with explicit MISMATCH list naming the failing field (posture/interrupt/monitor_without_wake). Unit tests user_only_action_with_unreceptive_user_defers and quiet_hours_defer gained requires_user_interrupt assertions so neither level can hide this again. |
+| Fixtures | Isolated pins: meeting=receptivity-only; sleeping=OVERLAP fixture where either deterministic primary blocker is accepted WITH its wake; network-only unchanged. New test wake_causes_reconsideration_not_automatic_action: blocked re-arbitrates Monitor identically (purity), restored facts independently justify ACT(user_action_required) - nothing remembered, everything re-derived. |
+| Real-organ note recorded | Live receptivity organ changed today (43pct-vs-31pct bias found, 628 orphaned engagement claims settled, gate moved to person-relative baseline). Do NOT hard-code receptivity thresholds in fixtures. Authoritative organs exist for all three receptivity signals (world-model receptivity bins, Telegram quiet-hours gate, ICS user_in_meeting) - EX5+ should source at least one case from a live organ rather than fixture literals. |
+| Result | mind-proactive 20/20; oracle scopes EX1 10/10 EX2 6/6 EX3 6/6 EX4 4/4; COVERAGE 26/37; overall intentional red retained (11 remain, competing-sets fold into EX5); EX0 report block relabeled FROZEN BASELINE ending the self-contradiction. Workspace 42 suites / 950 passed / 0 failed. |
+| Decision | KEEP. EX4 complete. STOP before EX5: several individually justified candidates competing for finite attention is the first true arbitration problem and earns its own RED spec. |

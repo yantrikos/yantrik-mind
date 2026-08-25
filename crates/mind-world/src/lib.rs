@@ -124,6 +124,55 @@ impl WorldLog {
     pub fn transitions(&self) -> &[WorldTransition] { &self.transitions }
     pub fn len(&self) -> u64 { self.next_seq }
     pub fn is_empty(&self) -> bool { self.transitions.is_empty() }
+
+    /// THE BI-TEMPORAL CUT (W2): what was true at `valid_at`, GIVEN only what had been learned
+    /// by `known_at`. Knowledge-time filtering first (observed_at <= known_at) — this is the
+    /// no-hindsight-leakage property; later information can never contaminate an earlier cut.
+    /// Then world-time selection among what was known: the latest-occurred non-retracted
+    /// assertion describes the state. A late-arriving OLD fact never resurrects a superseded
+    /// proposition, because supersession happened earlier in WORLD time than the old fact
+    /// describes... it wins because its occurred_at is later, regardless of arrival order.
+    pub fn state_at(&self, entity: &str, attr: &str, q: WorldQuery) -> StateAt {
+        let mut relevant: Vec<&WorldTransition> = self
+            .transitions()
+            .iter()
+            .filter(|t| {
+                t.entity == entity
+                    && t.attr == attr
+                    && t.observed_at <= q.known_at
+                    && t.occurred_at <= q.valid_at
+            })
+            .collect();
+        if relevant.is_empty() {
+            return StateAt::Unknown;
+        }
+        relevant.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
+        match relevant.last().unwrap().kind {
+            Kind::Assert | Kind::Supersede => StateAt::Known(relevant.last().unwrap().value.clone()),
+            // Retract/Expire leave nothing warranted at this cut (W3 refines into Expired).
+            Kind::Retract | Kind::Expire => StateAt::Unknown,
+        }
+    }
+}
+
+/// A purpose-scoped bi-temporal question. AccessContext joins in W5 — until then the type
+/// exists so no consumer API grows up around a context-free shape.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldQuery {
+    pub valid_at: i64,
+    pub known_at: i64,
+}
+
+/// Current-state values at a cut. W2 implements Known/Unknown; Conflicted/Stale/Expired are
+/// W3's epistemic-state work and are representable from day one so call sites cannot grow
+/// around booleans.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StateAt {
+    Known(String),
+    Unknown,
+    Conflicted(Vec<String>),
+    Stale { value: String, last_verified: i64 },
+    Expired,
 }
  
 #[cfg(test)]
@@ -185,3 +234,45 @@ mod tests {
         assert_eq!(log.transitions().len(), 1);
     }
 }
+ 
+#[cfg(test)]
+mod w2_tests {
+    use super::*;
+
+    fn ev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, val: &str) -> WorldEvent {
+        WorldEvent {
+            source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
+            kind, occurred_at: occ, observed_at: obs,
+            entity: ent.into(), attr: "status".into(), value: val.into(),
+        }
+    }
+    const D: i64 = 86_400_000;
+    fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
+
+    /// THE NO-HINDSIGHT-LEAKAGE PROPERTY. Delay occurred Aug 20; learned Aug 22.
+    /// The same world moment queried with two knowledge cuts gives two honest answers —
+    /// and the early cut MUST NOT know what arrived later. This never regresses.
+    #[test]
+    fn later_information_cannot_leak_into_earlier_knowledge() {
+        let log = WorldLog::replay(&[ev("carrier:771", Kind::Assert, base(20), base(22), "package", "delayed")]);
+        let early = log.state_at("package", "status", WorldQuery { valid_at: base(20), known_at: base(20) });
+        assert_eq!(early, StateAt::Unknown, "not yet LEARNED by the early cut — absence of knowledge, not denial");
+        let late = log.state_at("package", "status", WorldQuery { valid_at: base(20), known_at: base(22) });
+        assert_eq!(late, StateAt::Known("delayed".into()), "once learned, the past fact is known");
+    }
+
+    /// A LATE-ARRIVING OLD FACT must not resurrect a superseded proposition: supersession
+    /// happened earlier in WORLD time than what the stale email describes, so Thursday wins
+    /// even though the Tuesday email was only observed after it.
+    #[test]
+    fn a_late_old_email_does_not_resurrect_a_superseded_state() {
+        let log = WorldLog::replay(&[
+            ev("email:501", Kind::Assert, base(20), base(20), "interview", "Tuesday"),
+            ev("email:923", Kind::Supersede, base(22), base(22), "interview", "Thursday"),
+            ev("email:old", Kind::Assert, base(20), base(23), "interview", "Tuesday"), // arrives late
+        ]);
+        let s = log.state_at("interview", "status", WorldQuery { valid_at: base(23), known_at: base(23) });
+        assert_eq!(s, StateAt::Known("Thursday".into()), "world-time ordering beats arrival order: {s:?}");
+    }
+}
+

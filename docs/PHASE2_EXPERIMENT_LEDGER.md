@@ -186,3 +186,15 @@ shadow events (§8 — now unblocked, since the recorder exists).
 | Actual | mind-world 3/3 tests green; oracle **2/9** — DUPLICATE_ID ✅, CORROBORATION ✅ after its own check forced an E2 refinement: the LATE stale email (email:old-late) is a THIRD independent Tuesday witness, so corroboration had to be scored as distinct-SOURCES-preserved, not exact row lists. Exactly the kind of semantic sharpening the slice process exists to produce. Remaining 7 RED/UNREPRESENTABLE (no WorldQuery API yet). Ungated suite unaffected (env-gated oracle). |
 | Regressions | None from this slice. NOTE: unrelated concurrent edits appeared in the working tree during this slice (trades.rs, watch.rs, a `grade_due_trades` call without definition) — not mine, left untouched, excluded from this commit; they currently break `cargo test -p mind-conversation` until their author completes them. |
 | Decision | **KEEP — W1 complete.** Next: W2 bi-temporal cuts (the no-hindsight-leakage property), only after the tree is quiet again. |
+ 
+## E.W2 — Bi-temporal cut: 4/9 GREEN
+
+| Field | Entry |
+|---|---|
+| Hypothesis | state_at(entity, attr, WorldQuery{valid_at, known_at}) over the replayed log answers asserted/superseded state with ZERO hindsight leakage, and a late-arriving old fact cannot resurrect a superseded proposition. |
+| Baseline | E.W1: 2/9; bi-temporal cuts had no API. |
+| Change | `WorldLog::state_at` — knowledge filter first (observed_at <= known_at), then world-time selection (latest occurred_at among non-retracted); `WorldQuery` type exists now so no context-free consumer API can take root (W5 adds AccessContext); `StateAt` enum carries all five epistemic values from day one (Conflicted/Stale/Expired populated in W3). |
+| Expected | Leakage pair passes both ways (early=Unknown, later=Known(delayed)); late Tuesday email does NOT resurrect superseded interview. |
+| Actual | mind-world 5/5 (incl. the two new properties as permanent tests); oracle **4/9**: DUPLICATE_ID, CORROBORATION, **BITEMPORAL**, **SUPERSESSION** GREEN — scored through real queries, not assertion. |
+| Regressions | None. Concurrent trading work in tree (trades.rs/watch.rs/grade_due_trades) landed separately and compiles; untouched here. |
+| Decision | **KEEP — W2 complete.** Next: W3 epistemic state (Conflicted preserved per I4, named RESOLVE_BY_RULE for carrier-vs-ETA, Stale/Expired). |

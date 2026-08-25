@@ -174,8 +174,16 @@ async fn phase3a_red_baseline() {
     let mut score: Vec<(&str, bool)> = vec![
         ("DUPLICATE_ID", duplicate_id_green),
         ("CORROBORATION", corroboration_green),
-        ("BITEMPORAL", false),
-        ("SUPERSESSION", false),
+        // W2: scored through the real bi-temporal cut, not assertion.
+        ("BITEMPORAL", {
+            let early = log.state_at("package", "status", mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(20, 12) });
+            let late = log.state_at("package", "status", mind_world::WorldQuery { valid_at: day(20, 12), known_at: day(22, 13) });
+            early == mind_world::StateAt::Unknown && late == mind_world::StateAt::Known("delayed-until-Monday".into())
+        }),
+        ("SUPERSESSION", {
+            log.state_at("interview", "date", mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10) })
+                == mind_world::StateAt::Known("Thursday".into())
+        }),
         ("CONFLICT", false),
         ("STALE", false),
         ("EXPIRY", false),

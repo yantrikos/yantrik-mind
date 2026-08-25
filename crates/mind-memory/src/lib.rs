@@ -73,6 +73,7 @@ enum Cmd {
     RecentMessages { limit: usize, viewer: Option<String>, reply: Reply<Vec<(String, String)>> },
     MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
     UserTurnTimes { since_ms: i64, reply: Reply<Vec<i64>> },
+    ProactiveBaselineRate { reply: Reply<Option<f64>> },
     RecordProactiveOutcomeBackfill { sent_ms: i64, engaged: bool, reply: Reply<()> },
     RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
     RecordEpisode { label: String, reply: Reply<()> },
@@ -2334,6 +2335,13 @@ impl MemoryHandle {
                         Cmd::UserTurnTimes { since_ms, reply } => {
                             let _ = reply.send(user_turn_times(&db, since_ms));
                         }
+                        Cmd::ProactiveBaselineRate { reply } => {
+                            let r = (|| {
+                                let sum = db.world_model_summary().ok()?;
+                                (sum.total_transitions >= 20).then_some(sum.global_positive_rate)
+                            })();
+                            let _ = reply.send(Ok(r));
+                        }
                         Cmd::RecordProactiveOutcomeBackfill { sent_ms, engaged, reply } => {
                             // World model ONLY. Deliberately no personality/bond feedback: see the
                             // trait doc — those are live relationship steps, not replayable history.
@@ -3009,6 +3017,9 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn user_turn_times(&self, since_ms: i64) -> Result<Vec<i64>> {
         self.call(move |reply| Cmd::UserTurnTimes { since_ms, reply }).await
+    }
+    async fn proactive_baseline_rate(&self) -> Result<Option<f64>> {
+        self.call(|reply| Cmd::ProactiveBaselineRate { reply }).await
     }
     async fn proactive_receptivity(&self) -> Result<Option<f64>> {
         self.call(|reply| Cmd::ProactiveReceptivity { reply }).await

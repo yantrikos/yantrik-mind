@@ -822,12 +822,26 @@ impl super::ConversationEngine {
     }
 
     /// Gate for OPTIONAL proactive beats: false only when the learned world model says this moment
-    /// is a dead zone (<35% engagement). True until there's real data — never guess-gate.
+    /// is a dead zone FOR THIS PERSON. True until there's real data — never guess-gate.
+    ///
+    /// This used to be an absolute `>= 0.35`, which silently depended on the scale of the number
+    /// it was comparing. That scale was wrong: engagement was measured on the third of claims the
+    /// old single-slot resolver happened not to overwrite, and read 43% when the true rate is 31%.
+    /// Settling the other 628 fixed the measurement — and would have muted the mind as a side
+    /// effect, because four of the five time bins sit between 23% and 31% and all of them fall
+    /// below a threshold that was tuned against the inflated numbers. A data-quality repair must
+    /// not covertly change how talkative the thing is.
+    ///
+    /// So the question is asked relatively: is this moment materially worse than how this person
+    /// responds in general? That is what "dead zone" always meant, and unlike a constant it
+    /// survives the scale moving again. The floor keeps a pathologically low baseline from
+    /// declaring every moment acceptable.
     pub async fn proactive_receptivity_ok(&self) -> bool {
-        match self.memory.proactive_receptivity().await {
-            Ok(Some(r)) => r >= 0.35,
-            _ => true,
-        }
+        let Ok(Some(r)) = self.memory.proactive_receptivity().await else {
+            return true;
+        };
+        let baseline = self.memory.proactive_baseline_rate().await.ok().flatten();
+        r >= dead_zone_floor(baseline)
     }
 
     /// FOLLOW-THROUGH — the difference between filing a reminder and CARRYING it: open reminders
@@ -916,4 +930,17 @@ pub(crate) fn settle_plan(orphans: &[(i64, i64)], turns: &[i64], last_turn: i64,
         out.push((i, turns.get(next).is_some_and(|&t| t - sent <= WINDOW_MS)));
     }
     (out, skipped)
+}
+
+/// The receptivity below which a moment counts as a dead zone.
+///
+/// Relative to how this person responds in general, with two guards: a floor, so a baseline near
+/// zero cannot wave everything through, and a ceiling, so an unusually responsive person does not
+/// end up gated out of most of their own day. With no baseline yet, falls back to the original
+/// absolute constant.
+pub(crate) fn dead_zone_floor(baseline: Option<f64>) -> f64 {
+    match baseline {
+        Some(b) if b.is_finite() && b > 0.0 => (b * 0.6).clamp(0.10, 0.35),
+        _ => 0.35,
+    }
 }

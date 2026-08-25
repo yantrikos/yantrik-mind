@@ -660,6 +660,11 @@ pub trait MemoryFacade: Send + Sync {
     async fn record_proactive_outcome_backfill(&self, _sent_ms: i64, _engaged: bool) -> Result<()> {
         Ok(())
     }
+    /// This person's OVERALL engagement rate with proactive messages — the scale that a single
+    /// moment's receptivity has to be read against. Default: unknown.
+    async fn proactive_baseline_rate(&self) -> Result<Option<f64>> {
+        Ok(None)
+    }
     /// Predicted engagement rate for a proactive send RIGHT NOW (None until the world model has
     /// enough transitions to say anything real).
     async fn proactive_receptivity(&self) -> Result<Option<f64>> {

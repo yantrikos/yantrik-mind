@@ -4039,3 +4039,27 @@ async fn a_claim_is_settled_by_its_ref_even_when_t_disagrees() {
         serde_json::from_str(&mem.profile_get("judgment_ledger").await.unwrap().unwrap()).unwrap();
     assert!(!after[0]["outcome"].is_null(), "the claim must actually be graded: {after:?}");
 }
+
+/// The dead-zone threshold must be read against this person's own scale.
+///
+/// It was an absolute 0.35, which quietly depended on engagement being measured at 43%. It is
+/// really 31%, and four of the five time bins sit between 23% and 31% — so correcting the
+/// measurement would have muted the mind as a side effect of a data repair.
+#[test]
+fn the_dead_zone_threshold_follows_the_persons_own_baseline() {
+    use crate::proactive::dead_zone_floor;
+
+    // No data yet: keep the original constant rather than invent a scale.
+    assert_eq!(dead_zone_floor(None), 0.35);
+    assert_eq!(dead_zone_floor(Some(0.0)), 0.35);
+
+    // The live case. Baseline 31%, and the bins that are merely typical must stay open.
+    let f = dead_zone_floor(Some(0.31));
+    assert!(f < 0.23, "a 23% bin is this person's normal, not a dead zone (floor {f})");
+    assert!(f > 0.10, "and the gate must still mean something (floor {f})");
+
+    // A baseline near zero must not wave every moment through.
+    assert_eq!(dead_zone_floor(Some(0.01)), 0.10);
+    // An unusually responsive person must not be gated out of most of their own day.
+    assert_eq!(dead_zone_floor(Some(0.95)), 0.35);
+}

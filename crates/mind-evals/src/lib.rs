@@ -472,3 +472,6 @@ mod tests {
         assert_eq!(r.passed, r.total, "'remind me to' must create an open task in memory");
     }
 }
+
+pub mod world_oracle;
+

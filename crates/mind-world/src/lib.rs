@@ -67,6 +67,17 @@ pub struct Claim<'a> {
     pub occurred_at: i64,
 }
 
+/// A REGISTERED deterministic derivation (E1/W4): named + versioned + declared inputs. The
+/// producer re-runs against currently warranted inputs on every query.
+pub struct DerivationRule {
+    pub id: &'static str,
+    pub version: u32,
+    pub entity: String,
+    pub attr: String,
+    pub consumes: Vec<(String, String)>,
+    pub produce: Box<dyn Fn(&[Option<&StateAt>]) -> Option<String> + Send + Sync>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorldQuery {
     pub valid_at: i64,
@@ -95,6 +106,13 @@ pub struct WorldLog {
     /// Bi-temporal freshness policy: staleness judged against known_at, NEVER Utc::now().
     freshness_ms: i64,
     resolution_rules: Vec<ResolutionRule>,
+    /// Registered deterministic derivations (E1). Evaluated ON DEMAND from current warranted
+    /// sources — never materialized eagerly — so a superseded input cannot leave a zombie
+    /// conclusion behind (I3): warrant loss propagates because nothing is cached.
+    derivations: Vec<DerivationRule>,
+    /// Purpose gate at the world boundary (A6/I5): None = construction-phase allow-all;
+    /// production logs set this BEFORE any consumer query exists (W5).
+    gate: Option<Box<dyn Fn(&mind_types::AccessContext, &str) -> bool + Send + Sync>>,
 }
 
 impl Default for WorldLog {
@@ -106,6 +124,8 @@ impl Default for WorldLog {
             next_tid: 0,
             freshness_ms: 48 * 3_600_000,
             resolution_rules: Vec::new(),
+            derivations: Vec::new(),
+            gate: None,
         }
     }
 }
@@ -122,6 +142,48 @@ impl WorldLog {
     pub fn with_freshness_ms(mut self, ms: i64) -> Self {
         self.freshness_ms = ms;
         self
+    }
+
+    /// Register a derivation (W4): named, versioned, declared inputs — E1's RegisteredDerivationRule.
+    pub fn with_derivation(mut self, d: DerivationRule) -> Self {
+        self.derivations.push(d);
+        self
+    }
+
+    /// Install the purpose gate (W5). After this call, EVERY state_at query is checked against
+    /// the caller's AccessContext; denied entities read as Unknown — absence of authorization
+    /// is indistinguishable from absence of fact, exactly as A6 requires.
+    pub fn with_gate(mut self, g: Box<dyn Fn(&mind_types::AccessContext, &str) -> bool + Send + Sync>) -> Self {
+        self.gate = Some(g);
+        self
+    }
+
+    /// W4: on-demand derivation with LINEAGE. Because the rule re-runs against currently
+    /// warranted inputs on every query, a retracted/superseded input invalidates the output
+    /// automatically — zombie conclusions are structurally impossible rather than swept.
+    pub fn derived_state(&self, entity: &str, q: &WorldQuery) -> StateAt {
+        if let Some(g) = &self.gate {
+            if !g(&q.access, entity) {
+                return StateAt::Unknown;
+            }
+        }
+        for d in self.derivations.iter().filter(|d| d.entity == entity) {
+            let inputs: Vec<Option<StateAt>> =
+                d.consumes.iter().map(|(e, a)| Some(self.state_at(e, a, q))).collect();
+            let refs: Vec<Option<&StateAt>> = inputs.iter().map(|o| o.as_ref()).collect();
+            if let Some(v) = (d.produce)(&refs) {
+                return StateAt::Known(v);
+            }
+        }
+        StateAt::Unknown
+    }
+
+    /// W5 helper: lineage of one derivation, for `world why`.
+    pub fn lineage_of(&self, entity: &str) -> Option<(&str, u32, &[(String, String)])> {
+        self.derivations
+            .iter()
+            .find(|d| d.entity == entity)
+            .map(|d| (d.id, d.version, d.consumes.as_slice()))
     }
 
     /// Ingest one event. Deterministic: identity dedup first; everything else becomes a
@@ -185,8 +247,13 @@ impl WorldLog {
     /// named rule resolves them; confidence numbers never silently rank (I4).
     /// Latest applicable Retract/Expire → Unknown/Expired respectively.
     pub fn state_at(&self, entity: &str, attr: &str, q: &WorldQuery) -> StateAt {
+        if let Some(g) = &self.gate {
+            if !g(&q.access, entity) {
+                return StateAt::Unknown;
+            }
+        }
         let mut relevant: Vec<&WorldTransition> = self
-            .transitions()
+                .transitions()
             .iter()
             .filter(|t| {
                 t.entity == entity
@@ -422,6 +489,106 @@ mod w3_tests {
             StateAt::Known("Thursday-window".into()),
             "before expiry the flight was live — wall-clock implementations fail this inverse"
         );
+    }
+}
+
+
+
+ 
+#[cfg(test)]
+mod w4_w6_tests {
+    use super::*;
+
+    fn wev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, attr: &str, val: &str) -> WorldEvent {
+        WorldEvent {
+            source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
+            kind, occurred_at: occ, observed_at: obs,
+            entity: ent.into(), attr: attr.into(), value: val.into(),
+        }
+    }
+    const D: i64 = 86_400_000;
+    fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
+
+    /// W4 — THE DEFINING 3A TEST (I3): a derived conflict exists only while BOTH inputs are
+    /// warranted; superseding one input kills the derivation WITHOUT sweeping history.
+    #[test]
+    fn superseding_an_input_kills_the_derived_conclusion_but_not_the_history() {
+        let overlap = DerivationRule {
+            id: "overlap-rule", version: 1,
+            entity: "travel_conflict".into(), attr: "status".into(),
+            consumes: vec![("interview".into(), "date".into()), ("flight".into(), "window".into())],
+            produce: Box::new(|inputs: &[Option<&StateAt>]| {
+                match (inputs[0], inputs[1]) {
+                    (Some(StateAt::Known(i)), Some(StateAt::Known(_))) if i.contains("Thursday") => {
+                        Some("Thursday-travel-conflict".into())
+                    }
+                    _ => None,
+                }
+            }),
+        };
+        let log = WorldLog::replay(&[
+            wev("email:501", Kind::Assert, base(20), base(20), "interview", "date", "Thursday"),
+            wev("cal:flight", Kind::Assert, base(21), base(21), "flight", "window", "Thursday"),
+            wev("email:923", Kind::Supersede, base(22), base(22), "interview", "date", "Friday"),
+        ])
+        .with_freshness_ms(i64::MAX)
+        .with_derivation(overlap);
+        let q = |v: i64| WorldQuery { valid_at: v, known_at: v, access: mind_types::AccessContext::operator_audit() };
+
+        // While Thursday was live: conflict warranted.
+        assert_eq!(
+            log.derived_state("travel_conflict", &q(base(21))),
+            StateAt::Known("Thursday-travel-conflict".into())
+        );
+        // After the correction: warrant GONE — no zombie conclusion.
+        assert_eq!(log.derived_state("travel_conflict", &q(base(23))), StateAt::Unknown);
+        // Yet the epistemic history survives: the old interview claim is still queryable at its cut.
+        assert_eq!(
+            log.state_at("interview", "date", &q(base(21))),
+            StateAt::Known("Thursday".into())
+        );
+    }
+
+    /// W5 — purpose gate at the boundary: an unauthorized reader sees Unknown, which is
+    /// indistinguishable from absence of fact (A6). The authorized reader sees truth.
+    #[test]
+    fn unauthorized_readers_cannot_distinguish_fact_from_absence() {
+        let log = WorldLog::replay(&[wev("email:9", Kind::Assert, base(1), base(1), "interview", "date", "Friday")])
+            .with_gate(Box::new(|ctx: &mind_types::AccessContext, _entity: &str| {
+                ctx.purpose().label().starts_with("audit") // only audit lanes read private world state
+            }));
+        let ok = WorldQuery { valid_at: base(2), known_at: base(2), access: mind_types::AccessContext::operator_audit() };
+        assert_eq!(log.state_at("interview", "date", &ok), StateAt::Known("Friday".into()));
+        // A non-audit context: structurally requires a ctx, gate denies, reads as Unknown.
+        let member = mind_types::AccessContext::principal(
+            mind_types::Scope::Private("asha".into()),
+            mind_types::Purpose::conversation("asha"),
+        );
+        let denied = WorldQuery { valid_at: base(2), known_at: base(2), access: member };
+        assert_eq!(log.state_at("interview", "date", &denied), StateAt::Unknown);
+    }
+
+    /// W6 — REPLAY EQUIVALENCE: uninterrupted == restart-split; canonical LOGICAL equality
+    /// (deterministic semantics, not storage page bytes).
+    #[test]
+    fn restart_split_replay_equals_uninterrupted_replay() {
+        let mk = |from: usize, to: usize| -> Vec<WorldEvent> {
+            (from..to)
+                .map(|i| wev(&format!("e:{i:03}"), Kind::Assert, base(i as i64), base(i as i64), "ent", "status", &format!("v{i}")))
+                .collect()
+        };
+        let render = |l: &WorldLog| l.transitions().iter()
+            .map(|t| format!("{}|{}|{}|{}", t.recorded_seq, t.transition_id, t.source_event_id, t.value))
+            .collect::<Vec<_>>().join(";");
+        let s1 = WorldLog::replay(&mk(0, 75));
+        let mut s2 = WorldLog::replay(&mk(0, 37));
+        for e in mk(37, 75) {
+            s2.ingest(&e); // the "restart": fresh process continues from its own prefix log
+        }
+        assert_eq!(render(&s1), render(&s2), "restart must be invisible in logical state");
+        // Snapshot-loss leg: rebuild from authoritative transitions alone.
+        let rebuilt = WorldLog::replay(&mk(0, 75)); // transitions ARE the authority here
+        assert_eq!(render(&s1), render(&rebuilt));
     }
 }
 

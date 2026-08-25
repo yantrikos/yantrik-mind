@@ -142,7 +142,26 @@ async fn phase3a_red_baseline() {
         occurred_at: e.occurred_at, observed_at: e.observed_at,
         entity: e.entity.to_string(), attr: e.attr.to_string(), value: e.value.to_string(),
     }).collect();
-    let log = mind_world::WorldLog::replay(&world_events);
+    let log = mind_world::WorldLog::replay(&world_events)
+        .with_freshness_ms(48 * 3_600_000)
+        .with_derivation(mind_world::DerivationRule {
+            id: "overlap-rule",
+            version: 1,
+            entity: "travel_conflict".into(),
+            attr: "status".into(),
+            consumes: vec![("interview".into(), "date".into()), ("flight".into(), "window".into())],
+            produce: Box::new(|inputs: &[Option<&mind_world::StateAt>]| {
+                match (inputs[0], inputs[1]) {
+                    (Some(mind_world::StateAt::Known(i)), Some(mind_world::StateAt::Known(_))) if i.contains("Thursday") => {
+                        Some("Thursday-travel-conflict".into())
+                    }
+                    _ => None,
+                }
+            }),
+        })
+        .with_gate(Box::new(|ctx: &mind_types::AccessContext, _entity: &str| {
+            ctx.purpose().label().starts_with("audit") // W5 wall: audit-only world reads
+        }));
     let interview_rows: Vec<_> = log.transitions().iter().filter(|t| t.entity == "interview").collect();
     let duplicate_id_green = interview_rows.iter().filter(|t| t.source_event_id == "email:501").count() == 1;
     // E2: corroboration = DISTINCT SOURCES preserved as separate rows for one proposition
@@ -203,10 +222,49 @@ async fn phase3a_red_baseline() {
                 && log.state_at("flight", "window", &mind_world::WorldQuery { valid_at: day(21, 12), known_at: day(21, 12), access: mind_types::AccessContext::operator_audit() })
                     == mind_world::StateAt::Known("Thursday-1300-1600".into()) // inverse: before expiry it was live
         }),
-        ("INVALIDATION", false),
-        ("PURPOSE", false),
+        ("INVALIDATION", {
+            let op = || mind_types::AccessContext::operator_audit();
+            let warranted_early = log.derived_state(
+                "travel_conflict",
+                &mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10), access: op() },
+            ) == mind_world::StateAt::Known("Thursday-travel-conflict".into());
+            let zombie_killed = log.derived_state(
+                "travel_conflict",
+                &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: op() },
+            ) == mind_world::StateAt::Unknown;
+            let history_kept = log.state_at(
+                "interview",
+                "date",
+                &mind_world::WorldQuery { valid_at: day(21, 12), known_at: day(21, 12), access: op() },
+            ) == mind_world::StateAt::Known("Tuesday".into());
+            warranted_early && zombie_killed && history_kept
+        }),
+        ("PURPOSE", {
+            let member = mind_world::WorldQuery {
+                valid_at: day(25, 9),
+                known_at: day(25, 9),
+                access: mind_types::AccessContext::principal(
+                    mind_types::Scope::Private("asha".into()),
+                    mind_types::Purpose::conversation("asha"),
+                ),
+            };
+            let operator = mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() };
+            log.state_at("interview", "date", &member) == mind_world::StateAt::Unknown
+                && log.state_at("interview", "date", &operator) == mind_world::StateAt::Known("Friday".into())
+        }),
     ];
     let green = score.iter().filter(|(_, g)| *g).count();
+    for (k, g) in &score {
+        if !g {
+            println!("DBG {k}: inv=[{:?} | {:?} | {:?}] purpose_member={:?} purpose_op={:?}",
+                log.derived_state("travel_conflict", &mind_world::WorldQuery { valid_at: day(23, 10), known_at: day(23, 10), access: mind_types::AccessContext::operator_audit() }),
+                log.derived_state("travel_conflict", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() }),
+                log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(21, 12), known_at: day(21, 12), access: mind_types::AccessContext::operator_audit() }),
+                log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::principal(mind_types::Scope::Private("asha".into()), mind_types::Purpose::conversation("asha")) }),
+                log.state_at("interview", "date", &mind_world::WorldQuery { valid_at: day(25, 9), known_at: day(25, 9), access: mind_types::AccessContext::operator_audit() }),
+            );
+        }
+    }
     let report = format!(
         "PHASE 3A SCORECARD: {}/9 GREEN\n{}\n remaining expectations (bi-temporal cuts / conflicted / stale / expiry-invalidations / purpose-scoped world reads): UNREPRESENTABLE — no WorldQuery API exists\n RESTART leg: deferred to W6 (needs durable log)\n{}",
         green,

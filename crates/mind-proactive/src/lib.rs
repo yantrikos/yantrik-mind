@@ -65,6 +65,23 @@ pub struct ExecutiveCandidate {
     pub intervention_by_ms: Option<i64>,
     /// EX2: remaining-time threshold under which the user must be interrupted.
     pub interrupt_lead_ms: Option<i64>,
+    /// EX3: this candidate IS an obligation, seen through a VIEW over authoritative organs.
+    pub commitment: Option<CommitmentView>,
+    /// EX3: observable environment fact - the nearest OTHER obligation converging now.
+    pub converging_obligation_due_ms: Option<i64>,
+    /// EX3: waiting on someone; until this instant their grace is respected.
+    pub wait_grace_until_ms: Option<i64>,
+}
+
+/// Normalized view referencing an authoritative organ (task store / promise ledger).
+/// The executive NEVER owns obligation truth - it only reads through this lens.
+#[derive(Clone, Debug)]
+pub struct CommitmentView {
+    pub ref_id: String,
+    pub source_organ: &'static str,
+    pub made_at_ms: i64,
+    pub due_at_ms: i64,
+    pub fulfilled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +111,46 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
     // 1. Examined, nothing warrants revisiting: silence IS the decision.
     if c.already_resolved {
         return dec(Posture::Ignore, false, "already_resolved", None);
+    }
+    // ── EX3: obligations and waits (view-based; no registry owned here) ──
+    if let Some(cm) = &c.commitment {
+        if cm.fulfilled {
+            return dec(Posture::Ignore, false, "commitment_fulfilled", None);
+        }
+        if c.useful_action_available && c.intervention_window_open && cm.due_at_ms - c.now_ms <= DAY_MS {
+            return dec(Posture::Act, !c.internal_capability, "obligation_deadline_converging", None);
+        }
+        return dec(
+            Posture::Monitor,
+            false,
+            "commitment_tracked",
+            Some(MonitorPlan {
+                review_at_ms: Some(cm.due_at_ms - DAY_MS),
+                wake_when: vec![WakeCondition::DeadlineWithin(DAY_MS)],
+            }),
+        );
+    }
+    if c.waiting_on_someone {
+        if let Some(grace) = c.wait_grace_until_ms {
+            if c.now_ms < grace {
+                // Their grace is respected even if a window technically exists - no nagging.
+                return dec(
+                    Posture::Monitor,
+                    false,
+                    "waiting_grace_open",
+                    Some(MonitorPlan {
+                        review_at_ms: Some(grace),
+                        wake_when: vec![WakeCondition::StateChangeOf(c.source_ref.clone()), WakeCondition::DeadlineWithin(DAY_MS)],
+                    }),
+                );
+            }
+            if c.useful_action_available && c.intervention_window_open {
+                return dec(Posture::Act, !c.internal_capability, "dependency_wait_elapsed", None);
+            }
+        }
+    }
+    if c.converging_obligation_due_ms.is_some() && c.urgency < 2 && c.deadline_at_ms.is_none() {
+        return dec(Posture::Ignore, false, "yields_to_commitment", None);
     }
     if c.blocked {
         // Need persists; safe execution isn't justified NOW. Wake when resources return.
@@ -189,6 +246,7 @@ mod ex1_tests {
             useful_action_available: false, internal_capability: false, blocked: false,
             waiting_on_someone: false, intervention_window_open: false,
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.9,
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
             intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
         }
     }
@@ -267,6 +325,7 @@ mod ex2_temporal_tests {
             intervention_not_before_ms: Some(d - 9 * DAY_MS),
             intervention_by_ms: Some(d),
             interrupt_lead_ms: Some(4 * 3_600_000),
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
         }
     }
 
@@ -327,4 +386,86 @@ mod ex2_temporal_tests {
         assert_eq!(arbitrate(&done).posture, Posture::Ignore);
     }
 }
+
+
+#[cfg(test)]
+mod ex3_commitment_tests {
+    use super::*;
+
+    /// PHASE 3B EX3 RED SPEC - obligations outrank opportunities; waits honor grace.
+    /// CommitmentView is a NORMALIZED VIEW over authoritative organs, never a registry.
+    fn cand() -> ExecutiveCandidate {
+        ExecutiveCandidate {
+            candidate_id: "c".into(), source_ref: "world:c".into(), now_ms: 0,
+            urgency: 1, deadline_at_ms: None, already_resolved: false,
+            useful_action_available: false, internal_capability: true, blocked: false,
+            waiting_on_someone: false, intervention_window_open: false,
+            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+        }
+    }
+
+    #[test]
+    fn converging_promise_acts_internally() {
+        let mut c = cand();
+        c.commitment = Some(CommitmentView {
+            ref_id: "task:form-42".into(), source_organ: "mind-tasks",
+            made_at_ms: 0, due_at_ms: 90 * 60_000, fulfilled: false,
+        });
+        c.useful_action_available = true;
+        c.intervention_window_open = true;
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Act);
+        assert_eq!(d.reason_code, "obligation_deadline_converging");
+        assert!(!d.requires_user_interrupt);
+    }
+
+    #[test]
+    fn distant_promise_is_tracked_not_forgotten() {
+        let mut c = cand();
+        c.commitment = Some(CommitmentView {
+            ref_id: "promise:call-mom".into(), source_organ: "promise-ledger",
+            made_at_ms: 0, due_at_ms: 10 * 3_600_000, fulfilled: false,
+        });
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Monitor);
+        assert_eq!(d.reason_code, "commitment_tracked");
+    }
+
+    #[test]
+    fn optional_opportunity_yields_to_converging_obligation() {
+        let mut c = cand();
+        c.converging_obligation_due_ms = Some(90 * 60_000);
+        let d = arbitrate(&c);
+        assert_eq!(d.posture, Posture::Ignore);
+        assert_eq!(d.reason_code, "yields_to_commitment");
+    }
+
+    #[test]
+    fn wait_grace_monitors_then_dependency_failure_acts() {
+        let mut c = cand();
+        c.waiting_on_someone = true;
+        c.wait_grace_until_ms = Some(48 * 3_600_000);
+        c.deadline_at_ms = Some(72 * 3_600_000);
+        c.useful_action_available = true;
+        c.intervention_window_open = true;
+        c.internal_capability = false;
+        assert_eq!(arbitrate(&c).posture, Posture::Monitor);
+        let mut late = cand();
+        late.waiting_on_someone = true;
+        late.wait_grace_until_ms = Some(48 * 3_600_000);
+        late.now_ms = 50 * 3_600_000;
+        late.deadline_at_ms = Some(72 * 3_600_000);
+        late.useful_action_available = true;
+        late.intervention_window_open = true;
+        late.internal_capability = false;
+        let d = arbitrate(&late);
+        assert_eq!(d.posture, Posture::Act);
+        assert_eq!(d.reason_code, "dependency_wait_elapsed");
+        assert!(d.requires_user_interrupt);
+    }
+}
+
+
 

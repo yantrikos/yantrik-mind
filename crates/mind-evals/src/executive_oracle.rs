@@ -192,13 +192,15 @@ fn situations() -> Vec<Situation> {
         "same low urgency item; user free; act internally then surface summary",
         Posture::Act, "receptive context; internal action cheap", [1, 1, 0]));
     // ── Waiting-on-someone convergence (#12) ──
-    v.push(s("alice_friday_morning_missing", "L-wait",
+    let mut afm = s("alice_friday_morning_missing", "L-wait",
         "Friday morning; promised document not delivered; meeting depends on it Monday-prep",
-        Posture::Act, "grace elapsed; intervene now", [3, 2, 0]));
+        Posture::Act, "grace elapsed; intervene now", [3, 2, 0]);
+    afm.requires_user_interrupt = true;
+    v.push(afm);
     let mut late = s("alice_friday_passed_no_doc", "L-wait",
         "Friday end of day; document still missing; dependency meeting already started prep",
         Posture::Act, "late recovery; escalate differently", [3, 2, 1]);
-    late.late_recovery = true;
+    late.late_recovery = true; late.requires_user_interrupt = true;
     v.push(late);
     v
 }
@@ -328,6 +330,7 @@ async fn phase3b_red_executive_baseline() {
             waiting_on_someone: false, intervention_window_open: false,
             execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
             intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
         };
         match id {
             "stale_eta_after_delivered" | "flight_refunded_auto" | "key_rotated_old_alert" | "meeting_note_minuted" => {
@@ -425,6 +428,7 @@ async fn phase3b_red_executive_baseline() {
             intervention_not_before_ms: Some(d2 - 9 * DAY),
             intervention_by_ms: Some(d2),
             interrupt_lead_ms: Some(4 * 3_600_000),
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
         };
         let dec = mind_proactive::arbitrate(&cand);
         let got = match dec.posture {
@@ -444,6 +448,81 @@ async fn phase3b_red_executive_baseline() {
     }
     println!("EX2 SCOPE: {ex2_correct}/{ex2_total} GREEN {}", if ex2_failures.is_empty() { String::new() } else { format!("{ex2_failures:?}") });
 
+    // ── EX3: obligations outrank opportunities; waits honor grace (view-based) ───────────
+    const EX3_SCOPE: &[&str] = &[
+        "form_90min_promise", "call_mom_evening", "opportunity_vs_promise",
+        "alice_doc_inprogress_wed", "alice_friday_morning_missing", "alice_friday_passed_no_doc",
+    ];
+    let mut ex3_total = 0usize;
+    let mut ex3_correct = 0usize;
+    let mut ex3_failures: Vec<String> = Vec::new();
+    for sit in &sits {
+        if !EX3_SCOPE.contains(&sit.id) {
+            continue;
+        }
+        ex3_total += 1;
+        let mut cand = mind_proactive::ExecutiveCandidate {
+            candidate_id: sit.id.into(), source_ref: format!("world:{}", sit.id), now_ms: 0,
+            urgency: 1, deadline_at_ms: None, already_resolved: false,
+            useful_action_available: false, internal_capability: true, blocked: false,
+            waiting_on_someone: false, intervention_window_open: false,
+            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
+            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+        };
+        match sit.id {
+            "form_90min_promise" => {
+                cand.commitment = Some(mind_proactive::CommitmentView {
+                    ref_id: "task:form-42".into(), source_organ: "mind-tasks",
+                    made_at_ms: 0, due_at_ms: 90 * 60_000, fulfilled: false,
+                });
+                cand.useful_action_available = true;
+                cand.intervention_window_open = true;
+            }
+            "call_mom_evening" => {
+                cand.commitment = Some(mind_proactive::CommitmentView {
+                    ref_id: "promise:call-mom".into(), source_organ: "promise-ledger",
+                    made_at_ms: 0, due_at_ms: 10 * 3_600_000, fulfilled: false,
+                });
+            }
+            "opportunity_vs_promise" => {
+                cand.converging_obligation_due_ms = Some(90 * 60_000);
+            }
+            "alice_doc_inprogress_wed" => {
+                cand.waiting_on_someone = true;
+                cand.wait_grace_until_ms = Some(48 * 3_600_000);
+                cand.deadline_at_ms = Some(72 * 3_600_000);
+            }
+            "alice_friday_morning_missing" => {
+                cand.waiting_on_someone = true;
+                cand.wait_grace_until_ms = Some(-3_600_000); // elapsed an hour ago
+                cand.deadline_at_ms = Some(12 * 3_600_000);
+                cand.useful_action_available = true;
+                cand.intervention_window_open = true;
+                cand.internal_capability = false;
+            }
+            _ => { // alice_friday_passed_no_doc
+                cand.waiting_on_someone = true;
+                cand.wait_grace_until_ms = Some(-6 * 3_600_000);
+                cand.useful_action_available = true;
+                cand.intervention_window_open = true;
+                cand.internal_capability = false;
+            }
+        }
+        let dec = mind_proactive::arbitrate(&cand);
+        let got = match dec.posture {
+            mind_proactive::Posture::Ignore => Posture::Ignore,
+            mind_proactive::Posture::Monitor => Posture::Monitor,
+            mind_proactive::Posture::Act => Posture::Act,
+        };
+        let mut ok = got == sit.want && dec.requires_user_interrupt == sit.requires_user_interrupt;
+        if got == Posture::Monitor {
+            ok = ok && dec.monitor.as_ref().map(|m| !m.wake_when.is_empty()).unwrap_or(false);
+        }
+        if ok { ex3_correct += 1; } else { ex3_failures.push(format!("{} got {:?}/{} want {:?}", sit.id, dec.posture, dec.reason_code, sit.want)); }
+    }
+    println!("EX3 SCOPE: {ex3_correct}/{ex3_total} GREEN {}", if ex3_failures.is_empty() { String::new() } else { format!("{ex3_failures:?}") });
+
     // Retires when the executive seam earns full coverage — same discipline as E.W0.
     assert_eq!(
         total - unrep, total,
@@ -457,7 +536,13 @@ async fn phase3b_red_executive_baseline() {
         ex2_correct, ex2_total,
         "EX2 scope regressed ({ex2_correct}/{ex2_total}) — temporal escalation must hold while coverage expands"
     );
+    assert_eq!(
+        ex3_correct, ex3_total,
+        "EX3 scope regressed ({ex3_correct}/{ex3_total}) — obligation/wait semantics must hold while coverage expands"
+    );
 }
+
+
 
 
 

@@ -552,7 +552,11 @@ async fn phase3b_red_executive_baseline() {
         if sit.id == "user_sleeping_low_urgency" && got4 == Posture::Monitor {
             // overlap case: either deterministic primary blocker is acceptable
             let r = ["quiet_hours", "user_unavailable"].contains(&dec4.reason_code);
-            if !r { mismatches.push(format!("reason {}", dec4.reason_code)); } else { mismatches.clear(); }
+            // Relax ONLY the reason code here, never the rest. Clearing the accumulated list
+            // instead would let an acceptable reason forgive a wrong posture, a MONITOR that
+            // still demands an interrupt, or a MONITOR with no wake condition — i.e. the exact
+            // defect this fixture was just fixed for would pass silently.
+            if !r { mismatches.push(format!("reason {}", dec4.reason_code)); }
         }
         if mismatches.is_empty() { ex4_correct += 1; } else { ex4_failures.push(format!("{} MISMATCH [{}]", sit.id, mismatches.join(", "))); }
     }

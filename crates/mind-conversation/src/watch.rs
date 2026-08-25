@@ -648,13 +648,27 @@ impl super::ConversationEngine {
         }
 
         out.push_str("\n  candidates:\n");
+        // One clock for the whole shortlist, so every age is measured from the same instant.
+        let read_at = chrono::Utc::now().timestamp_millis();
         let mut brief = String::new();
         for m in keep.iter().take(6) {
             // Only a SPECIFIC headline counts as a catalyst. A roundup tagging a dozen tickers
             // sitting beside a candidate reads as the explanation and gets reasoned about as one,
             // which is a false premise dressed as evidence.
+            // A catalyst is only a catalyst if it is NEW. Story time and reading time are
+            // different facts: TNON showed "Stock Surges on Key Patent News" while down 41%, and
+            // MARA's driver was a Friday event read on a Tuesday. Undated on the page, a six-hour
+            // -old headline and a six-minute-old one look the same, and only one explains a move
+            // happening now.
             let head = mind_tools::hunt::catalyst_for(&m.symbol, &news)
-                .map(|h| h.headline.clone())
+                .map(|h| {
+                    let age = mind_tools::hunt::age_phrase(&h.at, read_at);
+                    if mind_tools::hunt::is_fresh(&h.at, read_at) {
+                        format!("[{age}] {}", h.headline)
+                    } else {
+                        format!("[{age} — STALE, may not explain today's move] {}", h.headline)
+                    }
+                })
                 .unwrap_or_else(|| "(no company-specific news — an unexplained move)".into());
             out.push_str(&format!("    {} {:>8.2} {:+6.2}%  {}\n", m.symbol, m.price, m.percent_change, head.chars().take(70).collect::<String>()));
             brief.push_str(&format!("- {} at {:.2}, {:+.2}% today. News: {}\n", m.symbol, m.price, m.percent_change, head));
@@ -1366,8 +1380,28 @@ impl super::ConversationEngine {
                             Err(e) => lines.push(format!("  {} — close FAILED: {e}", p.symbol)),
                         }
                     }
-                    None => lines.push(format!("  {} {:+} @ {:.2} — now {:.2} ({fav:+.2}%) — holding, no rule fired",
-                        p.symbol, p.qty, p.avg_entry_price, price)),
+                    None => {
+                        lines.push(format!("  {} {:+} @ {:.2} — now {:.2} ({fav:+.2}%) — holding, no rule fired",
+                            p.symbol, p.qty, p.avg_entry_price, price));
+                        // WHAT HAS BEEN SAID SINCE. A position is entered on a catalyst and then
+                        // watched only by price, but the REASON for holding can be refuted long
+                        // before the price reflects it — a correction, a denial, pulled guidance.
+                        // Watching price alone means finding out last.
+                        //
+                        // Surfaced, never auto-closed: whether a headline refutes a thesis is a
+                        // judgment, and a wrong automatic exit costs more than a late one. The rules
+                        // still own the closing; this owns the noticing.
+                        let syms = vec![p.symbol.clone()];
+                        if let Ok(news) = mind_tools::hunt::fetch_news_for(&syms, 20) {
+                            for h in mind_tools::hunt::news_since(&p.symbol, opened, &news).iter().take(3) {
+                                lines.push(format!(
+                                    "        NEWS SINCE ENTRY ({}): {}",
+                                    mind_tools::hunt::age_phrase(&h.at, now),
+                                    h.headline
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             Ok(lines)

@@ -209,6 +209,64 @@ pub fn news_for<'a>(sym: &str, news: &'a [Headline]) -> Vec<&'a Headline> {
     hits
 }
 
+/// How old a story is, in the words a person would use.
+///
+/// STORY TIME AND READING TIME ARE DIFFERENT FACTS, and conflating them is how stale news gets
+/// traded as fresh. Live examples: TNON carried "Stock Surges on Key Patent News" while it was down
+/// 41% — the surge was a previous day's story. MARA's move was "attributed to a 'Friday' event",
+/// which the model only distrusted because the word Friday happened to be in the text.
+///
+/// A catalyst is only a catalyst if it is NEW. Without an age beside it, a six-hour-old headline and
+/// a six-minute-old one look identical on the page, and only one of them explains a move happening
+/// now.
+pub fn age_phrase(at: &str, now_ms: i64) -> String {
+    let Some(t) = crate::shadow::parse_rfc3339_ms(at) else {
+        return "undated".to_string();
+    };
+    let mins = (now_ms - t) / 60_000;
+    if mins < 0 {
+        // A future timestamp is a clock or feed problem, and saying so beats printing "-3m ago".
+        return "timestamped in the future".to_string();
+    }
+    match mins {
+        0 => "just now".to_string(),
+        1..=59 => format!("{mins}m ago"),
+        60..=1439 => format!("{}h ago", mins / 60),
+        _ => format!("{}d ago", mins / 1440),
+    }
+}
+
+/// Is this story fresh enough to explain a move happening NOW?
+///
+/// Four hours is the working line for a same-day thesis: within one session, and outside it the
+/// story has been available long enough that the move it caused has already happened.
+pub const FRESH_CATALYST_MINS: i64 = 240;
+
+pub fn is_fresh(at: &str, now_ms: i64) -> bool {
+    crate::shadow::parse_rfc3339_ms(at)
+        .map(|t| (now_ms - t) / 60_000 <= FRESH_CATALYST_MINS && t <= now_ms)
+        .unwrap_or(false)
+}
+
+/// Headlines about this symbol published SINCE a given moment, newest first.
+///
+/// A position is entered on a catalyst and then left alone until price moves. But the reason for
+/// holding can be refuted while the price has not caught up yet — an earnings correction, a pulled
+/// guidance, a denied deal. Watching only the price means finding out last.
+///
+/// Roundups are excluded here for the same reason they are excluded from entry: a piece tagging a
+/// dozen tickers says nothing about this one, and a wall of market wallpaper would bury the single
+/// headline that actually matters.
+pub fn news_since<'a>(sym: &str, since_ms: i64, news: &'a [Headline]) -> Vec<&'a Headline> {
+    let mut out: Vec<&Headline> = news_for(sym, news)
+        .into_iter()
+        .filter(|h| is_specific(h))
+        .filter(|h| crate::shadow::parse_rfc3339_ms(&h.at).map(|t| t > since_ms).unwrap_or(false))
+        .collect();
+    out.sort_by_key(|h| std::cmp::Reverse(crate::shadow::parse_rfc3339_ms(&h.at).unwrap_or(0)));
+    out
+}
+
 /// The best explanation for this symbol's move, or None if only roundups mention it.
 pub fn catalyst_for<'a>(sym: &str, news: &'a [Headline]) -> Option<&'a Headline> {
     news_for(sym, news).into_iter().find(|h| is_specific(h))
@@ -444,6 +502,40 @@ mod tests {
         ];
         assert_eq!(news_for("SNOW", &news).len(), 1);
         assert_eq!(news_for("NOW", &news).len(), 0, "SNOW must not match NOW");
+    }
+
+    #[test]
+    fn a_story_carries_its_age_because_stale_news_reads_as_fresh() {
+        // The real failures: TNON showed "Stock Surges on Key Patent News" while down 41% (a
+        // previous day's story), and MARA's catalyst was a Friday event read on a Tuesday. On the
+        // page a six-hour-old headline and a six-minute-old one look identical.
+        let now = crate::shadow::parse_rfc3339_ms("2026-08-25T19:30:00Z").unwrap();
+        assert_eq!(age_phrase("2026-08-25T19:30:00Z", now), "just now");
+        assert_eq!(age_phrase("2026-08-25T19:16:00Z", now), "14m ago");
+        assert_eq!(age_phrase("2026-08-25T13:30:00Z", now), "6h ago");
+        assert_eq!(age_phrase("2026-08-21T19:30:00Z", now), "4d ago");
+        assert_eq!(age_phrase("not a date", now), "undated");
+
+        assert!(is_fresh("2026-08-25T19:00:00Z", now), "half an hour old explains a move now");
+        assert!(!is_fresh("2026-08-25T13:00:00Z", now), "six hours old has already been traded");
+        assert!(!is_fresh("2026-08-21T19:30:00Z", now), "Friday's story is not Tuesday's catalyst");
+        // A future timestamp is a feed problem, not a fresh story.
+        assert!(!is_fresh("2026-08-26T19:30:00Z", now));
+    }
+
+    #[test]
+    fn news_after_entry_is_what_can_refute_a_thesis() {
+        // A position is entered on a catalyst and then watched only by price. The reason for
+        // holding can be refuted long before the price reflects it, and watching price alone means
+        // finding out last.
+        let old = Headline { symbols: vec!["BMNR".into()], headline: "Bitmine buys $81M of Ethereum".into(), source: "b".into(), at: "2026-08-25T18:00:00Z".into() };
+        let fresh = Headline { symbols: vec!["BMNR".into()], headline: "Bitmine says the purchase was misreported".into(), source: "b".into(), at: "2026-08-25T19:40:00Z".into() };
+        let roundup = Headline { symbols: "A B C D E F".split(' ').map(String::from).collect(), headline: "12 crypto stocks moving today".into(), source: "b".into(), at: "2026-08-25T19:50:00Z".into() };
+        let news = vec![old, fresh, roundup];
+        let entry = crate::shadow::parse_rfc3339_ms("2026-08-25T19:00:00Z").unwrap();
+        let since = news_since("BMNR", entry, &news);
+        assert_eq!(since.len(), 1, "only the post-entry, company-specific one: {since:?}");
+        assert!(since[0].headline.contains("misreported"));
     }
 
     #[test]

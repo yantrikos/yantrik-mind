@@ -161,15 +161,37 @@ impl WorldLog {
     /// W4: on-demand derivation with LINEAGE. Because the rule re-runs against currently
     /// warranted inputs on every query, a retracted/superseded input invalidates the output
     /// automatically — zombie conclusions are structurally impossible rather than swept.
+    ///
+    /// Compound chains (found by the W7 fixture, classified MISSING SEMANTIC before coding):
+    /// a rule may consume an entity that is itself DERIVED (A+B→C, C+D→E). Inputs resolve
+    /// through raw transitions when any exist, otherwise recursively through registered
+    /// derivations, with a depth cap so cyclic rule graphs answer Unknown rather than hang.
     pub fn derived_state(&self, entity: &str, q: &WorldQuery) -> StateAt {
+        self.derived_state_depth(entity, q, 0)
+    }
+
+    fn derived_state_depth(&self, entity: &str, q: &WorldQuery, depth: u32) -> StateAt {
         if let Some(g) = &self.gate {
             if !g(&q.access, entity) {
                 return StateAt::Unknown;
             }
         }
+        if depth > 8 {
+            return StateAt::Unknown; // cyclic derivation graph: refuse, never loop
+        }
         for d in self.derivations.iter().filter(|d| d.entity == entity) {
-            let inputs: Vec<Option<StateAt>> =
-                d.consumes.iter().map(|(e, a)| Some(self.state_at(e, a, q))).collect();
+            let inputs: Vec<Option<StateAt>> = d.consumes.iter()
+                .map(|(e, a)| {
+                    let has_raw = self.transitions.iter().any(|t| t.entity == *e && t.attr == *a);
+                    if has_raw || depth > 8 {
+                        Some(self.state_at(e, a, q))
+                    } else if self.derivations.iter().any(|d2| d2.entity == *e) {
+                        Some(self.derived_state_depth(e, q, depth + 1))
+                    } else {
+                        Some(self.state_at(e, a, q))
+                    }
+                })
+                .collect();
             let refs: Vec<Option<&StateAt>> = inputs.iter().map(|o| o.as_ref()).collect();
             if let Some(v) = (d.produce)(&refs) {
                 return StateAt::Known(v);
@@ -698,3 +720,68 @@ mod w7_metamorphic_tests {
         assert!(log.transitions().iter().any(|t| t.entity == "gamma" && t.kind == Kind::Expire));
     }
 }
+
+#[cfg(test)]
+mod compound_chain_tests {
+    use super::*;
+
+    /// THE COMPOUND INVALIDATION LAW (W7 fixture forced this): A+B->C, C+D->E. When B is
+    /// superseded, C loses warrant — and E must lose warrant THROUGH C, transitively,
+    /// with no sweeper and no caching. History keeps its own answer at its own cut.
+    #[test]
+    fn two_hop_derivation_loses_warrant_transitively() {
+        let rule_visa = DerivationRule {
+            id: "visa-clear", version: 1, entity: "visa_status".into(), attr: "status".into(),
+            consumes: vec![("visa".into(), "status".into()), ("passport".into(), "status".into())],
+            produce: Box::new(|i: &[Option<&StateAt>]| match (i[0], i[1]) {
+                (Some(StateAt::Known(a)), Some(StateAt::Known(b))) if a == "submitted" && b == "valid" => Some("clear".into()),
+                _ => None,
+            }),
+        };
+        let mk_trip = || DerivationRule {
+            id: "trip-ready", version: 1, entity: "trip_ready".into(), attr: "status".into(),
+            consumes: vec![("visa_status".into(), "status".into()), ("itinerary".into(), "status".into())],
+            produce: Box::new(|i: &[Option<&StateAt>]| match (i[0], i[1]) {
+                (Some(StateAt::Known(a)), Some(StateAt::Known(b))) if a == "clear" && b == "held" => Some("go".into()),
+                _ => None,
+            }),
+        };
+        let log = WorldLog::replay(&[
+            wev("portal:v1", Kind::Assert, base(20), base(20), "visa", "submitted"),
+            wev("rec:p1", Kind::Assert, base(20), base(20), "passport", "valid"),
+            wev("air:b1", Kind::Assert, base(21), base(21), "itinerary", "held"),
+        ])
+        .with_freshness_ms(i64::MAX)
+        .with_derivation(rule_visa)
+        .with_derivation(mk_trip());
+        let q = |kn: i64| WorldQuery { valid_at: kn, known_at: kn, access: mind_types::AccessContext::operator_audit() };
+
+        // both hops warranted while inputs hold
+        assert_eq!(log.derived_state("trip_ready", &q(base(22))), StateAt::Known("go".into()));
+        assert_eq!(log.derived_state("visa_status", &q(base(22))), StateAt::Known("clear".into()));
+
+        // B superseded -> C unwarranted -> E unwarranted THROUGH C
+        let log2 = WorldLog::replay(&[
+            wev("portal:v1", Kind::Assert, base(20), base(20), "visa", "submitted"),
+            wev("rec:p1", Kind::Assert, base(20), base(20), "passport", "valid"),
+            wev("rec:p2", Kind::Supersede, base(25), base(25), "passport", "expired"),
+            wev("air:b1", Kind::Assert, base(21), base(21), "itinerary", "held"),
+        ])
+        .with_freshness_ms(i64::MAX)
+        .with_derivation(DerivationRule {
+            id: "visa-clear", version: 1, entity: "visa_status".into(), attr: "status".into(),
+            consumes: vec![("visa".into(), "status".into()), ("passport".into(), "status".into())],
+            produce: Box::new(|i: &[Option<&StateAt>]| match (i[0], i[1]) {
+                (Some(StateAt::Known(a)), Some(StateAt::Known(b))) if a == "submitted" && b == "valid" => Some("clear".into()),
+                _ => None,
+            }),
+        })
+        .with_derivation(mk_trip());
+        assert_eq!(log2.derived_state("visa_status", &q(base(26))), StateAt::Unknown);
+        assert_eq!(log2.derived_state("trip_ready", &q(base(26))), StateAt::Unknown);
+        // history at its own cut still answers through the chain
+        assert_eq!(log2.derived_state("trip_ready", &q(base(22))), StateAt::Known("go".into()));
+        assert_eq!(log2.lineage_of("trip_ready"), Some(("trip-ready", 1, &[(("visa_status".into()), ("status".into())), (("itinerary".into()), ("status".into()))][..])));
+    }
+}
+

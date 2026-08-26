@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "document": "AGI_EVAL_MANIFEST",
+  "companion_to": "docs/AGI_ROADMAP.md",
+  "generated": "2026-08-26",
+  "baseline_commit": "1200f3d02b623a0965d3a5ec71d7bb434a27b4ac",
+  "purpose": "The frozen baseline the AGI roadmap measures against: what this mind is scored by today, with each number tagged by whether it was re-run for this manifest or is cited from the experiment ledger. Written read-only, before any roadmap phase is built, so later lift is measured against a record that predates it.",
+  "non_claims": [
+    "None of these suites is a generality benchmark. They score machinery, not intelligence.",
+    "No suite here has a held-out domain split, an anti-memorization variant, or a human baseline. Phase A-I add those; their absence is the point of this baseline.",
+    "No number here is cost- or latency-normalised. Nothing in this repository is, yet.",
+    "Suites marked evidence:ledger were NOT re-run for this manifest; they are quoted from the entry named, which recorded them when they were run."
+  ],
+
+  "workspace": {
+    "evidence": "re-run",
+    "command": "cargo test --workspace --no-fail-fast",
+    "tests_passed": 1009,
+    "tests_failed": 0,
+    "crate_result_lines": 42,
+    "note": "The whole-workspace count is a regression floor, not a capability measure. It is recorded because a roadmap phase that lowers it has broken something."
+  },
+
+  "suites": [
+    {
+      "id": "coverage_oracle",
+      "path": "crates/mind-evals/src/coverage_oracle.rs",
+      "scores": "The coverage router: which expertise pack a query should lease, and when it should abstain.",
+      "gate": "YM_COVERAGE_P3=1",
+      "corpus": {
+        "total_cases": 50,
+        "pack_applies": 38,
+        "no_pack": 12,
+        "library_packs": 12,
+        "frozen": true,
+        "authored": "From the packs' own coverage lists and descriptions, BEFORE the router ran on anything."
+      },
+      "preregistered_bar": {
+        "top1_agreement": ">= 0.80 (a tie counts as wrong)",
+        "abstention": ">= 0.90 (a tie counts as right)"
+      },
+      "last_result": { "agreement": "35/38", "abstention": "12/12", "verdict": "bar met on the first run" },
+      "evidence": "ledger",
+      "ledger": "E.PK3",
+      "known_weakness": "The labels are not independent of the coverage authors (same lineage), so this bar measures self-consistency, not correctness. Stated in the suite's own header."
+    },
+    {
+      "id": "attach_harm_control",
+      "path": "crates/mind-evals/src/coverage_oracle.rs",
+      "scores": "Whether mounting real expertise packs pollutes answers to questions no pack covers.",
+      "gate": "YM_PACK_DIST=<dir of .ydbpack files>",
+      "corpus": { "queries": 12, "source": "the no-pack half of the coverage corpus" },
+      "preregistered_bar": { "rows_clearing_the_floor": "0 on every query, with every pack mounted" },
+      "last_result": {
+        "packs_mounted": 13,
+        "queries": 12,
+        "rows_cleared": 0,
+        "rows_withheld_by_floor_per_query": 15,
+        "where": "the box (engine 0.15.0), through the production console"
+      },
+      "evidence": "re-run",
+      "ledger": "E.PK4",
+      "blocked": "Cannot run in the local harness: engine 0.16.0 fails to mount any pack sealed by 0.15.x (no such column: synthesis_state). Reported to core; fix pending on fix/pack-mount-pre-v42-schema."
+    },
+    {
+      "id": "executive_oracle",
+      "path": "crates/mind-evals/src/executive_oracle.rs",
+      "scores": "Whether the executive's vocabulary can REPRESENT a set of hand-authored decisions. Representability, not correctness.",
+      "gate": "YM_EXEC_3B=1",
+      "corpus": { "decisions": 37, "frozen_baseline": "0/37 representable at EX0" },
+      "last_result": { "representable": "26/37" },
+      "evidence": "ledger",
+      "ledger": "E.EX4-R2",
+      "known_weakness": "Representability is a floor, not a capability: a decision the vocabulary can express may still be decided wrongly. Nothing here has ever controlled live behaviour."
+    },
+    {
+      "id": "world_oracle",
+      "path": "crates/mind-evals/src/world_oracle.rs",
+      "scores": "The temporal-epistemic world model: bi-temporal cuts, epistemic state, retraction.",
+      "gate": "YM_WORLD_3A=1",
+      "corpus": { "oracles": 9, "metamorphic_transitions": "~78", "adversarial_month_events": 65 },
+      "last_result": { "oracles": "9/9", "adversarial_month": "11/11", "frozen_as": "world-state-v1.1 (immutable)" },
+      "evidence": "ledger",
+      "ledger": "E.W7-c, E.W8",
+      "known_weakness": "BENCHMARKED and never reachable: no live decision consults it."
+    },
+    {
+      "id": "immune",
+      "path": "crates/mind-evals/src/immune.rs",
+      "scores": "An adversarial critic whose objective is to invalidate high-impact beliefs — cognition between exams, rather than the exam.",
+      "gate": "YM_CRITIC_URL / YM_CRITIC_MODEL / YM_CRITIC_KEY",
+      "evidence": "not-run-for-this-manifest",
+      "note": "Requires an external critic model; no frozen corpus."
+    },
+    {
+      "id": "loop_eval",
+      "path": "crates/mind-evals/src/loop_eval.rs",
+      "scores": "The agentic loop's machinery — tool dispatch, observation feedback, the loop guard, budget/termination, failed-tool recovery, grounding — deterministically, independent of model quality.",
+      "evidence": "re-run",
+      "note": "Runs unconditionally in the workspace count above."
+    },
+    {
+      "id": "brain_bench",
+      "path": "crates/mind-evals/src/brain_bench.rs",
+      "scores": "Model-dependent cognition against a configured backend.",
+      "gate": "YM_BENCH_KEY / YM_BENCH_MODEL",
+      "evidence": "not-run-for-this-manifest",
+      "note": "Model-dependent; excluded from any regression floor by design."
+    }
+  ],
+
+  "capability_baseline": {
+    "legend": {
+      "ladder": "DEFINED -> TESTED -> BENCHMARKED -> REACHABLE -> SHADOWED -> ACTIVE -> OUTCOME-VALIDATED (E.D1)",
+      "status": "EVIDENCED = a ledger entry and a production trace; IMPLEMENTED-UNWITNESSED = code exists, nothing has observed it doing its job; ABSENT = not built"
+    },
+    "capabilities": [
+      { "name": "persistent episodic/semantic memory", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.1", "gap": "no held-out continuity measurement" },
+      { "name": "hash-chained decision record", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.4" },
+      { "name": "closed learning chain (tool calls)", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.L1, E.T1, E.R2" },
+      { "name": "outcome attribution", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK2b, E.PK2d, E.PK2e, E.PK2f" },
+      { "name": "abstention", "rung": "SHADOWED", "status": "EVIDENCED", "witness": "E.PK3", "gap": "decides nothing; exists elsewhere only as refusal" },
+      { "name": "self-observation", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK2", "gap": "self-model accuracy never measured" },
+      { "name": "expertise routing", "rung": "SHADOWED", "status": "EVIDENCED", "witness": "E.PK3, E.PK3b" },
+      { "name": "expertise attachment (leases)", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK4, E.PK4a", "gap": "efficacy explicitly not claimed" },
+      { "name": "bounded planning", "rung": "BENCHMARKED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.EX4-R2, E.EX4-LIVE-A", "gap": "one shadow decision, which decided nothing" },
+      { "name": "temporal/world model", "rung": "BENCHMARKED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.W7-c, E.W8" },
+      { "name": "safety walls", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK4 hostile-pack invariant" },
+      { "name": "procedure learning", "rung": "TESTED", "status": "IMPLEMENTED-UNWITNESSED", "gap": "no evidence a banked procedure was ever reused to a better outcome" },
+      { "name": "cross-domain transfer", "rung": "none", "status": "ABSENT" },
+      { "name": "tool learning from contracts", "rung": "none", "status": "ABSENT", "gap": "the mind is given schemas and held to them; never scored on an unseen tool" },
+      { "name": "long-horizon agency", "rung": "none", "status": "ABSENT" },
+      { "name": "causal reasoning", "rung": "none", "status": "ABSENT" },
+      { "name": "calibrated uncertainty", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.T1", "gap": "scored on tool success only, never on answers; E.P2 is the standing warning" },
+      { "name": "multi-agent cooperation", "rung": "ACTIVE", "status": "IMPLEMENTED-UNWITNESSED", "gap": "the Mind/Codex arrangement runs unmeasured against no solo baseline" },
+      { "name": "safe self-improvement", "rung": "DEFINED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.C1", "gap": "no promotion has ever been blinded or scored against a hidden holdout" }
+    ]
+  },
+
+  "event_schema_gaps": {
+    "note": "Phase A. Measured against mind_observability::DecisionEvent as it exists at the baseline commit.",
+    "present": ["trace_id", "parent_id", "actor", "goal (free text)", "policy", "predicted", "confidence", "object_id (redacted)", "evidence_ids", "outcome", "verdict", "prediction_error", "brier", "lesson", "event_id (stable where set)"],
+    "missing": ["goal_id (stable identity across turns)", "context fingerprint", "evaluator identity", "cost", "latency", "semantic success (distinct from mechanical success)", "model/tool version stamps"]
+  },
+
+  "metric_definitions": {
+    "note": "Every rate is published with the denominator an adversary would accept, and with its observation rate beside it (Doctrine 2).",
+    "metrics": [
+      { "name": "router agreement", "formula": "top-1 = label / labelled pack-applies queries" },
+      { "name": "router abstention", "formula": "abstained / no-pack queries" },
+      { "name": "attach harm", "formula": "corpus rows clearing the floor / no-pack queries, library mounted" },
+      { "name": "pack local efficacy", "formula": "graded-good / graded, shown with surfaced, used and censoring = 1 - graded/used" },
+      { "name": "lease precision", "formula": "leases whose pack evidence was used / leases granted", "caveat": "the used-proxy is word overlap, not causal use" },
+      { "name": "tool reliability", "formula": "successes / calls that count toward reliability", "caveat": "Malformed and Denied are excluded in both directions by design" }
+    ]
+  },
+
+  "reproduction": {
+    "workspace": "cargo test --workspace --no-fail-fast   # read EVERY crate's test result line, not the last one",
+    "coverage_router": "YM_COVERAGE_P3=1 cargo test -p mind-evals -- --nocapture",
+    "attach_harm": "YM_PACK_DIST=<dir> cargo test -p mind-evals attach_harm_control_on_the_real_packs -- --nocapture",
+    "executive": "YM_EXEC_3B=1 cargo test -p mind-evals -- --nocapture",
+    "world": "YM_WORLD_3A=1 cargo test -p mind-evals -- --nocapture"
+  }
+}

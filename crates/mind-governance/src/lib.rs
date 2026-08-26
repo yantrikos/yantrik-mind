@@ -548,3 +548,52 @@ mod tests {
         assert!(receipt.ok && !receipt.idempotency_key.is_empty());
     }
 }
+
+/// E.SEC1b boundary proof 3 of 4 — outward actions (Codex point 4).
+#[cfg(test)]
+mod sec1b_boundary {
+    use super::*;
+
+    #[test]
+    fn an_outward_action_carrying_a_secret_is_denied_and_the_reason_carries_no_part_of_it() {
+        let g = RealHarmGate::new();
+        for secret in ["my password is hunter2", "ghp_SECRET12345", "-----BEGIN RSA PRIVATE KEY-----"] {
+            let i = ActionIntent {
+                kind: "send".into(),
+                target: "someone@example.com".into(),
+                summary: secret.into(),
+                payload: None,
+                capabilities: vec![Capability::SendMessage],
+                risk: RiskLevel::Low,
+                reversible: false,
+            };
+            match g.evaluate(&i) {
+                Decision::Deny { reason } => {
+                    for word in secret.split_whitespace().filter(|w| w.len() >= 4) {
+                        assert!(!reason.contains(word), "the denial leaked {word:?}: {reason}");
+                    }
+                }
+                other => panic!("an outward action carrying a secret must be denied, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_text_inward_is_not_denied_for_carrying_a_secret() {
+        // The control that makes the test above mean something: the rule is about OUTWARD
+        // capabilities, so a memory-only action with identical text must not trip this clause.
+        let g = RealHarmGate::new();
+        let i = ActionIntent {
+            kind: "recall".into(),
+            target: "memory".into(),
+            summary: "my password is hunter2".into(),
+            payload: None,
+            capabilities: vec![Capability::Memory],
+            risk: RiskLevel::None,
+            reversible: true,
+        };
+        if let Decision::Deny { reason } = g.evaluate(&i) {
+            assert!(!reason.contains("secret/credential"), "inward recall must not trip the exfiltration clause: {reason}");
+        }
+    }
+}

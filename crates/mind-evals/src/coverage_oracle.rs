@@ -568,6 +568,41 @@ pub fn extract_live_routes(log: &std::path::Path) -> Result<LiveCorpus, String> 
 /// the router already did is withheld, because a label informed by the answer is not a label. This
 /// is the exact text to send; it is rendered by the same code that reads the log so the two cannot
 /// drift apart.
+/// Scan a FULLY RENDERED export artifact, and fail closed.
+///
+/// The per-query gate (`looks_sensitive`) runs before a query enters the corpus. This runs after
+/// everything is assembled, because rendering concatenates: fields that were each clean can sit
+/// together in the output and form something that is not, and only the finished artifact shows
+/// what actually leaves. Reports KINDS and a count, never a value, never an offset into content
+/// nobody may see (E.SEC1b, Codex point 6).
+pub fn scan_export_artifact(artifact: &str) -> Result<(), String> {
+    let found = mind_types::sensitive_findings(artifact);
+    if found.is_empty() {
+        return Ok(());
+    }
+    let mut kinds: Vec<&str> = found.iter().map(|f| f.kind.label()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    Err(format!("export refused: {} finding(s) [{}]", found.len(), kinds.join(", ")))
+}
+
+/// The witness prompt, or a refusal. Never a rendered artifact that has not been scanned.
+///
+/// Fail-closed: a caller cannot obtain the string without the scan having passed, because there is
+/// no other function that returns it.
+pub fn render_for_witness_checked(corpus: &LiveCorpus) -> Result<String, String> {
+    let rendered = render_for_witness(corpus);
+    scan_export_artifact(&rendered)?;
+    Ok(rendered)
+}
+
+/// The case table, or a refusal. Same rule as [`render_for_witness_checked`].
+pub fn render_cases_checked(corpus: &LiveCorpus) -> Result<String, String> {
+    let rendered = render_cases(corpus);
+    scan_export_artifact(&rendered)?;
+    Ok(rendered)
+}
+
 pub fn render_for_witness(corpus: &LiveCorpus) -> String {
     let mut out = String::from(
         "Label each query with ONE answer: a single pack id, or NONE if no pack would materially \
@@ -1032,5 +1067,53 @@ mod tests {
             }
         }
         assert!(offences.is_empty(), "rows surfaced for no-pack queries — KILL for those packs' floors:\n{}", offences.join("\n"));
+    }
+}
+
+/// E.SEC1b boundary proof 4 of 4 — the eval export gate and the rendered artifact (Codex points 4, 6).
+#[cfg(test)]
+mod sec1b_boundary {
+    use super::*;
+
+    #[test]
+    fn the_export_gate_withholds_a_secret_query_and_still_admits_ordinary_ones() {
+        for secret in ["my password is hunter2", "ghp_SECRET12345", "charge my card 4471 9302 1122 8890"] {
+            assert!(looks_sensitive(secret), "must be withheld: {secret:?}");
+        }
+        // The control. The FIRST version of this gate withheld any run of twelve or more digits,
+        // which caught every order id, tracking number and epoch — Codex named it "the current
+        // failure mode wearing a new coat".
+        for ordinary in ["where is order 100000000000", "track 1Z999AA10123456784", "what happened at 1756170000000", "asian food recipes"] {
+            assert!(!looks_sensitive(ordinary), "must still be exportable: {ordinary:?}");
+        }
+    }
+
+    #[test]
+    fn a_rendered_artifact_is_scanned_whole_and_refuses_rather_than_ships() {
+        let corpus = LiveCorpus {
+            routes: vec![ExtractedRoute {
+                query: "my password is hunter2".into(),
+                verdict: "NONE".into(),
+                top: vec![],
+                occurrences: 1,
+                rankings_differ: false,
+            }],
+            withheld: 0,
+        };
+        // The per-query gate is not the last word: this corpus was built by hand, as a caller with
+        // a bug could build one. The artifact scan is what stands between it and the wire.
+        let err = render_for_witness_checked(&corpus).expect_err("a secret in the artifact must refuse");
+        assert!(err.contains("credential-phrase"), "the refusal names kinds: {err}");
+        assert!(!err.contains("hunter2"), "and never the value: {err}");
+        assert!(render_cases_checked(&corpus).is_err(), "the case table is the same artifact by another name");
+
+        // The control: a clean corpus renders, so the gate is not simply closed.
+        let clean = LiveCorpus {
+            routes: vec![ExtractedRoute { query: "where is order 100000000000".into(), verdict: "NONE".into(), top: vec![], occurrences: 1, rankings_differ: false }],
+            withheld: 2,
+        };
+        let out = render_for_witness_checked(&clean).expect("a clean corpus must render");
+        assert!(out.contains("order 100000000000"));
+        assert!(out.contains("2 further quer"), "and still says what it withheld");
     }
 }

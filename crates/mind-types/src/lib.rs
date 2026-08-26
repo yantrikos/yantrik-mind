@@ -33,7 +33,10 @@ pub use action::{
 pub use harm::{Decision, HarmGate};
 pub use turn::TurnContext;
 pub use task::Task;
-pub use safety::{contains_secret, first_sensitive, ProvenanceCategory, SensitiveFinding, SensitiveKind, SECRET_MARKERS};
+pub use safety::{
+    contains_secret, first_sensitive, sensitive_findings, sensitive_pair, ProvenanceCategory,
+    SensitiveFinding, SensitiveKind, SECRET_MARKERS,
+};
 pub use purpose::{purpose_allows, Activity, Purpose, PurposeGrant, PurposeGrantSpec, Sensitivity, Subject};
 
 /// The default persona — and, deliberately, the communication spine. Most of what makes a reply

@@ -1977,6 +1977,7 @@ dependencies = [
  "mind-tools",
  "mind-types",
  "mind-world",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

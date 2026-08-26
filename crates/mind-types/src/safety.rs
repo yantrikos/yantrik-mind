@@ -195,7 +195,15 @@ fn digit_runs(text: &str) -> Vec<(usize, usize, String)> {
 /// Order is deliberate: the cheapest and most certain shapes first, so a finding names the most
 /// specific reason it could.
 pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
-    let lower = text.to_lowercase();
+    // ASCII-only lowering, and it MUST stay that way. Every offset below is found in `lower` and
+    // then used to slice `text`, so the two must agree byte for byte. `to_lowercase()` is not
+    // length-preserving — `İ` (U+0130, 2 bytes) lowers to 3 — which shifts every later offset and
+    // lets one land inside a multibyte character: `first_sensitive("İpassword日本")` panicked with
+    // `byte index 11 is not a char boundary`. Reachable from `gate_write`, which scans arbitrary
+    // user text on every memory write. `to_ascii_lowercase` touches only A-Z, so lengths and char
+    // boundaries are identical by construction, and every marker here is ASCII anyway (E.SEC1b).
+    let lower = text.to_ascii_lowercase();
+    debug_assert_eq!(lower.len(), text.len(), "offsets are shared between the two");
     let find = |kind, start: usize, len: usize| Some(SensitiveFinding { kind, start, len });
 
     // 1. PEM private keys — a shape, not a phrase.
@@ -298,7 +306,12 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
 fn value_follows(after: &str) -> bool {
     const WINDOW: usize = 48;
     const MAX_TOKENS: usize = 3;
-    let window = &after[..after.len().min(WINDOW)];
+    // Truncating at a fixed byte count cuts multibyte characters in half.
+    let mut end = after.len().min(WINDOW);
+    while end > 0 && !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &after[..end];
     let mut seen = 0usize;
     for tok in window.split(|c: char| !(c.is_ascii_alphanumeric() || "_-./+=".contains(c))) {
         let tok = tok.trim_matches(|c| c == '=' || c == '.' || c == '/');
@@ -321,6 +334,67 @@ fn value_follows(after: &str) -> bool {
 /// every existing caller upgrades at once rather than each deciding for itself (E.SEC1).
 pub fn contains_secret(text: &str) -> bool {
     first_sensitive(text).is_some()
+}
+
+/// EVERY sensitive thing in `text`, not just the first.
+///
+/// The audit needs the full set to report kinds; the boundaries only ever need to know whether
+/// there is one. Both read the same rules, because an audit that classifies for itself can certify
+/// a policy production does not run (E.SEC1b).
+pub fn sensitive_findings(text: &str) -> Vec<SensitiveFinding> {
+    // A generous ceiling. It exists so a pathological input cannot spin, not as a real limit.
+    const MAX: usize = 4096;
+    let mut out = Vec::new();
+    let mut base = 0usize;
+    while base < text.len() && out.len() < MAX {
+        let Some(f) = first_sensitive(&text[base..]) else { break };
+        out.push(SensitiveFinding { kind: f.kind, start: base + f.start, len: f.len });
+        // Always advance, even on a zero-length match, and always onto a char boundary.
+        let mut next = base + f.start + f.len.max(1);
+        while next < text.len() && !text.is_char_boundary(next) {
+            next += 1;
+        }
+        base = next;
+    }
+    out
+}
+
+/// Is this a credential-shaped KEY beside a secret-shaped VALUE?
+///
+/// JSON splits the context from the content: in `{"api_key": "9f2b1c4d8e"}` neither half is
+/// sensitive alone — the key is a word, the value is a hex-ish token — and a walk that scans only
+/// values will report the file clean. Judging the pair is the only way to see it, and it belongs
+/// in this crate rather than in the walker, so the audit and the boundaries share one policy.
+///
+/// The returned span is into `value`, and as everywhere here it carries no part of it (E.SEC1b).
+pub fn sensitive_pair(key: &str, value: &str) -> Option<SensitiveFinding> {
+    // `api_key` and `api-key` and `apiKey` are the same key wearing three coats.
+    let flat: String = key
+        .chars()
+        .map(|c| if c == '_' || c == '-' { ' ' } else { c.to_ascii_lowercase() })
+        .collect();
+    let named = CREDENTIAL_PHRASES.iter().any(|p| {
+        let mut from = 0usize;
+        while let Some(rel) = flat[from..].find(p) {
+            let at = from + rel;
+            if at_token_start(&flat, at) {
+                return true;
+            }
+            from = at + p.len();
+        }
+        false
+    });
+    if !named {
+        return None;
+    }
+    // A named key still needs a value that looks like a secret rather than a sentence about one:
+    // `{"password_policy": "requires 12 characters"}` is documentation.
+    let v = value.trim();
+    let single_token = !v.chars().any(|c| c.is_whitespace());
+    if single_token && v.len() >= 6 {
+        return Some(SensitiveFinding { kind: SensitiveKind::CredentialPhrase, start: 0, len: v.len() });
+    }
+    None
 }
 
 /// Where a memory write came from — the trust category. Human/system intent is trusted; everything
@@ -514,5 +588,149 @@ mod sensitivity_tests {
         // The span points at the WORD, and the caller may use it to redact — but nothing in the
         // finding hands over the text.
         assert_eq!(&secret[f.start..f.start + f.len], "password");
+    }
+}
+
+/// E.SEC1b — Codex's review points, as tests.
+#[cfg(test)]
+mod sec1b {
+    use super::*;
+
+    /// Characters chosen for the ways they break byte arithmetic: a length-CHANGING lowercase, a
+    /// dotless pair, a combining mark that can stand alone, 3- and 4-byte scalars, and a BOM.
+    const NASTY: &[&str] = &["İ", "ı", "ẞ", "\u{0307}", "日", "🔑", "\u{feff}", "é", "Ⱥ"];
+
+    #[test]
+    fn no_offset_arithmetic_can_panic_or_leave_a_span_mid_character() {
+        // THE BUG THIS EXISTS FOR: `first_sensitive` finds offsets in a lowered copy and slices the
+        // ORIGINAL with them. `to_lowercase` is not length-preserving (`İ` is 2 bytes, its
+        // lowercase is 3), so offsets shifted and one landed inside a multibyte character:
+        // `first_sensitive("İpassword日本")` panicked with `byte index 11 is not a char boundary`.
+        // Reachable from `gate_write`, which scans arbitrary user text on every memory write.
+        // It must not PANIC. The correct answer is None — no value is assigned after the word —
+        // and the assertion says so rather than assuming a finding, which is what I assumed first.
+        assert!(first_sensitive("İpassword日本").is_none(), "no value follows it, so it is not a credential");
+        // The same multibyte prefix with a real value is still caught, so the fix did not buy
+        // boundary-safety by going blind.
+        assert!(first_sensitive("İpassword: hunter2").is_some(), "a shifted offset must not hide a secret");
+        assert!(first_sensitive("日本語 ghp_SECRET12345").is_some());
+
+        // Every nasty character woven through a body at EVERY byte boundary, against every rule.
+        let bodies = [
+            "password: hunter2",
+            "ghp_SECRET12345",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "card 4471 9302 1122 8890",
+            "ssn 123456789",
+            "AKIAIOSFODNN7EXAMPLE",
+            "nothing sensitive here at all",
+            "",
+        ];
+        for body in bodies {
+            for nasty in NASTY {
+                for cut in 0..=body.len() {
+                    if !body.is_char_boundary(cut) {
+                        continue;
+                    }
+                    let text = format!("{}{}{}", &body[..cut], nasty, &body[cut..]);
+                    // 1. It must not panic.
+                    let found = first_sensitive(&text);
+                    // 2. And any span it reports must be a real slice of the text it scanned —
+                    //    a span that cannot be sliced is a span that was computed against
+                    //    something else.
+                    if let Some(f) = found {
+                        assert!(f.start <= text.len() && f.start + f.len <= text.len(), "span inside the text: {f} of {text:?}");
+                        assert!(text.is_char_boundary(f.start), "start on a boundary: {f} of {text:?}");
+                        assert!(text.is_char_boundary(f.start + f.len), "end on a boundary: {f} of {text:?}");
+                    }
+                    // 3. And the all-findings scan must terminate and agree about the first one.
+                    let all = sensitive_findings(&text);
+                    assert_eq!(all.first().copied(), found, "the two entry points agree: {text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_value_window_is_cut_on_a_character_not_a_byte() {
+        // `value_follows` truncates what follows a credential word at a FIXED 48 bytes. A multibyte
+        // character straddling that edge is sliced in half. Padding is swept across the edge so the
+        // straddle is hit whatever the exact offset.
+        for pad in 36..64 {
+            for nasty in NASTY {
+                let text = format!("password: {}{}", "a".repeat(pad), nasty);
+                let _ = first_sensitive(&text);
+                let text = format!("api key = {}{}9", "b".repeat(pad), nasty);
+                let _ = first_sensitive(&text);
+            }
+        }
+    }
+
+    #[test]
+    fn a_credential_key_and_its_value_are_judged_together() {
+        // POINT 2. JSON splits the context from the content. Neither half of
+        // `{"api_key": "9f2b1c4d8e"}` is sensitive alone — the key is a word, the value is a
+        // hex-ish token — so a walk that scans only values reports the file clean.
+        assert!(sensitive_pair("api_key", "9f2b1c4d8e").is_some(), "the case a value-only walk misses");
+        assert!(sensitive_pair("password", "hunter2").is_some());
+        assert!(sensitive_pair("apiKey", "9f2b1c4d8e").is_some(), "camelCase is the same key");
+        assert!(sensitive_pair("API-KEY", "9f2b1c4d8e").is_some());
+        assert!(sensitive_pair("client_secret", "abcdef123456").is_some());
+        assert!(sensitive_pair("auth_token", "eyJhbGciOiJIUzI1NiJ9").is_some());
+
+        // And the documentation that must stay writable.
+        assert!(sensitive_pair("password_policy", "requires 12 characters").is_none(), "a sentence is not a secret");
+        assert!(sensitive_pair("note", "9f2b1c4d8e").is_none(), "an unnamed key is not context");
+        assert!(sensitive_pair("password", "").is_none(), "an empty value is not a secret");
+        assert!(sensitive_pair("password", "unset").is_none(), "too short to be one");
+        assert!(sensitive_pair("passwords_are_hard", "why is that").is_none());
+
+        // The whole-text detector already catches the phrase form across JSON punctuation; the pair
+        // rule is the ADDITION, not a replacement.
+        assert!(first_sensitive(r#"{"password":"hunter2"}"#).is_some(), "already caught before E.SEC1b");
+        assert!(first_sensitive(r#"{"api_key":"sk-abc123"}"#).is_some(), "caught by token shape");
+        assert!(first_sensitive(r#"{"api_key":"9f2b1c4d8e"}"#).is_none(), "and THIS is the gap the pair rule closes");
+    }
+
+    #[test]
+    fn a_finding_has_nowhere_to_put_the_value_it_found() {
+        // POINT 4's other half: a refusal that quotes what it refused is the leak it prevents. This
+        // asserts over the DERIVED formatting, which is what error messages and log lines are built
+        // from — there is no path from a finding back to the text.
+        let secret = "hunter2";
+        let text = format!("my password is {secret}");
+        let f = first_sensitive(&text).expect("caught");
+        for rendered in [format!("{f}"), format!("{f:?}"), format!("{:?}", f.kind), f.kind.label().to_string()] {
+            assert!(!rendered.contains(secret), "a finding must not carry its value: {rendered}");
+            assert!(!rendered.contains("my password is"), "nor the text around it: {rendered}");
+        }
+        // The same for every kind, against a battery of real-shaped secrets.
+        for probe in [
+            "ghp_SECRET12345",
+            "AKIAIOSFODNN7EXAMPLE",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "card 4471 9302 1122 8890",
+            "my ssn is 123456789",
+        ] {
+            let f = first_sensitive(probe).expect("caught");
+            let rendered = format!("{f} / {f:?}");
+            for word in probe.split_whitespace().filter(|w| w.len() >= 5) {
+                assert!(!rendered.contains(word), "{rendered} leaked {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_all_findings_scan_terminates_and_finds_more_than_one() {
+        let text = "ghp_SECRET12345 and also AKIAIOSFODNN7EXAMPLE";
+        let all = sensitive_findings(text);
+        assert!(all.len() >= 2, "both tokens: {all:?}");
+        for f in &all {
+            assert!(text.is_char_boundary(f.start) && text.is_char_boundary(f.start + f.len), "{f}");
+        }
+        assert!(sensitive_findings("nothing here").is_empty());
+        assert!(sensitive_findings("").is_empty());
+        // Termination on a degenerate input, not just a clean one.
+        let _ = sensitive_findings(&"sk-abc123 ".repeat(500));
     }
 }

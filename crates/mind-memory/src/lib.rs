@@ -7618,3 +7618,45 @@ mod lane_experiment {
         assert!(leasable_identity(&entry(Some("blake3:aa"))).is_ok(), "a real artifact is still leasable");
     }
 }
+
+/// E.SEC1b boundary proof 1 of 4 — the memory write gate (Codex point 4).
+#[cfg(test)]
+mod sec1b_boundary {
+    /// Real-shaped canaries, one per detector kind, and what each must be named as.
+    const CANARIES: &[(&str, &str)] = &[
+        ("my password is hunter2", "credential-phrase"),
+        ("ghp_SECRET12345", "token"),
+        ("-----BEGIN RSA PRIVATE KEY-----", "pem-private-key"),
+        ("my card is 4471 9302 1122 8890", "card-context-number"),
+        ("ssn 123456789", "national-id"),
+    ];
+
+    #[test]
+    fn the_write_gate_refuses_a_secret_and_the_refusal_carries_no_part_of_it() {
+        for (text, kind) in CANARIES {
+            let err = super::gate_write(text).expect_err("the gate must refuse a secret");
+            assert!(err.contains(kind), "the refusal names the kind: {err}");
+            // A refusal that quotes what it refused puts the secret into an error string, a log
+            // line and probably a chat reply — the leak the gate exists to prevent.
+            //
+            // The KIND NAME is removed before the check, because a kind is allowed to share a word
+            // with the thing it describes: `card-context-number` contains "card", and so does the
+            // input it names. Testing the raw message flagged that as a leak. The invariant that
+            // actually matters is that NOTHING FROM THE INPUT survives beyond the kind's own name.
+            let body = err.replace(kind, "");
+            for word in text.split_whitespace().filter(|w| w.len() >= 4) {
+                assert!(!body.contains(word), "the refusal leaked {word:?}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_write_gate_is_not_simply_closed() {
+        // The control. A gate that refuses everything proves nothing about the one that refuses
+        // secrets, and this is the failure mode the old detector actually had: it refused
+        // "asian food recipes" while admitting a password.
+        for clean in ["asian food recipes", "the task list for Tuesday", "how do passwords work?", "order 100000000000 shipped"] {
+            assert!(super::gate_write(clean).is_ok(), "ordinary life must still be writable: {clean:?}");
+        }
+    }
+}

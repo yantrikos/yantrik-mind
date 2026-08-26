@@ -20,6 +20,8 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+# The E.SEC1b audit reads mind.db read-only; mind-memory already builds it.
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 # Sealed-pack fixtures for the coverage-router oracle (E.PK3): real manifests, authored coverage.

@@ -1503,3 +1503,29 @@ mod float_stability {
     }
 }
 
+/// E.SEC1b boundary proof 2 of 4 — the flight recorder's redaction (Codex point 4).
+#[cfg(test)]
+mod sec1b_boundary {
+    #[test]
+    fn the_ledger_redacts_a_secret_and_the_line_it_writes_carries_no_part_of_it() {
+        for text in ["my password is hunter2", "ghp_SECRET12345", "-----BEGIN RSA PRIVATE KEY-----"] {
+            let out = super::brief(text, 160);
+            assert_eq!(out, "[redacted-secret]", "secret-shaped free text is replaced, not truncated");
+            for word in text.split_whitespace().filter(|w| w.len() >= 4) {
+                assert!(!out.contains(word), "the ledger line leaked {word:?}: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn redaction_replaces_rather_than_shortens() {
+        // Truncating a secret still writes the front of it. The distinction matters: an earlier
+        // shape of this could have kept the first 160 characters of a PEM block.
+        let long_secret = format!("my password is hunter2 {}", "x".repeat(400));
+        assert_eq!(super::brief(&long_secret, 160), "[redacted-secret]");
+        // And the control: ordinary long text IS truncated, so the test above is meaningful.
+        let ordinary = "y".repeat(400);
+        let out = super::brief(&ordinary, 160);
+        assert!(out.ends_with('…') && out.chars().count() == 161, "ordinary text truncates: {}", out.chars().count());
+    }
+}

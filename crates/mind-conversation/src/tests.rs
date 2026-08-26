@@ -4669,3 +4669,57 @@ async fn a_transformed_fallback_is_not_an_alias_and_the_audit_target_is_not_per_
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_lease_outbox_keeps_what_the_recorder_would_not_take() {
+    // P.4c (Codex's review of P.4a): the drain used to call `record` — which cannot fail from the
+    // caller's side and no-ops while the recorder is unhealthy — and then acknowledge regardless.
+    // A recorder that could not write therefore DESTROYED the evidence the outbox existed to keep.
+    // Here the recorder's path is a DIRECTORY, so every append genuinely fails.
+    use mind_types::memory::LeaseEnd;
+    let dir = std::env::temp_dir().join(format!("ym_p4c_outbox_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("library");
+    std::fs::create_dir_all(&lib).unwrap();
+    let unwritable = dir.join("a-directory-not-a-file.jsonl");
+    std::fs::create_dir_all(&unwritable).unwrap();
+    let games = mind_memory::fixtures::seal_fixture_pack_full(
+        lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+        &["one row"], Some(&["platformer feel"]), None, None,
+    )
+    .unwrap();
+    let handle = MemoryHandle::spawn(":memory:", 64).unwrap();
+    handle.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+    let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
+        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&unwritable)));
+
+    let out = conv.pack_lease(&format!("{games} days=1 reason=the recorder is broken")).await;
+    assert!(out.contains("Leased"), "the lease itself still succeeds: {out}");
+    // The grant is durable in the outbox and NOT acknowledged, because it never reached the log.
+    let pending = mem.pending_lease_events().await.unwrap();
+    assert_eq!(pending.len(), 1, "the event must survive a recorder that could not take it: {pending:?}");
+    assert_eq!(pending[0].kind, "leased");
+    let lines = conv.drain_lease_events().await;
+    assert!(lines.iter().any(|l| l.contains("stays in the outbox")), "and the drain says so: {lines:?}");
+    assert_eq!(mem.pending_lease_events().await.unwrap().len(), 1, "still held after a failed drain");
+
+    // Point the engine at a recorder that works: the SAME event now lands and is acknowledged.
+    let good = dir.join("good.jsonl");
+    let conv = ConversationEngine::new(mem.clone(), mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1), "JARVIS")
+        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&good)));
+    conv.drain_lease_events().await;
+    assert!(mem.pending_lease_events().await.unwrap().is_empty(), "delivered, then acknowledged");
+    let ev = conv.recorder().read_all();
+    assert_eq!(ev.iter().filter(|e| e.kind == "pack_leased").count(), 1, "{ev:?}");
+    // A re-drain of the same event id cannot write a second copy (the crash-before-ack case).
+    conv.drain_lease_events().await;
+    assert_eq!(conv.recorder().read_all().iter().filter(|e| e.kind == "pack_leased").count(), 1, "a replay must not duplicate");
+
+    // An explicit but empty reason is an error, not a quiet "unstated".
+    assert!(conv.pack_lease(&format!("{games} reason=")).await.contains("say why"));
+    assert!(crate::pack::parse_lease_args("x reason=").is_err());
+    let _ = mem.release_pack(&games, LeaseEnd::Released).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

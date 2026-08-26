@@ -802,9 +802,28 @@ impl super::ConversationEngine {
                     d.outcome = Some(format!("granted {} · was due {}", iso_utc(l.granted_ms), iso_utc(l.expires_ms)));
                 }
             }
-            self.recorder.record(d);
-            if let Err(e) = self.memory.ack_lease_event(&ev.event_id).await {
-                log.push(format!("[lease] recorded {} but could not acknowledge it: {e}", ev.event_id));
+            // ACKNOWLEDGE ONLY WHAT IS DURABLE. `record` cannot fail from the caller's side — it
+            // no-ops while the recorder is in its failure backoff — so acknowledging after it
+            // destroyed the very evidence the outbox exists to keep (Codex's review of P.4a).
+            // `record_once` reports what really happened, and dedupes by the event's own id, so a
+            // crash between the append and this acknowledgement re-delivers rather than duplicates.
+            match self.recorder.record_once(d) {
+                o if o.is_durable() => {
+                    if let Err(e) = self.memory.ack_lease_event(&ev.event_id).await {
+                        log.push(format!("[lease] recorded {} but could not acknowledge it: {e}", ev.event_id));
+                    }
+                }
+                mind_observability::RecordOutcome::Disabled => {
+                    // No log is configured at all (a test, an eval harness). Nothing can ever be
+                    // written, so holding the event forever would grow the outbox without end.
+                    if let Err(e) = self.memory.ack_lease_event(&ev.event_id).await {
+                        log.push(format!("[lease] could not drop {} from the outbox: {e}", ev.event_id));
+                    }
+                }
+                mind_observability::RecordOutcome::Failed(why) => {
+                    log.push(format!("[lease] {} stays in the outbox — the recorder did not take it: {why}", ev.event_id));
+                }
+                _ => {}
             }
         }
         log
@@ -984,6 +1003,12 @@ pub(crate) fn parse_lease_args(arg: &str) -> std::result::Result<(String, u32, S
         }
     }
     let id = id.ok_or_else(|| "usage: ym pack lease <pack-id> [days=N] [reason=why]".to_string())?;
+    // An EXPLICIT `reason=` with nothing after it is an error, not an unstated reason: the
+    // operator meant to say why and did not, and quietly writing "unstated" into the record
+    // bypasses the memory layer's own non-empty check (Codex's review of P.4a).
+    if arg.contains("reason=") && reason.is_empty() {
+        return Err("reason= was given with nothing after it — say why, or leave reason= off".to_string());
+    }
     let reason = if reason.is_empty() { "unstated".to_string() } else { reason };
     Ok((id, days, reason))
 }

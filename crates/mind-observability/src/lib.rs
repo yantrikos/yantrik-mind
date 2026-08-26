@@ -237,6 +237,10 @@ pub struct DecisionLog {
     path: Mutex<Option<PathBuf>>,
     head: Mutex<Option<String>>,
     health: Mutex<RecorderHealth>,
+    /// Event ids already on disk, read once on the first `record_once` and kept. `None` = not read
+    /// yet. Only `record_once` consults it; ordinary `record` neither reads nor maintains it, so
+    /// the cost lands on the one caller that needs idempotence.
+    seen_ids: Mutex<Option<std::collections::HashSet<String>>>,
 }
 
 impl std::fmt::Debug for DecisionLog {
@@ -252,13 +256,13 @@ impl std::fmt::Debug for DecisionLog {
 impl DecisionLog {
     /// Open (or create) the log at `path`. An existing file continues its chain.
     pub fn open(path: impl Into<PathBuf>) -> Self {
-        Self { path: Mutex::new(Some(path.into())), head: Mutex::new(None), health: Mutex::new(RecorderHealth::new()) }
+        Self { path: Mutex::new(Some(path.into())), head: Mutex::new(None), health: Mutex::new(RecorderHealth::new()), seen_ids: Mutex::new(None) }
     }
 
     /// A log that records nothing — the default for eval harnesses and scratch minds, so call
     /// sites can log unconditionally and stay branch-free.
     pub fn disabled() -> Self {
-        Self { path: Mutex::new(None), head: Mutex::new(None), health: Mutex::new(RecorderHealth::new()) }
+        Self { path: Mutex::new(None), head: Mutex::new(None), health: Mutex::new(RecorderHealth::new()), seen_ids: Mutex::new(None) }
     }
 
     /// From env override, else beside the DB (same convention as the read-receipt ledger):
@@ -295,6 +299,52 @@ impl DecisionLog {
             return;
         }
         self.health.lock().unwrap_or_else(|e| e.into_inner()).note_success();
+    }
+
+    /// Record an event EXACTLY ONCE, and say what happened.
+    ///
+    /// `record` cannot fail from the caller's perspective, which is right for cognition — a disk
+    /// hiccup must not stop the mind thinking — and wrong for anything holding a durable outbox: a
+    /// caller that acknowledges a delivery `record` silently dropped has destroyed the evidence it
+    /// was keeping (Codex's review of P.4a). This returns the outcome so an outbox can acknowledge
+    /// only what is really on disk.
+    ///
+    /// Idempotence needs more than a stable id. A crash AFTER the append and BEFORE the
+    /// acknowledgement re-delivers the same event on the next start, and an append-only log has no
+    /// opinion about that — so the ids already in the log are read once, kept, and consulted here.
+    /// `Ok(AlreadyPresent)` is a success for a retrying caller: the event IS durable, which is what
+    /// the acknowledgement is about.
+    pub fn record_once(&self, event: DecisionEvent) -> RecordOutcome {
+        let Some(id) = event.event_id.clone() else {
+            return RecordOutcome::Failed("record_once needs an event_id — it is the identity that makes the write idempotent".into());
+        };
+        let path = self.path.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(p) = path else { return RecordOutcome::Disabled };
+        let now = now_ms();
+        {
+            let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+            if health.in_backoff(now) {
+                return RecordOutcome::Failed("recorder is in its failure backoff window".into());
+            }
+        }
+        {
+            // The ids on disk, read once per process and kept. A cheap scan of a log that is
+            // already read whole by every `ym why`.
+            let mut seen = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner());
+            let ids = seen.get_or_insert_with(|| read_events(&p).into_iter().filter_map(|e| e.event_id).collect());
+            if ids.contains(&id) {
+                return RecordOutcome::AlreadyPresent;
+            }
+        }
+        if let Err(e) = self.append_inner(&p, event.sanitized()) {
+            self.health.lock().unwrap_or_else(|e| e.into_inner()).note_failure(now);
+            return RecordOutcome::Failed(format!("append failed: {e}"));
+        }
+        self.health.lock().unwrap_or_else(|e| e.into_inner()).note_success();
+        if let Some(ids) = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            ids.insert(id);
+        }
+        RecordOutcome::Written
     }
 
     /// Where this log writes, when active.
@@ -345,6 +395,26 @@ impl DecisionLog {
         f.sync_all()?;
         *head = Some(chain);
         Ok(())
+    }
+}
+
+/// What a durable-delivery attempt actually did. `Written` and `AlreadyPresent` both mean the
+/// event is on disk; nothing else does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordOutcome {
+    Written,
+    /// This id is already in the log — a retry after a crash between the append and the
+    /// acknowledgement. Durable, so an outbox may acknowledge it.
+    AlreadyPresent,
+    /// No log is configured (an eval harness, a test). Nothing was written and nothing can be.
+    Disabled,
+    Failed(String),
+}
+
+impl RecordOutcome {
+    /// Is the event durably on disk? The only question an outbox should ask.
+    pub fn is_durable(&self) -> bool {
+        matches!(self, RecordOutcome::Written | RecordOutcome::AlreadyPresent)
     }
 }
 
@@ -836,6 +906,50 @@ mod tests {
     }
 
     #[test]
+    /// P.4c (Codex's review of P.4a): `record` cannot fail from the caller's side, which is right
+    /// for cognition and wrong for a durable outbox — a caller that acknowledges what `record`
+    /// silently dropped has destroyed the evidence it was keeping. `record_once` reports what
+    /// really happened, and a stable id is not idempotence on an append-only log unless something
+    /// consults it: a crash between the append and the acknowledgement re-delivers the same event.
+    #[test]
+    fn record_once_reports_delivery_and_never_writes_one_id_twice() {
+        // Unique per RUN, not per process: this crate's tests are compiled into more than one
+        // binary and a pid-derived path let two runs clobber each other's log.
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("ym_rec_once_{}_{stamp}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d.jsonl");
+        let ev = |id: &str| {
+            let mut e = DecisionEvent::new("t", "pack_leased");
+            e.event_id = Some(id.to_string());
+            e
+        };
+
+        let log = DecisionLog::open(&path);
+        assert_eq!(log.record_once(ev("lease:leased:a:1")), RecordOutcome::Written);
+        // The same id again — the re-delivery a crash before the acknowledgement produces.
+        assert_eq!(log.record_once(ev("lease:leased:a:1")), RecordOutcome::AlreadyPresent);
+        assert!(RecordOutcome::AlreadyPresent.is_durable(), "a retry finds it durable, which is what the ack asks");
+        assert_eq!(log.read_all().iter().filter(|e| e.event_id.as_deref() == Some("lease:leased:a:1")).count(), 1, "written once");
+        assert_eq!(log.record_once(ev("lease:released:a:1")), RecordOutcome::Written);
+        assert_eq!(log.read_all().len(), 2);
+
+        // A RESTART: a new log over the same file must still refuse the duplicate, so the ids have
+        // to be read from disk rather than remembered in this process.
+        let reopened = DecisionLog::open(&path);
+        assert_eq!(reopened.record_once(ev("lease:leased:a:1")), RecordOutcome::AlreadyPresent, "the ids on disk are what count");
+        assert_eq!(reopened.read_all().len(), 2, "a restart did not duplicate the event");
+
+        // No id at all is a caller error, not a silent write.
+        assert!(matches!(reopened.record_once(DecisionEvent::new("t", "pack_leased")), RecordOutcome::Failed(_)));
+        // A disabled log says so instead of pretending to have written.
+        assert_eq!(DecisionLog::disabled().record_once(ev("x")), RecordOutcome::Disabled);
+        assert!(!RecordOutcome::Disabled.is_durable());
+        assert!(!RecordOutcome::Failed("x".into()).is_durable());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn appends_reads_and_verifies() {
         let path = scratch("ok");
         let log = DecisionLog::open(&path);

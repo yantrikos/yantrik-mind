@@ -8156,11 +8156,33 @@ impl ConversationEngine {
     async fn turn_grounding(&self, user_text: &str, id: &TurnIdentity, trace: &str) -> String {
         let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
+        // THE SAME GATE THE PLAIN PATH USES (E.SEC8 slice 4), and finding out it was missing here
+        // cost a live probe. Slice 4 wired `handle_turn_as`'s composition; THIS function builds the
+        // grounding the AGENT LOOP uses, which is where substantive turns actually go. A probe
+        // asking "summarize what you know about me but do not reveal private facts" named four
+        // projects and two side businesses with the gate deployed, and logged nothing — because on
+        // that path it never ran.
+        //
+        // Fifth instance of one error: wire the path you are looking at and call it coverage.
+        let policy = id.output_policy(user_text);
+        let (ws, evidence) = mind_types::admit_working_set(
+            &policy,
+            mind_types::detect_minimization(user_text),
+            &ws,
+        );
+        record_evidence_decision(&evidence);
+        // A policy permitting NO entity class is a total prohibition. These next blocks are
+        // household content that never passes through the working set — the rolling summary is
+        // private conversation, the people block is the household roster — so filtering `ws` while
+        // leaving them standing would be the same half-measure one layer down.
+        let names_anything = !policy.entity_classes.is_empty();
         let mut grounding = String::new();
         // Continuity summary — PRIMARY VIEWER ONLY. The rolling summary is distilled from the primary
         // transcript; surfacing it to another household member would leak private conversation
         // straight through the read-isolation wall.
-        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+        if names_anything
+            && matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY)
+        {
             if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
                 if !sum.trim().is_empty() {
                     grounding.push_str(&format!(
@@ -8292,7 +8314,9 @@ impl ConversationEngine {
         // the name even though it was stored at 0.91: the name never made the injected working set.
         // Every profile still appears; only the FACT TAIL is relevance-gated (see `gate_people`).
         let people = self.load_people_profiles().await;
-        grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
+        if names_anything {
+            grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
+        }
 
         // The time-spine + open threads — so answers CONNECT to what's coming, not just what's stored
         // (a birthday answer should carry the gift plan + its deadline without being asked).
@@ -9020,6 +9044,18 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
         let recent = self.memory.recent_messages(8, &ctx).await.unwrap_or_default();
         let ws = self.memory.hydrate_working_set(user_text, &ctx).await.unwrap_or_default();
+        // THE GATE, on the VOICE path too (E.SEC8 slice 4). Three grounding assemblies exist in
+        // this file — the plain composition, the agent loop, and this one — and slice 4 originally
+        // wired exactly one of them. A spoken turn is scoped HouseholdMember and reads the roster,
+        // so leaving it ungated would have meant the strictest surface was the unprotected one.
+        let policy = id.output_policy(user_text);
+        let (ws, evidence) = mind_types::admit_working_set(
+            &policy,
+            mind_types::detect_minimization(user_text),
+            &ws,
+        );
+        record_evidence_decision(&evidence);
+        let names_anything = !policy.entity_classes.is_empty();
         let mut grounding = Self::render_grounding(&ws);
         // THE PEOPLE LAYER — the same block the agent loop adds, for the same reason recorded there:
         // the belief store's top-k ranking can bury a high-confidence identity fact (a spouse's NAME
@@ -9030,7 +9066,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // "what's my wife's name" is most likely — was the one place still answering "I don't have
         // that stored" about someone the mind knows. Verified live on 2026-08-11.
         let people = self.load_people_profiles().await;
-        grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
+        if names_anything {
+            grounding.push_str(&crate::people::gate_people(&people, user_text, &local_now()));
+        }
 
         // THE MARKET LAYER — same medicine as the people layer above, for the same disease.
         //
@@ -9783,12 +9821,17 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             &ws,
         );
         record_evidence_decision(&evidence);
+        // Same reasoning as `turn_grounding`: the rolling summary is private conversation and does
+        // not travel through the working set, so the gate has to reach it explicitly.
+        let names_anything = !policy.entity_classes.is_empty();
         let mut grounding = Self::render_grounding(&ws);
         // Continuity beyond the raw-turn window: the rolling summary of everything older (compaction
         // absorbs aging turns into it in the background). Rides inside the untrusted memory block.
         // PRIMARY VIEWER ONLY — the summary is distilled from the primary transcript; handing it to
         // another member would leak private conversation around the read-isolation wall.
-        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+        if names_anything
+            && matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY)
+        {
             if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
                 if !sum.trim().is_empty() {
                     grounding = format!(

@@ -122,6 +122,63 @@ mod tests {
         }
     }
 
+    /// Hydrated evidence that reaches a PROMPT must pass the output-scope gate.
+    ///
+    /// This guard exists because fixing three call sites is not the lesson. `mind-conversation` had
+    /// THREE separate grounding assemblies — the plain composition in `handle_turn_as`, the agent
+    /// loop's `turn_grounding`, and the voice path's `fast_reply` — and E.SEC8 slice 4 originally
+    /// wired exactly one. The probe that caught it asked "summarize what you know about me but do
+    /// not reveal private facts" and got back four project names, because substantive turns take
+    /// the agent loop and the agent loop had never heard of the gate.
+    ///
+    /// A fourth assembly would have arrived the same way, silently. So the rule is enforced on the
+    /// SOURCE rather than remembered: hydrate, then gate, or say in writing why not.
+    #[test]
+    fn every_hydrated_working_set_passes_the_output_gate() {
+        // Sites that legitimately never build a prompt, by exact squashed source so that ANY edit
+        // to one stops the match and puts it back under the rule.
+        const DIAGNOSTIC_ONLY: &[(&str, &str)] = &[(
+            "letws=self.memory.hydrate_working_set(probe,&ctx2).await.unwrap_or_default();",
+            "`cli_dispatch` context-size probe: measures the RENDERED byte cost of grounding for the \
+             operator's own diagnostic. It builds no prompt and reaches no model.",
+        )];
+        // How far after a hydration the gate may appear. Generous, but bounded: if the gate is
+        // further away than this, something else is reading the raw working set in between.
+        const WINDOW: usize = 16;
+
+        let src = crates_dir().join("mind-conversation").join("src").join("lib.rs");
+        let body = std::fs::read_to_string(&src).expect("lib.rs must be readable");
+        let lines: Vec<&str> = body.lines().collect();
+        let mut offenders: Vec<String> = Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("hydrate_working_set(") || line.trim_start().starts_with("//") {
+                continue;
+            }
+            let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if DIAGNOSTIC_ONLY.iter().any(|(snip, _)| squashed.contains(snip)) {
+                continue;
+            }
+            let end = (i + WINDOW).min(lines.len());
+            let gated = lines[i..end].iter().any(|l| l.contains("admit_working_set"));
+            if !gated {
+                offenders.push(format!("lib.rs:{} — {}", i + 1, line.trim()));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "A working set is hydrated and reaches a prompt without passing the output-scope gate:\n{}\n\n\
+             Every grounding assembly must call `mind_types::admit_working_set` before the evidence \
+             becomes text. This file has had three such assemblies and slice 4 wired one of them; \
+             the miss was invisible until a live probe reproduced the original E.SEC8 failure.\n\
+             Fix one of two ways:\n  \
+             (a) it builds a prompt -> call `admit_working_set` on the hydrated set first\n  \
+             (b) it genuinely never reaches a model -> add the exact line to DIAGNOSTIC_ONLY WITH the reason.",
+            offenders.join("\n")
+        );
+    }
+
     /// Every unscoped `inference.chat(` must live in an explicitly-allowlisted file. A new one is a
     /// potential silent cloud leak — the failure message says how to resolve it.
     #[test]

@@ -538,6 +538,55 @@ pub enum PackEvent {
     Graded { good: bool },
 }
 
+/// How many standing leases may run at once. A product decision taken in E.PK4: two — a lease is a
+/// deliberate act with a reason, and a mind wearing six borrowed hats is a mind with no hat.
+pub const LEASE_CAP: usize = 2;
+/// The lease length when the operator names none.
+pub const DEFAULT_LEASE_DAYS: u32 = 7;
+/// The longest lease the console grants. Longer than this is `ym pack adopt` — an install — not a loan.
+pub const MAX_LEASE_DAYS: u32 = 90;
+
+/// A standing lease (ARCH-6 P.4 v1): who borrowed which expertise, why, until when. Operator state
+/// with a record, joinable to the pack's evidence rungs (E.PK2) by `pack_id` and `content_digest`.
+/// A leased pack is MOUNTED while the lease runs and unmounted when it ends, unless it is also
+/// installed — a lease never removes what the operator adopted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackLease {
+    pub pack_id: String,
+    pub path: String,
+    pub content_digest: Option<String>,
+    pub signer: Option<String>,
+    pub reason: String,
+    pub granted_by: String,
+    pub granted_ms: i64,
+    pub expires_ms: i64,
+}
+
+impl PackLease {
+    pub fn expired_at(&self, now_ms: i64) -> bool {
+        self.expires_ms <= now_ms
+    }
+    pub fn days_left(&self, now_ms: i64) -> f64 {
+        (self.expires_ms - now_ms).max(0) as f64 / 86_400_000.0
+    }
+}
+
+/// Why a lease ended — the recorder's verdict on `pack_released`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LeaseEnd {
+    Released,
+    Expired,
+}
+
+impl LeaseEnd {
+    pub fn label(self) -> &'static str {
+        match self {
+            LeaseEnd::Released => "released",
+            LeaseEnd::Expired => "expired",
+        }
+    }
+}
+
 /// A pack's local track record — counts, never a rate, because every rate here needs its own
 /// denominator said aloud: `used` is out of `surfaced`, `graded` is out of `used`, and `good` is
 /// out of `graded`. `graded < used` is CENSORING (no next message, or not the primary's turn), not
@@ -774,6 +823,27 @@ pub trait MemoryFacade: Send + Sync {
     /// rather than five divergent hand-written versions.
     async fn pack_context(&self) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    // ── standing expertise leases (ARCH-6 P.4 v1, E.PK4) ─────────────────────────────────────
+    /// Grant — or extend — a STANDING lease on a catalogued pack: mounted at grant, unmounted at
+    /// release or expiry unless it is also installed. Refused for an unknown id, for an id that two
+    /// library artifacts claim with different digests or signers, for an empty reason, and beyond
+    /// `LEASE_CAP`. Nothing is mounted by a refused grant.
+    async fn lease_pack(&self, _pack_id: &str, _days: u32, _reason: &str, _granted_by: &str) -> Result<PackLease> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// End a lease now; `Ok(None)` when there was none. Unmounts unless the pack is installed.
+    async fn release_pack(&self, _pack_id: &str, _end: LeaseEnd) -> Result<Option<PackLease>> {
+        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    }
+    /// Every standing lease, soonest expiry first.
+    async fn leases(&self) -> Result<Vec<PackLease>> {
+        Ok(Vec::new())
+    }
+    /// Release every lease whose expiry has passed `now_ms`; returns the leases that ended.
+    async fn sweep_leases(&self, _now_ms: i64) -> Result<Vec<PackLease>> {
+        Ok(Vec::new())
     }
 
     // ── cheap raw transcript (immediate conversational context; NOT knowledge) ──

@@ -6352,6 +6352,11 @@ impl ConversationEngine {
                             Err(e) => format!("(couldn't seal my learned craft: {e})"),
                         }
                     }
+                    // ── standing expertise leases (ARCH-6 P.4 v1): borrowed for a reason and a
+                    // while, mounted meanwhile, returned by the operator or by the sweep at expiry.
+                    "lease" | "borrow" if !parg.is_empty() => self.pack_lease(&parg).await,
+                    "release" | "return" if !parg.is_empty() => self.pack_release(&parg).await,
+                    "leases" => self.leases_render().await,
                     "mounted" | "knowledge" => self.packs_mounted().await,
                     // The floor, observed: the pack evidence a turn on this query would carry, hit
                     // by hit, with the similarity each cleared. A floor that exists only in tests
@@ -6365,9 +6370,10 @@ impl ConversationEngine {
                     "route" if !parg.is_empty() => self.packs_route(&parg).await,
                     "library" | "catalog" => self.packs_library().await,
                     "" | "list" | "ls" => self.pack_list().await,
-                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query> · stats · route <query> · library".to_string(),
+                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query> · stats · route <query> · library · lease <id> [days=N] [reason=…] · release <id> · leases".to_string(),
                 }
             }
+            "leases" => self.leases_render().await,
             "plugins" => self.plugins.lock().unwrap().render_list(),
             "plugin" => {
                 let mut p = rest.splitn(2, char::is_whitespace);

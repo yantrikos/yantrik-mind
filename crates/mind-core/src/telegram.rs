@@ -1228,6 +1228,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
     let mut last_ics = 0u64; // external-calendar (ICS) refresh cadence
+    let mut last_lease_sweep = 0u64; // standing-lease expiry sweep (ARCH-6 P.4)
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     let mut last_member_beat = 0u64; // member reminders + briefs cadence
     loop {
@@ -2047,6 +2048,19 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     eprintln!("[calendar] refreshed {n} external event(s)");
                 }
                 last_ics = now;
+            }
+        }
+
+        // Standing-lease expiry sweep (ARCH-6 P.4): its own cursor, no chat gating — it only ends
+        // leases whose time has passed, records each, and logs only when it did.
+        {
+            let period: u64 = std::env::var("YM_LEASE_SWEEP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+            let now = now_ms();
+            if now.saturating_sub(last_lease_sweep) >= period * 1000 {
+                for line in conv.sweep_leases().await {
+                    eprintln!("{line}");
+                }
+                last_lease_sweep = now;
             }
         }
 

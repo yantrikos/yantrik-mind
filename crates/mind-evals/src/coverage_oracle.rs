@@ -472,4 +472,53 @@ mod tests {
             score.abstention()
         );
     }
+
+    /// E.PK4 wall (1): ATTACH-HARM CONTROL on the REAL packs. Gated: `YM_PACK_DIST=<dir>` of
+    /// `.ydbpack` files. With every mountable pack in the directory mounted, the corpus's no-pack
+    /// queries must surface ZERO rows through `recall_from_packs` — any row is KILL for that pack's
+    /// floor (the publisher sweeps it) and blocks leasing it by default. Prints every pack's mount
+    /// result and every query's row count, so a KILL names the pack and the query.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attach_harm_control_on_the_real_packs() {
+        use mind_types::MemoryFacade;
+        let Ok(dir) = std::env::var("YM_PACK_DIST") else {
+            println!("ATTACH-HARM CONTROL: gated (set YM_PACK_DIST=<dir of .ydbpack files>)");
+            return;
+        };
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 64).unwrap();
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{dir}: {e}"))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |x| x == "ydbpack"))
+            .collect();
+        files.sort();
+        let (mut mounted, mut unmountable) = (Vec::new(), Vec::new());
+        for f in &files {
+            match mem.mount_pack(f.to_str().unwrap()).await {
+                Ok(id) => mounted.push(id),
+                Err(e) => unmountable.push(format!("{}: {e}", f.file_name().unwrap().to_string_lossy())),
+            }
+        }
+        println!("ATTACH-HARM CONTROL: {} of {} pack(s) mounted", mounted.len(), files.len());
+        for m in &mounted {
+            println!("  mounted {m}");
+        }
+        for u in &unmountable {
+            println!("  NOT mounted {u}");
+        }
+        assert!(!mounted.is_empty(), "nothing mounted from {dir}: {unmountable:?}");
+        let all = cases();
+        let nopack: Vec<&RouteCase> = all.iter().filter(|c| c.accept.is_empty()).collect();
+        assert!(nopack.len() >= 10, "the control needs the no-pack corpus: {}", nopack.len());
+        let mut offences = Vec::new();
+        for c in &nopack {
+            let hits = mem.recall_from_packs(c.query, 8).await.unwrap();
+            println!("  {:<18} {} row(s)", c.id, hits.len());
+            for h in &hits {
+                offences.push(format!("{} <- {} @ {:.3}: {}", h.pack_id, c.id, h.similarity, h.text.chars().take(90).collect::<String>()));
+            }
+        }
+        assert!(offences.is_empty(), "rows surfaced for no-pack queries — KILL for those packs' floors:\n{}", offences.join("\n"));
+    }
 }

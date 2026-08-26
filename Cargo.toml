@@ -30,13 +30,20 @@ uuid7 = "1"
 # the in-process BundledEmbedder (potion-base-2M, dim 64) ON BY DEFAULT — so `record_text`/
 # `recall_text` and semantic recall Just Work with no external server, no candle, no download.
 # `package=` rename keeps every `use yantrikdb_core::…` site compiling unchanged.
-# PINNED TO THE PUBLISHED CRATE (E.18b, 2026-08-26), not to a working checkout. A path dependency
+# Pinned to the published crate (E.18b, corrected in E.18c), not to a working checkout. A path dependency
 # into ../yantrikdb built the mind against whatever that tree happened to contain - it sat at
 # 0.16.0 with uncommitted changes - so no one else could reproduce this build and it moved under us
 # whenever someone worked there. 0.18.0 also fixes the pack-mount regression that made E.PK4's
 # attach-harm wall unrunnable in this repo's own harness (0.16 could mount no 0.15-sealed pack).
 # To test against an unpublished engine, override this ONE line locally and say so in the ledger.
-yantrikdb-core = { version = "0.18", package = "yantrikdb" }
+# EXACT, not a range. `version = "0.18"` is caret `^0.18` to Cargo, so a future 0.18.1 would have
+# changed the substrate silently — and this repo does not track Cargo.lock (.gitignore:2), so there
+# would be no committed evidence of what was actually resolved. `=0.18.0` is the pin the comment
+# above already claimed to be (Codex's review of E.18b). Resolved artifact, recorded in E.18c:
+# yantrikdb 0.18.0, checksum 8ff1ffe72dc393998df748020b12134eaaa1a1fb85d653c632f28c6fb06bbb42.
+# NOTE the limit: this pins the ENGINE exactly. The rest of the dependency graph still floats,
+# because the lockfile is untracked — see E.18c's residual.
+yantrikdb-core = { version = "=0.18.0", package = "yantrikdb" }
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml", default-features = false }
 yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
 yantrik-chat = { path = "../yantrik-companion/crates/yantrik-chat" }

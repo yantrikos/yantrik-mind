@@ -144,9 +144,25 @@ fn token_at(text: &str, at: usize) -> &str {
 /// 64-character hex hash contains card-shaped substrings often enough to matter: 28 of 11,866
 /// read-receipt lines on the box, every one a false positive, which is how this rule was found.
 fn is_embedded(text: &str, start: usize, len: usize) -> bool {
-    let before = text[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphabetic());
-    let after = text[start + len..].chars().next().is_some_and(|c| c.is_ascii_alphabetic());
-    before || after
+    let mut lead = text[..start].chars().rev();
+    let mut trail = text[start + len..].chars();
+    let (b1, b2) = (lead.next(), lead.next());
+    let (a1, a2) = (trail.next(), trail.next());
+    let before = b1.is_some_and(|c| c.is_ascii_alphabetic());
+    let after = a1.is_some_and(|c| c.is_ascii_alphabetic());
+
+    // THE FRACTIONAL PART OF A DECIMAL is not a card. `0.5500005555555559` carries a 16-digit run
+    // that starts with 5 and satisfies Luhn, so the shape rules alone call a high-precision float a
+    // payment card — and the audit found three of them sitting in `event.confidence` on the box.
+    // Reachable from `gate_write`, so a memory carrying a precise number would have been refused as
+    // a credit card, which is the "asian food recipes" failure wearing arithmetic.
+    //
+    // Only a decimal POINT WITH A DIGIT ON ITS FAR SIDE counts: `4111111111111111.` at the end of a
+    // sentence is still a card, because the period is followed by nothing (E.SEC1b).
+    let fractional = b1 == Some('.') && b2.is_some_and(|c| c.is_ascii_digit());
+    let truncated = a1 == Some('.') && a2.is_some_and(|c| c.is_ascii_digit());
+
+    before || after || fractional || truncated
 }
 
 fn luhn_ok(digits: &str) -> bool {
@@ -718,6 +734,24 @@ mod sec1b {
                 assert!(!rendered.contains(word), "{rendered} leaked {word}");
             }
         }
+    }
+
+    #[test]
+    fn a_high_precision_decimal_is_not_a_payment_card() {
+        // FOUND BY THE AUDIT, on the box: three `event.confidence` values in the decision log were
+        // being reported as payment cards. A confidence float's fractional part is a long digit run
+        // that can start with 3-6 and satisfy Luhn by chance, and nothing about the shape rules
+        // says otherwise. `gate_write` scans every memory write, so this refused precise numbers.
+        assert!(first_sensitive("0.5500005555555559").is_none(), "a fraction is not a card");
+        assert!(first_sensitive("confidence 0.5500005555555559 recorded").is_none());
+        assert!(first_sensitive("ratio 12.5500005555555559").is_none());
+        // The far side of the point must be a DIGIT for it to be part of a number.
+        assert!(first_sensitive("I paid with 5500005555555559.").is_some(), "a sentence-ending period is not a decimal");
+        assert!(first_sensitive("I paid with 5500005555555559").is_some());
+        assert!(first_sensitive("5500005555555559 is the number").is_some());
+        // And the control from the audit's own evidence: the same digits buried in hex stay out.
+        assert!(first_sensitive("deadbeef4111111111111111cafebabe").is_none());
+        assert!(first_sensitive("paid with 4111111111111111 today").is_some());
     }
 
     #[test]

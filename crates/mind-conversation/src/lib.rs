@@ -7954,7 +7954,7 @@ impl ConversationEngine {
                         surfaced.push(crate::pace_ledger::TurnPackEvidence {
                             pack_id,
                             trace: trace.to_string(),
-                            text: phits.iter().map(|h| h.text.as_str()).collect::<Vec<_>>().join("\n"),
+                            rows: phits.iter().map(|h| h.text.clone()).collect(),
                             surfaced_event_id,
                             used: None,
                             used_event_id: None,
@@ -7963,8 +7963,14 @@ impl ConversationEngine {
                 }
             }
         }
-        // Replace, never append: a stale turn's packs must not be graded by this turn's next message.
-        *self.turn_packs.lock().unwrap() = surfaced;
+        // The stash belongs to the PRIMARY lane and only a primary turn may replace it — replace,
+        // never append, so a stale turn's packs are not graded by this turn's next message. A member
+        // turn leaves it alone: otherwise an intervening member message would erase the primary's
+        // pending evidence, and whether a pack got graded would depend on who else spoke in between
+        // — censoring by household activity (Codex's review of P.2).
+        if primary_lane {
+            *self.turn_packs.lock().unwrap() = surfaced;
+        }
         // Self-referential turn -> the instrument panel (fixes introspection myopia).
         if is_self_referential(user_text) {
             grounding.push_str(&self.self_model_block().await);

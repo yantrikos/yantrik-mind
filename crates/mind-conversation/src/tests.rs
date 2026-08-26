@@ -3659,6 +3659,23 @@ async fn a_members_turn_surfaces_pack_evidence_but_does_not_carry_it_to_the_grad
     assert_eq!(kinds, vec!["pack_surfaced".to_string()], "{kinds:?}");
     let stats = mem.pack_stats().await.unwrap();
     assert_eq!((stats[0].surfaced, stats[0].used, stats[0].graded), (1, 0, 0), "{stats:?}");
+
+    // And the INTERLEAVING case (Codex's review): the primary's pending evidence must survive a
+    // member's whole turn in between, or whether a pack gets graded would depend on who else spoke.
+    // The sequence mirrors `turn()`: grade (primary only) → grounding → note answer (primary only),
+    // so the member's turn is its grounding and nothing else.
+    let who = TurnIdentity::primary();
+    conv.turn_grounding(row, &who, "run-p2-primary").await;
+    conv.note_turn_answer("For body text you want contrast of at least 4.5 to 1 against the background so it stays readable.").await;
+    conv.turn_grounding(row, &member, "run-p2-member-2").await; // the member's turn, as `turn()` runs it
+    conv.grade_previous_turn("thanks, that is exactly what I needed").await; // the primary's next message
+    let events = conv.recorder().read_all();
+    let graded: Vec<&mind_observability::DecisionEvent> = events.iter().filter(|e| e.kind == "pack_evidence_graded").collect();
+    assert_eq!(graded.len(), 1, "exactly the primary's evidence was graded: {events:?}");
+    assert_eq!(graded[0].trace_id, "run-p2-primary");
+    assert_eq!((graded[0].verdict.as_deref(), graded[0].semantic_success), (Some("accepted"), Some(true)));
+    let stats = mem.pack_stats().await.unwrap();
+    assert_eq!((stats[0].surfaced, stats[0].used, stats[0].graded, stats[0].good), (3, 1, 1, 1), "{stats:?}");
     let _ = std::fs::remove_file(&pack);
     let _ = std::fs::remove_file(&log);
 }

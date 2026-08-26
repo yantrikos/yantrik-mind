@@ -572,12 +572,14 @@ pub fn render_pack_evidence(events: &[DecisionEvent]) -> String {
             _ => "  observation audit: too few rows on one side to compare (needs ≥5 used and ≥5 unused)\n".to_string(),
         };
         out.push_str(&format!(
-            "  {pack}: surfaced {} · used {} of {} surfaced · graded {} of {} used · accepted {} of {} graded · censored {} of {} surfaced never graded\n",
+            "  {pack}: surfaced {} · used {} of {} surfaced · graded {} of {} surfaced ({} after use, {} after non-use) · accepted {} of {} graded · censored {} of {} surfaced never graded\n",
             c.surfaced,
             c.used,
+            c.surfaced,
+            graded,
             c.surfaced,
             c.graded_used,
-            c.used,
+            c.graded_unused,
             c.good,
             graded,
             c.surfaced.saturating_sub(graded),
@@ -724,6 +726,7 @@ mod tests {
         assert_eq!((c.surfaced, c.used, c.unused, c.graded_used, c.graded_unused, c.good), (10, 6, 4, 6, 0, 4));
         let r = render_pack_evidence(&ev);
         assert!(r.contains("used 6 of 10 surfaced"), "{r}");
+        assert!(r.contains("graded 6 of 10 surfaced (6 after use, 0 after non-use)"), "{r}");
         assert!(r.contains("accepted 4 of 6 graded"), "{r}");
         assert!(r.contains("censored 4 of 10 surfaced never graded"), "{r}");
         assert!(r.contains("too few rows on one side"), "unused=4 cannot support the audit yet: {r}");

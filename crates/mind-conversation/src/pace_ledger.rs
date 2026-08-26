@@ -123,7 +123,12 @@ impl super::ConversationEngine {
         *self.last_turn_answer.lock().unwrap() = Some(answer.chars().take(300).collect());
         let mut packs = std::mem::take(&mut *self.turn_packs.lock().unwrap());
         for p in packs.iter_mut() {
-            let (used, share) = evidence_used(&p.text, answer);
+            // Judged once. `turn()` calls this once per primary turn, after the grounding that
+            // stashed the evidence; a second call must not re-judge (and re-count) the same rows.
+            if p.used.is_some() {
+                continue;
+            }
+            let (used, share) = evidence_used_any(&p.rows, answer);
             let mut ev = mind_observability::DecisionEvent::span(&p.trace, p.surfaced_event_id.as_deref(), "pack_evidence_used");
             ev.object_id = Some(format!("pack:{}", p.pack_id));
             ev.verdict = Some(if used { "used" } else { "unused" }.to_string());
@@ -214,19 +219,32 @@ impl super::ConversationEngine {
 pub(crate) struct TurnPackEvidence {
     pub(crate) pack_id: String,
     pub(crate) trace: String,
-    /// The surfaced rows' text, for the used-proxy.
-    pub(crate) text: String,
+    /// The surfaced rows, each kept whole: the used-proxy is judged PER ROW, because a reply that
+    /// faithfully uses one of five surfaced rows shares few words with the other four.
+    pub(crate) rows: Vec<String>,
     pub(crate) surfaced_event_id: Option<String>,
     pub(crate) used: Option<bool>,
     pub(crate) used_event_id: Option<String>,
 }
 
-/// Did the reply USE the evidence? A PROXY, deliberately cheap and deterministic: the share of the
-/// evidence's informative words (five letters or more) that reappear in the reply. `(true, share)`
-/// when at least three reappear and they are a quarter or more of the evidence's vocabulary. It
+/// Did the reply USE any of the surfaced rows? Judged per row — `evidence_used` on each — and the
+/// pack counts as used when ANY row clears; the share reported is the best row's. Judging the
+/// rows as one text would divide one row's words by five rows' vocabulary and call faithful use of
+/// one row "unused" (Codex's review of P.2).
+pub(crate) fn evidence_used_any(rows: &[String], reply: &str) -> (bool, f64) {
+    rows.iter()
+        .map(|r| evidence_used(r, reply))
+        .fold((false, 0.0), |(u, s), (ru, rs)| (u || ru, if rs > s { rs } else { s }))
+}
+
+/// Did the reply USE this row? A PROXY, deliberately cheap and deterministic: the share of the
+/// row's informative words (five letters or more) that reappear in the reply. `(true, share)`
+/// when at least three reappear and they are a quarter or more of the row's vocabulary. It
 /// cannot see paraphrase and it cannot see causation — a reply can restate a row it would have
-/// written anyway. It is named as a proxy everywhere it is reported, and P.5 will not learn from
-/// it until the grade rung has enough rows to say whether it predicts anything.
+/// written anyway (measured live on 2026-08-26: a reply that clearly acted on a row — "kill the
+/// gradient", "break the six-card grid" — scored 0.18 and read as unused). It is named as a proxy
+/// everywhere it is reported, and P.5 will not learn from it until the grade rung has enough rows
+/// to say whether it predicts anything.
 pub(crate) fn evidence_used(evidence: &str, reply: &str) -> (bool, f64) {
     fn informative(s: &str) -> std::collections::HashSet<String> {
         s.to_lowercase()
@@ -260,5 +278,27 @@ mod evidence_proxy_tests {
         let (thin, _) = evidence_used(row, "the background matters");
         assert!(!thin);
         assert_eq!(evidence_used("", "anything"), (false, 0.0));
+    }
+
+    /// Five rows surfaced, the reply restates ONE: judged per row it is used, with that row's
+    /// share; judged against the union vocabulary it would have read as unused.
+    #[test]
+    fn using_one_of_five_surfaced_rows_counts_as_used() {
+        let rows: Vec<String> = vec![
+            "Contrast — body text needs at least 4.5 to 1 against its background to be readable.".into(),
+            "Typography — set body text on a modular scale with a measure of 45 to 75 characters per line.".into(),
+            "Spacing — derive every gap in a layout from one base unit so the page reads as a system.".into(),
+            "Motion — animate only transform and opacity so the compositor does the work.".into(),
+            "Focus — every interactive control needs a visible focus ring that is not the browser default.".into(),
+        ];
+        let reply = "For body text you want contrast of at least 4.5 to 1 against the background so it stays readable.";
+        let (used, share) = super::evidence_used_any(&rows, reply);
+        assert!(used, "one faithfully used row is use");
+        assert!(share >= 0.25, "the best row's share is reported: {share}");
+        let (union_used, union_share) = super::evidence_used(&rows.join("
+"), reply);
+        assert!(!union_used && union_share < 0.25, "the union denominator would have hidden it: {union_share}");
+        let (none, _) = super::evidence_used_any(&rows, "I don't know.");
+        assert!(!none);
     }
 }

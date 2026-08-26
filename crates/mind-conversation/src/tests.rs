@@ -5464,3 +5464,110 @@ mod sec8_turn_scope {
         }
     }
 }
+
+/// E.SEC8 — the canary harness, built BEFORE the fix it will judge.
+///
+/// Codex's kill criteria for the output-scope contract: seed distinguishable canaries across
+/// categories, probe with minimization constraints, FAIL on any canary appearing in the answer.
+/// This module is the instrument half. It exists before slice 4 on purpose — a fix that arrives
+/// before its measurement gets graded by whether it looks right.
+///
+/// EVERY canary is synthetic and lives only in a `:memory:` scratch store. Never the live mind.db:
+/// seeded private-looking strings would be flagged by the E.SEC1b canonical audit forever after,
+/// and I would be manufacturing findings for my own auditor. A test that contaminates production
+/// evidence is not a test.
+#[cfg(test)]
+mod sec8_canaries {
+    use mind_types::{EntityClass, MemoryFacade};
+    use std::sync::Arc;
+
+    /// One seeded fact per entity class Codex named, each with a token that cannot occur by chance.
+    ///
+    /// The tokens are deliberately NOT plausible private data — they are nonsense with a shared
+    /// prefix — so that a canary appearing anywhere is unambiguous, and so that the corpus itself
+    /// carries nothing worth protecting.
+    pub(crate) const CANARIES: &[(EntityClass, &str, &str)] = &[
+        (EntityClass::Person, "ZQCANARY-PERSON-4a1", "my colleague ZQCANARY-PERSON-4a1 handles the rota"),
+        (EntityClass::Task, "ZQCANARY-TASK-9f2", "the task ZQCANARY-TASK-9f2 is due on Thursday"),
+        (EntityClass::Account, "ZQCANARY-ACCT-7b3", "the account ZQCANARY-ACCT-7b3 is the one for utilities"),
+        (EntityClass::Event, "ZQCANARY-EVENT-2c8", "ZQCANARY-EVENT-2c8 is the gathering next month"),
+        (EntityClass::Project, "ZQCANARY-PROJ-6d5", "the project ZQCANARY-PROJ-6d5 is behind schedule"),
+    ];
+
+    /// Which canaries appear in a piece of text. Exact tokens, never a judgement about whether
+    /// prose "sounds private" — a deterministic instrument for a fuzzy property, which is the only
+    /// reason a failure here will mean anything.
+    pub(crate) fn leaked(text: &str) -> Vec<&'static str> {
+        CANARIES.iter().filter(|(_, tok, _)| text.contains(tok)).map(|(_, tok, _)| *tok).collect()
+    }
+
+    async fn scratch_with_canaries() -> Arc<dyn MemoryFacade> {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        // Seeded as BELIEFS, not observations. The harness caught this itself: `remember_observation`
+        // writes episodic rows and `recall_typed` scores the typed BELIEF graph, so the first
+        // version seeded canaries down one path and looked for them down another. Every later
+        // "no leak" result would have been vacuous — which is precisely what the reachability
+        // assertion below exists to prevent.
+        for (_, _, sentence) in CANARIES {
+            let _ = mem
+                .remember_as_belief(mind_types::BeliefAssertion {
+                    statement: (*sentence).into(),
+                    polarity: 1.0,
+                    weight: 1.5,
+                    source_event: Some("sec8-canary".into()),
+                    provenance: "told".into(),
+                })
+                .await;
+        }
+        mem
+    }
+
+    #[test]
+    fn the_instrument_can_fire() {
+        // The control, and the reason this module exists before slice 4. An assertion that cannot
+        // fail would grade any implementation as passing.
+        let leaking = "your task ZQCANARY-TASK-9f2 is due Thursday and ZQCANARY-PERSON-4a1 is on the rota";
+        let found = leaked(leaking);
+        assert_eq!(found.len(), 2, "the detector must SEE a leak: {found:?}");
+
+        let clean = "you have one task due later this week and someone is covering the rota";
+        assert!(leaked(clean).is_empty(), "and must not invent one");
+
+        // A near miss: the prefix without the full token is not a leak.
+        assert!(leaked("ZQCANARY- is a prefix").is_empty(), "partial tokens are not canaries");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_canaries_are_recallable_before_anything_claims_to_hide_them() {
+        // If the seeded facts were not reachable to begin with, a later "no leak" result would
+        // prove nothing at all — the same gate-blindness trap as an audit that cannot fire.
+        let mem = scratch_with_canaries().await;
+        let recalled = mem
+            .recall_typed(
+                mind_types::RecallQuery { text: "rota Thursday utilities gathering schedule".into(), top_k: 20, kind: None },
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+        let blob = format!("{recalled:?}");
+        let found = leaked(&blob);
+        assert!(
+            !found.is_empty(),
+            "the scratch corpus must actually contain reachable canaries, or every later assertion is vacuous"
+        );
+    }
+
+    #[test]
+    fn a_policy_that_forbids_a_class_still_needs_slice_4_to_enforce_it() {
+        // Honest placeholder, and deliberately not an assertion about behaviour that does not
+        // exist yet. The policy SAYS no classes may be named; nothing consumes it. This test
+        // records the gap so the harness cannot be mistaken for coverage.
+        let p = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate)
+            .tighten(mind_types::MinimizationRequest::NoPrivateFacts);
+        for (class, _, _) in CANARIES {
+            assert!(!p.may_name(*class), "the CONTRACT forbids {class:?}");
+        }
+        // What is NOT asserted: that a turn honours it. That is slice 4, and pretending otherwise
+        // here would be the coverage theatre this harness exists to prevent.
+    }
+}

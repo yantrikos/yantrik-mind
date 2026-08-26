@@ -12,6 +12,13 @@ fn arg(args: &Value, k: &str) -> String {
     args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
 }
 
+/// The capability handlers' argument reader, resolving through the ONE alias table the boundary
+/// validates against (`tool_catalog::read_arg`) — so `calc {"expr"}`, `weather {"city"}`,
+/// `stock {"ticker"}` and the rest are declared once and served identically on both paths (P.2f).
+fn targ(tool: &str, args: &Value, k: &str) -> String {
+    crate::tool_catalog::read_arg(tool, args, k)
+}
+
 /// Web search — discovery, then web_fetch reads.
 pub struct WebSearchCapability;
 
@@ -32,7 +39,7 @@ impl CapabilityHandler for WebSearchCapability {
         Some(match tool {
             "search" | "web_search" => match &host.searcher {
                 Some(se) => {
-                    let q = { let a = arg(args, "query"); if a.is_empty() { arg(args, "q") } else { a } };
+                    let q = targ(tool, args, "query");
                     if q.len() < 2 {
                         return Some("(what should I search for?)".to_string());
                     }
@@ -100,7 +107,7 @@ impl CapabilityHandler for WeatherCapability {
     async fn handle_tool(&self, host: &ConversationEngine, tool: &str, args: &Value) -> Option<String> {
         Some(match tool {
             "weather" => match &host.weather {
-                Some(w) => match w.report(&{ let p = arg(args, "place"); if p.is_empty() { arg(args, "city") } else { p } }).await { Ok(r) => r, Err(e) => format!("(weather: {e})") },
+                Some(w) => match w.report(&targ(tool, args, "place")).await { Ok(r) => r, Err(e) => format!("(weather: {e})") },
                 None => "(weather isn't configured)".to_string(),
             },
             _ => return None,
@@ -127,7 +134,7 @@ impl CapabilityHandler for WikipediaCapability {
     async fn handle_tool(&self, host: &ConversationEngine, tool: &str, args: &Value) -> Option<String> {
         Some(match tool {
             "wikipedia" | "wiki" => match &host.wiki {
-                Some(w) => match w.lookup(&{ let q = arg(args, "query"); if q.is_empty() { arg(args, "topic") } else { q } }).await { Ok(r) => r, Err(e) => format!("(wikipedia: {e})") },
+                Some(w) => match w.lookup(&targ(tool, args, "query")).await { Ok(r) => r, Err(e) => format!("(wikipedia: {e})") },
                 None => "(wikipedia isn't configured)".to_string(),
             },
             _ => return None,
@@ -153,7 +160,7 @@ impl CapabilityHandler for CalculatorCapability {
 
     async fn handle_tool(&self, _host: &ConversationEngine, tool: &str, args: &Value) -> Option<String> {
         Some(match tool {
-            "calc" | "calculate" | "math" => crate::calc(&{ let e = arg(args, "expression"); if e.is_empty() { arg(args, "expr") } else { e } }),
+            "calc" | "calculate" | "math" => crate::calc(&targ(tool, args, "expression")),
             _ => return None,
         })
     }
@@ -179,11 +186,11 @@ impl CapabilityHandler for MarketsCapability {
     async fn handle_tool(&self, host: &ConversationEngine, tool: &str, args: &Value) -> Option<String> {
         Some(match tool {
             "crypto" | "coin" => match &host.markets {
-                Some(m) => match m.crypto(&{ let c = arg(args, "coin"); if c.is_empty() { arg(args, "query") } else { c } }).await { Ok(r) => r, Err(e) => format!("(crypto: {e})") },
+                Some(m) => match m.crypto(&targ(tool, args, "coin")).await { Ok(r) => r, Err(e) => format!("(crypto: {e})") },
                 None => "(markets aren't configured)".to_string(),
             },
             "stock" | "ticker" => match &host.markets {
-                Some(m) => match m.stock(&{ let t = arg(args, "symbol"); if t.is_empty() { arg(args, "ticker") } else { t } }).await { Ok(r) => r, Err(e) => format!("(stock: {e})") },
+                Some(m) => match m.stock(&targ(tool, args, "symbol")).await { Ok(r) => r, Err(e) => format!("(stock: {e})") },
                 None => "(markets aren't configured)".to_string(),
             },
             _ => return None,
@@ -220,7 +227,7 @@ impl CapabilityHandler for TranslateCapability {
     async fn handle_tool(&self, host: &ConversationEngine, tool: &str, args: &Value) -> Option<String> {
         Some(match tool {
             "translate" => match &host.translator {
-                Some(tr) => match tr.translate(&{ let l = arg(args, "to"); if l.is_empty() { arg(args, "language") } else { l } }, &arg(args, "text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
+                Some(tr) => match tr.translate(&targ(tool, args, "to"), &arg(args, "text")).await { Ok(r) => r, Err(e) => format!("(translate: {e})") },
                 None => "(translator isn't configured)".to_string(),
             },
             _ => return None,
@@ -293,7 +300,7 @@ impl CapabilityHandler for ResearchCapability {
         if tool != "research" {
             return None;
         }
-        let topic = { let q = arg(args, "query"); if q.is_empty() { arg(args, "topic") } else { q } };
+        let topic = targ(tool, args, "query");
         if topic.len() < 3 {
             return Some("(what should I research? give me a topic)".to_string());
         }
@@ -343,7 +350,7 @@ impl CapabilityHandler for CoderCapability {
         if tool != "code" {
             return None;
         }
-        let task = { let t = arg(args, "task"); if t.is_empty() { arg(args, "query") } else { t } };
+        let task = targ(tool, args, "task");
         if task.len() < 3 {
             return Some("(what should I build? describe the script/task)".to_string());
         }

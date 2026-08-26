@@ -397,13 +397,19 @@ pub(crate) fn tool_schemas(user_text: &str, gated_src: &str) -> Vec<Value> {
 }
 
 /// Names a HANDLER accepts in place of a documented argument — the tool's own tolerance, written
-/// down so the boundary can hold a call to the contract the model was shown WITHOUT blaming the
-/// planner for a synonym the handler has always taken (`calc {"expr"}` for `calc {expression}`).
-/// Read off the dispatch's `s("a")`-then-`s("b")` fallbacks, not invented; every arm name is
-/// listed because the catalog may advertise any of them. A required field is satisfied by its own
-/// name or an alias, and an alias is TYPED as the field it stands for (`deals {"max": 500}` is a
-/// budget, not text). Codex's review of P.2d: the alias rationale is represented explicitly, not
-/// by switching per-field enforcement off whenever any value exists.
+/// down ONCE so that the boundary and the dispatch cannot disagree about it.
+///
+/// This table is the ONLY source. `read_arg`/`read_num` resolve a handler's argument through it, and
+/// `ArgContract` validates against the same rows, so a call the dispatch would happily serve can
+/// never be refused as malformed and a synonym can never be silently accepted without being typed.
+/// P.2e's first cut kept the dispatch's own `s("a")`-then-`s("b")` chains beside the table and they
+/// had already drifted apart in six places (Codex's review of b4c455b): `deals {"item"}`,
+/// `watch_price {"item"}`, `learn_about {"query"}`, `track_subject {"query"}`,
+/// `about_person {"query"}` and `quote {"ticker"}` were all servable and all refused.
+///
+/// Order matters: the canonical name wins, then each alias in the order written. A required field
+/// is satisfied by its own name or by any alias, and an alias is TYPED as the field it stands for
+/// (`deals {"max": 500}` is a budget, not text).
 pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
     (&["calc", "calculate", "math"], "expression", &["expr"]),
     (&["weather"], "place", &["city"]),
@@ -416,7 +422,13 @@ pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
     (&["code"], "task", &["query"]),
     (&["revoke", "rm", "remove"], "url", &["repo", "query"]),
     (&["deals", "shop", "shopping", "find_deals", "deal"], "budget", &["max"]),
+    (&["deals", "shop", "shopping", "find_deals", "deal"], "query", &["item", "text"]),
     (&["watch_price", "track_price", "pricewatch", "watch_deal"], "target", &["budget"]),
+    (&["watch_price", "track_price", "pricewatch", "watch_deal"], "query", &["item"]),
+    (&["learn_about", "learn", "study"], "url", &["query"]),
+    (&["track_subject", "follow_subject"], "subject", &["query"]),
+    (&["about_person", "person"], "name", &["query"]),
+    (&["quote", "price", "get_quote", "market_price"], "symbols", &["symbol", "ticker", "tickers", "query", "text", "input", "name"]),
     (&["photo_send", "send_photo", "find_photo"], "query", &["text"]),
     (&["photo_patterns", "photo_pattern"], "name", &["query"]),
     (&["growup_reel", "reel", "timelapse"], "name", &["query"]),
@@ -436,8 +448,51 @@ pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
     (&["calendar_remove", "remove_event"], "title", &["query"]),
     (&["surf", "feeds"], "handles", &["spec"]),
     (&["copy_trade", "copy_desk"], "url", &["link"]),
-    (&["watch", "watch_media", "listen"], "url", &["link"]),
+    (&["watch", "watch_media", "listen"], "url", &["link", "query"]),
 ];
+
+/// One argument, read the way the boundary validated it: the canonical name first, then each
+/// declared alias in order. Trimmed; empty when nothing usable was supplied. Every handler reads
+/// through this, so the dispatch and `ArgContract` can never disagree about what a call means.
+pub(crate) fn read_arg(tool: &str, args: &Value, field: &str) -> String {
+    let take = |k: &str| args.get(k).and_then(|x| x.as_str()).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if let Some(v) = take(field) {
+        return v;
+    }
+    for (tools, canonical, aliases) in ARG_ALIASES {
+        if *canonical == field && tools.contains(&tool) {
+            for a in *aliases {
+                if let Some(v) = take(a) {
+                    return v;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// The numeric form of `read_arg`, for the money fields the handlers parse loosely ("$1,200").
+pub(crate) fn read_num(tool: &str, args: &Value, field: &str) -> Option<f64> {
+    let take = |k: &str| {
+        args.get(k).and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_str().and_then(|v| v.trim().trim_start_matches('$').replace(',', "").parse().ok()))
+        })
+    };
+    if let Some(v) = take(field) {
+        return Some(v);
+    }
+    for (tools, canonical, aliases) in ARG_ALIASES {
+        if *canonical == field && tools.contains(&tool) {
+            for a in *aliases {
+                if let Some(v) = take(a) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
 
 /// The aliases a tool's handler accepts, as `(field, aliases)` pairs.
 pub(crate) fn aliases_for(tool: &str) -> Vec<(String, Vec<String>)> {
@@ -1036,3 +1091,22 @@ mod compaction_tests {
     }
 }
 
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    /// The resolver's own order: canonical first, then aliases as written, and nothing for a tool
+    /// the row does not name.
+    #[test]
+    fn the_resolver_prefers_the_canonical_then_each_alias_in_order() {
+        let both = serde_json::json!({ "symbols": "SPY", "ticker": "RELIANCE.NS" });
+        assert_eq!(read_arg("quote", &both, "symbols"), "SPY", "the documented name wins");
+        assert_eq!(read_arg("quote", &serde_json::json!({ "ticker": "RELIANCE.NS" }), "symbols"), "RELIANCE.NS");
+        assert_eq!(read_arg("quote", &serde_json::json!({ "input": "  NIFTY  " }), "symbols"), "NIFTY", "trimmed");
+        assert_eq!(read_arg("recall", &serde_json::json!({ "ticker": "SPY" }), "symbols"), "", "aliases are per tool");
+        assert_eq!(read_arg("deals", &serde_json::json!({ "item": "headphones" }), "query"), "headphones");
+        assert_eq!(read_num("deals", &serde_json::json!({ "max": "$1,200" }), "budget"), Some(1200.0), "money is parsed loosely through the alias");
+        assert_eq!(read_num("watch_price", &serde_json::json!({ "budget": 450 }), "target"), Some(450.0));
+        assert_eq!(read_num("deals", &serde_json::json!({}), "budget"), None);
+    }
+}

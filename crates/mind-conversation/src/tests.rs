@@ -4518,3 +4518,70 @@ async fn the_lease_verbs_grant_record_release_and_scope_what_a_turn_sees() {
     assert_eq!(crate::pack::parse_lease_args("days=4").0, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_declared_alias_satisfies_its_canonical_and_inherits_its_type() {
+    // P.2f (Codex's review of P.2e): the alias table is the ONE source, so every row must hold
+    // against the REAL catalog too — the alias satisfies its canonical's requirement, inherits its
+    // type, agrees with the catalog when the catalog also declares it, and the dispatch reads it
+    // the same way the boundary validates it. A row true of only one side is the drift that let
+    // six servable calls (`deals {"item"}`, `quote {"ticker"}`, …) be refused as malformed.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem, pool, "JARVIS");
+    let src = format!("{}\n{}", crate::tool_catalog::CORE_HEAD, conv.catalog_source());
+    let contracts = crate::tool_catalog::arg_contracts(&src);
+    let (mut checked, mut with_contract) = (0usize, 0usize);
+    for (tools, canonical, aliases) in crate::tool_catalog::ARG_ALIASES {
+        for tool in *tools {
+            for alias in *aliases {
+                checked += 1;
+                // The dispatch reads the alias as the canonical field — always, contract or not.
+                let only_alias = serde_json::json!({ *alias: "x" });
+                assert_eq!(crate::tool_catalog::read_arg(tool, &only_alias, canonical), "x", "{tool}: read_arg must find {canonical} under {alias}");
+                let Some(c) = contracts.get(*tool) else { continue };
+                with_contract += 1;
+                assert_eq!(c.canonical(alias), *canonical, "{tool}: the contract must resolve {alias} to {canonical}");
+                // Supplying ONLY the alias satisfies a required canonical.
+                if c.required.iter().any(|r| r == canonical) {
+                    let refusal = crate::tool_outcome::malformed_call(tool, &only_alias, Some(c));
+                    assert!(
+                        refusal.as_deref().map_or(true, |r| !r.contains(&format!("missing required {canonical}"))),
+                        "{tool}: `{alias}` alone must satisfy required `{canonical}` — got {refusal:?}"
+                    );
+                }
+                // The alias inherits the canonical's type.
+                let numeric = serde_json::json!({ *alias: 42 });
+                let refused_as_text = crate::tool_outcome::malformed_call(tool, &numeric, Some(c))
+                    .map_or(false, |r| r.contains(&format!("`{alias}`:number")));
+                if c.strings.iter().any(|f| f == canonical) {
+                    assert!(refused_as_text, "{tool}: `{alias}` stands for free-text `{canonical}`, so a number must be refused");
+                } else if c.scalars.iter().any(|f| f == canonical) {
+                    assert!(!refused_as_text, "{tool}: `{alias}` stands for scalar `{canonical}`, so a number must pass");
+                }
+                // If the catalog also DECLARES the alias, the two must agree about its type.
+                let alias_is_text = c.strings.iter().any(|f| f == alias);
+                let alias_is_scalar = c.scalars.iter().any(|f| f == alias);
+                if alias_is_text || alias_is_scalar {
+                    let canon_is_text = c.strings.iter().any(|f| f == canonical);
+                    assert_eq!(alias_is_text, canon_is_text, "{tool}: declared `{alias}` and `{canonical}` disagree about type");
+                }
+            }
+        }
+    }
+    assert!(checked >= 40, "the table must actually have been walked: {checked}");
+    assert!(with_contract >= 10, "the real catalog must have contributed contracts: {with_contract}");
+
+    // The six Codex named, end to end through the boundary the live loop uses.
+    for (tool, args) in [
+        ("deals", serde_json::json!({"item": "headphones"})),
+        ("watch_price", serde_json::json!({"item": "rtx 4070", "target": 450})),
+        ("learn_about", serde_json::json!({"query": "https://example.org/x"})),
+        ("track_subject", serde_json::json!({"query": "fusion"})),
+        ("about_person", serde_json::json!({"query": "Priya"})),
+        ("quote", serde_json::json!({"ticker": "RELIANCE.NS"})),
+        ("watch", serde_json::json!({"query": "https://example.org/v"})),
+    ] {
+        assert!(conv.admit_args(tool, &args).is_ok(), "{tool} {args} is servable and must be admitted");
+    }
+}

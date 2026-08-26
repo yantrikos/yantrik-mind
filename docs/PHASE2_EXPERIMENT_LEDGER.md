@@ -581,3 +581,16 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Actual metric | mind-memory 61/0 (+2), mind-observability 12/0, workspace 995/0. Live (box, bca555d): `ym pack library` lists 13 packs through the nanosecond-fingerprinted cache (web-craft@0.3.0 mounted; twelve library files, web-craft@0.3.1 among them - a different id, so no collision); `ym why routes` after the turn: lease 2 / abstain:tie 1 over 3 turns, "would-lease but nothing surfaced 2" (game-feel is in the library, not mounted - P.4's case in one line); `coverage router failed` count in the journal since the deploy: 0. |
 | Not claimed | That a re-seal inside one filesystem timestamp tick is detected: a seal takes longer than the tick, which is the assumption the fingerprint rests on and the test cannot force. A router failure is counted, not diagnosed - `ym why routes` shows the verdict; the error is in the service log. |
 | Decision | KEEP pending Codex's pass on this commit. |
+
+## E.PK2f - one alias table, driving both the boundary and the dispatch (from Codex's review of bca555d)
+
+*Amends E.PK2e. Two blockers, both accepted.*
+
+| Field | Entry |
+|---|---|
+| What was wrong with bca555d | (1) TWO SOURCES: `ARG_ALIASES` was written down but the handlers kept their own `s("a")`-then-`s("b")` chains, and the two had already drifted - `deals {"item"}`, `watch_price {"item"}`, `learn_about {"query"}`, `track_subject {"query"}`, `about_person {"query"}`, `quote {"ticker"}` and `watch {"query"}` were servable by the dispatch and refused by the boundary as missing a required field. The fix for false attribution had reintroduced false attribution. (2) LAUNDERING: `normalize_tool_args` stringified any array, so `run_skill {"name":[447193]}` became the name "447193" and `{"name":[{"x":1}]}` a JSON blob - a malformed call turned into a valid one, carrying the value the refusal exists to keep out of the record. |
+| Change | `tool_catalog::read_arg` / `read_num` resolve canonical-then-aliases from the table; the dispatch's `s()` and the capability handlers' reader go through them; the 22 hand-written chains are deleted; the 7 missing rows declared. The normalizer joins a list only when every element is a plain string or a content block wrapping text - anything else is preserved as an array and refused. |
+| Tests | Table-driven over every ARG_ALIASES row against the REAL catalog: dispatch finds the canonical under the alias; the contract resolves alias to canonical; the alias alone satisfies a required canonical; the alias inherits the canonical's type; where the catalog also declares the alias, the two agree about type. The 7 live shapes through `admit_args`. Normalizer: the numeric list, the arbitrary-object list, the mixed list, a block wrapping a number (all preserved and refused, no value in the refusal), and the valid content block (unwrapped and served). |
+| Actual metric | mind-conversation 423/0 (+3), workspace 1003/0. |
+| Not claimed | That every handler tolerance is now captured - the table was read from the dispatch and the capability handlers, and a NEW alias must be added to the table rather than to a handler. That is now enforceable by construction: a handler has no other way to read an argument. |
+| Decision | KEEP pending Codex's pass. |

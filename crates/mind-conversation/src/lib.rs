@@ -1081,17 +1081,31 @@ pub(crate) fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
                 let inner = o.get("content").or_else(|| o.get("text")).cloned().unwrap_or(Value::Null);
                 scalar(&inner)
             }
-            // A list of blocks — join their text, which is how a split string arrives.
+            // A list of TEXT — joined, which is how a split string arrives. ONLY a list whose every
+            // element is text (a plain string, or a content block wrapping text) is joined:
+            // stringifying anything else turned `run_skill {"name":[447193]}` into the name
+            // "447193" and `{"name":[{"x":1}]}` into a JSON blob, both of which then passed the
+            // boundary as free text — a malformed call laundered into a valid one, carrying the
+            // value the refusal exists to keep out of the record (Codex's review of P.2e).
+            // Anything else is preserved AS an array, so `malformed_call` refuses it.
             Value::Array(items) => {
-                let parts: Vec<String> = items
-                    .iter()
-                    .map(scalar)
-                    .filter_map(|s| match s {
-                        Value::String(s) => Some(s),
-                        Value::Null => None,
-                        other => Some(other.to_string()),
-                    })
-                    .collect();
+                let mut parts: Vec<String> = Vec::new();
+                for item in items {
+                    let text = match item {
+                        Value::String(s) => Some(s.clone()),
+                        Value::Object(o) if o.contains_key("content") || o.contains_key("text") => {
+                            match scalar(o.get("content").or_else(|| o.get("text")).unwrap_or(&Value::Null)) {
+                                Value::String(s) => Some(s),
+                                Value::Null => None,
+                                _ => return v.clone(),
+                            }
+                        }
+                        _ => return v.clone(),
+                    };
+                    if let Some(t) = text {
+                        parts.push(t);
+                    }
+                }
                 if parts.is_empty() { v.clone() } else { Value::String(parts.join("")) }
             }
             other => other.clone(),
@@ -7266,7 +7280,12 @@ impl ConversationEngine {
             Err(refused) => return refused,
         };
         let args = &args;
-        let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        // Every argument is read through the ALIAS TABLE the boundary validated against
+        // (`tool_catalog::read_arg`), so the dispatch and the contract cannot disagree about what a
+        // call means. The hand-written `s("a")`-then-`s("b")` chains that used to live in the arms
+        // below are gone with it: they were a second source, and it had already drifted in six
+        // places — servable calls refused as malformed (Codex's review of P.2e).
+        let s = |k: &str| tool_catalog::read_arg(tool, args, k);
         // Plugin gate: a tool owned by a DISABLED plugin is refused here (one check covers every tool).
         // Core tools (owned by no plugin) always pass; MCP tools are governed by their own catalog.
         let disabled_id = {
@@ -7292,7 +7311,8 @@ impl ConversationEngine {
             use mind_governance::egress::{EgressClass, EgressDecision, EgressRequest};
             if matches!(mind_governance::egress::classify(tool), Some(EgressClass::External(_))) {
                 let canon = mind_governance::egress::canonicalize(args);
-                let target = args.get("url").or_else(|| args.get("repo")).or_else(|| args.get("query")).and_then(|v| v.as_str());
+                let url = s("url");
+                let target = (!url.is_empty()).then_some(url.as_str());
                 let req = EgressRequest { principal: &id.owner, tool, target, source: "agent_tool", args_canonical: &canon };
                 if let EgressDecision::Deny(msg) = broker.authorize(&req) {
                     return msg;
@@ -7394,61 +7414,61 @@ impl ConversationEngine {
             // "money"/"subscriptions"/"finance" tools dispatch via the capability registry above.
             // NATIVE life/shopping tools — reachable from chat, not just the `ym` CLI.
             "deals" | "shop" | "shopping" | "find_deals" | "deal" => {
-                let q = { let a = s("query"); if !a.is_empty() { a } else { let b = s("item"); if !b.is_empty() { b } else { s("text") } } };
+                let q = s("query");
                 if q.is_empty() { return "What should I find deals on?".to_string(); }
                 // fold an optional budget/max into the query string (find_deals parses a trailing number)
-                let budget = args.get("budget").or_else(|| args.get("max")).and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|v| v.trim().trim_start_matches('$').replace(',', "").parse().ok())));
+                let budget = tool_catalog::read_num(tool, args, "budget");
                 let full = match budget { Some(b) => format!("{q} {}", b as i64), None => q };
                 self.find_deals(&full).await
             }
             "watch_price" | "track_price" | "pricewatch" | "watch_deal" => {
-                let q = { let a = s("query"); if !a.is_empty() { a } else { s("item") } };
+                let q = s("query");
                 if q.is_empty() { return "What item should I price-watch?".to_string(); }
-                let target = args.get("target").or_else(|| args.get("budget")).and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|v| v.trim().trim_start_matches('$').replace(',', "").parse().ok())));
+                let target = tool_catalog::read_num(tool, args, "target");
                 let full = match target { Some(t) => format!("{q} {}", t as i64), None => q };
                 self.watch_price(&full).await
             }
             "watches" | "watchlist" | "watching" => self.watches_view().await,
             "learn_about" | "learn" | "study" => {
-                let u = { let a = s("url"); if !a.is_empty() { a } else { s("query") } };
+                let u = s("url");
                 if u.is_empty() { return "Give me a link to learn from.".to_string(); }
                 self.learn_profile(&u).await
             }
             "track_subject" | "follow_subject" => {
-                let sub = { let a = s("subject"); if !a.is_empty() { a } else { s("query") } };
+                let sub = s("subject");
                 if sub.is_empty() { return "What subject should I track?".to_string(); }
                 self.evolve_understanding(&sub).await
             }
             "patterns" | "insights" => self.find_patterns().await,
             "family" | "relationships" => self.family_view().await,
             "about_person" | "person" => {
-                let n = { let a = s("name"); if !a.is_empty() { a } else { s("query") } };
+                let n = s("name");
                 if n.is_empty() { self.family_view().await } else { self.person_about(&n).await }
             }
             // news/headlines/track_news tools dispatch via the capability registry above.
             "see_page" | "screenshot_page" | "look_at_page" => self.see_page(&s("url"), &s("question")).await,
             "photo_send" | "send_photo" | "find_photo" => {
-                let q = { let a = s("query"); if a.is_empty() { s("text") } else { a } };
+                let q = s("query");
                 if q.is_empty() { "What photo should I look for?".to_string() } else { self.photo_find_and_send(&q).await }
             }
             "photo_patterns" | "photo_pattern" => {
-                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                let nm = s("name");
                 if nm.trim().is_empty() { self.photo_patterns(None, None, 10).await } else { self.photo_patterns(None, Some(nm.trim()), 10).await }
             }
             "growup_reel" | "reel" | "timelapse" => {
-                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                let nm = s("name");
                 if nm.trim().is_empty() { "Whose reel should I build?".to_string() } else { self.build_growup_reel(nm.trim()).await }
             }
             "photo_create" | "collage" | "compose_photo" => {
-                let q = { let a = s("request"); if a.is_empty() { s("query") } else { a } };
+                let q = s("request");
                 if q.trim().is_empty() { "What should I compose? Describe the collage or picture.".to_string() } else { self.photo_create(q.trim()).await }
             }
             "taste_profile" | "tastes" | "preference_profile" => {
-                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                let nm = s("name");
                 if nm.trim().is_empty() { "Whose tastes should I study?".to_string() } else { self.taste_study(nm.trim(), 40).await }
             }
             "person_items" | "inventory" | "closet" => {
-                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                let nm = s("name");
                 if nm.trim().is_empty() { "Whose photos should I inventory?".to_string() } else { self.person_inventory(nm.trim()).await }
             }
             "inbox_analytics" | "mail_analytics" | "inboxes" => self.inbox_analytics(30).await,
@@ -7471,7 +7491,7 @@ impl ConversationEngine {
                 }
             }
             "mail_search" | "mailsearch" | "search_mail" => {
-                let q = { let a = s("query"); if a.is_empty() { s("q") } else { a } };
+                let q = s("query");
                 if q.is_empty() {
                     "mail_search needs a 'query'".to_string()
                 } else {
@@ -7491,7 +7511,7 @@ impl ConversationEngine {
                 None => "No frame pick available right now.".to_string(),
             },
             "style_timeline" | "style" => {
-                let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
+                let who = s("person");
                 if who.is_empty() {
                     "style_timeline needs a 'person'".to_string()
                 } else {
@@ -7499,7 +7519,7 @@ impl ConversationEngine {
                 }
             }
             "share_with_member" | "share" => {
-                let member = { let a = s("member"); if a.is_empty() { s("person") } else { a } };
+                let member = s("member");
                 if member.is_empty() {
                     "share_with_member needs a 'member'".to_string()
                 } else {
@@ -7507,7 +7527,7 @@ impl ConversationEngine {
                 }
             }
             "find_younger_self" | "younger_self" => {
-                let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
+                let who = s("person");
                 if who.is_empty() {
                     "find_younger_self needs a 'person'".to_string()
                 } else {
@@ -7515,7 +7535,7 @@ impl ConversationEngine {
                 }
             }
             "then_and_now" | "thennow" => {
-                let who = { let a = s("person"); if a.is_empty() { s("name") } else { a } };
+                let who = s("person");
                 if who.is_empty() {
                     "then_and_now needs a 'person'".to_string()
                 } else {
@@ -7527,19 +7547,19 @@ impl ConversationEngine {
                 None => self.book_toc().await,
             },
             "event_ledger" | "events" | "event" => {
-                let q = { let a = s("query"); if a.is_empty() { s("date") } else { a } };
+                let q = s("query");
                 self.events_list(q.trim()).await
             }
             "trip_ledger" | "trips" | "trip" => {
-                let q = { let a = s("query"); if a.is_empty() { s("place") } else { a } };
+                let q = s("query");
                 if q.trim().is_empty() { self.trips_list("").await } else { self.trip_brief(q.trim()).await }
             }
             "bill_autopay" | "autopay" => {
-                let n = { let a = s("name"); if a.is_empty() { s("bill") } else { a } };
+                let n = s("name");
                 self.bill_autopay(&n).await
             }
             "mail_rule" | "mailrule" => {
-                let r = { let a = s("rule"); if a.is_empty() { s("text") } else { a } };
+                let r = s("rule");
                 if r.trim().is_empty() {
                     "What's the rule?".to_string()
                 } else {
@@ -7551,7 +7571,7 @@ impl ConversationEngine {
                 }
             }
             "gift_intel" | "gift_ideas" => {
-                let nm = { let a = s("name"); if a.is_empty() { s("query") } else { a } };
+                let nm = s("name");
                 if nm.trim().is_empty() { "Whose photos should I study for gift ideas?".to_string() } else { self.gift_intel(nm.trim()).await }
             }
             "enhance_photo" => {
@@ -7579,7 +7599,7 @@ impl ConversationEngine {
                 "Queued — the next unknown face goes to the chat momentarily.".to_string()
             }
             "calendar_remove" | "remove_event" => {
-                let t = { let a = s("title"); if a.is_empty() { s("query") } else { a } };
+                let t = s("title");
                 self.calendar_remove(&t).await
             }
             "forget_date" | "remove_date" => self.forget_person_date(&s("name"), &s("label")).await,
@@ -7660,11 +7680,13 @@ impl ConversationEngine {
                 self.hunt(act).await
             }
             "surf" | "feeds" => {
-                let spec = args.get("handles").or_else(|| args.get("spec")).and_then(|v| v.as_str()).unwrap_or("");
+                let spec_owned = s("handles");
+                let spec = spec_owned.as_str();
                 self.surf_feeds(spec).await
             }
             "copy_trade" | "copy_desk" => {
-                let url = args.get("url").or_else(|| args.get("link")).and_then(|v| v.as_str()).unwrap_or("");
+                let url_owned = s("url");
+                let url = url_owned.as_str();
                 if url.trim().is_empty() {
                     return "(copy_trade needs the url of a live trading broadcast)".to_string();
                 }
@@ -7676,18 +7698,14 @@ impl ConversationEngine {
                 // Model-authored args arrive under whatever key the model felt like. Reading only
                 // "symbols" meant the tool returned empty and the mind honestly reported that its
                 // "quote lookup came back empty" — a working capability defeated by a key name.
-                let q = ["symbols", "symbol", "ticker", "tickers", "query", "text", "input", "name"]
-                    .iter()
-                    .map(|k| s(k))
-                    .find(|v| !v.trim().is_empty())
-                    .unwrap_or_default();
+                let q = s("symbols");
                 if q.trim().is_empty() {
                     return "(need a symbol, e.g. SPY or RELIANCE.NS)".to_string();
                 }
                 self.quote_symbols(&q).await
             }
             "watch" | "watch_media" | "listen" => {
-                let url = if s("url").trim().is_empty() { s("link") } else { s("url") };
+                let url = s("url");
                 let url = if url.trim().is_empty() { mind_tools::first_url(&s("query")).unwrap_or_default() } else { url };
                 if url.trim().is_empty() {
                     return "(need a media url to watch)".to_string();

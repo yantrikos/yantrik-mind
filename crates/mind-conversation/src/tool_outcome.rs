@@ -581,8 +581,21 @@ mod malformed_tests {
         let c = contracts();
         // The contract carries the handler's aliases, read from one table.
         assert_eq!(c["calc"].aliases, vec![("expression".to_string(), vec!["expr".to_string()])]);
-        assert_eq!(c["deals"].aliases, vec![("budget".to_string(), vec!["max".to_string()])]);
-        assert_eq!(c["watch_price"].aliases, vec![("target".to_string(), vec!["budget".to_string()])]);
+        // A tool may declare several fields' aliases; each row is (canonical, aliases in order).
+        assert_eq!(
+            c["deals"].aliases,
+            vec![
+                ("budget".to_string(), vec!["max".to_string()]),
+                ("query".to_string(), vec!["item".to_string(), "text".to_string()]),
+            ]
+        );
+        assert_eq!(
+            c["watch_price"].aliases,
+            vec![
+                ("target".to_string(), vec!["budget".to_string()]),
+                ("query".to_string(), vec!["item".to_string()]),
+            ]
+        );
         assert!(c["run_skill"].aliases.is_empty(), "run_skill's handler takes no synonym: {:?}", c["run_skill"].aliases);
         // calc {"expr"} is calc {expression}: the two bounded-loop tests that caught P.2d's first cut.
         assert!(malformed_call("calc", &serde_json::json!({"expr": "6*7"}), c.get("calc")).is_none());
@@ -604,5 +617,35 @@ mod malformed_tests {
         assert!(malformed_call("watch_price", &serde_json::json!({"query": "rtx 4070", "budget": 450}), c.get("watch_price")).is_none());
         assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "max": 300}), c.get("deals")).is_none(), "max is deals' budget");
         assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "max": "300"}), c.get("deals")).is_none());
+    }
+
+    /// P.2f (Codex's review of P.2e): the normalizer unwraps a list only when every element is
+    /// TEXT. Stringifying anything else laundered a malformed call into a valid one — and carried
+    /// the value into the record the refusal exists to keep out of it.
+    #[test]
+    fn only_a_list_of_text_is_unwrapped_by_the_normalizer() {
+        let n = crate::normalize_tool_args;
+        // The documented shapes still work.
+        assert_eq!(n(serde_json::json!({"name": [{"type": "text", "content": "csv-clean"}]})), serde_json::json!({"name": "csv-clean"}));
+        assert_eq!(n(serde_json::json!({"name": ["csv", "-clean"]})), serde_json::json!({"name": "csv-clean"}), "a split string is one string");
+        assert_eq!(n(serde_json::json!({"name": [{"text": "a"}, "b"]})), serde_json::json!({"name": "ab"}));
+        // A PIN-shaped number in a list is not a name.
+        assert_eq!(n(serde_json::json!({"name": [447193]})), serde_json::json!({"name": [447193]}), "a number must stay an array");
+        assert_eq!(n(serde_json::json!({"name": [{"x": 1}]})), serde_json::json!({"name": [{"x": 1}]}), "an arbitrary object must stay an array");
+        assert_eq!(n(serde_json::json!({"name": ["ok", 447193]})), serde_json::json!({"name": ["ok", 447193]}), "one bad element preserves the list");
+        assert_eq!(n(serde_json::json!({"name": [{"type": "text", "content": 447193}]})), serde_json::json!({"name": [{"type": "text", "content": 447193}]}), "a block wrapping a number is not text");
+        // ...and the boundary refuses every preserved one, naming the type and never the value.
+        let c = contracts();
+        for bad in [
+            serde_json::json!({"name": [447193]}),
+            serde_json::json!({"name": [{"x": 1}]}),
+            serde_json::json!({"name": ["ok", 447193]}),
+            serde_json::json!({"name": [{"type": "text", "content": 447193}]}),
+        ] {
+            let refusal = malformed_call("run_skill", &n(bad.clone()), c.get("run_skill")).unwrap_or_else(|| panic!("must refuse {bad}"));
+            assert!(refusal.contains("`name`:array"), "{refusal}");
+            assert!(!refusal.contains("447193"), "the value reached the refusal: {refusal}");
+        }
+        assert!(malformed_call("run_skill", &n(serde_json::json!({"name": [{"type": "text", "content": "csv-clean"}]})), c.get("run_skill")).is_none());
     }
 }

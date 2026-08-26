@@ -429,7 +429,15 @@ impl Bus for EngineBus {
     /// auto-quarantines below half over four runs). A guidance procedure has nowhere to record to yet,
     /// so this is a no-op for it rather than a silent lie about being tracked.
     async fn record_procedure_outcome(&self, name: &str, ok: bool) {
-        let _ = self.engine.memory.record_skill_outcome(name, ok).await;
+        // This caller HAS judged the outcome — it is the arc's own assessment of whether following
+        // the procedure worked, which is what `task_success` means. Recorded as an operator-grade
+        // verdict rather than as executor completion (E.P5b).
+        let outcome = mind_types::SkillOutcome {
+            executor_ok: true,
+            task_success: Some(ok),
+            basis: mind_types::TaskBasis::Operator,
+        };
+        let _ = self.engine.memory.record_skill_outcome(name, outcome).await;
     }
 
     /// Bank an approach that worked.

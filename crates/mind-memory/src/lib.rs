@@ -91,7 +91,7 @@ enum Cmd {
     GetSkill { name: String, reply: Reply<Option<Skill>> },
     ListSkills { reply: Reply<Vec<Skill>> },
     RecallSkills { query: String, limit: usize, reply: Reply<Vec<Skill>> },
-    RecordSkillOutcome { name: String, success: bool, reply: Reply<()> },
+    RecordSkillOutcome { name: String, outcome: mind_types::SkillOutcome, reply: Reply<()> },
     // Attachable expertise. Mount/unmount are process-local; install copies the pack beside the db
     // so it comes back on every open.
     MountPack { path: String, reply: Reply<String> },
@@ -2355,9 +2355,18 @@ fn ensure_skills_table(db: &YantrikDB) {
     let _ = db.conn().execute(
         "CREATE TABLE IF NOT EXISTS mind_skills \
          (name TEXT PRIMARY KEY, lang TEXT NOT NULL, code TEXT NOT NULL, summary TEXT NOT NULL, \
-          tags TEXT NOT NULL, status TEXT NOT NULL, runs INTEGER NOT NULL, successes INTEGER NOT NULL, created_ms INTEGER NOT NULL)",
+          tags TEXT NOT NULL, status TEXT NOT NULL, runs INTEGER NOT NULL, successes INTEGER NOT NULL, created_ms INTEGER NOT NULL, \
+          graded INTEGER NOT NULL DEFAULT 0, executor_ok INTEGER NOT NULL DEFAULT 0)",
         [],
     );
+    // For databases that already exist. `graded` DEFAULTS TO 0 on legacy rows on purpose: their
+    // `successes` conflated "the executor finished" with "the task got done", and the honest
+    // reading of a number that meant two things is that it means neither. They read as UNTESTED
+    // until judged runs accumulate - Codex's "migrate historical to unknown", achieved without
+    // destroying the old counts, which are still in the table if anyone wants to audit them.
+    for col in ["graded INTEGER NOT NULL DEFAULT 0", "executor_ok INTEGER NOT NULL DEFAULT 0"] {
+        let _ = db.conn().execute(&format!("ALTER TABLE mind_skills ADD COLUMN {col}"), []);
+    }
 }
 
 /// A knowledge pack's LOCAL track record (ARCH-6 P.2): the SQL witness beside the flight
@@ -3061,6 +3070,7 @@ fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
         status: r.get(5)?,
         runs: r.get::<_, i64>(6)? as u64,
         successes: r.get::<_, i64>(7)? as u64,
+        graded: r.get::<_, i64>(9)? as u64,
         created_ms: r.get::<_, i64>(8)? as u64,
     })
 }
@@ -3071,10 +3081,12 @@ fn save_skill(db: &YantrikDB, s: &Skill) -> std::result::Result<(), String> {
     let tags = serde_json::to_string(&s.tags).unwrap_or_else(|_| "[]".into());
     db.conn()
         .execute(
-            "INSERT INTO mind_skills (name,lang,code,summary,tags,status,runs,successes,created_ms) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+            // The ledger columns are set on INSERT and deliberately NOT touched by the conflict
+            // update: re-saving a skill must not reset its track record.
+            "INSERT INTO mind_skills (name,lang,code,summary,tags,status,runs,successes,created_ms,graded) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
              ON CONFLICT(name) DO UPDATE SET lang=?2,code=?3,summary=?4,tags=?5,status=?6",
-            rusqlite::params![s.name, s.lang, s.code, s.summary, tags, s.status, s.runs as i64, s.successes as i64, s.created_ms as i64],
+            rusqlite::params![s.name, s.lang, s.code, s.summary, tags, s.status, s.runs as i64, s.successes as i64, s.created_ms as i64, s.graded as i64],
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3082,7 +3094,7 @@ fn save_skill(db: &YantrikDB, s: &Skill) -> std::result::Result<(), String> {
 
 fn get_skill(db: &YantrikDB, name: &str) -> std::result::Result<Option<Skill>, String> {
     db.conn()
-        .query_row("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms FROM mind_skills WHERE name=?1", [name], skill_row)
+        .query_row("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms,graded FROM mind_skills WHERE name=?1", [name], skill_row)
         .optional()
         .map_err(|e| e.to_string())
 }
@@ -3090,7 +3102,7 @@ fn get_skill(db: &YantrikDB, name: &str) -> std::result::Result<Option<Skill>, S
 fn list_skills(db: &YantrikDB) -> std::result::Result<Vec<Skill>, String> {
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms FROM mind_skills ORDER BY created_ms DESC")
+        .prepare("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms,graded FROM mind_skills ORDER BY created_ms DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], skill_row).map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -3141,21 +3153,34 @@ fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Resu
     Ok(scored.into_iter().take(limit).map(|(_, s)| s).collect())
 }
 
-fn record_skill_outcome(db: &YantrikDB, name: &str, success: bool) -> std::result::Result<(), String> {
+fn record_skill_outcome(db: &YantrikDB, name: &str, outcome: mind_types::SkillOutcome) -> std::result::Result<(), String> {
     let conn = db.conn();
+    // Three counters for three questions. `runs` is every attempt; `executor_ok` is how often the
+    // RUNNER got through; `graded` is how often anybody judged the deliverable, and it is the only
+    // honest denominator for `successes` (E.P5b).
     conn.execute(
-        "UPDATE mind_skills SET runs = runs + 1, successes = successes + ?2 WHERE name = ?1",
-        rusqlite::params![name, if success { 1i64 } else { 0 }],
+        "UPDATE mind_skills SET runs = runs + 1, executor_ok = executor_ok + ?2, \
+         graded = graded + ?3, successes = successes + ?4 WHERE name = ?1",
+        rusqlite::params![
+            name,
+            i64::from(outcome.executor_ok),
+            i64::from(outcome.is_graded()),
+            i64::from(outcome.is_task_success()),
+        ],
     )
     .map_err(|e| e.to_string())?;
     // Auto-quarantine a flaky skill. The rule USED TO LIVE HERE, as an SQL predicate
     // (`runs>=4 AND (successes*2) < runs`) — a policy in a second language, which is a policy that
     // can drift from the Rust copies of it, and this one already had. Read the counts back and ask
     // the one verdict function (E.P5a).
-    let (runs, successes): (i64, i64) = conn
-        .query_row("SELECT runs, successes FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
+    //
+    // Over GRADED runs, not attempts. Judging on attempts would quarantine every document after
+    // four runs, because a document nobody assessed contributes an attempt and no success — it
+    // would read as four straight failures when nothing had failed at all (E.P5b).
+    let (graded, successes): (i64, i64) = conn
+        .query_row("SELECT graded, successes FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(|e| e.to_string())?;
-    if mind_types::reliability::Reliability::new(runs.max(0) as u32, successes.max(0) as u32).is_discredited() {
+    if mind_types::reliability::Reliability::new(graded.max(0) as u32, successes.max(0) as u32).is_discredited() {
         conn.execute("UPDATE mind_skills SET status='quarantined' WHERE name=?1", [name]).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -3537,8 +3562,8 @@ impl MemoryHandle {
                         Cmd::RecallSkills { query, limit, reply } => {
                             let _ = reply.send(recall_skills(&db, &query, limit));
                         }
-                        Cmd::RecordSkillOutcome { name, success, reply } => {
-                            let _ = reply.send(record_skill_outcome(&db, &name, success));
+                        Cmd::RecordSkillOutcome { name, outcome, reply } => {
+                            let _ = reply.send(record_skill_outcome(&db, &name, outcome));
                         }
                         Cmd::MountPack { path, reply } => {
                             // The engine REFUSES a pack built against a different embedder
@@ -4459,9 +4484,9 @@ impl MemoryFacade for MemoryHandle {
         let query = query.to_string();
         self.call(|reply| Cmd::RecallSkills { query, limit, reply }).await
     }
-    async fn record_skill_outcome(&self, name: &str, success: bool) -> Result<()> {
+    async fn record_skill_outcome(&self, name: &str, outcome: mind_types::SkillOutcome) -> Result<()> {
         let name = name.to_string();
-        self.call(|reply| Cmd::RecordSkillOutcome { name, success, reply }).await
+        self.call(|reply| Cmd::RecordSkillOutcome { name, outcome, reply }).await
     }
     async fn uninstall_pack(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
@@ -5263,6 +5288,7 @@ mod tests {
             status: "active".into(),
             runs: 4,
             successes: 4,
+            graded: 0,
             created_ms: 0,
         })
         .await
@@ -6313,6 +6339,7 @@ mod tests {
                 status: "active".into(),
                 runs: 3,
                 successes: 3,
+                graded: 0,
                 created_ms: 0,
             })
             .await
@@ -7666,5 +7693,113 @@ mod sec1b_boundary {
         for clean in ["asian food recipes", "the task list for Tuesday", "how do passwords work?", "order 100000000000 shipped"] {
             assert!(super::gate_write(clean).is_ok(), "ordinary life must still be writable: {clean:?}");
         }
+    }
+}
+
+/// E.P5b — Codex's acceptance tests, at the ledger rather than the type.
+#[cfg(test)]
+mod p5b_ledger {
+    use mind_types::{MemoryFacade, Skill, SkillOutcome, TaskBasis};
+    use std::sync::Arc;
+
+    async fn bank(mem: &Arc<dyn MemoryFacade>, name: &str, lang: &str) {
+        mem.save_skill(Skill {
+            name: name.into(),
+            lang: lang.into(),
+            code: "x".into(),
+            summary: "s".into(),
+            tags: vec![],
+            status: "active".into(),
+            runs: 0,
+            successes: 0,
+            graded: 0,
+            created_ms: 0,
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn get(mem: &Arc<dyn MemoryFacade>, name: &str) -> Skill {
+        mem.get_skill(name).await.unwrap().expect("banked")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unjudged_run_never_strengthens_a_skill_and_never_condemns_one() {
+        // Codex's acceptance test 1. The case that started this: a document ran perfectly and
+        // answered "I cannot perform this task", and the ledger recorded a success because the
+        // EXECUTOR had finished. It must now record an attempt and no evidence.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "doc", "md").await;
+
+        for _ in 0..10 {
+            mem.record_skill_outcome("doc", SkillOutcome::ungraded()).await.unwrap();
+        }
+        let s = get(&mem, "doc").await;
+        assert_eq!(s.runs, 10, "every attempt is counted");
+        assert_eq!(s.graded, 0, "and none of them is evidence");
+        assert_eq!(s.successes, 0);
+        assert_eq!(s.reliability().rate(), None, "no rate can be computed from nothing");
+        assert!(!s.reliability().is_discredited());
+
+        // AND THE REGRESSION THIS GUARDS: judged over `runs`, ten unassessed runs would read as ten
+        // straight failures and quarantine a document that never failed at all.
+        assert_eq!(s.status, "active", "an unjudged document must not be auto-quarantined");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_infrastructure_failure_is_not_a_deliverable_and_not_a_task_failure() {
+        // Codex's acceptance test 3, live on the box before fa908a9: an
+        // "OpenAI-compatible API request failed" reached the job board under a green tick.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "flaky-provider", "md").await;
+
+        for _ in 0..6 {
+            mem.record_skill_outcome("flaky-provider", SkillOutcome::executor_failed()).await.unwrap();
+        }
+        let s = get(&mem, "flaky-provider").await;
+        assert_eq!(s.successes, 0, "an outage is never a success");
+        assert_eq!(s.graded, 0, "and never evidence against the skill either");
+        assert_eq!(s.status, "active", "the provider having a bad afternoon must not discredit a skill");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_judged_record_moves_the_verdict() {
+        // Codex's acceptance test 2: exit 0 reaches task_success through the code adapter, and the
+        // quarantine line is drawn over JUDGED runs.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "code", "python").await;
+
+        mem.record_skill_outcome("code", SkillOutcome::from_exit(true)).await.unwrap();
+        let s = get(&mem, "code").await;
+        assert_eq!((s.runs, s.graded, s.successes), (1, 1, 1));
+        assert_eq!(s.reliability().rate(), Some(1.0));
+
+        // Four judged failures against one judged success: below the line, and quarantined.
+        for _ in 0..4 {
+            mem.record_skill_outcome("code", SkillOutcome::from_exit(false)).await.unwrap();
+        }
+        let s = get(&mem, "code").await;
+        assert_eq!((s.runs, s.graded, s.successes), (5, 5, 1));
+        assert!(s.reliability().is_discredited(), "1 of 5 judged is below the line");
+        assert_eq!(s.status, "quarantined");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unjudged_runs_cannot_dilute_a_judged_record() {
+        // The mirror of the first test: interleaving unassessed runs must not rescue a skill that
+        // IS failing, any more than it should condemn one nobody assessed.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "mixed", "md").await;
+
+        for _ in 0..4 {
+            mem.record_skill_outcome("mixed", SkillOutcome::judged(false)).await.unwrap();
+            mem.record_skill_outcome("mixed", SkillOutcome::ungraded()).await.unwrap();
+        }
+        let s = get(&mem, "mixed").await;
+        assert_eq!(s.runs, 8, "eight attempts");
+        assert_eq!(s.graded, 4, "four of which were judged");
+        assert_eq!(s.reliability().rate(), Some(0.0), "and the rate is over those four");
+        assert_eq!(s.status, "quarantined");
+        assert_eq!(TaskBasis::StructuredJudge.label(), "structured_judge");
     }
 }

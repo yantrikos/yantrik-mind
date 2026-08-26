@@ -242,7 +242,10 @@ impl ConversationEngine {
         let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
         let result = out.vars.get("result").and_then(|v| v.as_str()).map(|s| s.to_string());
         let ok = out.error.is_none() && result.as_deref().map(|r| !r.trim().is_empty()).unwrap_or(false);
-        let _ = self.memory.record_skill_outcome(bank_name, ok).await;
+        // `ok` here means the recipe produced non-empty text. That is the executor finishing, not
+        // the answer being right (E.P5b).
+        let outcome = if ok { mind_types::SkillOutcome::ungraded() } else { mind_types::SkillOutcome::executor_failed() };
+        let _ = self.memory.record_skill_outcome(bank_name, outcome).await;
         match result {
             Some(r) if ok => (true, r),
             _ => (false, format!("(pack skill '{bank_name}' produced nothing{})", out.error.map(|e| format!(": {e}")).unwrap_or_default())),
@@ -342,6 +345,7 @@ impl ConversationEngine {
                     status: "active".into(),
                     runs: 0,
                     successes: 0,
+                    graded: 0,
                     created_ms: now,
                 };
                 if let Err(e) = self.memory.save_skill(s).await {

@@ -471,6 +471,7 @@ impl super::ConversationEngine {
                 status: "candidate".into(),
                 runs: 0,
                 successes: 0,
+                graded: 0,
                 created_ms: Self::now_ms(),
             };
             return Some(match self.memory.save_skill(skill).await {
@@ -522,10 +523,17 @@ impl super::ConversationEngine {
         match res {
             Ok(r) => {
                 let ok = r.exit_code == 0 && !r.timed_out;
-                let _ = self.memory.record_skill_outcome(&sk.name, ok).await;
-                format!("Ran skill \"{}\" (prior {}/{} ok):\n\n{}", sk.name, sk.successes, sk.runs, r.render())
+                // THE code-skill adapter, and the only path allowed to reach `task_success`
+                // through an exit code (E.P5b).
+                let _ = self.memory.record_skill_outcome(&sk.name, mind_types::SkillOutcome::from_exit(ok)).await;
+                format!("Ran skill \"{}\" (prior {}/{} judged ok):\n\n{}", sk.name, sk.successes, sk.graded, r.render())
             }
-            Err(e) => format!("Couldn't run skill \"{}\" — sandbox unavailable ({e}).", sk.name),
+            Err(e) => {
+                // No sandbox is an INFRASTRUCTURE failure. It says nothing about the skill, so it
+                // must not enter the denominator that decides whether to keep using it.
+                let _ = self.memory.record_skill_outcome(&sk.name, mind_types::SkillOutcome::executor_failed()).await;
+                format!("Couldn't run skill \"{}\" — sandbox unavailable ({e}).", sk.name)
+            }
         }
     }
 

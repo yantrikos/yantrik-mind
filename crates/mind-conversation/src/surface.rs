@@ -383,6 +383,9 @@ pub struct SkillRow {
     /// `None` when never run. NOT 1.0 — an untested skill has no rate, and showing one would present
     /// an assumption as a measurement.
     pub success_rate: Option<f64>,
+    /// How many runs anybody actually JUDGED. `runs` is attempts; this is evidence. A rate without
+    /// its denominator said aloud is how "2 successes" hid the fact that nothing was assessed.
+    pub graded: u64,
     /// Below half over four or more runs: the store's own quarantine rule, surfaced so the operator
     /// can see a skill on its way out rather than discovering it gone.
     pub failing: bool,
@@ -770,6 +773,7 @@ impl ConversationEngine {
                 successes: s.successes,
                 success_rate,
                 failing,
+                graded: 0,
                 created_ms: s.created_ms,
             });
         }
@@ -1325,6 +1329,11 @@ mod tests {
             status: "active".into(),
             runs,
             successes: ok,
+            // These fixtures stand for a JUDGED track record — the whole point of the test is a
+            // skill whose failures were observed. Since E.P5b the denominator is `graded`, not
+            // `runs`: a run nobody assessed is not a failure, so leaving this 0 would have made an
+            // 8-run skill read as untested.
+            graded: runs,
             created_ms: 0,
         };
         mem.save_skill(skill("fresh", 0, 0)).await.unwrap();

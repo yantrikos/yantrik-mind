@@ -1691,6 +1691,7 @@ async fn auto_select_suggests_a_matching_skill() {
             status: "candidate".into(),
             runs: 0,
             successes: 0,
+            graded: 0,
             created_ms: 0,
         })
         .await
@@ -2798,18 +2799,18 @@ async fn pack_lifecycle_install_certify_demote_draft() {
     // 4. DRAFT: a proven banked skill self-authors into a certified pack.
     let now = chrono::Utc::now().timestamp_millis() as u64;
     memarc
-        .save_skill(mind_types::Skill { name: "csv summer".into(), lang: "md".into(), code: "Sum the csv.".into(), summary: "sums csv numbers".into(), tags: vec![], status: "active".into(), runs: 0, successes: 0, created_ms: now })
+        .save_skill(mind_types::Skill { name: "csv summer".into(), lang: "md".into(), code: "Sum the csv.".into(), summary: "sums csv numbers".into(), tags: vec![], status: "active".into(), runs: 0, successes: 0, graded: 0, created_ms: now })
         .await
         .unwrap();
-    memarc.record_skill_outcome("csv summer", true).await.unwrap();
+    memarc.record_skill_outcome("csv summer", mind_types::SkillOutcome::judged(true)).await.unwrap();
     let draft = conv.cli_dispatch("pack draft csv", &ctx).await;
     assert!(draft.contains("self_authored") && draft.contains("certified"), "proven skill must draft into a certified pack: {draft}");
 
     // 5. DEMOTION: quarantine-grade failure — break the reliability the draft's eval requires.
     // (The draft's smoke eval recorded one success, so: 2 ok + 3 fail = 40% < 50%.)
-    memarc.record_skill_outcome("csv summer", false).await.unwrap();
-    memarc.record_skill_outcome("csv summer", false).await.unwrap();
-    memarc.record_skill_outcome("csv summer", false).await.unwrap();
+    memarc.record_skill_outcome("csv summer", mind_types::SkillOutcome::judged(false)).await.unwrap();
+    memarc.record_skill_outcome("csv summer", mind_types::SkillOutcome::judged(false)).await.unwrap();
+    memarc.record_skill_outcome("csv summer", mind_types::SkillOutcome::judged(false)).await.unwrap();
     let recert = conv.pack_certify("csv_pack").await;
     assert!(recert.contains("NOT certified"), "regressed reliability must demote: {recert}");
     let listing = conv.cli_dispatch("packs", &ctx).await;
@@ -4993,6 +4994,7 @@ async fn an_instruction_document_runs_instead_of_being_refused() {
         status: "active".into(),
         runs: 0,
         successes: 0,
+        graded: 0,
         created_ms: 0,
     })
     .await
@@ -5052,6 +5054,7 @@ fn banked(name: &str, lang: &str, code: &str) -> mind_types::Skill {
         status: "active".into(),
         runs: 0,
         successes: 0,
+        graded: 0,
         created_ms: 0,
     }
 }

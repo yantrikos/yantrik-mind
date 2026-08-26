@@ -347,13 +347,26 @@ pub struct Skill {
     pub summary: String,
     pub tags: Vec<String>,
     pub status: String, // "candidate" | "active" | "quarantined"
+    /// Every attempt, judged or not.
     pub runs: u64,
+    /// Attempts where the TASK was accomplished (`task_success == Some(true)`).
     pub successes: u64,
+    /// Attempts anybody actually JUDGED — the denominator `successes` belongs over.
+    ///
+    /// `runs` is the wrong denominator and always was: a document that ran fine and was never
+    /// assessed is not a failure, and counting it as one would quarantine every document after
+    /// four runs. Legacy rows carry `graded = 0`, which reads as UNTESTED rather than as the
+    /// conflated number it used to be - Codex's "migrate historical to unknown" (E.P5b).
+    pub graded: u64,
     pub created_ms: u64,
 }
 
 impl Skill {
-    /// What is actually known about this skill's outcomes.
+    /// What is actually known about this skill's outcomes — over the runs somebody JUDGED.
+    ///
+    /// Not over `runs`. See [`Skill::graded`]: an unjudged run is not evidence, and pooling it with
+    /// judged ones is the conflation E.P5b ended (E.P5a built the verdict; this gave it an honest
+    /// denominator).
     ///
     /// `success_rate()` used to serve two meanings at once — an optimism prior for RANKING (1.0 at
     /// zero runs, so a new skill gets tried at all) and a claim about reliability (where that 1.0
@@ -361,7 +374,13 @@ impl Skill {
     /// hand-rolled guards and comments saying so. Now the ranking half is `rank_score()` and the
     /// truth is here (E.P5a).
     pub fn reliability(&self) -> crate::reliability::Reliability {
-        crate::reliability::Reliability::new(self.runs as u32, self.successes as u32)
+        crate::reliability::Reliability::new(self.graded as u32, self.successes as u32)
+    }
+
+    /// How often the RUNNER got through, which is a different question and a different ledger.
+    /// Kept separate on purpose: an API outage must never discredit a skill.
+    pub fn attempts(&self) -> u64 {
+        self.runs
     }
 
     /// The optimism prior for ranking. See [`crate::reliability::Reliability::rank_score`].
@@ -811,7 +830,10 @@ pub trait MemoryFacade: Send + Sync {
     /// Recall skills relevant to a task (ranked by name/summary/tag match).
     async fn recall_skills(&self, query: &str, limit: usize) -> Result<Vec<Skill>>;
     /// Record a run outcome → updates runs/successes; auto-quarantines a flaky skill.
-    async fn record_skill_outcome(&self, name: &str, success: bool) -> Result<()>;
+    /// Record one run. Takes a typed [`crate::SkillOutcome`] rather than a bare bool, because a
+    /// bool made every caller decide what it meant and they decided differently — an API outage,
+    /// a clean exit and a model that finished a sentence all became the same `true` (E.P5b).
+    async fn record_skill_outcome(&self, name: &str, outcome: crate::SkillOutcome) -> Result<()>;
 
     // ── attachable expertise: YantrikDB knowledge packs ────────────────────────────────────────
     //

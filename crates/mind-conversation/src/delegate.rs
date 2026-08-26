@@ -767,7 +767,10 @@ impl super::ConversationEngine {
         };
         // The outcome is recorded AFTER the run and reports what happened (E.SK1).
         let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
-        let _ = self.memory.record_skill_outcome(&sk.name, out.ok).await;
+        // The recipe completing is EXECUTOR news. Whether the monitor actually told the household
+        // anything useful is unjudged, so it stays out of the success denominator (E.P5b).
+        let outcome = if out.ok { mind_types::SkillOutcome::ungraded() } else { mind_types::SkillOutcome::executor_failed() };
+        let _ = self.memory.record_skill_outcome(&sk.name, outcome).await;
         if out.sleeping_until.is_some() {
             format!("Running skill '{}' — watching {label} for \"{target}\".", sk.name)
         } else if !out.notifications.is_empty() {
@@ -883,7 +886,12 @@ impl super::ConversationEngine {
             // completed, not that the task was accomplished -- a document that correctly refuses
             // still counts here. Named as a residual in E.SK3; separating them needs a judge on
             // the deliverable.
-            let _ = mem.record_skill_outcome(&name2, ok).await;
+            // A DOCUMENT. `ok` is the researcher finishing, not the deliverable being any good —
+            // and the case that started this was a document that ran perfectly and answered "I
+            // cannot perform this task". Ungraded until something competent judges it; a generated
+            // refusal must never strengthen a skill (E.P5b, Codex's acceptance test 1).
+            let outcome = if ok { mind_types::SkillOutcome::ungraded() } else { mind_types::SkillOutcome::executor_failed() };
+            let _ = mem.record_skill_outcome(&name2, outcome).await;
             ledger_update(&mem, &id2, if ok { "done" } else { "failed" }, Some(msg.clone())).await;
             q.lock().unwrap().push(msg);
             jobs.fetch_sub(1, Ordering::Relaxed);

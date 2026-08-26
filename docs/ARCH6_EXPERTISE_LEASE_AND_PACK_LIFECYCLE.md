@@ -287,20 +287,44 @@ entry with the fields below, KEEP/KILL decided on the box.
 |---|---|---|---|---|
 | P.1 pack floor + identity | `55d9c3f` | yes | E.PK1 KEEP | Codex passed |
 | P.2 pack telemetry | `26511c9` | yes | E.PK2 KEEP | Codex passed |
-| P.3 coverage router (SHADOWED) | `f0e4275` → `9b58975` | yes | E.PK3 KEEP, E.PK3b | superseded by P.3b |
-| P.2b–P.2d argument boundary | `67e36f5` → `b4c455b` | yes | E.PK2b, E.PK2d KEEP | superseded by P.2e/P.2f |
-| P.2e + P.3b | `bca555d` | yes | E.PK2e, E.PK3b | **superseded by P.2f** |
-| P.4 standing leases | `59b3b5c` | yes | E.PK4 KEEP | **superseded by P.4a** |
-| P.2f one alias table | `51f5fb5` | yes | E.PK2f | **awaiting Codex** |
-| P.4a lease lifecycle | `c6ec138` | yes | E.PK4a | **awaiting Codex** |
+| P.3 coverage router (SHADOWED) | `f0e4275` → `9b58975` | yes | E.PK3, E.PK3b | superseded |
+| P.2b–P.2f argument boundary | `67e36f5` → `51f5fb5` | yes | E.PK2b…E.PK2f | superseded by P.2g |
+| **P.2g** alias / fallback / audit target | **`dda9de8`** | yes | E.PK2g | **PASSED** |
+| P.4 standing leases | `59b3b5c` → `c6ec138` → `04f75a6` → `480a317` | yes | E.PK4, E.PK4a, E.PK4c, E.PK4d | superseded |
+| **P.4e** lease state + artifact identity | **`8990fbb`** | yes | E.PK4e | **PASSED** |
+| P.4f durable outbox | `e814ea3` | yes | E.PK4f | superseded by P.4g |
+| **P.4g** one chain, one lock, no private memory | **`9959593`** | yes | E.PK4g | **PASSED — P.4 GATE CLOSED** |
+
+**The P.4 gate closed on 2026-08-26** after six corrective rounds, every one opened by a defect
+Codex found reading code that had already passed its author's tests. The pattern is recorded in
+E.PK4d and E.PK4g rather than smoothed over: a fix narrows one hole and widens another, and the
+test written by the fix's author exercises the path the author was thinking about — the one that
+is already correct.
+
+**Residuals carried deliberately** (Codex's stated conditions on the pass):
+
+1. **Locking is process-scoped.** Two OS processes writing one decision log would still race. That
+   configuration is NOT supported until a file lock exists.
+2. **Digestless legacy packs are refused a lease**, proven at the decision level only — there is no
+   old-engine end-to-end fixture, because the current engine always writes a digest at seal.
+3. **A mind with no decision log RETAINS its lease evidence** rather than dropping it, and the
+   backlog is visible in the drain's output. Retention was accepted over making a configured
+   recorder mandatory, on that condition.
+4. **`coverage-router-v1` is NOT activated** and must not be described as such. It remains
+   SHADOWED after scoring 2/4 on live phrasings against 0.92 on its own corpus (E.PK3c).
 
 Both pre-registered walls of E.PK4 passed: the attach-harm control (13 packs mounted, 12 no-pack
 queries, ZERO rows cleared the 0.55 floor — run on the box, because engine 0.16 cannot mount any
 0.15-sealed pack) and the hostile-pack invariant (72 purpose combinations, 8 egress classes, 3 harm
 intents, byte-identical across a mount whose constitution demands privileges).
 
-**P.4b (per-turn router leases) is BLOCKED** on core 0.18's `pack_context_for` /
-`recall_from_packs_for`, and on the pack-mount regression above. Codex's acceptance points for it
+**P.4b (per-turn router leases) is UNBLOCKED technically and BLOCKED on evidence.** Core 0.18.0 is
+published (2026-08-26) with `pack_context_for` / `recall_from_packs_for`, and the 0.16 pack-mount
+regression is fixed — all 40 published packs mount. What now blocks P.4b is E.PK3c: activating
+`coverage-router-v1` would, on the only real phrasings ever measured, lease the wrong pack or
+nothing half the time, including one false lease into a turn no pack covered. The router earns
+activation with a bigger recorder-grown live split and a pre-registered bar, not with an engine
+upgrade. Codex's acceptance points for it
 are recorded in yantrikdb memory ("P.4b (0.18 integration) acceptance points"): one immutable
 turn-owned leased allowlist frozen after mount+validation, the same list for recall and context,
 one `pack_context_for` call, the host's 0.55 passed through as `min_similarity`, `top_k` bounded at

@@ -807,6 +807,18 @@ pub trait MemoryFacade: Send + Sync {
     /// A deletion whose reason is lost is indistinguishable from a dedup;
     /// "user-deleted" must stay distinguishable forever. Default: delegates
     /// to `forget` (reason dropped — real backends override).
+    /// Quarantine one host memory BY IDENTIFIER, through the engine lifecycle path.
+    ///
+    /// Takes a rid and a reason and NOTHING ELSE — a remediation for content nobody may read must
+    /// not require reading it. Distinct from `forget_with_reason`, which resolves a BELIEF by its
+    /// statement text and so cannot be used on a row whose text is the thing under quarantine.
+    ///
+    /// Defaults to refusing: a store that has not implemented this must not silently report a
+    /// quarantine it did not perform (E.SEC1c).
+    async fn quarantine_memory(&self, _rid: &str, _reason: &str) -> Result<bool> {
+        Err(crate::error::MindError::Memory("this store cannot quarantine by rid".into()))
+    }
+
     async fn forget_with_reason(&self, id: &str, _reason: &str) -> Result<bool> {
         self.forget(id).await
     }

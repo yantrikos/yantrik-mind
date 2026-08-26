@@ -92,6 +92,8 @@ enum Cmd {
     ListSkills { reply: Reply<Vec<Skill>> },
     RecallSkills { query: String, limit: usize, reply: Reply<Vec<Skill>> },
     RecordSkillOutcome { name: String, outcome: mind_types::SkillOutcome, reply: Reply<()> },
+    /// Quarantine one host memory BY IDENTIFIER. Never takes content (E.SEC1c).
+    QuarantineRid { rid: String, reason: String, reply: Reply<bool> },
     // Attachable expertise. Mount/unmount are process-local; install copies the pack beside the db
     // so it comes back on every open.
     MountPack { path: String, reply: Reply<String> },
@@ -2695,6 +2697,47 @@ fn list_purpose_grants(db: &YantrikDB) -> std::result::Result<Vec<mind_types::Pu
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// E.SEC1c: what was quarantined, when, and why — by IDENTIFIER, never content.
+///
+/// A state change to somebody's memory must leave a record of itself. This table is that record,
+/// and it is deliberately incapable of holding the thing it describes: rid, reason, timestamp.
+fn ensure_memory_quarantine_table(db: &YantrikDB) {
+    let _ = db.conn().execute(
+        "CREATE TABLE IF NOT EXISTS mind_memory_quarantine \
+         (rid TEXT PRIMARY KEY, reason TEXT NOT NULL, at_ms INTEGER NOT NULL)",
+        [],
+    );
+}
+
+/// Quarantine one host memory by rid, through the ENGINE lifecycle path.
+///
+/// NOT a raw `UPDATE memories SET consolidation_status='tombstoned'`. Codex's warning, and it is
+/// the difference between a quarantine and a claim of one: raw SQL sets the durable status but
+/// skips the live vector tombstone, the chunk-key tombstones, cache removal, graph unlinking, link
+/// invalidation, the visible-seq bump and synthesis invalidation — so live recall can go on
+/// serving the row until something rebuilds. `db.forget(rid)` goes through `tombstone_inner` and
+/// does all of it.
+///
+/// The row's TEXT survives, tombstoned. That is intended: the E.SEC1b audit reads
+/// `SELECT rid, text FROM memories` with no status filter, so the auditor keeps seeing what a
+/// reader no longer can. A quarantine that blinded the audit would be the wrong trade (E.SEC1c).
+fn quarantine_rid(db: &YantrikDB, rid: &str, reason: &str) -> std::result::Result<bool, String> {
+    ensure_memory_quarantine_table(db);
+    let gone = db.forget(rid).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    db.conn()
+        .execute(
+            "INSERT INTO mind_memory_quarantine (rid, reason, at_ms) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(rid) DO UPDATE SET reason = ?2, at_ms = ?3",
+            rusqlite::params![rid, reason, now],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(gone)
+}
+
 /// Belief-lifecycle storage: the tombstone ledger. One row per forgotten
 /// proposition, carrying WHY — readable after the fact, unlike the row it
 /// marks, so "user-deleted" stays forever distinguishable from dedup/hygiene.
@@ -3536,6 +3579,9 @@ impl MemoryHandle {
                         }
                         Cmd::Relate { src, dst, rel, weight, reply } => {
                             let _ = reply.send(relate(&db, &src, &dst, &rel, weight));
+                        }
+                        Cmd::QuarantineRid { rid, reason, reply } => {
+                            let _ = reply.send(quarantine_rid(&db, &rid, &reason));
                         }
                         Cmd::Forget { statement, reason, reply } => {
                             let r = match find_belief(&db, &statement) {
@@ -4486,6 +4532,11 @@ impl MemoryFacade for MemoryHandle {
     async fn forget(&self, id: &str) -> Result<bool> {
         let statement = id.to_string();
         self.call(|reply| Cmd::Forget { statement, reason: None, reply }).await
+    }
+
+    async fn quarantine_memory(&self, rid: &str, reason: &str) -> Result<bool> {
+        let (rid, reason) = (rid.to_string(), reason.to_string());
+        self.call(|reply| Cmd::QuarantineRid { rid, reason, reply }).await
     }
 
     async fn forget_with_reason(&self, id: &str, reason: &str) -> Result<bool> {
@@ -7991,4 +8042,37 @@ mod p7_rehabilitation {
         assert!(s.graded > 0, "it holds real evidence: {} graded", s.graded);
         assert_eq!(s.judged_ok, 0);
     }
+}
+
+/// E.SEC1c — quarantine by identifier.
+#[cfg(test)]
+mod sec1c_quarantine {
+    use mind_types::MemoryFacade;
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unknown_rid_reports_that_nothing_changed() {
+        // A remediation that claims success for a row it never touched is worse than one that
+        // fails: it closes the finding while the row keeps surfacing.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let changed = mem
+            .quarantine_memory("00000000-0000-0000-0000-000000000000", "E.SEC1c test")
+            .await
+            .unwrap();
+        assert!(!changed, "an unknown rid must report false, not success");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quarantining_needs_only_an_identifier_and_a_reason() {
+        // The signature IS the guarantee: a remediation for content nobody may read must not be
+        // able to require the content. This compiles with a rid and a reason and nothing else.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let r = mem.quarantine_memory("some-rid", "E.SEC1c: flagged credential-phrase, pending human classification").await;
+        assert!(r.is_ok(), "the store implements it: {r:?}");
+    }
+
+    // NOT asserted here: that the trait's DEFAULT impl refuses. The property is real and the
+    // default returns an error for it, but asserting it needs a full MemoryFacade stub — dozens of
+    // methods — and a test whose scaffolding dwarfs the claim tends to get deleted rather than
+    // maintained. Recorded as documented-but-unasserted instead of faked.
 }

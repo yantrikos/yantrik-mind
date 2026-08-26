@@ -6115,6 +6115,24 @@ impl ConversationEngine {
             "about" | "who" if !rest.is_empty() => self.person_about(&rest).await,
             "about" | "who" => "Who? e.g. `ym about wife`. (`ym family` lists everyone I track.)".to_string(),
             "forget" if !rest.is_empty() => self.forget_person(&rest).await,
+            // --- E.SEC1c: quarantine a host memory BY IDENTIFIER, never by content ---
+            "quarantine" if !rest.trim().is_empty() => {
+                let mut it = rest.trim().splitn(2, char::is_whitespace);
+                let rid = it.next().unwrap_or("").trim().to_string();
+                let reason = it.next().unwrap_or("").trim().to_string();
+                if reason.is_empty() {
+                    "Usage: `ym quarantine <rid> <reason>` — the reason is required. A state change to                      someone's memory that does not say why is indistinguishable from a bug.".to_string()
+                } else {
+                    match self.memory.quarantine_memory(&rid, &reason).await {
+                        // The reply names the rid and the reason and NOTHING of the row — the whole
+                        // point is that this is usable on content nobody may read.
+                        Ok(true) => format!("Quarantined {rid} — {reason}. It is out of recall; the row and its text remain for audit."),
+                        Ok(false) => format!("No memory with rid {rid} (nothing changed)."),
+                        Err(e) => format!("(could not quarantine {rid}: {e})"),
+                    }
+                }
+            }
+            "quarantine" => "Usage: `ym quarantine <rid> <reason>`.".to_string(),
             // --- correct a canonical name, then flag beliefs still naming the old one (confirm or purge) ---
             "rename" | "rename-person" if !rest.is_empty() => self.rename_person(&rest).await,
             // --- memory hygiene: purge stale/wrong beliefs by text match (+ compact state for retrospect) ---

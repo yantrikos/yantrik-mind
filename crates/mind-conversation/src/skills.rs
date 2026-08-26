@@ -463,7 +463,9 @@ impl super::ConversationEngine {
             // Verifier-generated summary for recall (not author prose).
             let summary = self
                 .inference
-                .chat(
+                // Private: the user's own code, verbatim (E.SEC9).
+                // Refusal degrades to the deterministic path below rather than propagating.
+                .chat_grounded(
                     vec![
                         ChatMessage::system(&self.persona),
                         ChatMessage::user(&format!(

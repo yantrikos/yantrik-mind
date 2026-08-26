@@ -70,12 +70,22 @@ const UNSCOPED_PENDING: &[(&str, &str)] = &[
     // mail.rs, finance.rs, calendar.rs and briefing.rs were HERE and are now grounded — the four
     // whose prompts were unambiguously household. Struck rather than left standing, which the
     // companion test enforces.
-    ("mind-conversation/src/foresight.rs", "persona + a prompt built from household signals."),
-    ("mind-conversation/src/onboarding.rs", "two calls carrying persona + user answers during setup."),
-    ("mind-conversation/src/studio.rs", "three calls; prompt provenance not yet traced."),
-    ("mind-conversation/src/plugins_mod.rs", "persona + plugin prompt; provenance not yet traced."),
-    ("mind-conversation/src/skills.rs", "the verifier-written skill summary — the prompt carries the user's own code."),
-    ("mind-conversation/src/lib.rs", "five calls in the conversation core; each needs its own reading."),
+    //
+    // E.SEC9 struck five more — foresight, onboarding, studio, plugins_mod, skills — plus four of
+    // the five lib.rs sites. Each carried Private-class content by the enum's own definition (a
+    // face and its relation, names with relationships, a person's style from their own photos, the
+    // user's code), and each already degraded gracefully on Err, so grounding them could not cost
+    // a working path. The provenance was traced per call site, not inferred from the file name.
+    //
+    // ONE SITE REMAINS, and it is the largest: `handle_turn_as`'s main composition. It carries
+    // recalled grounding, PINNED FACTS naming people with certainties, the mail digest, the GitHub
+    // digest, the transcript and pack context — the most private prompt the system assembles.
+    // It is NOT left here out of doubt about what it carries. It is left because it propagates with
+    // `?` and has no deterministic fallback, so grounding it makes every plain conversational turn
+    // FAIL CLOSED whenever the owned lane is unavailable — and that lane is already observed
+    // returning 429. That is an availability change to the primary interface, and it is Pranab's
+    // call rather than a cleanup's side effect (E.SEC9).
+    ("mind-conversation/src/lib.rs", "ONE site: handle_turn_as's main turn. Grounding it fails the turn closed when the owned lane is down — awaiting Pranab's decision, not awaiting analysis."),
 ];
 
 /// Crates whose sources are scanned. These are the ones that hold an `InferencePool` and can reach

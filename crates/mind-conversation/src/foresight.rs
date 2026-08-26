@@ -460,7 +460,9 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
         let cfg = GenerationConfig { max_tokens: 950, ..GenerationConfig::default() };
         let text = match self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            // Private: the prompt embeds self_profile and interest_follow under "THE PERSON YOU ARE ADVISING" (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
         {
             Ok(r) => r.text,

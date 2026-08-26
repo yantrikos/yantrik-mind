@@ -299,7 +299,9 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let cfg = GenerationConfig { max_tokens: 60, think: mind_inference::think_for("onboarding_ask", Some(false)), ..GenerationConfig::default() };
                 let label = self
                     .inference
-                    .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+                    // Private: the user's own words about a family occasion (E.SEC9).
+                    // Refusal degrades to the deterministic path below rather than propagating.
+                    .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
                     .await
                     .ok()
                     .map(|r| r.text.trim().trim_matches('"').chars().take(60).collect::<String>())
@@ -346,7 +348,9 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let cfg = GenerationConfig { max_tokens: 120, think: mind_inference::think_for("onboarding_reply", Some(false)), ..GenerationConfig::default() };
                 let v = self
                     .inference
-                    .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+                    // Private: a face, a name, and their relation to the user -- the most sensitive prompt here (E.SEC9).
+                    // Refusal degrades to the deterministic path below rather than propagating.
+                    .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
                     .await
                     .map(|r| parse_json_obj(&r.text))
                     .unwrap_or_default();

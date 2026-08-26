@@ -512,7 +512,9 @@ impl super::ConversationEngine {
                 "One warm line (max 14 words) for a side-by-side photo pair of {display}: left from {y_then}, right from {y_now} ({gap} years apart). Use only these facts. No hashtags, no quotes."
             );
             let cfg = GenerationConfig { max_tokens: 50, think: mind_inference::think_for("studio_title", Some(false)), ..GenerationConfig::default() };
-            if let Ok(r) = inf.chat(vec![ChatMessage::user(&prompt)], cfg).await {
+            // Private: a household member's name with the places and years they were photographed (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            if let Ok(r) = inf.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await {
                 let line = r.text.trim().trim_matches('"').to_string();
                 if line.len() > 8 && line.len() < 120 {
                     caption.push_str(&format!("\n{line}"));
@@ -686,7 +688,9 @@ impl super::ConversationEngine {
         );
         let cfg = GenerationConfig { max_tokens: 90, think: mind_inference::think_for("studio_blurb", Some(false)), ..GenerationConfig::default() };
         self.inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            // Private: names WITH relationships ("his wife"), place and date (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
             .ok()
             .map(|r| r.text.trim().trim_matches('"').chars().take(180).collect::<String>())
@@ -721,7 +725,9 @@ impl super::ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
         let v = self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&parse_prompt)], cfg)
+            // Private: the user's raw request, which names people (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&parse_prompt)], cfg)
             .await
             .map(|r| parse_json_obj(&r.text))
             .unwrap_or_default();

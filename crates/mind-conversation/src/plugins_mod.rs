@@ -260,7 +260,9 @@ impl super::ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
         match self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            // Private: the user's corrections, taught mail rules, and how many faces I can name (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
         {
             Ok(r) => format!("🪞 Week {week} self-report\n\n{}", r.text.trim()),

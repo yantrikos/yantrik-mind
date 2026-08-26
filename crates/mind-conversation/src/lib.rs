@@ -1825,7 +1825,9 @@ async fn style_task(
     );
     let cfg = GenerationConfig { max_tokens: 380, ..GenerationConfig::default() };
     let trend = inference
-        .chat(vec![ChatMessage::user(&prompt)], cfg)
+        // Private: a named person's style measured from their own photos, year by year (E.SEC9).
+        // Refusal degrades to the deterministic path below rather than propagating.
+        .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
         .await
         .map(|r| r.text.trim().to_string())
         .unwrap_or_default();
@@ -2141,7 +2143,9 @@ async fn studio_task(
     );
     let cfg = GenerationConfig { max_tokens: 80, think: mind_inference::think_for("photo_caption", Some(false)), ..GenerationConfig::default() };
     let caption = inference
-        .chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg)
+        // Private: who is in the photo, when, and where (E.SEC9).
+        // Refusal degrades to the deterministic path below rather than propagating.
+        .chat_grounded(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg)
         .await
         .ok()
         .map(|r| r.text.trim().trim_matches('"').chars().take(200).collect::<String>())
@@ -3704,7 +3708,9 @@ impl ConversationEngine {
         };
         let raw = self
             .inference
-            .chat(
+            // Private: the learner's own message and their recorded misconceptions (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            .chat_grounded(
                 vec![
                     ChatMessage::system(&primer_system_prompt(record.difficulty)),
                     ChatMessage::user(&prompt),
@@ -4712,7 +4718,9 @@ impl ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 650, ..GenerationConfig::default() };
         match self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            // Private: self-telemetry naming a human and quoting failure lines (E.SEC9).
+            // Refusal degrades to the deterministic path below rather than propagating.
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
         {
             Ok(r) => format!("🔬 CAPABILITIES & LIMITS (self-measured)\n\n{}", r.text.trim()),

@@ -444,6 +444,10 @@ pub const TYPED_VERBS: &[&str] = &[
     "funnel_json",
     "capabilities_json",
     "orders_json",
+    // The executive's CURRENT posture, for the cockpit's Executive pane. Advertised here is what
+    // switches the pane on: it is gated on this handshake and shows an honest "predates" state
+    // until the box says it serves this.
+    "posture_json",
     "threads_json",
     "skills_json",
     // Separate from `pulse` on purpose: this one makes an OUTBOUND call, and pulse is painted
@@ -1095,6 +1099,12 @@ mod tests {
         let listed: Vec<&str> = v["surfaces"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
         assert!(listed.contains(&"pulse"));
         assert!(listed.contains(&"surfaces"), "the handshake must include itself, so a client can probe it");
+        // A surface a client gates on must be ADVERTISED, or the pane stays dark while the box
+        // happily serves it. `posture_json` is the Executive pane's switch (E.SURF1).
+        assert!(listed.contains(&"posture_json"), "posture_json must be advertised: {listed:?}");
+        for verb in TYPED_VERBS {
+            assert!(listed.contains(verb), "{verb} is in TYPED_VERBS but the handshake omits it: {listed:?}");
+        }
         assert_eq!(listed.len(), TYPED_VERBS.len());
     }
 

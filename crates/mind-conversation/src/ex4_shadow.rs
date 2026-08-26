@@ -172,6 +172,20 @@ pub(crate) fn candidate_for_digest(
     }
 }
 
+/// One wake condition in the wire form the cockpit reads.
+///
+/// `WakeCondition`'s variants are TUPLES, so a serde derive with `rename_all = "snake_case"` would
+/// emit `{"deadline_within": n}` — not the `deadline_within_ms` the client expects. Written out by
+/// hand for that reason, and because `mind-proactive` carries no serde at all.
+pub(crate) fn wake_json(w: &mind_proactive::WakeCondition) -> serde_json::Value {
+    use mind_proactive::WakeCondition as W;
+    match w {
+        W::DeadlineWithin(ms) => serde_json::json!({ "deadline_within_ms": ms }),
+        W::StateChangeOf(entity) => serde_json::json!({ "state_change_of": entity }),
+        W::SourceFresh(source) => serde_json::json!({ "source_fresh": source }),
+    }
+}
+
 pub(crate) fn posture_name(p: Posture) -> &'static str {
     match p {
         Posture::Ignore => "IGNORE",
@@ -330,6 +344,80 @@ impl crate::ConversationEngine {
     /// claim that either policy is better. A send the person ignored does not establish that
     /// deferring would have produced a better total outcome; interruption cost and delayed
     /// usefulness are unmeasured. Hence "shadow-consistent", never "correct".
+    /// Record what the poll loop just observed about quiet hours, so a surface can report the SAME
+    /// reading the arbiter was given rather than recomputing one.
+    ///
+    /// Quiet hours belong to the frontend that owns the user's clock and time zone (`mind-core`),
+    /// which is why `ex4_shadow_decide` takes them as parameters. This is the same value arriving
+    /// by the same route, kept so `posture_json` is not forced to guess.
+    pub fn note_observed_quiet(&self, quiet_hours: bool, quiet_hours_end_ms: Option<i64>) {
+        *self.observed_quiet.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((quiet_hours, quiet_hours_end_ms, mind_observability::now_ms() as i64));
+    }
+
+    /// `posture_json` — the executive's CURRENT reading, for the cockpit's Executive pane.
+    ///
+    /// Two rules make this honest, and they are the whole design:
+    ///
+    /// 1. NOTHING IS SYNTHESISED. The decision comes from `arbitrate()` over the same
+    ///    `candidate_for_digest` the proactive loop builds, so what the pane shows is what the
+    ///    executive would actually say right now. Rows are never composed for the reply.
+    /// 2. WHAT IS NOT KNOWN IS NOT CLAIMED. If the poll loop has not run in this process there is
+    ///    no observed quiet-hours reading, and quiet hours cannot be derived here — so `decisions`
+    ///    is EMPTY (which the contract allows) rather than arbitrated against a guessed `false`,
+    ///    and `user_receptive` is `null` whenever the world model has no bin for now.
+    ///
+    /// Wire form is snake_case and mirrors `ExecutiveDecision` one-for-one. Nothing in
+    /// `mind-proactive` derives `Serialize` — deliberately, it is a model-free waist — so the JSON
+    /// is built here, and `posture` goes through `posture_name` for the uppercase the client reads.
+    pub async fn posture_report(&self) -> serde_json::Value {
+        let observed = *self.observed_quiet.lock().unwrap_or_else(|e| e.into_inner());
+
+        // `user_receptive`: the live world-model bin. `proactive_receptivity_ok` answers TRUE when
+        // there is no bin at all (unknown treated as permissive, which is right for a gate); here
+        // unknown must stay unknown, so the underlying reading is used directly.
+        let user_receptive: Option<bool> = match self.memory.proactive_receptivity().await {
+            Ok(Some(r)) => {
+                let baseline = self.memory.proactive_baseline_rate().await.ok().flatten();
+                Some(r >= crate::proactive::dead_zone_floor(baseline))
+            }
+            _ => None,
+        };
+
+        let decisions: Vec<serde_json::Value> = match observed {
+            None => Vec::new(),
+            Some((quiet_hours, quiet_hours_end_ms, _)) => {
+                let now = mind_observability::now_ms() as i64;
+                let candidate = candidate_for_digest(now, quiet_hours, quiet_hours_end_ms, user_receptive);
+                let d = mind_proactive::arbitrate(&candidate);
+                vec![serde_json::json!({
+                    "candidate_id": d.candidate_id,
+                    "posture": posture_name(d.posture),
+                    "requires_user_interrupt": d.requires_user_interrupt,
+                    "reason_code": d.reason_code,
+                    "monitor": d.monitor.as_ref().map(|m| serde_json::json!({
+                        "review_at_ms": m.review_at_ms,
+                        "wake_when": m.wake_when.iter().map(wake_json).collect::<Vec<_>>(),
+                    })),
+                    "evidence_refs": d.evidence_refs,
+                })]
+            }
+        };
+
+        serde_json::json!({
+            "decisions": decisions,
+            "receptivity": {
+                "quiet_hours": observed.map(|(q, _, _)| q).unwrap_or(false),
+                "quiet_hours_end_ms": observed.and_then(|(_, e, _)| e),
+                "user_receptive": user_receptive,
+                // Additive, and the reason the two fields above can be trusted: when this is null
+                // nothing has been observed in this process and `quiet_hours: false` is a default
+                // rather than a reading. The client ignores keys it does not know.
+                "observed_at_ms": observed.map(|(_, _, at)| at),
+            }
+        })
+    }
+
     pub async fn ex4_report(&self) -> String {
         let list = self.ex4_load().await;
         if list.is_empty() {

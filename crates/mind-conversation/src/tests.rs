@@ -4824,3 +4824,81 @@ async fn one_sensitivity_finding_guards_all_four_boundaries_and_none_of_them_quo
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn posture_json_is_the_executives_real_reading_and_never_a_composed_row() {
+    // The cockpit's Executive pane is gated on the `surfaces` handshake and renders this contract.
+    // Two properties matter more than the field names: the decision is ARBITRATED, not composed,
+    // and anything unknown is reported as unknown rather than defaulted into a claim.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem, pool, "JARVIS");
+    let ctx = mind_types::AccessContext::operator_audit();
+
+    // ── Before the poll loop has run: nothing has been observed, so nothing is claimed ─────────
+    let v: serde_json::Value = serde_json::from_str(&conv.cli_dispatch("posture_json", &ctx).await)
+        .expect("posture_json must be JSON");
+    assert_eq!(v["decisions"].as_array().map(|a| a.len()), Some(0), "no observation, no arbitration: {v}");
+    assert!(v["receptivity"]["observed_at_ms"].is_null(), "and it SAYS nothing was observed: {v}");
+    assert!(v["receptivity"]["user_receptive"].is_null(), "unknown stays null, never false: {v}");
+
+    // ── After the loop deposits a reading: a real arbitrated decision ──────────────────────────
+    let ends = mind_observability::now_ms() as i64 + 3_600_000;
+    conv.note_observed_quiet(true, Some(ends));
+    let v: serde_json::Value = serde_json::from_str(&conv.cli_dispatch("posture_json", &ctx).await).unwrap();
+    let decisions = v["decisions"].as_array().expect("decisions is an array");
+    assert_eq!(decisions.len(), 1, "the current candidate set is one digest: {v}");
+    let d = &decisions[0];
+
+    // The contract, field by field, in the wire form the client parses.
+    assert_eq!(d["candidate_id"], "periodic_digest");
+    let posture = d["posture"].as_str().unwrap();
+    assert!(["ACT", "MONITOR", "IGNORE"].contains(&posture), "posture is uppercase: {posture}");
+    assert!(d["requires_user_interrupt"].is_boolean());
+    assert!(d["reason_code"].is_string() && !d["reason_code"].as_str().unwrap().is_empty());
+    assert!(d["evidence_refs"].is_array(), "{d}");
+    assert!(d["monitor"].is_null() || d["monitor"].is_object(), "monitor is a plan or null: {d}");
+    if let Some(m) = d["monitor"].as_object() {
+        assert!(m.contains_key("review_at_ms") && m.contains_key("wake_when"), "{d}");
+        for w in m["wake_when"].as_array().unwrap() {
+            let k = w.as_object().unwrap().keys().next().unwrap().clone();
+            assert!(
+                ["deadline_within_ms", "state_change_of", "source_fresh"].contains(&k.as_str()),
+                "wake conditions are snake_case with the _ms suffix the client reads: {k}"
+            );
+        }
+    }
+    // Receptivity is the reading that was deposited, not one recomputed here.
+    assert_eq!(v["receptivity"]["quiet_hours"], true);
+    assert_eq!(v["receptivity"]["quiet_hours_end_ms"], serde_json::json!(ends));
+    assert!(!v["receptivity"]["observed_at_ms"].is_null());
+
+    // NOT COMPOSED: the same candidate through the same arbiter gives the same answer. If this
+    // surface ever started inventing rows, the two would drift.
+    let direct = mind_proactive::arbitrate(&crate::ex4_shadow::candidate_for_digest(
+        mind_observability::now_ms() as i64,
+        true,
+        Some(ends),
+        None,
+    ));
+    assert_eq!(d["posture"], crate::ex4_shadow::posture_name(direct.posture));
+    assert_eq!(d["reason_code"], direct.reason_code);
+    assert_eq!(d["requires_user_interrupt"], direct.requires_user_interrupt);
+
+    // Quiet hours OFF is a different reading and must produce a different one.
+    conv.note_observed_quiet(false, None);
+    let v2: serde_json::Value = serde_json::from_str(&conv.cli_dispatch("posture_json", &ctx).await).unwrap();
+    assert!(v2["receptivity"]["quiet_hours_end_ms"].is_null());
+    assert_eq!(v2["receptivity"]["quiet_hours"], false);
+}
+
+#[test]
+fn wake_conditions_use_the_wire_names_the_client_reads() {
+    // A serde derive with rename_all = "snake_case" would emit `deadline_within` for a tuple
+    // variant — not `deadline_within_ms`. That one character of drift is why these are written out.
+    use mind_proactive::WakeCondition as W;
+    let j = |w: &W| crate::ex4_shadow::wake_json(w);
+    assert_eq!(j(&W::DeadlineWithin(1_500)), serde_json::json!({ "deadline_within_ms": 1_500 }));
+    assert_eq!(j(&W::StateChangeOf("inbox".into())), serde_json::json!({ "state_change_of": "inbox" }));
+    assert_eq!(j(&W::SourceFresh("imap/inbox".into())), serde_json::json!({ "source_fresh": "imap/inbox" }));
+}

@@ -3307,6 +3307,15 @@ pub struct ConversationEngine {
     news: Option<Arc<dyn NewsClient>>,
     /// Dedup state for the proactive news watch — keys of headlines already surfaced per tracked topic.
     news_seen: Mutex<std::collections::HashSet<String>>,
+    /// What the poll loop last OBSERVED about quiet hours: `(quiet_hours, ends_at_ms, observed_at_ms)`.
+    ///
+    /// Quiet hours are a function of the user's wall clock and time zone, and that organ lives in
+    /// `mind-core` (`in_quiet_hours_now`) because it belongs to the frontend that owns the clock —
+    /// which is why `ex4_shadow_decide` takes it as a PARAMETER rather than computing it. The
+    /// surface needs the same reading, so the loop deposits it here on the tick it already computes
+    /// it. `None` means the loop has not run in this process, and the surface says so rather than
+    /// guessing `false` (which would be a claim about the user's night).
+    observed_quiet: Mutex<Option<(bool, Option<i64>, i64)>>,
     /// The most-recently surfaced news topic (set by news_watch), so a follow-up "tell me more" has a
     /// referent → the companion proactively researches it into a full brief. Consumed on use.
     last_news_topic: Mutex<Option<String>>,
@@ -3451,6 +3460,7 @@ impl ConversationEngine {
             searcher: None,
             news: None,
             news_seen: Mutex::new(std::collections::HashSet::new()),
+            observed_quiet: Mutex::new(None),
             last_news_topic: Mutex::new(None),
             prepped_local: Mutex::new(std::collections::HashSet::new()),
             weather: None,
@@ -4771,6 +4781,7 @@ impl ConversationEngine {
             "funnel_json" => surface::json_or_error(&self.funnel_json().await),
             "capabilities_json" => surface::json_or_error(&self.capability_report()),
             "orders_json" => surface::json_or_error(&self.orders_report()),
+            "posture_json" => self.posture_report().await.to_string(),
             "threads_json" => surface::json_or_error(&self.thread_report().await),
             "skills_json" => surface::json_or_error(&self.skill_report().await),
             // Blocking ureq behind spawn_blocking, and internally cached for 60s, so a UI can poll

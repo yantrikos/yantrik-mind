@@ -2100,8 +2100,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 std::env::var("YM_ASK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(7_200);
             let now = now_ms();
             let chat = active_chat.load(Ordering::Relaxed);
+            // ONE reading of the user's clock per tick, used by the gate below AND handed to the
+            // engine, so the Executive pane cannot show a different night from the one the arbiter
+            // was given. Quiet hours live here because this frontend owns the clock and the tz.
+            let quiet_now = in_quiet_hours_now();
+            conv.note_observed_quiet(quiet_now, quiet_hours_end_in_ms());
             let idle_ok = chat != 0
-                && !in_quiet_hours_now()
+                && !quiet_now
                 && now.saturating_sub(last_activity) >= idle_secs * 1000;
             let mut spoke = false;
             // THE CALIBRATED KNOCK goes FIRST — it is the highest-value thing the mind can say
@@ -2128,7 +2133,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 // re-evaluations an hour that a suppressed opportunity produces collapse into one
                 // record instead of drowning the sample (ledger E.D4).
                 let _shadow = conv
-                    .ex4_shadow_decide(last_digest as i64, in_quiet_hours_now(), quiet_hours_end_in_ms())
+                    .ex4_shadow_decide(last_digest as i64, quiet_now, quiet_hours_end_in_ms())
                     .await;
                 if conv.proactive_receptivity_ok().await {
                     if let Some(msg) = conv.proactive_digest().await {

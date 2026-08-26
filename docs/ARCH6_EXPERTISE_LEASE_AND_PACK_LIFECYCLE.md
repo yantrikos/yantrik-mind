@@ -128,7 +128,14 @@ takes five positional args, no `AccessContext`, no pack context, `max_steps` as 
 | `recall_from_packs` evidence | ACTIVE, not outcome-validated, **and unfloored** | `lib.rs:7908`; §B.2 |
 | Capability-pack certification | ACTIVE for skill bundles | `pack_certify`; Weft attestation when configured |
 | `seal_learned_pack` | REACHABLE (operator verb) | never certified, hardcoded version |
-| Coverage routing, leases, local efficacy, gap ladder, lifecycle registry | absent | — |
+| Coverage routing | SHADOWED | E.PK3 / E.PK3b; `pack_route_shadow` on every turn, every lane, including router failures |
+| Expertise leases | ACTIVE (operator-granted) | E.PK4 / E.PK4a; live grant → restart → remount → release on the box |
+| Local efficacy (per pack) | ACTIVE, not outcome-validated | E.PK2; two witnesses agreeing, censoring explicit |
+| Gap ladder, lifecycle registry, sub-agent Mission, provenance-into-beliefs | absent | P.6–P.9, unbuilt |
+
+*(This table was written when the pack line began; the rows above it are unchanged and the rows
+here are what P.1–P.4a earned. The rung is the highest the EVIDENCE reaches, not the highest the
+code could support.)*
 
 ---
 
@@ -271,6 +278,41 @@ Order rationale: walls first (P.1), instrumentation before adaptation (P.2 befor
 router shadowed before it leases (P.3 → P.4), learning closure (P.5) before anything escalates
 on it (P.6), lifecycle last because it consumes every earlier signal (P.7). Each slice is one ledger
 entry with the fields below, KEEP/KILL decided on the box.
+
+### D.0 STATUS (2026-08-26) — what shipped, and where it stands
+
+*The slice descriptions below are the PLAN, kept as written. This is the state.*
+
+| Slice | SHA | Deployed | Ledger | Review |
+|---|---|---|---|---|
+| P.1 pack floor + identity | `55d9c3f` | yes | E.PK1 KEEP | Codex passed |
+| P.2 pack telemetry | `26511c9` | yes | E.PK2 KEEP | Codex passed |
+| P.3 coverage router (SHADOWED) | `f0e4275` → `9b58975` | yes | E.PK3 KEEP, E.PK3b | superseded by P.3b |
+| P.2b–P.2d argument boundary | `67e36f5` → `b4c455b` | yes | E.PK2b, E.PK2d KEEP | superseded by P.2e/P.2f |
+| P.2e + P.3b | `bca555d` | yes | E.PK2e, E.PK3b | **superseded by P.2f** |
+| P.4 standing leases | `59b3b5c` | yes | E.PK4 KEEP | **superseded by P.4a** |
+| P.2f one alias table | `51f5fb5` | yes | E.PK2f | **awaiting Codex** |
+| P.4a lease lifecycle | `c6ec138` | yes | E.PK4a | **awaiting Codex** |
+
+Both pre-registered walls of E.PK4 passed: the attach-harm control (13 packs mounted, 12 no-pack
+queries, ZERO rows cleared the 0.55 floor — run on the box, because engine 0.16 cannot mount any
+0.15-sealed pack) and the hostile-pack invariant (72 purpose combinations, 8 egress classes, 3 harm
+intents, byte-identical across a mount whose constitution demands privileges).
+
+**P.4b (per-turn router leases) is BLOCKED** on core 0.18's `pack_context_for` /
+`recall_from_packs_for`, and on the pack-mount regression above. Codex's acceptance points for it
+are recorded in yantrikdb memory ("P.4b (0.18 integration) acceptance points"): one immutable
+turn-owned leased allowlist frozen after mount+validation, the same list for recall and context,
+one `pack_context_for` call, the host's 0.55 passed through as `min_similarity`, `top_k` bounded at
+64 with `0 => []`, per-pack `recommended_top_k` retained, provenance from structured
+`RecallResult.pack` only, a compile-time compatibility adapter, and no broad fallback after an API
+error. Until it lands the router stays SHADOWED and leases stay operator-granted.
+
+Next unbuilt slices in order: **P.5** (close the learning signals; a `Reliability` type), **P.6**
+(the capability-gap ladder), **P.7** (lifecycle registry: seal → probation → proven), **P.8**
+(sub-agent Mission), **P.9** (provenance into beliefs).
+
+---
 
 **P.1 — Pack identity + similarity floor (the wall).**
 Objective: no pack evidence enters a prompt below the pack's own floor; every hit knows its pack.

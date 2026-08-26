@@ -811,6 +811,12 @@ const SEAM_GRANT_TX: u8 = 2;
 const SEAM_UNMOUNT: u8 = 4;
 #[cfg(test)]
 const SEAM_RELEASE_TX: u8 = 8;
+/// Reading the durable lease state fails — the case that used to become "there are no leases".
+#[cfg(test)]
+const SEAM_LEASE_READ: u8 = 16;
+/// The last-resort quarantine write fails too, leaving nothing durable to suppress from.
+#[cfg(test)]
+const SEAM_QUARANTINE_WRITE: u8 = 32;
 
 #[allow(unused_variables)]
 fn seam_fails(bit: u8) -> bool {
@@ -870,7 +876,38 @@ fn lease_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<mind_types::memory:
     })
 }
 
+/// Mounts this process attached and then could not detach or record — the fallback when even the
+/// quarantine write fails, so there is no durable row for the visibility gate to read. Process-local
+/// by necessity: the point is that the database could not be written to (Codex's review of P.4c).
+/// A restart clears it, and a restart also re-derives the truth from the engine's own mounts.
+static ORPHANED_MOUNTS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// The one place a pack is physically detached, so every path — release, expiry, the visibility
+/// gate, a compensating rollback — fails the same way when the engine will not let go.
+fn detach_now(db: &YantrikDB, pack_id: &str) -> std::result::Result<(), String> {
+    if seam_fails(4) {
+        return Err("unmount failed (test seam)".into());
+    }
+    db.unmount_pack(pack_id).map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn note_orphaned_mount(pack_id: &str) {
+    ORPHANED_MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).insert(pack_id.to_string());
+}
+
+fn orphaned_mounts() -> std::collections::BTreeSet<String> {
+    ORPHANED_MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn forget_orphaned_mount(pack_id: &str) {
+    ORPHANED_MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).remove(pack_id);
+}
+
 fn list_leases(db: &YantrikDB) -> std::result::Result<Vec<mind_types::memory::PackLease>, String> {
+    if seam_fails(16) {
+        return Err("lease read failed (test seam)".into());
+    }
     let conn = db.conn();
     let mut st = conn
         .prepare(&format!("SELECT {LEASE_COLUMNS} FROM mind_pack_leases ORDER BY expires_ms ASC, pack_id ASC"))
@@ -1000,11 +1037,16 @@ fn artifact_claimants(
                 out.push(Claimant { path, digest: m.content_digest.clone(), signer: m.publisher_pubkey.clone() })
             }
             Some(_) => {}
-            // A file already MOUNTED under this id whose manifest will not read is the dangerous
-            // case: it is serving rows this host cannot identify.
+            // Only a file the engine ALREADY has mounted under this id is a proven claimant this
+            // host cannot identify — it is serving rows right now. An unreadable LIBRARY file
+            // claims nothing until its manifest is read, so counting it here let one corrupt and
+            // unrelated pack block every lease in the library, with an error that named the wrong
+            // id (Codex's review of P.4c). Library corruption is its own condition, logged once.
             None => {
-                if mounted.contains(&path) || library_files(library).contains(&path) {
+                if mounted.contains(&path) {
                     unreadable.push(path);
+                } else {
+                    tracing::warn!(path = %path, "a library file's manifest will not read — it claims no pack id until it does");
                 }
             }
         }
@@ -1119,10 +1161,7 @@ fn unmount_for_lease(
     if is_installed_path(db, &m.path) {
         return Ok(()); // adopted since the grant; a loan never removes it
     }
-    if seam_fails(4) {
-        return Err("unmount failed (test seam)".into());
-    }
-    db.unmount_pack(&lease.pack_id).map(|_| ()).map_err(|e| e.to_string())
+    detach_now(db, &lease.pack_id)
 }
 
 fn lease_pack(
@@ -1200,7 +1239,7 @@ fn lease_pack(
         if let Err(e) = write {
             // Undo exactly what this call attached; the previous grant keeps whatever it owned.
             if mounted_now {
-                if let Err(u) = db.unmount_pack(pack_id) {
+                if let Err(u) = detach_now(db, pack_id) {
                     return Err(format!("{e}; AND the pack could not be detached again ({u}) — it is attached with no lease extension recorded"));
                 }
             }
@@ -1258,13 +1297,16 @@ fn lease_pack(
     })();
     if let Err(e) = write {
         if mounted_by_lease {
-            if let Err(u) = db.unmount_pack(pack_id) {
+            if let Err(u) = detach_now(db, pack_id) {
                 // The compensating detach failed, so the pack is attached with no lease behind it —
                 // an untracked mount that would serve turns nobody granted. Record it as a
                 // QUARANTINED lease: the row is what the visibility gate reads, so the pack is
                 // suppressed and the operator can see and clear it (Codex's review of P.4a).
                 let note = format!("grant failed and the pack could not be detached: {u}");
-                let quarantine = db.conn().execute(
+                let quarantine = if seam_fails(32) {
+                    Err(rusqlite::Error::InvalidQuery)
+                } else {
+                    db.conn().execute(
                     &format!("INSERT OR REPLACE INTO mind_pack_leases ({LEASE_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 'quarantined', ?9)"),
                     rusqlite::params![
                         lease.pack_id,
@@ -1277,10 +1319,21 @@ fn lease_pack(
                         lease.expires_ms,
                         note
                     ],
-                );
+                    )
+                };
+                if quarantine.is_err() {
+                    // Nothing durable could be written at all, so the visibility gate has nothing
+                    // to read. Remember it in this process instead: an attached pack with no lease
+                    // behind it must not serve a turn just because the database is unwell.
+                    note_orphaned_mount(pack_id);
+                }
                 return Err(format!(
                     "could not record the lease: {e}; the pack could not be detached either ({u}) — {}",
-                    if quarantine.is_ok() { "it is quarantined and will not serve; `ym pack release` clears it" } else { "AND it could not be quarantined; detach it by hand" }
+                    if quarantine.is_ok() {
+                        "it is quarantined and will not serve; `ym pack release` clears it"
+                    } else {
+                        "and it could not be quarantined either — it is suppressed for this process and will not serve; restart or detach it by hand"
+                    }
                 ));
             }
         }
@@ -1463,20 +1516,34 @@ fn reconcile_leases(
 /// What a lease-owned pack may do at the VISIBILITY boundary, decided from the DURABLE STATE and
 /// the artifact's IDENTITY — never from the fact that something is physically mounted.
 ///
-/// P.4a gated serving on the mount alone, so a lease whose unmount had failed sat in `releasing`,
-/// still attached, and went on serving recall, probe and the prompt block: the state said "ending"
-/// and the mind kept answering from it (Codex's review). A pack now serves only while its lease is
-/// Active, unexpired, and over the artifact that is actually mounted. Anything else is detached if
-/// it can be, and SUPPRESSED if it cannot — fail closed, both ways.
+/// Three fail-open paths were closed here in turn, each found by review rather than by a test.
+/// P.4a gated serving on the mount alone, so a `releasing` lease whose unmount had failed went on
+/// answering. P.4c then skipped any lease whose mounted artifact did NOT match it — which served
+/// the worst case of all: the lease attached A, B is what is mounted, and the gate walked past it.
+/// And the durable state was read with `unwrap_or_default()`, so a database error became "there
+/// are no leases" and every physical mount served.
+///
+/// The rule now: a pack serves only while its lease is Active, unexpired, AND over the artifact
+/// actually mounted. Anything else is SUPPRESSED by pack id — always, whether or not it can be
+/// detached — and only the physical detach requires exact identity, because a lease may never
+/// remove an artifact it did not attach. If the lease state cannot be read at all, nothing serves.
 #[derive(Debug, Default)]
 struct LeaseVisibility {
     /// Lease-owned packs that are still attached and must not reach a turn.
     suppressed: std::collections::HashSet<String>,
+    /// The durable state could not be read, so nothing can be shown to be serving. Fail closed.
+    withhold_all: bool,
 }
 
 impl LeaseVisibility {
-    fn is_suppressed(&self, pack_id: &str) -> bool {
-        self.suppressed.contains(pack_id)
+    /// Must this pack be kept out of a turn?
+    fn hides(&self, pack_id: &str) -> bool {
+        self.withhold_all || self.suppressed.contains(pack_id)
+    }
+    /// The engine assembles `pack_context` over everything mounted and the host cannot edit one
+    /// pack out of it, so ANY suppression withholds the whole block.
+    fn withholds_context(&self) -> bool {
+        self.withhold_all || !self.suppressed.is_empty()
     }
 }
 
@@ -1487,29 +1554,61 @@ fn enforce_lease_visibility(
 ) -> LeaseVisibility {
     use mind_types::memory::LeaseState;
     let mut vis = LeaseVisibility::default();
-    let leases = list_leases(db).unwrap_or_default();
+    // Mounts this process could not detach and could not record: nothing durable exists to read
+    // them from, so they are carried here until a restart or a successful detach.
+    for pack_id in orphaned_mounts() {
+        if db.mounted_packs().iter().any(|p| p.pack_id == pack_id) {
+            vis.suppressed.insert(pack_id);
+        } else {
+            forget_orphaned_mount(&pack_id);
+        }
+    }
+    let leases = match list_leases(db) {
+        Ok(l) => l,
+        Err(e) => {
+            // UNCERTAINTY IS NOT PERMISSION. Without the durable state nothing can be shown to be
+            // serving, so nothing does (Codex's review of P.4c).
+            tracing::error!(error = %e, "the lease state could not be read — withholding every pack from this turn");
+            vis.withhold_all = true;
+            return vis;
+        }
+    };
     // Expiry first: ending a due lease is the ordinary path and it detaches as it goes.
     if leases.iter().any(|l| l.state != LeaseState::Quarantined && l.expired_at(now_ms)) {
         if let Err(e) = sweep_leases(db, manifests, now_ms) {
             tracing::warn!(error = %e, "expired lease could not be ended at the visibility boundary");
         }
     }
-    for lease in list_leases(db).unwrap_or_default() {
+    let leases = match list_leases(db) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(error = %e, "the lease state could not be re-read — withholding every pack from this turn");
+            vis.withhold_all = true;
+            return vis;
+        }
+    };
+    for lease in leases {
         let Some(mounted) = mounted_claimant(db, manifests, &lease.pack_id) else { continue };
-        // Only what THIS lease attached is the lease's to hide or detach; an operator's own mount
-        // of a different artifact is not.
-        if !lease.mounted_by_lease || !mounted.is(&lease) {
+        // Only what THIS lease attached is the lease's business at all.
+        if !lease.mounted_by_lease {
             continue;
         }
-        let serving = lease.state == LeaseState::Active && !lease.expired_at(now_ms);
+        let identity_ok = mounted.is(&lease);
+        let serving = lease.state == LeaseState::Active && !lease.expired_at(now_ms) && identity_ok;
         if serving {
             continue;
         }
-        if is_installed_path(db, &mounted.path) {
-            continue; // adopted: it stands on its own, not on the lease
+        if identity_ok && is_installed_path(db, &mounted.path) {
+            continue; // adopted since the grant: it stands on its own, not on the lease
         }
-        let detached = if seam_fails(4) { Err("unmount failed (test seam)".to_string()) } else { db.unmount_pack(&lease.pack_id).map(|_| ()).map_err(|e| e.to_string()) };
-        match detached {
+        if !identity_ok {
+            // A DIFFERENT artifact is mounted under this id. It is not this lease's to remove —
+            // someone else attached it — but it is certainly not this lease's to serve either.
+            tracing::warn!(pack_id = %lease.pack_id, mounted = %mounted.path, "a foreign artifact is mounted under a leased id — suppressed, not detached");
+            vis.suppressed.insert(lease.pack_id.clone());
+            continue;
+        }
+        match detach_now(db, &lease.pack_id) {
             Ok(_) => tracing::info!(pack_id = %lease.pack_id, state = %lease.state.label(), "detached a pack whose lease is no longer serving"),
             Err(e) => {
                 tracing::warn!(pack_id = %lease.pack_id, error = %e, "could not detach a non-serving leased pack — suppressing it instead");
@@ -3479,24 +3578,24 @@ impl MemoryHandle {
                             // cannot edit one pack out of it. So if a pack that must not serve is
                             // still attached, the whole block is withheld rather than carrying its
                             // rules into the prompt — fail closed, loudly, and rarely.
-                            let out = if vis.suppressed.is_empty() {
-                                Ok(db.pack_context())
-                            } else {
-                                tracing::error!(suppressed = ?vis.suppressed, "withholding the whole pack context: a non-serving leased pack is still attached and cannot be detached");
+                            let out = if vis.withholds_context() {
+                                tracing::error!(suppressed = ?vis.suppressed, withhold_all = vis.withhold_all, "withholding the whole pack context");
                                 Ok(None)
+                            } else {
+                                Ok(db.pack_context())
                             };
                             let _ = reply.send(out);
                         }
                         Cmd::RecallFromPacks { query, top_k, reply } => {
                             let vis = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
                             let r = recall_from_mounted_packs(&db, &mut pack_manifests, &query, top_k)
-                                .map(|hits| hits.into_iter().filter(|h| !vis.is_suppressed(&h.pack_id)).collect());
+                                .map(|hits| hits.into_iter().filter(|h| !vis.hides(&h.pack_id)).collect());
                             let _ = reply.send(r);
                         }
                         Cmd::ProbePacks { query, top_k, reply } => {
                             let vis = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
                             let r = probe_mounted_packs(&db, &mut pack_manifests, &query, top_k)
-                                .map(|rows| rows.into_iter().filter(|r| !vis.is_suppressed(&r.pack_id)).collect());
+                                .map(|rows| rows.into_iter().filter(|r| !vis.hides(&r.pack_id)).collect());
                             let _ = reply.send(r);
                         }
                         Cmd::RecordPackEvent { pack_id, event, reply } => {
@@ -7236,6 +7335,159 @@ mod lane_experiment {
         let e = mem.lease_pack(&a, 5, "over the impostor", "operator").await.unwrap_err().to_string();
         assert!(e.contains("different digests or signers"), "{e}");
         assert!(e.contains("refusing to lease an ambiguous artifact"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.4d (Codex's review of P.4c), P1-1: A FOREIGN ARTIFACT UNDER A LIVE LEASE, IN ONE PROCESS.
+    /// The lease attached A and is Active and unexpired; B — same id, different content — is what
+    /// is actually mounted. P.4c's gate walked PAST this case (it skipped any lease whose mounted
+    /// artifact did not match it), so an ACTIVE lease served an artifact nobody granted. No restart
+    /// here: a restart drops transient mounts and would hide the bug.
+    ///
+    /// The swap is done by remounting rather than by rewriting the file, because a mounted pack's
+    /// file cannot be replaced under Windows — the semantics under test are "what is mounted is not
+    /// what was granted", and this reaches them on every platform.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_foreign_artifact_under_a_live_lease_is_suppressed_without_a_restart() {
+        let _lease_tests = lease_test_lock();
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p4d_swap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let row = "Coyote time: allow the jump for 80 to 100 ms after leaving a ledge.";
+        let a = fixtures::seal_fixture_pack_full(lib.join("a.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &[row], Some(&["platformer feel"]), None, None).unwrap();
+        let b_path = dir.join("b.ydbpack");
+        let b = fixtures::seal_fixture_pack_full(b_path.to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &[row, "and an extra row nobody granted"], Some(&["platformer feel"]), None, None).unwrap();
+        assert_eq!(a, b, "same id, different content");
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+        let q = "coyote time after leaving a ledge";
+
+        mem.lease_pack(&a, 30, "granted over A", "operator").await.unwrap();
+        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "the granted artifact serves");
+        assert!(mem.pack_context().await.unwrap().is_some());
+
+        // A is detached and B is attached under the same id. The lease is untouched: still Active,
+        // still unexpired, still recorded as having attached something.
+        mem.unmount_pack(&a).await.unwrap();
+        mem.mount_pack(b_path.to_str().unwrap()).await.unwrap();
+        let ls = mem.leases().await.unwrap();
+        assert_eq!(ls[0].state, mind_types::memory::LeaseState::Active, "the lease still looks healthy — that is the trap");
+        assert!(ls[0].mounted_by_lease);
+
+        // What a turn gets: nothing. The lease is over A; A is not what is mounted.
+        let hits = mem.recall_from_packs(q, 4).await.unwrap();
+        assert!(hits.is_empty(), "an artifact nobody granted reached a turn: {hits:?}");
+        assert!(mem.probe_packs(q, 4).await.unwrap().is_empty(), "and the probe must agree");
+        assert!(mem.pack_context().await.unwrap().is_none(), "and its rules must not reach the prompt");
+        // B is NOT detached — it is not this lease's to remove — only hidden.
+        assert_eq!(mounted_ids(&mem).await, vec![b.clone()], "suppressed, not seized");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.4d, P1-2: UNCERTAINTY IS NOT PERMISSION. When the durable lease state cannot be read,
+    /// P.4c's `unwrap_or_default()` turned the error into "there are no leases" and every physical
+    /// mount served. Nothing may serve while the state is unknown.
+    #[tokio::test(flavor = "current_thread")]
+    async fn nothing_serves_while_the_lease_state_cannot_be_read() {
+        let _lease_tests = lease_test_lock();
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p4d_read_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let id = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+            &["Coyote time: allow the jump for 80 to 100 ms after leaving a ledge."],
+            Some(&["platformer feel"]), None, None,
+        ).unwrap();
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+        let q = "coyote time after leaving a ledge";
+        mem.lease_pack(&id, 30, "serving", "operator").await.unwrap();
+        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "the premise: it serves while all is well");
+
+        {
+            let _seam = Seam::arm(SEAM_LEASE_READ);
+            let hits = mem.recall_from_packs(q, 4).await.unwrap();
+            assert!(hits.is_empty(), "packs served while the lease state was unreadable: {hits:?}");
+            assert!(mem.probe_packs(q, 4).await.unwrap().is_empty());
+            assert!(mem.pack_context().await.unwrap().is_none(), "the prompt block must be withheld too");
+        }
+        // The uncertainty passes; service resumes.
+        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "and it serves again afterwards");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.4d, P1-3: EVERY DURABLE WRITE FAILS. Mount succeeds, the lease transaction fails, the
+    /// compensating unmount fails, and the last-resort quarantine write fails too — so there is no
+    /// row anywhere for the visibility gate to read. The pack is attached and nobody granted it.
+    /// It must still not reach a turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_mount_nothing_could_record_still_never_reaches_a_turn() {
+        let _lease_tests = lease_test_lock();
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p4d_orphan_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let id = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+            &["Coyote time: allow the jump for 80 to 100 ms after leaving a ledge."],
+            Some(&["platformer feel"]), None, None,
+        ).unwrap();
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+        let q = "coyote time after leaving a ledge";
+
+        let err = {
+            let _seam = Seam::arm(SEAM_GRANT_TX | SEAM_UNMOUNT | SEAM_QUARANTINE_WRITE);
+            mem.lease_pack(&id, 1, "everything fails", "operator").await.unwrap_err().to_string()
+        };
+        assert!(err.contains("could not record the lease"), "{err}");
+        assert!(err.contains("suppressed for this process"), "it says what it did instead: {err}");
+        assert!(mem.leases().await.unwrap().is_empty(), "no row exists — that is the premise");
+        assert_eq!(mounted_ids(&mem).await, vec![id.clone()], "and the pack really is attached");
+
+        // The turn, with no seams armed at all: nothing durable says this pack may serve, so it does not.
+        let hits = mem.recall_from_packs(q, 4).await.unwrap();
+        assert!(hits.is_empty(), "an unrecorded mount reached a turn: {hits:?}");
+        assert!(mem.pack_context().await.unwrap().is_none());
+        // Detaching it by hand clears the suppression: the registry follows the engine, not the reverse.
+        mem.unmount_pack(&id).await.unwrap();
+        assert!(mem.recall_from_packs(q, 4).await.unwrap().is_empty());
+        assert!(!orphaned_mounts().contains(&id), "the note is dropped once the pack is really gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.4d, P2-4: one corrupt and UNRELATED library file must not block every lease. P.4c counted
+    /// any unreadable library file as an unreadable claimant of whichever id was being asked about,
+    /// so a single bad pack made every grant fail with an error naming the wrong id.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_corrupt_unrelated_library_file_does_not_block_other_leases() {
+        let _lease_tests = lease_test_lock();
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p4d_corrupt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let good = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+            &["one row"], Some(&["platformer feel"]), None, None,
+        ).unwrap();
+        // A file that is not a pack at all, sitting in the same library.
+        std::fs::write(lib.join("broken.ydbpack"), b"this is not a sealed pack").unwrap();
+
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+        // The catalog simply does not list what it cannot read...
+        let cat = mem.available_packs().await.unwrap();
+        assert_eq!(cat.len(), 1, "{cat:?}");
+        // ...and the good pack is still leasable.
+        let l = mem.lease_pack(&good, 1, "unaffected by a neighbour", "operator").await.unwrap();
+        assert_eq!(l.pack_id, good);
+        assert_eq!(mounted_ids(&mem).await, vec![good.clone()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

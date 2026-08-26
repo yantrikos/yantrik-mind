@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 evals_history.jsonl
 telegram_offset
 *.db

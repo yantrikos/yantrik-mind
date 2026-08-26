@@ -92,6 +92,12 @@ pub enum Outcome {
     Denied,
     /// Genuinely broke: an error, a timeout, an unreachable host, a panic.
     Failed,
+    /// The call could not be made as asked: the model's arguments did not fit the tool (a bare
+    /// number or boolean where every field is a string). The PLANNER's failure, not the tool's —
+    /// the tool never ran, so this says nothing about whether it works. Found live on 2026-08-26:
+    /// `run_skill {"name":328}` came back "(no saved skill named '')", which the classifier read as
+    /// Ok and CREDITED to run_skill's reliability (ARCH-6 P.2b, Codex's review).
+    Malformed,
 }
 
 /// What the loop should do next. Advisory — the controller owns the decision.
@@ -131,6 +137,13 @@ impl Outcome {
         let low = trimmed.to_lowercase();
         let has = |ms: &[&str]| ms.iter().any(|m| low.contains(m));
 
+        // The runtime's own marker for a call refused at the argument boundary — checked first,
+        // because the message goes on to say what the tool "takes", and those words must not be
+        // read as the tool reporting on itself.
+        if low.starts_with("(malformed call") {
+            return Outcome::Malformed;
+        }
+
         // PRIORITY ORDER, most specific first. A refusal often also contains the word "cannot", and a
         // missing credential often contains "unable" — whichever arm is checked first wins, so the
         // order encodes which reading is correct.
@@ -157,7 +170,7 @@ impl Outcome {
         // caught only by testing against observations captured from the running box. Every fixture I
         // invented passed; this one did not.
         if has(&["no results", "nothing found", "no matches", "found nothing", "0 results",
-                 "no entries", "empty", "none found", "no tool or saved skill"]) {
+                 "no entries", "empty", "none found", "no tool or saved skill", "no saved skill named"]) {
             return Outcome::Empty;
         }
         Outcome::Ok
@@ -174,7 +187,9 @@ impl Outcome {
             // The tool ran and did its job — an honest empty answer included.
             Outcome::Ok | Outcome::Empty => Some(true),
             Outcome::Failed => Some(false),
-            Outcome::Unavailable | Outcome::Denied => None,
+            // The tool never ran (not configured / refused / never asked properly): nothing here
+            // is evidence about the tool, in either direction.
+            Outcome::Unavailable | Outcome::Denied | Outcome::Malformed => None,
         }
     }
 
@@ -185,6 +200,8 @@ impl Outcome {
             Outcome::Unavailable => Recovery::Reroute,
             Outcome::Denied => Recovery::Tell,
             Outcome::Failed => Recovery::Retry,
+            // The call was wrong, not the tool: ask again, properly.
+            Outcome::Malformed => Recovery::Vary,
         }
     }
 
@@ -202,6 +219,7 @@ impl Outcome {
             Outcome::Unavailable => "unavailable",
             Outcome::Denied => "denied",
             Outcome::Failed => "failed",
+            Outcome::Malformed => "malformed",
         }
     }
 
@@ -214,7 +232,62 @@ impl Outcome {
             Outcome::Unavailable => " [not available on this box — do not retry it, use another route or say so]",
             Outcome::Denied => " [refused by the safety gate — tell the user, do not work around it]",
             Outcome::Failed => " [the tool broke — one retry is reasonable, then route around it]",
+            Outcome::Malformed => " [your arguments did not fit the tool — every field is a string; call it again as documented]",
         }
+    }
+}
+
+/// Tools that legitimately take a number or a boolean argument. Every other arm in the dispatch
+/// table reads its arguments as strings, so for them a bare number or boolean from the model is a
+/// call that cannot be made as asked. MCP tools carry their own schemas and are not judged here.
+pub(crate) const SCALAR_ARG_TOOLS: &[&str] = &[
+    "deals", "shop", "shopping", "find_deals", "deal", // budget / max
+    "watch_price", "track_price", "pricewatch", "watch_deal", // target / budget
+    "family_book", "book", // year
+    "hunt", "scan_movers", // act
+];
+
+/// The argument boundary: `Some(refusal)` when the model's arguments cannot be what the tool reads.
+/// The refusal names the tool and the offending fields with their TYPES and values — the model's
+/// own invented scalars (`name=328`), never data the person typed, which arrives as strings — and
+/// starts with the marker `classify` maps to `Outcome::Malformed`, so it is excluded from the
+/// tool's reliability instead of credited to it.
+pub(crate) fn malformed_call(tool: &str, args: &serde_json::Value) -> Option<String> {
+    if tool.starts_with("mcp.") || SCALAR_ARG_TOOLS.contains(&tool) {
+        return None;
+    }
+    let obj = match args {
+        serde_json::Value::Object(o) => o,
+        serde_json::Value::Null => return None,
+        other => {
+            return Some(format!(
+                "(malformed call: {tool} takes an object of string arguments; got a bare {} — call it again with the fields as documented)",
+                json_type(other)
+            ))
+        }
+    };
+    let bad: Vec<String> = obj
+        .iter()
+        .filter(|(_, v)| v.is_number() || v.is_boolean())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    if bad.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "(malformed call: {tool} takes string arguments; got {} — call it again with the fields as documented)",
+        bad.join(", ")
+    ))
+}
+
+fn json_type(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -374,5 +447,39 @@ mod live_fixtures {
         // failures — teaching the mind that a tool it never ran is unreliable.
         assert_eq!(record("(unknown tool: answer)"), None);
         assert_eq!(record("(no tool or saved skill matches — use build_capability)"), Some(true));
+    }
+}
+
+#[cfg(test)]
+mod malformed_tests {
+    use super::*;
+
+    /// P.2b: a call the model could not make properly is its own outcome, teaches nothing about the
+    /// tool, and is told to try again — and the boundary leaves legitimate shapes alone.
+    #[test]
+    fn a_malformed_call_is_its_own_outcome_and_teaches_nothing_about_the_tool() {
+        let refused = malformed_call("run_skill", &serde_json::json!({"name": 328, "target": 328})).expect("refused");
+        assert!(refused.starts_with("(malformed call: run_skill takes string arguments; got name=328, target=328"), "{refused}");
+        let o = Outcome::classify("run_skill", &refused);
+        assert_eq!(o, Outcome::Malformed);
+        assert_eq!(o.counts_toward_reliability(), None, "never evidence about the tool, either way");
+        assert_eq!(o.recovery(), Recovery::Vary);
+        assert_eq!(o.badge(), "malformed");
+        assert!(o.note().contains("call it again"));
+        // The other live shape.
+        assert!(malformed_call("discover_tools", &serde_json::json!({"query": true})).unwrap().contains("query=true"));
+        // Strings, arrays, objects and null are never malformed here; a bare scalar body is.
+        assert!(malformed_call("discover_tools", &serde_json::json!({"query": "weather tool"})).is_none());
+        assert!(malformed_call("recall", &serde_json::json!({"tags": ["a", "b"], "opts": {}})).is_none());
+        assert!(malformed_call("recall", &serde_json::Value::Null).is_none());
+        assert!(malformed_call("recall", &serde_json::json!("just a string")).unwrap().contains("bare string"));
+        // The tools that really take numbers or booleans, and MCP tools, pass untouched.
+        for t in SCALAR_ARG_TOOLS {
+            assert!(malformed_call(t, &serde_json::json!({"x": 1, "y": true})).is_none(), "{t}");
+        }
+        assert!(malformed_call("mcp.fs.read", &serde_json::json!({"limit": 10})).is_none());
+        // A REAL name that is not in the bank is the tool honestly finding nothing — Empty, and it
+        // was reading as Ok before this slice.
+        assert_eq!(Outcome::classify("run_skill", "(no saved skill named 'foo')"), Outcome::Empty);
     }
 }

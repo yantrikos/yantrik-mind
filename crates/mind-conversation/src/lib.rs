@@ -7201,6 +7201,14 @@ impl ConversationEngine {
     }
 
     async fn run_agent_tool_as(&self, tool: &str, args: &serde_json::Value, id: &TurnIdentity) -> String {
+        // THE ARGUMENT BOUNDARY (ARCH-6 P.2b). A call the model could not make properly is refused
+        // here, named as the planner's failure, before any tool runs — so it can never be graded as
+        // the tool's outcome. Every arm below reads its arguments as strings through `s`, which
+        // turns a bare number into "" and lets the tool run on nothing and report "not found"; the
+        // classifier then read that as Ok and credited the tool. Live, 2026-08-26, three times a turn.
+        if let Some(refused) = crate::tool_outcome::malformed_call(tool, args) {
+            return refused;
+        }
         let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         // Plugin gate: a tool owned by a DISABLED plugin is refused here (one check covers every tool).
         // Core tools (owned by no plugin) always pass; MCP tools are governed by their own catalog.

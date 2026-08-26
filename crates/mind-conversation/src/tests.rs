@@ -3017,10 +3017,10 @@ fn step_detail_reads_as_the_work_not_as_json() {
 fn the_outcome_badge_keeps_every_case_distinct() {
     use crate::tool_outcome::Outcome;
 
-    let all = [Outcome::Ok, Outcome::Empty, Outcome::Unavailable, Outcome::Denied, Outcome::Failed];
+    let all = [Outcome::Ok, Outcome::Empty, Outcome::Unavailable, Outcome::Denied, Outcome::Failed, Outcome::Malformed];
     let badges: Vec<&str> = all.iter().map(|o| o.badge()).collect();
 
-    assert_eq!(badges, vec!["ok", "empty", "unavailable", "denied", "failed"]);
+    assert_eq!(badges, vec!["ok", "empty", "unavailable", "denied", "failed", "malformed"]);
     let unique: std::collections::HashSet<_> = badges.iter().collect();
     assert_eq!(unique.len(), all.len(), "two outcomes must never share a badge");
     assert!(badges.iter().all(|b| !b.is_empty()), "every outcome needs a visible badge");
@@ -4207,4 +4207,42 @@ fn the_dead_zone_threshold_follows_the_persons_own_baseline() {
     assert_eq!(dead_zone_floor(Some(0.01)), 0.10);
     // An unusually responsive person must not be gated out of most of their own day.
     assert_eq!(dead_zone_floor(Some(0.95)), 0.35);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_call_is_refused_at_the_boundary_and_never_touches_the_tools_record() {
+    // ARCH-6 P.2b (Codex's review): the model's malformed arguments are the planner's failure. They
+    // are refused before any tool runs, classified as their own outcome, and — through the one
+    // write site's rule — never recorded as the tool's outcome, in either direction.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    // A healthy tool with three good runs on record.
+    for _ in 0..3 {
+        mem.record_tool_outcome("run_skill", true).await.unwrap();
+    }
+    let before = mem.tool_track_record().await.unwrap();
+    let healthy = before.iter().find(|(t, _, _)| t == "run_skill").cloned().expect("run_skill on record");
+    assert_eq!(healthy.2, 3);
+
+    // The two live shapes from the box, five times each, on both tools they hit — through the real
+    // dispatch boundary and the real grading rule `guards::post` applies.
+    let who = TurnIdentity::primary();
+    for args in [serde_json::json!({"name": 328, "target": 328}), serde_json::json!({"query": true})] {
+        for tool in ["run_skill", "discover_tools"] {
+            for _ in 0..5 {
+                let obs = conv.run_agent_tool_as(tool, &args, &who).await;
+                assert!(obs.starts_with("(malformed call"), "{tool} {args}: {obs}");
+                let outcome = crate::tool_outcome::Outcome::classify(tool, &obs);
+                assert_eq!(outcome, crate::tool_outcome::Outcome::Malformed);
+                if let Some(ok) = outcome.counts_toward_reliability() {
+                    mem.record_tool_outcome(tool, ok).await.unwrap();
+                }
+            }
+        }
+    }
+    let after = mem.tool_track_record().await.unwrap();
+    let still = after.iter().find(|(t, _, _)| t == "run_skill").cloned().unwrap();
+    assert_eq!(still, healthy, "twenty malformed calls changed run_skill's record");
+    assert!(!after.iter().any(|(t, _, _)| t == "discover_tools"), "a tool that never ran must not appear on the record: {after:?}");
 }

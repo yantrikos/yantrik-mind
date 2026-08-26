@@ -579,7 +579,10 @@ impl ConversationEngine {
                 });
             }
             None => {
-                e.lesson = Some(format!("{}: excluded from reliability (capability gap or gate)", verdict.badge()));
+                e.lesson = Some(match verdict {
+                    Outcome::Malformed => "malformed: excluded from reliability — the model's arguments did not fit the tool; the planner's failure, not the tool's".to_string(),
+                    _ => format!("{}: excluded from reliability (capability gap or gate)", verdict.badge()),
+                });
             }
         }
         self.recorder().record(e);

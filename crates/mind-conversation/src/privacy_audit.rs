@@ -23,6 +23,22 @@
 /// `mind-agents/src/lib.rs` and `mind-recipes/src/lib.rs` along with the one it was written for —
 /// and `mind-agents/src/lib.rs` is exactly where E.SEC2 grounded the sub-agent synthesis call. The
 /// guard had gone blind to the very file it was protecting (E.SEC5).
+/// Individual call sites that are not inference calls at all, matched by EXACT squashed source.
+///
+/// Per-FILE allowlisting is too coarse here: `mind-agents/src/lib.rs` holds a test-double backend
+/// AND the real sub-agent synthesis call that E.SEC2 grounded. Listing the file would silently
+/// re-open the very call that audit closed.
+///
+/// Keyed on the exact source text with whitespace removed, so ANY edit to the line stops the match
+/// and the guard fires again. That is the safe direction: this list can only go stale toward
+/// MORE noise, never toward less coverage.
+const ALLOWED_SITES: &[(&str, &str, &str)] = &[(
+    "mind-agents/src/lib.rs",
+    "letr=self.chat(messages,config,tools)?;",
+    "a #[cfg(test)] LLMBackend double that pops canned responses from a queue — it reaches no \
+     provider and carries no household data. Its `chat` is the trait method, not an inference call.",
+)];
+
 const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
     (
         "mind-conversation/src/egress_planning.rs",
@@ -67,25 +83,17 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
 /// closed when the local endpoint is down. That is a capability trade on features in daily use —
 /// the owner's call, not the auditor's.
 const UNSCOPED_PENDING: &[(&str, &str)] = &[
-    // mail.rs, finance.rs, calendar.rs and briefing.rs were HERE and are now grounded — the four
-    // whose prompts were unambiguously household. Struck rather than left standing, which the
-    // companion test enforces.
+    // EMPTY, and that is the finding rather than the absence of one.
     //
-    // E.SEC9 struck five more — foresight, onboarding, studio, plugins_mod, skills — plus four of
-    // the five lib.rs sites. Each carried Private-class content by the enum's own definition (a
-    // face and its relation, names with relationships, a person's style from their own photos, the
-    // user's code), and each already degraded gracefully on Err, so grounding them could not cost
-    // a working path. The provenance was traced per call site, not inferred from the file name.
+    // mail, finance, calendar and briefing were struck first; E.SEC9 struck foresight, onboarding,
+    // studio, plugins_mod, skills and every lib.rs site including `handle_turn_as`'s main
+    // composition -- the largest of them, grounded once Pranab chose fail-closed-but-honest over
+    // both a hard outage and a silent cloud failover.
     //
-    // ONE SITE REMAINS, and it is the largest: `handle_turn_as`'s main composition. It carries
-    // recalled grounding, PINNED FACTS naming people with certainties, the mail digest, the GitHub
-    // digest, the transcript and pack context — the most private prompt the system assembles.
-    // It is NOT left here out of doubt about what it carries. It is left because it propagates with
-    // `?` and has no deterministic fallback, so grounding it makes every plain conversational turn
-    // FAIL CLOSED whenever the owned lane is unavailable — and that lane is already observed
-    // returning 429. That is an availability change to the primary interface, and it is Pranab's
-    // call rather than a cleanup's side effect (E.SEC9).
-    ("mind-conversation/src/lib.rs", "ONE site: handle_turn_as's main turn. Grounding it fails the turn closed when the owned lane is down — awaiting Pranab's decision, not awaiting analysis."),
+    // An empty list means the guard now defends the whole crate with no deferrals: any new
+    // `inference.chat(` must either be grounded or justify itself in UNSCOPED_ALLOWED. Keep it
+    // empty. A name added back here is a deferral, and deferrals are how the four originals
+    // survived as long as they did.
 ];
 
 /// Crates whose sources are scanned. These are the ones that hold an `InferencePool` and can reach
@@ -152,15 +160,37 @@ mod tests {
                 // either; whitespace is then removed entirely, which is what makes the match
                 // wrapping-proof. `chat_grounded(`/`chat_scoped(` do not match: the character after
                 // `chat` is `_`, not `(`.
-                let squashed: String =
+                let mut squashed: String =
                     crate::source_audit::strip_comments(&body).chars().filter(|c| !c.is_whitespace()).collect();
-                if squashed.contains("inference.chat(") {
+                // Remove the known non-inference sites FIRST, so one test double cannot excuse a
+                // whole file. An edit to any of these snippets stops the match and the guard fires.
+                for (f, snip, _) in ALLOWED_SITES {
+                    if *f == name {
+                        squashed = squashed.replace(snip, "");
+                    }
+                }
+                // ANY receiver, not just one spelled `inference`. The pattern used to be
+                // `inference.chat(` and `book.rs` defeated it with a variable named `inf` --
+                // carrying a prompt that opens "You are writing one chapter of a family's private
+                // book" and embeds places, trips, occasions, who is most often in frame, and
+                // direct quotes attributed to named family members. Its neighbour four lines below
+                // was already grounded, so this was a miss, not a decision.
+                //
+                // That is the SAME defeat as the line-wrapping one this guard was rewritten to fix:
+                // matching one spelling of a call and calling it coverage. Matching every `.chat(`
+                // over-triggers, and over-triggering is the safe direction here -- a false positive
+                // costs one allowlist line WITH a reason, which is the outcome we want anyway.
+                if squashed.contains(".chat(") {
                     // Report every `.chat(` in the file: the exact line of a wrapped call is
                     // ambiguous, and naming the candidates is more useful than guessing one.
                     let sites: Vec<String> = body
                         .lines()
                         .enumerate()
                         .filter(|(_, l)| l.contains(".chat(") && !l.trim_start().starts_with("//"))
+                        .filter(|(_, l)| {
+                            let sq: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+                            !ALLOWED_SITES.iter().any(|(f, snip, _)| *f == name && sq.contains(snip))
+                        })
                         .map(|(i, l)| format!("{}:{} — {}", name, i + 1, l.trim()))
                         .collect();
                     if sites.is_empty() {

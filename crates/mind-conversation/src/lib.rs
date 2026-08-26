@@ -111,6 +111,17 @@ const VOICE_NOTE: &str = "SPOKEN CHANNEL: this reply is read aloud by a synthesi
 /// `TurnIdentity` is the thing it is constructing, so the vocabulary travels with it (E.SEC8).
 pub use mind_types::{OutputPolicy, OutputScope};
 
+/// What the mind says when it cannot answer a turn from home.
+///
+/// Names the real reason rather than a generic error, because "something went wrong" invites a
+/// retry loop while this invites waiting. It deliberately does NOT offer a "send it to cloud
+/// anyway" verb: a phrase that opts a turn INTO disclosure fails in the dangerous direction, and
+/// this codebase has already retired four text matchers that could fail both ways (E.SEC9).
+const HOME_LANE_UNAVAILABLE: &str = "I can't answer this one privately right now \u{2014} my own \
+hardware is unreachable. This turn carries what I recalled about you, your mail and code digests, \
+and our recent conversation, so I'm not sending it to a cloud model to work around the outage. \
+Ask me again in a moment.";
+
 /// How many turns fell back to the strictest scope because no surface declared one.
 ///
 /// Should be ZERO for known production surfaces, and a test asserts none of them call
@@ -9761,11 +9772,35 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             id.format_note(),
             self.memory.pack_context().await.ok().flatten().as_deref(),
         );
-        let resp = self
-            .inference
-            .chat(messages, GenerationConfig::default())
-            .await
-            .map_err(|e| MindError::Inference(e.to_string()))?;
+        // THE MAIN TURN, GROUNDED (E.SEC9). This is the most private prompt the mind assembles:
+        // recalled grounding, PINNED FACTS naming people with certainties, the mail digest, the
+        // GitHub digest, the transcript and pack context. It was unscoped, which does NOT mean it
+        // routinely went to cloud -- the default backend's first link is the owned cluster -- but
+        // it meant a FAIL-OPEN: when that cluster returns 429 (which the journal shows it does),
+        // the chain silently continued to nanogpt/deepseek carrying all of the above.
+        //
+        // `chat_grounded` has no chain to fall down: the private lane is built from the owned
+        // endpoint and refuses rather than failing over.
+        let resp = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            Ok(r) => r,
+            // FAIL CLOSED, BUT ANSWER -- Pranab's call, 2026-08-26. A bare `?` here would take the
+            // primary interface offline whenever the cluster hiccups; a cloud fallback would be
+            // the leak wearing a fallback's clothes. So: a deterministic, honest reply.
+            //
+            // Deliberately triggered by ANY error, not just a privacy refusal. The case that
+            // actually matters -- the owned cluster returning 429 -- surfaces as an ordinary
+            // backend error, so keying on a refusal would miss it. It also keeps this off the
+            // string-matching path that has cost this codebase four guards already.
+            Err(_) => {
+                let reply = HOME_LANE_UNAVAILABLE.to_string();
+                // The turn is still remembered: the question was asked, and the honest non-answer
+                // is what happened. Skill auto-select is skipped -- suggesting a tool based on an
+                // outage notice would be nonsense.
+                let _ = self.memory.append_message("user", user_text).await;
+                let _ = self.memory.append_message("assistant", &reply).await;
+                return Ok(reply);
+            }
+        };
         let mut reply = resp.text;
         // Auto-select: if a banked skill clearly fits this task, surface it (suggest, never auto-run).
         if let Some(suggestion) = self.suggest_skill(user_text).await {

@@ -162,7 +162,15 @@ impl super::ConversationEngine {
                 }
                 let prompt = Self::book_chapter_prompt(year, &ev, &lore_y);
                 let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-                let Ok(resp) = inf.chat(vec![ChatMessage::user(&prompt)], cfg).await else { continue };
+                // PRIVATE, and it was one variable name away from invisible (E.SEC9). This prompt
+                // opens "You are writing one chapter of a family's private book" and carries the
+                // places, trips, named occasions, who is most often in frame, and direct quotes
+                // attributed to named family members. The call four lines below was already
+                // grounded, so this was a miss rather than a decision — and the guard could not
+                // see it because it matched `inference.chat(` and this receiver is called `inf`.
+                // Refusal skips the chapter, which is the right degradation: no chapter beats a
+                // chapter written by a third party.
+                let Ok(resp) = inf.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await else { continue };
                 let txt = resp.text.trim().to_string();
                 let (title, body) = match txt.split_once('\n') {
                     Some((t, b)) => (t.trim().trim_start_matches("TITLE:").trim().to_string(), b.trim().to_string()),

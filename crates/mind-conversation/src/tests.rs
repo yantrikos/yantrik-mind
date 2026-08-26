@@ -5361,3 +5361,29 @@ mod sec4 {
         }
     }
 }
+
+/// E.SEC6c — a track record must never render as a ratio over a zero denominator.
+#[test]
+fn a_track_record_never_prints_a_rate_it_does_not_have() {
+    use crate::skills::track_record;
+
+    let sk = |runs: u64, successes: u64, graded: u64| mind_types::Skill {
+        name: "s".into(), lang: "python".into(), code: "x".into(), summary: "x".into(),
+        tags: vec![], status: "active".into(), runs, successes, graded, created_ms: 0,
+    };
+
+    // THE LIVE DEFECT, found by running csv-sum on the box after deploying E.P5b: a legacy row
+    // carries successes from the old conflated column and graded = 0, and the render printed
+    // "prior 5/0 judged ok" — a ratio with a zero denominator.
+    let legacy = track_record(&sk(8, 5, 0));
+    assert!(!legacy.contains("/0"), "no ratio over a zero denominator: {legacy}");
+    assert!(legacy.contains("8 runs") && legacy.contains("none judged"), "it says what is true: {legacy}");
+
+    // Never run at all is a different sentence from run-but-unjudged, and both are honest.
+    assert_eq!(track_record(&sk(0, 0, 0)), "untested");
+
+    // With judged evidence, both numbers appear AND attempts stay visible, so neither is hidden.
+    let judged = track_record(&sk(9, 6, 1));
+    assert!(judged.contains("6/1 judged ok"), "{judged}");
+    assert!(judged.contains("9 runs"), "attempts are not hidden: {judged}");
+}

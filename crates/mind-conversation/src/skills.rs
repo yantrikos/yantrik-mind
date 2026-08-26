@@ -20,6 +20,20 @@ pub(crate) fn word_offset(lower: &str, word: &str) -> Option<usize> {
     None
 }
 
+/// How a skill's track record READS to a person.
+///
+/// `{successes}/{graded}` is nonsense when `graded` is 0 — a legacy row rendered as "prior 5/0
+/// judged ok", a ratio with a zero denominator, which is exactly the class of number this line of
+/// work exists to stop printing. Found by RUNNING a skill on the box after deploying E.P5b, not by
+/// reading the diff: the deploy was correct and the sentence describing it was not (E.SEC6c).
+pub(crate) fn track_record(sk: &Skill) -> String {
+    match sk.reliability().rate() {
+        None if sk.runs > 0 => format!("{} runs, none judged yet", sk.runs),
+        None => "untested".to_string(),
+        Some(_) => format!("{}/{} judged ok of {} runs", sk.successes, sk.graded, sk.runs),
+    }
+}
+
 /// What a banked skill actually IS -- decided ONCE, here, so every executor agrees.
 ///
 /// Three call sites used to decide this independently and disagreed. The tool arm read the JSON
@@ -415,11 +429,8 @@ impl super::ConversationEngine {
             let body = skills
                 .iter()
                 .map(|s| format!(
-                    // `{successes}/{graded}`, not `/{runs}`: printing judged successes over
-                    // ATTEMPTS reads as a failure rate for every document nobody has assessed
-                    // (E.SEC6). Attempts are shown separately so neither number is hidden.
-                    "- {} [{}] — {} ({}/{} judged ok, {} runs{})",
-                    s.name, s.lang, s.summary, s.successes, s.graded, s.runs,
+                    "- {} [{}] — {} ({}{})",
+                    s.name, s.lang, s.summary, track_record(s),
                     if s.status == "quarantined" { ", QUARANTINED" } else { "" }
                 ))
                 .collect::<Vec<_>>()
@@ -437,7 +448,7 @@ impl super::ConversationEngine {
             }
             let body = hits
                 .iter()
-                .map(|s| format!("- {} [{}] — {} ({}/{} judged ok) → \"run skill {}\"", s.name, s.lang, s.summary, s.successes, s.graded, s.name))
+                .map(|s| format!("- {} [{}] — {} ({}) → \"run skill {}\"", s.name, s.lang, s.summary, track_record(s), s.name))
                 .collect::<Vec<_>>()
                 .join("\n");
             return Some(format!("Skills matching \"{query}\":\n{body}"));
@@ -529,7 +540,7 @@ impl super::ConversationEngine {
                 // THE code-skill adapter, and the only path allowed to reach `task_success`
                 // through an exit code (E.P5b).
                 let _ = self.memory.record_skill_outcome(&sk.name, mind_types::SkillOutcome::from_exit(ok)).await;
-                format!("Ran skill \"{}\" (prior {}/{} judged ok):\n\n{}", sk.name, sk.successes, sk.graded, r.render())
+                format!("Ran skill \"{}\" (prior: {}):\n\n{}", sk.name, track_record(sk), r.render())
             }
             Err(e) => {
                 // No sandbox is an INFRASTRUCTURE failure. It says nothing about the skill, so it

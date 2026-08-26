@@ -348,7 +348,7 @@ impl super::ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 260, ..GenerationConfig::default() };
         let body = self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
             .await
             .ok()?
             .text

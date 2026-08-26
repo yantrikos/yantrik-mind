@@ -67,10 +67,9 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
 /// closed when the local endpoint is down. That is a capability trade on features in daily use —
 /// the owner's call, not the auditor's.
 const UNSCOPED_PENDING: &[(&str, &str)] = &[
-    ("mind-conversation/src/mail.rs", "email header triage, sender classification from aggregates, and email analysis — plainly household."),
-    ("mind-conversation/src/finance.rs", "extracts recurring subscriptions FROM EMAIL METADATA — plainly household."),
-    ("mind-conversation/src/calendar.rs", "calendar events — plainly household."),
-    ("mind-conversation/src/briefing.rs", "the daily briefing, composed over household context."),
+    // mail.rs, finance.rs, calendar.rs and briefing.rs were HERE and are now grounded — the four
+    // whose prompts were unambiguously household. Struck rather than left standing, which the
+    // companion test enforces.
     ("mind-conversation/src/foresight.rs", "persona + a prompt built from household signals."),
     ("mind-conversation/src/onboarding.rs", "two calls carrying persona + user answers during setup."),
     ("mind-conversation/src/studio.rs", "three calls; prompt provenance not yet traced."),

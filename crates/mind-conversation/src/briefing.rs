@@ -418,7 +418,7 @@ impl super::ConversationEngine {
         ];
         let resp = self
             .inference
-            .chat(messages, GenerationConfig::default())
+            .chat_grounded(messages, GenerationConfig::default())
             .await
             .map_err(|e| MindError::Inference(e.to_string()))?;
         Ok(resp.text)

@@ -173,6 +173,29 @@ impl OutputPolicy {
     }
 }
 
+/// How many evidence items a policy permits, and which survive.
+///
+/// PURE, and deliberately not wired to anything yet: whether the mind ends up FILTERING context or
+/// merely INSTRUCTING the model is still an open question with Codex, and both answers need to know
+/// which items are disallowed. This is the half that is the same either way.
+///
+/// # What it can and cannot do, stated plainly
+///
+/// It enforces the EVIDENCE BUDGET (`max_evidence_items`) and the total prohibition (a policy that
+/// permits no entity classes admits nothing). It does NOT filter per class, because deciding that
+/// a given sentence names a Person rather than a Project is entity classification — a real
+/// problem, unbuilt, and one I am not going to fake with a substring rule. Until it exists, a
+/// policy permitting SOME classes is treated as permitting the items it is given, capped.
+///
+/// That gap is the honest state and is recorded here rather than hidden behind a partial
+/// implementation that would look like protection (E.SEC8).
+pub fn admitted_evidence<T: Clone>(policy: &OutputPolicy, items: &[T]) -> Vec<T> {
+    if policy.entity_classes.is_empty() || policy.max_evidence_items == 0 {
+        return Vec::new();
+    }
+    items.iter().take(policy.max_evidence_items).cloned().collect()
+}
+
 /// What the user asked for, in this turn, about disclosure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MinimizationRequest {
@@ -310,6 +333,49 @@ mod tests {
                 assert!(after.entity_classes.iter().all(|c| base.entity_classes.contains(c)));
             }
         }
+    }
+
+    #[test]
+    fn a_total_prohibition_admits_nothing_at_all() {
+        // The case the live failure needs: operator-private inference, an explicit "do not reveal
+        // private facts", and therefore no evidence reaches the answer regardless of how much was
+        // recalled. This is the half of slice 4 that is the same whether the policy ends up
+        // filtering context or instructing the model.
+        let items: Vec<&str> = vec!["a", "b", "c"];
+        let asked = OutputPolicy::for_scope(OutputScope::OperatorPrivate)
+            .tighten(MinimizationRequest::NoPrivateFacts);
+        assert!(admitted_evidence(&asked, &items).is_empty());
+
+        // And a public surface admits nothing before anyone even asks.
+        let public = OutputPolicy::for_scope(OutputScope::PublicShare);
+        assert!(admitted_evidence(&public, &items).is_empty());
+    }
+
+    #[test]
+    fn the_evidence_budget_is_enforced() {
+        let items: Vec<u8> = (0..50).collect();
+        let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
+        let kept = admitted_evidence(&member, &items);
+        assert_eq!(kept.len(), member.max_evidence_items, "a member surface is capped");
+        assert_eq!(kept[0], 0, "and keeps the highest-ranked, not a random slice");
+
+        let operator = OutputPolicy::for_scope(OutputScope::OperatorPrivate);
+        assert_eq!(admitted_evidence(&operator, &items).len(), 50, "the owner is not capped");
+    }
+
+    #[test]
+    fn per_class_filtering_is_not_implemented_and_does_not_pretend_to_be() {
+        // A policy permitting SOME classes admits what it is given, capped. Deciding that a given
+        // sentence names a Person rather than a Project is entity classification — unbuilt, and a
+        // substring rule would be the fifth fuzzy matcher this week wearing a new hat.
+        let items: Vec<&str> = vec!["ZQCANARY-PERSON-4a1 handles the rota"];
+        let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
+        assert!(!member.may_name(EntityClass::Account), "the CONTRACT forbids accounts here");
+        assert_eq!(
+            admitted_evidence(&member, &items).len(),
+            1,
+            "and the FILTER cannot yet tell what this item names — recorded, not hidden"
+        );
     }
 
     #[test]

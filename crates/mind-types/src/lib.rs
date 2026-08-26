@@ -36,7 +36,7 @@ pub use task::Task;
 pub mod reliability;
 pub mod scratch;
 pub mod output_scope;
-pub use output_scope::{detect_minimization, EntityClass, MinimizationRequest, OutputPolicy, OutputScope};
+pub use output_scope::{admitted_evidence, detect_minimization, EntityClass, MinimizationRequest, OutputPolicy, OutputScope};
 pub mod skill_outcome;
 pub use skill_outcome::{SkillOutcome, TaskBasis};
 pub use reliability::{Reliability, Verdict};

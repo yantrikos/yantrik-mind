@@ -62,6 +62,18 @@ fn control_passes() -> Result<(), String> {
     Ok(())
 }
 
+/// WHERE a finding is and WHAT it is — never what it says.
+///
+/// `path` is the JSON key path and `len` the byte length of the matched span. Both are metadata
+/// about a value, not the value: this is how the 28 chain-hash false positives were identified
+/// (key path plus digit-run length) without anyone reading one.
+#[derive(Clone)]
+struct Hit {
+    path: String,
+    kind: &'static str,
+    len: usize,
+}
+
 /// Every kind present in one scalar. Never returns any part of it.
 fn kinds_of(text: &str) -> Vec<&'static str> {
     let mut k: Vec<&'static str> = mind_types::sensitive_findings(text).iter().map(|f| f.kind.label()).collect();
@@ -70,77 +82,100 @@ fn kinds_of(text: &str) -> Vec<&'static str> {
     k
 }
 
+fn hits_of(path: &str, text: &str) -> Vec<Hit> {
+    mind_types::sensitive_findings(text)
+        .iter()
+        .map(|f| Hit { path: path.to_string(), kind: f.kind.label(), len: f.len })
+        .collect()
+}
+
 /// Walk parsed JSON, judging each scalar AND each key beside its scalar value.
 ///
 /// FIELD-AWARE, never raw-line. A raw scan lets a digit run continue across JSON punctuation and
 /// manufacture a card-shaped number out of two unrelated fields, which is what a first pass
 /// appeared to find. The key/value pass is the other half: `{"api_key": "9f2b1c4d8e"}` has nothing
 /// sensitive in either half alone, so a value-only walk reports it clean (Codex point 2).
-fn walk(node: &serde_json::Value, out: &mut Vec<&'static str>) {
+fn walk(node: &serde_json::Value, path: &str, out: &mut Vec<Hit>) {
     match node {
-        serde_json::Value::String(s) => out.extend(kinds_of(s)),
-        serde_json::Value::Number(n) => out.extend(kinds_of(&n.to_string())),
-        serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+        serde_json::Value::String(s) => out.extend(hits_of(path, s)),
+        serde_json::Value::Number(n) => out.extend(hits_of(path, &n.to_string())),
+        serde_json::Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                walk(v, &format!("{path}[{i}]"), out);
+            }
+        }
         serde_json::Value::Object(map) => {
             for (k, v) in map {
+                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
                 if let Some(scalar) = match v {
                     serde_json::Value::String(s) => Some(s.clone()),
                     serde_json::Value::Number(n) => Some(n.to_string()),
                     _ => None,
                 } {
                     if let Some(f) = mind_types::sensitive_pair(k, &scalar) {
-                        out.push(f.kind.label());
+                        out.push(Hit { path: format!("{child} (key+value)"), kind: f.kind.label(), len: f.len });
                     }
                 }
-                walk(v, out);
+                walk(v, &child, out);
             }
         }
         _ => {}
     }
 }
 
-fn kinds_of_json_line(line: &str) -> Vec<&'static str> {
+fn hits_of_json_line(line: &str) -> Vec<Hit> {
     let mut found = Vec::new();
     match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(v) => walk(&v, &mut found),
+        Ok(v) => walk(&v, "", &mut found),
         // A line that will not parse is scanned as text — assuming a schema that does not apply
         // would report a clean bill of health for a file the audit never looked inside.
-        Err(_) => found.extend(kinds_of(line)),
+        Err(_) => found.extend(hits_of("<unparsed line>", line)),
     }
-    found.sort_unstable();
-    found.dedup();
     found
 }
 
 struct Report {
     scanned: usize,
     per_kind: BTreeMap<&'static str, usize>,
-    flagged: Vec<(String, Vec<&'static str>)>,
+    flagged: Vec<(String, Vec<Hit>)>,
 }
 
 impl Report {
     fn new() -> Self {
         Report { scanned: 0, per_kind: BTreeMap::new(), flagged: Vec::new() }
     }
-    fn record(&mut self, id: String, kinds: Vec<&'static str>) {
+    fn record(&mut self, id: String, hits: Vec<Hit>) {
         self.scanned += 1;
-        if kinds.is_empty() {
+        if hits.is_empty() {
             return;
         }
-        for k in &kinds {
+        let mut kinds: Vec<&'static str> = hits.iter().map(|h| h.kind).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        for k in kinds {
             *self.per_kind.entry(k).or_insert(0) += 1;
         }
-        self.flagged.push((id, kinds));
+        self.flagged.push((id, hits));
     }
-    fn print(&self, path: &str, unit: &str) {
+    fn print(&self, path: &str, unit: &str, explain: bool) {
         println!("{path}");
         println!("  {unit} scanned : {}", self.scanned);
         println!("  {unit} flagged : {}", self.flagged.len());
         for (k, n) in &self.per_kind {
             println!("    {k:22} {n}");
         }
-        for (id, kinds) in self.flagged.iter().take(20) {
+        for (id, hits) in self.flagged.iter().take(20) {
+            let mut kinds: Vec<&str> = hits.iter().map(|h| h.kind).collect();
+            kinds.sort_unstable();
+            kinds.dedup();
             println!("    id={id} kinds={}", kinds.join(","));
+            if explain {
+                // Key path and span LENGTH only. This is how the chain-hash false positives were
+                // identified without anyone reading one.
+                for h in hits {
+                    println!("        at {} kind={} span_len={}", h.path, h.kind, h.len);
+                }
+            }
         }
         if self.flagged.len() > 20 {
             println!("    … {} more flagged records not listed", self.flagged.len() - 20);
@@ -158,14 +193,14 @@ fn audit_jsonl(path: &str) -> std::io::Result<Report> {
             Ok(l) => l,
             // Invalid UTF-8 is itself worth seeing rather than skipping silently.
             Err(_) => {
-                rep.record(format!("line:{}", i + 1), vec!["unreadable-line"]);
+                rep.record(format!("line:{}", i + 1), vec![Hit { path: "<invalid utf-8>".into(), kind: "unreadable-line", len: 0 }]);
                 continue;
             }
         };
         if line.trim().is_empty() {
             continue;
         }
-        rep.record(format!("line:{}", i + 1), kinds_of_json_line(&line));
+        rep.record(format!("line:{}", i + 1), hits_of_json_line(&line));
     }
     Ok(rep)
 }
@@ -183,7 +218,7 @@ fn audit_db(path: &str) -> Result<Report, String> {
     let mut rep = Report::new();
     for row in rows {
         let (rid, text) = row.map_err(|e| e.to_string())?;
-        rep.record(rid, kinds_of(&text));
+        rep.record(rid, hits_of("memories.text", &text));
     }
     Ok(rep)
 }
@@ -191,6 +226,8 @@ fn audit_db(path: &str) -> Result<Report, String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let fail_closed = args.iter().any(|a| a == "--fail-closed");
+    // Key paths and span lengths for each finding — metadata about a value, never the value.
+    let explain = args.iter().any(|a| a == "--explain");
     let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
     println!("E.SEC1b READ-ONLY AUDIT — production's detector; counts, kinds and record ids only\n");
@@ -214,7 +251,7 @@ fn main() {
         let rep = if path.ends_with(".jsonl") {
             match audit_jsonl(path) {
                 Ok(r) => {
-                    r.print(path, "lines");
+                    r.print(path, "lines", explain);
                     r
                 }
                 Err(e) => {
@@ -225,7 +262,7 @@ fn main() {
         } else {
             match audit_db(path) {
                 Ok(r) => {
-                    r.print(path, "memories");
+                    r.print(path, "memories", explain);
                     r
                 }
                 Err(e) => {

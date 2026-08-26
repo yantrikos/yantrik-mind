@@ -751,3 +751,18 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The pattern, third instance | E.PK4d recorded that each fix in this line created the next defect. This is the same shape one level down: the fix for a race introduced a subtler race, and the test I wrote for it was shaped by the mechanism rather than by the promise. A test written by the author of a fix tends to exercise the code path the author was thinking about - which is exactly the path that is already correct. |
 | Not claimed | Cross-process durability, still: the lock is process-scoped and two OS processes appending to one log would race. Unchanged from E.PK4f and stated again rather than allowed to fade. |
 | Decision | **KEEP - PASSED.** Codex reviewed the isolated diff and implementation and closed the P.4 lifecycle + durable-outbox gate on 9959593, combined with the approved lease side of E.PK4e. |
+
+## E.18 - pin the PUBLISHED yantrikdb 0.18.0 instead of a local checkout - pre-registered before the dependency is touched
+
+*Pre-registration. Written and committed before a single line of `Cargo.toml` changes. This slice moves the substrate under every crate in the workspace, so it gets an entry rather than a version bump.*
+
+| Field | Entry |
+|---|---|
+| Why now | Core published 0.18.0 to crates.io and PyPI on 2026-08-26, fresh-install verified, all 40 published packs mounting. Two things follow. The mind currently builds against a PATH dependency into a working checkout that sits at 0.16.0 with uncommitted changes in it - a build nobody else could reproduce and that changes under us whenever that tree changes. And 0.16 carries the pack-mount regression (`no such column: synthesis_state`) that made E.PK4's attach-harm wall unrunnable in this repo's own harness. |
+| Hypothesis under test | The workspace builds and passes green against the published 0.18.0 with NO source changes beyond the dependency line - i.e. nothing this mind depends on changed incompatibly between 0.16 and 0.18. |
+| What is expected to CHANGE, measurably | The gated attach-harm control (`YM_PACK_DIST`, E.PK4 wall 1) becomes runnable in-process for the first time: 0.16 could not mount any 0.15-sealed pack, and 0.18 mounts all 40. Its result on the real artifacts is the number this slice exists to obtain locally, and the box's 0.15 run stays as separate evidence rather than being replaced by it. |
+| Expected metric | Workspace green at its current count (1027/0 across 42 crates) or higher, and the gated attach-harm control reporting ZERO rows cleared across the twelve no-pack queries, matching what the box reported at 0.15. |
+| KILL criteria, fixed now | (1) If the workspace does not build against published 0.18.0 without touching non-dependency source, the pin is REVERTED and the incompatibility reported to Core rather than worked around here. (2) If any currently-green test goes red, the pin is REVERTED - a substrate upgrade may not be paid for with a weakened assertion. (3) If the attach-harm control clears ANY row for a no-pack query, that is KILL for the affected pack's floor, exactly as pre-registered in E.PK4, and it is reported as an attach-harm finding rather than as a dependency problem. |
+| Not claimed | That 0.18 improves anything for this mind. Its published `pack_context_for` / `recall_from_packs_for` are NOT used by this slice; wiring them is P.4b, which stays blocked on EVIDENCE (E.PK3c's 2/4), not on the engine. A dependency upgrade earns no behaviour change. |
+| Reachability (Doctrine 1) | Not satisfied by a green build. The slice is not done until the box runs the pinned build on the production path and a real turn is served from it. |
+| Decision | pending. |

@@ -7765,53 +7765,22 @@ impl ConversationEngine {
                     Ok(Some(x)) => x,
                     _ => return format!("(no saved skill named '{name}')"),
                 };
-                let recipes = match &self.recipes {
-                    Some(r) => r,
-                    None => return "(engine unavailable)".to_string(),
+                // ONE classifier, shared with the phrase path, and each runner states its own
+                // precondition. E.SK1 split this two ways -- a spec with a `tool` key, or "an
+                // instruction document" -- and real CODE is "everything else", so `run_skill` on
+                // a Python skill handed its source to the model as prose to follow. Three arms,
+                // each chosen by what the skill DECLARES (E.SK2).
+                return match crate::skills::classify_skill(&sk) {
+                    crate::skills::SkillBody::Capability { tool, spec } => {
+                        self.run_capability_skill(&sk, &tool, &spec, &s("target"), &s("url")).await
+                    }
+                    crate::skills::SkillBody::Code { lang, source } => {
+                        self.run_code_skill(&sk, lang, &source).await
+                    }
+                    crate::skills::SkillBody::Instructions { text } => {
+                        self.run_instruction_skill(&sk, &text, &s("target")).await
+                    }
                 };
-                let spec: serde_json::Value = serde_json::from_str(&sk.code).unwrap_or_else(|_| serde_json::json!({}));
-                let tool_name = spec.get("tool").and_then(|x| x.as_str()).unwrap_or("");
-                if tool_name.is_empty() {
-                    // AN INSTRUCTION DOCUMENT. `import_agent` banks the markdown itself as `code`,
-                    // so every imported document used to die on the refusal that stood here and the
-                    // model improvised instead. It runs now — as the same recipe the standing
-                    // schedule uses, in the BACKGROUND (a research document takes minutes and a
-                    // tool call must not hold the turn open), and on the job board so it is
-                    // watchable rather than silent (E.SK1).
-                    return self.run_instruction_skill(&sk, &s("target")).await;
-                }
-                let var = spec.get("var").and_then(|x| x.as_str()).unwrap_or("out").to_string();
-                let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&sk.name).to_string();
-                let target = s("target");
-                if target.len() < 2 {
-                    return "(need a target/query to run the skill with)".to_string();
-                }
-                let mut targs = spec.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
-                if spec.get("needs_url").and_then(|x| x.as_bool()).unwrap_or(false) {
-                    targs = serde_json::json!({ "url": s("url") });
-                }
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                let rec = Recipe {
-                    id: "skill".into(),
-                    name: format!("run {}: {target}", sk.name),
-                    steps: vec![
-                        RecipeStep::WaitForCondition { tool_name: tool_name.into(), args: targs, store_as: var.clone(), condition: Condition::VarContains { var, substring: target.clone() }, poll_secs: 120, expire_ms: now + 24 * 3600 * 1000 },
-                        RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
-                    ],
-                };
-                // The outcome is recorded AFTER the run and reports what happened. This used to
-                // credit success before `run_with` was called, so a skill that failed every time
-                // still read as perfectly reliable in the ledger skill selection consults — the
-                // same shape as E.PK2b, crediting an outcome nobody observed (E.SK1).
-                let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
-                let _ = self.memory.record_skill_outcome(&sk.name, out.ok).await;
-                if out.sleeping_until.is_some() {
-                    format!("Running skill '{}' — watching {label} for \"{target}\".", sk.name)
-                } else if !out.notifications.is_empty() {
-                    out.notifications.join("\n")
-                } else {
-                    format!("(skill '{}' ran but produced nothing)", sk.name)
-                }
             }
             // publish_page + make_dashboard dispatch via the capability registry above.
             "discover_tools" | "search_skills" => {

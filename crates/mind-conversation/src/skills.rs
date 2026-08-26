@@ -2,20 +2,56 @@
 
 use super::*;
 
+/// What a banked skill actually IS -- decided ONCE, here, so every executor agrees.
+///
+/// Three call sites used to decide this independently and disagreed. The tool arm read the JSON
+/// shape; the phrase path read `lang` through a `_ => Python` fallback; documents are banked as
+/// `md` or `capability`, which is "anything unrecognised". So prose was fed to a Python
+/// interpreter, and after E.SK1 source code was handed to the model as prose. There is no
+/// fallback interpreter here on purpose: guessing one is the bug this replaces (E.SK2).
+pub(crate) enum SkillBody {
+    /// A capability spec: JSON naming a tool to poll until it matches a target.
+    Capability { tool: String, spec: serde_json::Value },
+    /// Source. Run in the sandbox, never read aloud to a model.
+    Code { lang: CodeLang, source: String },
+    /// Prose. Followed by the model, never executed.
+    Instructions { text: String },
+}
+
+/// Classify a banked skill by what it DECLARES, never by what its bytes resemble.
+pub(crate) fn classify_skill(sk: &Skill) -> SkillBody {
+    // Some importers double-encoded the body: `code` is a JSON *string* wrapping the real text,
+    // which is why three banked skills arrive wearing quotes. Unwrap once so the content is
+    // judged rather than its packaging -- undoing a known encoding is not guessing.
+    let body = match serde_json::from_str::<serde_json::Value>(&sk.code) {
+        Ok(serde_json::Value::Object(map)) => {
+            if let Some(tool) = map.get("tool").and_then(|x| x.as_str()).filter(|t| !t.is_empty()) {
+                return SkillBody::Capability {
+                    tool: tool.to_string(),
+                    spec: serde_json::Value::Object(map),
+                };
+            }
+            sk.code.clone()
+        }
+        Ok(serde_json::Value::String(inner)) => inner,
+        _ => sk.code.clone(),
+    };
+    // A DECLARED language means source. Everything else -- `md`, `capability`, whatever a future
+    // importer writes -- is prose, and prose goes to the model, not to an interpreter.
+    match sk.lang.as_str() {
+        "python" => SkillBody::Code { lang: CodeLang::Python, source: body },
+        "shell" => SkillBody::Code { lang: CodeLang::Shell, source: body },
+        "rust" => SkillBody::Code { lang: CodeLang::Rust, source: body },
+        _ => SkillBody::Instructions { text: body },
+    }
+}
+
 impl super::ConversationEngine {
     pub(crate) fn lang_str(l: CodeLang) -> &'static str {
         match l {
             CodeLang::Shell => "shell",
             CodeLang::Python => "python",
             CodeLang::Rust => "rust",
-        }
-    }
-
-    pub(crate) fn lang_from_str(s: &str) -> CodeLang {
-        match s {
-            "rust" => CodeLang::Rust,
-            "shell" => CodeLang::Shell,
-            _ => CodeLang::Python,
         }
     }
 
@@ -43,18 +79,28 @@ impl super::ConversationEngine {
     }
 
     /// "run/use (the )? skill <name>" / "use the <name> skill" → skill name.
-    pub(crate) fn parse_run_skill(text: &str) -> Option<String> {
+    /// `run skill <name>` and `run skill <name>: <input>` -> the name and the run's input.
+    ///
+    /// The input used to be unreachable: the trailer strips quotes and dots but not colons, so
+    /// `run skill market-check: WMT` parsed the name as `market-check:` and the lookup failed
+    /// outright. A document without the input it exists to process is not worth running (E.SK2).
+    pub(crate) fn parse_run_skill(text: &str) -> Option<(String, String)> {
         let l = text.to_lowercase();
         for marker in ["run skill ", "use skill ", "run the skill ", "use the skill ", "invoke skill "] {
             if let Some(i) = l.find(marker) {
-                let name = text[i + marker.len()..]
+                let rest = text[i + marker.len()..].trim();
+                let (head, target) = match rest.split_once(':') {
+                    Some((h, t)) => (h, t.trim()),
+                    None => (rest, ""),
+                };
+                let name = head
                     .trim()
                     .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
                     .split_whitespace()
                     .next()
                     .unwrap_or("");
                 if !name.is_empty() {
-                    return Some(name.to_string());
+                    return Some((name.to_string(), target.to_string()));
                 }
             }
         }
@@ -331,7 +377,9 @@ impl super::ConversationEngine {
     /// sandbox), or list skills. Returns Some(reply) if handled. Requires the sandbox (reuse runs
     /// code; banking without a runner would be pointless).
     pub(crate) async fn handle_skills(&self, user_text: &str) -> Option<String> {
-        let sb = self.sandbox.as_ref()?;
+        // NOT gated on the sandbox any more: listing, searching and running a DOCUMENT need no
+        // interpreter, and gating the whole handler on one kept documents dead on a box without
+        // it. The sandbox is required where code actually runs, in `run_code_skill` (E.SK2).
 
         if Self::wants_list_skills(user_text) {
             let skills = self.memory.list_skills().await.unwrap_or_default();
@@ -405,7 +453,7 @@ impl super::ConversationEngine {
             });
         }
 
-        if let Some(name) = Self::parse_run_skill(user_text) {
+        if let Some((name, target)) = Self::parse_run_skill(user_text) {
             let skill = match self.memory.get_skill(&name).await.ok().flatten() {
                 Some(s) => s,
                 None => {
@@ -418,21 +466,41 @@ impl super::ConversationEngine {
                     return Some(format!("No skill named \"{name}\".{hint}"));
                 }
             };
-            let res = match Self::lang_from_str(&skill.lang) {
-                CodeLang::Python => sb.run_python(&skill.code).await,
-                CodeLang::Shell => sb.run_shell(&skill.code).await,
-                CodeLang::Rust => sb.run_rust(&skill.code).await,
-            };
-            return Some(match res {
-                Ok(r) => {
-                    let ok = r.exit_code == 0 && !r.timed_out;
-                    let _ = self.memory.record_skill_outcome(&name, ok).await;
-                    format!("Ran skill \"{name}\" (prior {}/{} ok):\n\n{}", skill.successes, skill.runs, r.render())
+            // The SAME three runners the tool arm uses, chosen by the SAME classifier. This
+            // branch used to dispatch on its own and send everything unrecognised to Python
+            // (E.SK2).
+            return Some(match classify_skill(&skill) {
+                SkillBody::Code { lang, source } => self.run_code_skill(&skill, lang, &source).await,
+                SkillBody::Instructions { text } => self.run_instruction_skill(&skill, &text, &target).await,
+                SkillBody::Capability { tool, spec } => {
+                    self.run_capability_skill(&skill, &tool, &spec, &target, "").await
                 }
-                Err(e) => format!("Couldn't run skill \"{name}\" — sandbox unavailable ({e})."),
             });
         }
         None
+    }
+
+    /// Run a banked skill's SOURCE in the sandbox, and record what actually happened.
+    ///
+    /// Shared by the phrase path and the tool arm so a code skill runs the same way whichever
+    /// sentence reached it (E.SK2).
+    pub(crate) async fn run_code_skill(&self, sk: &Skill, lang: CodeLang, source: &str) -> String {
+        let Some(sb) = self.sandbox.as_ref() else {
+            return format!("(\"{}\" is {} code, but there is no sandbox on this box to run it in)", sk.name, sk.lang);
+        };
+        let res = match lang {
+            CodeLang::Python => sb.run_python(source).await,
+            CodeLang::Shell => sb.run_shell(source).await,
+            CodeLang::Rust => sb.run_rust(source).await,
+        };
+        match res {
+            Ok(r) => {
+                let ok = r.exit_code == 0 && !r.timed_out;
+                let _ = self.memory.record_skill_outcome(&sk.name, ok).await;
+                format!("Ran skill \"{}\" (prior {}/{} ok):\n\n{}", sk.name, sk.successes, sk.runs, r.render())
+            }
+            Err(e) => format!("Couldn't run skill \"{}\" — sandbox unavailable ({e}).", sk.name),
+        }
     }
 
     /// Conservative recall router: if a banked skill strongly matches the task, return a one-line

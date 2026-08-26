@@ -728,7 +728,56 @@ impl super::ConversationEngine {
     ///
     /// Returns a RECEIPT immediately. A research document takes minutes and a tool call must not
     /// hold the turn open while it thinks.
-    pub(crate) async fn run_instruction_skill(&self, sk: &mind_types::Skill, target: &str) -> String {
+    /// Run a banked CAPABILITY SPEC -- JSON naming a tool to poll until it matches a target.
+    ///
+    /// Lifted out of the `run_skill` tool arm unchanged so the phrase path can reach it too: a
+    /// user who types `run skill web-monitor: bitcoin` should get a monitor, not a lecture about
+    /// how to ask for one (E.SK2).
+    pub(crate) async fn run_capability_skill(
+        &self,
+        sk: &mind_types::Skill,
+        tool_name: &str,
+        spec: &serde_json::Value,
+        target: &str,
+        url: &str,
+    ) -> String {
+        let Some(recipes) = self.recipes.clone() else {
+            return "(the recipe engine isn't configured on this box)".to_string();
+        };
+        let var = spec.get("var").and_then(|x| x.as_str()).unwrap_or("out").to_string();
+        let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&sk.name).to_string();
+        if target.len() < 2 {
+            return format!(
+                "(\"{}\" watches the {label} for something you name -- say \"run skill {}: <target>\")",
+                sk.name, sk.name
+            );
+        }
+        let mut targs = spec.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        if spec.get("needs_url").and_then(|x| x.as_bool()).unwrap_or(false) {
+            targs = serde_json::json!({ "url": url });
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let rec = Recipe {
+            id: "skill".into(),
+            name: format!("run {}: {target}", sk.name),
+            steps: vec![
+                RecipeStep::WaitForCondition { tool_name: tool_name.into(), args: targs, store_as: var.clone(), condition: Condition::VarContains { var, substring: target.to_string() }, poll_secs: 120, expire_ms: now + 24 * 3600 * 1000 },
+                RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
+            ],
+        };
+        // The outcome is recorded AFTER the run and reports what happened (E.SK1).
+        let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+        let _ = self.memory.record_skill_outcome(&sk.name, out.ok).await;
+        if out.sleeping_until.is_some() {
+            format!("Running skill '{}' — watching {label} for \"{target}\".", sk.name)
+        } else if !out.notifications.is_empty() {
+            out.notifications.join("\n")
+        } else {
+            format!("(skill '{}' ran but produced nothing)", sk.name)
+        }
+    }
+
+    pub(crate) async fn run_instruction_skill(&self, sk: &mind_types::Skill, instructions: &str, target: &str) -> String {
         let Some(recipes) = self.recipes.clone() else {
             // The executor-presence rule `delegate_cmd` keeps: a ledger row for a job that cannot
             // run is a lie on the board, so this is refused BEFORE a row exists.
@@ -758,7 +807,7 @@ impl super::ConversationEngine {
         }
         let _ = self.memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
 
-        let steps = crate::import_skill::instruction_steps(&sk.name, &sk.code, Some(target));
+        let steps = crate::import_skill::instruction_steps(&sk.name, instructions, Some(target));
         let rec = Recipe { id: format!("skill:{}", sk.name), name: format!("run {}: {task}", sk.name), steps };
         let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
         let (id2, name2, task2) = (id.clone(), sk.name.clone(), task.clone());

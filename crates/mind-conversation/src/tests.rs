@@ -1586,8 +1586,15 @@ fn vague_topic_detection() {
 fn skill_command_parsing() {
     assert_eq!(ConversationEngine::parse_save_skill("save that as skill csv_rows").as_deref(), Some("csv_rows"));
     assert_eq!(ConversationEngine::parse_save_skill("save this as a skill called fib").as_deref(), Some("fib"));
-    assert_eq!(ConversationEngine::parse_run_skill("run skill csv_rows").as_deref(), Some("csv_rows"));
-    assert_eq!(ConversationEngine::parse_run_skill("use the skill fib").as_deref(), Some("fib"));
+    assert_eq!(ConversationEngine::parse_run_skill("run skill csv_rows"), Some(("csv_rows".into(), String::new())));
+    assert_eq!(ConversationEngine::parse_run_skill("use the skill fib"), Some(("fib".into(), String::new())));
+    // E.SK2: the input after the colon. This used to parse the name as `market-check:` — the
+    // trailer strips quotes and dots but not colons — so the lookup failed and a document could
+    // never be given the input it exists to process.
+    assert_eq!(
+        ConversationEngine::parse_run_skill("run skill market-check: check WMT"),
+        Some(("market-check".into(), "check WMT".into()))
+    );
     assert!(ConversationEngine::wants_list_skills("list my skills"));
     assert!(ConversationEngine::parse_run_skill("run python: print(1)").is_none());
     // search
@@ -4942,9 +4949,10 @@ async fn an_instruction_document_runs_instead_of_being_refused() {
     // the executor-presence rule. What matters is that it is no longer the "no runnable recipe
     // spec" refusal: the document is recognised as runnable.
     assert!(!out.contains("no runnable recipe spec"), "an instruction document must not be refused as unrunnable: {out}");
-    // The arm's own engine check fires before the branch is reached, which is the same rule stated
-    // once earlier: a job that cannot run is refused BEFORE a ledger row exists.
-    assert!(out.contains("engine unavailable"), "no engine, no run: {out}");
+    // The runner that needs the recipe engine is the one that says so (E.SK2 moved the check off
+    // the arm and into each runner). The rule is unchanged: a job that cannot run is refused
+    // BEFORE a ledger row exists.
+    assert!(out.contains("recipe engine isn't configured"), "no engine, no run: {out}");
     let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
     assert!(!rows.contains("market-check"), "no row may exist for a job that never started: {rows}");
 }
@@ -4976,4 +4984,111 @@ fn one_instruction_recipe_serves_both_callers() {
     assert!(b.starts_with(&a), "the on-call prompt is the standing one plus the input, not a rewrite");
     // Blank input is no input, not an empty line pretending to be one.
     assert_eq!(prompt_of(&instruction_steps("x", "Do it.", Some("   "))), prompt_of(&instruction_steps("x", "Do it.", None)));
+}
+
+/// Build a banked skill without repeating nine fields per case.
+#[cfg(test)]
+fn banked(name: &str, lang: &str, code: &str) -> mind_types::Skill {
+    mind_types::Skill {
+        name: name.into(),
+        lang: lang.into(),
+        code: code.into(),
+        summary: "banked".into(),
+        tags: vec![],
+        status: "active".into(),
+        runs: 0,
+        successes: 0,
+        created_ms: 0,
+    }
+}
+
+#[test]
+fn a_skill_is_classified_by_what_it_declares_never_by_a_guess() {
+    // E.SK2. The phrase path used to pick an interpreter with `match lang { "rust"=>.., "shell"=>..,
+    // _ => Python }`. Documents are banked as `md` (import_agent) or `capability`, and both are
+    // "anything unrecognised" — so prose went to a Python interpreter. There is no fallback
+    // interpreter here: an undeclared language is prose, and prose goes to the model.
+    use crate::skills::{classify_skill, SkillBody};
+
+    // A well-formed capability spec — the shape `web-monitor` carries on the live box.
+    let spec = banked("web-monitor", "capability", r#"{"tool":"fetch","var":"page","label":"web page","needs_url":true}"#);
+    match classify_skill(&spec) {
+        SkillBody::Capability { tool, .. } => assert_eq!(tool, "fetch"),
+        _ => panic!("a spec naming a tool is a capability"),
+    }
+
+    // Declared source.
+    assert!(matches!(classify_skill(&banked("csv-sum", "python", "print(1)")), SkillBody::Code { lang: CodeLang::Python, .. }));
+    assert!(matches!(classify_skill(&banked("s", "shell", "ls")), SkillBody::Code { lang: CodeLang::Shell, .. }));
+
+    // THE BUG. Markdown prose, and a `capability` label with no tool key: neither may become Code,
+    // because becoming Code means being executed by an interpreter that was guessed.
+    for sk in [
+        banked("test-market", "md", "# Ticker Intelligence Agent\nYou are a market agent."),
+        banked("deal-tracker", "capability", "1. Generate the HTML file."),
+        banked("mystery", "", "do the thing"),
+        banked("future-importer", "org-mode", "* headline"),
+    ] {
+        assert!(
+            matches!(classify_skill(&sk), SkillBody::Instructions { .. }),
+            "an undeclared language is prose, never an interpreter: {} / {}",
+            sk.name,
+            sk.lang
+        );
+    }
+}
+
+#[test]
+fn a_double_encoded_body_is_unwrapped_before_it_is_judged() {
+    // E.SK2. Three skills on the live box were banked with `code` as a JSON *string* wrapping the
+    // real text, so the body arrives wearing quotes. Fed to Python, `"import json, ..."` is a bare
+    // string literal: it parses, does nothing, exits 0 — and `ok = exit_code == 0` recorded that
+    // no-op as a SUCCESS. That is E.PK2b's shape (an outcome credited for work never performed),
+    // and it had already reached the ledger skill selection reads.
+    use crate::skills::{classify_skill, SkillBody};
+
+    let wrapped = banked("deal-tracker-page", "capability", r#""1. Generate the complete HTML file with embedded JS.""#);
+    match classify_skill(&wrapped) {
+        SkillBody::Instructions { text } => {
+            assert!(text.starts_with("1. Generate"), "the packaging is removed: {text}");
+            assert!(!text.starts_with('"'), "and not left on the front of the prompt: {text}");
+        }
+        _ => panic!("a quoted document is still a document"),
+    }
+
+    // Unwrapping must not turn a spec into prose: the object case is decided before it.
+    assert!(matches!(
+        classify_skill(&banked("m", "capability", r#"{"tool":"inbox","label":"inbox"}"#)),
+        SkillBody::Capability { .. }
+    ));
+    // Nor may it strip a code skill that happens to parse as JSON.
+    assert!(matches!(classify_skill(&banked("n", "python", "42")), SkillBody::Code { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_document_is_never_handed_to_an_interpreter_and_code_is_never_read_aloud() {
+    // E.SK2, the two directions of the same defect, at the seam a user actually reaches.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("done")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    mem.save_skill(banked("test-market", "md", "# Ticker Agent\nReport the move.")).await.unwrap();
+    mem.save_skill(banked("csv-sum", "python", "print(1)")).await.unwrap();
+
+    // A DOCUMENT. This engine has no sandbox and no recipe engine, so what matters is WHICH
+    // refusal comes back: the instruction runner's, not the sandbox's. Before E.SK2 this reached
+    // `sb.run_python(<markdown>)`.
+    let doc = conv.handle_skills("run skill test-market: check WMT").await.expect("the phrase is handled");
+    assert!(doc.contains("recipe engine isn't configured"), "a document goes to the instruction runner: {doc}");
+    assert!(!doc.contains("sandbox"), "and never to an interpreter: {doc}");
+
+    // CODE. The mirror image, and the regression E.SK1 shipped: `run_skill` classified two ways —
+    // a spec with a `tool` key, or "an instruction document" — and code is "everything else", so
+    // Python source was handed to a model as standing instructions to follow.
+    let code = conv.run_agent_tool_as("run_skill", &serde_json::json!({ "name": "csv-sum", "target": "x" }), &TurnIdentity::primary()).await;
+    assert!(code.contains("sandbox"), "declared source goes to the sandbox: {code}");
+    assert!(!code.contains("recipe engine"), "and is never read aloud to a model: {code}");
+
+    // Neither refusal may leave a row on the board for a job that never started.
+    let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
+    assert!(!rows.contains("test-market") && !rows.contains("csv-sum"), "no row for a job that never ran: {rows}");
 }

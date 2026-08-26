@@ -5164,3 +5164,81 @@ async fn a_delegation_named_after_a_skill_runs_the_skill_not_a_generic_job() {
     let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
     assert!(!rows.contains("test-market"), "no row for a job that never ran: {rows}");
 }
+
+/// E.SEC3 — the same offset bug as E.SEC1b, in the parsers on the live chat path.
+#[cfg(test)]
+mod sec3 {
+    use super::*;
+
+    /// Characters that break byte arithmetic: length-CHANGING lowercases first.
+    const NASTY: &[&str] = &["İ", "ẞ", "ı", "\u{0307}", "日", "🔑", "é"];
+
+    #[test]
+    fn a_command_parser_cannot_panic_or_silently_lose_a_character() {
+        // PROVEN BEFORE THE FIX, on the live chat path:
+        //   parse_run_skill("İ run skill 日本")
+        //     -> byte index 14 is not a char boundary; it is inside '日'
+        //   parse_save_skill("İ save that as skill 日本")
+        //     -> byte index 23 is not a char boundary
+        // And where it did not panic it corrupted the answer instead:
+        //   parse_run_skill("İ run skill csv-sum") -> Some(("sv-sum", ""))
+        // — the name lost its first character, so the lookup failed with "No skill named sv-sum".
+        // `to_lowercase` is not length-preserving, and every one of these parsers found offsets in
+        // the lowered copy and sliced the ORIGINAL. Reachable from any message a user types.
+        assert_eq!(
+            ConversationEngine::parse_run_skill("İ run skill csv-sum"),
+            Some(("csv-sum".into(), String::new())),
+            "the name must survive a length-changing character earlier in the sentence"
+        );
+
+        let bodies = [
+            "run skill csv-sum",
+            "run skill market-check: check WMT",
+            "save that as skill deploy",
+            "do you have a skill for parsing csv",
+            "list my skills",
+            "run python: print(1)",
+            "",
+        ];
+        for body in bodies {
+            for nasty in NASTY {
+                for cut in 0..=body.len() {
+                    if !body.is_char_boundary(cut) {
+                        continue;
+                    }
+                    let text = format!("{}{}{}", &body[..cut], nasty, &body[cut..]);
+                    // None of these may panic on any input a user can type.
+                    let _ = ConversationEngine::parse_run_skill(&text);
+                    let _ = ConversationEngine::parse_save_skill(&text);
+                    let _ = ConversationEngine::parse_find_skill(&text);
+                    let _ = ConversationEngine::wants_list_skills(&text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn asking_to_run_a_saved_skill_is_not_heard_as_asking_to_save_one() {
+        // The sentence that swallowed my own first live attempt. `save` was tested with
+        // `contains`, which is true of "saved", and save is dispatched ahead of run — so a request
+        // to RUN a banked document was answered with "Run something green first".
+        assert_eq!(ConversationEngine::parse_save_skill("run the saved skill named test-market"), None);
+        assert_eq!(ConversationEngine::parse_save_skill("use your run_skill tool to run the saved skill named test-market"), None);
+        assert_eq!(ConversationEngine::parse_save_skill("show me the skills I saved"), None, "no name follows, and `saved` is not the verb");
+
+        // And the run parser still hears it.
+        assert_eq!(
+            ConversationEngine::parse_run_skill("run the skill test-market: check WMT"),
+            Some(("test-market".into(), "check WMT".into()))
+        );
+
+        // THE CONTROL — real save requests must still be heard, or this trade is a regression.
+        assert_eq!(ConversationEngine::parse_save_skill("save that as skill csv_rows").as_deref(), Some("csv_rows"));
+        assert_eq!(ConversationEngine::parse_save_skill("save this as a skill called fib").as_deref(), Some("fib"));
+        assert_eq!(ConversationEngine::parse_save_skill("please save it as skill deploy").as_deref(), Some("deploy"));
+        assert_eq!(ConversationEngine::parse_save_skill("SAVE that as skill Loud").as_deref(), Some("Loud"));
+
+        // `save` must come BEFORE the marker it applies to: a trailing "save" is not this request.
+        assert_eq!(ConversationEngine::parse_save_skill("skill deploy — remember to save"), None);
+    }
+}

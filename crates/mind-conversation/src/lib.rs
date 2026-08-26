@@ -6718,7 +6718,7 @@ impl ConversationEngine {
     /// Parse a "send an email to X saying Y" request into (to, subject, body). Returns None if this
     /// isn't a send request. Recipient missing is signalled with an empty `to`.
     fn parse_send_email(text: &str) -> Option<(String, String, String)> {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         // "send ... saying <verbatim>" — the literal-body path. (Drafting is parse_draft_email.)
         let is_send = ["send an email", "send a email", "send email", "send the email",
             "email to ", "shoot an email", "send a mail"]
@@ -6730,7 +6730,7 @@ impl ConversationEngine {
         let to = Self::first_email(text).unwrap_or_default();
         // Body: everything after a "saying"/"that says"/"with the message"/":" marker, else after the
         // recipient address.
-        let lower = text.to_lowercase();
+        let lower = text.to_ascii_lowercase();
         let body = ["saying", "that says", "with the message", "with message", "message:", "telling them", "tell them", " - ", ": "]
             .iter()
             .filter_map(|m| lower.find(m).map(|i| (i, m.len())))
@@ -6756,7 +6756,7 @@ impl ConversationEngine {
 
     /// Parse a "comment on owner/repo#N saying Y" request into (target, body). None if not one.
     fn parse_github_comment(text: &str) -> Option<(String, String)> {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         let is_cmt = ["comment on", "reply on github", "reply to github", "post a comment", "github comment", "comment github"]
             .iter()
             .any(|p| l.contains(p));
@@ -6770,7 +6770,7 @@ impl ConversationEngine {
             .find(|t| t.contains('/') && t.contains('#') && t.rsplit('#').next().map(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).unwrap_or(false))
             .map(|t| t.to_string())
             .unwrap_or_default();
-        let lower = text.to_lowercase();
+        let lower = text.to_ascii_lowercase();
         let body = ["saying", "that says", "with the message", "with message", "message:", " - ", ": "]
             .iter()
             .filter_map(|m| lower.find(m).map(|i| (i, m.len())))
@@ -6784,7 +6784,7 @@ impl ConversationEngine {
     /// Parse a "draft/compose an email to X about Y" request → (to, gist). The body is LLM-DRAFTED
     /// (vs parse_send_email's verbatim). Empty `to` signals a missing recipient.
     fn parse_draft_email(text: &str) -> Option<(String, String)> {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         let is = ["draft an email", "draft a email", "draft email", "compose an email", "compose a email",
             "write an email", "draft a reply", "compose a reply", "write a reply", "draft a message"]
             .iter()

@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// Byte offset of `word` where it stands as ITS OWN token, not buried inside another one.
+///
+/// `contains("save")` is true of "saved", "saves" and "lifesaver". A command parser that dispatches
+/// on a substring answers the wrong request (E.SEC3).
+pub(crate) fn word_offset(lower: &str, word: &str) -> Option<usize> {
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find(word) {
+        let at = from + rel;
+        let before_ok = lower[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = lower[at + word.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return Some(at);
+        }
+        from = at + word.len();
+    }
+    None
+}
+
 /// What a banked skill actually IS -- decided ONCE, here, so every executor agrees.
 ///
 /// Three call sites used to decide this independently and disagreed. The tool arm read the JSON
@@ -57,13 +75,21 @@ impl super::ConversationEngine {
 
     /// "save that/this/it as (a )?skill (called|named)? <name>" → skill name.
     pub(crate) fn parse_save_skill(text: &str) -> Option<String> {
-        let l = text.to_lowercase();
-        if !(l.contains("save") && l.contains("skill")) {
+        let l = text.to_ascii_lowercase();
+        // `save` must be the VERB OF THIS SENTENCE, not a syllable inside another word, and it must
+        // come BEFORE the skill marker it applies to.
+        //
+        // The old test was `l.contains("save") && l.contains("skill")`, which matches "run the
+        // SAVEd SKILL named X" — and because save is dispatched ahead of run, asking to run a
+        // banked skill was answered with "Run something green first". I hit this myself on the
+        // first live attempt to run a document and mistook it for a routing bug (E.SEC3).
+        let Some(save_at) = word_offset(&l, "save") else { return None };
+        if !l.contains("skill") {
             return None;
         }
         // take the token(s) after "skill", "called", or "named"
         for marker in ["skill called ", "skill named ", "as skill ", "a skill called ", "skill "] {
-            if let Some(i) = l.find(marker) {
+            if let Some(i) = l.find(marker).filter(|i| *i > save_at) {
                 let name = text[i + marker.len()..]
                     .trim()
                     .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
@@ -85,7 +111,7 @@ impl super::ConversationEngine {
     /// `run skill market-check: WMT` parsed the name as `market-check:` and the lookup failed
     /// outright. A document without the input it exists to process is not worth running (E.SK2).
     pub(crate) fn parse_run_skill(text: &str) -> Option<(String, String)> {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         for marker in ["run skill ", "use skill ", "run the skill ", "use the skill ", "invoke skill "] {
             if let Some(i) = l.find(marker) {
                 let rest = text[i + marker.len()..].trim();
@@ -108,7 +134,7 @@ impl super::ConversationEngine {
     }
 
     pub(crate) fn wants_list_skills(text: &str) -> bool {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         ["list skills", "list my skills", "what skills", "which skills", "your skills", "what can you do"]
             .iter()
             .any(|p| l.contains(p))
@@ -116,7 +142,7 @@ impl super::ConversationEngine {
 
     /// "find/search (a )?skill for X" / "do you have a skill for/to X" / "any skill for X" → query.
     pub(crate) fn parse_find_skill(text: &str) -> Option<String> {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         let is_search = ["find a skill", "find skill", "search skill", "search for a skill",
             "do you have a skill", "any skill for", "is there a skill", "which skill", "skill for ", "skill to "]
             .iter()
@@ -167,7 +193,7 @@ impl super::ConversationEngine {
     /// keyword/sender to monitor the inbox for. Persistent delegation: a WaitForCondition that polls
     /// the inbox until a match, then pings you. Distinct from task reminders (this is a monitor).
     pub(crate) fn parse_watch_request(text: &str) -> Option<String> {
-        let low = text.to_lowercase();
+        let low = text.to_ascii_lowercase();
         let is_monitor = (low.contains("watch")
             || low.contains("let me know when")
             || low.contains("tell me when")
@@ -233,7 +259,7 @@ impl super::ConversationEngine {
 
     /// "watch <url> for X" / "tell me when <url> says X" → (url, X). Monitors any web page.
     pub(crate) fn parse_web_watch(text: &str) -> Option<(String, String)> {
-        let low = text.to_lowercase();
+        let low = text.to_ascii_lowercase();
         if !Self::is_monitor_verb(&low) {
             return None;
         }
@@ -244,7 +270,7 @@ impl super::ConversationEngine {
 
     /// "watch my github for X" / "tell me when a PR about X" → X (no URL, github-ish words present).
     pub(crate) fn parse_github_watch(text: &str) -> Option<String> {
-        let low = text.to_lowercase();
+        let low = text.to_ascii_lowercase();
         if !Self::is_monitor_verb(&low) {
             return None;
         }
@@ -260,7 +286,7 @@ impl super::ConversationEngine {
     /// main box). Distinct prefix from the local "run python:" path so both coexist.
     pub(crate) fn parse_worker_run(text: &str) -> Option<(CodeLang, String)> {
         let l = text.trim();
-        let low = l.to_lowercase();
+        let low = l.to_ascii_lowercase();
         for (pat, lang) in [
             ("worker python:", CodeLang::Python),
             ("worker shell:", CodeLang::Shell),
@@ -281,7 +307,7 @@ impl super::ConversationEngine {
     /// planner (authors + runs a recipe). Explicit prefixes keep it from swallowing ordinary chat.
     pub(crate) fn parse_plan_request(text: &str) -> Option<String> {
         let l = text.trim();
-        let low = l.to_lowercase();
+        let low = l.to_ascii_lowercase();
         for p in ["plan:", "task:", "automate:", "do this:", "set up:"] {
             if let Some(rest) = low.strip_prefix(p) {
                 let g = l[l.len() - rest.len()..].trim();
@@ -305,7 +331,7 @@ impl super::ConversationEngine {
     /// task for Claude Code (on MiniMax). Distinct from "run python: …" (that's the raw sandbox).
     pub(crate) fn parse_coder_request(text: &str) -> Option<String> {
         let l = text.trim();
-        let low = l.to_lowercase();
+        let low = l.to_ascii_lowercase();
         for p in ["code:", "coder:", "claude code:"] {
             if let Some(rest) = low.strip_prefix(p) {
                 let task = l[l.len() - rest.len()..].trim();
@@ -339,7 +365,7 @@ impl super::ConversationEngine {
     /// Parse a "run/execute … <lang> … <code>" request → (language, code). Requires an explicit run
     /// intent AND a determinable language (never guesses), so ordinary code chat isn't executed.
     pub(crate) fn parse_code_request(text: &str) -> Option<(CodeLang, String)> {
-        let l = text.to_lowercase();
+        let l = text.to_ascii_lowercase();
         if !["run ", "execute ", "exec ", "eval "].iter().any(|p| l.contains(p)) {
             return None;
         }

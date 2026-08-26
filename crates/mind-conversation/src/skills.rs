@@ -415,8 +415,11 @@ impl super::ConversationEngine {
             let body = skills
                 .iter()
                 .map(|s| format!(
-                    "- {} [{}] — {} ({}/{} ok{})",
-                    s.name, s.lang, s.summary, s.successes, s.runs,
+                    // `{successes}/{graded}`, not `/{runs}`: printing judged successes over
+                    // ATTEMPTS reads as a failure rate for every document nobody has assessed
+                    // (E.SEC6). Attempts are shown separately so neither number is hidden.
+                    "- {} [{}] — {} ({}/{} judged ok, {} runs{})",
+                    s.name, s.lang, s.summary, s.successes, s.graded, s.runs,
                     if s.status == "quarantined" { ", QUARANTINED" } else { "" }
                 ))
                 .collect::<Vec<_>>()
@@ -434,7 +437,7 @@ impl super::ConversationEngine {
             }
             let body = hits
                 .iter()
-                .map(|s| format!("- {} [{}] — {} ({}/{} ok) → \"run skill {}\"", s.name, s.lang, s.summary, s.successes, s.runs, s.name))
+                .map(|s| format!("- {} [{}] — {} ({}/{} judged ok) → \"run skill {}\"", s.name, s.lang, s.summary, s.successes, s.graded, s.name))
                 .collect::<Vec<_>>()
                 .join("\n");
             return Some(format!("Skills matching \"{query}\":\n{body}"));

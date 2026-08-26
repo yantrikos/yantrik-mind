@@ -760,7 +760,10 @@ impl ConversationEngine {
             };
             match s.status.as_str() {
                 "quarantined" => rep.quarantined += 1,
-                _ if s.runs == 0 => rep.untested += 1,
+                // UNTESTED means nothing has been judged, not that nothing has been run. A
+                // document with ten clean unassessed runs is untested and was being counted as
+                // active (E.SEC6).
+                _ if s.graded == 0 => rep.untested += 1,
                 _ => rep.active += 1,
             }
             rep.skills.push(SkillRow {

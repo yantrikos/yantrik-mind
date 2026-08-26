@@ -482,7 +482,11 @@ impl ConversationEngine {
         let candidates = self.memory.recall_skills(topic, 8).await.unwrap_or_default();
         let proven: Vec<_> = candidates
             .into_iter()
-            .filter(|s| s.runs > 0 && (s.successes as f32 / s.runs as f32) >= 0.5 && !s.name.contains('.'))
+            // "Proven" over JUDGED runs. This was a second copy of the raw-attempts rule Codex
+            // found in SkillReliable, in the same file — it would have drafted a pack from a legacy
+            // row whose conflated counts looked healthy, and refused to draft from a skill with a
+            // dozen clean but unassessed runs (E.SEC6).
+            .filter(|s| skill_reliable(s, 1, 0.5) && !s.name.contains('.'))
             .collect();
         if proven.is_empty() {
             return format!("Nothing proven to pack yet — I have no banked skills about \"{topic}\" with a run history. Teach me some first, then ask again.");

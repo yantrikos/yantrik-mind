@@ -351,8 +351,11 @@ impl Bus for EngineBus {
             // A banked-but-never-run skill is UNPROVEN. The guard that used to stand here is gone
             // because the type no longer hands out a rate it does not have: `rate()` is `None` at
             // zero runs, so the untested case cannot be forgotten (E.P5a).
+            // The rate came from `reliability()` and was right; the BASIS still counted attempts.
+            // `Basis::Measured { runs }` is what `is_trustworthy` reads, so a skill with three
+            // judged runs and forty unassessed ones looked well-evidenced (E.SEC6).
             let reliability = match s.reliability().rate() {
-                Some(rate) => Prior::measured(rate, s.runs as u32),
+                Some(rate) => Prior::measured(rate, s.graded as u32),
                 None => Prior::declared(0.5),
             };
             out.push(Procedure {

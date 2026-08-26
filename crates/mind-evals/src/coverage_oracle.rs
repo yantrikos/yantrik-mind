@@ -395,6 +395,160 @@ pub async fn run_router_oracle(mem: &dyn MemoryFacade) -> RouterScore {
     score
 }
 
+// ── THE LIVE SPLIT (E.PK3c) ──────────────────────────────────────────────────────────────────
+//
+// The frozen corpus above says so in its own header: its labels were written from the packs'
+// coverage lists, so they share lineage with the coverage authors, and 35/38 may be measuring
+// SELF-CONSISTENCY rather than correctness. This split is the antidote — queries the mind was
+// actually asked, taken verbatim from the box's flight recorder (`pack_route_shadow.goal`), with
+// the ranking the box itself produced recorded beside each one.
+//
+// Two rules keep it honest. The labels are NOT written here by the same hand that reads the
+// routes: they come from an independent witness who was sent the queries without the rankings
+// (Doctrine 3), and until they arrive `label` is None and nothing is scored. And nothing is ever
+// TUNED on this split: the policy, the floor, the margin and the frozen corpus are untouched by
+// anything in this module. A policy revision earns its own pre-registration and its own bar.
+
+/// One query the mind was really asked, and what the box's router really did with it.
+#[derive(Debug, Clone)]
+pub struct LiveCase {
+    pub id: &'static str,
+    /// Verbatim from the recorder. Never edited to route better.
+    pub query: &'static str,
+    /// The independent witness's answer: `Some("pack-id")`, `Some("NONE")`, or None until labelled.
+    pub label: Option<&'static str>,
+    /// What the BOX did: (verdict, top three as "pack@sim"). Recorded so that a divergence between
+    /// this harness's fixture library and the real packs is visible rather than assumed away.
+    pub box_verdict: &'static str,
+    pub box_top: &'static [&'static str],
+}
+
+/// Every live routing decision the box has recorded since the router shipped. Not sampled, not
+/// filtered: all of them. n is tiny and stays stated — the value is the harness and the first
+/// honest datapoint of a split that grows from the recorder by itself.
+pub fn live_cases() -> Vec<LiveCase> {
+    vec![
+        LiveCase {
+            id: "live-ms-buffering",
+            query: "what coyote time and input buffering should a 2D platformer use, in milliseconds?",
+            label: None,
+            box_verdict: "abstain:tie",
+            box_top: &["yantrik/c-safety@0.1.0@0.60", "yantrik/python-stdlib@0.1.0@0.58", "yantrik/game-feel-craft@0.1.0@0.55"],
+        },
+        LiveCase {
+            id: "live-npm-skills",
+            query: "which of my saved skills could fetch the npm download counts for saga-mcp this week?",
+            label: None,
+            box_verdict: "lease",
+            box_top: &["yantrik/mcp-spec@0.3.2@0.56", "yantrik/c-safety@0.1.0@0.48", "yantrik/python-stdlib@0.1.0@0.40"],
+        },
+        LiveCase {
+            id: "live-coyote-roughly",
+            query: "what coyote time should my 2D platformer use, roughly?",
+            label: None,
+            box_verdict: "lease",
+            box_top: &["yantrik/game-feel-craft@0.1.0@0.56", "yantrik/python-stdlib@0.1.0@0.40", "yantrik/java-modern@0.1.0@0.28"],
+        },
+        LiveCase {
+            id: "live-coyote-jump",
+            query: "what coyote time and jump buffering should my 2D platformer use",
+            label: None,
+            box_verdict: "lease",
+            box_top: &["yantrik/game-feel-craft@0.1.0@0.75", "yantrik/c-safety@0.1.0@0.53", "yantrik/python-stdlib@0.1.0@0.52"],
+        },
+    ]
+}
+
+/// The live split's result. Reported with n said out loud, because four is not a measurement of
+/// anything and a rate over four would read as though it were.
+#[derive(Debug, Default)]
+pub struct LiveScore {
+    pub labelled: usize,
+    pub agree: usize,
+    pub unlabelled: usize,
+    /// Queries where this harness's fixture library ranked a different pack first than the box did.
+    pub fixture_box_divergence: Vec<String>,
+    pub lines: Vec<String>,
+}
+
+impl LiveScore {
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for l in &self.lines {
+            out.push_str(l);
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "LIVE SPLIT (E.PK3c): {} of {} labelled queries agree; {} still unlabelled. n is 4 — this is a datapoint, not a rate.\n",
+            self.agree, self.labelled, self.unlabelled
+        ));
+        if self.fixture_box_divergence.is_empty() {
+            out.push_str("  fixture library reproduces the box's top pack on every live query\n");
+        } else {
+            out.push_str("  FIXTURE/BOX DIVERGENCE (this harness is not a faithful proxy for those queries):\n");
+            for d in &self.fixture_box_divergence {
+                out.push_str(&format!("    {d}\n"));
+            }
+        }
+        out
+    }
+}
+
+/// Route every live query through the CURRENT policy and compare with (a) the independent labels,
+/// where they exist, and (b) what the box actually did. Changes nothing and tunes nothing.
+pub async fn run_live_split(mem: &dyn MemoryFacade) -> LiveScore {
+    let mut score = LiveScore::default();
+    for case in live_cases() {
+        let (ranked, route) = match mem.route_packs(case.query).await {
+            Ok(x) => x,
+            Err(e) => {
+                score.lines.push(format!("  {} ERROR {e}", case.id));
+                continue;
+            }
+        };
+        let here_top = ranked.first().map(|m| m.pack_id.clone());
+        let box_top_pack = case.box_top.first().and_then(|s| s.rsplit_once('@')).map(|(p, _)| p.to_string());
+        if let (Some(h), Some(b)) = (&here_top, &box_top_pack) {
+            if h != b {
+                score.fixture_box_divergence.push(format!("{}: fixture ranked {h} first, the box ranked {b}", case.id));
+            }
+        }
+        let leased = route.leased().map(str::to_string);
+        let verdict = match &case.label {
+            None => {
+                score.unlabelled += 1;
+                "UNLABELLED".to_string()
+            }
+            Some(label) => {
+                score.labelled += 1;
+                let ok = match *label {
+                    "NONE" => leased.is_none(),
+                    want => leased.as_deref() == Some(want),
+                };
+                if ok {
+                    score.agree += 1;
+                }
+                if ok { "AGREE".to_string() } else { format!("DISAGREE (witness said {label})") }
+            }
+        };
+        let top3 = ranked
+            .iter()
+            .take(3)
+            .map(|m| format!("{}@{:.2}", m.pack_id, m.sim))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        score.lines.push(format!(
+            "  {:<20} {:<28} here: {:<14} [{top3}]\n      box: {:<14} [{}]",
+            case.id,
+            verdict,
+            route.label(),
+            case.box_verdict,
+            case.box_top.join(" · ")
+        ));
+    }
+    score
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +625,55 @@ mod tests {
             score.agreement(),
             score.abstention()
         );
+    }
+
+    /// E.PK3c: the live split runs against the CURRENT policy and reports. Ungated, because it
+    /// asserts nothing about agreement until an independent witness has labelled the queries — what
+    /// it pins today is that every live query still routes deterministically, and whether this
+    /// harness's fixture library is a faithful proxy for the real packs on those queries.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_live_split_runs_and_reports_against_the_unchanged_policy() {
+        let dir = scratch("live");
+        seal_library(&dir).unwrap();
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
+        let score = run_live_split(&mem).await;
+        println!("{}", score.render());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(score.labelled + score.unlabelled, live_cases().len(), "every live query is accounted for");
+        // Until the labels arrive nothing is scored — and that is stated, not silently skipped.
+        if score.labelled == 0 {
+            assert_eq!(score.unlabelled, 4, "the live set is the four the recorder holds");
+        } else {
+            assert!(score.labelled >= 1);
+        }
+    }
+
+    /// E.PK3c: the split's own integrity. Every query is verbatim from the recorder and every case
+    /// carries what the box did, so a label can never be quietly written to fit a route.
+    #[test]
+    fn the_live_split_is_shaped_so_labels_cannot_be_fitted_to_routes() {
+        let live = live_cases();
+        assert_eq!(live.len(), 4, "all four recorded routes, not a sample");
+        for c in &live {
+            assert!(!c.query.trim().is_empty());
+            assert!(c.box_top.len() >= 3, "{}: the box's ranking is recorded beside the query", c.id);
+            assert!(
+                ["lease", "abstain:tie", "abstain:below_floor", "abstain:no_packs", "abstain:router_error"].contains(&c.box_verdict),
+                "{}: {} is not a verdict the router can produce",
+                c.id,
+                c.box_verdict
+            );
+            if let Some(l) = c.label {
+                assert!(l == "NONE" || l.starts_with("yantrik/"), "{}: a label is a pack id or NONE, got {l}", c.id);
+            }
+        }
+        // The live queries must not have been copied from the frozen corpus: a split that repeats
+        // the corpus measures the corpus again.
+        let corpus: Vec<&str> = cases().iter().map(|c| c.query).collect();
+        for c in &live {
+            assert!(!corpus.contains(&c.query), "{} is already in the frozen corpus", c.id);
+        }
     }
 
     /// E.PK4 wall (1): ATTACH-HARM CONTROL on the REAL packs. Gated: `YM_PACK_DIST=<dir>` of

@@ -1016,3 +1016,31 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why exclusion rather than deletion | Deletion destroys the evidence needed to judge whether the write gate should have caught them, and the write gate is the thing under review. Exclusion is reversible and provable; deletion is neither. |
 | KILL criteria | (1) Any read, print, export or transmission of either memory's content before a human has classified it. (2) Any in-place edit of a hash-chained record. (3) Remediation running before a verified backup exists. (4) A quarantine that hides the rows from the AUDIT as well as from readers — the audit must keep seeing them, or the next run reports a clean bill of health it has not earned. |
 | Status | Pre-registered only. Awaiting Codex's read and Pranab's decision. |
+
+## E.SK5 - an API error was banked as a deliverable - closed
+
+*Pranab pasted a live run: `📥 [test-market] (sub-agent synthesis error: OpenAI-compatible API request failed)` followed by six real NVDA sources.*
+
+| Field | Entry |
+|---|---|
+| What happened | The researcher searched six pages successfully, then SYNTHESIS failed. `AgentResult` has no failure signal, so the error was formatted INTO `answer`: `format!("(sub-agent synthesis error: {e})")`. Callers decided success with `!res.answer.trim().is_empty()` - and that string is not empty. So the job board showed **done**, the error message was presented as the deliverable, and `record_skill_outcome` credited the skill with a success. |
+| The residual I had NAMED, arriving as its worst case | E.SK3 recorded that `ok` means "the executor completed", not "the task was accomplished", and I judged it a milder strain. It is not milder. A refusal at least says something true; this banked an API outage as a finished report. |
+| Root cause, one level up | A FAILURE DISGUISED AS CONTENT. Every consumer had to guess from prose whether it was reading a report or an error, and three of them guessed the same wrong way: the instruction runner, `delegate_cmd`'s research path (which hardcoded `"done"`), and the courier. |
+| Fix | `AgentResult.error: Option<String>` and `AgentResult::ok()` - the one place callers ask. All four construction sites set it, including the two that already stringified errors. Consumers now ask the field. The answer stays human-readable on failure and the SOURCES still go out, because they are what the run did accomplish: the difference between "it broke" and "it broke after reading six pages, here they are". |
+| Actual metric | mind-agents 75/0 (+1), workspace 1062/0 with `--locked`. |
+
+## E.SEC2 - the privacy guard was switched off by a line break - PARTIALLY closed, decision needed
+
+*Found because E.SK5's edit happened to join a wrapped method chain onto one line, and the guard fired for the first time.*
+
+| Field | Entry |
+|---|---|
+| The guard | `privacy_audit::no_new_unscoped_inference_calls` exists because an unscoped `inference.chat()` takes the household (cloud) lane silently and never touches `PRIVACY_ESCALATED` - so a private-carrying call written as a bare `chat()` leaks AND reads as clean on the dashboard. Its own docs cite the DMN leak and `work_radar_run` shipping 40 verbatim user messages to a cloud provider on a daily timer while the counter read zero. |
+| The blindness | It matched the literal `inference.chat(` **one line at a time**. rustfmt wraps the chain as `.inference` / `.chat(...)`, so no single line contains the pattern. Every wrapped call was invisible. A guard a line break can switch off is not a guard. |
+| Scale | **19 unscoped calls across 12 files**, hidden for as long as the guard has existed. Among them: `mail.rs` x3 (email header triage, sender classification from aggregates, email analysis), `finance.rs` (recurring subscriptions FROM EMAIL METADATA), `calendar.rs`, `briefing.rs`, `onboarding.rs` x2, `studio.rs` x3, `lib.rs` x5, `foresight.rs`, `plugins_mod.rs`, `skills.rs`. |
+| Fixed now | The scan strips line comments, removes ALL whitespace, then matches - wrapping-proof, and a `//` mid-chain cannot split it either. `chat_grounded(`/`chat_scoped(` still do not match, since the character after `chat` is `_`. Pinned by a test that asserts a wrapped chain matches and the grounded forms do not, so the blindness cannot return silently. |
+| Fixed now (the worst one) | `mind-agents` sub-agent SYNTHESIS moved to `chat_grounded`. Its sibling decision loop 120 lines earlier was already grounded, with a comment saying a sub-agent's task carries household context - and the synthesis prompt carries the task AND every observation gathered, strictly more. The inconsistency was invisible for the same reason as the rest. |
+| NOT fixed, and deliberately not | The other 19. This box HAS a private lane (`YM_PRIVATE_PROVIDERS=ollama-local`, qwen3.8:27b), so `chat_grounded` would move mail triage, finance parsing and the briefing off `deepseek-v4-pro` onto the local model AND fail closed when that endpoint is down. That is a confidentiality-versus-capability trade on features in daily use - Pranab's call, not the auditor's. |
+| How the backlog is held honestly | A SEPARATE `UNSCOPED_PENDING` list, never folded into `UNSCOPED_ALLOWED`. The allowlist means "we looked, and this prompt cannot carry household memory". The pending list means "we looked, and it probably CAN - a human has to choose". Merging them would record a privacy decision nobody made, which is worse than the original blindness because it would look settled. A test asserts every pending file STILL has an unscoped call, so the list can only shrink toward empty and cannot become permission. |
+| KILL criteria for the remainder | (1) Any pending entry surviving without a decision once Pranab has read this. (2) Any of them moved to `UNSCOPED_ALLOWED` without a stated reason the prompt cannot carry household memory. (3) The wrapping-proof scan being narrowed to make a failure go away. |
+| Actual metric | Workspace 1062/0 across 42 crates with `--locked`. |

@@ -45,6 +45,35 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Files with unscoped calls that the WRAPPING-PROOF scan found on 2026-08-26, whose disposition is
+/// NOT YET DECIDED (E.SEC2).
+///
+/// These are NOT allowlisted. `UNSCOPED_ALLOWED` means "we looked, and this prompt cannot carry
+/// household memory". This list means "we looked, and it probably CAN — a human has to choose".
+/// Keeping them apart matters: folding them into the allowlist would record a privacy decision
+/// nobody made, which is worse than the original blindness because it would look settled.
+///
+/// Why they were invisible: the guard matched `inference.chat(` one line at a time, and rustfmt
+/// wraps the chain as `.inference` / `.chat(...)`. Every call below has been taking the household
+/// (cloud) lane silently, uncounted, for as long as this guard has existed.
+///
+/// Why they are not simply converted: this box HAS a private lane (`YM_PRIVATE_PROVIDERS=
+/// ollama-local`, qwen3.8:27b), so `chat_grounded` would move them off the cloud model AND fail
+/// closed when the local endpoint is down. That is a capability trade on features in daily use —
+/// the owner's call, not the auditor's.
+const UNSCOPED_PENDING: &[(&str, &str)] = &[
+    ("mail.rs", "email header triage, sender classification from aggregates, and email analysis — plainly household."),
+    ("finance.rs", "extracts recurring subscriptions FROM EMAIL METADATA — plainly household."),
+    ("calendar.rs", "calendar events — plainly household."),
+    ("briefing.rs", "the daily briefing, composed over household context."),
+    ("foresight.rs", "persona + a prompt built from household signals."),
+    ("onboarding.rs", "two calls carrying persona + user answers during setup."),
+    ("studio.rs", "three calls; prompt provenance not yet traced."),
+    ("plugins_mod.rs", "persona + plugin prompt; provenance not yet traced."),
+    ("skills.rs", "the verifier-written skill summary — the prompt carries the user's own code."),
+    ("lib.rs", "five calls in the conversation core; each needs its own reading."),
+];
+
 /// Crates whose sources are scanned. These are the ones that hold an `InferencePool` and can reach
 /// household memory; the inference crate itself defines the primitives and is exempt.
 const SCANNED: &[&str] = &["mind-conversation", "mind-recipes", "mind-agents"];
@@ -87,13 +116,42 @@ mod tests {
                     continue;
                 }
                 let Ok(body) = std::fs::read_to_string(&f) else { continue };
-                for (i, line) in body.lines().enumerate() {
-                    // `chat_grounded(` / `chat_scoped(` also contain "chat(" only via `.chat(` —
-                    // match the bare call precisely.
-                    if line.contains("inference.chat(")
-                        && !UNSCOPED_ALLOWED.iter().any(|(f, _)| *f == name)
-                    {
-                        offenders.push(format!("{}:{} — {}", name, i + 1, line.trim()));
+                if UNSCOPED_ALLOWED.iter().any(|(f, _)| *f == name)
+                    || UNSCOPED_PENDING.iter().any(|(f, _)| *f == name)
+                {
+                    continue;
+                }
+                // A LINE-AT-A-TIME SCAN IS DEFEATED BY RUSTFMT. `self.inference.chat(...)` wrapped
+                // as `.inference` / `.chat(...)` puts the two halves on different lines, and no
+                // single line then contains the pattern. mind-agents' sub-agent synthesis hid there
+                // — an unscoped cloud call, uncounted, for as long as the guard has existed — and
+                // surfaced only because an unrelated edit happened to join the chain onto one line.
+                // A guard that a line break can switch off is not a guard (E.SEC2).
+                //
+                // Line comments are stripped first so a `//` mid-chain cannot split the pattern
+                // either; whitespace is then removed entirely, which is what makes the match
+                // wrapping-proof. `chat_grounded(`/`chat_scoped(` do not match: the character after
+                // `chat` is `_`, not `(`.
+                let decommented = body
+                    .lines()
+                    .map(|l| l.split("//").next().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("
+");
+                let squashed: String = decommented.chars().filter(|c| !c.is_whitespace()).collect();
+                if squashed.contains("inference.chat(") {
+                    // Report every `.chat(` in the file: the exact line of a wrapped call is
+                    // ambiguous, and naming the candidates is more useful than guessing one.
+                    let sites: Vec<String> = body
+                        .lines()
+                        .enumerate()
+                        .filter(|(_, l)| l.contains(".chat(") && !l.trim_start().starts_with("//"))
+                        .map(|(i, l)| format!("{}:{} — {}", name, i + 1, l.trim()))
+                        .collect();
+                    if sites.is_empty() {
+                        offenders.push(format!("{name} — unscoped inference.chat( found (wrapped across lines)"));
+                    } else {
+                        offenders.extend(sites);
                     }
                 }
             }
@@ -121,5 +179,65 @@ mod tests {
                  household memory), got: {reason:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sec2 {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn crates_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    }
+
+    fn squash(body: &str) -> String {
+        let decommented = body.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("
+");
+        decommented.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// A pending entry that no longer has an unscoped call must be REMOVED, not left standing.
+    ///
+    /// A deferral list that outlives its reasons stops being a backlog and becomes permission. This
+    /// fails when someone grounds a call and forgets to strike the file, so the list can only ever
+    /// shrink toward empty (E.SEC2).
+    #[test]
+    fn a_pending_file_still_has_the_call_it_was_deferred_for() {
+        for (file, why) in UNSCOPED_PENDING {
+            let mut found = false;
+            for krate in SCANNED {
+                let path = crates_dir().join(krate).join("src").join(file);
+                if let Ok(body) = std::fs::read_to_string(&path) {
+                    if squash(&body).contains("inference.chat(") {
+                        found = true;
+                    }
+                }
+            }
+            assert!(found, "{file} is on the E.SEC2 pending list ({why}) but has no unscoped inference.chat( left — strike it from UNSCOPED_PENDING.");
+        }
+    }
+
+    /// The guard must see a call that rustfmt has wrapped across lines. This is the blindness
+    /// itself, pinned: `.inference` on one line and `.chat(` on the next matched nothing, which is
+    /// how nineteen calls stayed invisible.
+    #[test]
+    fn a_wrapped_call_is_not_invisible() {
+        let wrapped = "let x = self
+    .inference
+    .chat(messages, cfg)
+    .await;";
+        assert!(squash(wrapped).contains("inference.chat("), "a wrapped chain must still match");
+        let single = "let x = self.inference.chat(messages, cfg).await;";
+        assert!(squash(single).contains("inference.chat("));
+        // A comment mid-chain must not split it either.
+        let commented = "let x = self
+    .inference // note
+    .chat(messages, cfg);";
+        assert!(squash(commented).contains("inference.chat("), "a comment must not switch the guard off");
+        // And the grounded forms must NOT match, or everything is an offender.
+        assert!(!squash("self.inference.chat_grounded(m, c)").contains("inference.chat("));
+        assert!(!squash("self.inference
+  .chat_scoped(m, c, s)").contains("inference.chat("));
     }
 }

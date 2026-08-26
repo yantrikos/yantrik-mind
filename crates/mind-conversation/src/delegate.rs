@@ -834,14 +834,28 @@ impl super::ConversationEngine {
                         scratch_note(&mem, &id2, &format!("source: {u}")).await;
                     }
                     scratch_note(&mem, &id2, &res.answer).await;
-                    let mut m = format!("📥 [{name2}] {}", res.answer);
+                    // ASK THE FIELD. `!answer.is_empty()` was a guess, and a synthesis failure
+                    // arrives AS text — `(sub-agent synthesis error: …)` is not empty — so an API
+                    // error went on the board as a finished deliverable and the skill was credited
+                    // with a success. Reported live by Pranab on an NVDA run (E.SK5).
+                    let ok = res.ok();
+                    let mut m = if ok {
+                        format!("📥 [{name2}] {}", res.answer)
+                    } else {
+                        let why = res.error.clone().unwrap_or_else(|| "the instructions produced nothing".into());
+                        scratch_note(&mem, &id2, &format!("failed: {why}")).await;
+                        format!("📥 [{name2}] I couldn't finish it: {why}")
+                    };
+                    // The sources go out either way: they are what the run DID accomplish, and on a
+                    // failure they are the difference between "it broke" and "it broke after
+                    // reading six pages, here they are".
                     if !res.sources.is_empty() {
                         m.push_str("\n\nSources:\n");
                         for u in res.sources.iter().take(6) {
                             m.push_str(&format!("- {u}\n"));
                         }
                     }
-                    (!res.answer.trim().is_empty(), m)
+                    (ok, m)
                 }
                 // No researcher: the bare recipe, so a box without one keeps the executor it had.
                 (None, Some(recipes)) => {
@@ -1270,14 +1284,23 @@ impl super::ConversationEngine {
                     scratch_note(&mem, &id2, &format!("source: {u}")).await;
                 }
                 scratch_note(&mem, &id2, &res.answer).await;
-                let mut msg = format!("🔎 [{name2}] {}", res.answer);
+                // The same rule as the skill path: a delegation that failed says so on the board
+                // rather than showing its error message under a green tick (E.SK5).
+                let ok = res.ok();
+                let mut msg = if ok {
+                    format!("🔎 [{name2}] {}", res.answer)
+                } else {
+                    let why = res.error.clone().unwrap_or_else(|| "the research produced nothing".into());
+                    scratch_note(&mem, &id2, &format!("failed: {why}")).await;
+                    format!("🔎 [{name2}] I couldn't finish it: {why}")
+                };
                 if !res.sources.is_empty() {
                     msg.push_str("\n\nSources:\n");
                     for u in res.sources.iter().take(6) {
                         msg.push_str(&format!("- {u}\n"));
                     }
                 }
-                ledger_update(&mem, &id2, "done", Some(msg.clone())).await;
+                ledger_update(&mem, &id2, if ok { "done" } else { "failed" }, Some(msg.clone())).await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             });

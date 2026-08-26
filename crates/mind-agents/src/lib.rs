@@ -67,6 +67,23 @@ pub struct AgentResult {
     pub pending_actions: Vec<ActionRequest>,
     /// Source URLs the agent searched/fetched — for citations.
     pub sources: Vec<String>,
+    /// Why this run produced no deliverable, when it produced none.
+    ///
+    /// A synthesis or inference failure used to be FORMATTED INTO `answer` — so every caller saw a
+    /// non-empty string and had no way to tell an API error from a report. The job board banked
+    /// `(sub-agent synthesis error: …)` as a finished deliverable and credited the skill with a
+    /// success. A failure has to be a field: prose can be mistaken for content, a `Some` cannot
+    /// (E.SK5).
+    pub error: Option<String>,
+}
+
+impl AgentResult {
+    /// Did this run actually produce something? The ONE place callers should ask.
+    ///
+    /// Guessing from `!answer.is_empty()` is what put an error message on the board under a tick.
+    pub fn ok(&self) -> bool {
+        self.error.is_none() && !self.answer.trim().is_empty()
+    }
 }
 
 /// Pull http(s) URLs out of text (for collecting research sources).
@@ -317,19 +334,29 @@ impl SubAgent {
             // turn was about — on a companion that is the household's own context. Fail closed.
             let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
                 Ok(r) => r.text,
-                Err(e) => return AgentResult { task: task.into(), answer: format!("(sub-agent inference error: {e})"), steps: step, trace, pending_actions, sources: sources.clone() },
+                Err(e) => {
+                    return AgentResult {
+                        task: task.into(),
+                        answer: format!("(sub-agent inference error: {e})"),
+                        steps: step,
+                        trace,
+                        pending_actions,
+                        sources: sources.clone(),
+                        error: Some(e.to_string()),
+                    }
+                }
             };
             let decision = parse_decision(&text);
 
             if decision.action == "finish" || (decision.action.is_empty() && !decision.answer.is_empty()) {
                 let answer = plain_prose(&decision.answer);
-                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
+                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone(), error: None };
             }
             // call_tool
             let tool = decision.tool.trim().to_string();
             if tool.is_empty() {
                 let answer = plain_prose(&decision.answer);
-                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone() };
+                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone(), error: None };
             }
             // OUTWARD action tool → through the harm-gate. The agent can never self-confirm.
             if self.act_tools.iter().any(|t| t == &tool) {
@@ -411,13 +438,21 @@ impl SubAgent {
                  claim in the observations above; never invent."
             )),
         ];
-        let answer = self
-            .inference
-            .chat(messages, GenerationConfig::default())
-            .await
-            .map(|r| plain_prose(&r.text))
-            .unwrap_or_else(|e| format!("(sub-agent synthesis error: {e})"));
-        AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions, sources: sources.clone() }
+        // The answer stays human-readable on failure — the sources below it are still worth seeing,
+        // and a caller that only displays text should keep displaying something. What changes is
+        // that the failure is ALSO a field, so a caller that has to DECIDE can tell (E.SK5).
+        // PRIVATE-GROUNDED, like the decision loop 120 lines above — and for a stronger reason.
+        // The loop's prompt carries the task and the trace; THIS one carries the task AND every
+        // observation gathered along the way, so it is strictly more household context. It was a
+        // bare `chat()`, which takes the cloud lane silently and never touches PRIVACY_ESCALATED,
+        // so the escalation did not appear on the dashboard either. The privacy guard did not catch
+        // it because the call was WRAPPED across lines and the scan matched one line at a time
+        // (E.SEC2).
+        let (answer, error) = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            Ok(r) => (plain_prose(&r.text), None),
+            Err(e) => (format!("(sub-agent synthesis error: {e})"), Some(e.to_string())),
+        };
+        AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions, sources: sources.clone(), error }
     }
 
     /// Run several tasks concurrently (parallelism via the InferencePool's blocking pool).
@@ -761,5 +796,42 @@ mod tests {
         let r = a.run("find the best stocks to trade today").await;
         assert!(!r.answer.contains("\"action\""), "the envelope reached the caller: {}", r.answer);
         assert!(r.answer.starts_with("I cannot provide"), "got: {}", r.answer);
+    }
+}
+
+/// E.SK5 — a failure must be a field, not prose.
+#[cfg(test)]
+mod sk5 {
+    use super::*;
+
+    fn result(answer: &str, error: Option<&str>) -> AgentResult {
+        AgentResult {
+            task: "t".into(),
+            answer: answer.into(),
+            steps: 1,
+            trace: vec![],
+            pending_actions: vec![],
+            sources: vec![],
+            error: error.map(String::from),
+        }
+    }
+
+    #[test]
+    fn a_synthesis_error_is_not_a_deliverable() {
+        // THE LIVE REPORT: a test-market run on NVDA searched six pages, failed at synthesis, and
+        // returned `(sub-agent synthesis error: OpenAI-compatible API request failed)`. Callers
+        // decided success with `!answer.trim().is_empty()` — and that string is not empty — so an
+        // API error went on the job board under a green tick and was credited to the skill.
+        let failed = result("(sub-agent synthesis error: OpenAI-compatible API request failed)", Some("OpenAI-compatible API request failed"));
+        assert!(!failed.ok(), "an error message is not an answer");
+        assert!(!failed.answer.trim().is_empty(), "and it is NOT empty — which is why the old guess failed");
+
+        let inference_failed = result("(sub-agent inference error: timeout)", Some("timeout"));
+        assert!(!inference_failed.ok(), "the loop's own failure path too");
+
+        // The control, so `ok()` is not simply false.
+        assert!(result("WMT closed at $105.38, down 1.04%.", None).ok(), "a real deliverable is ok");
+        // And an empty answer with no error is still not a deliverable.
+        assert!(!result("   ", None).ok(), "blank is not an answer");
     }
 }

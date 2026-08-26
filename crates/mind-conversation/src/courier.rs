@@ -273,7 +273,9 @@ impl super::ConversationEngine {
                             for u in res.sources.iter().take(4) {
                                 evidence.push(format!("source: {u}"));
                             }
-                            (!res.answer.trim().is_empty()).then_some(res.answer)
+                            // Was `!answer.is_empty()`, which treats a synthesis error as an
+                            // answer worth couriering (E.SK5).
+                            res.ok().then_some(res.answer)
                         }
                         Err(_) => {
                             out.push("[courier] preparation timed out — holding the reminder only".into());

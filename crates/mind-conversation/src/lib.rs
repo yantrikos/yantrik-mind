@@ -8396,6 +8396,23 @@ Open reminders you're carrying for them:");
         // latest reply long enough to answer a follow-up, and marks every elision so the model never
         // has to guess what was removed. See `tool_catalog::compact_recent`.
         let recent = tool_catalog::compact_recent(&recent);
+        // THE AGENT LOOP FETCHES ITS OWN TRANSCRIPT (E.SEC8 slice 4, fourth pass). Gating `recent`
+        // inside `build_prompt` does not reach here — this loop assembles its own messages, so the
+        // transcript arrived untouched even with the working set emptied. Observed: the gate logged
+        // `0/97 admitted` and the model still answered from its own earlier, unrestricted reply.
+        //
+        // A transcript is where the mind's PREVIOUS answers live, which makes it the one channel
+        // that can defeat a retrieval filter entirely: whatever was said before minimization was
+        // asked for is still sitting in the conversation.
+        let recent = if mind_types::OutputPolicy::for_scope(id.output_scope)
+            .tighten(mind_types::detect_minimization(user_text))
+            .entity_classes
+            .is_empty()
+        {
+            String::new()
+        } else {
+            recent
+        };
         let skills = self.memory.recall_skills(user_text, 5).await.unwrap_or_default();
         let skill_line = if skills.is_empty() {
             "\n(no saved skills surfaced for this — use discover_tools to search, or build_capability)".to_string()

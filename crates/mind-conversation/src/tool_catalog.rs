@@ -448,7 +448,12 @@ pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
     (&["calendar_remove", "remove_event"], "title", &["query"]),
     (&["surf", "feeds"], "handles", &["spec"]),
     (&["copy_trade", "copy_desk"], "url", &["link"]),
-    (&["watch", "watch_media", "listen"], "url", &["link", "query"]),
+    // `link` is a true synonym for `url`. `query` deliberately is NOT: the watch handler pulls a
+    // URL OUT of a sentence (`first_url`), which is a TRANSFORMATION, and an alias table performs
+    // substitution. Declaring it here made `watch {"query": "please watch https://x"}` hand the
+    // whole sentence to the player and left the extraction branch unreachable (Codex's review of
+    // P.2f). A transformed fallback belongs in the handler that knows the transformation.
+    (&["watch", "watch_media", "listen"], "url", &["link"]),
 ];
 
 /// One argument, read the way the boundary validated it: the canonical name first, then each
@@ -469,6 +474,47 @@ pub(crate) fn read_arg(tool: &str, args: &Value, field: &str) -> String {
         }
     }
     String::new()
+}
+
+/// A field a handler can SERVE but not by substitution — it has to transform the value first.
+///
+/// `watch {"query": "please watch https://x"}` is servable: the handler pulls the URL out of the
+/// sentence. But `query` is not another NAME for `url`, and treating it as one handed the whole
+/// sentence to the player. Removing it outright was no better: the boundary then refused a call
+/// the handler could serve, which is the false attribution the boundary exists to prevent, just
+/// from the other side (both halves found by Codex, reviewing P.2f).
+///
+/// So a fallback is declared, and the two halves are kept apart deliberately:
+/// * `ArgContract::present` COUNTS it, so the required field is satisfied and the call is admitted;
+/// * `read_arg` IGNORES it, so no value is ever substituted;
+/// * the handler that knows the transformation performs it (`media_url`).
+pub(crate) const ARG_FALLBACKS: &[(&[&str], &str, &[&str])] = &[
+    (&["watch", "watch_media", "listen"], "url", &["query"]),
+];
+
+/// The transformed fallbacks a tool's handler can work from, as `(field, fallbacks)` pairs.
+pub(crate) fn fallbacks_for(tool: &str) -> Vec<(String, Vec<String>)> {
+    ARG_FALLBACKS
+        .iter()
+        .filter(|(names, _, _)| names.contains(&tool))
+        .map(|(_, field, fbs)| (field.to_string(), fbs.iter().map(|f| f.to_string()).collect()))
+        .collect()
+}
+
+/// WHERE THE EGRESS AUDIT'S TARGET COMES FROM — deliberately NOT the alias table.
+///
+/// The broker records what an outward call was aimed at, across every classified external tool at
+/// once: a repo for github, a query for search and mail, a url for the fetchers. Those are not
+/// synonyms of one another and no single tool declares them as such, so resolving the target
+/// through per-tool aliases silently produced `None` for every tool without a `url` alias — the
+/// receipt kept the decision and lost the subject (Codex's review of P.2f). The order is the one
+/// the broker has always used: the most specific target first.
+pub(crate) fn egress_target(args: &Value) -> Option<&str> {
+    // The blank test belongs INSIDE the search: a present-but-empty `url` must fall through to the
+    // repo and the query, not short-circuit the whole resolution to None.
+    ["url", "repo", "query"]
+        .into_iter()
+        .find_map(|k| args.get(k).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()))
 }
 
 /// The numeric form of `read_arg`, for the money fields the handlers parse loosely ("$1,200").
@@ -513,6 +559,9 @@ pub(crate) struct ArgContract {
     pub strings: Vec<String>,
     pub scalars: Vec<String>,
     pub aliases: Vec<(String, Vec<String>)>,
+    /// Fields the handler can serve only after transforming them (`ARG_FALLBACKS`). They satisfy a
+    /// required field but are never substituted for it.
+    pub fallbacks: Vec<(String, Vec<String>)>,
 }
 
 impl ArgContract {
@@ -525,15 +574,15 @@ impl ArgContract {
             .unwrap_or(key)
     }
 
-    /// Is `field` supplied — by its own name or an alias — with something other than null?
+    /// Is `field` supplied — by its own name, an alias, or a transformed fallback the handler can
+    /// work from — with something other than null? A fallback counts HERE and nowhere else: the
+    /// call is admitted, and the handler does the transforming.
     pub(crate) fn present(&self, obj: &serde_json::Map<String, Value>, field: &str) -> bool {
         let given = |k: &str| obj.get(k).map_or(false, |v| !v.is_null());
-        given(field)
-            || self
-                .aliases
-                .iter()
-                .filter(|(f, _)| f == field)
-                .any(|(_, aliases)| aliases.iter().any(|a| given(a)))
+        let any_of = |table: &[(String, Vec<String>)]| {
+            table.iter().filter(|(f, _)| f == field).any(|(_, names)| names.iter().any(|n| given(n)))
+        };
+        given(field) || any_of(&self.aliases) || any_of(&self.fallbacks)
     }
 }
 
@@ -555,7 +604,8 @@ fn contract_of(schema: &Value) -> Option<(String, ArgContract)> {
         }
     }
     let aliases = aliases_for(&name);
-    Some((name, ArgContract { required, strings, scalars, aliases }))
+    let fallbacks = fallbacks_for(&name);
+    Some((name, ArgContract { required, strings, scalars, aliases, fallbacks }))
 }
 
 /// Every catalogued tool's contract: core + meta first, then each line of `src` — the FULL catalog,

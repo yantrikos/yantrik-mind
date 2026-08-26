@@ -4599,8 +4599,73 @@ async fn every_declared_alias_satisfies_its_canonical_and_inherits_its_type() {
         ("track_subject", serde_json::json!({"query": "fusion"})),
         ("about_person", serde_json::json!({"query": "Priya"})),
         ("quote", serde_json::json!({"ticker": "RELIANCE.NS"})),
-        ("watch", serde_json::json!({"query": "https://example.org/v"})),
+        ("watch", serde_json::json!({"url": "https://example.org/v"})),
     ] {
         assert!(conv.admit_args(tool, &args).is_ok(), "{tool} {args} is servable and must be admitted");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transformed_fallback_is_not_an_alias_and_the_audit_target_is_not_per_tool() {
+    // P.2g (Codex's review of P.2f). Two things an alias table must NOT be asked to do.
+    //
+    // (1) TRANSFORMATION. `watch {"query": "please watch https://x"}` needs a URL pulled OUT of a
+    //     sentence. Declaring `query` an alias of `url` substituted the whole sentence instead and
+    //     left the extraction branch unreachable — the player would have been handed prose.
+    // (2) CROSS-TOOL AUDIT. The egress receipt's target spans every external tool at once (a repo
+    //     for github, a query for search, a url for a fetcher). Resolving it through one tool's
+    //     aliases produced None for every tool without a `url` alias: the receipt kept the decision
+    //     and lost the subject.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem, pool, "JARVIS");
+
+    // (1) The transformation, as a pure function.
+    assert_eq!(crate::media_url("https://a.example/v", ""), "https://a.example/v");
+    assert_eq!(crate::media_url("  https://a.example/v  ", ""), "https://a.example/v", "trimmed");
+    assert_eq!(
+        crate::media_url("", "please watch https://b.example/clip and tell me what they say"),
+        "https://b.example/clip",
+        "the URL is EXTRACTED from the sentence, never the sentence itself"
+    );
+    assert_eq!(crate::media_url("https://a.example/v", "and also https://b.example/x"), "https://a.example/v", "an explicit url wins");
+    assert_eq!(crate::media_url("", "what did they say in that video"), "", "a sentence with no URL yields none");
+    // ...and through the real dispatch: a query with no URL is refused, not played.
+    let out = conv.run_agent_tool_as("watch", &serde_json::json!({"query": "what did they say in that video"}), &TurnIdentity::primary()).await;
+    assert!(out.contains("need a media url"), "{out}");
+    // `query` is a declared FALLBACK, not a synonym: it satisfies the contract and substitutes
+    // nothing. Both halves matter — one of them refuses a servable call, the other plays a sentence.
+    let watch_aliases = crate::tool_catalog::aliases_for("watch");
+    assert_eq!(watch_aliases, vec![("url".to_string(), vec!["link".to_string()])], "{watch_aliases:?}");
+    let watch_fallbacks = crate::tool_catalog::fallbacks_for("watch");
+    assert_eq!(watch_fallbacks, vec![("url".to_string(), vec!["query".to_string()])], "{watch_fallbacks:?}");
+    assert_eq!(crate::tool_catalog::read_arg("watch", &serde_json::json!({"query": "please watch https://x"}), "url"), "", "a sentence is never substituted for a url");
+    assert_eq!(crate::tool_catalog::read_arg("watch", &serde_json::json!({"link": "https://x"}), "url"), "https://x", "link still is a synonym");
+    // ...and the boundary ADMITS the fallback shape, rather than blaming the planner for a call
+    // the handler can serve.
+    assert!(conv.admit_args("watch", &serde_json::json!({"query": "please watch https://x"})).is_ok(), "a servable fallback must be admitted");
+    assert!(conv.admit_args("watch", &serde_json::json!({"link": "https://x"})).is_ok());
+    assert!(conv.admit_args("watch", &serde_json::json!({})).is_err(), "nothing usable is still refused");
+
+    // (2) The audit target, across the shapes real external tools actually use.
+    let t = |v: serde_json::Value| crate::tool_catalog::egress_target(&v).map(str::to_string);
+    assert_eq!(t(serde_json::json!({"repo": "acme/x"})), Some("acme/x".into()), "github's target is its repo");
+    assert_eq!(t(serde_json::json!({"query": "rtx 4070 price"})), Some("rtx 4070 price".into()), "search's target is its query");
+    assert_eq!(t(serde_json::json!({"url": "https://a.example"})), Some("https://a.example".into()));
+    assert_eq!(t(serde_json::json!({"url": "https://a.example", "repo": "acme/x", "query": "q"})), Some("https://a.example".into()), "most specific first");
+    assert_eq!(t(serde_json::json!({"repo": "acme/x", "query": "q"})), Some("acme/x".into()), "then the repo");
+    assert_eq!(t(serde_json::json!({"url": "   ", "query": "q"})), Some("q".into()), "blank does not count as a target");
+    assert_eq!(t(serde_json::json!({"note": "nothing outward here"})), None);
+    // Every tool the broker classifies as External must be able to name a target from its own
+    // arguments — the property that silently broke.
+    for (tool, args) in [
+        ("github_repo_items", serde_json::json!({"repo": "acme/x"})),
+        ("web_search", serde_json::json!({"query": "who won"})),
+        ("mail_search", serde_json::json!({"query": "school"})),
+        ("watch", serde_json::json!({"url": "https://a.example/v"})),
+    ] {
+        if matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
+            assert!(crate::tool_catalog::egress_target(&args).is_some(), "{tool} is external and its receipt must name a target: {args}");
+        }
     }
 }

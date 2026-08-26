@@ -1070,6 +1070,16 @@ pub(crate) fn shadow_route_event(
     ev
 }
 
+/// The media URL a watch request actually names: the `url` field when there is one, otherwise the
+/// first URL found INSIDE a `query` sentence. A transformation, which is why `query` is not
+/// declared an alias of `url` — an alias substitutes a value, and this one has to extract it.
+pub(crate) fn media_url(url: &str, query: &str) -> String {
+    if !url.trim().is_empty() {
+        return url.trim().to_string();
+    }
+    mind_tools::first_url(query).unwrap_or_default()
+}
+
 pub(crate) fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
 
@@ -7311,8 +7321,9 @@ impl ConversationEngine {
             use mind_governance::egress::{EgressClass, EgressDecision, EgressRequest};
             if matches!(mind_governance::egress::classify(tool), Some(EgressClass::External(_))) {
                 let canon = mind_governance::egress::canonicalize(args);
-                let url = s("url");
-                let target = (!url.is_empty()).then_some(url.as_str());
+                // The audit's subject, resolved across every external tool's shape (url, then repo,
+                // then query) rather than through one tool's aliases — see `egress_target`.
+                let target = tool_catalog::egress_target(args);
                 let req = EgressRequest { principal: &id.owner, tool, target, source: "agent_tool", args_canonical: &canon };
                 if let EgressDecision::Deny(msg) = broker.authorize(&req) {
                     return msg;
@@ -7705,8 +7716,8 @@ impl ConversationEngine {
                 self.quote_symbols(&q).await
             }
             "watch" | "watch_media" | "listen" => {
-                let url = s("url");
-                let url = if url.trim().is_empty() { mind_tools::first_url(&s("query")).unwrap_or_default() } else { url };
+                // `query` is a sentence a URL has to be pulled out of, not another name for `url`.
+                let url = media_url(&s("url"), &s("query"));
                 if url.trim().is_empty() {
                     return "(need a media url to watch)".to_string();
                 }

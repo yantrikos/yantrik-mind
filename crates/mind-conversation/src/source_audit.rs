@@ -54,9 +54,8 @@ mod tests {
         }
     }
 
-    /// Split a file into rough function bodies. Crude on purpose: the point is to stop a binding in
-    /// one function being paired with a slice in another, which is the only false positive this
-    /// check has ever produced.
+    /// Split a file into rough function bodies, so a binding in one function is never paired with
+    /// a slice in another.
     fn functions(body: &str) -> Vec<(usize, Vec<&str>)> {
         let mut out: Vec<(usize, Vec<&str>)> = Vec::new();
         for (i, line) in body.lines().enumerate() {
@@ -75,62 +74,106 @@ mod tests {
         out
     }
 
+    /// A function body as LOGICAL STATEMENTS, not physical lines.
+    ///
+    /// CODEX FOUND WHY THIS IS NECESSARY. The first version matched a single line shaped like
+    /// `let x = y.to_lowercase();`, so rustfmt's own output defeated it: a binding wrapped as
+    /// `let low = text` / `.trim()` / `.to_lowercase();` has no line carrying both the assignment
+    /// and the lowering, and nothing fired. That is the EXACT class this guard was written to catch
+    /// after `privacy_audit` fell to it — reproduced inside the replacement. Comments are stripped,
+    /// whitespace collapsed, and the space rustfmt inserts before a wrapped `.method()` removed, so
+    /// a chain reads as one statement whatever shape it was formatted into (E.SEC5).
+    fn statements(lines: &[&str]) -> Vec<String> {
+        let joined = lines.iter().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join(" ");
+        let mut flat = String::with_capacity(joined.len());
+        let mut prev_space = false;
+        for c in joined.chars() {
+            if c.is_whitespace() {
+                if !prev_space {
+                    flat.push(' ');
+                }
+                prev_space = true;
+            } else {
+                flat.push(c);
+                prev_space = false;
+            }
+        }
+        let flat = flat.replace(" .", ".");
+        flat.split(';').map(|st| format!("{};", st.trim())).filter(|st| st.len() > 1).collect()
+    }
+
     /// The variable bound to a lowered copy, and the expression it was lowered FROM.
-    fn lowered_binding(line: &str) -> Option<(&str, &str)> {
-        let (lhs, rhs) = line.split_once('=')?;
-        let rhs = rhs.trim();
-        let src = rhs.strip_suffix(".to_lowercase();")?;
-        let name = lhs.trim().strip_prefix("let ")?.trim().strip_prefix("mut ").unwrap_or_else(|| {
-            lhs.trim().strip_prefix("let ").unwrap_or("").trim()
-        });
+    fn lowered_binding(stmt: &str) -> Option<(String, String)> {
+        let (lhs, rhs) = stmt.split_once('=')?;
+        let src = rhs.trim().strip_suffix(".to_lowercase();")?;
+        // The LAST `let` in the left-hand side. Joining physical lines into statements glues a
+        // function signature or an opening brace onto the first one, so `lhs` no longer starts
+        // with `let` even when the statement plainly is a binding.
+        let let_at = lhs.rfind("let ")?;
+        let name = lhs[let_at + "let ".len()..].trim();
+        let name = name.strip_prefix("mut ").unwrap_or(name);
         let name = name.split(':').next()?.trim();
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return None;
         }
-        // The ROOT of what was lowered — and ONLY when the expression is a plain variable wearing
-        // identity-preserving calls. `toks.iter().map(..).join(" ").to_lowercase()` lowercases the
-        // JOINED STRING, not `toks`, so pairing it with a `toks[i]` Vec index is nonsense; a looser
-        // rule reported sixteen of those and buried the real hits in them.
+        // Only a plain variable wearing identity-preserving calls. `toks.iter().map(..).join(" ")`
+        // lowercases the JOINED STRING, not `toks`, so pairing it with a `toks[i]` index is nonsense.
         let mut rest = src.trim_start_matches(['&', '*']).trim();
-        let root = rest.split(['.', ' ']).next()?.trim();
+        let root = rest.split(['.', ' ']).next()?.trim().to_string();
         if root.is_empty() || !root.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return None;
         }
         rest = rest[root.len()..].trim();
-        // Only these may sit between the variable and the lowering. `trim` is INCLUDED on purpose:
-        // it shifts offsets too, which is the research.rs defect.
-        for call in [".trim()", ".trim_start()", ".trim_end()", ".as_str()", ""] {
-            if call.is_empty() {
-                break;
+        // `trim` is INCLUDED on purpose: it shifts offsets too, which is the research.rs defect.
+        loop {
+            let before = rest.len();
+            for call in [".trim()", ".trim_start()", ".trim_end()", ".as_str()"] {
+                rest = rest.strip_prefix(call).unwrap_or(rest).trim();
             }
-            while let Some(r) = rest.strip_prefix(call) {
-                rest = r.trim();
+            if rest.len() == before {
+                break;
             }
         }
         if !rest.is_empty() {
             return None;
         }
-        Some((name, root))
+        Some((name.to_string(), root))
     }
 
-    /// Does this line index `root` — as a WHOLE NAME, not as the tail of a longer one?
+    /// Does this statement index `root` — as a WHOLE NAME, not the tail of a longer one?
     ///
     /// Matching the bare substring `t[` finds it inside `next["id"]`, and `s[` inside `parts[0]`.
-    /// Both were reported as findings by the first version of this check. It is the same
-    /// substring-for-token mistake that made `contains("save")` fire on "saved" — this time in the
-    /// instrument rather than in the code it audits, which is the more embarrassing place for it.
-    fn slices(line: &str, root: &str) -> bool {
+    /// Both were reported as findings by the first version — the same substring-for-token mistake
+    /// this codebase keeps making, that time in the instrument rather than the code it audits.
+    fn slices(stmt: &str, root: &str) -> bool {
         let pat = format!("{root}[");
         let mut from = 0usize;
-        while let Some(rel) = line[from..].find(&pat) {
+        while let Some(rel) = stmt[from..].find(&pat) {
             let at = from + rel;
-            let boundary = line[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            let boundary = stmt[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if boundary {
                 return true;
             }
             from = at + pat.len();
         }
         false
+    }
+
+    /// A lowered binding whose source is sliced elsewhere in the same function.
+    fn offenders_in(lines: &[&str]) -> Vec<(String, String)> {
+        let stmts = statements(lines);
+        let mut out = Vec::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            let Some((low, root)) = lowered_binding(stmt) else { continue };
+            let sliced = stmts
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && !other.contains(".to_lowercase()") && slices(other, &root));
+            if sliced {
+                out.push((low, root));
+            }
+        }
+        out
     }
 
     /// An offset taken from a lowered copy must never index a string that is not byte-identical to
@@ -152,16 +195,10 @@ mod tests {
                 if lines.iter().any(|l| l.contains("#[test]") || l.contains("#[cfg(test)]")) {
                     continue;
                 }
-                for line in &lines {
-                    let Some((low, root)) = lowered_binding(line) else { continue };
-                    // Does this function slice the ORIGINAL, or the lowered copy's source?
-                    let slices_original =
-                        lines.iter().any(|l| !l.contains(".to_lowercase()") && slices(l, root));
-                    if slices_original {
-                        offenders.push(format!(
-                            "{name}: fn at line {start} binds `{low}` from `{root}.to_lowercase()` and slices `{root}[..]`"
-                        ));
-                    }
+                for (low, root) in offenders_in(&lines) {
+                    offenders.push(format!(
+                        "{name}: fn at line {start} binds `{low}` from `{root}.to_lowercase()` and slices `{root}[..]`"
+                    ));
                 }
             }
         }
@@ -169,7 +206,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "An offset from a LOWERED COPY is being used to index an ORIGINAL string.\n\n{}\n\n\
-             `to_lowercase()` is NOT length-preserving — U+0130 is 2 bytes and its lowercase is 3 — \
+             `to_lowercase()` is NOT length-preserving - U+0130 is 2 bytes and its lowercase is 3 - \
              so every offset after such a character is shifted. Best case the parse silently changes \
              what the user asked for; worst case the shifted offset lands mid-character and panics.\n\
              Fix one of two ways:\n  \
@@ -186,28 +223,66 @@ mod tests {
     /// The guard must be able to see the defect it exists for, or it is decoration.
     #[test]
     fn the_check_can_actually_fire() {
-        let bad = "fn f(text: &str) {\n    let l = text.to_lowercase();\n    let x = &text[l.find(\"a\").unwrap()..];\n}";
-        let found = functions(bad).iter().any(|(_, lines)| {
-            lines.iter().any(|line| {
-                lowered_binding(line).is_some_and(|(_, root)| {
-                    lines.iter().any(|l| !l.contains(".to_lowercase()") && slices(l, root))
-                })
-            })
-        });
-        assert!(found, "the check must fire on the shape it exists to catch");
+        let one_line = [
+            "fn f(text: &str) {",
+            "    let l = text.to_lowercase();",
+            "    let x = &text[l.find(\"a\").unwrap()..];",
+            "}",
+        ];
+        assert_eq!(offenders_in(&one_line).len(), 1, "the plain shape must fire");
 
-        // And it must NOT fire on the safe forms, or it will be silenced rather than heeded.
-        let ascii = "fn f(text: &str) {\n    let l = text.to_ascii_lowercase();\n    let x = &text[l.find(\"a\").unwrap()..];\n}";
-        assert!(functions(ascii).iter().all(|(_, lines)| lines.iter().all(|l| lowered_binding(l).is_none())));
+        // CODEX'S CASE: rustfmt wrapped the binding itself. The first version saw nothing here -
+        // the same line-wrapping blindness this guard was written to replace.
+        let wrapped = [
+            "fn f(text: &str) {",
+            "    let low = text",
+            "        .trim()",
+            "        .to_lowercase();",
+            "    let x = &text[low.find(\"a\").unwrap()..];",
+            "}",
+        ];
+        assert_eq!(offenders_in(&wrapped).len(), 1, "a wrapped binding must fire too");
 
-        let compare_only = "fn f(text: &str) {\n    let t = text.trim().to_lowercase();\n    let _ = t == \"yes\";\n}";
-        let fired = functions(compare_only).iter().any(|(_, lines)| {
-            lines.iter().any(|line| {
-                lowered_binding(line).is_some_and(|(_, root)| {
-                    lines.iter().any(|l| !l.contains(".to_lowercase()") && slices(l, root))
-                })
-            })
-        });
-        assert!(!fired, "a lowered copy that is only COMPARED is not this defect");
+        // And it must NOT fire on the safe forms, or it gets silenced rather than heeded.
+        let ascii = [
+            "fn f(text: &str) {",
+            "    let l = text.to_ascii_lowercase();",
+            "    let x = &text[l.find(\"a\").unwrap()..];",
+            "}",
+        ];
+        assert!(offenders_in(&ascii).is_empty(), "to_ascii_lowercase is the fix, not the defect");
+
+        let wrapped_ascii = [
+            "fn f(text: &str) {",
+            "    let l = text",
+            "        .to_ascii_lowercase();",
+            "    let x = &text[l.find(\"a\").unwrap()..];",
+            "}",
+        ];
+        assert!(offenders_in(&wrapped_ascii).is_empty(), "and wrapped, still the fix");
+
+        let compare_only = [
+            "fn f(text: &str) {",
+            "    let t = text.trim().to_lowercase();",
+            "    let _ = t == \"yes\";",
+            "}",
+        ];
+        assert!(offenders_in(&compare_only).is_empty(), "a lowered copy that is only COMPARED is not this defect");
+
+        let joined = [
+            "fn f(toks: &[&str]) {",
+            "    let c = toks.iter().map(|t| *t).collect::<Vec<_>>().join(\" \").to_lowercase();",
+            "    let _ = toks[0];",
+            "}",
+        ];
+        assert!(offenders_in(&joined).is_empty(), "the JOINED string is not `toks`");
+
+        let substring = [
+            "fn f(next: &serde_json::Value) {",
+            "    let t = next.to_string().to_lowercase();",
+            "    let _ = next[\"id\"];",
+            "}",
+        ];
+        assert!(offenders_in(&substring).is_empty(), "`t[` must not match inside `next[\"id\"]`");
     }
 }

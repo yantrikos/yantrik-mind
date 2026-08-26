@@ -18,26 +18,31 @@
 /// Files permitted to call the unscoped `inference.chat(...)`, each with the reason it is NOT
 /// private-grounded. Adding a file here is a PRIVACY DECISION: state why the prompt cannot carry
 /// household memory. If it can, use `chat_grounded` instead.
+/// Keyed by CRATE-RELATIVE PATH, never by basename. Codex found the hole: `SCANNED` covers three
+/// crates and `lib.rs` exists in nineteen, so a bare `"lib.rs"` entry silenced
+/// `mind-agents/src/lib.rs` and `mind-recipes/src/lib.rs` along with the one it was written for —
+/// and `mind-agents/src/lib.rs` is exactly where E.SEC2 grounded the sub-agent synthesis call. The
+/// guard had gone blind to the very file it was protecting (E.SEC5).
 const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
     (
-        "egress_planning.rs",
+        "mind-conversation/src/egress_planning.rs",
         "MUST stay unscoped BY DESIGN: the ARCH-3 egress-clean planner re-authors outbound tool args \
          in a clean room that has never seen private memory. Grounding it would defeat its purpose.",
     ),
     (
-        "news.rs",
+        "mind-conversation/src/news.rs",
         "public-web facts — the prompt carries a topic string and fetched headlines, no household memory.",
     ),
     (
-        "festivals.rs",
+        "mind-conversation/src/festivals.rs",
         "public calendar facts (lunar-calendar festival dates); no household memory in the prompt.",
     ),
     (
-        "research.rs",
+        "mind-conversation/src/research.rs",
         "public-web research; the prompt carries the research query and fetched sources.",
     ),
     (
-        "code.rs",
+        "mind-conversation/src/code.rs",
         "the REMAINING calls carry venture/codebase task text only (PRD drafting, code Q&A over a \
          studied repo). The two that did read the household substrate — work_radar_run (40 verbatim \
          user messages) and paper_ask (belief-store output) — are on chat_grounded as of the \
@@ -62,16 +67,16 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
 /// closed when the local endpoint is down. That is a capability trade on features in daily use —
 /// the owner's call, not the auditor's.
 const UNSCOPED_PENDING: &[(&str, &str)] = &[
-    ("mail.rs", "email header triage, sender classification from aggregates, and email analysis — plainly household."),
-    ("finance.rs", "extracts recurring subscriptions FROM EMAIL METADATA — plainly household."),
-    ("calendar.rs", "calendar events — plainly household."),
-    ("briefing.rs", "the daily briefing, composed over household context."),
-    ("foresight.rs", "persona + a prompt built from household signals."),
-    ("onboarding.rs", "two calls carrying persona + user answers during setup."),
-    ("studio.rs", "three calls; prompt provenance not yet traced."),
-    ("plugins_mod.rs", "persona + plugin prompt; provenance not yet traced."),
-    ("skills.rs", "the verifier-written skill summary — the prompt carries the user's own code."),
-    ("lib.rs", "five calls in the conversation core; each needs its own reading."),
+    ("mind-conversation/src/mail.rs", "email header triage, sender classification from aggregates, and email analysis — plainly household."),
+    ("mind-conversation/src/finance.rs", "extracts recurring subscriptions FROM EMAIL METADATA — plainly household."),
+    ("mind-conversation/src/calendar.rs", "calendar events — plainly household."),
+    ("mind-conversation/src/briefing.rs", "the daily briefing, composed over household context."),
+    ("mind-conversation/src/foresight.rs", "persona + a prompt built from household signals."),
+    ("mind-conversation/src/onboarding.rs", "two calls carrying persona + user answers during setup."),
+    ("mind-conversation/src/studio.rs", "three calls; prompt provenance not yet traced."),
+    ("mind-conversation/src/plugins_mod.rs", "persona + plugin prompt; provenance not yet traced."),
+    ("mind-conversation/src/skills.rs", "the verifier-written skill summary — the prompt carries the user's own code."),
+    ("mind-conversation/src/lib.rs", "five calls in the conversation core; each needs its own reading."),
 ];
 
 /// Crates whose sources are scanned. These are the ones that hold an `InferencePool` and can reach
@@ -110,11 +115,17 @@ mod tests {
             let mut files = Vec::new();
             rs_files(&src, &mut files);
             for f in files {
-                let name = f.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+                let base = f.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
                 // tests may call chat() freely — they carry no real household data.
-                if name == "tests.rs" || name == "privacy_audit.rs" {
+                if base == "tests.rs" || base == "privacy_audit.rs" {
                     continue;
                 }
+                // CRATE-RELATIVE, so a decision about one crate's `lib.rs` cannot speak for
+                // another crate's (E.SEC5).
+                let name = f
+                    .strip_prefix(crates_dir())
+                    .map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                    .unwrap_or_else(|_| base.clone());
                 let Ok(body) = std::fs::read_to_string(&f) else { continue };
                 if UNSCOPED_ALLOWED.iter().any(|(f, _)| *f == name)
                     || UNSCOPED_PENDING.iter().any(|(f, _)| *f == name)
@@ -202,18 +213,46 @@ mod sec2 {
     /// A deferral list that outlives its reasons stops being a backlog and becomes permission. This
     /// fails when someone grounds a call and forgets to strike the file, so the list can only ever
     /// shrink toward empty (E.SEC2).
+    /// A decision about one crate's file must not silence another crate's file of the same name.
+    ///
+    /// CODEX FOUND THIS. `SCANNED` covers three crates; `lib.rs` exists in nineteen. Keyed by
+    /// basename, the pending entry written for `mind-conversation/src/lib.rs` also silenced
+    /// `mind-agents/src/lib.rs` and `mind-recipes/src/lib.rs` — and `mind-agents/src/lib.rs` is
+    /// where E.SEC2 grounded the sub-agent synthesis call, so the guard had gone blind to the very
+    /// file it was protecting (E.SEC5).
+    #[test]
+    fn an_entry_for_one_crates_file_cannot_speak_for_another_crates_file() {
+        let listed: Vec<&str> = UNSCOPED_ALLOWED.iter().chain(UNSCOPED_PENDING).map(|(f, _)| *f).collect();
+        for key in &listed {
+            assert!(key.contains('/'), "keys must be crate-relative paths, not basenames: {key}");
+            assert!(
+                SCANNED.iter().any(|c| key.starts_with(&format!("{c}/"))),
+                "{key} names no scanned crate, so it silences nothing and hides a typo"
+            );
+            assert!(crates_dir().join(key).exists(), "{key} does not exist — a stale entry is a hole");
+        }
+        // The concrete collision, asserted rather than argued: for every listed file, the SAME
+        // basename in another scanned crate must not be covered by it.
+        for key in &listed {
+            let base = key.rsplit('/').next().unwrap();
+            for krate in SCANNED {
+                let sibling = format!("{krate}/src/{base}");
+                if &sibling.as_str() == key || !crates_dir().join(&sibling).exists() {
+                    continue;
+                }
+                assert!(
+                    !listed.contains(&sibling.as_str()) || listed.iter().filter(|k| **k == sibling).count() == 1,
+                    "{sibling} must earn its own entry, never inherit {key}'s"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_pending_file_still_has_the_call_it_was_deferred_for() {
         for (file, why) in UNSCOPED_PENDING {
-            let mut found = false;
-            for krate in SCANNED {
-                let path = crates_dir().join(krate).join("src").join(file);
-                if let Ok(body) = std::fs::read_to_string(&path) {
-                    if squash(&body).contains("inference.chat(") {
-                        found = true;
-                    }
-                }
-            }
+            let path = crates_dir().join(file);
+            let found = std::fs::read_to_string(&path).map(|b| squash(&b).contains("inference.chat(")).unwrap_or(false);
             assert!(found, "{file} is on the E.SEC2 pending list ({why}) but has no unscoped inference.chat( left — strike it from UNSCOPED_PENDING.");
         }
     }

@@ -4944,7 +4944,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mounted_pack_is_floored_on_similarity_and_names_itself() {
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p1_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p1");
         std::fs::create_dir_all(&dir).unwrap();
         let strict = dir.join("strict.ydbpack");
         let rows = [
@@ -5001,7 +5001,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pack_declaring_a_zero_floor_is_still_held_to_the_host_wall() {
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p1_zero_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p1_zero");
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("zero.ydbpack");
         let row = "Motion — animate only transform and opacity so the compositor does the work.";
@@ -5025,7 +5025,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_rows_sharing_the_namespace_do_not_starve_pack_evidence_at_this_scale() {
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p1_crowd_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p1_crowd");
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("crowd.ydbpack");
         let host_db = dir.join("crowd_host.db");
@@ -5062,7 +5062,7 @@ mod tests {
     async fn the_library_is_catalogued_unmounted_and_the_router_leases_only_a_clear_winner() {
         use mind_types::memory::{AbstainReason, PackRoute};
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p3_lib_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p3_lib");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |file: &str, name: &str, ns: &str, cov: &[&str]| {
@@ -5104,7 +5104,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn coverage_vectors_follow_the_phrases_not_the_content_digest() {
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p3a_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p3a");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Pack A: one row, coverage about platformers.
@@ -5162,7 +5162,7 @@ mod tests {
     async fn pack_stats_count_rungs_and_reset_when_the_pack_is_resealed() {
         use mind_types::memory::PackEvent as E;
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p2_stats_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p2_stats");
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("stats.ydbpack");
         let id = fixtures::seal_fixture_pack(pack.to_str().unwrap(), "stats-craft", "stats_ns", &["Row one — the first sealing."], None, None).unwrap();
@@ -5197,7 +5197,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pack_without_a_declared_floor_is_still_floored() {
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p1_default_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p1_default");
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("nofloor.ydbpack");
         let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
@@ -5286,7 +5286,7 @@ mod tests {
         assert!(approaches[0].starts_with("APPROACH: mail check"), "newest first");
 
         // Sealing exports the skill + the clean approach; the personal value is withheld.
-        let dir = std::env::temp_dir().join(format!("ym_seal_test_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("seal_test");
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("craft.ydbpack");
         let _ = std::fs::remove_file(&dest);
@@ -5539,7 +5539,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn every_read_leaves_a_hash_chained_receipt_with_its_purpose() {
         use mind_types::Scope;
-        let db_path = scratch_db_path("receipts");
+        let db_path_scratch = scratch_db("receipts");
+        let db_path = db_path_scratch.as_str().to_string();
         let ledger_path = std::path::PathBuf::from(format!("{db_path}.read_receipts.jsonl"));
         let mem = MemoryHandle::spawn(&db_path, 8).unwrap();
         mem.remember_as_belief_scoped(
@@ -5722,22 +5723,21 @@ mod tests {
         assert!(audit_hits.iter().any(|b| b.statement == asha_health), "the audit lane must retain full visibility");
     }
 
-    fn scratch_db_path(tag: &str) -> String {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ym_snap_{tag}_{}_{}.db",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        p.to_string_lossy().into_owned()
+    /// Removed when the test ends, ALONG WITH the `-wal`, `-shm` and `.read_receipts.jsonl` files
+    /// sqlite and the ledger park beside it — those sidecars were most of what still accumulated
+    /// after the first pass at this (E.SCRATCH1).
+    fn scratch_db(tag: &str) -> mind_types::scratch::Scratch {
+        mind_types::scratch::file(&format!("snap_{tag}"), "db")
     }
 
     /// The immune-harness invariant: a snapshot is a faithful, independently
     /// openable copy, and seeding the COPY leaves the live mind untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn snapshot_to_copies_beliefs_and_seeding_copy_never_touches_live() {
-        let live_path = scratch_db_path("live");
-        let snap_path = scratch_db_path("copy");
+        let live_path_scratch = scratch_db("live");
+        let live_path = live_path_scratch.as_str().to_string();
+        let snap_path_scratch = scratch_db("copy");
+        let snap_path = snap_path_scratch.as_str().to_string();
         {
             let live = MemoryHandle::spawn(&live_path, 8).unwrap();
             live.remember_as_belief(BeliefAssertion {
@@ -5778,11 +5778,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn snapshot_to_refuses_existing_dest_and_memory_source() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        assert!(mem.snapshot_to(scratch_db_path("nomem")).await.is_err());
+        let nomem = scratch_db("nomem");
+        assert!(mem.snapshot_to(nomem.as_str().to_string()).await.is_err());
 
-        let live_path = scratch_db_path("live2");
+        let live_path_scratch = scratch_db("live2");
+        let live_path = live_path_scratch.as_str().to_string();
         let live = MemoryHandle::spawn(&live_path, 8).unwrap();
-        let dest = scratch_db_path("exists");
+        let dest_scratch = scratch_db("exists");
+        let dest = dest_scratch.as_str().to_string();
         std::fs::write(&dest, b"occupied").unwrap();
         assert!(live.snapshot_to(&dest).await.is_err());
         let _ = std::fs::remove_file(&live_path);
@@ -6663,7 +6666,7 @@ mod lane_experiment {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn experiment_bulk_op_does_not_delay_live_reads() {
-        let dir = std::env::temp_dir().join(format!("ym_lane_exp_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("lane_exp");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("exp.db").to_string_lossy().to_string();
@@ -6724,7 +6727,7 @@ mod lane_experiment {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_same_size_reseal_in_place_is_read_on_the_very_next_scan() {
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p3b_reseal_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p3b_reseal");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("games.ydbpack");
@@ -6807,7 +6810,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::{LeaseEnd, LEASE_CAP};
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4_lease_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4_lease");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -6873,7 +6876,7 @@ mod lane_experiment {
     async fn an_expired_lease_is_swept_and_an_ambiguous_artifact_is_refused() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4_sweep_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4_sweep");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -6953,7 +6956,7 @@ mod lane_experiment {
     async fn a_mount_does_not_survive_a_reopen() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_probe_mount_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("probe_mount");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -6985,7 +6988,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::{LeaseEnd, LeaseState};
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4a_seams_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4a_seams");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7071,7 +7074,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::LeaseEnd;
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4a_own_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4a_own");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7097,7 +7100,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::{LeaseEnd, LeaseState};
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4a_restart_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4a_restart");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7201,7 +7204,7 @@ mod lane_experiment {
     async fn expiry_is_enforced_at_the_visibility_boundary_not_only_by_the_poll_loop() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4a_vis_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4a_vis");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7222,7 +7225,7 @@ mod lane_experiment {
     /// P.4a: `packs-evil` must not look installed because `packs` is a prefix of it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_sibling_directory_sharing_a_prefix_is_not_the_install_dir() {
-        let dir = std::env::temp_dir().join(format!("ym_p4a_prefix_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4a_prefix");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("packs")).unwrap();
         std::fs::create_dir_all(dir.join("packs-evil")).unwrap();
@@ -7250,7 +7253,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::{LeaseEnd, LeaseState};
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4c_vis_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4c_vis");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7299,7 +7302,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::LeaseState;
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4c_ident_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4c_ident");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7341,7 +7344,7 @@ mod lane_experiment {
         let _lease_tests = lease_test_lock();
         use mind_types::memory::LeaseEnd;
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4c_own_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4c_own");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7386,7 +7389,7 @@ mod lane_experiment {
     async fn a_foreign_artifact_under_a_live_lease_is_suppressed_without_a_restart() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4d_swap_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4d_swap");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7428,7 +7431,7 @@ mod lane_experiment {
     async fn nothing_serves_while_the_lease_state_cannot_be_read() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4d_read_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4d_read");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7463,7 +7466,7 @@ mod lane_experiment {
     async fn a_mount_nothing_could_record_still_never_reaches_a_turn() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4d_orphan_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4d_orphan");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7506,7 +7509,7 @@ mod lane_experiment {
     async fn a_corrupt_unrelated_library_file_does_not_block_other_leases() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4d_corrupt_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4d_corrupt");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
@@ -7538,7 +7541,7 @@ mod lane_experiment {
     async fn two_minds_in_one_process_do_not_share_each_others_orphaned_mounts() {
         let _lease_tests = lease_test_lock();
         use mind_types::MemoryFacade;
-        let dir = std::env::temp_dir().join(format!("ym_p4e_two_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4e_two");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();

@@ -1115,9 +1115,7 @@ mod learning_chain_tests {
     /// predict (empirical prior only) → act → observe (five-way) → prediction error → lesson.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_tool_call_leaves_a_predict_observe_pair_with_its_error() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_chain_calc_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
+        let p = mind_types::scratch::file("chain_calc", "jsonl");
 
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let pool = mind_inference::InferencePool::new(
@@ -1181,9 +1179,7 @@ mod learning_chain_tests {
     /// says why instead.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_unavailable_capability_records_no_false_prediction_error() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_chain_unavail_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
+        let p = mind_types::scratch::file("chain_unavail", "jsonl");
 
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let pool = mind_inference::InferencePool::new(
@@ -1223,9 +1219,7 @@ mod goal_contribution_tests {
     /// evidence marks that tool `contributed`; the contract verdict is the goal-level outcome.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_completed_run_grades_its_tools_goal_contribution() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_contrib_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
+        let p = mind_types::scratch::file("contrib", "jsonl");
 
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let seq = Arc::new(mind_inference::SequencedLLM::new(vec![
@@ -1282,7 +1276,7 @@ mod goal_contribution_tests {
     /// sentinel: a leak through any field fails, not just through `outcome`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_malformed_call_on_the_bus_is_refused_before_prediction_and_no_field_carries_a_value() {
-        let dir = std::env::temp_dir().join(format!("ym_p2e_bus_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("p2e_bus");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("bus.decisions.jsonl");
         let _ = std::fs::remove_file(&log);

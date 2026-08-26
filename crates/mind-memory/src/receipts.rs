@@ -151,11 +151,9 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_receipts_{tag}_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
-        p
+    /// Unique per RUN and removed when the test ends (E.SCRATCH1).
+    fn scratch(tag: &str) -> mind_types::scratch::Scratch {
+        mind_types::scratch::file(&format!("receipts_{tag}"), "jsonl")
     }
 
     fn receipt(method: &str, detail: &str) -> ReadReceipt {
@@ -173,7 +171,7 @@ mod tests {
     #[test]
     fn appends_chain_and_verifies() {
         let path = scratch("ok");
-        let ledger = ReadReceiptLedger { path: Some(path.clone()), head: Mutex::new(None) };
+        let ledger = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
         ledger.append(receipt("recall_typed", "safe combination"));
         ledger.append(receipt("beliefs_matching", "gift"));
         ledger.append(receipt("conflicts", ""));
@@ -187,7 +185,7 @@ mod tests {
     #[test]
     fn tamper_breaks_the_chain() {
         let path = scratch("tamper");
-        let ledger = ReadReceiptLedger { path: Some(path.clone()), head: Mutex::new(None) };
+        let ledger = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
         ledger.append(receipt("recall_typed", "one"));
         ledger.append(receipt("recall_typed", "two"));
         // Rewrite record #1's detail without recomputing the chain: verify must flag line 0.
@@ -202,11 +200,11 @@ mod tests {
     fn head_survives_reopen() {
         let path = scratch("reopen");
         {
-            let ledger = ReadReceiptLedger { path: Some(path.clone()), head: Mutex::new(None) };
+            let ledger = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
             ledger.append(receipt("recall_typed", "first"));
         }
         // A NEW ledger handle (fresh process) must chain off the persisted head, not genesis.
-        let ledger2 = ReadReceiptLedger { path: Some(path.clone()), head: Mutex::new(None) };
+        let ledger2 = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
         ledger2.append(receipt("recall_typed", "second"));
         assert_eq!(verify_ledger(&path), Ok(2));
         let _ = std::fs::remove_file(&path);

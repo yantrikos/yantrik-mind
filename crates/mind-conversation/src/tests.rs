@@ -1724,7 +1724,8 @@ async fn draft_email_without_body_asks_then_resumes_then_sends() {
         }
     }
     // AskUser resume requires a store (persistence).
-    let db = format!("{}/ym_ask_{}.db", std::env::temp_dir().display(), std::process::id());
+    let db_scratch = mind_types::scratch::file("ask", "db");
+    let db = db_scratch.as_str().to_string();
     let store = Arc::new(RecipeStore::open(&db).unwrap());
     let engine = Arc::new(
         RecipeEngine::new(pool.clone(), Arc::new(NoHost), "JARVIS").with_runtime(rt.clone()).with_store(store),
@@ -3554,7 +3555,7 @@ async fn grounding_labels_pack_evidence_with_the_pack_id_and_keeps_it_out_of_mem
     // A pack claim in the grounding must say WHICH pack made it — the identity every later belief,
     // grade or correction keys on — and must sit under the third-party heading, never inside the
     // household's own memory block. Tested on a REAL sealed pack, not a mock facade.
-    let dir = std::env::temp_dir().join(format!("ym_conv_p1_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("conv_p1");
     std::fs::create_dir_all(&dir).unwrap();
     let pack = dir.join("label.ydbpack");
     let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
@@ -3583,7 +3584,7 @@ async fn pack_evidence_climbs_surfaced_used_graded_on_two_witnesses() {
     // uses it or not (rung two, a named proxy), the next message grades the answer (rung three).
     // Every rung lands on the hash-chained flight recorder AND in mind_pack_stats, and the two
     // witnesses must agree.
-    let dir = std::env::temp_dir().join(format!("ym_p2_chain_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p2_chain");
     std::fs::create_dir_all(&dir).unwrap();
     let pack = dir.join("chain.ydbpack");
     let log = dir.join("chain.decisions.jsonl");
@@ -3652,7 +3653,7 @@ async fn a_members_turn_surfaces_pack_evidence_but_does_not_carry_it_to_the_grad
     // The lane rule: a member's message must not grade the owner's packs, nor the reverse. A
     // member turn still records SURFACED (it happened), but nothing is carried to the used or
     // graded rungs.
-    let dir = std::env::temp_dir().join(format!("ym_p2_lane_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p2_lane");
     std::fs::create_dir_all(&dir).unwrap();
     let pack = dir.join("lane.ydbpack");
     let log = dir.join("lane.decisions.jsonl");
@@ -4320,10 +4321,10 @@ async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() 
         MALFORMED_ARGS_SCRIPT.contains(&LEAK_SENTINEL.to_string()),
         "the script and the sentinel it is asserted about must carry the same value"
     );
-    let dir = std::env::temp_dir().join(format!("ym_p2d_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p2d");
     std::fs::create_dir_all(&dir).unwrap();
     let run = |n: usize, script: Vec<&'static str>| {
-        let dir = dir.clone();
+        let dir = dir.to_path_buf();
         async move {
             let log = dir.join(format!("p2d-{n}.decisions.jsonl"));
             let _ = std::fs::remove_file(&log);
@@ -4399,7 +4400,7 @@ async fn a_router_failure_is_still_a_turn_in_the_shadows_denominator() {
     // P.3b (Codex's review of P.3a): a dim-8 host has no embedder, so a non-empty catalog makes the
     // router fail on the query embedding — a REAL failure, not a stub. That turn must still be in
     // the record, as abstain:router_error, with the error's text kept out of it.
-    let dir = std::env::temp_dir().join(format!("ym_p3b_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p3b");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dest = dir.join("games.ydbpack");
@@ -4440,7 +4441,7 @@ async fn a_hostile_pack_cannot_move_the_walls() {
     use mind_types::action::{ActionIntent, Capability, RiskLevel};
     use mind_types::harm::HarmGate;
     use mind_types::purpose::{purpose_allows, Activity, Purpose, Sensitivity, Subject};
-    let dir = std::env::temp_dir().join(format!("ym_p4_hostile_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p4_hostile");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dest = dir.join("hostile.ydbpack");
@@ -4511,7 +4512,7 @@ async fn the_lease_verbs_grant_record_release_and_scope_what_a_turn_sees() {
     // recorder through the outbox — written beside the state change, drained afterwards, carrying
     // the outbox's own id so a replay cannot write a second copy.
     use mind_types::memory::LeaseEnd;
-    let dir = std::env::temp_dir().join(format!("ym_p4_verbs_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p4_verbs");
     let _ = std::fs::remove_dir_all(&dir);
     let lib = dir.join("library");
     std::fs::create_dir_all(&lib).unwrap();
@@ -4737,7 +4738,7 @@ async fn the_lease_outbox_keeps_what_the_recorder_would_not_take() {
     // A recorder that could not write therefore DESTROYED the evidence the outbox existed to keep.
     // Here the recorder's path is a DIRECTORY, so every append genuinely fails.
     use mind_types::memory::LeaseEnd;
-    let dir = std::env::temp_dir().join(format!("ym_p4c_outbox_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p4c_outbox");
     let _ = std::fs::remove_dir_all(&dir);
     let lib = dir.join("library");
     std::fs::create_dir_all(&lib).unwrap();
@@ -4798,7 +4799,7 @@ async fn a_mind_with_no_decision_log_keeps_its_lease_evidence_instead_of_droppin
     // host that simply forgot `with_recorder` would have deleted its own audit trail one lease at
     // a time — the drain acknowledged `Disabled` even though it is not durable. Convenience for
     // eval harnesses cannot outrank the outbox's whole purpose.
-    let dir = std::env::temp_dir().join(format!("ym_p4f_disabled_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("p4f_disabled");
     let _ = std::fs::remove_dir_all(&dir);
     let lib = dir.join("library");
     std::fs::create_dir_all(&lib).unwrap();
@@ -4852,7 +4853,7 @@ async fn one_sensitivity_finding_guards_all_four_boundaries_and_none_of_them_quo
     );
 
     // ── 2. OBSERVABILITY ────────────────────────────────────────────────────────────────────
-    let dir = std::env::temp_dir().join(format!("ym_sec1_{}", std::process::id()));
+    let dir = mind_types::scratch::dir("sec1");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("d.jsonl");

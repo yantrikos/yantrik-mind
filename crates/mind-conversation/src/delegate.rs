@@ -1559,7 +1559,7 @@ mod iterate_tests {
     /// mtime movement reads as change.
     #[test]
     fn workdir_snapshots_detect_change_and_stillness() {
-        let wd = std::env::temp_dir().join(format!("ym-snap-test-{}", std::process::id()));
+        let wd = mind_types::scratch::dir("snap_test_");
         std::fs::create_dir_all(&wd).unwrap();
         std::fs::write(wd.join("a.txt"), "one").unwrap();
         let s1 = workdir_snapshot(&wd.to_string_lossy());
@@ -1606,7 +1606,7 @@ mod iterate_tests {
     /// without quoting them, and never split a UTF-8 character.
     #[test]
     fn artifact_excerpts_are_bounded_and_binary_safe() {
-        let wd = std::env::temp_dir().join(format!("ym-excerpt-test-{}", std::process::id()));
+        let wd = mind_types::scratch::dir("excerpt_test_");
         std::fs::create_dir_all(&wd).unwrap();
         std::fs::write(wd.join("notes.md"), "café ".repeat(1_000)).unwrap(); // multibyte, > per-file cap
         std::fs::write(wd.join("blob.bin"), [0u8, 159, 146, 150]).unwrap();

@@ -1223,18 +1223,6 @@ mod tests {
         assert!(r.orders.is_empty());
     }
 
-    /// Remove a scratch file when the test ends, however it ends — an assertion that fires must
-    /// still not leave state behind for the next run to trip over.
-    fn scopeguard_remove(path: std::path::PathBuf) -> impl Drop {
-        struct G(std::path::PathBuf);
-        impl Drop for G {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-        G(path)
-    }
-
     /// A standing order carries the actions that will actually work in its current state, so the
     /// client renders three buttons that succeed rather than four where one fails.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1244,9 +1232,9 @@ mod tests {
         // Unique per RUN and REMOVED at the end. Keyed on the pid alone this file was never
         // cleaned up — 188 of them had accumulated in temp — and a recycled pid made the test read
         // a previous run's two sleeping orders as well as its own, so it counted four. It passed
-        // for years and failed the moment an unrelated test shifted which pid it got.
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let db = std::env::temp_dir().join(format!("ym_surface_orders_{}_{stamp}.db", std::process::id()));
+        // for years and failed the moment an unrelated test shifted which pid it got. The bespoke
+        // stamp and Drop guard written here that day are now the shared helper (E.SCRATCH1).
+        let db = mind_types::scratch::file("surface_orders", "db");
         let store = Arc::new(mind_recipes::RecipeStore::open(db.to_str().unwrap()).unwrap());
         let pool = mind_inference::InferencePool::new(
             Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
@@ -1278,7 +1266,6 @@ mod tests {
         assert!(r.store, "a wired store means scheduling is available");
         assert_eq!(r.orders.len(), 2, "both the sleeping and the paused order are listed");
 
-        let _cleanup = scopeguard_remove(db.clone());
         let paused = r.orders.iter().find(|o| o.id == paused_id).expect("paused order present");
         assert_eq!(paused.state, OrderState::Paused);
         assert_eq!(paused.actions, vec!["resume", "cancel"], "a paused order cannot be run or re-paused");

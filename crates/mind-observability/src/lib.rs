@@ -1036,11 +1036,10 @@ mod tests {
         assert!(render_pack_routes(&[]).contains("No shadow routes"));
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_flight_{tag}_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
-        p
+    /// Unique per RUN and removed when the test ends. Keyed on the pid alone this both leaked and
+    /// could hand a test a previous run's chain through a recycled pid (E.SCRATCH1).
+    fn scratch(tag: &str) -> mind_types::scratch::Scratch {
+        mind_types::scratch::file(&format!("flight_{tag}"), "jsonl")
     }
 
     fn ev(trace: &str, kind: &str, chosen: &str) -> DecisionEvent {
@@ -1062,7 +1061,7 @@ mod tests {
         // stacked on the function — Codex found it. The comment is corrected rather than removed
         // because the wrong diagnosis is the more useful half of the story.)
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ym_rec_once_{}_{stamp}", std::process::id()));
+        let dir = mind_types::scratch::dir("rec_once");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("d.jsonl");
@@ -1102,7 +1101,7 @@ mod tests {
     #[test]
     fn durable_delivery_survives_corruption_forgery_and_concurrency() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ym_p4f_{}_{stamp}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4f");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ev = |id: &str| {
@@ -1179,7 +1178,7 @@ mod tests {
     #[test]
     fn a_warm_handle_cannot_write_over_what_another_handle_appended() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ym_p4g_warm_{}_{stamp}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4g_warm");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("d.jsonl");
@@ -1214,7 +1213,7 @@ mod tests {
     #[test]
     fn ordinary_records_and_durable_deliveries_share_one_chain_under_contention() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ym_p4g_mix_{}_{stamp}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4g_mix");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("d.jsonl");
@@ -1259,7 +1258,7 @@ mod tests {
     #[test]
     fn a_handle_made_before_the_file_exists_shares_the_lock_with_one_made_after() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ym_p4g_key_{}_{stamp}", std::process::id()));
+        let dir = mind_types::scratch::dir("p4g_key");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("late.jsonl");
@@ -1479,9 +1478,7 @@ mod float_stability {
     /// graded prediction in the system is one write away from an unverifiable ledger.
     #[test]
     fn floats_survive_write_read_verify_without_ulp_drift() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_float_rt_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
+        let p = mind_types::scratch::file("float_rt", "jsonl");
         let log = DecisionLog::open(&p);
         let mut pred = DecisionEvent::new("run-t", "tool_predicted");
         pred.event_id = Some("tool_predicted-123".into());

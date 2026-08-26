@@ -1049,14 +1049,9 @@ pub fn epoch_summary(reports: &[TrialReport]) -> EpochSummary {
 mod tests {
     use super::*;
 
-    fn scratch_dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "ym_immune_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// Unique per RUN and removed when the test ends (E.SCRATCH1).
+    fn scratch_dir() -> mind_types::scratch::Scratch {
+        mind_types::scratch::dir("immune")
     }
 
     /// A critic with the answer key — tests the PLUMBING (injection, join

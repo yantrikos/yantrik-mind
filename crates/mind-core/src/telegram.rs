@@ -2290,7 +2290,7 @@ mod tests {
         use mind_memory::MemoryHandle;
         use yantrik_ml::LLMBackend;
 
-        let dir = std::env::temp_dir().join(format!("ym_ctlgate_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("ctlgate");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(DeviceStore::open(&dir).unwrap());
@@ -2365,7 +2365,7 @@ mod tests {
         use mind_memory::MemoryHandle;
         use yantrik_ml::LLMBackend;
 
-        let dir = std::env::temp_dir().join(format!("ym_wgchat_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("wgchat");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(DeviceStore::open(&dir).unwrap());

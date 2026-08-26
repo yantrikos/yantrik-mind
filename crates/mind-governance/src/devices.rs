@@ -450,12 +450,11 @@ fn fsync_dir(_dir: &Path) {}
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_devtrust_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// Unique per RUN and removed when the test ends. Keyed on the pid alone this leaked a
+    /// directory per run per tag — 185 of each of eight tags had accumulated — and a recycled pid
+    /// could hand a test a previous run's devices.json (E.SCRATCH1).
+    fn scratch(tag: &str) -> mind_types::scratch::Scratch {
+        mind_types::scratch::dir(&format!("devtrust_{tag}"))
     }
 
     #[test]

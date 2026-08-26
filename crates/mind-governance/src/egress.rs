@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn receipts_are_hmac_chained_and_verify() {
-        let dir = std::env::temp_dir().join(format!("ym_egress_{}", std::process::id()));
+        let dir = mind_types::scratch::dir("egress");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let b = EgressBroker::open(&dir, true);

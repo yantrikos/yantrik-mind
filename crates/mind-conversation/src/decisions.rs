@@ -739,10 +739,8 @@ mod flight_recorder_tests {
     use super::*;
     use std::sync::Arc;
 
-    fn engine_with_recorder(tag: &str) -> (Arc<ConversationEngine>, std::path::PathBuf) {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_flight_{tag}_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
+    fn engine_with_recorder(tag: &str) -> (Arc<ConversationEngine>, mind_types::scratch::Scratch) {
+        let p = mind_types::scratch::file(&format!("flight_{tag}"), "jsonl");
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let pool = mind_inference::InferencePool::new(
             Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,

@@ -732,10 +732,11 @@ pub async fn run_live_split(mem: &dyn MemoryFacade) -> LiveScore {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ym_p3_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    /// Unique per RUN and removed when the test ends (E.SCRATCH1). The `remove_dir_all` that used
+    /// to stand here existed because the pid-keyed path was REUSED across runs; a path that is
+    /// unique has nothing to clear, and removing it now would delete the directory just created.
+    fn scratch(tag: &str) -> mind_types::scratch::Scratch {
+        mind_types::scratch::dir(&format!("p3_{tag}"))
     }
 
     /// The corpus itself is well-formed before anything is routed: sizes the pre-registration
@@ -863,7 +864,7 @@ mod tests {
     fn the_extractor_lifts_live_queries_without_touching_them() {
         use mind_observability::{DecisionEvent, DecisionLog};
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ym_pk3d_{}_{stamp}", std::process::id()));
+        let dir = mind_types::scratch::dir("pk3d");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("d.jsonl");

@@ -371,9 +371,7 @@ mod tests {
 
     #[test]
     fn the_tape_round_trips_through_the_ledger() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ym_tape_test_{}.jsonl", std::process::id()));
-        let _ = std::fs::remove_file(&p);
+        let p = mind_types::scratch::file("tape_test", "jsonl");
         let s = TapeSample {
             at_ms: 1,
             source: "stream".into(),

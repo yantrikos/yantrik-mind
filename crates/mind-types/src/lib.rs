@@ -34,6 +34,7 @@ pub use harm::{Decision, HarmGate};
 pub use turn::TurnContext;
 pub use task::Task;
 pub mod reliability;
+pub mod scratch;
 pub use reliability::{Reliability, Verdict};
 
 pub use safety::{

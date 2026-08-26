@@ -1929,6 +1929,13 @@ fn collect_pack_candidates(
                 None,        // certainty_min
                 None,        // order — relevance
                 false,       // include_superseded
+                // Valid-time bounds (engine 0.18, issue #149 phase 2). BOTH None: no temporal
+                // filter, which is exactly the behaviour this call had at 0.16. A pack's rows are
+                // reference material — they have no event time to be inside or outside of — so
+                // there is nothing here to filter by, and this is the whole of the adaptation
+                // rather than a deferral (E.18b).
+                None,        // event_after
+                None,        // event_before
             )
             .map_err(|e| e.to_string())?;
         candidates.extend(rs.into_iter().map(PackCandidate::from_engine));

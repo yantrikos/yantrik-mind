@@ -42,7 +42,7 @@ const FILLER: &[&str] = &["before i forget", "don't forget", "dont forget", "ple
 
 fn tidy(s: &str) -> String {
     let mut t = s.trim().trim_matches(|c: char| c == ',' || c == '.' || c == '"').trim().to_string();
-    let low = t.to_lowercase();
+    let low = t.to_ascii_lowercase();
     for f in FILLER {
         if let Some(pos) = low.find(f) {
             // strip the filler wherever it sits, then re-tidy the seam
@@ -64,7 +64,7 @@ pub(crate) fn detect(msg: &str) -> Option<Commitment> {
     if raw.contains('?') {
         return None;
     }
-    let low = raw.to_lowercase();
+    let low = raw.to_ascii_lowercase();
     // Find the earliest conditional lead.
     let (lead_at, lead) = LEADS
         .iter()

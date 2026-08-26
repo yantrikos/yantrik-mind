@@ -188,7 +188,9 @@ pub fn symbols_with_context(text: &str, recent: &[String]) -> Vec<String> {
         // case: "TCS is at 2297.50, down 0.30 percent. Want me to pull the Nifty 50 to compare?" —
         // "yes please" means the Nifty, and answering with TCS again would be answering the part
         // that was already finished.
-        let lower = line.to_lowercase();
+        // ASCII-only: `offer_at` is an offset into `lower` and is used to slice `line`, so the
+        // two must agree byte for byte. `to_lowercase` is not length-preserving (E.SEC4).
+        let lower = line.to_ascii_lowercase();
         let offer_at = ["want me to", "shall i", "should i", "would you like", "want to see"]
             .iter()
             .filter_map(|p| lower.find(p))

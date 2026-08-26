@@ -596,7 +596,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
 
     pub(crate) fn clean_name(s: &str) -> String {
         let t = s.trim();
-        let low = t.to_lowercase();
+        let low = t.to_ascii_lowercase();
         for p in ["my name is ", "i am ", "i'm ", "call me ", "it's ", "this is ", "name's "] {
             if let Some(rest) = low.strip_prefix(p) {
                 let start = t.len() - rest.len();

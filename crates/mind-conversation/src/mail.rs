@@ -32,7 +32,7 @@ impl super::ConversationEngine {
                             // Match-centered window: receipts are long and the relevant line (hotel,
                             // dates, amount) is wherever the query hits — show ±260 chars around it,
                             // not just the head.
-                            let low = cleanish.to_lowercase();
+                            let low = cleanish.to_ascii_lowercase();
                             let anchor = q.to_lowercase();
                             let first_word = anchor.split_whitespace().next().unwrap_or(&anchor);
                             let hit = low.find(&anchor).or_else(|| low.find(first_word));

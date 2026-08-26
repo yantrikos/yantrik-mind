@@ -64,6 +64,7 @@ pub mod delegate;
 pub mod config_panel;
 mod import_skill;
 mod privacy_audit;
+mod source_audit;
 mod proactive;
 pub(crate) mod research;
 mod skills;
@@ -455,7 +456,7 @@ pub(crate) fn split_reasoning(text: &str) -> (String, String) {
         loop {
             // Case-insensitive search without allocating a lowercase copy per iteration would be
             // nicer; replies are small and this runs once per turn, so clarity wins.
-            let lower = out.to_lowercase();
+            let lower = out.to_ascii_lowercase();
             let Some(start) = lower.find(&open.to_lowercase()) else { break };
             // Boundary rule: only treat this as a block when the tag opens a line (or the whole
             // reply). Otherwise "wrap it in <think> tags" would swallow a legitimate sentence.
@@ -2683,7 +2684,7 @@ fn strip_code_fence(s: &str) -> &str {
 /// So: keep from the first `<!doctype`/`<html` to the last `</html>`, and drop whatever surrounds it.
 fn extract_document(s: &str) -> &str {
     let t = strip_code_fence(s);
-    let low = t.to_lowercase();
+    let low = t.to_ascii_lowercase();
     let start = low.find("<!doctype").or_else(|| low.find("<html")).unwrap_or(0);
     let end = low.rfind("</html>").map(|i| i + "</html>".len()).unwrap_or(t.len());
     if end > start {
@@ -2799,7 +2800,7 @@ fn is_tool_call_blob(s: &str) -> bool {
 /// A meaningful page slug source: the HTML's `<title>` (else first `<h1>`). Beats naming a page after
 /// the user's raw request text ("can-you-please-try-again..."). Returns the inner text, tags stripped.
 fn title_from_html(html: &str) -> Option<String> {
-    let low = html.to_lowercase();
+    let low = html.to_ascii_lowercase();
     let pick = |open: &str, close: &str| -> Option<String> {
         let i = low.find(open)? + open.len();
         let j = low[i..].find(close)? + i;
@@ -7121,7 +7122,7 @@ impl ConversationEngine {
     /// LLM-extracted learning is a later eval-driven step).
     fn extract_taught_belief(text: &str) -> Option<String> {
         let t = text.trim();
-        let lower = t.to_lowercase();
+        let lower = t.to_ascii_lowercase();
         for p in ["remember that ", "remember: ", "remember "] {
             if lower.starts_with(p) {
                 let rest = t[p.len()..].trim().trim_end_matches('.').trim();
@@ -7137,7 +7138,7 @@ impl ConversationEngine {
     /// due time from a coarse date word. Returns (description, due_ms).
     fn extract_commitment(text: &str) -> Option<(String, Option<u64>)> {
         let t = text.trim().trim_end_matches(['.', '!', '?']).trim();
-        let lower = t.to_lowercase();
+        let lower = t.to_ascii_lowercase();
         let prefixes = [
             "remind me to ", "i'll ", "i will ", "i need to ", "i have to ", "i gotta ",
             "i must ", "i should ", "i'm going to ", "im going to ",

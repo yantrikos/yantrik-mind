@@ -73,7 +73,15 @@ impl super::ConversationEngine {
 
     /// "research X" / "look into X" / "investigate X" → (topic). None if not a research ask.
     pub(crate) fn wants_research(text: &str) -> Option<String> {
-        let l = text.trim().to_lowercase();
+        // Slice the SAME string the offsets come from. `l` was built from `text.trim()` while the
+        // topic was cut out of the UNTRIMMED `text`, so a leading space or newline shifted every
+        // offset by exactly that much and the mind researched a corrupted topic, silently:
+        //   "  research quantum computing"        -> topic "h quantum computing"
+        //   "\n\nlook into the pack lease bug"     -> topic "o the pack lease bug"
+        // ASCII-only lowering closes the second half of the same defect: `to_lowercase` is not
+        // length-preserving, so its offsets do not line up with the original either (E.SEC4).
+        let text = text.trim();
+        let l = text.to_ascii_lowercase();
         for p in ["research ", "look into ", "investigate ", "dig into ", "find out about ", "look up "] {
             if let Some(idx) = l.find(p) {
                 let topic = text[idx + p.len()..].trim().trim_end_matches(['.', '?', '!']).trim();
@@ -88,7 +96,15 @@ impl super::ConversationEngine {
     /// "research and update X" / "update your knowledge on X" → (topic). The research→belief-revision
     /// path: live findings reconcile against + revise prior typed beliefs. Checked FIRST.
     pub(crate) fn wants_research_revise(text: &str) -> Option<String> {
-        let l = text.trim().to_lowercase();
+        // Slice the SAME string the offsets come from. `l` was built from `text.trim()` while the
+        // topic was cut out of the UNTRIMMED `text`, so a leading space or newline shifted every
+        // offset by exactly that much and the mind researched a corrupted topic, silently:
+        //   "  research quantum computing"        -> topic "h quantum computing"
+        //   "\n\nlook into the pack lease bug"     -> topic "o the pack lease bug"
+        // ASCII-only lowering closes the second half of the same defect: `to_lowercase` is not
+        // length-preserving, so its offsets do not line up with the original either (E.SEC4).
+        let text = text.trim();
+        let l = text.to_ascii_lowercase();
         for p in [
             "research and update ", "research and revise ", "update your knowledge on ",
             "update your beliefs on ", "refresh your knowledge on ", "fact-check and update ",
@@ -106,7 +122,15 @@ impl super::ConversationEngine {
     /// "deep dive on X" / "deep research X" / "thoroughly research X" → (topic). Checked BEFORE the
     /// single-agent research so the deeper, parallel path wins.
     pub(crate) fn wants_deep_research(text: &str) -> Option<String> {
-        let l = text.trim().to_lowercase();
+        // Slice the SAME string the offsets come from. `l` was built from `text.trim()` while the
+        // topic was cut out of the UNTRIMMED `text`, so a leading space or newline shifted every
+        // offset by exactly that much and the mind researched a corrupted topic, silently:
+        //   "  research quantum computing"        -> topic "h quantum computing"
+        //   "\n\nlook into the pack lease bug"     -> topic "o the pack lease bug"
+        // ASCII-only lowering closes the second half of the same defect: `to_lowercase` is not
+        // length-preserving, so its offsets do not line up with the original either (E.SEC4).
+        let text = text.trim();
+        let l = text.to_ascii_lowercase();
         for p in ["deep dive on ", "deep dive into ", "deep-dive on ", "deep dive ", "deep research ",
                   "thoroughly research ", "comprehensive research on ", "thorough research on "] {
             if let Some(idx) = l.find(p) {
@@ -123,7 +147,15 @@ impl super::ConversationEngine {
     /// Parse a ResearchOps ask -> (mode, subject). mode ∈ review|related|next. Explicit verbs only,
     /// so ordinary "research X" (deep dive) and casual "review this" aren't hijacked.
     pub(crate) fn wants_researchops(text: &str) -> Option<(&'static str, String)> {
-        let l = text.trim().to_lowercase();
+        // Slice the SAME string the offsets come from. `l` was built from `text.trim()` while the
+        // topic was cut out of the UNTRIMMED `text`, so a leading space or newline shifted every
+        // offset by exactly that much and the mind researched a corrupted topic, silently:
+        //   "  research quantum computing"        -> topic "h quantum computing"
+        //   "\n\nlook into the pack lease bug"     -> topic "o the pack lease bug"
+        // ASCII-only lowering closes the second half of the same defect: `to_lowercase` is not
+        // length-preserving, so its offsets do not line up with the original either (E.SEC4).
+        let text = text.trim();
+        let l = text.to_ascii_lowercase();
         let after = |t: &str, pats: &[&str]| -> Option<String> {
             for p in pats {
                 if let Some(i) = t.find(p) {
@@ -154,7 +186,15 @@ impl super::ConversationEngine {
     /// (action) are not stolen. Subject is taken before the kind ("an SDF adoption plan" -> "SDF") or
     /// after a connector ("a plan about SDF" -> "SDF").
     pub(crate) fn wants_draft(text: &str) -> Option<(String, String)> {
-        let l = text.trim().to_lowercase();
+        // Slice the SAME string the offsets come from. `l` was built from `text.trim()` while the
+        // topic was cut out of the UNTRIMMED `text`, so a leading space or newline shifted every
+        // offset by exactly that much and the mind researched a corrupted topic, silently:
+        //   "  research quantum computing"        -> topic "h quantum computing"
+        //   "\n\nlook into the pack lease bug"     -> topic "o the pack lease bug"
+        // ASCII-only lowering closes the second half of the same defect: `to_lowercase` is not
+        // length-preserving, so its offsets do not line up with the original either (E.SEC4).
+        let text = text.trim();
+        let l = text.to_ascii_lowercase();
         let verbs = [
             "draft me ", "draft an ", "draft a ", "draft ", "write me ", "write up ", "write an ",
             "write a ", "compose ", "put together ", "prepare ",
@@ -172,7 +212,7 @@ impl super::ConversationEngine {
         ];
         let kind = kinds.iter().find(|k| l.contains(**k))?.to_string();
         let rest = &text[verb.len()..];
-        let rl = rest.to_lowercase();
+        let rl = rest.to_ascii_lowercase();
         let kpos = rl.find(&kind)?;
         // Subject BEFORE the kind: "an SDF adoption plan" -> "SDF".
         let before = rest[..kpos]
@@ -186,7 +226,7 @@ impl super::ConversationEngine {
         }
         // Subject AFTER the kind via a connector: "a plan about SDF" -> "SDF".
         let after = &rest[kpos + kind.len()..];
-        let al = after.to_lowercase();
+        let al = after.to_ascii_lowercase();
         for c in [" about ", " on ", " for ", " regarding ", " covering ", " of "] {
             if let Some(i) = al.find(c) {
                 let subj = after[i + c.len()..].trim().trim_end_matches(['.', '?', '!']).trim();

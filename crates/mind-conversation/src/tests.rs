@@ -5242,3 +5242,65 @@ mod sec3 {
         assert_eq!(ConversationEngine::parse_save_skill("skill deploy — remember to save"), None);
     }
 }
+
+/// E.SEC4 — the sweep finished. Same defect class, the rest of the places it lived.
+#[cfg(test)]
+mod sec4 {
+    use super::*;
+
+    #[test]
+    fn a_research_ask_keeps_its_topic_whatever_whitespace_precedes_it() {
+        // PROVEN BEFORE THE FIX. `l` was built from `text.trim()` and the topic was cut out of the
+        // UNTRIMMED `text`, so leading whitespace shifted every offset by exactly its length:
+        //   "  research quantum computing"     -> Some("h quantum computing")
+        //   "\n\nlook into the pack lease bug" -> Some("o the pack lease bug")
+        // Silent: the mind went and researched the corrupted topic. Leading whitespace is ordinary
+        // — a pasted message, a line that starts on a newline.
+        let expected = Some("quantum computing".to_string());
+        for lead in ["", " ", "  ", "\n", "\n\n", "\t", " \n \t "] {
+            assert_eq!(
+                ConversationEngine::wants_research(&format!("{lead}research quantum computing")),
+                expected,
+                "leading {lead:?} must not eat the topic"
+            );
+        }
+        assert_eq!(
+            ConversationEngine::wants_research("\n\nlook into the pack lease bug"),
+            Some("the pack lease bug".to_string())
+        );
+        // And a length-changing character before the verb must not shift it either.
+        assert_eq!(
+            ConversationEngine::wants_research("İ research quantum computing"),
+            expected,
+            "a 2-byte char whose lowercase is 3 bytes must not shift the topic"
+        );
+        // The control: a non-research sentence is still not a research ask.
+        assert_eq!(ConversationEngine::wants_research("what is the weather"), None);
+    }
+
+    #[test]
+    fn the_turn_path_parsers_survive_boundary_breaking_input() {
+        // Every parser the sweep touched, against characters that break byte arithmetic, inserted
+        // at every byte position. None may panic; none may be reached with a shifted offset.
+        const NASTY: &[&str] = &["İ", "ẞ", "\u{0307}", "日", "🔑"];
+        let bodies = [
+            "research quantum computing",
+            "remember that the deploy key lives on the box",
+            "look into the pack lease bug",
+            "yes send it",
+            "",
+        ];
+        for body in bodies {
+            for nasty in NASTY {
+                for cut in 0..=body.len() {
+                    if !body.is_char_boundary(cut) {
+                        continue;
+                    }
+                    let text = format!("{}{}{}", &body[..cut], nasty, &body[cut..]);
+                    let _ = ConversationEngine::wants_research(&text);
+                    let _ = ConversationEngine::wants_research_revise(&text);
+                }
+            }
+        }
+    }
+}

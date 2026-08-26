@@ -159,7 +159,7 @@ impl super::ConversationEngine {
                 );
                 let cfg = GenerationConfig { max_tokens: 2600, ..GenerationConfig::default() };
                 let classified: Vec<serde_json::Value> = match inference
-                    .chat(vec![ChatMessage::system("You classify email senders from aggregates. Output only JSON."), ChatMessage::user(&classify)], cfg)
+                    .chat_grounded(vec![ChatMessage::system("You classify email senders from aggregates. Output only JSON."), ChatMessage::user(&classify)], cfg)
                     .await
                 {
                     Ok(r) => {
@@ -317,7 +317,7 @@ impl super::ConversationEngine {
         let mut opened = String::new();
         if let Ok(r) = self
             .inference
-            .chat(vec![ChatMessage::system("You triage email headers. Output only JSON."), ChatMessage::user(&triage)], cfg_small)
+            .chat_grounded(vec![ChatMessage::system("You triage email headers. Output only JSON."), ChatMessage::user(&triage)], cfg_small)
             .await
         {
             let body = crate::strip_reasoning(&r.text);
@@ -376,7 +376,7 @@ impl super::ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
         match self
             .inference
-            .chat(vec![ChatMessage::system("You analyze email. Terse, factual, never invent amounts, senders, or states."), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(vec![ChatMessage::system("You analyze email. Terse, factual, never invent amounts, senders, or states."), ChatMessage::user(&prompt)], cfg)
             .await
         {
             Ok(r) => format!(

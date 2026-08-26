@@ -386,7 +386,7 @@ impl super::ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 1500, ..GenerationConfig::default() };
         let text = match self
             .inference
-            .chat(vec![ChatMessage::system("You extract recurring subscriptions from email metadata. Output only a JSON array."), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(vec![ChatMessage::system("You extract recurring subscriptions from email metadata. Output only a JSON array."), ChatMessage::user(&prompt)], cfg)
             .await
         {
             Ok(r) => r.text,

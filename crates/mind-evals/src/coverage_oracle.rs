@@ -480,11 +480,13 @@ const SENSITIVE_DIGIT_RUN: usize = 12;
 
 /// Would sending this query to an outside witness be a mistake?
 ///
-/// The recorder's own redaction cannot be relied on here. `mind_types::contains_secret` is a
-/// MARKER detector - it finds "api key", "password" and their neighbours - and a bare string of
-/// digits carries no marker at all, so `my card pin is 4471-9302-1122-8890 what coyote time` is
-/// written to the log verbatim and would have gone out with the labelling request. Found by the
-/// test that assumed the opposite (E.PK3d).
+/// The recorder's own redaction cannot be relied on here. `mind_types::contains_secret` matches a
+/// short list of TOKEN PREFIXES (`ghp_`, `glpat-`, `akia`, `xoxb-`, `sk-`, PEM headers, and
+/// `app password`) — it does NOT contain generic "api key" or "password", which an earlier version
+/// of this comment claimed and Codex corrected. A bare string of digits carries no marker either,
+/// so `my card pin is 4471-9302-1122-8890 what coyote time` is written to the log verbatim and
+/// would have gone out with the labelling request. Found by the test that assumed the opposite
+/// (E.PK3d); the detector itself is being rebuilt in P.SEC1.
 ///
 /// So this gate is the split's own, applied before anything leaves the building, and it errs
 /// toward withholding: a false positive loses one corpus row, a false negative loses a secret.

@@ -609,3 +609,18 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Found while testing | An unchecked `remove_file` on Windows silently does nothing while the file is still mapped, so one restart test had been asserting against an artifact that was never deleted - it passed for the wrong reason until the deletion was made real. Recorded because "the test's premise never held" is the same failure shape as E.P2 and E.D2, one level down. |
 | Not claimed | That the outbox makes the record exactly-once - it is at-least-once with a stable id, which is what a crash-safe log can honestly offer. That reconciliation can recover a pack whose file is gone: it cannot, and says so by quarantining. |
 | Decision | KEEP pending Codex's pass. |
+
+## E.PK3c - the router scored on LIVE phrasings, labelled by an independent witness - pre-registered before the labels arrived
+
+*Pre-registration. Written and committed BEFORE Codex was asked to label the queries and before any live score was computed. No policy changes in this entry; `coverage-router-v1` and E.PK3's frozen corpus and bar are untouched.*
+
+| Field | Entry |
+|---|---|
+| The weakness being measured | E.PK3's corpus says so in its own header: the labels were written from the packs' coverage lists and descriptions, so they share lineage with the coverage authors. 35/38 = 0.92 agreement may therefore be measuring SELF-CONSISTENCY, not correctness. A router that only ever sees phrasings written by the same hands that wrote the coverage phrases has not been tested on demand. |
+| Hypothesis under test | The shipped router scores MATERIALLY WORSE on real user phrasings than on the author-derived corpus. Specifically: paraphrase collapses the margin between the right pack and a vocabulary neighbour, because under the bundled 64-dim embedder "buffering" sits nearer "buffer overflows" than "input buffering and jump forgiveness" (the E.PK1 coarse-vocabulary shape, already observed once live and recorded in E.PK3). |
+| The live set, provenance | FOUR queries taken verbatim from the box's flight recorder - the `goal` field of every `pack_route_shadow` event written since the router shipped. Not chosen, not edited, not filtered: every recorded live routing decision, which is all of them. n=4 is far too small to be a verdict about anything; the value is the harness and the first honest datapoint of a split that accumulates from the recorder by itself. |
+| Labels, and why not mine | The four queries were sent to the `yantrikdb-core-codex` workspace WITHOUT the router's rankings or verdicts, with the twelve packs' coverage summarised, and one answer required per query: a pack id, or NONE. Labelling them myself AFTER seeing how the router ranked them is precisely the bias the frozen corpus exists to prevent, and Doctrine 3 asks for a witness that fails independently of the thing being measured. Codex has not seen the routes. |
+| Expected metric (pre-registered) | Live agreement at or below 0.75 - i.e. at least one of the four wrong - against 0.92 on the frozen corpus. I expect the "input buffering ... in milliseconds" phrasing to be the failure, and I expect at least one query whose right answer is NONE to have been leased something. If live agreement comes back at 1.00 the hypothesis is WRONG and the corpus's independence worry is smaller than E.PK3 feared - which would be the more welcome result. |
+| What this entry may NOT do | Change the floor, the margin, the policy id, or the frozen corpus. Nothing is tuned on a set of four. A policy revision earns its own pre-registration with its own bar, on a live split large enough to carry one. |
+| Actual metric | pending: Codex's labels. |
+| Decision | pending. |

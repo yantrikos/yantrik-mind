@@ -459,6 +459,166 @@ pub fn live_cases() -> Vec<LiveCase> {
     ]
 }
 
+// ── GROWING THE SPLIT FROM THE RECORDER (E.PK3d) ────────────────────────────────────────────────
+//
+// E.PK3c said the live split "accumulates from the recorder by itself" while its four cases had in
+// fact been read off a dump and typed in by hand. That is fine for four and is not a mechanism.
+// This is the mechanism.
+//
+// The type below deliberately has NOWHERE TO PUT A LABEL. That is not an oversight: a label must
+// come from a witness who has not seen the routes, so a label that could be computed in this repo
+// — from the ranking sitting right there in the same struct — would not be a witness's answer at
+// all. Making it structurally impossible is stronger than promising not to.
+
+/// What the recorder writes in place of a goal it will not hold. Not a query, and never a case.
+const REDACTED_GOAL: &str = "[redacted-secret]";
+
+/// A digit run this long, ignoring the separators people put inside numbers, is card-, account- or
+/// PIN-shaped. Deliberately low: withholding a query that merely contains a long number costs one
+/// case, and sending someone's card number to another agent costs something that cannot be undone.
+const SENSITIVE_DIGIT_RUN: usize = 12;
+
+/// Would sending this query to an outside witness be a mistake?
+///
+/// The recorder's own redaction cannot be relied on here. `mind_types::contains_secret` is a
+/// MARKER detector - it finds "api key", "password" and their neighbours - and a bare string of
+/// digits carries no marker at all, so `my card pin is 4471-9302-1122-8890 what coyote time` is
+/// written to the log verbatim and would have gone out with the labelling request. Found by the
+/// test that assumed the opposite (E.PK3d).
+///
+/// So this gate is the split's own, applied before anything leaves the building, and it errs
+/// toward withholding: a false positive loses one corpus row, a false negative loses a secret.
+pub fn looks_sensitive(query: &str) -> bool {
+    if mind_types::contains_secret(query) {
+        return true;
+    }
+    let (mut run, mut longest) = (0usize, 0usize);
+    for c in query.chars() {
+        if c.is_ascii_digit() {
+            run += 1;
+            longest = longest.max(run);
+        } else if !matches!(c, '-' | ' ' | '.' | '_') {
+            run = 0;
+        }
+    }
+    longest >= SENSITIVE_DIGIT_RUN
+}
+
+/// What a decision log yields: the cases, and how many queries were WITHHELD as possibly sensitive.
+/// The count is carried rather than dropped, because a corpus that silently shrinks is a corpus
+/// nobody can reason about.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveCorpus {
+    pub routes: Vec<ExtractedRoute>,
+    pub withheld: usize,
+}
+
+/// One live routing decision, lifted out of a decision log exactly as the recorder holds it, and
+/// unlabelled by construction.
+///
+/// "Exactly as the recorder holds it" is narrower than "as the person typed it", and the gap is
+/// upstream of this file. `DecisionEvent::sanitized` applies `brief(goal, 160)` on append, which
+/// does two things a live corpus has to know about:
+///
+/// * it TRIMS surrounding whitespace and TRUNCATES past 160 characters (adding an ellipsis), so a
+///   long question reaches this corpus shortened and would be labelled and scored on less than the
+///   router actually routed;
+/// * it REDACTS: a goal containing secret-shaped text is replaced wholesale by `[redacted-secret]`.
+///
+/// The first is a fidelity limit the split inherits and E.PK3d records. The second is not a
+/// query at all, so it is dropped here rather than carried: a corpus row reading
+/// `[redacted-secret]` could never be labelled, and must never be sent to a witness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractedRoute {
+    /// The query the mind was actually asked, exactly as the recorder holds it. Never edited,
+    /// normalised or tidied — a query that routes badly because of its punctuation is evidence.
+    pub query: String,
+    /// The verdict the router reached at the time (`lease`, `abstain:tie`, …).
+    pub verdict: String,
+    /// The ranking it recorded, as `pack@sim` strings in the recorder's own format.
+    pub top: Vec<String>,
+    /// How many times this exact query text was routed. Repeats are demand, not duplicates.
+    pub occurrences: usize,
+    /// True when two routings of the SAME text produced different top packs — which would mean the
+    /// catalog or the embedder moved underneath, and is worth knowing before anything is labelled.
+    pub rankings_differ: bool,
+}
+
+/// Every distinct live routing decision in a decision log, oldest first by first appearance.
+///
+/// Reads through the VERIFIED chain: a log that does not verify yields an error rather than a
+/// best-effort scrape, because a corpus grown from unverified lines is a corpus of unknown
+/// provenance. Non-routing events are ignored; a routing event with no goal text cannot become a
+/// case and is skipped.
+pub fn extract_live_routes(log: &std::path::Path) -> Result<LiveCorpus, String> {
+    let events = mind_observability::read_events_verified(log)
+        .map_err(|bad| format!("{} does not verify at line {bad} — refusing to grow a corpus from an unverified log", log.display()))?;
+    let mut out = LiveCorpus::default();
+    for e in events.into_iter().filter(|e| e.kind == "pack_route_shadow") {
+        // A redacted goal is not a question anyone asked — it is the recorder's refusal to hold
+        // one — so it can never become a case (E.PK3d).
+        let Some(query) = e.goal.filter(|g| !g.trim().is_empty() && g.trim() != REDACTED_GOAL) else { continue };
+        // ...and one the recorder DID hold may still be nobody's business but the household's.
+        if looks_sensitive(&query) {
+            out.withheld += 1;
+            continue;
+        }
+        let verdict = e.verdict.unwrap_or_default();
+        let top = e.candidates;
+        match out.routes.iter_mut().find(|r| r.query == query) {
+            Some(seen) => {
+                seen.occurrences += 1;
+                if seen.top.first() != top.first() {
+                    seen.rankings_differ = true;
+                }
+            }
+            None => out.routes.push(ExtractedRoute { query, verdict, top, occurrences: 1, rankings_differ: false }),
+        }
+    }
+    Ok(out)
+}
+
+/// What goes to the WITNESS: the queries, numbered, and nothing else.
+///
+/// No verdict, no ranking, no similarity, no pack name — everything that could tell someone what
+/// the router already did is withheld, because a label informed by the answer is not a label. This
+/// is the exact text to send; it is rendered by the same code that reads the log so the two cannot
+/// drift apart.
+pub fn render_for_witness(corpus: &LiveCorpus) -> String {
+    let mut out = String::from(
+        "Label each query with ONE answer: a single pack id, or NONE if no pack would materially \
+         help answer it. You are deliberately not being shown what the router did.\n\n",
+    );
+    for (i, r) in corpus.routes.iter().enumerate() {
+        out.push_str(&format!("({}) {}\n", i + 1, r.query));
+    }
+    if corpus.withheld > 0 {
+        out.push_str(&format!(
+            "\n({} further quer{} withheld by this host as possibly sensitive and not sent.)\n",
+            corpus.withheld,
+            if corpus.withheld == 1 { "y was" } else { "ies were" }
+        ));
+    }
+    out
+}
+
+/// What goes into THIS FILE: `LiveCase` rows with `label: None`, ready for a witness's answers to
+/// be typed in beside them. The ranking is carried here — where it is evidence — and never in the
+/// text above, where it would be contamination.
+pub fn render_cases(corpus: &LiveCorpus) -> String {
+    let mut out = String::new();
+    for (i, r) in corpus.routes.iter().enumerate() {
+        out.push_str(&format!(
+            "        LiveCase {{\n            id: \"live-{}\",\n            query: {:?},\n            label: None,\n            box_verdict: {:?},\n            box_top: &[{}],\n        }},\n",
+            i + 1,
+            r.query,
+            r.verdict,
+            r.top.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out
+}
+
 /// The live split's result. Reported with n said out loud, because four is not a measurement of
 /// anything and a rate over four would read as though it were.
 #[derive(Debug, Default)]
@@ -647,6 +807,134 @@ mod tests {
         } else {
             assert!(score.labelled >= 1);
         }
+    }
+
+    /// E.PK3d: the extractor copies the recorder VERBATIM, counts repeats instead of dropping them,
+    /// notices when one query's ranking moves between routings, and refuses a log that does not
+    /// verify. A corpus grown from a scrape of unverified lines has unknown provenance.
+    #[test]
+    fn the_extractor_lifts_live_queries_without_touching_them() {
+        use mind_observability::{DecisionEvent, DecisionLog};
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("ym_pk3d_{}_{stamp}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d.jsonl");
+        let log = DecisionLog::open(&path);
+        let route = |goal: &str, verdict: &str, top: &[&str]| {
+            let mut e = DecisionEvent::new("t", "pack_route_shadow");
+            e.goal = Some(goal.to_string());
+            e.verdict = Some(verdict.to_string());
+            e.candidates = top.iter().map(|s| s.to_string()).collect();
+            e
+        };
+        // Two routings of one query, one of another, and noise that must be ignored.
+        log.record(route("  what coyote time, roughly?  ", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        log.record(DecisionEvent::new("t", "tool_predicted"));
+        log.record(route("which saved skill fetches npm counts for saga-mcp?", "lease", &["yantrik/mcp-spec@0.3.2@0.56"]));
+        log.record(route("  what coyote time, roughly?  ", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        let mut e = DecisionEvent::new("t", "pack_route_shadow");
+        e.verdict = Some("abstain:no_packs".into()); // no goal: cannot become a case
+        log.record(e);
+
+        let routes = extract_live_routes(&path).unwrap().routes;
+        assert_eq!(routes.len(), 2, "one row per distinct query, noise ignored: {routes:?}");
+        // EXACTLY WHAT THE RECORDER HOLDS. The surrounding spaces are gone — and NOT by this
+        // extractor's doing: `DecisionEvent::sanitized` trims every free-text field on append, so
+        // they were already gone before the log was read. The distinction matters enough to assert
+        // rather than describe (E.PK3d).
+        assert_eq!(routes[0].query, "what coyote time, roughly?");
+        assert_eq!(routes[0].occurrences, 2, "a repeat is demand, not a duplicate");
+        assert!(!routes[0].rankings_differ);
+        assert_eq!(routes[1].query, "which saved skill fetches npm counts for saga-mcp?");
+        assert_eq!(routes[1].occurrences, 1);
+        // Order is first-appearance, so the output is stable across runs.
+        assert_eq!(routes.iter().map(|r| r.occurrences).collect::<Vec<_>>(), vec![2, 1]);
+
+        // A ranking that MOVES under one query is flagged rather than silently overwritten.
+        log.record(route("  what coyote time, roughly?  ", "lease", &["yantrik/c-safety@0.1.0@0.61"]));
+        let routes = extract_live_routes(&path).unwrap().routes;
+        assert!(routes[0].rankings_differ, "the catalog or the embedder moved: that must be visible");
+
+        // THE FIDELITY LIMIT, pinned rather than described: the recorder caps a goal at 160
+        // characters, so a long question reaches the corpus SHORTENED while the router routed all
+        // of it live. A case built from it would be labelled on less than the mind was asked.
+        let long = format!("what coyote time should my platformer use {}", "and also ".repeat(40));
+        assert!(long.chars().count() > 160);
+        log.record(route(&long, "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        let routes = extract_live_routes(&path).unwrap().routes;
+        let stored = routes.iter().find(|r| r.query.starts_with("what coyote time should my platformer use")).expect("the long one is there");
+        assert!(stored.query.ends_with('…'), "the recorder marks what it cut: {}", stored.query);
+        assert!(stored.query.chars().count() < long.chars().count(), "so the corpus holds LESS than the router saw");
+        assert_eq!(stored.query.chars().count(), 161, "160 characters plus the ellipsis brief() adds");
+
+        // THE ONE THAT SURPRISED ME. The recorder does NOT redact this: `contains_secret` is a
+        // marker detector and a bare run of digits carries no marker, so the card number is written
+        // to the log verbatim — and this protocol's whole purpose is to send queries to an OUTSIDE
+        // witness. The split therefore gates on its own, before anything leaves the building.
+        log.record(route("my card pin is 4471-9302-1122-8890 what coyote time", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        let corpus = extract_live_routes(&path).unwrap();
+        assert_eq!(corpus.withheld, 1, "the card-shaped query must be withheld, not carried");
+        assert!(
+            !corpus.routes.iter().any(|r| r.query.contains("4471")),
+            "a secret reached the corpus: {:?}", corpus.routes
+        );
+        let sent = render_for_witness(&corpus);
+        assert!(!sent.contains("4471"), "and it must never reach the request:\n{sent}");
+        assert!(sent.contains("withheld by this host"), "the count is stated, not silently dropped:\n{sent}");
+
+        // An unverified log yields an error, never a best-effort scrape.
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&path).unwrap()
+                .write_all(b"{\"chain\":\"deadbeef\",\"event\":{\"trace_id\":\"t\",\"ts_ms\":1,\"kind\":\"pack_route_shadow\",\"goal\":\"forged\"}}\n").unwrap();
+        }
+        let err = extract_live_routes(&path).unwrap_err();
+        assert!(err.contains("does not verify"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E.PK3d, THE PROTOCOL'S ONE STRUCTURAL GUARANTEE: what goes to the witness carries the
+    /// queries and NOTHING that could reveal what the router already did. A label informed by the
+    /// answer is not a label, and this is the check that keeps the request honest as the renderer
+    /// changes.
+    #[test]
+    fn the_witness_is_shown_the_queries_and_nothing_else() {
+        let routes = vec![
+            ExtractedRoute {
+                query: "what coyote time and input buffering, in milliseconds?".into(),
+                verdict: "abstain:tie".into(),
+                top: vec!["yantrik/c-safety@0.1.0@0.60".into(), "yantrik/game-feel-craft@0.1.0@0.55".into()],
+                occurrences: 3,
+                rankings_differ: false,
+            },
+            ExtractedRoute {
+                query: "which saved skill fetches npm counts for saga-mcp?".into(),
+                verdict: "lease".into(),
+                top: vec!["yantrik/mcp-spec@0.3.2@0.56".into()],
+                occurrences: 1,
+                rankings_differ: false,
+            },
+        ];
+        let corpus = LiveCorpus { routes: routes.clone(), withheld: 0 };
+        let sent = render_for_witness(&corpus);
+        for q in routes.iter().map(|r| &r.query) {
+            assert!(sent.contains(q.as_str()), "every query must be asked: {sent}");
+        }
+        // Nothing about the routes may leak: no verdict, no pack, no similarity, no repeat count.
+        for leak in ["abstain", "lease", "c-safety", "game-feel", "mcp-spec", "0.60", "0.55", "0.56", "yantrik/"] {
+            assert!(!sent.contains(leak), "the witness must not be told {leak:?}:\n{sent}");
+        }
+        assert!(!sent.contains("occurrences") && !sent.contains("3"), "not even how often it was asked:\n{sent}");
+        assert!(sent.contains("NONE"), "the NONE option must be offered explicitly, not inferred");
+
+        // The rows that go into THIS file do carry the ranking — where it is evidence — and never
+        // a label, because there is nowhere for one to come from yet.
+        let rows = render_cases(&corpus);
+        assert!(rows.contains("label: None"), "{rows}");
+        assert!(rows.matches("label: None").count() == 2);
+        assert!(rows.contains("yantrik/c-safety@0.1.0@0.60"), "the ranking is kept as evidence: {rows}");
+        assert!(rows.contains("abstain:tie"));
     }
 
     /// E.PK3c: the split's own integrity. Every query is verbatim from the recorder and every case

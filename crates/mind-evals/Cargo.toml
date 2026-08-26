@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 mind-types = { workspace = true }
+# The live router split is grown FROM the flight recorder (E.PK3d), so the harness reads it.
+mind-observability = { workspace = true }
 mind-memory = { workspace = true }
 mind-inference = { workspace = true }
 mind-conversation = { workspace = true }

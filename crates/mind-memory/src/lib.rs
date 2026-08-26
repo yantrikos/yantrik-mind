@@ -671,7 +671,13 @@ fn available_packs(
     for path in library_files(library) {
         let Some(m) = cached_manifest(manifests, &path) else { continue };
         let pack_id = m.pack_id();
-        if out.iter().any(|e| e.pack_id == pack_id) {
+        if let Some(prev) = out.iter().find(|e| e.pack_id == pack_id) {
+            // A mounted copy, or an earlier library file (sorted path order), already claims this
+            // id. First wins and the collision is named: two files claiming one id is either a
+            // duplicate or a conflict, and the catalog must not let a conflict pass silently.
+            if !prev.mounted && prev.path != path {
+                tracing::warn!(pack_id, kept = %prev.path, ignored = %path, "two library files claim one pack id — keeping the first by path");
+            }
             continue;
         }
         out.push(mind_types::memory::PackCatalogEntry {
@@ -687,24 +693,47 @@ fn available_packs(
     out
 }
 
-/// Coverage vectors for one catalog entry, cached by content digest (a re-sealed pack embeds
-/// afresh; an unchanged one never embeds twice). A pack whose digest is unknown is embedded per
-/// call rather than cached under a key that could collide.
+/// The identity of a coverage list's vectors: the embedder and the phrases, nothing else. NOT the
+/// pack's content digest — the engine's digest is blake3 over (rid, text) rows and coverage sits
+/// outside it, so two packs (or two re-seals) with identical rows and different coverage would
+/// share a digest and one pack's vectors would be served under the other's phrases (Codex's
+/// review of P.3).
+fn coverage_key(embedder: &str, phrases: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    // Length-prefixed, order-preserving: ["ab","c"] and ["a","bc"] must not alias, and neither may
+    // a phrase that happens to contain a separator byte.
+    let mut h = Sha256::new();
+    h.update((embedder.len() as u64).to_le_bytes());
+    h.update(embedder.as_bytes());
+    h.update((phrases.len() as u64).to_le_bytes());
+    for p in phrases {
+        h.update((p.len() as u64).to_le_bytes());
+        h.update(p.as_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
+/// Coverage vectors for one catalog entry, cached by `coverage_key` when the embedder has a
+/// stable identity (an unchanged coverage list never embeds twice; a changed one embeds afresh
+/// whatever the rows did). With NO embedder identity nothing proves two calls used the same model,
+/// so nothing is cached across them.
 fn coverage_vectors(
     db: &YantrikDB,
+    embedder: Option<&str>,
     cache: &mut std::collections::HashMap<String, Vec<Vec<f32>>>,
     entry: &mind_types::memory::PackCatalogEntry,
 ) -> mind_spec::coverage::CoverageVectors {
     let embed_all = |db: &YantrikDB| -> Vec<Vec<f32>> {
         entry.coverage.iter().map(|ph| db.embed(ph).unwrap_or_default()).collect()
     };
-    let vectors = match &entry.content_digest {
-        Some(d) => {
-            if !cache.contains_key(d) {
+    let vectors = match embedder {
+        Some(id) => {
+            let key = coverage_key(id, &entry.coverage);
+            if !cache.contains_key(&key) {
                 let v = embed_all(db);
-                cache.insert(d.clone(), v);
+                cache.insert(key.clone(), v);
             }
-            cache.get(d).cloned().unwrap_or_default()
+            cache.get(&key).cloned().unwrap_or_default()
         }
         None => embed_all(db),
     };
@@ -725,8 +754,15 @@ fn route_packs(
         return Ok((Vec::new(), mind_types::memory::PackRoute::Abstain { reason: mind_types::memory::AbstainReason::NoPacks, best: None }));
     }
     let q = db.embed(query).map_err(|e| e.to_string())?;
+    // The embedder's identity, when it has one: the cache is only sound across calls that provably
+    // used the same model.
+    let embedder: Option<String> = db
+        .embedder_identity()
+        .ok()
+        .flatten()
+        .map(|(name, digest, dim)| format!("{}:{digest}:{dim}", name.unwrap_or_default()));
     let packs: Vec<mind_spec::coverage::CoverageVectors> =
-        catalog.iter().map(|e| coverage_vectors(db, coverage_cache, e)).collect();
+        catalog.iter().map(|e| coverage_vectors(db, embedder.as_deref(), coverage_cache, e)).collect();
     let (ranked, route) = mind_spec::coverage::decide(&q, &packs);
     let matches = ranked
         .into_iter()
@@ -746,7 +782,18 @@ fn cached_manifest<'a>(
     cache: &'a mut std::collections::HashMap<String, Option<ManifestView>>,
     path: &str,
 ) -> Option<&'a ManifestView> {
-    if !cache.contains_key(path) {
+    // Keyed by path AND the file's size and mtime: a library file replaced in place (a re-seal
+    // to the same name) is re-read on the next scan, without a mount or unmount in between
+    // (Codex's review of P.3). Stale keys for the old version are harmless and few.
+    let key = match std::fs::metadata(path) {
+        Ok(md) => format!(
+            "{path}|{}|{}",
+            md.len(),
+            md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis()).unwrap_or(0)
+        ),
+        Err(_) => path.to_string(),
+    };
+    if !cache.contains_key(&key) {
         let read = match YantrikDB::read_manifest(path) {
             Ok(m) => Some(ManifestView::of(&m)),
             Err(e) => {
@@ -754,9 +801,9 @@ fn cached_manifest<'a>(
                 None
             }
         };
-        cache.insert(path.to_string(), read);
+        cache.insert(key.clone(), read);
     }
-    cache.get(path).and_then(|m| m.as_ref())
+    cache.get(&key).and_then(|m| m.as_ref())
 }
 
 /// Where one mounted pack's rows live and how its publisher said to retrieve them.
@@ -4025,6 +4072,65 @@ mod tests {
         let cat = mem.available_packs().await.unwrap();
         assert_eq!(cat.len(), 2);
         assert!(cat[0].mounted && cat[0].pack_id == wages && !cat[1].mounted, "{cat:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.3a (Codex's review): the coverage cache is keyed by the PHRASES, not the rows. Two packs
+    /// with byte-identical rows and rids — the same content digest — but different coverage must
+    /// each route by their own phrases. Also: a library file re-sealed in place is re-read, and two
+    /// files claiming one pack id resolve to the first by path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coverage_vectors_follow_the_phrases_not_the_content_digest() {
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p3a_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pack A: one row, coverage about platformers.
+        let a = dir.join("a.ydbpack");
+        let a_id = fixtures::seal_fixture_pack_full(a.to_str().unwrap(), "yantrik", "same-rows-a", "0.1.0", "same_rows", &["one shared row"], Some(&["coyote time, input buffering and jump forgiveness"]), None, None).unwrap();
+        // Pack B: a BYTE COPY of A — same rows, same rids, same content digest — with only the
+        // manifest's identity and coverage rewritten (to UK wages).
+        let b = dir.join("b.ydbpack");
+        std::fs::copy(&a, &b).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&b).unwrap();
+            let json: String = conn.query_row("SELECT value FROM meta WHERE key = 'pack_manifest'", [], |r| r.get(0)).unwrap();
+            let mut m: serde_json::Value = serde_json::from_str(&json).unwrap();
+            m["name"] = serde_json::json!("same-rows-b");
+            m["origin"] = serde_json::json!("yantrik/same-rows-b");
+            m["coverage"] = serde_json::json!(["UK National Minimum Wage hourly rates by age band"]);
+            conn.execute("UPDATE meta SET value = ?1 WHERE key = 'pack_manifest'", [m.to_string()]).unwrap();
+        }
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
+        let cat = mem.available_packs().await.unwrap();
+        assert_eq!(cat.len(), 2, "{cat:?}");
+        assert_eq!(cat[0].content_digest, cat[1].content_digest, "the trap: identical digests");
+        assert_ne!(cat[0].coverage, cat[1].coverage);
+
+        // Route a platformer question FIRST (fills the cache under A's phrases), then a wages
+        // question: B must rank first on its OWN phrase, not on A's cached vectors.
+        let (r1, _) = mem.route_packs("what coyote time and jump buffering should my platformer use").await.unwrap();
+        assert_eq!(r1[0].pack_id, a_id, "{r1:?}");
+        let (r2, _) = mem.route_packs("what is the UK minimum wage for a 20 year old").await.unwrap();
+        assert_eq!(r2[0].pack_id, "yantrik/same-rows-b@0.1.0", "B must route by its own coverage: {r2:?}");
+        assert!(r2[0].phrase.contains("Minimum Wage"), "{r2:?}");
+
+        // In-place replacement: re-seal A's file with new coverage; the catalog reads it back
+        // without any mount or unmount in between.
+        let _ = std::fs::remove_file(&a);
+        fixtures::seal_fixture_pack_full(a.to_str().unwrap(), "yantrik", "same-rows-a", "0.1.0", "same_rows", &["one shared row"], Some(&["React error boundaries, Suspense and concurrent rendering"]), None, None).unwrap();
+        let cat = mem.available_packs().await.unwrap();
+        let a_now = cat.iter().find(|e| e.pack_id == a_id).unwrap();
+        assert!(a_now.coverage[0].contains("React"), "a replaced library file must be re-read: {a_now:?}");
+
+        // Two files, one pack id: the first by path wins, the catalog has one entry for it.
+        let dup = dir.join("zz-duplicate-of-b.ydbpack");
+        std::fs::copy(&b, &dup).unwrap();
+        let cat = mem.available_packs().await.unwrap();
+        let bs: Vec<&mind_types::memory::PackCatalogEntry> = cat.iter().filter(|e| e.pack_id == "yantrik/same-rows-b@0.1.0").collect();
+        assert_eq!(bs.len(), 1, "{cat:?}");
+        assert!(bs[0].path.ends_with("b.ydbpack"), "first by sorted path: {}", bs[0].path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -626,7 +626,12 @@ pub fn render_pack_routes(events: &[DecisionEvent]) -> String {
         }
     }
     let policy = routes.last().and_then(|r| r.policy.first().cloned()).unwrap_or_else(|| "?".into());
-    let mut out = format!("SHADOW ROUTES ({policy}; recorded, never acted on) — {} primary turn(s):\n", routes.len());
+    let members = routes.iter().filter(|r| r.actor.as_deref() == Some("member")).count();
+    let mut out = format!(
+        "SHADOW ROUTES ({policy}; recorded, never acted on) — {} turn(s), {} of them member lane:\n",
+        routes.len(),
+        members
+    );
     for (v, n) in &by_verdict {
         out.push_str(&format!("  {v}: {n}\n"));
     }
@@ -810,7 +815,7 @@ mod tests {
         ev.push(surfaced("t4", "b")); // different pack
         ev.push(route("t5", None, "abstain:tie")); // nothing surfaced either → agree
         let r = render_pack_routes(&ev);
-        assert!(r.contains("5 primary turn(s)"), "{r}");
+        assert!(r.contains("5 turn(s), 0 of them member lane"), "{r}");
         assert!(r.contains("lease: 3") && r.contains("abstain:below_floor: 1") && r.contains("abstain:tie: 1"), "{r}");
         assert!(r.contains("agree 2 · would-lease but nothing surfaced 1 · abstained while something surfaced 1 · different pack 1"), "{r}");
         assert!(render_pack_routes(&[]).contains("No shadow routes"));

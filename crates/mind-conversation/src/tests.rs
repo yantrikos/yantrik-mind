@@ -3662,7 +3662,13 @@ async fn a_members_turn_surfaces_pack_evidence_but_does_not_carry_it_to_the_grad
     conv.turn_grounding(row, &member, "run-p2-member").await;
     conv.note_turn_answer(row).await;
     conv.grade_previous_turn("thanks").await;
-    let kinds: Vec<String> = conv.recorder().read_all().into_iter().map(|e| e.kind).collect();
+    let all = conv.recorder().read_all();
+    // The shadow route runs on EVERY lane (P.3a) and is checked separately; the evidence ladder
+    // for a member's turn stops at surfaced.
+    let shadow: Vec<&mind_observability::DecisionEvent> = all.iter().filter(|e| e.kind == "pack_route_shadow").collect();
+    assert_eq!(shadow.len(), 1, "one shadow route for the member's turn too: {all:?}");
+    assert_eq!(shadow[0].actor.as_deref(), Some("member"));
+    let kinds: Vec<String> = all.into_iter().filter(|e| e.kind != "pack_route_shadow").map(|e| e.kind).collect();
     assert_eq!(kinds, vec!["pack_surfaced".to_string()], "{kinds:?}");
     let stats = mem.pack_stats().await.unwrap();
     assert_eq!((stats[0].surfaced, stats[0].used, stats[0].graded), (1, 0, 0), "{stats:?}");
@@ -3679,6 +3685,7 @@ async fn a_members_turn_surfaces_pack_evidence_but_does_not_carry_it_to_the_grad
     let events = conv.recorder().read_all();
     let graded: Vec<&mind_observability::DecisionEvent> = events.iter().filter(|e| e.kind == "pack_evidence_graded").collect();
     assert_eq!(graded.len(), 1, "exactly the primary's evidence was graded: {events:?}");
+    assert_eq!(events.iter().filter(|e| e.kind == "pack_route_shadow").count(), 3, "one shadow route per turn, every lane: {events:?}");
     assert_eq!(graded[0].trace_id, "run-p2-primary");
     assert_eq!((graded[0].verdict.as_deref(), graded[0].semantic_success), (Some("accepted"), Some(true)));
     let stats = mem.pack_stats().await.unwrap();

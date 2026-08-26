@@ -143,6 +143,11 @@ impl Outcome {
         if low.starts_with("(malformed call") {
             return Outcome::Malformed;
         }
+        // An MCP server's own verdict on the model's arguments: JSON-RPC -32602 / "Invalid params"
+        // is the planner's failure by the protocol's definition, not the tool's.
+        if has(&["-32602", "invalid params"]) {
+            return Outcome::Malformed;
+        }
 
         // PRIORITY ORDER, most specific first. A refusal often also contains the word "cannot", and a
         // missing credential often contains "unable" — whichever arm is checked first wins, so the
@@ -237,23 +242,39 @@ impl Outcome {
     }
 }
 
-/// Tools that legitimately take a number or a boolean argument. Every other arm in the dispatch
-/// table reads its arguments as strings, so for them a bare number or boolean from the model is a
-/// call that cannot be made as asked. MCP tools carry their own schemas and are not judged here.
-pub(crate) const SCALAR_ARG_TOOLS: &[&str] = &[
-    "deals", "shop", "shopping", "find_deals", "deal", // budget / max
-    "watch_price", "track_price", "pricewatch", "watch_deal", // target / budget
-    "family_book", "book", // year
-    "hunt", "scan_movers", // act
+/// The FIELDS that legitimately take a number or a boolean, per tool. Every other field of every
+/// tool in the dispatch table is read as a string, so a bare number or boolean there is a call
+/// that cannot be made as asked — including on these tools' OTHER fields (`deals {"query":328}` is
+/// as malformed as anywhere else; Codex's review). MCP tools carry their own schemas and are not
+/// judged at this boundary; their `Invalid params` replies are classified instead.
+pub(crate) const SCALAR_ARG_FIELDS: &[(&str, &[&str])] = &[
+    ("deals", &["budget", "max"]),
+    ("shop", &["budget", "max"]),
+    ("shopping", &["budget", "max"]),
+    ("find_deals", &["budget", "max"]),
+    ("deal", &["budget", "max"]),
+    ("watch_price", &["target", "budget"]),
+    ("track_price", &["target", "budget"]),
+    ("pricewatch", &["target", "budget"]),
+    ("watch_deal", &["target", "budget"]),
+    ("family_book", &["year"]),
+    ("book", &["year"]),
+    ("hunt", &["act"]),
+    ("scan_movers", &["act"]),
 ];
 
+fn scalar_allowed(tool: &str, field: &str) -> bool {
+    SCALAR_ARG_FIELDS.iter().any(|(t, fields)| *t == tool && fields.contains(&field))
+}
+
 /// The argument boundary: `Some(refusal)` when the model's arguments cannot be what the tool reads.
-/// The refusal names the tool and the offending fields with their TYPES and values — the model's
-/// own invented scalars (`name=328`), never data the person typed, which arrives as strings — and
-/// starts with the marker `classify` maps to `Outcome::Malformed`, so it is excluded from the
-/// tool's reliability instead of credited to it.
+/// The refusal names the tool and the offending fields with their TYPES ONLY — never a value. A
+/// number the model put in a field may be one the person typed and the model encoded (a PIN, a
+/// year, a dose), and this string reaches the work log, the recorder and the model's next prompt
+/// (Codex's review). It starts with the marker `classify` maps to `Outcome::Malformed`, so the
+/// call is excluded from the tool's reliability instead of credited to it.
 pub(crate) fn malformed_call(tool: &str, args: &serde_json::Value) -> Option<String> {
-    if tool.starts_with("mcp.") || SCALAR_ARG_TOOLS.contains(&tool) {
+    if tool.starts_with("mcp.") {
         return None;
     }
     let obj = match args {
@@ -268,10 +289,19 @@ pub(crate) fn malformed_call(tool: &str, args: &serde_json::Value) -> Option<Str
     };
     let bad: Vec<String> = obj
         .iter()
-        .filter(|(_, v)| v.is_number() || v.is_boolean())
-        .map(|(k, v)| format!("{k}={v}"))
+        .filter(|(k, v)| (v.is_number() || v.is_boolean()) && !scalar_allowed(tool, k))
+        .map(|(k, v)| format!("{k}:{}", json_type(v)))
         .collect();
     if bad.is_empty() {
+        // A call whose EVERY argument is null asked for nothing: `discover_tools {"query":null}`,
+        // seen live on 2026-08-26 right after P.2b shipped, ran an empty search, "found nothing",
+        // and was credited. A null beside real arguments still reads as "absent" and passes.
+        if !obj.is_empty() && obj.values().all(|v| v.is_null()) {
+            return Some(format!(
+                "(malformed call: {tool} was given only null arguments ({}) — call it again with the fields as documented)",
+                obj.keys().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
         return None;
     }
     Some(format!(
@@ -459,25 +489,38 @@ mod malformed_tests {
     #[test]
     fn a_malformed_call_is_its_own_outcome_and_teaches_nothing_about_the_tool() {
         let refused = malformed_call("run_skill", &serde_json::json!({"name": 328, "target": 328})).expect("refused");
-        assert!(refused.starts_with("(malformed call: run_skill takes string arguments; got name=328, target=328"), "{refused}");
+        assert!(refused.starts_with("(malformed call: run_skill takes string arguments; got name:number, target:number"), "{refused}");
+        // PRIVACY: the refusal never carries a value — a number the model encoded may be the
+        // person's (Codex's review). A sentinel PIN must not appear anywhere in it.
+        let leak = malformed_call("recall", &serde_json::json!({"query": "card", "pin": 447193})).expect("refused");
+        assert!(!leak.contains("447193"), "value leaked into the refusal: {leak}");
+        assert!(leak.contains("pin:number"), "{leak}");
         let o = Outcome::classify("run_skill", &refused);
         assert_eq!(o, Outcome::Malformed);
         assert_eq!(o.counts_toward_reliability(), None, "never evidence about the tool, either way");
         assert_eq!(o.recovery(), Recovery::Vary);
         assert_eq!(o.badge(), "malformed");
         assert!(o.note().contains("call it again"));
-        // The other live shape.
-        assert!(malformed_call("discover_tools", &serde_json::json!({"query": true})).unwrap().contains("query=true"));
+        // The other live shapes: a boolean, and — seen after P.2b shipped — nothing but null.
+        assert!(malformed_call("discover_tools", &serde_json::json!({"query": true})).unwrap().contains("query:boolean"));
+        assert!(malformed_call("discover_tools", &serde_json::json!({"query": null})).unwrap().contains("only null arguments (query)"));
+        // A null beside a real argument is "absent", not malformed.
+        assert!(malformed_call("recall", &serde_json::json!({"query": "dinner", "limit": null})).is_none());
         // Strings, arrays, objects and null are never malformed here; a bare scalar body is.
         assert!(malformed_call("discover_tools", &serde_json::json!({"query": "weather tool"})).is_none());
         assert!(malformed_call("recall", &serde_json::json!({"tags": ["a", "b"], "opts": {}})).is_none());
         assert!(malformed_call("recall", &serde_json::Value::Null).is_none());
         assert!(malformed_call("recall", &serde_json::json!("just a string")).unwrap().contains("bare string"));
-        // The tools that really take numbers or booleans, and MCP tools, pass untouched.
-        for t in SCALAR_ARG_TOOLS {
-            assert!(malformed_call(t, &serde_json::json!({"x": 1, "y": true})).is_none(), "{t}");
-        }
+        // Exemptions are per FIELD: the numeric fields these tools really read pass, their other
+        // fields do not, and MCP tools are judged by their own reply instead.
+        assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "budget": 300})).is_none());
+        assert!(malformed_call("deals", &serde_json::json!({"query": 328})).unwrap().contains("query:number"));
+        assert!(malformed_call("family_book", &serde_json::json!({"year": 2019})).is_none());
+        assert!(malformed_call("family_book", &serde_json::json!({"name": 5})).unwrap().contains("name:number"));
+        assert!(malformed_call("hunt", &serde_json::json!({"act": true})).is_none());
         assert!(malformed_call("mcp.fs.read", &serde_json::json!({"limit": 10})).is_none());
+        assert_eq!(Outcome::classify("mcp.fs.read", "error: Invalid params (-32602): path must be a string"), Outcome::Malformed);
+        assert_eq!(Outcome::classify("mcp.fs.read", "(mcp error -32602)"), Outcome::Malformed);
         // A REAL name that is not in the bank is the tool honestly finding nothing — Empty, and it
         // was reading as Ok before this slice.
         assert_eq!(Outcome::classify("run_skill", "(no saved skill named 'foo')"), Outcome::Empty);

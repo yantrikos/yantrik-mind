@@ -7985,26 +7985,28 @@ impl ConversationEngine {
         // — censoring by household activity (Codex's review of P.2).
         if primary_lane {
             *self.turn_packs.lock().unwrap() = surfaced;
-            // THE COVERAGE ROUTER, SHADOWED (ARCH-6 P.3, E.PK3): which expertise this turn would
-            // have leased, decided from the publishers' coverage phrases and recorded — never acted
-            // on. Leasing is P.4's; until then the only thing this changes is the flight recorder.
-            if let Ok((ranked, route)) = self.memory.route_packs(user_text).await {
-                if !ranked.is_empty() {
-                    let mut ev = mind_observability::DecisionEvent::span(trace, None, "pack_route_shadow");
-                    ev.goal = Some(user_text.chars().take(160).collect());
-                    ev.candidates = ranked.iter().take(5).map(|m| format!("{}@{:.2} ({})", m.pack_id, m.sim, m.phrase.chars().take(48).collect::<String>())).collect();
-                    ev.chosen = route.leased().map(|p| format!("pack:{p}"));
-                    ev.verdict = Some(route.label().to_string());
-                    ev.confidence = ranked.first().map(|m| m.sim);
-                    ev.policy = vec![
-                        mind_spec::coverage::COVERAGE_POLICY_ID.to_string(),
-                        format!("floor={:.2}", mind_spec::coverage::COVERAGE_FLOOR),
-                        format!("margin={:.2}", mind_spec::coverage::COVERAGE_MARGIN),
-                        "shadow: nothing leased".to_string(),
-                    ];
-                    self.recorder.record(ev);
-                }
-            }
+        }
+        // THE COVERAGE ROUTER, SHADOWED (ARCH-6 P.3, E.PK3): which expertise this turn would have
+        // leased, decided from the publishers' coverage phrases and recorded — never acted on.
+        // EVERY turn, every lane, even with an empty catalog (recorded as abstain:no_packs): the
+        // shadow's denominator is turns, and a turn skipped because nothing was routable or because
+        // a member spoke is demand the record would silently lose (Codex's review of P.3). Leasing
+        // is P.4's; until then the only thing this changes is the flight recorder.
+        if let Ok((ranked, route)) = self.memory.route_packs(user_text).await {
+            let mut ev = mind_observability::DecisionEvent::span(trace, None, "pack_route_shadow");
+            ev.goal = Some(user_text.chars().take(160).collect());
+            ev.actor = Some(if primary_lane { "primary".into() } else { "member".into() });
+            ev.candidates = ranked.iter().take(5).map(|m| format!("{}@{:.2} ({})", m.pack_id, m.sim, m.phrase.chars().take(48).collect::<String>())).collect();
+            ev.chosen = route.leased().map(|p| format!("pack:{p}"));
+            ev.verdict = Some(route.label().to_string());
+            ev.confidence = ranked.first().map(|m| m.sim);
+            ev.policy = vec![
+                mind_spec::coverage::COVERAGE_POLICY_ID.to_string(),
+                format!("floor={:.2}", mind_spec::coverage::COVERAGE_FLOOR),
+                format!("margin={:.2}", mind_spec::coverage::COVERAGE_MARGIN),
+                "shadow: nothing leased".to_string(),
+            ];
+            self.recorder.record(ev);
         }
         // Self-referential turn -> the instrument panel (fixes introspection myopia).
         if is_self_referential(user_text) {

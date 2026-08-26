@@ -8442,6 +8442,27 @@ Open reminders you're carrying for them:");
         // that ignore the `tools` param fall back to parsing the prose catalog above — so the prose
         // stays authoritative for them and the name-only tail remains reachable via that path.
         let schemas = tool_catalog::tool_schemas(user_text, &gated_src);
+        // UNDER TOTAL PROHIBITION THE LOOP GETS NO TOOLS (E.SEC8 slice 4, fifth pass).
+        //
+        // The agent loop does not merely RECEIVE evidence, it PULLS it. With grounding filtered to
+        // empty, the model called `recall` thirteen times in one turn, each call handing back the
+        // household beliefs the filter had just withheld, then ran out of steps and returned
+        // nothing at all. The filter did not leak. It was routed around, and the turn broke doing it.
+        //
+        // Withholding ALL tools rather than a denylist of the memory-reading ones is deliberate.
+        // Every failure tonight came from enumerating the cases I thought of: a line break, a
+        // basename, a variable name, an opening tag, one code path, one evidence channel. A list of
+        // "the tools that read memory" would be that same list a seventh time. A turn permitted to
+        // name nothing has nothing to look up.
+        let schemas = if mind_types::OutputPolicy::for_scope(id.output_scope)
+            .tighten(mind_types::detect_minimization(user_text))
+            .entity_classes
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            schemas
+        };
         // WHAT THE MODEL ACTUALLY SEES. Set YM_DUMP_TOOLS=/path to write this turn's rendered tool
         // surface there. Built after chasing "the mind says it has no market-data tool" through four
         // wrong theories — enriched wording, pinning, a poisoned sibling plugin, the wrong endpoint —

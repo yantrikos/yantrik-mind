@@ -211,14 +211,31 @@ fn audit_db(path: &str) -> Result<Report, String> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT rid, text FROM memories").map_err(|e| e.to_string())?;
+    // LIFECYCLE STATUS comes back with the rid, and it is not decoration. Without it this audit
+    // cannot tell a LIVE memory from a tombstoned one, and the difference is the whole severity of
+    // a finding: a live row is reachable by recall, a tombstoned one is already excluded by the
+    // engine. Both of the rows this audit flagged on the box turned out to be tombstoned pack
+    // staging residue, and I spent a day treating them as live private memory because the
+    // instrument could not say otherwise (E.SEC1d).
+    let mut stmt = conn
+        .prepare("SELECT rid, text, coalesce(consolidation_status, 'unknown') FROM memories")
+        .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                r.get::<_, String>(2)?,
+            ))
+        })
         .map_err(|e| e.to_string())?;
     let mut rep = Report::new();
     for row in rows {
-        let (rid, text) = row.map_err(|e| e.to_string())?;
-        rep.record(rid, hits_of("memories.text", &text));
+        let (rid, text, status) = row.map_err(|e| e.to_string())?;
+        // The rid carries its lifecycle so every printed finding says whether it is reachable.
+        let live = status != "tombstoned";
+        let label = if live { format!("{rid} [LIVE:{status}]") } else { format!("{rid} [tombstoned]") };
+        rep.record(label, hits_of("memories.text", &text));
     }
     Ok(rep)
 }
@@ -276,6 +293,9 @@ fn main() {
 
     if any && fail_closed {
         println!("FINDINGS PRESENT — exiting non-zero (fail-closed).");
+        println!(
+            "NOTE: a finding marked [tombstoned] is already excluded from recall by the engine's              lifecycle. It still sits in the table and would still travel in a raw export that              ignores status — which is what the corpus gate is for — but it is not reachable by a              reader. A [LIVE:*] finding is."
+        );
         std::process::exit(1);
     }
 }

@@ -773,7 +773,7 @@ impl super::ConversationEngine {
             Ok(e) => e,
             Err(e) => return vec![format!("[lease] could not read pending lease events: {e}")],
         };
-        let mut log = Vec::new();
+        let (mut log, mut undelivered) = (Vec::new(), 0usize);
         for ev in events {
             let l = &ev.lease;
             let kind = if ev.kind == "leased" { "pack_leased" } else { "pack_released" };
@@ -814,17 +814,26 @@ impl super::ConversationEngine {
                     }
                 }
                 mind_observability::RecordOutcome::Disabled => {
-                    // No log is configured at all (a test, an eval harness). Nothing can ever be
-                    // written, so holding the event forever would grow the outbox without end.
-                    if let Err(e) = self.memory.ack_lease_event(&ev.event_id).await {
-                        log.push(format!("[lease] could not drop {} from the outbox: {e}", ev.event_id));
-                    }
+                    // NEVER acknowledged. `ConversationEngine::new` leaves the recorder disabled,
+                    // so a host that simply forgot `with_recorder` would otherwise delete its own
+                    // audit trail one lease at a time (Codex's review of P.4c). The events are
+                    // kept and the backlog is said out loud; nothing silently disappears.
+                    undelivered += 1;
                 }
                 mind_observability::RecordOutcome::Failed(why) => {
+                    undelivered += 1;
                     log.push(format!("[lease] {} stays in the outbox — the recorder did not take it: {why}", ev.event_id));
                 }
                 _ => {}
             }
+        }
+        if undelivered > 0 {
+            // Visible, held by the outbox itself, and never silently dropped: an operator can see
+            // exactly how much lease evidence is waiting for a recorder that will take it.
+            log.push(format!(
+                "[lease] {undelivered} lease event(s) still undelivered{} — they stay in the outbox until a recorder accepts them",
+                if self.recorder.trace_path().is_none() { " (this mind has no decision log configured)" } else { "" }
+            ));
         }
         log
     }

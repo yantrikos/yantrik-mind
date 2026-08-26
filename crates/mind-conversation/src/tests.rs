@@ -4713,7 +4713,15 @@ async fn the_lease_outbox_keeps_what_the_recorder_would_not_take() {
     assert!(mem.pending_lease_events().await.unwrap().is_empty(), "delivered, then acknowledged");
     let ev = conv.recorder().read_all();
     assert_eq!(ev.iter().filter(|e| e.kind == "pack_leased").count(), 1, "{ev:?}");
-    // A re-drain of the same event id cannot write a second copy (the crash-before-ack case).
+    // A re-drain cannot write a second copy. The outbox is empty by now, so the honest way to
+    // exercise the crash-before-ack case is to record the SAME event id again directly: the log
+    // must refuse it as already present rather than appending a twin.
+    let again = {
+        let mut d = mind_observability::DecisionEvent::span("lease-x", None, "pack_leased");
+        d.event_id = conv.recorder().read_all().iter().find(|e| e.kind == "pack_leased").and_then(|e| e.event_id.clone());
+        conv.recorder().record_once(d)
+    };
+    assert_eq!(again, mind_observability::RecordOutcome::AlreadyPresent, "a replayed delivery must not duplicate");
     conv.drain_lease_events().await;
     assert_eq!(conv.recorder().read_all().iter().filter(|e| e.kind == "pack_leased").count(), 1, "a replay must not duplicate");
 
@@ -4721,5 +4729,37 @@ async fn the_lease_outbox_keeps_what_the_recorder_would_not_take() {
     assert!(conv.pack_lease(&format!("{games} reason=")).await.contains("say why"));
     assert!(crate::pack::parse_lease_args("x reason=").is_err());
     let _ = mem.release_pack(&games, LeaseEnd::Released).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mind_with_no_decision_log_keeps_its_lease_evidence_instead_of_dropping_it() {
+    // P.4f (Codex's recorder review): `ConversationEngine::new` leaves the recorder DISABLED, so a
+    // host that simply forgot `with_recorder` would have deleted its own audit trail one lease at
+    // a time — the drain acknowledged `Disabled` even though it is not durable. Convenience for
+    // eval harnesses cannot outrank the outbox's whole purpose.
+    let dir = std::env::temp_dir().join(format!("ym_p4f_disabled_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("library");
+    std::fs::create_dir_all(&lib).unwrap();
+    let games = mind_memory::fixtures::seal_fixture_pack_full(
+        lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+        &["one row"], Some(&["platformer feel"]), None, None,
+    )
+    .unwrap();
+    let handle = MemoryHandle::spawn(":memory:", 64).unwrap();
+    handle.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+    let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    // No `with_recorder` at all — the default, and the trap.
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    assert!(conv.recorder().trace_path().is_none(), "the premise: this mind has no decision log");
+
+    conv.pack_lease(&format!("{games} days=1 reason=no recorder here")).await;
+    let pending = mem.pending_lease_events().await.unwrap();
+    assert_eq!(pending.len(), 1, "the evidence must be kept, not dropped: {pending:?}");
+    let lines = conv.drain_lease_events().await;
+    assert!(lines.iter().any(|l| l.contains("undelivered") && l.contains("no decision log")), "and the backlog is said out loud: {lines:?}");
+    assert_eq!(mem.pending_lease_events().await.unwrap().len(), 1, "still kept after a drain");
     let _ = std::fs::remove_dir_all(&dir);
 }

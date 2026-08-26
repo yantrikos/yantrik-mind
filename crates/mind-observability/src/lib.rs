@@ -309,9 +309,24 @@ impl DecisionLog {
     /// was keeping (Codex's review of P.4a). This returns the outcome so an outbox can acknowledge
     /// only what is really on disk.
     ///
-    /// Idempotence needs more than a stable id. A crash AFTER the append and BEFORE the
-    /// acknowledgement re-delivers the same event on the next start, and an append-only log has no
-    /// opinion about that — so the ids already in the log are read once, kept, and consulted here.
+    /// Four things had to be true before that promise was worth anything, and none of them were
+    /// (Codex's recorder review of P.4c):
+    ///
+    /// 1. CHECK AND APPEND ARE ONE ACT. The first cut released the id cache before appending, so
+    ///    two concurrent drains could both look, both miss, and both write. The whole sequence now
+    ///    runs under a lock keyed by the log's canonical PATH, because two handles can address one
+    ///    file and a per-handle lock would not see the other.
+    /// 2. THE TAIL IS VERIFIED BEFORE IT IS WRITTEN TO. A crash mid-write leaves a partial line;
+    ///    appending onto it concatenates the next event into the fragment and quietly breaks the
+    ///    chain from there on. Corruption anywhere in the log is now `Failed` and nothing is
+    ///    written through it.
+    /// 3. THE IDS COME FROM A VERIFIED CHAIN. Built from `read_events`, which skips what it cannot
+    ///    parse, a forged line carrying a real id would answer "already present" and the outbox
+    ///    would acknowledge an event the log does not honestly contain.
+    /// 4. AN AMBIGUOUS WRITE IS RESOLVED, NOT ASSUMED. `sync_all` can fail after the bytes have
+    ///    landed. The cache is invalidated and the log re-verified in the same critical section:
+    ///    durable only if the valid chain really contains the id, `Failed` otherwise.
+    ///
     /// `Ok(AlreadyPresent)` is a success for a retrying caller: the event IS durable, which is what
     /// the acknowledgement is about.
     pub fn record_once(&self, event: DecisionEvent) -> RecordOutcome {
@@ -327,24 +342,58 @@ impl DecisionLog {
                 return RecordOutcome::Failed("recorder is in its failure backoff window".into());
             }
         }
+        // ONE CRITICAL SECTION, per file, for the whole check-scan-append-remember sequence.
+        let file_lock = path_lock(&p);
+        let _writing = file_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The ids on disk, from a chain that verifies. Re-read whenever the cache is cold.
+        let refresh = |seen: &mut Option<std::collections::HashSet<String>>| -> std::result::Result<(), usize> {
+            if seen.is_none() {
+                let events = read_events_verified(&p)?;
+                *seen = Some(events.into_iter().filter_map(|e| e.event_id).collect());
+            }
+            Ok(())
+        };
         {
-            // The ids on disk, read once per process and kept. A cheap scan of a log that is
-            // already read whole by every `ym why`.
             let mut seen = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner());
-            let ids = seen.get_or_insert_with(|| read_events(&p).into_iter().filter_map(|e| e.event_id).collect());
-            if ids.contains(&id) {
+            if let Err(bad) = refresh(&mut seen) {
+                *seen = None;
+                return RecordOutcome::Failed(format!(
+                    "the log does not verify at line {bad} — refusing to append onto a broken chain; repair or rotate it"
+                ));
+            }
+            if seen.as_ref().is_some_and(|ids| ids.contains(&id)) {
                 return RecordOutcome::AlreadyPresent;
             }
         }
-        if let Err(e) = self.append_inner(&p, event.sanitized()) {
-            self.health.lock().unwrap_or_else(|e| e.into_inner()).note_failure(now);
-            return RecordOutcome::Failed(format!("append failed: {e}"));
+        match self.append_inner(&p, event.sanitized()) {
+            Ok(()) => {
+                self.health.lock().unwrap_or_else(|e| e.into_inner()).note_success();
+                if let Some(ids) = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    ids.insert(id);
+                }
+                RecordOutcome::Written
+            }
+            Err(e) => {
+                // The bytes may or may not have landed. Ask the file, under the same lock, instead
+                // of guessing — and drop the cached head, which no longer describes what is there.
+                self.health.lock().unwrap_or_else(|e| e.into_inner()).note_failure(now);
+                *self.head.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                let mut seen = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner());
+                *seen = None;
+                match refresh(&mut seen) {
+                    Ok(()) if seen.as_ref().is_some_and(|ids| ids.contains(&id)) => {
+                        // It landed after all, and the chain still verifies with it in.
+                        RecordOutcome::AlreadyPresent
+                    }
+                    Ok(()) => RecordOutcome::Failed(format!("append failed and the event is not in the log: {e}")),
+                    Err(bad) => {
+                        *seen = None;
+                        RecordOutcome::Failed(format!("append failed ({e}) and the log no longer verifies at line {bad} — repair it before recording again"))
+                    }
+                }
+            }
         }
-        self.health.lock().unwrap_or_else(|e| e.into_inner()).note_success();
-        if let Some(ids) = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            ids.insert(id);
-        }
-        RecordOutcome::Written
     }
 
     /// Where this log writes, when active.
@@ -418,6 +467,26 @@ impl RecordOutcome {
     }
 }
 
+/// One lock per LOG FILE, shared by every `DecisionLog` handle that points at it.
+///
+/// `record_once` has to check, scan, append and remember as one indivisible act: two drains that
+/// both looked before either appended would each miss the id and write it (Codex's review). A lock
+/// inside one handle is not enough, because two handles can address the same path — the identity
+/// that matters is the file, so the lock is keyed by its canonical path.
+///
+/// Process-scoped, and honestly so: two OS processes appending to one log would still race, and
+/// this mind runs one. A cross-process guarantee needs a file lock and is not built here.
+static PATH_LOCKS: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>> =
+    std::sync::Mutex::new(None);
+
+fn path_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    // Canonicalised so `./x.jsonl` and an absolute path are one file, falling back to the path as
+    // given when it does not exist yet (the first write creates it).
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut guard = PATH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(Default::default).entry(key).or_default().clone()
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -452,6 +521,42 @@ pub fn verify_log(path: &Path) -> Result<usize, usize> {
         n += 1;
     }
     Ok(n)
+}
+
+/// Every event whose chain verifies, walking from the genesis — and an error the moment one does
+/// not, carrying how many were good before it.
+///
+/// `read_events` deliberately skips what it cannot parse, which is right for a report and wrong for
+/// anything that must not be fooled: a line with a forged chain and a real event id would satisfy a
+/// dedupe check built on it, and the outbox would acknowledge an event the log does not honestly
+/// contain (Codex's review of P.4c). Durable delivery reads through here and nowhere else.
+pub fn read_events_verified(path: &Path) -> std::result::Result<Vec<DecisionEvent>, usize> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        // A log that does not exist yet is an empty one; a log that cannot be READ is not.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(0),
+    };
+    let mut prev = "genesis".to_string();
+    let mut out = Vec::new();
+    for (i, line) in content.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        let parsed: ChainedLine = serde_json::from_str(line).map_err(|_| i)?;
+        let event_json = serde_json::to_string(&parsed.event).map_err(|_| i)?;
+        let mut hasher = Sha256::new();
+        hasher.update(prev.as_bytes());
+        hasher.update(event_json.as_bytes());
+        if format!("{:x}", hasher.finalize()) != parsed.chain {
+            return Err(i);
+        }
+        prev = parsed.chain;
+        out.push(parsed.event);
+    }
+    // A trailing PARTIAL line — a crash mid-write — is not a valid event and must never be appended
+    // onto: the next line would be concatenated into it and the whole tail would stop verifying.
+    if !content.is_empty() && !content.ends_with('\n') {
+        return Err(out.len());
+    }
+    Ok(out)
 }
 
 /// All events, in file order (chain NOT verified here — pair with [`verify_log`] when it matters).
@@ -905,7 +1010,6 @@ mod tests {
         e
     }
 
-    #[test]
     /// P.4c (Codex's review of P.4a): `record` cannot fail from the caller's side, which is right
     /// for cognition and wrong for a durable outbox — a caller that acknowledges what `record`
     /// silently dropped has destroyed the evidence it was keeping. `record_once` reports what
@@ -913,8 +1017,10 @@ mod tests {
     /// consults it: a crash between the append and the acknowledgement re-delivers the same event.
     #[test]
     fn record_once_reports_delivery_and_never_writes_one_id_twice() {
-        // Unique per RUN, not per process: this crate's tests are compiled into more than one
-        // binary and a pid-derived path let two runs clobber each other's log.
+        // A unique path per run. (The first version of this test appeared to run twice and I
+        // blamed multiple test binaries; the real cause was a stray `#[test]` this patch left
+        // stacked on the function — Codex found it. The comment is corrected rather than removed
+        // because the wrong diagnosis is the more useful half of the story.)
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = std::env::temp_dir().join(format!("ym_rec_once_{}_{stamp}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -950,6 +1056,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// P.4f (Codex's recorder review): the guarantees `record_once` has to keep beyond "the id is
+    /// stable". Each of these was a way the outbox could acknowledge an event the log did not
+    /// honestly contain.
+    #[test]
+    fn durable_delivery_survives_corruption_forgery_and_concurrency() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("ym_p4f_{}_{stamp}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ev = |id: &str| {
+            let mut e = DecisionEvent::new("t", "pack_leased");
+            e.event_id = Some(id.to_string());
+            e
+        };
+
+        // A PARTIAL TAIL — a crash mid-write. Appending onto it would concatenate the next event
+        // into the fragment and silently break the chain from there on.
+        let torn = dir.join("torn.jsonl");
+        let log = DecisionLog::open(&torn);
+        assert_eq!(log.record_once(ev("a")), RecordOutcome::Written);
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&torn).unwrap();
+            f.write_all(b"{\"chain\":\"deadbeef\",\"eve").unwrap(); // no newline: a torn line
+        }
+        let fresh = DecisionLog::open(&torn);
+        match fresh.record_once(ev("b")) {
+            RecordOutcome::Failed(why) => assert!(why.contains("does not verify") || why.contains("broken chain"), "{why}"),
+            other => panic!("appended onto a torn log: {other:?}"),
+        }
+        assert!(!std::fs::read_to_string(&torn).unwrap().contains("\"b\""), "nothing may be written through corruption");
+
+        // A FORGED LINE carrying a real id. `read_events` would happily hand back its event, and a
+        // dedupe built on that would answer AlreadyPresent for something the chain does not contain.
+        let forged = dir.join("forged.jsonl");
+        let log = DecisionLog::open(&forged);
+        assert_eq!(log.record_once(ev("real")), RecordOutcome::Written);
+        {
+            use std::io::Write;
+            let line = "{\"chain\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"event\":{\"trace_id\":\"t\",\"ts_ms\":1,\"kind\":\"pack_leased\",\"event_id\":\"forged\"}}\n";
+            std::fs::OpenOptions::new().append(true).open(&forged).unwrap().write_all(line.as_bytes()).unwrap();
+        }
+        assert!(read_events(&forged).iter().any(|e| e.event_id.as_deref() == Some("forged")), "the unverified reader is fooled — that is the point");
+        assert!(read_events_verified(&forged).is_err(), "the verified reader is not");
+        match DecisionLog::open(&forged).record_once(ev("forged")) {
+            RecordOutcome::Failed(_) => {}
+            other => panic!("a forged chain was treated as durable: {other:?}"),
+        }
+
+        // CONCURRENCY: many threads, many handles, one file, one id. Exactly one may write it.
+        let shared = dir.join("shared.jsonl");
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let already = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let (shared, written, already) = (shared.clone(), written.clone(), already.clone());
+                scope.spawn(move || {
+                    // A SEPARATE handle per thread: the lock cannot live inside one of them.
+                    let mut e = DecisionEvent::new("t", "pack_leased");
+                    e.event_id = Some("one-and-only".into());
+                    match DecisionLog::open(&shared).record_once(e) {
+                        RecordOutcome::Written => written.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                        RecordOutcome::AlreadyPresent => already.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                        other => panic!("unexpected outcome under contention: {other:?}"),
+                    };
+                });
+            }
+        });
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 1, "exactly one writer");
+        assert_eq!(already.load(std::sync::atomic::Ordering::SeqCst), 7, "the rest found it durable");
+        assert_eq!(verify_log(&shared), Ok(1), "and the chain still verifies");
+        assert_eq!(read_events_verified(&shared).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn appends_reads_and_verifies() {
         let path = scratch("ok");
         let log = DecisionLog::open(&path);

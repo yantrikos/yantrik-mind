@@ -1665,7 +1665,6 @@ mod tests {
         assert_eq!(got, vec!["A", "A", "C"]);
     }
 
-    #[test]
     /// Owned hardware gets room; the cloud keeps its budget.
     ///
     /// Measured 2026-08-14 on the local pool: a call costs a fixed 14–28 s, and `num_predict=100`

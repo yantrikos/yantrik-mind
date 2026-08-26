@@ -876,12 +876,15 @@ fn lease_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<mind_types::memory:
     })
 }
 
-/// Mounts this process attached and then could not detach or record — the fallback when even the
-/// quarantine write fails, so there is no durable row for the visibility gate to read. Process-local
-/// by necessity: the point is that the database could not be written to (Codex's review of P.4c).
-/// A restart clears it, and a restart also re-derives the truth from the engine's own mounts.
-static ORPHANED_MOUNTS: std::sync::Mutex<std::collections::BTreeSet<String>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// Mounts THIS actor attached and then could not detach or record — the fallback when even the
+/// quarantine write fails, so there is no durable row for the visibility gate to read.
+///
+/// Owned by the memory actor, one set per database. It began as a process-global static, which is
+/// wrong the moment two minds share a process: one actor's note would suppress a pack in another
+/// actor's database, and the other actor's visibility pass would clear a note that was never its
+/// own (Codex's review of P.4d). Deliberately not durable — the point is that the database could
+/// not be written to — and a restart re-derives the truth from the engine's own mounts.
+type OrphanedMounts = std::collections::BTreeSet<String>;
 
 /// The one place a pack is physically detached, so every path — release, expiry, the visibility
 /// gate, a compensating rollback — fails the same way when the engine will not let go.
@@ -890,18 +893,6 @@ fn detach_now(db: &YantrikDB, pack_id: &str) -> std::result::Result<(), String> 
         return Err("unmount failed (test seam)".into());
     }
     db.unmount_pack(pack_id).map(|_| ()).map_err(|e| e.to_string())
-}
-
-fn note_orphaned_mount(pack_id: &str) {
-    ORPHANED_MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).insert(pack_id.to_string());
-}
-
-fn orphaned_mounts() -> std::collections::BTreeSet<String> {
-    ORPHANED_MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-fn forget_orphaned_mount(pack_id: &str) {
-    ORPHANED_MOUNTS.lock().unwrap_or_else(|e| e.into_inner()).remove(pack_id);
 }
 
 fn list_leases(db: &YantrikDB) -> std::result::Result<Vec<mind_types::memory::PackLease>, String> {
@@ -1006,10 +997,34 @@ struct Claimant {
 }
 
 impl Claimant {
-    /// Is this the artifact the lease was granted over? Content and signer, not the file name — a
-    /// pack is its content, and a path is only where a copy of it happens to sit.
+    /// Is this the artifact the lease was granted over?
+    ///
+    /// Content and signer, never the file name — a pack is its content, and a path is only where a
+    /// copy of it happens to sit. And ABSENCE IS NEVER IDENTITY: comparing `Option`s made
+    /// `None == None` a match, so two packs whose manifests carry no digest at all — anything
+    /// sealed before the field existed — were "the same artifact" to every wall built on this, and
+    /// arbitrary content could be swapped under one `origin@version` (Codex's review of P.4d).
+    /// A digest that is missing or blank means the artifact cannot be identified, which is a
+    /// refusal, not a pass.
     fn is(&self, lease: &mind_types::memory::PackLease) -> bool {
-        self.digest == lease.content_digest && self.signer == lease.signer
+        match (self.digest.as_deref(), lease.content_digest.as_deref()) {
+            (Some(mine), Some(theirs)) if !mine.trim().is_empty() && mine == theirs => self.signer == lease.signer,
+            _ => false,
+        }
+    }
+}
+
+/// A pack may be LEASED only if its artifact can be identified. Everything the lease machinery
+/// promises — that what serves is what was granted, that a swap is caught, that a lease detaches
+/// only its own — rests on a digest, and none of it can be honoured without one. A pack with no
+/// verifiable digest can still be mounted or installed by hand; it cannot be borrowed.
+fn leasable_identity(entry: &mind_types::memory::PackCatalogEntry) -> std::result::Result<(), String> {
+    match entry.content_digest.as_deref() {
+        Some(d) if !d.trim().is_empty() => Ok(()),
+        _ => Err(format!(
+            "{} carries no content digest, so this host cannot tell it apart from any other pack with the same name — refusing to lease an artifact it cannot identify (`ym pack mount` still works)",
+            entry.pack_id
+        )),
     }
 }
 
@@ -1167,6 +1182,7 @@ fn unmount_for_lease(
 fn lease_pack(
     db: &YantrikDB,
     manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    orphans: &mut OrphanedMounts,
     library: Option<&std::path::Path>,
     pack_id: &str,
     days: u32,
@@ -1193,6 +1209,7 @@ fn lease_pack(
         .find(|e| e.pack_id == pack_id)
         .cloned()
         .ok_or_else(|| format!("no pack {pack_id} in the catalog — `ym pack library` lists what can be leased"))?;
+    leasable_identity(&entry)?;
     if let Some((a, b)) = divergent_artifacts(db, manifests, library, pack_id) {
         return Err(format!(
             "two artifacts claim {pack_id} with different digests or signers ({a} vs {b}) — refusing to lease an ambiguous artifact; remove one"
@@ -1325,7 +1342,7 @@ fn lease_pack(
                     // Nothing durable could be written at all, so the visibility gate has nothing
                     // to read. Remember it in this process instead: an attached pack with no lease
                     // behind it must not serve a turn just because the database is unwell.
-                    note_orphaned_mount(pack_id);
+                    orphans.insert(pack_id.to_string());
                 }
                 return Err(format!(
                     "could not record the lease: {e}; the pack could not be detached either ({u}) — {}",
@@ -1550,19 +1567,20 @@ impl LeaseVisibility {
 fn enforce_lease_visibility(
     db: &YantrikDB,
     manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    orphans: &mut OrphanedMounts,
     now_ms: i64,
 ) -> LeaseVisibility {
     use mind_types::memory::LeaseState;
     let mut vis = LeaseVisibility::default();
     // Mounts this process could not detach and could not record: nothing durable exists to read
     // them from, so they are carried here until a restart or a successful detach.
-    for pack_id in orphaned_mounts() {
-        if db.mounted_packs().iter().any(|p| p.pack_id == pack_id) {
-            vis.suppressed.insert(pack_id);
-        } else {
-            forget_orphaned_mount(&pack_id);
+    orphans.retain(|pack_id| {
+        let still_attached = db.mounted_packs().iter().any(|p| &p.pack_id == pack_id);
+        if still_attached {
+            vis.suppressed.insert(pack_id.clone());
         }
-    }
+        still_attached
+    });
     let leases = match list_leases(db) {
         Ok(l) => l,
         Err(e) => {
@@ -3315,6 +3333,8 @@ impl MemoryHandle {
                 // The coverage router's state: where the library is, and each pack's coverage
                 // phrases embedded once per content digest.
                 let mut pack_library: Option<std::path::PathBuf> = default_pack_library(&path);
+                // This actor's own orphan notes — never shared with another mind in the same process.
+                let mut orphaned_mounts: OrphanedMounts = Default::default();
                 let mut coverage_cache: std::collections::HashMap<String, Vec<Vec<f32>>> =
                     std::collections::HashMap::new();
                 // LEASE RECONCILIATION, before a single command is served (Codex's review of P.4).
@@ -3542,7 +3562,7 @@ impl MemoryHandle {
                             let _ = reply.send(seal_craft_pack(&db, &dest, &name, &version, &texts));
                         }
                         Cmd::MountedPacks { reply } => {
-                            let _ = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
+                            let _ = enforce_lease_visibility(&db, &mut pack_manifests, &mut orphaned_mounts, now_ms_i64());
                             let packs = db
                                 .mounted_packs()
                                 .into_iter()
@@ -3573,7 +3593,7 @@ impl MemoryHandle {
                             let _ = reply.send(Ok(packs));
                         }
                         Cmd::PackContext { reply } => {
-                            let vis = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
+                            let vis = enforce_lease_visibility(&db, &mut pack_manifests, &mut orphaned_mounts, now_ms_i64());
                             // The engine assembles this block over EVERYTHING mounted and the host
                             // cannot edit one pack out of it. So if a pack that must not serve is
                             // still attached, the whole block is withheld rather than carrying its
@@ -3587,13 +3607,13 @@ impl MemoryHandle {
                             let _ = reply.send(out);
                         }
                         Cmd::RecallFromPacks { query, top_k, reply } => {
-                            let vis = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
+                            let vis = enforce_lease_visibility(&db, &mut pack_manifests, &mut orphaned_mounts, now_ms_i64());
                             let r = recall_from_mounted_packs(&db, &mut pack_manifests, &query, top_k)
                                 .map(|hits| hits.into_iter().filter(|h| !vis.hides(&h.pack_id)).collect());
                             let _ = reply.send(r);
                         }
                         Cmd::ProbePacks { query, top_k, reply } => {
-                            let vis = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
+                            let vis = enforce_lease_visibility(&db, &mut pack_manifests, &mut orphaned_mounts, now_ms_i64());
                             let r = probe_mounted_packs(&db, &mut pack_manifests, &query, top_k)
                                 .map(|rows| rows.into_iter().filter(|r| !vis.hides(&r.pack_id)).collect());
                             let _ = reply.send(r);
@@ -3625,7 +3645,7 @@ impl MemoryHandle {
                             let _ = reply.send(r);
                         }
                         Cmd::LeasePack { pack_id, days, reason, granted_by, reply } => {
-                            let r = lease_pack(&db, &mut pack_manifests, pack_library.as_deref(), &pack_id, days, &reason, &granted_by);
+                            let r = lease_pack(&db, &mut pack_manifests, &mut orphaned_mounts, pack_library.as_deref(), &pack_id, days, &reason, &granted_by);
                             pack_manifests.clear();
                             let _ = reply.send(r);
                         }
@@ -3647,7 +3667,7 @@ impl MemoryHandle {
                             let _ = reply.send(Ok(()));
                         }
                         Cmd::AvailablePacks { reply } => {
-                            let _ = enforce_lease_visibility(&db, &mut pack_manifests, now_ms_i64());
+                            let _ = enforce_lease_visibility(&db, &mut pack_manifests, &mut orphaned_mounts, now_ms_i64());
                             let _ = reply.send(Ok(available_packs(&db, &mut pack_manifests, pack_library.as_deref())));
                         }
                         Cmd::RoutePacks { query, reply } => {
@@ -7454,10 +7474,13 @@ mod lane_experiment {
         let hits = mem.recall_from_packs(q, 4).await.unwrap();
         assert!(hits.is_empty(), "an unrecorded mount reached a turn: {hits:?}");
         assert!(mem.pack_context().await.unwrap().is_none());
-        // Detaching it by hand clears the suppression: the registry follows the engine, not the reverse.
+        // Detaching it by hand clears the suppression: the note follows the engine, not the reverse.
         mem.unmount_pack(&id).await.unwrap();
         assert!(mem.recall_from_packs(q, 4).await.unwrap().is_empty());
-        assert!(!orphaned_mounts().contains(&id), "the note is dropped once the pack is really gone");
+        // Re-mounting it now that no lease claims it: nothing suppresses it any more, because the
+        // actor's note was dropped when the pack really went away.
+        mem.mount_pack(lib.join("games.ydbpack").to_str().unwrap()).await.unwrap();
+        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "a stale note must not suppress a fresh mount forever");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7489,5 +7512,99 @@ mod lane_experiment {
         assert_eq!(l.pack_id, good);
         assert_eq!(mounted_ids(&mem).await, vec![good.clone()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.4e (Codex's review of P.4d): ONE MIND'S TROUBLE IS NOT ANOTHER'S. The orphan note began
+    /// as a process-global static keyed by pack id, so with two minds in one process — which is
+    /// exactly what a test binary is — actor A's note could suppress a pack in actor B's database,
+    /// and B's visibility pass could clear a note that was never its own. The state belongs to the
+    /// actor that owns the database.
+    #[tokio::test(flavor = "current_thread")]
+    async fn two_minds_in_one_process_do_not_share_each_others_orphaned_mounts() {
+        let _lease_tests = lease_test_lock();
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p4e_two_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let row = "Coyote time: allow the jump for 80 to 100 ms after leaving a ledge.";
+        let id = fixtures::seal_fixture_pack_full(lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &[row], Some(&["platformer feel"]), None, None).unwrap();
+        let q = "coyote time after leaving a ledge";
+
+        let a = MemoryHandle::spawn(":memory:", 64).unwrap();
+        let b = MemoryHandle::spawn(":memory:", 64).unwrap();
+        a.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+        b.set_pack_library(lib.to_str().unwrap()).await.unwrap();
+
+        // A ends up with an untracked mount it could neither record nor detach.
+        let err = {
+            let _seam = Seam::arm(SEAM_GRANT_TX | SEAM_UNMOUNT | SEAM_QUARANTINE_WRITE);
+            a.lease_pack(&id, 1, "everything fails", "operator").await.unwrap_err().to_string()
+        };
+        assert!(err.contains("suppressed for this process"), "{err}");
+        assert!(a.recall_from_packs(q, 4).await.unwrap().is_empty(), "A must not serve its orphan");
+
+        // B leases the same pack legitimately. Its turns are unaffected by A's trouble...
+        b.lease_pack(&id, 5, "a healthy lease in another mind", "operator").await.unwrap();
+        let hits = b.recall_from_packs(q, 4).await.unwrap();
+        assert!(!hits.is_empty(), "B's own healthy lease was suppressed by another mind's note: {hits:?}");
+        assert!(b.pack_context().await.unwrap().is_some(), "and B's prompt block is its own");
+
+        // ...and B's visibility pass must not have cleared A's note either.
+        assert!(a.recall_from_packs(q, 4).await.unwrap().is_empty(), "another mind's turn cleared A's suppression");
+        assert!(a.pack_context().await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.4e: ABSENCE IS NOT IDENTITY. A manifest with no content digest — anything sealed before
+    /// the field existed — made `None == None` an identity match, so arbitrary content could be
+    /// swapped under one `origin@version` and pass every wall built on it. Identity now requires a
+    /// real digest, and a pack that has none cannot be leased at all.
+    #[test]
+    fn a_pack_without_a_digest_is_never_identified_and_never_leased() {
+        use mind_types::memory::{LeaseState, PackCatalogEntry, PackLease};
+        let lease = |digest: Option<&str>, signer: Option<&str>| PackLease {
+            pack_id: "yantrik/legacy@0.1.0".into(),
+            path: "/lib/a.ydbpack".into(),
+            content_digest: digest.map(String::from),
+            signer: signer.map(String::from),
+            reason: "r".into(),
+            granted_by: "operator".into(),
+            granted_ms: 1,
+            expires_ms: i64::MAX,
+            mounted_by_lease: true,
+            state: LeaseState::Active,
+            note: None,
+        };
+        let claim = |path: &str, digest: Option<&str>, signer: Option<&str>| Claimant {
+            path: path.into(),
+            digest: digest.map(String::from),
+            signer: signer.map(String::from),
+        };
+        // TWO legacy artifacts, same id, both with digest and signer absent: not the same thing.
+        assert!(!claim("/lib/a.ydbpack", None, None).is(&lease(None, None)), "absence must never match absence");
+        assert!(!claim("/lib/b.ydbpack", None, None).is(&lease(None, None)), "not even a different file with the same nothing");
+        // A blank digest is absence wearing a string.
+        assert!(!claim("/lib/a.ydbpack", Some("   "), None).is(&lease(Some("   "), None)));
+        // A real digest identifies; a different one does not; a re-signature is a different identity.
+        assert!(claim("/lib/a.ydbpack", Some("blake3:aa"), None).is(&lease(Some("blake3:aa"), None)));
+        assert!(claim("/anywhere/else.ydbpack", Some("blake3:aa"), None).is(&lease(Some("blake3:aa"), None)), "content, not the path");
+        assert!(!claim("/lib/a.ydbpack", Some("blake3:bb"), None).is(&lease(Some("blake3:aa"), None)));
+        assert!(!claim("/lib/a.ydbpack", Some("blake3:aa"), Some("key")).is(&lease(Some("blake3:aa"), None)), "a re-signature is not the same grant");
+        // ...and the wall refuses the grant outright rather than leaving it to identity later.
+        let entry = |digest: Option<&str>| PackCatalogEntry {
+            pack_id: "yantrik/legacy@0.1.0".into(),
+            path: "/lib/a.ydbpack".into(),
+            content_digest: digest.map(String::from),
+            coverage: vec![],
+            floor: 0.55,
+            mounted: false,
+            signer: None,
+        };
+        let e = leasable_identity(&entry(None)).unwrap_err();
+        assert!(e.contains("no content digest") && e.contains("cannot identify"), "{e}");
+        assert!(leasable_identity(&entry(Some(""))).is_err());
+        assert!(leasable_identity(&entry(Some("  "))).is_err());
+        assert!(leasable_identity(&entry(Some("blake3:aa"))).is_ok(), "a real artifact is still leasable");
     }
 }

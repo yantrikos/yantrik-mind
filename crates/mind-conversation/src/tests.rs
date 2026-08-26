@@ -4242,7 +4242,7 @@ async fn a_malformed_call_is_refused_at_the_boundary_and_never_touches_the_tools
     // The two live shapes from the box, five times each, on both tools they hit — through the real
     // dispatch boundary and the real grading rule `guards::post` applies.
     let who = TurnIdentity::primary();
-    for args in [serde_json::json!({"name": 328, "target": 328}), serde_json::json!({"query": true})] {
+    for args in [serde_json::json!({"name": LEAK_SENTINEL, "target": LEAK_SENTINEL}), serde_json::json!({"query": true})] {
         for tool in ["run_skill", "discover_tools"] {
             for _ in 0..5 {
                 let obs = conv.run_agent_tool_as(tool, &args, &who).await;
@@ -4261,12 +4261,65 @@ async fn a_malformed_call_is_refused_at_the_boundary_and_never_touches_the_tools
     assert!(!after.iter().any(|(t, _, _)| t == "discover_tools"), "a tool that never ran must not appear on the record: {after:?}");
 }
 
+/// A value that cannot appear by chance in a millisecond timestamp.
+///
+/// The sentinel used to be `328`. The assertion below scans the WHOLE serialized event for it, and
+/// a 13-digit epoch has eleven 3-digit windows — so roughly one run in fifty, `ts_ms` or `event_id`
+/// contained "328" and this test failed for no reason at all. Reproduced: the failing event was
+/// `{"trace_id":"run-1787732858606","ts_ms":1787732858624,...}` — note the `328` inside both.
+///
+/// A flaky guard is worse than no guard: it teaches the next person to rerun until it passes, and
+/// this one is guarding a value LEAK. Ten digits that no clock will hold, so a hit means a hit.
+const LEAK_SENTINEL: i64 = 4242424242;
+
+/// The script carrying it. A literal because the loop runner takes `&'static str`; the test asserts
+/// the two agree rather than trusting that they do.
+const MALFORMED_ARGS_SCRIPT: &str =
+    r#"{"thought":"running it","tool":"run_skill","args":{"name":4242424242,"target":4242424242}}"#;
+
+#[test]
+fn the_leak_sentinel_cannot_be_manufactured_by_a_clock() {
+    // The value-leak assertion scans the WHOLE serialized event, timestamps included, so the
+    // sentinel must be a number no clock can produce. `328` was not: a 13-digit epoch has eleven
+    // 3-digit windows, so it turned up in `ts_ms` or `event_id` about one run in fifty and failed a
+    // test that was working perfectly. A flaky guard is worse than no guard — it teaches the next
+    // person to rerun until green, and this one guards a value LEAK.
+    let needle = LEAK_SENTINEL.to_string();
+    assert!(needle.len() >= 10, "a short digit run WILL appear in a timestamp: {needle}");
+
+    // Sweep a wide band of plausible epoch-millisecond values: two years either side of the
+    // timestamps in the failure, at a stride fine enough to cover every 3-digit window.
+    const BASE: i64 = 1_787_732_858_624;
+    const SPAN: i64 = 63_000_000_000; // ~2 years of milliseconds
+    let mut sentinel_hits = 0usize;
+    let mut control_hits = 0usize;
+    let mut t = BASE - SPAN;
+    while t < BASE + SPAN {
+        let stamp = t.to_string();
+        if stamp.contains(&needle) {
+            sentinel_hits += 1;
+        }
+        if stamp.contains("328") {
+            control_hits += 1;
+        }
+        t += 97_003; // a prime-ish stride, so the scan does not sample one residue class
+    }
+    // THE CONTROL. The old sentinel must be shown to collide, or this test proves nothing about
+    // the new one — an instrument that cannot fire is the same defect as a detector that cannot.
+    assert!(control_hits > 1000, "the old sentinel `328` must be shown to collide: {control_hits}");
+    assert_eq!(sentinel_hits, 0, "the sentinel must never appear in a timestamp: {sentinel_hits} hits");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() {
     // P.2d/P.2e (Codex's reviews): the boundary sits BEFORE guards::pre and before the prediction
     // event on the loop that actually runs, judges the NORMALIZED arguments, and holds a call to the
     // contract's required fields by name or handler alias. Each scripted run is a fresh engine,
     // because the loop ends after MAX_BARREN_STEPS malformed steps — which is itself the point.
+    assert!(
+        MALFORMED_ARGS_SCRIPT.contains(&LEAK_SENTINEL.to_string()),
+        "the script and the sentinel it is asserted about must carry the same value"
+    );
     let dir = std::env::temp_dir().join(format!("ym_p2d_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let run = |n: usize, script: Vec<&'static str>| {
@@ -4293,7 +4346,7 @@ async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() 
 
     // 1. The two live shapes from the box: wrong types, and nothing but null.
     let (ev, track) = run(1, vec![
-        r#"{"thought":"running it","tool":"run_skill","args":{"name":328,"target":328}}"#,
+        MALFORMED_ARGS_SCRIPT,
         r#"{"thought":"searching","tool":"discover_tools","args":{"query":null}}"#,
         r#"{"answer":"I could not run that."}"#,
     ])
@@ -4304,7 +4357,7 @@ async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() 
     assert!(m.iter().all(|e| e.lesson.as_deref().map_or(false, |l| l.contains("planner's failure"))), "{m:?}");
     for e in &ev {
         let s = serde_json::to_string(e).unwrap();
-        assert!(!s.contains("328"), "a value reached the record through some field: {s}");
+        assert!(!s.contains(&LEAK_SENTINEL.to_string()), "a value reached the record through some field: {s}");
     }
     assert!(!track.iter().any(|(t, _, _)| t == "run_skill" || t == "discover_tools"), "the bandit must not have been fed: {track:?}");
 

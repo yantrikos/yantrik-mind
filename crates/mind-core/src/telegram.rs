@@ -828,6 +828,48 @@ fn arch2_open_device_store() -> Option<Arc<mind_governance::devices::DeviceStore
     Some(Arc::new(store))
 }
 
+/// Every configurable listener and the port it will try, read from the same env vars the spawns do.
+///
+/// Exists because two of them silently shared a default. A collision is not a crash: one listener
+/// binds, the other prints a line to stderr that nobody reads, and the surface it was meant to
+/// serve answers as though its routes do not exist. That is indistinguishable from a missing
+/// feature, and it cost a reviewer a real investigation (E.SEC7).
+pub(crate) fn listener_plan() -> Vec<(&'static str, u16)> {
+    let port = |var: &str, default: u16| -> u16 {
+        std::env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    };
+    vec![
+        ("YM_CTL_PORT", port("YM_CTL_PORT", 8077)),
+        ("YM_CHAT_PORT", port("YM_CHAT_PORT", 8079)),
+        ("YM_FRAME_PORT", port("YM_FRAME_PORT", 8078)),
+        ("YM_WEB_PORT", port("YM_WEB_PORT", 8088)),
+    ]
+}
+
+/// Ports claimed by more than one listener, with the names that claim them.
+pub(crate) fn port_collisions(plan: &[(&'static str, u16)]) -> Vec<(u16, Vec<&'static str>)> {
+    let mut out: Vec<(u16, Vec<&'static str>)> = Vec::new();
+    for (name, port) in plan {
+        match out.iter_mut().find(|(p, _)| p == port) {
+            Some((_, names)) => names.push(name),
+            None => out.push((*port, vec![name])),
+        }
+    }
+    out.retain(|(_, names)| names.len() > 1);
+    out
+}
+
+/// Say so at startup, once, where an operator will actually see it.
+pub(crate) fn warn_on_port_collisions() {
+    for (port, names) in port_collisions(&listener_plan()) {
+        eprintln!(
+            "[ports] COLLISION on {port}: {} all want it. One will bind and the REST WILL NOT — \
+             their routes will answer as if they do not exist. Set one of those variables to a free port.",
+            names.join(", ")
+        );
+    }
+}
+
 fn spawn_control_server(
     conv: Arc<ConversationEngine>,
     devices: Arc<mind_governance::devices::DeviceStore>,
@@ -925,7 +967,12 @@ fn spawn_chat_server(
             return;
         }
     };
-    let port: u16 = std::env::var("YM_CHAT_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8078);
+    // 8079, NOT 8078. This defaulted to the same port as YM_FRAME_PORT, so two listeners raced for
+    // it and the winner was an accident of start order — on the box the frame server won, the chat
+    // server was disabled anyway, and `GET /status` answered 404 from a handler that has no such
+    // route. The frame keeps 8078 because it is the one actually serving traffic; moving a live URL
+    // to fix a latent collision would be the wrong trade (E.SEC7, found by Codex live-driving).
+    let port: u16 = std::env::var("YM_CHAT_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8079);
     std::thread::spawn(move || match std::net::TcpListener::bind((ip, port)) {
         Ok(listener) => {
             eprintln!("[chat] WireGuard chat endpoint on {ip}:{port} (member /chat only; expects Host {host}). NOTE: the firewall must restrict this port to wg0.");
@@ -944,7 +991,7 @@ fn spawn_chat_server(
                 });
             }
         }
-        Err(e) => eprintln!("[chat] could not bind {ip}:{port}: {e}"),
+        Err(e) => eprintln!("[chat] COULD NOT BIND {ip}:{port}: {e} — /chat and /status will answer as if they do not exist. Set YM_CHAT_PORT to a free port."),
     });
 }
 
@@ -1105,7 +1152,7 @@ fn spawn_frame_server(conv: Arc<ConversationEngine>, rt: tokio::runtime::Handle)
                 std::thread::spawn(move || frame_handle(stream, conv, rt, token));
             }
         }
-        Err(e) => eprintln!("[frame] could not bind 0.0.0.0:{port}: {e}"),
+        Err(e) => eprintln!("[frame] COULD NOT BIND 0.0.0.0:{port}: {e} — /frame will answer as if it does not exist. Set YM_FRAME_PORT to a free port."),
     });
 }
 
@@ -1190,6 +1237,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // against the device store (ARCH-2). Disable with YM_CTL=off.
     match &devices {
         Some(d) => {
+            warn_on_port_collisions();
             spawn_control_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
             // ARCH-2 WireGuard slice: the separate, member-only /chat listener for a paired phone over
             // WireGuard. Disabled unless YM_CHAT_BIND is set to the WG interface IP (fail-closed config).
@@ -2419,5 +2467,51 @@ mod tests {
         assert_eq!(code, 401, "a revoked device must be refused immediately");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// E.SEC7 — two listeners must never share a default port.
+#[cfg(test)]
+mod sec7_ports {
+    use super::{listener_plan, port_collisions};
+
+    #[test]
+    fn the_shipped_defaults_do_not_collide() {
+        // THE REGRESSION. YM_CHAT_PORT and YM_FRAME_PORT both defaulted to 8078, so which listener
+        // answered was an accident of start order. Codex found it by driving the box: GET /status
+        // returned 404 from the frame handler, which has no such route, while the source of the
+        // chat handler plainly serves it.
+        //
+        // Reads the real env, so a deployment that sets two variables to the same port fails here
+        // too rather than discovering it as a mystery 404 months later.
+        let plan = listener_plan();
+        let clashes = port_collisions(&plan);
+        assert!(
+            clashes.is_empty(),
+            "two listeners want the same port; one of them will silently not exist: {clashes:?} (plan: {plan:?})"
+        );
+    }
+
+    #[test]
+    fn a_collision_is_actually_detected() {
+        // The control: the check above is only meaningful if it CAN fire.
+        let clashing = vec![("A", 8078u16), ("B", 8078), ("C", 9000)];
+        let found = port_collisions(&clashing);
+        assert_eq!(found.len(), 1, "one clashing port");
+        assert_eq!(found[0].0, 8078);
+        assert_eq!(found[0].1, vec!["A", "B"], "and it names BOTH claimants, so the fix is obvious");
+
+        assert!(port_collisions(&[("A", 1u16), ("B", 2)]).is_empty(), "distinct ports are fine");
+        assert!(port_collisions(&[]).is_empty());
+    }
+
+    #[test]
+    fn every_configurable_listener_is_in_the_plan() {
+        // A plan that forgets a listener cannot detect its collisions. Pinned by name so adding a
+        // fifth server without adding it here fails.
+        let names: Vec<&str> = listener_plan().into_iter().map(|(n, _)| n).collect();
+        for expected in ["YM_CTL_PORT", "YM_CHAT_PORT", "YM_FRAME_PORT", "YM_WEB_PORT"] {
+            assert!(names.contains(&expected), "{expected} missing from the plan: {names:?}");
+        }
     }
 }

@@ -183,9 +183,134 @@ pub enum MinimizationRequest {
     NoPrivateFacts,
 }
 
+/// Phrases that ask for no concrete private detail at all.
+const NO_PRIVATE_FACTS: &[&str] = &[
+    "do not reveal", "don't reveal", "dont reveal",
+    "do not mention", "don't mention", "dont mention",
+    "do not name", "don't name", "dont name",
+    "do not share", "don't share", "dont share",
+    "do not disclose", "don't disclose", "dont disclose",
+    "without revealing", "without naming", "without mentioning", "without disclosing",
+    "without specifics", "no specifics", "no private", "nothing private",
+    "keep it general", "in general terms", "generic terms",
+];
+
+/// Phrases that ask only for no worked illustrations, which is weaker.
+const NO_EXAMPLES: &[&str] = &[
+    "without examples", "no examples", "without example",
+    "don't give examples", "do not give examples", "dont give examples",
+    "without illustrations", "no illustrations",
+];
+
+/// Openings that mean the user is asking ABOUT disclosure rather than instructing on it.
+///
+/// "how do I stop revealing private facts?" is a question about the topic. Treating it as an
+/// instruction would only cost specificity — the failure is one-directional — but answering a
+/// question about privacy with a deliberately vague answer is a bad product, so the obvious cases
+/// are excluded.
+const TOPIC_QUESTION: &[&str] = &[
+    "how do i", "how do you", "how does", "how would i", "how can i",
+    "why do", "why does", "what happens if", "what does it mean",
+    "explain how", "tell me how", "what is the difference",
+];
+
+/// What did the user ask for, about disclosure, in this turn?
+///
+/// DELIBERATELY LIBERAL. Because [`OutputPolicy::tighten`] can only ever narrow, a false positive
+/// costs a more generic answer and a false negative leaves the surface default — so when in doubt
+/// this tightens. That asymmetry is the entire licence for matching on text here, and it is why the
+/// phrase lists may be added to freely but the monotonicity invariant may not be relaxed (E.SEC8).
+pub fn detect_minimization(user_text: &str) -> MinimizationRequest {
+    let t = user_text.to_ascii_lowercase();
+    let asking_about_it = TOPIC_QUESTION.iter().any(|q| t.trim_start().starts_with(q));
+    if asking_about_it {
+        return MinimizationRequest::None;
+    }
+    if NO_PRIVATE_FACTS.iter().any(|m| t.contains(m)) {
+        return MinimizationRequest::NoPrivateFacts;
+    }
+    if NO_EXAMPLES.iter().any(|m| t.contains(m)) {
+        return MinimizationRequest::NoExamples;
+    }
+    MinimizationRequest::None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_instruction_to_minimize_is_recognised() {
+        // The live shape Codex probed with.
+        for text in [
+            "do not reveal private facts",
+            "summarize my posture but do not name current tasks",
+            "answer without naming anyone",
+            "keep it general please",
+            "give me the state in general terms",
+            "DO NOT MENTION any of my projects",
+        ] {
+            assert_eq!(
+                detect_minimization(text),
+                MinimizationRequest::NoPrivateFacts,
+                "should have tightened fully: {text:?}"
+            );
+        }
+
+        for text in ["answer without examples from my life", "no examples please", "without illustrations"] {
+            assert_eq!(detect_minimization(text), MinimizationRequest::NoExamples, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_question_about_disclosure_is_not_an_instruction_about_it() {
+        // Tightening here would only cost specificity — the failure is one-directional — but
+        // answering a question ABOUT privacy with a deliberately vague answer is a bad product.
+        for text in [
+            "how do i stop revealing private facts",
+            "how does the mind decide what to share",
+            "why do you not name people sometimes",
+            "explain how without naming works",
+            "what happens if i say do not reveal private facts",
+        ] {
+            assert_eq!(detect_minimization(text), MinimizationRequest::None, "topic question: {text:?}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_turn_is_left_alone() {
+        for text in [
+            "what is on my calendar tomorrow",
+            "run skill csv-sum",
+            "summarise the week",
+            "",
+        ] {
+            assert_eq!(detect_minimization(text), MinimizationRequest::None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_detector_can_only_ever_tighten_whatever_it_says() {
+        // THE LICENCE, restated as a property over the DETECTOR rather than over `tighten` alone:
+        // whatever this returns for any input, applying it never widens the policy. So the phrase
+        // lists can be wrong in either direction without opening anything.
+        let inputs = [
+            "do not reveal private facts",
+            "how do i stop revealing private facts",
+            "what is on my calendar",
+            "no private lane is configured on this box",
+            "",
+        ];
+        for scope in [OutputScope::OperatorPrivate, OutputScope::HouseholdMember, OutputScope::PublicShare] {
+            let base = OutputPolicy::for_scope(scope);
+            for text in inputs {
+                let after = base.tighten(detect_minimization(text));
+                assert!(!after.examples_allowed || base.examples_allowed);
+                assert!(after.max_evidence_items <= base.max_evidence_items);
+                assert!(after.entity_classes.iter().all(|c| base.entity_classes.contains(c)));
+            }
+        }
+    }
 
     #[test]
     fn tightening_can_never_widen() {

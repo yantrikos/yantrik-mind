@@ -5138,3 +5138,29 @@ async fn a_document_with_no_executor_at_all_is_refused_before_a_row_exists() {
     let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
     assert!(!rows.contains("test-market"), "and no row on the board for it: {rows}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delegation_named_after_a_skill_runs_the_skill_not_a_generic_job() {
+    // E.SK4. `delegate_cmd` parsed `<name>: <task>` and routed on the TASK alone, so the name was
+    // only a label: `delegate test-market: check WMT` started a generic research job and never
+    // opened the document the name refers to. Every prior test-market row on the live job board is
+    // that — a decent answer that owes nothing to the instructions it was meant to follow.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    mem.save_skill(banked("test-market", "md", "# Ticker Agent\nReport the move.")).await.unwrap();
+
+    // This engine has no executor at all, so the instruction runner refuses — and WHICH refusal
+    // comes back is the whole point: the skill was resolved rather than the task routed.
+    let out = conv.delegate_cmd("test-market: check WMT").await;
+    assert!(out.contains("recipe engine isn't configured"), "the name resolved to the banked skill: {out}");
+    assert!(!out.contains("on the board"), "and no generic job was started: {out}");
+
+    // A name that is NOT a banked skill must behave exactly as it did before.
+    let other = conv.delegate_cmd("quant-check: compare two quant levels").await;
+    assert!(!other.contains("recipe engine isn't configured"), "an ordinary delegation is untouched: {other}");
+
+    // Neither may leave a row for a job that never started.
+    let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
+    assert!(!rows.contains("test-market"), "no row for a job that never ran: {rows}");
+}

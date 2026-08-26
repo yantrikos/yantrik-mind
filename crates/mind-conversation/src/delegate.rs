@@ -885,6 +885,26 @@ impl super::ConversationEngine {
         let Some((name, task, _floor)) = parse_delegation(rest) else {
             return "Usage: `ym delegate <name>: <task>` (e.g. `ym delegate quant-check: compare DeepSeek IQ2 vs Q3 quality claims`).".to_string();
         };
+        // A DELEGATION NAMED AFTER A BANKED SKILL RUNS THAT SKILL, with the task as its input.
+        //
+        // Without this the name was only a label: `delegate test-market: check WMT` routed on the
+        // TASK alone, started a generic research job, and never opened the 6,149-byte document the
+        // name refers to. Every prior `test-market · research` row on the board is that — a decent
+        // answer that owes nothing to the instructions it was supposed to follow.
+        //
+        // EXACT match only. A fuzzy one would hijack delegations that merely resemble a skill name.
+        // Classification comes from the shared `classify_skill` and dispatches to the same three
+        // runners the phrase path and the tool arm use, so this adds a caller, not an executor
+        // (E.SK4).
+        if let Ok(Some(sk)) = self.memory.get_skill(&name).await {
+            return match crate::skills::classify_skill(&sk) {
+                crate::skills::SkillBody::Code { lang, source } => self.run_code_skill(&sk, lang, &source).await,
+                crate::skills::SkillBody::Instructions { text } => self.run_instruction_skill(&sk, &text, &task).await,
+                crate::skills::SkillBody::Capability { tool, spec } => {
+                    self.run_capability_skill(&sk, &tool, &spec, &task, "").await
+                }
+            };
+        }
         let kind = self.route(&task).await;
         // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
         let runnable = match kind {

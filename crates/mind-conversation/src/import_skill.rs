@@ -128,6 +128,21 @@ pub(crate) fn parse_schedule_line(v: &str) -> Option<(String, u8, u8, u8)> {
     }
 }
 
+/// The PROMPT an instruction document runs as, composed in ONE place.
+///
+/// Three executors now compose it: the standing schedule, the bare recipe, and the researcher.
+/// E.SK1 factored the recipe because two copies of it would drift; the prompt is the part that
+/// actually has to match, because it is what the model reads (E.SK3).
+pub(crate) fn instruction_prompt(instructions: &str, input: Option<&str>) -> String {
+    let mut prompt = format!(
+        "Follow these standing instructions exactly and produce the deliverable they describe:\n\n{instructions}"
+    );
+    if let Some(input) = input.map(str::trim).filter(|i| !i.is_empty()) {
+        prompt.push_str(&format!("\n\nInput for this run: {input}"));
+    }
+    prompt
+}
+
 /// The steps an instruction DOCUMENT runs as: follow the instructions, then deliver the result.
 ///
 /// ONE construction, used by both callers — `import_agent` for a standing schedule and `run_skill`
@@ -137,12 +152,15 @@ pub(crate) fn parse_schedule_line(v: &str) -> Option<(String, u8, u8, u8)> {
 /// `input` is the run's argument woven in where the instructions can see it. A standing order has
 /// none; an on-call run usually does (`run market-check: WMT`).
 pub(crate) fn instruction_steps(name: &str, instructions: &str, input: Option<&str>) -> Vec<RecipeStep> {
-    let mut prompt = format!(
-        "Follow these standing instructions exactly and produce the deliverable they describe:\n\n{instructions}"
-    );
-    if let Some(input) = input.map(str::trim).filter(|i| !i.is_empty()) {
-        prompt.push_str(&format!("\n\nInput for this run: {input}"));
-    }
+    instruction_steps_from_prompt(name, instruction_prompt(instructions, input))
+}
+
+/// The same steps from a prompt that is ALREADY composed.
+///
+/// The fallback executor has the prompt in hand and must not send it back through
+/// `instruction_prompt`, which would stack a second "Follow these standing instructions" preamble
+/// on top of the first.
+pub(crate) fn instruction_steps_from_prompt(name: &str, prompt: String) -> Vec<RecipeStep> {
     vec![
         RecipeStep::Think { prompt, store_as: "result".into(), on_error: ErrorAction::Fail, max_tokens: None, think: None },
         RecipeStep::Notify { message: format!("📥 [{name}] {{{{result}}}}") },

@@ -778,11 +778,14 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn run_instruction_skill(&self, sk: &mind_types::Skill, instructions: &str, target: &str) -> String {
-        let Some(recipes) = self.recipes.clone() else {
-            // The executor-presence rule `delegate_cmd` keeps: a ledger row for a job that cannot
-            // run is a lie on the board, so this is refused BEFORE a row exists.
+        // EITHER executor will do, but one of them must exist before a row is written -- the
+        // executor-presence rule `delegate_cmd` keeps: a ledger row for a job that cannot run is a
+        // lie on the board.
+        let researcher = self.researcher.clone();
+        let recipes = self.recipes.clone();
+        if researcher.is_none() && recipes.is_none() {
             return "(the recipe engine isn't configured on this box)".to_string();
-        };
+        }
         if !self.try_acquire_bg(3) {
             return "(the job board is full — a few jobs are already running; `ym jobs` to see them)".to_string();
         }
@@ -807,8 +810,7 @@ impl super::ConversationEngine {
         }
         let _ = self.memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
 
-        let steps = crate::import_skill::instruction_steps(&sk.name, instructions, Some(target));
-        let rec = Recipe { id: format!("skill:{}", sk.name), name: format!("run {}: {task}", sk.name), steps };
+        let prompt = crate::import_skill::instruction_prompt(instructions, Some(target));
         let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
         let (id2, name2, task2) = (id.clone(), sk.name.clone(), task.clone());
         let trace = format!("skill:{}:{}", sk.name, id);
@@ -816,21 +818,59 @@ impl super::ConversationEngine {
             // The flight trace first, so a run that dies still says what it was.
             scratch_note(&mem, &id2, &format!("trace: {trace}")).await;
             scratch_note(&mem, &id2, &format!("task: {task2}")).await;
-            scratch_note(&mem, &id2, "following banked instructions").await;
-            let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
-            let msg = if out.ok {
-                out.notifications
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| format!("📥 [{name2}] done."))
-            } else {
-                let why = out.error.clone().unwrap_or_else(|| "the instructions produced nothing".into());
-                scratch_note(&mem, &id2, &format!("failed: {why}")).await;
-                format!("📥 [{name2}] I couldn't finish it: {why}")
+            let (ok, msg) = match (researcher, recipes) {
+                // A document that says "use live data only" needs live data. E.SK1 ran documents
+                // through a bare `Think` step because the SCHEDULED path used one, and never asked
+                // whether that executor could do the work the documents describe -- so
+                // `test-market` ran, followed its instructions correctly, and reported that it
+                // could not comply. The research executor two feet away has the tools, and the
+                // same document through it returned real quotes (E.SK3).
+                (Some(r), _) => {
+                    scratch_note(&mem, &id2, "following banked instructions (research)").await;
+                    let res = r.run(&prompt).await;
+                    // Findings land in SCRATCH, not memory -- the promotion gate (`jobs keep`) is
+                    // the only door from a job's output into the mind's real memory.
+                    for u in res.sources.iter().take(10) {
+                        scratch_note(&mem, &id2, &format!("source: {u}")).await;
+                    }
+                    scratch_note(&mem, &id2, &res.answer).await;
+                    let mut m = format!("📥 [{name2}] {}", res.answer);
+                    if !res.sources.is_empty() {
+                        m.push_str("\n\nSources:\n");
+                        for u in res.sources.iter().take(6) {
+                            m.push_str(&format!("- {u}\n"));
+                        }
+                    }
+                    (!res.answer.trim().is_empty(), m)
+                }
+                // No researcher: the bare recipe, so a box without one keeps the executor it had.
+                (None, Some(recipes)) => {
+                    scratch_note(&mem, &id2, "following banked instructions").await;
+                    let steps = crate::import_skill::instruction_steps_from_prompt(&name2, prompt);
+                    let rec = Recipe { id: format!("skill:{name2}"), name: format!("run {name2}: {task2}"), steps };
+                    let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                    if out.ok {
+                        let m = out
+                            .notifications
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| format!("📥 [{name2}] done."));
+                        (true, m)
+                    } else {
+                        let why = out.error.clone().unwrap_or_else(|| "the instructions produced nothing".into());
+                        scratch_note(&mem, &id2, &format!("failed: {why}")).await;
+                        (false, format!("📥 [{name2}] I couldn't finish it: {why}"))
+                    }
+                }
+                // Refused before the row was written, above.
+                (None, None) => (false, format!("📥 [{name2}] no executor.")),
             };
-            // AFTER the run, and reporting what actually happened.
-            let _ = mem.record_skill_outcome(&name2, out.ok).await;
-            ledger_update(&mem, &id2, if out.ok { "done" } else { "failed" }, Some(msg.clone())).await;
+            // AFTER the run, and reporting what actually happened. NOTE: `ok` means the executor
+            // completed, not that the task was accomplished -- a document that correctly refuses
+            // still counts here. Named as a residual in E.SK3; separating them needs a judge on
+            // the deliverable.
+            let _ = mem.record_skill_outcome(&name2, ok).await;
+            ledger_update(&mem, &id2, if ok { "done" } else { "failed" }, Some(msg.clone())).await;
             q.lock().unwrap().push(msg);
             jobs.fetch_sub(1, Ordering::Relaxed);
         });

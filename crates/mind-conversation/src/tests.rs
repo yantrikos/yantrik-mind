@@ -5092,3 +5092,49 @@ async fn a_document_is_never_handed_to_an_interpreter_and_code_is_never_read_alo
     let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
     assert!(!rows.contains("test-market") && !rows.contains("csv-sum"), "no row for a job that never ran: {rows}");
 }
+
+#[test]
+fn the_instruction_prompt_is_composed_exactly_once() {
+    // E.SK3. Three executors compose this prompt now — the standing schedule, the bare recipe and
+    // the researcher — so the composition moved into `instruction_prompt`. The fallback executor
+    // holds an already-composed prompt, and my first draft of that branch handed it back to
+    // `instruction_steps`, which wrapped a SECOND "Follow these standing instructions" preamble
+    // around the first. The doubling is invisible in a diff and changes what the model reads.
+    use crate::import_skill::{instruction_prompt, instruction_steps, instruction_steps_from_prompt};
+    const PREAMBLE: &str = "Follow these standing instructions exactly";
+
+    let composed = instruction_prompt("Report the move.", Some("WMT"));
+    assert_eq!(composed.matches(PREAMBLE).count(), 1, "one preamble: {composed}");
+    assert!(composed.contains("Report the move."));
+    assert!(composed.contains("Input for this run: WMT"));
+
+    let prompt_of = |steps: &Vec<mind_recipes::RecipeStep>| match &steps[0] {
+        mind_recipes::RecipeStep::Think { prompt, .. } => prompt.clone(),
+        _ => panic!("the first step reads the instructions"),
+    };
+    // The from-prompt builder passes the prompt through UNTOUCHED.
+    assert_eq!(prompt_of(&instruction_steps_from_prompt("x", composed.clone())), composed);
+    // And the two builders agree, so no caller gets a different prompt than another.
+    assert_eq!(prompt_of(&instruction_steps("x", "Report the move.", Some("WMT"))), composed);
+
+    // The doubling this test exists to catch.
+    let doubled = prompt_of(&instruction_steps("x", &composed, None));
+    assert_eq!(doubled.matches(PREAMBLE).count(), 2, "guard is meaningful only if re-wrapping doubles");
+    assert_ne!(prompt_of(&instruction_steps_from_prompt("x", composed.clone())), doubled);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_document_with_no_executor_at_all_is_refused_before_a_row_exists() {
+    // E.SK3 widened the precondition from "a recipe engine" to "either executor", and the rule it
+    // must not lose is the one `delegate_cmd` keeps: a ledger row for a job that cannot run is a
+    // lie on the board. This engine has neither a researcher nor a recipe engine.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    mem.save_skill(banked("test-market", "md", "# Ticker Agent\nReport the move.")).await.unwrap();
+
+    let out = conv.handle_skills("run skill test-market: check WMT").await.expect("the phrase is handled");
+    assert!(out.contains("recipe engine isn't configured"), "no executor, no run: {out}");
+    let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
+    assert!(!rows.contains("test-market"), "and no row on the board for it: {rows}");
+}

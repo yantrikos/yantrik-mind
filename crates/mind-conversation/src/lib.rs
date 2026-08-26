@@ -7200,13 +7200,21 @@ impl ConversationEngine {
         self.run_agent_tool_as(tool, args, &TurnIdentity::primary()).await
     }
 
+    /// The argument boundary with the tool's CONTRACT — derived from the same catalog schemas the
+    /// model was shown (`tool_catalog::arg_contracts`), so what is enforced is what was advertised.
+    pub(crate) fn refuse_malformed(&self, tool: &str, args: &serde_json::Value) -> Option<String> {
+        let src = format!("{}\n{}", tool_catalog::CORE_HEAD, self.catalog_source());
+        let contracts = tool_catalog::arg_contracts(&src);
+        crate::tool_outcome::malformed_call(tool, args, contracts.get(tool))
+    }
+
     async fn run_agent_tool_as(&self, tool: &str, args: &serde_json::Value, id: &TurnIdentity) -> String {
         // THE ARGUMENT BOUNDARY (ARCH-6 P.2b). A call the model could not make properly is refused
         // here, named as the planner's failure, before any tool runs — so it can never be graded as
         // the tool's outcome. Every arm below reads its arguments as strings through `s`, which
         // turns a bare number into "" and lets the tool run on nothing and report "not found"; the
         // classifier then read that as Ok and credited the tool. Live, 2026-08-26, three times a turn.
-        if let Some(refused) = crate::tool_outcome::malformed_call(tool, args) {
+        if let Some(refused) = self.refuse_malformed(tool, args) {
             return refused;
         }
         let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -8502,6 +8510,21 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 break;
             }
             let raw_args = v.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            // THE ARGUMENT BOUNDARY, before egress and before any prediction (P.2d): a call the
+            // model could not make properly is nothing for the broker to inspect and nothing to
+            // predict. Recorded as its own outcome, excluded from the bandit, counted as a barren
+            // step so a loop that keeps doing it still ends.
+            if let Some(msg) = self.refuse_malformed(&tool, &raw_args) {
+                eprintln!("[agent] step {step}: {tool} -> {}", msg.chars().take(120).collect::<String>());
+                emit_detail(&format!("[malformed] {msg}"));
+                scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
+                self.record_tool_observation(&run_trace, None, &tool, &format!("{tool}:malformed"), crate::tool_outcome::Outcome::Malformed, &msg, 0.0);
+                barren += 1;
+                if barren >= MAX_BARREN_STEPS {
+                    break;
+                }
+                continue;
+            }
             let args = match guards::pre(self, &guard_state, id, user_text, &tool, raw_args, &format!("step {step}")).await {
                 guards::PreVerdict::Proceed(a) => a,
                 guards::PreVerdict::Refuse { kind: guards::RefusalKind::Unavailable, msg } => {

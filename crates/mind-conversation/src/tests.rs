@@ -4253,3 +4253,36 @@ async fn a_malformed_call_is_refused_at_the_boundary_and_never_touches_the_tools
     assert_eq!(still, healthy, "twenty malformed calls changed run_skill's record");
     assert!(!after.iter().any(|(t, _, _)| t == "discover_tools"), "a tool that never ran must not appear on the record: {after:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() {
+    // P.2d (Codex's review): the boundary sits BEFORE guards::pre and before the prediction event on
+    // the loop that actually runs. A scripted model emits the live shape; the recorder must show a
+    // malformed observation with NO prediction, and the bandit must not know the tool was named.
+    let dir = std::env::temp_dir().join(format!("ym_p2d_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("p2d.decisions.jsonl");
+    let _ = std::fs::remove_file(&log);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let script = vec![
+        r#"{"thought":"running it","tool":"run_skill","args":{"name":328,"target":328}}"#.to_string(),
+        r#"{"thought":"searching","tool":"discover_tools","args":{"query":null}}"#.to_string(),
+        r#"{"answer":"I could not run that."}"#.to_string(),
+    ];
+    let llm = Arc::new(mind_inference::SequencedLLM::new(script));
+    let pool = mind_inference::InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
+        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
+    let _ = conv.agent_loop_for_eval("run my csv skill", &TurnIdentity::primary()).await;
+
+    let events = conv.recorder().read_all();
+    let predicted = events.iter().filter(|e| e.kind == "tool_predicted").count();
+    let malformed: Vec<&mind_observability::DecisionEvent> = events.iter().filter(|e| e.kind == "tool_observed" && e.verdict.as_deref() == Some("malformed")).collect();
+    assert_eq!(predicted, 0, "a call that cannot be made is nothing to predict: {events:?}");
+    assert_eq!(malformed.len(), 2, "both malformed calls recorded as their own outcome: {events:?}");
+    assert!(malformed.iter().all(|e| e.lesson.as_deref().map_or(false, |l| l.contains("planner's failure"))), "{malformed:?}");
+    assert!(malformed.iter().all(|e| !e.outcome.as_deref().unwrap_or("").contains("328")), "no value in the record: {malformed:?}");
+    let track = mem.tool_track_record().await.unwrap();
+    assert!(!track.iter().any(|(t, _, _)| t == "run_skill" || t == "discover_tools"), "the bandit must not have been fed: {track:?}");
+    let _ = std::fs::remove_file(&log);
+}

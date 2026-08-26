@@ -132,7 +132,10 @@ pub(crate) async fn post(
     }
     // Only EXTERNAL tools feed the egress provenance: what came back from the outside world is
     // already outside.
-    if matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
+    // A malformed-call refusal is the runtime's own text, not something that came back from outside.
+    if outcome != crate::tool_outcome::Outcome::Malformed
+        && matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_)))
+    {
         s.external_obs.push_str(obs);
         s.external_obs.push('\n');
     }

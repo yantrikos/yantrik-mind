@@ -193,6 +193,35 @@ fn line_schemas(line: &str) -> Vec<Value> {
     line.split('·').filter_map(|piece| one_schema(piece)).collect()
 }
 
+/// The catalog args that legitimately carry a number or a boolean (`{"shares": 3}`, `{"act": true}`).
+/// Every other arg is free text: typed `string` in the native schema so the model cannot invent a
+/// shape (the Kyoto-latitude lesson below), and string-checked at the argument boundary
+/// (`tool_outcome::malformed_call`). ONE list, two consumers, so the schema the model is shown and
+/// the contract the runtime enforces can never disagree (ARCH-6 P.2d, Codex's review).
+pub(crate) const SCALAR_ARGS: &[&str] =
+    &["limit", "count", "n", "top_k", "shares", "quantity", "amount", "price", "days", "hours", "minutes", "sections", "year"];
+
+/// Per-tool scalar fields whose NAMES are free text elsewhere: `target` is a price for watch_price
+/// and a URL for run_skill, so a global name list cannot say it. Consulted with `SCALAR_ARGS`
+/// wherever a schema is built, so the model is shown the same typing the runtime enforces.
+pub(crate) const SCALAR_FIELDS_BY_TOOL: &[(&str, &[&str])] = &[
+    ("deals", &["budget", "max"]),
+    ("shop", &["budget", "max"]),
+    ("shopping", &["budget", "max"]),
+    ("find_deals", &["budget", "max"]),
+    ("deal", &["budget", "max"]),
+    ("watch_price", &["target", "budget"]),
+    ("track_price", &["target", "budget"]),
+    ("pricewatch", &["target", "budget"]),
+    ("watch_deal", &["target", "budget"]),
+    ("hunt", &["act"]),
+    ("scan_movers", &["act"]),
+];
+
+fn scalar_for(tool: &str, key: &str) -> bool {
+    SCALAR_ARGS.contains(&key) || SCALAR_FIELDS_BY_TOOL.iter().any(|(t, f)| *t == tool && f.contains(&key))
+}
+
 /// Parse a single "name {arg, arg2?}: description" fragment into a function schema. Returns None for
 /// header/rule lines (no lowercase tool name).
 fn one_schema(fragment: &str) -> Option<Value> {
@@ -217,8 +246,6 @@ fn one_schema(fragment: &str) -> Option<Value> {
     //
     // String is the right default because nearly every catalog arg is free text (query, place, url,
     // topic, text, to, symbol). The genuinely numeric names stay untyped so they are not forced.
-    const NUMERIC_ARGS: &[&str] =
-        &["limit", "count", "n", "top_k", "shares", "quantity", "amount", "price", "days", "hours", "minutes", "sections", "year"];
     let mut props = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
     if let (Some(a), Some(b)) = (body.find('{'), body.find('}')) {
@@ -233,7 +260,7 @@ fn one_schema(fragment: &str) -> Option<Value> {
                 if key.is_empty() {
                     continue;
                 }
-                let prop = if NUMERIC_ARGS.contains(&key) {
+                let prop = if scalar_for(name, key) {
                     json!({ "description": key })
                 } else {
                     json!({ "type": "string", "description": key })
@@ -277,7 +304,10 @@ fn arg_schema(name: &str, desc: &str, args: &[(&str, bool)]) -> Value {
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
     for (a, req) in args {
-        props.insert((*a).to_string(), json!({ "description": a }));
+        // Typed like the catalog lines (see `one_schema`): a core tool advertising an untyped
+        // `name` invited `{"name": 328}` — and the boundary must hold the model to what it was shown.
+        let prop = if scalar_for(name, a) { json!({ "description": a }) } else { json!({ "type": "string", "description": a }) };
+        props.insert((*a).to_string(), prop);
         if *req {
             required.push((*a).to_string());
         }
@@ -363,6 +393,56 @@ pub(crate) fn tool_schemas(user_text: &str, gated_src: &str) -> Vec<Value> {
         let name = s["function"]["name"].as_str().unwrap_or("").to_string();
         !name.is_empty() && seen.insert(name)
     });
+    out
+}
+
+/// What the runtime holds a tool call to: which args are required, which are free text (typed
+/// `string` in the schema the model saw) and which are declared scalars. Derived from the SAME
+/// schemas as the native tool-calling surface, so the contract enforced is the contract advertised.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ArgContract {
+    pub required: Vec<String>,
+    pub strings: Vec<String>,
+    pub scalars: Vec<String>,
+}
+
+fn contract_of(schema: &Value) -> Option<(String, ArgContract)> {
+    let name = schema["function"]["name"].as_str()?.to_string();
+    let params = &schema["function"]["parameters"];
+    let required: Vec<String> = params["required"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let (mut strings, mut scalars) = (Vec::new(), Vec::new());
+    if let Some(props) = params["properties"].as_object() {
+        for (k, p) in props {
+            if p["type"].as_str() == Some("string") {
+                strings.push(k.clone());
+            } else {
+                scalars.push(k.clone());
+            }
+        }
+    }
+    Some((name, ArgContract { required, strings, scalars }))
+}
+
+/// Every catalogued tool's contract: core + meta first, then each line of `src` — the FULL catalog,
+/// not the relevance-gated one, because a tool the model reached by name is still held to its
+/// contract. First wins on a name, matching `tool_schemas`.
+pub(crate) fn arg_contracts(src: &str) -> std::collections::HashMap<String, ArgContract> {
+    let mut out = std::collections::HashMap::new();
+    for s in core_meta_schemas() {
+        if let Some((n, c)) = contract_of(&s) {
+            out.entry(n).or_insert(c);
+        }
+    }
+    for line in src.lines() {
+        for s in line_schemas(line) {
+            if let Some((n, c)) = contract_of(&s) {
+                out.entry(n).or_insert(c);
+            }
+        }
+    }
     out
 }
 

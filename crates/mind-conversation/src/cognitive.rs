@@ -129,6 +129,19 @@ impl Bus for EngineBus {
         let trace = self.current_trace().unwrap_or_else(|| format!("toolcall-{}", mind_observability::now_ms()));
         let prior = self.empirical_prior(tool).await;
         let object_id = format!("{}:{}", tool, signature(tool, args));
+        // THE ARGUMENT BOUNDARY, before prediction and before egress (P.2d): a call the model could
+        // not make properly is nothing to predict and nothing for the broker to inspect.
+        if let Some(msg) = self.engine.refuse_malformed(tool, args) {
+            self.engine.recorder().record({
+                let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_observed");
+                e.object_id = Some(object_id);
+                e.outcome = Some(msg.chars().take(160).collect());
+                e.verdict = Some("malformed".into());
+                e.lesson = Some("malformed: excluded from reliability — the model's arguments did not fit the tool; the planner's failure, not the tool's".into());
+                e
+            });
+            anyhow::bail!("{msg}");
+        }
         let predicted = {
             let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_predicted");
             e.object_id = Some(object_id.clone());
@@ -198,7 +211,10 @@ impl Bus for EngineBus {
                     });
                 }
                 None => {
-                    e.lesson = Some(format!("{}: excluded from reliability (capability gap or gate)", verdict.badge()));
+                    e.lesson = Some(match verdict {
+                        crate::tool_outcome::Outcome::Malformed => "malformed: excluded from reliability — the model's arguments did not fit the tool; the planner's failure, not the tool's".to_string(),
+                        _ => format!("{}: excluded from reliability (capability gap or gate)", verdict.badge()),
+                    });
                 }
             }
             self.engine.recorder().record(e);

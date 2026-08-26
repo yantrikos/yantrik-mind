@@ -1249,3 +1249,18 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | OPERATIONAL CONSTRAINT, mine, learned the hard way | Canary seeding runs against a SCRATCH instance, never the live `mind.db`. Two reasons: seeded private-looking strings would be flagged by the E.SEC1b canonical audit forever after, polluting the very ledger this work protects; and a probe I ran this morning with read-only intent wrote a false success into the live skill ledger. A test that contaminates production evidence is not a test. |
 | Not claimed | That the model can be made to obey reliably by prompt assembly alone. The contract's value is that a violation becomes DETECTABLE and, on the surfaces that matter, BLOCKABLE — not that generation becomes trustworthy. |
 | Status | Pre-registered only. No code. Sequenced after the four decisions currently with Pranab. |
+
+
+## E.P7 - quarantine was one-way, and the evidence it rested on has been retracted - pre-registered
+
+*Taken under Pranab's grant to decide autonomously. ARCH-6 named skill rehabilitation as P.7 and E.P5a deliberately deferred it; E.P5c's reset turned it from a nicety into a correctness problem.*
+
+| Field | Entry |
+|---|---|
+| Quarantine is SELF-SEALING | `recall_skills` filters out quarantined skills (`mind-memory:3129`). A quarantined skill is therefore never selected, never accumulates judged evidence, and can never earn its way back. There is no rehabilitation path and never was — ARCH-5 recorded this as gap G.9 and nothing acted on it. |
+| Why that became urgent rather than untidy | E.P5c reset every `graded` to 0, because counts recorded while `successes` was still being read as the numerator were of mixed provenance. So the four quarantined skills are now condemned **on evidence that has been explicitly retracted**, with no mechanism to gather more. That is a permanent sentence passed by a metric we withdrew. |
+| And at least one sentence was OUR bug, not the skill's | `deal-tracker-page` reads 4 runs / 0 successes. It is a prose document, and until E.SK2 every run fed it to a PYTHON INTERPRETER, where it raised a SyntaxError and was recorded as a failure. Its "unreliability" was our defect. `headroom-check` (6/2) is the same story with a different mechanism: a JSON-encoded string that parsed as a bare Python literal, exited 0, and banked a phantom success. Keeping these quarantined preserves the consequences of bugs that have been fixed. |
+| The rule | Status FOLLOWS the verdict rather than latching. On each recorded outcome: `Discredited` → quarantined; `Active` → released to active; `Candidate` or `Untested` → status untouched. Quarantine stops being a mark and becomes a reading of current evidence. |
+| The one-time part | Skills quarantined while holding NO evidence (`status = quarantined AND graded = 0`) are released once, to **`candidate`** — not to active. They must re-earn. Stamped with `rehabilitated_ms` so the release is provenance rather than a silent state change, and gated on an `ALTER TABLE ADD COLUMN` that succeeds exactly once. |
+| KILL criteria | (1) The rule must still be able to CONDEMN: a skill with judged evidence below the line quarantines, or this is just an amnesty. (2) A rehabilitated skill must NOT arrive at `active` — it re-earns or it does not. (3) An `Untested` skill must never be promoted by this. (4) Rehabilitation must not fire twice. (5) No skill may be released while holding judged evidence against it — retracted evidence is the only ground. |
+| Not claimed | That any released skill is good. Only that a skill condemned by a withdrawn measurement, by a bug since fixed, and with no route to gather new evidence, is being punished for our mistakes rather than its own. |

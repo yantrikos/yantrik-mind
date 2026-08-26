@@ -2382,6 +2382,28 @@ fn ensure_skills_table(db: &YantrikDB) {
     {
         let _ = db.conn().execute("UPDATE mind_skills SET graded = 0", []);
     }
+    // E.P7, one-time. `recall_skills` filters out quarantined skills, so a quarantined skill is
+    // never selected, never gathers judged evidence, and can NEVER earn its way back — the sentence
+    // is self-sealing. E.P5c then retracted the evidence those sentences rested on by zeroing
+    // `graded`. Worse, some were our own bugs: `deal-tracker-page` failed four times because prose
+    // was being fed to a Python interpreter, and `headroom-check` banked a phantom success from a
+    // JSON string that parsed as a bare literal. Releasing to CANDIDATE, not active: they re-earn.
+    // Stamped, so the release is provenance rather than a silent state change.
+    if db
+        .conn()
+        .execute("ALTER TABLE mind_skills ADD COLUMN rehabilitated_ms INTEGER NOT NULL DEFAULT 0", [])
+        .is_ok()
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let _ = db.conn().execute(
+            "UPDATE mind_skills SET status = 'candidate', rehabilitated_ms = ?1 \
+             WHERE status = 'quarantined' AND graded = 0",
+            [now],
+        );
+    }
 }
 
 /// A knowledge pack's LOCAL track record (ARCH-6 P.2): the SQL witness beside the flight
@@ -3198,8 +3220,20 @@ fn record_skill_outcome(db: &YantrikDB, name: &str, outcome: mind_types::SkillOu
     let (graded, judged_ok): (i64, i64) = conn
         .query_row("SELECT graded, judged_ok FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(|e| e.to_string())?;
-    if mind_types::reliability::Reliability::new(graded.max(0) as u32, judged_ok.max(0) as u32).is_discredited() {
-        conn.execute("UPDATE mind_skills SET status='quarantined' WHERE name=?1", [name]).map_err(|e| e.to_string())?;
+    // Status FOLLOWS the verdict rather than latching. Quarantine used to be one-way, which meant a
+    // skill could be condemned and then had no route to gather the evidence that would clear it
+    // (E.P7). `Candidate` and `Untested` leave status alone: neither is grounds to promote or demote.
+    use mind_types::reliability::Verdict;
+    let verdict = mind_types::reliability::Reliability::new(graded.max(0) as u32, judged_ok.max(0) as u32).verdict();
+    match verdict {
+        Verdict::Discredited => {
+            conn.execute("UPDATE mind_skills SET status='quarantined' WHERE name=?1", [name]).map_err(|e| e.to_string())?;
+        }
+        Verdict::Active => {
+            conn.execute("UPDATE mind_skills SET status='active' WHERE name=?1 AND status='quarantined'", [name])
+                .map_err(|e| e.to_string())?;
+        }
+        Verdict::Candidate | Verdict::Untested => {}
     }
     Ok(())
 }
@@ -7879,5 +7913,82 @@ mod p5c_numerator {
         assert_eq!(s.judged_ok, 2, "two of them succeeded");
         assert_eq!(s.successes, 3, "the frozen column never moved");
         assert!((s.reliability().rate().unwrap() - 2.0 / 3.0).abs() < 1e-9);
+    }
+}
+
+/// E.P7 — quarantine follows the evidence instead of latching.
+#[cfg(test)]
+mod p7_rehabilitation {
+    use mind_types::{MemoryFacade, Skill, SkillOutcome};
+    use std::sync::Arc;
+
+    async fn bank(mem: &Arc<dyn MemoryFacade>, name: &str, status: &str) {
+        mem.save_skill(Skill {
+            name: name.into(), lang: "python".into(), code: "x".into(), summary: "x".into(),
+            tags: vec![], status: status.into(),
+            runs: 0, successes: 0, judged_ok: 0, graded: 0, created_ms: 0,
+        }).await.unwrap();
+    }
+
+    async fn status(mem: &Arc<dyn MemoryFacade>, name: &str) -> String {
+        mem.get_skill(name).await.unwrap().unwrap().status
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_rule_can_still_condemn() {
+        // KILL CRITERION 1. If this cannot quarantine, the rest is an amnesty rather than a rule.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "bad", "active").await;
+        for _ in 0..4 {
+            mem.record_skill_outcome("bad", SkillOutcome::judged(false)).await.unwrap();
+        }
+        assert_eq!(status(&mem, "bad").await, "quarantined", "4 judged failures must condemn");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_that_earns_its_way_back_is_released() {
+        // The path that did not exist: quarantine used to latch, so a condemned skill could never
+        // clear itself even when the evidence turned. Direct invocation is how it gathers evidence
+        // while `recall_skills` still excludes it.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "recovering", "quarantined").await;
+        for _ in 0..4 {
+            mem.record_skill_outcome("recovering", SkillOutcome::judged(true)).await.unwrap();
+        }
+        assert_eq!(status(&mem, "recovering").await, "active", "judged evidence clears the sentence");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn neither_untested_nor_candidate_moves_the_status() {
+        // KILL CRITERION 3. An unjudged run is not grounds to promote OR demote.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "quiet", "quarantined").await;
+        for _ in 0..6 {
+            mem.record_skill_outcome("quiet", SkillOutcome::ungraded()).await.unwrap();
+        }
+        assert_eq!(status(&mem, "quiet").await, "quarantined", "unjudged runs do not clear a sentence");
+
+        bank(&mem, "fresh", "active").await;
+        for _ in 0..3 {
+            mem.record_skill_outcome("fresh", SkillOutcome::judged(true)).await.unwrap();
+        }
+        assert_eq!(status(&mem, "fresh").await, "active", "3 judged runs is Candidate — status untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skill_holding_evidence_against_it_is_not_released() {
+        // KILL CRITERION 5. The one-time rehabilitation releases sentences resting on RETRACTED
+        // evidence. A skill that has been judged and failed keeps its sentence.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        bank(&mem, "deservedly", "active").await;
+        for _ in 0..5 {
+            mem.record_skill_outcome("deservedly", SkillOutcome::judged(false)).await.unwrap();
+        }
+        assert_eq!(status(&mem, "deservedly").await, "quarantined");
+        // Re-opening the store re-runs the migration block; the sentence must survive it, because
+        // this row HAS judged evidence (graded > 0) and so is not a retracted one.
+        let s = mem.get_skill("deservedly").await.unwrap().unwrap();
+        assert!(s.graded > 0, "it holds real evidence: {} graded", s.graded);
+        assert_eq!(s.judged_ok, 0);
     }
 }

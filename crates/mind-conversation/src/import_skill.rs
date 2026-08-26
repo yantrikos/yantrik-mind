@@ -128,6 +128,27 @@ pub(crate) fn parse_schedule_line(v: &str) -> Option<(String, u8, u8, u8)> {
     }
 }
 
+/// The steps an instruction DOCUMENT runs as: follow the instructions, then deliver the result.
+///
+/// ONE construction, used by both callers — `import_agent` for a standing schedule and `run_skill`
+/// for an on-call run. Two copies would drift, and the scheduled path is the one nobody watches
+/// (E.SK1).
+///
+/// `input` is the run's argument woven in where the instructions can see it. A standing order has
+/// none; an on-call run usually does (`run market-check: WMT`).
+pub(crate) fn instruction_steps(name: &str, instructions: &str, input: Option<&str>) -> Vec<RecipeStep> {
+    let mut prompt = format!(
+        "Follow these standing instructions exactly and produce the deliverable they describe:\n\n{instructions}"
+    );
+    if let Some(input) = input.map(str::trim).filter(|i| !i.is_empty()) {
+        prompt.push_str(&format!("\n\nInput for this run: {input}"));
+    }
+    vec![
+        RecipeStep::Think { prompt, store_as: "result".into(), on_error: ErrorAction::Fail, max_tokens: None, think: None },
+        RecipeStep::Notify { message: format!("📥 [{name}] {{{{result}}}}") },
+    ]
+}
+
 impl super::ConversationEngine {
     /// `ym import <document>` — the whole file rides as the verb's argument. Returns a receipt
     /// naming what was created and how to run/cancel it.
@@ -158,18 +179,10 @@ impl super::ConversationEngine {
                     name: format!("standing: {}", agent.name),
                     steps: vec![
                         RecipeStep::Schedule { every: every.clone(), weekday: wd, hour: h, minute: m },
-                        RecipeStep::Think {
-                            prompt: format!(
-                                "Follow these standing instructions exactly and produce the deliverable they describe:\n\n{}",
-                                agent.instructions
-                            ),
-                            store_as: "result".into(),
-                            on_error: ErrorAction::Fail,
-                            max_tokens: None,
-                            think: None,
-                        },
-                        RecipeStep::Notify { message: format!("📥 [{}] {{{{result}}}}", agent.name) },
-                    ],
+                    ]
+                    .into_iter()
+                    .chain(instruction_steps(&agent.name, &agent.instructions, None))
+                    .collect(),
                 };
                 let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
                 receipt.push_str(&match out.sleeping_until {

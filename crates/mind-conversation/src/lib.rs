@@ -7772,7 +7772,13 @@ impl ConversationEngine {
                 let spec: serde_json::Value = serde_json::from_str(&sk.code).unwrap_or_else(|_| serde_json::json!({}));
                 let tool_name = spec.get("tool").and_then(|x| x.as_str()).unwrap_or("");
                 if tool_name.is_empty() {
-                    return format!("(skill '{name}' has no runnable recipe spec yet — {})", sk.summary);
+                    // AN INSTRUCTION DOCUMENT. `import_agent` banks the markdown itself as `code`,
+                    // so every imported document used to die on the refusal that stood here and the
+                    // model improvised instead. It runs now — as the same recipe the standing
+                    // schedule uses, in the BACKGROUND (a research document takes minutes and a
+                    // tool call must not hold the turn open), and on the job board so it is
+                    // watchable rather than silent (E.SK1).
+                    return self.run_instruction_skill(&sk, &s("target")).await;
                 }
                 let var = spec.get("var").and_then(|x| x.as_str()).unwrap_or("out").to_string();
                 let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&sk.name).to_string();
@@ -7793,8 +7799,12 @@ impl ConversationEngine {
                         RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
                     ],
                 };
-                let _ = self.memory.record_skill_outcome(&sk.name, true).await;
+                // The outcome is recorded AFTER the run and reports what happened. This used to
+                // credit success before `run_with` was called, so a skill that failed every time
+                // still read as perfectly reliable in the ledger skill selection consults — the
+                // same shape as E.PK2b, crediting an outcome nobody observed (E.SK1).
                 let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                let _ = self.memory.record_skill_outcome(&sk.name, out.ok).await;
                 if out.sleeping_until.is_some() {
                     format!("Running skill '{}' — watching {label} for \"{target}\".", sk.name)
                 } else if !out.notifications.is_empty() {

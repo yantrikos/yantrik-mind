@@ -719,6 +719,79 @@ impl super::ConversationEngine {
     }
 
     /// `ym delegate <name>: <task>` — ledger row + background execution + chat delivery.
+    /// Run a banked INSTRUCTION DOCUMENT — a skill whose `code` is prose, not a capability spec.
+    ///
+    /// Lives here rather than in the dispatch because everything it needs is the delegation
+    /// machinery: the job-board slot, the ledger row the cockpit renders, the scratch notes that
+    /// make a long run watchable, and the notify queue. A document run IS a delegation; the only
+    /// difference is that the instructions were banked earlier instead of typed now (E.SK1).
+    ///
+    /// Returns a RECEIPT immediately. A research document takes minutes and a tool call must not
+    /// hold the turn open while it thinks.
+    pub(crate) async fn run_instruction_skill(&self, sk: &mind_types::Skill, target: &str) -> String {
+        let Some(recipes) = self.recipes.clone() else {
+            // The executor-presence rule `delegate_cmd` keeps: a ledger row for a job that cannot
+            // run is a lie on the board, so this is refused BEFORE a row exists.
+            return "(the recipe engine isn't configured on this box)".to_string();
+        };
+        if !self.try_acquire_bg(3) {
+            return "(the job board is full — a few jobs are already running; `ym jobs` to see them)".to_string();
+        }
+        let id = format!("{:x}", chrono::Utc::now().timestamp_millis() & 0xffffff);
+        let now = chrono::Utc::now().timestamp_millis();
+        let task = if target.trim().is_empty() { sk.summary.clone() } else { target.trim().to_string() };
+        let mut rows: Vec<serde_json::Value> = self
+            .memory
+            .profile_get(LEDGER_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        rows.push(serde_json::json!({
+            "id": id, "name": sk.name, "task": task, "kind": "skill",
+            "status": "running", "started_ms": now,
+        }));
+        if rows.len() > LEDGER_CAP {
+            let cut = rows.len() - LEDGER_CAP;
+            rows.drain(..cut);
+        }
+        let _ = self.memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
+
+        let steps = crate::import_skill::instruction_steps(&sk.name, &sk.code, Some(target));
+        let rec = Recipe { id: format!("skill:{}", sk.name), name: format!("run {}: {task}", sk.name), steps };
+        let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
+        let (id2, name2, task2) = (id.clone(), sk.name.clone(), task.clone());
+        let trace = format!("skill:{}:{}", sk.name, id);
+        tokio::spawn(async move {
+            // The flight trace first, so a run that dies still says what it was.
+            scratch_note(&mem, &id2, &format!("trace: {trace}")).await;
+            scratch_note(&mem, &id2, &format!("task: {task2}")).await;
+            scratch_note(&mem, &id2, "following banked instructions").await;
+            let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+            let msg = if out.ok {
+                out.notifications
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| format!("📥 [{name2}] done."))
+            } else {
+                let why = out.error.clone().unwrap_or_else(|| "the instructions produced nothing".into());
+                scratch_note(&mem, &id2, &format!("failed: {why}")).await;
+                format!("📥 [{name2}] I couldn't finish it: {why}")
+            };
+            // AFTER the run, and reporting what actually happened.
+            let _ = mem.record_skill_outcome(&name2, out.ok).await;
+            ledger_update(&mem, &id2, if out.ok { "done" } else { "failed" }, Some(msg.clone())).await;
+            q.lock().unwrap().push(msg);
+            jobs.fetch_sub(1, Ordering::Relaxed);
+        });
+        format!(
+            "📥 Running \"{}\" on the board (job {id}) — {}. I'll bring back the deliverable; `ym jobs` shows it working.",
+            sk.name,
+            if target.trim().is_empty() { sk.summary.clone() } else { format!("input: {}", target.trim()) }
+        )
+    }
+
     pub async fn delegate_cmd(&self, rest: &str) -> String {
         let Some((name, task, _floor)) = parse_delegation(rest) else {
             return "Usage: `ym delegate <name>: <task>` (e.g. `ym delegate quant-check: compare DeepSeek IQ2 vs Q3 quality claims`).".to_string();

@@ -4912,3 +4912,68 @@ fn wake_conditions_use_the_wire_names_the_client_reads() {
     assert_eq!(j(&W::StateChangeOf("inbox".into())), serde_json::json!({ "state_change_of": "inbox" }));
     assert_eq!(j(&W::SourceFresh("imap/inbox".into())), serde_json::json!({ "source_fresh": "imap/inbox" }));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instruction_document_runs_instead_of_being_refused() {
+    // E.SK1. `import_agent` banks a markdown document AS the skill's code, and `run_skill` used to
+    // parse code as a JSON capability spec and refuse anything without a `tool` key — so every
+    // imported document was a note the mind could name and would not execute.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("the deliverable")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+
+    // A banked instruction document: prose, not a spec.
+    mem.save_skill(mind_types::Skill {
+        name: "market-check".into(),
+        lang: "markdown".into(),
+        code: "Look up the ticker. Report the move and one sentence on why.".into(),
+        summary: "check a ticker and report".into(),
+        tags: vec!["research".into()],
+        status: "active".into(),
+        runs: 0,
+        successes: 0,
+        created_ms: 0,
+    })
+    .await
+    .unwrap();
+
+    let out = conv.run_agent_tool_as("run_skill", &serde_json::json!({ "name": "market-check", "target": "WMT" }), &TurnIdentity::primary()).await;
+    // No recipe engine is configured on this bare engine, so it refuses BEFORE writing a row —
+    // the executor-presence rule. What matters is that it is no longer the "no runnable recipe
+    // spec" refusal: the document is recognised as runnable.
+    assert!(!out.contains("no runnable recipe spec"), "an instruction document must not be refused as unrunnable: {out}");
+    // The arm's own engine check fires before the branch is reached, which is the same rule stated
+    // once earlier: a job that cannot run is refused BEFORE a ledger row exists.
+    assert!(out.contains("engine unavailable"), "no engine, no run: {out}");
+    let rows = mem.profile_get("delegations").await.unwrap_or(None).unwrap_or_default();
+    assert!(!rows.contains("market-check"), "no row may exist for a job that never started: {rows}");
+}
+
+#[test]
+fn one_instruction_recipe_serves_both_callers() {
+    // E.SK1: the standing schedule and the on-call run must build the SAME steps. Two copies would
+    // drift, and the scheduled path is the one nobody watches.
+    use crate::import_skill::instruction_steps;
+    let scheduled = instruction_steps("weekly-brief", "Summarise the week.", None);
+    let on_call = instruction_steps("weekly-brief", "Summarise the week.", Some("focus on retail"));
+
+    for steps in [&scheduled, &on_call] {
+        assert_eq!(steps.len(), 2, "follow the instructions, then deliver");
+        assert!(matches!(steps[0], crate::RecipeStep::Think { .. }));
+        assert!(matches!(steps[1], crate::RecipeStep::Notify { .. }));
+    }
+    let prompt_of = |steps: &Vec<crate::RecipeStep>| match &steps[0] {
+        crate::RecipeStep::Think { prompt, store_as, .. } => {
+            assert_eq!(store_as, "result", "the Notify step reads {{{{result}}}}");
+            prompt.clone()
+        }
+        _ => unreachable!(),
+    };
+    let (a, b) = (prompt_of(&scheduled), prompt_of(&on_call));
+    assert!(a.contains("Summarise the week."), "the instructions are the prompt: {a}");
+    assert!(!a.contains("Input for this run"), "a standing order has no input: {a}");
+    assert!(b.contains("Input for this run: focus on retail"), "an on-call run weaves its input in: {b}");
+    assert!(b.starts_with(&a), "the on-call prompt is the standing one plus the input, not a rewrite");
+    // Blank input is no input, not an empty line pretending to be one.
+    assert_eq!(prompt_of(&instruction_steps("x", "Do it.", Some("   "))), prompt_of(&instruction_steps("x", "Do it.", None)));
+}

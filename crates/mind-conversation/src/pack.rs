@@ -35,7 +35,12 @@ pub struct PackSkillDoc {
 pub enum PackEval {
     /// The named pack skill is present in the bank.
     SkillExists { name: String },
-    /// The named pack skill has earned reliability: >= min_runs recorded runs at >= min_rate success.
+    /// The named pack skill has earned reliability: >= min_runs JUDGED runs at >= min_rate success.
+    ///
+    /// `min_runs` counts runs somebody actually assessed, not attempts. Reading raw attempts made
+    /// this certify a legacy row whose old counts looked healthy but whose outcomes were never
+    /// judged, and reject a skill with ten clean unassessed runs because `successes/runs` read as
+    /// zero (E.SEC6, found by Codex).
     SkillReliable {
         name: String,
         #[serde(default = "d_min_runs")]
@@ -277,10 +282,10 @@ impl ConversationEngine {
                 PackEval::SkillReliable { name, min_runs, min_rate } => {
                     let bank = resolve(name);
                     let ok = match self.memory.get_skill(&bank).await {
-                        Ok(Some(s)) => s.runs >= *min_runs as u64 && s.runs > 0 && (s.successes as f32 / s.runs as f32) >= *min_rate,
+                        Ok(Some(s)) => skill_reliable(&s, *min_runs, *min_rate),
                         _ => false,
                     };
-                    (ok, format!("skill_reliable({bank}, ≥{min_runs} runs @ ≥{:.0}%)", min_rate * 100.0))
+                    (ok, format!("skill_reliable({bank}, ≥{min_runs} judged runs @ ≥{:.0}%)", min_rate * 100.0))
                 }
                 PackEval::ToolContains { tool, args, expect } => {
                     let out = self.run_agent_tool(tool, args).await;
@@ -613,6 +618,25 @@ fn floor_in_force(declared: Option<f64>) -> String {
         Some(d) => format!("{eff:.2} (host wall; the pack declared {d:.2}, which cannot lower it)"),
         None => format!("{eff:.2} (host wall; the pack declares none)"),
     }
+}
+
+/// Has this skill earned certification — over runs somebody actually JUDGED?
+///
+/// A pure function so it can be tested without a store, and so there is ONE place the rule lives.
+/// It used to be written inline as `s.runs >= min_runs && s.successes / s.runs >= min_rate`, which
+/// bypassed the E.P5b split in both directions (found by Codex, E.SEC6):
+///
+///   * a LEGACY row (`graded = 0`) whose old conflated counts looked healthy would CERTIFY, even
+///     though nothing about it had ever been assessed;
+///   * a skill with ten clean but unassessed runs would be REJECTED, because `successes / runs`
+///     reads as zero when the numerator counts judged successes and the denominator counts
+///     attempts.
+///
+/// No evidence means NOT YET CERTIFIABLE — which is not the same as discredited, and is why this
+/// asks `rate()` for an `Option` rather than defaulting.
+pub(crate) fn skill_reliable(s: &mind_types::Skill, min_runs: u32, min_rate: f32) -> bool {
+    let r = s.reliability();
+    r.runs() >= min_runs && r.rate().is_some_and(|rate| rate as f32 >= min_rate)
 }
 
 impl super::ConversationEngine {
@@ -1030,4 +1054,59 @@ fn iso_utc(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .map(|d| d.format("%Y-%m-%d %H:%MZ").to_string())
         .unwrap_or_else(|| format!("{ms} ms"))
+}
+
+/// E.SEC6 — Codex's certification tests. Pack certification must read the GRADED denominator.
+#[cfg(test)]
+mod sec6_certification {
+    use super::skill_reliable;
+
+    fn skill(runs: u64, successes: u64, graded: u64) -> mind_types::Skill {
+        mind_types::Skill {
+            name: "s".into(),
+            lang: "md".into(),
+            code: "x".into(),
+            summary: "x".into(),
+            tags: vec![],
+            status: "active".into(),
+            runs,
+            successes,
+            graded,
+            created_ms: 0,
+        }
+    }
+
+    #[test]
+    fn ten_unassessed_runs_cannot_certify() {
+        // Ten clean executions that nobody judged. The old inline rule read
+        // `successes / runs` = 0/10 and REJECTED it, which is just as wrong as certifying it:
+        // there is no evidence either way, and "no evidence" is not "failed".
+        let s = skill(10, 0, 0);
+        assert!(!skill_reliable(&s, 4, 0.5), "no judged runs, nothing to certify on");
+        assert_eq!(s.reliability().rate(), None, "and no rate exists to be read as zero");
+    }
+
+    #[test]
+    fn a_legacy_row_whose_old_counts_look_healthy_cannot_certify() {
+        // THE DANGEROUS DIRECTION. Before E.P5b, `successes` conflated "the executor finished" with
+        // "the task got done". A legacy row of 10 runs / 9 successes reads as 90% to the old rule
+        // and would CERTIFY a pack on evidence that never existed. graded = 0 says so.
+        let s = skill(10, 9, 0);
+        assert!(!skill_reliable(&s, 4, 0.5), "conflated history is not evidence");
+    }
+
+    #[test]
+    fn judged_successes_certify() {
+        assert!(skill_reliable(&skill(6, 5, 6), 4, 0.5), "5 of 6 judged is comfortably over the line");
+        assert!(skill_reliable(&skill(4, 2, 4), 4, 0.5), "exactly the floor, exactly at the rate");
+        // Attempts beyond the judged ones neither help nor hurt.
+        assert!(skill_reliable(&skill(50, 5, 6), 4, 0.5), "44 unassessed attempts change nothing");
+    }
+
+    #[test]
+    fn judged_failures_fail_and_too_few_judged_runs_fail() {
+        assert!(!skill_reliable(&skill(6, 1, 6), 4, 0.5), "1 of 6 judged is below the rate");
+        assert!(!skill_reliable(&skill(3, 3, 3), 4, 0.5), "3 judged runs is below the floor, however good");
+        assert!(!skill_reliable(&skill(0, 0, 0), 4, 0.5), "nothing at all cannot certify");
+    }
 }

@@ -143,13 +143,8 @@ mod tests {
                 // either; whitespace is then removed entirely, which is what makes the match
                 // wrapping-proof. `chat_grounded(`/`chat_scoped(` do not match: the character after
                 // `chat` is `_`, not `(`.
-                let decommented = body
-                    .lines()
-                    .map(|l| l.split("//").next().unwrap_or(""))
-                    .collect::<Vec<_>>()
-                    .join("
-");
-                let squashed: String = decommented.chars().filter(|c| !c.is_whitespace()).collect();
+                let squashed: String =
+                    crate::source_audit::strip_comments(&body).chars().filter(|c| !c.is_whitespace()).collect();
                 if squashed.contains("inference.chat(") {
                     // Report every `.chat(` in the file: the exact line of a wrapped call is
                     // ambiguous, and naming the candidates is more useful than guessing one.
@@ -203,9 +198,7 @@ mod sec2 {
     }
 
     fn squash(body: &str) -> String {
-        let decommented = body.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("
-");
-        decommented.chars().filter(|c| !c.is_whitespace()).collect()
+        crate::source_audit::strip_comments(body).chars().filter(|c| !c.is_whitespace()).collect()
     }
 
     /// A pending entry that no longer has an unscoped call must be REMOVED, not left standing.
@@ -273,7 +266,13 @@ mod sec2 {
         let commented = "let x = self
     .inference // note
     .chat(messages, cfg);";
-        assert!(squash(commented).contains("inference.chat("), "a comment must not switch the guard off");
+        assert!(squash(commented).contains("inference.chat("), "a line comment must not switch the guard off");
+        // Codex's note: a matcher that only understands `//` can be hidden from by a BLOCK comment.
+        let blocked = "let x = self.inference /* sneaky */ .chat(messages, cfg);";
+        assert!(squash(blocked).contains("inference.chat("), "nor a block comment");
+        let blocked_multi = "let x = self.inference /* one
+   two */ .chat(messages, cfg);";
+        assert!(squash(blocked_multi).contains("inference.chat("), "nor a multi-line block comment");
         // And the grounded forms must NOT match, or everything is an offender.
         assert!(!squash("self.inference.chat_grounded(m, c)").contains("inference.chat("));
         assert!(!squash("self.inference

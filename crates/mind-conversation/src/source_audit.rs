@@ -28,7 +28,52 @@
 ///
 /// Empty, and it should stay that way. An entry here is a claim that the transform is
 /// length-preserving for every input the function can receive — state why.
+///
+/// Keyed by CRATE-RELATIVE PATH even while empty. `privacy_audit` was keyed by basename and a
+/// single `lib.rs` entry silenced three crates' worth of files; an empty list keyed the same way
+/// is not a bug today and is a bug the first time someone adds a row (E.SEC6, Codex's note).
 const ALLOWED: &[(&str, &str)] = &[];
+
+/// Remove `/* block */` and `// line` comments, replacing each with a single space.
+///
+/// A space, not nothing: deleting a comment outright would glue the tokens on either side of it
+/// into one, which invents matches. Both audits use this, because both squash whitespace before
+/// matching and a comment left in place splits the very pattern they look for — Codex's note that
+/// `inference /* c */ .chat(...)` could hide from a matcher that only understood `//` (E.SEC6).
+#[cfg(test)]
+pub(crate) fn strip_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let (mut i, mut in_block, mut in_line) = (0usize, false, false);
+    while i < b.len() {
+        if in_block {
+            if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                in_block = false;
+                out.push(' ');
+                i += 2;
+                continue;
+            }
+        } else if in_line {
+            if b[i] == b'\n' {
+                in_line = false;
+                out.push('\n');
+            }
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            in_block = true;
+            i += 2;
+            continue;
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            in_line = true;
+            out.push(' ');
+            i += 2;
+            continue;
+        } else {
+            out.push(b[i] as char);
+        }
+        i += 1;
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -84,7 +129,7 @@ mod tests {
     /// whitespace collapsed, and the space rustfmt inserts before a wrapped `.method()` removed, so
     /// a chain reads as one statement whatever shape it was formatted into (E.SEC5).
     fn statements(lines: &[&str]) -> Vec<String> {
-        let joined = lines.iter().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join(" ");
+        let joined = super::strip_comments(&lines.join("\n")).replace('\n', " ");
         let mut flat = String::with_capacity(joined.len());
         let mut prev_space = false;
         for c in joined.chars() {
@@ -185,7 +230,11 @@ mod tests {
         rs_files(&crates_dir(), &mut files);
 
         for f in files {
-            let name = f.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+            // CRATE-RELATIVE, never a basename — see ALLOWED's own note.
+            let name = f
+                .strip_prefix(crates_dir())
+                .map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                .unwrap_or_else(|_| f.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string());
             if ALLOWED.iter().any(|(a, _)| *a == name) {
                 continue;
             }

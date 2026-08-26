@@ -554,6 +554,34 @@ pub(crate) fn split_reasoning(text: &str) -> (String, String) {
                 None => break, // a bare mention mid-sentence — leave the text alone
             }
         }
+        // DANGLING CLOSE: a close tag with NO opener. Providers strip the opening tag, or the model
+        // begins mid-thought, so the reply arrives as draft, newline, close-tag, then the answer.
+        // The loop above looks for the OPEN tag first and breaks when it finds none, so it shipped
+        // the draft AND the answer with a stray tag between them — the cockpit showed the same
+        // sentence twice.
+        //
+        // The old `text.rsplit` idiom got this case right by construction. The rewrite fixed the
+        // two holes it was looking for and opened one it was not, which is the error this file
+        // keeps repeating: fixing the spellings you thought of and calling it coverage. Observed
+        // live on the main turn, 2026-08-26.
+        //
+        // Same boundary discipline as an opener — the close must own its line — so prose that
+        // merely MENTIONS the tag mid-sentence is still left alone.
+        let lower = out.to_ascii_lowercase();
+        if let Some(pos) = lower.find(&close.to_lowercase()) {
+            let owns_line =
+                out[..pos].trim_end_matches([' ', '\t']).ends_with('\n') || out[..pos].trim().is_empty();
+            if owns_line {
+                let inner = out[..pos].trim().to_string();
+                if !inner.is_empty() {
+                    if !reasoning.is_empty() {
+                        reasoning.push_str("\n\n");
+                    }
+                    reasoning.push_str(&inner);
+                }
+                out.replace_range(..pos + close.len(), "");
+            }
+        }
     }
     (reasoning.trim().to_string(), out.trim().to_string())
 }
@@ -9801,7 +9829,12 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 return Ok(reply);
             }
         };
-        let mut reply = resp.text;
+        // STRIP THE REASONING, as seventeen other call sites already do. This one did not, and the
+        // local reasoner emits reasoning blocks, so the plain conversational turn — the most-used
+        // path in the product — was the one place a raw reasoning dump could reach the user.
+        // PRE-EXISTING, not a consequence of grounding: the default chain's first link was already
+        // this same reasoner. It surfaced because E.SEC9 sent one live turn to look.
+        let mut reply = strip_reasoning(&resp.text);
         // Auto-select: if a banked skill clearly fits this task, surface it (suggest, never auto-run).
         if let Some(suggestion) = self.suggest_skill(user_text).await {
             reply.push_str(&suggestion);

@@ -2887,6 +2887,37 @@ async fn the_voice_path_grounds_in_the_people_layer() {
 {prompt}");
 }
 
+/// A CLOSING tag with no opener — the third hole, found by looking at a live reply.
+///
+/// Providers strip the opening tag, or the model starts mid-thought, so the reply arrives as
+/// `draft…\n</think>\n\nanswer`. `split_reasoning` searches for the OPEN tag first and breaks when
+/// it finds none, so it shipped the draft AND the answer with a stray `</think>` between them.
+///
+/// This is the exact case the OLD `rsplit("</think>")` idiom got right by construction. The rewrite
+/// fixed the two holes it was looking for and opened one it was not — the same error as matching
+/// `inference.chat(` and missing `inf.chat(`. Fixture is the real reply from the box, 2026-08-26.
+#[test]
+fn a_closing_tag_with_no_opener_is_still_reasoning() {
+    use super::{split_reasoning, strip_reasoning};
+
+    let live = "\"Prudent\" works well — or \"cautious\" if you want something plainer.\n</think>\n\n**Prudent** — or \"cautious\" if you want something plainer.";
+    assert_eq!(
+        strip_reasoning(live),
+        "**Prudent** — or \"cautious\" if you want something plainer.",
+        "the draft before a dangling close must not reach the user"
+    );
+    let (reasoning, visible) = split_reasoning(live);
+    assert!(reasoning.contains("works well"), "the draft is REASONING, not deleted: {reasoning:?}");
+    assert!(!visible.contains("</think>"), "no stray tag survives: {visible:?}");
+
+    // The boundary rule still holds: a mid-sentence MENTION is prose, not a block terminator.
+    let prose = "Close the block with </think> when you are done.";
+    assert_eq!(strip_reasoning(prose), prose, "a mention mid-sentence must be left alone");
+
+    // And a properly-paired block is unaffected by the new branch.
+    assert_eq!(strip_reasoning("<think>hidden</think>\nVisible."), "Visible.");
+}
+
 /// Reasoning must not reach the user, including the case that actually leaked.
 ///
 /// The old idiom was `text.rsplit("</think>").next()`, copy-pasted to a dozen sites. It handled the

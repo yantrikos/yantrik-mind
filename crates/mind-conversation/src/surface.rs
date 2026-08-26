@@ -365,7 +365,7 @@ pub struct SkillReport {
     pub skills: Vec<SkillRow>,
     pub active: usize,
     pub quarantined: usize,
-    /// Never run, so unproven rather than good — the distinction `success_rate()` alone would hide,
+    /// Never run, so unproven rather than good — the distinction a bare rate would hide,
     /// since it returns 1.0 for zero runs.
     pub untested: usize,
 }
@@ -747,7 +747,14 @@ impl ConversationEngine {
     pub async fn skill_report(&self) -> SkillReport {
         let mut rep = SkillReport::default();
         for s in self.memory.list_skills().await.unwrap_or_default() {
-            let failing = s.runs >= 4 && s.successes * 2 < s.runs;
+            // Was `s.runs >= 4 && s.successes * 2 < s.runs`, one of four copies of the same rule
+            // (E.P5a). An untested skill has NO rate — `rate()` is `None` at zero runs, so the
+            // distinction between "never tried" and "perfect" cannot be lost here by forgetting to
+            // check, which is what the hand-rolled arithmetic that stood here relied on.
+            let (failing, success_rate) = {
+                let r = s.reliability();
+                (r.is_discredited(), r.rate())
+            };
             match s.status.as_str() {
                 "quarantined" => rep.quarantined += 1,
                 _ if s.runs == 0 => rep.untested += 1,
@@ -761,9 +768,7 @@ impl ConversationEngine {
                 status: s.status,
                 runs: s.runs,
                 successes: s.successes,
-                // An untested skill has NO rate. `Skill::success_rate()` returns 1.0 for zero runs,
-                // which is a sensible ranking default and a lie as a displayed measurement.
-                success_rate: (s.runs > 0).then(|| s.successes as f64 / s.runs as f64),
+                success_rate,
                 failing,
                 created_ms: s.created_ms,
             });
@@ -1317,8 +1322,8 @@ mod tests {
         assert!(watch.days_over.unwrap() >= 20);
     }
 
-    /// An UNTESTED skill has no success rate. `Skill::success_rate()` returns 1.0 for zero runs — a
-    /// sensible ranking default and a lie once it is rendered as a measurement.
+    /// An UNTESTED skill has no success rate. The optimism prior that makes a new skill rankable
+    /// is `Reliability::rank_score()`; rendering it as a measurement is the lie E.P5a separated out.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_untested_skill_has_no_rate_and_a_failing_one_is_flagged() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();

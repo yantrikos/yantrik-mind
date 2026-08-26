@@ -3112,7 +3112,8 @@ fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Resu
                 .map(|s| {
                     let text = format!("{}. {}. {}", s.name, s.summary, s.tags.join(" "));
                     let sim = db.embed(&text).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
-                    (sim + 0.1 * s.success_rate(), sim, s)
+                    // The optimism prior, named. An untested skill keeps its nudge and gets tried.
+                    (sim + 0.1 * s.rank_score(), sim, s)
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -3147,12 +3148,16 @@ fn record_skill_outcome(db: &YantrikDB, name: &str, success: bool) -> std::resul
         rusqlite::params![name, if success { 1i64 } else { 0 }],
     )
     .map_err(|e| e.to_string())?;
-    // Auto-quarantine a flaky skill: <50% success over >=4 runs (DeepSeek's rule).
-    conn.execute(
-        "UPDATE mind_skills SET status='quarantined' WHERE name=?1 AND runs>=4 AND (successes*2) < runs",
-        [name],
-    )
-    .map_err(|e| e.to_string())?;
+    // Auto-quarantine a flaky skill. The rule USED TO LIVE HERE, as an SQL predicate
+    // (`runs>=4 AND (successes*2) < runs`) — a policy in a second language, which is a policy that
+    // can drift from the Rust copies of it, and this one already had. Read the counts back and ask
+    // the one verdict function (E.P5a).
+    let (runs, successes): (i64, i64) = conn
+        .query_row("SELECT runs, successes FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?;
+    if mind_types::reliability::Reliability::new(runs.max(0) as u32, successes.max(0) as u32).is_discredited() {
+        conn.execute("UPDATE mind_skills SET status='quarantined' WHERE name=?1", [name]).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

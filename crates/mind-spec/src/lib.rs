@@ -49,6 +49,13 @@ pub use goal::{Budget, CompletionCriteria, Contract, GoalSpec, OutputContract, V
 /// this mind has ever used it. Wrapping them keeps the estimate honest at every read: a caller can
 /// see that `0.6` is a default someone chose rather than a rate observed over 40 runs, and the
 /// observability layer can show it that way instead of implying measurement.
+/// Reliability lives in `mind-types`, not here, because `mind-spec` depends on it and `Skill` —
+/// whose numbers it describes — is defined there. Re-exported so `mind_spec::reliability::…`, the
+/// name ARCH-6 P.5 specifies, resolves (E.P5a).
+pub mod reliability {
+    pub use mind_types::reliability::{is_discredited, Reliability, Verdict, MIN_RUNS};
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Prior {
     pub value: f64,
@@ -77,8 +84,17 @@ impl Prior {
         Self { value: value.clamp(0.0, 1.0), basis: Basis::Estimated }
     }
     /// Is this backed by enough observation to act on without hedging?
+    ///
+    /// Used to require 5 runs while the three quarantine sites required 4 — one policy with two
+    /// thresholds, invisible because nothing compared them. Now the shared one (E.P5a).
     pub fn is_trustworthy(&self) -> bool {
-        matches!(self.basis, Basis::Measured { runs } if runs >= 5)
+        matches!(self.basis, Basis::Measured { runs } if runs >= reliability::MIN_RUNS)
+    }
+
+    /// Failing more often than not, over enough runs to mean it — the SAME predicate the skill
+    /// store and the surface report ask, reached from a rate rather than counts.
+    pub fn is_discredited(&self) -> bool {
+        matches!(self.basis, Basis::Measured { runs } if reliability::is_discredited(runs, self.value))
     }
 }
 

@@ -348,13 +348,12 @@ impl Bus for EngineBus {
 
         // Executable: the sandboxed skill bank. `recall_skills` already excludes quarantined ones.
         for s in self.engine.memory.recall_skills(goal, limit).await.unwrap_or_default() {
-            // A banked-but-never-run skill is UNPROVEN, and must say so rather than borrow the 1.0
-            // that `Skill::success_rate()` returns for zero runs — that default is right for ranking
-            // inside the skill store and wrong as a claim about reliability.
-            let reliability = if s.runs > 0 {
-                Prior::measured(s.success_rate(), s.runs as u32)
-            } else {
-                Prior::declared(0.5)
+            // A banked-but-never-run skill is UNPROVEN. The guard that used to stand here is gone
+            // because the type no longer hands out a rate it does not have: `rate()` is `None` at
+            // zero runs, so the untested case cannot be forgotten (E.P5a).
+            let reliability = match s.reliability().rate() {
+                Some(rate) => Prior::measured(rate, s.runs as u32),
+                None => Prior::declared(0.5),
             };
             out.push(Procedure {
                 name: s.name.clone(),

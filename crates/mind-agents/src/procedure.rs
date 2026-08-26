@@ -66,13 +66,13 @@ impl Procedure {
     /// DECLARED reliability can never trip this: an unmeasured procedure is unproven, not bad, and
     /// treating the two the same would keep the library from ever growing.
     pub fn is_discredited(&self) -> bool {
-        matches!(self.reliability.basis, Basis::Measured { runs } if runs >= 4 && self.reliability.value < 0.5)
+        self.reliability.is_discredited()
     }
 
     /// Ordering key: proven beats plausible, and a longer record breaks ties.
     fn standing(&self) -> (u8, f64, u32) {
         let (tier, runs) = match self.reliability.basis {
-            Basis::Measured { runs } if runs >= 4 => (2, runs),
+            Basis::Measured { runs } if runs >= mind_types::reliability::MIN_RUNS => (2, runs),
             Basis::Measured { runs } => (1, runs),
             _ => (0, 0),
         };

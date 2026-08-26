@@ -33,6 +33,9 @@ pub use action::{
 pub use harm::{Decision, HarmGate};
 pub use turn::TurnContext;
 pub use task::Task;
+pub mod reliability;
+pub use reliability::{Reliability, Verdict};
+
 pub use safety::{
     contains_secret, first_sensitive, sensitive_findings, sensitive_pair, ProvenanceCategory,
     SensitiveFinding, SensitiveKind, SECRET_MARKERS,

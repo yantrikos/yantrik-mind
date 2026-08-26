@@ -353,8 +353,20 @@ pub struct Skill {
 }
 
 impl Skill {
-    pub fn success_rate(&self) -> f64 {
-        if self.runs == 0 { 1.0 } else { self.successes as f64 / self.runs as f64 }
+    /// What is actually known about this skill's outcomes.
+    ///
+    /// `success_rate()` used to serve two meanings at once — an optimism prior for RANKING (1.0 at
+    /// zero runs, so a new skill gets tried at all) and a claim about reliability (where that 1.0
+    /// is a lie). Every caller had to remember which it was getting, and two of them carried
+    /// hand-rolled guards and comments saying so. Now the ranking half is `rank_score()` and the
+    /// truth is here (E.P5a).
+    pub fn reliability(&self) -> crate::reliability::Reliability {
+        crate::reliability::Reliability::new(self.runs as u32, self.successes as u32)
+    }
+
+    /// The optimism prior for ranking. See [`crate::reliability::Reliability::rank_score`].
+    pub fn rank_score(&self) -> f64 {
+        self.reliability().rank_score()
     }
 }
 

@@ -85,6 +85,15 @@ pub struct ResourceContextView {
     /// None = receptivity unknown / not needed.
     pub user_receptive: Option<bool>,
     pub quiet_hours: bool,
+    /// When quiet hours END, as an ABSOLUTE epoch-millisecond timestamp — not a duration.
+    ///
+    /// `arbitrate` copies this straight into `MonitorPlan.review_at_ms`, whose sibling construction
+    /// is `Some(cm.due_at_ms - DAY_MS)` — plainly an instant. The unit was never written down here,
+    /// and the live caller passed "milliseconds until quiet hours end" for as long as EX4-LIVE-A
+    /// has been recording: every quiet-hours decision carried a review time a few hours after the
+    /// 1970 epoch. Nothing acted on it (the executive is shadow-only) and nothing rendered it until
+    /// `posture_json` did, which is how it was finally seen. Stated now so the next caller cannot
+    /// make the same guess.
     pub quiet_hours_end_ms: Option<i64>,
 }
 

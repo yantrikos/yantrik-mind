@@ -4871,6 +4871,16 @@ async fn posture_json_is_the_executives_real_reading_and_never_a_composed_row() 
     // Receptivity is the reading that was deposited, not one recomputed here.
     assert_eq!(v["receptivity"]["quiet_hours"], true);
     assert_eq!(v["receptivity"]["quiet_hours_end_ms"], serde_json::json!(ends));
+    // UNITS. `quiet_hours_end_ms` is an INSTANT, not a duration — the live caller passed a
+    // duration for as long as EX4-LIVE-A had been recording, and every quiet-hours decision
+    // carried a review time a few hours after 1970. Nothing rendered it until this surface did.
+    // Anything below the year 2000 is a duration wearing a timestamp's name.
+    const YEAR_2000_MS: i64 = 946_684_800_000;
+    let end_ms = v["receptivity"]["quiet_hours_end_ms"].as_i64().unwrap();
+    assert!(end_ms > YEAR_2000_MS, "quiet_hours_end_ms must be an epoch instant, got {end_ms}");
+    if let Some(review) = decisions[0]["monitor"].get("review_at_ms").and_then(|r| r.as_i64()) {
+        assert!(review > YEAR_2000_MS, "review_at_ms must be an epoch instant, got {review}");
+    }
     assert!(!v["receptivity"]["observed_at_ms"].is_null());
 
     // NOT COMPOSED: the same candidate through the same arbiter gives the same answer. If this

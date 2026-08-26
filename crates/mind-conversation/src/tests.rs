@@ -4763,3 +4763,64 @@ async fn a_mind_with_no_decision_log_keeps_its_lease_evidence_instead_of_droppin
     assert_eq!(mem.pending_lease_events().await.unwrap().len(), 1, "still kept after a drain");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_sensitivity_finding_guards_all_four_boundaries_and_none_of_them_quote_it() {
+    // E.SEC1. The same typed finding drives memory-write refusal, observability redaction, egress
+    // denial and eval withholding — and at every one of them the RAW VALUE must be absent from the
+    // output AND from the error text. A refusal that quotes what it refused is the leak.
+    const SECRET: &str = "my password is hunter2swordfish";
+    const CARD: &str = "my card pin is 4471-9302-1122-8890";
+    // Ordinary text that the OLD substring detector refused: the regression that mattered most.
+    const ORDINARY: &str = "remind me about the task-list and asian food recipes";
+
+    let leaked = |haystack: &str| -> bool {
+        haystack.contains("hunter2swordfish") || haystack.contains("4471") || haystack.contains("9302")
+    };
+
+    // ── 1. MEMORY WRITE ─────────────────────────────────────────────────────────────────────
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let refused = mem.remember_observation(SECRET, mind_types::ProvenanceCategory::Human).await;
+    let msg = format!("{:?}", refused.as_ref().err());
+    assert!(refused.is_err(), "a credential must not be written to memory");
+    assert!(msg.contains("credential-phrase"), "the refusal names the kind: {msg}");
+    assert!(!leaked(&msg), "THE REFUSAL QUOTED THE SECRET: {msg}");
+    // ...and ordinary life is writable again, which the old detector refused.
+    assert!(
+        mem.remember_observation(ORDINARY, mind_types::ProvenanceCategory::Human).await.is_ok(),
+        "the mind must be able to remember a task-list and asian food"
+    );
+
+    // ── 2. OBSERVABILITY ────────────────────────────────────────────────────────────────────
+    let dir = std::env::temp_dir().join(format!("ym_sec1_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("d.jsonl");
+    let recorder = mind_observability::DecisionLog::open(&log);
+    let mut ev = mind_observability::DecisionEvent::new("t", "tool_observed");
+    ev.goal = Some(SECRET.to_string());
+    ev.outcome = Some(CARD.to_string());
+    recorder.record(ev);
+    let on_disk = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!leaked(&on_disk), "THE LOG HOLDS THE SECRET:\n{on_disk}");
+    assert!(on_disk.contains("redacted-secret"), "and says that it withheld something:\n{on_disk}");
+
+    // ── 3. EGRESS ───────────────────────────────────────────────────────────────────────────
+    // The broker's own check, on the canonical args an outward call would carry.
+    assert!(mind_types::contains_secret(SECRET), "the shared detector is what egress consults");
+    assert!(mind_types::contains_secret(CARD));
+    assert!(!mind_types::contains_secret(ORDINARY), "and it must not deny ordinary traffic");
+
+    // ── 4. EVAL WITHHOLDING ─────────────────────────────────────────────────────────────────
+    // Asserted in `mind-evals` itself (`the_eval_gate_uses_the_shared_finding_and_not_a_blanket_
+    // number_rule`): that crate depends on this one, so testing it from here would be a cycle.
+    // What IS checked here is the thing both boundaries read — the shared finding above.
+
+    // ── and the finding itself, at every boundary, is kind + span only ──────────────────────
+    for text in [SECRET, CARD] {
+        let f = mind_types::first_sensitive(text).expect("caught");
+        assert!(!leaked(&format!("{f:?}")), "Debug leaked: {f:?}");
+        assert!(!leaked(&format!("{f}")), "Display leaked: {f}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

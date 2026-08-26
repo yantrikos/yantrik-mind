@@ -473,37 +473,19 @@ pub fn live_cases() -> Vec<LiveCase> {
 /// What the recorder writes in place of a goal it will not hold. Not a query, and never a case.
 const REDACTED_GOAL: &str = "[redacted-secret]";
 
-/// A digit run this long, ignoring the separators people put inside numbers, is card-, account- or
-/// PIN-shaped. Deliberately low: withholding a query that merely contains a long number costs one
-/// case, and sending someone's card number to another agent costs something that cannot be undone.
-const SENSITIVE_DIGIT_RUN: usize = 12;
-
 /// Would sending this query to an outside witness be a mistake?
 ///
-/// The recorder's own redaction cannot be relied on here. `mind_types::contains_secret` matches a
-/// short list of TOKEN PREFIXES (`ghp_`, `glpat-`, `akia`, `xoxb-`, `sk-`, PEM headers, and
-/// `app password`) — it does NOT contain generic "api key" or "password", which an earlier version
-/// of this comment claimed and Codex corrected. A bare string of digits carries no marker either,
-/// so `my card pin is 4471-9302-1122-8890 what coyote time` is written to the log verbatim and
-/// would have gone out with the labelling request. Found by the test that assumed the opposite
-/// (E.PK3d); the detector itself is being rebuilt in P.SEC1.
+/// Delegates to the ONE shared detector (`mind_types::first_sensitive`), which is the whole point:
+/// memory-write refusal, observability redaction, egress denial and this eval gate all read the
+/// same finding, so an improvement lands at four boundaries at once (E.SEC1).
 ///
-/// So this gate is the split's own, applied before anything leaves the building, and it errs
-/// toward withholding: a false positive loses one corpus row, a false negative loses a secret.
+/// The first version of this gate withheld ANY query containing a run of twelve or more digits.
+/// That caught the card number and also every order id, tracking number and epoch timestamp — the
+/// blanket rejection Codex named as "the current failure mode wearing a new coat". The shared
+/// detector distinguishes them: a payment card needs Luhn AND a card industry digit, and a bare
+/// number needs card/PIN/CVV wording nearby to count as one.
 pub fn looks_sensitive(query: &str) -> bool {
-    if mind_types::contains_secret(query) {
-        return true;
-    }
-    let (mut run, mut longest) = (0usize, 0usize);
-    for c in query.chars() {
-        if c.is_ascii_digit() {
-            run += 1;
-            longest = longest.max(run);
-        } else if !matches!(c, '-' | ' ' | '.' | '_') {
-            run = 0;
-        }
-    }
-    longest >= SENSITIVE_DIGIT_RUN
+    mind_types::first_sensitive(query).is_some()
 }
 
 /// What a decision log yields: the cases, and how many queries were WITHHELD as possibly sensitive.
@@ -811,6 +793,34 @@ mod tests {
         }
     }
 
+    /// E.SEC1, BOUNDARY 4 of 4: eval withholding reads the same finding as memory, observability
+    /// and egress. Asserted here because `mind-evals` depends on `mind-conversation` and the other
+    /// three boundaries are tested there — the cycle is why this half lives on its own.
+    #[test]
+    fn the_eval_gate_uses_the_shared_finding_and_not_a_blanket_number_rule() {
+        // Caught — and by the shared detector, not by counting digits.
+        for text in [
+            "my password is hunter2swordfish",
+            "my card pin is 4471-9302-1122-8890",
+            "charge 4111 1111 1111 1111 today",
+        ] {
+            assert!(looks_sensitive(text), "must be withheld: {text:?}");
+            assert!(mind_types::first_sensitive(text).is_some(), "and by the SHARED detector: {text:?}");
+        }
+        // NOT caught: the blanket twelve-digit rule used to withhold every one of these.
+        for text in [
+            "order 9876543210987 shipped",
+            "the timestamp was 1756170000000",
+            "tracking 1Z999AA10123456784",
+            "uuid 550e8400-e29b-41d4-a716-446655440000",
+            "the box is at 192.168.4.90",
+            "use 80-100 ms of coyote time",
+            "remind me about the task-list and asian food recipes",
+        ] {
+            assert!(!looks_sensitive(text), "a corpus must be able to hold this: {text:?}");
+        }
+    }
+
     /// E.PK3d: the extractor copies the recorder VERBATIM, counts repeats instead of dropping them,
     /// notices when one query's ranking moves between routings, and refuses a log that does not
     /// verify. A corpus grown from a scrape of unverified lines has unknown provenance.
@@ -876,14 +886,23 @@ mod tests {
         // witness. The split therefore gates on its own, before anything leaves the building.
         log.record(route("my card pin is 4471-9302-1122-8890 what coyote time", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
         let corpus = extract_live_routes(&path).unwrap();
-        assert_eq!(corpus.withheld, 1, "the card-shaped query must be withheld, not carried");
+        // E.SEC1 moved the defence EARLIER than this gate. The recorder now recognises the card
+        // context and writes `[redacted-secret]` in place of the goal, so the number never enters
+        // the log at all — and the extractor drops a redacted goal, because it is not a question
+        // anyone asked. `withheld` is therefore 0: there was nothing left for the eval gate to
+        // withhold. That is the STRONGER outcome, and worth asserting as such rather than
+        // restoring the weaker one that assumed the secret got as far as this corpus.
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("4471"), "the RECORDER must not hold it");
         assert!(
-            !corpus.routes.iter().any(|r| r.query.contains("4471")),
-            "a secret reached the corpus: {:?}", corpus.routes
+            !corpus.routes.iter().any(|r| r.query.contains("4471") || r.query.contains("redacted")),
+            "neither a secret nor a redaction marker may become a case: {:?}",
+            corpus.routes
         );
         let sent = render_for_witness(&corpus);
-        assert!(!sent.contains("4471"), "and it must never reach the request:\n{sent}");
-        assert!(sent.contains("withheld by this host"), "the count is stated, not silently dropped:\n{sent}");
+        assert!(!sent.contains("4471"), "and nothing reaches the request");
+        // The eval gate still stands as the LAST line of defence, for anything the recorder was
+        // willing to hold — proved directly, since the recorder now stops this one earlier.
+        assert!(looks_sensitive("my card pin is 4471-9302-1122-8890 what coyote time"));
 
         // An unverified log yields an error, never a best-effort scrape.
         {

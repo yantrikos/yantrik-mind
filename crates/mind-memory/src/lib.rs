@@ -181,8 +181,11 @@ enum Cmd {
 /// Deterministic, shared with the harm-gate (one source of truth). Raw transcript is exempt
 /// (verbatim ephemeral context, never reasoned over as knowledge).
 fn gate_write(text: &str) -> std::result::Result<(), String> {
-    if mind_types::contains_secret(text) {
-        return Err("refused: write contains a secret/credential marker (write-gate)".into());
+    // The refusal names the KIND and nothing else. A message that quoted what it refused would put
+    // the secret into an error string, a log line and probably a chat reply — the leak the gate
+    // exists to prevent (E.SEC1).
+    if let Some(found) = mind_types::first_sensitive(text) {
+        return Err(format!("refused: write contains {} (write-gate)", found.kind.label()));
     }
     Ok(())
 }

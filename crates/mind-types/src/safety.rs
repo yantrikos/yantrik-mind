@@ -137,6 +137,18 @@ fn token_at(text: &str, at: usize) -> &str {
     &rest[..end]
 }
 
+/// Is this run buried inside a longer alphanumeric token (a hash, an id, a base64 blob)?
+///
+/// A payment card stands on its own or is grouped with spaces and hyphens. Anything with a letter
+/// pressed up against either end is part of some other string that merely contains digits — and a
+/// 64-character hex hash contains card-shaped substrings often enough to matter: 28 of 11,866
+/// read-receipt lines on the box, every one a false positive, which is how this rule was found.
+fn is_embedded(text: &str, start: usize, len: usize) -> bool {
+    let before = text[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphabetic());
+    let after = text[start + len..].chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+    before || after
+}
+
 fn luhn_ok(digits: &str) -> bool {
     let mut sum = 0u32;
     for (i, c) in digits.chars().rev().enumerate() {
@@ -211,13 +223,23 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
         }
     }
 
-    // 3. Payment cards by SHAPE: Luhn AND a card industry digit (3–6). A 13-digit epoch can satisfy
-    //    Luhn by chance — 1756170000000 does — and starts with 1, so it is not one.
+    // 3. Payment cards by SHAPE: Luhn, a card industry digit (3–6), and STANDING ALONE.
+    //
+    //    Two ways to be fooled here, both found rather than imagined. A 13-digit epoch can satisfy
+    //    Luhn by chance — 1756170000000 does — but starts with 1, so the industry digit excludes
+    //    it. And a digit run EMBEDDED in a longer alphanumeric token satisfies everything by pure
+    //    chance: the read-receipt audit on the box flagged 28 lines, and every one of them was a
+    //    SHA-256 `chain` value with a card-shaped substring inside it. A real card is its own
+    //    token, optionally grouped with spaces or hyphens — it is never buried in hex.
     for (start, len, digits) in digit_runs(text) {
         let n = digits.len();
-        if (13..=19).contains(&n) && matches!(digits.as_bytes()[0], b'3'..=b'6') && luhn_ok(&digits) {
-            return find(SensitiveKind::PaymentPan, start, len);
+        if !(13..=19).contains(&n) || !matches!(digits.as_bytes()[0], b'3'..=b'6') || !luhn_ok(&digits) {
+            continue;
         }
+        if is_embedded(text, start, len) {
+            continue;
+        }
+        return find(SensitiveKind::PaymentPan, start, len);
     }
 
     // 4. Card/PIN/CVV wording beside a number — catches what Luhn does not, which is the reported
@@ -426,6 +448,11 @@ mod sensitivity_tests {
             "uuid 550e8400-e29b-41d4-a716-446655440000",
             "the box is at 192.168.4.90",
             "engine version 0.18.0 is pinned",
+            // A SHA-256 chain value. 28 of these were flagged as payment cards by the box audit
+            // before `is_embedded` existed — the digits are real, the card is not.
+            "chain 8ff1ffe72dc393998df748020b12134eaaa1a1fb85d653c632f28c6fb06bbb42",
+            "chain c8fb17f2ac95d3dfb5489f4a595c173276f5b51b9165c9971a436dc9c6d7bc8e",
+            "blob YWJjZGVmZ2hpams0MTExMTExMTExMTExMTEx",
             "use 80-100 ms of coyote time",
             // Discussion of credentials is not a credential.
             "how do passwords work?",

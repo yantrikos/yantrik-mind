@@ -4256,33 +4256,117 @@ async fn a_malformed_call_is_refused_at_the_boundary_and_never_touches_the_tools
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() {
-    // P.2d (Codex's review): the boundary sits BEFORE guards::pre and before the prediction event on
-    // the loop that actually runs. A scripted model emits the live shape; the recorder must show a
-    // malformed observation with NO prediction, and the bandit must not know the tool was named.
+    // P.2d/P.2e (Codex's reviews): the boundary sits BEFORE guards::pre and before the prediction
+    // event on the loop that actually runs, judges the NORMALIZED arguments, and holds a call to the
+    // contract's required fields by name or handler alias. Each scripted run is a fresh engine,
+    // because the loop ends after MAX_BARREN_STEPS malformed steps — which is itself the point.
     let dir = std::env::temp_dir().join(format!("ym_p2d_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let log = dir.join("p2d.decisions.jsonl");
-    let _ = std::fs::remove_file(&log);
-    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let script = vec![
-        r#"{"thought":"running it","tool":"run_skill","args":{"name":328,"target":328}}"#.to_string(),
-        r#"{"thought":"searching","tool":"discover_tools","args":{"query":null}}"#.to_string(),
-        r#"{"answer":"I could not run that."}"#.to_string(),
-    ];
-    let llm = Arc::new(mind_inference::SequencedLLM::new(script));
-    let pool = mind_inference::InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
-    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
-        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
-    let _ = conv.agent_loop_for_eval("run my csv skill", &TurnIdentity::primary()).await;
+    let run = |n: usize, script: Vec<&'static str>| {
+        let dir = dir.clone();
+        async move {
+            let log = dir.join(format!("p2d-{n}.decisions.jsonl"));
+            let _ = std::fs::remove_file(&log);
+            let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let llm = Arc::new(mind_inference::SequencedLLM::new(script.into_iter().map(String::from).collect()));
+            let pool = mind_inference::InferencePool::new(llm as Arc<dyn LLMBackend>, 1);
+            let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
+                .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
+            let _ = conv.agent_loop_for_eval("run my csv skill", &TurnIdentity::primary()).await;
+            let events = conv.recorder().read_all();
+            let track = mem.tool_track_record().await.unwrap();
+            let _ = std::fs::remove_file(&log);
+            (events, track)
+        }
+    };
+    let predicted = |ev: &[mind_observability::DecisionEvent]| ev.iter().filter(|e| e.kind == "tool_predicted").count();
+    let malformed = |ev: &[mind_observability::DecisionEvent]| {
+        ev.iter().filter(|e| e.kind == "tool_observed" && e.verdict.as_deref() == Some("malformed")).cloned().collect::<Vec<_>>()
+    };
 
-    let events = conv.recorder().read_all();
-    let predicted = events.iter().filter(|e| e.kind == "tool_predicted").count();
-    let malformed: Vec<&mind_observability::DecisionEvent> = events.iter().filter(|e| e.kind == "tool_observed" && e.verdict.as_deref() == Some("malformed")).collect();
-    assert_eq!(predicted, 0, "a call that cannot be made is nothing to predict: {events:?}");
-    assert_eq!(malformed.len(), 2, "both malformed calls recorded as their own outcome: {events:?}");
-    assert!(malformed.iter().all(|e| e.lesson.as_deref().map_or(false, |l| l.contains("planner's failure"))), "{malformed:?}");
-    assert!(malformed.iter().all(|e| !e.outcome.as_deref().unwrap_or("").contains("328")), "no value in the record: {malformed:?}");
-    let track = mem.tool_track_record().await.unwrap();
+    // 1. The two live shapes from the box: wrong types, and nothing but null.
+    let (ev, track) = run(1, vec![
+        r#"{"thought":"running it","tool":"run_skill","args":{"name":328,"target":328}}"#,
+        r#"{"thought":"searching","tool":"discover_tools","args":{"query":null}}"#,
+        r#"{"answer":"I could not run that."}"#,
+    ])
+    .await;
+    assert_eq!(predicted(&ev), 0, "a call that cannot be made is nothing to predict: {ev:?}");
+    let m = malformed(&ev);
+    assert_eq!(m.len(), 2, "both malformed calls recorded as their own outcome: {ev:?}");
+    assert!(m.iter().all(|e| e.lesson.as_deref().map_or(false, |l| l.contains("planner's failure"))), "{m:?}");
+    for e in &ev {
+        let s = serde_json::to_string(e).unwrap();
+        assert!(!s.contains("328"), "a value reached the record through some field: {s}");
+    }
     assert!(!track.iter().any(|(t, _, _)| t == "run_skill" || t == "discover_tools"), "the bandit must not have been fed: {track:?}");
-    let _ = std::fs::remove_file(&log);
+
+    // 2. Required fields, per field (Codex's review of P.2d): a run_skill without a name and an
+    //    add_reminder without a `when` are refused although other values were supplied.
+    let (ev, track) = run(2, vec![
+        r#"{"thought":"running it","tool":"run_skill","args":{"target":"https://example.org/x.csv"}}"#,
+        r#"{"thought":"noting","tool":"add_reminder","args":{"text":"call mum"}}"#,
+        r#"{"answer":"noted"}"#,
+    ])
+    .await;
+    assert_eq!(predicted(&ev), 0, "{ev:?}");
+    let m = malformed(&ev);
+    assert_eq!(m.len(), 2, "{ev:?}");
+    assert!(m[0].outcome.as_deref().unwrap_or("").contains("missing required name"), "{m:?}");
+    assert!(m[1].outcome.as_deref().unwrap_or("").contains("missing required when"), "{m:?}");
+    for e in &ev {
+        let s = serde_json::to_string(e).unwrap();
+        assert!(!s.contains("example.org") && !s.contains("call mum"), "a value reached the record: {s}");
+    }
+    assert!(track.is_empty(), "{track:?}");
+
+    // 3. The normalizer runs BEFORE the boundary: a name wrapped as a content block is a name, the
+    //    tool runs on it, and it is observed as ITSELF (an honest not-found), never as malformed.
+    let (ev, _) = run(3, vec![
+        r#"{"thought":"running it","tool":"run_skill","args":{"name":[{"type":"text","content":"csv-clean"}]}}"#,
+        r#"{"answer":"no such skill"}"#,
+    ])
+    .await;
+    assert!(malformed(&ev).is_empty(), "a content-block name is a name: {ev:?}");
+    assert!(
+        ev.iter().any(|e| e.kind == "tool_observed" && e.verdict.as_deref() != Some("malformed") && serde_json::to_string(e).unwrap().contains("run_skill")),
+        "the tool ran and was observed as itself: {ev:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_router_failure_is_still_a_turn_in_the_shadows_denominator() {
+    // P.3b (Codex's review of P.3a): a dim-8 host has no embedder, so a non-empty catalog makes the
+    // router fail on the query embedding — a REAL failure, not a stub. That turn must still be in
+    // the record, as abstain:router_error, with the error's text kept out of it.
+    let dir = std::env::temp_dir().join(format!("ym_p3b_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.join("games.ydbpack");
+    mind_memory::fixtures::seal_fixture_pack_full(dest.to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["one row"], Some(&["tuning the feel of a 2D platformer"]), None, None).unwrap();
+    let handle = MemoryHandle::spawn(":memory:", 8).unwrap();
+    handle.set_pack_library(dir.to_str().unwrap()).await.unwrap();
+    let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
+    let failure = mem.route_packs("what coyote time should my platformer use").await;
+    assert!(failure.is_err(), "the fixture must actually fail — no embedder at dim 8: {failure:?}");
+    let log = dir.join("p3b.decisions.jsonl");
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS").with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
+    // The production turn path, not the grounding function alone: one turn, exactly one record.
+    let _ = conv.agent_loop_for_eval("what coyote time should my platformer use", &TurnIdentity::primary()).await;
+    let events = conv.recorder().read_all();
+    let routes: Vec<_> = events.iter().filter(|e| e.kind == "pack_route_shadow").collect();
+    assert_eq!(routes.len(), 1, "one shadow record for the turn: {events:?}");
+    assert_eq!(routes[0].verdict.as_deref(), Some("abstain:router_error"));
+    assert_eq!(routes[0].actor.as_deref(), Some("primary"));
+    assert!(routes[0].chosen.is_none() && routes[0].candidates.is_empty(), "{:?}", routes[0]);
+    assert!(routes[0].policy.iter().any(|p| p == "shadow: nothing leased"), "{:?}", routes[0]);
+    let s = serde_json::to_string(routes[0]).unwrap().to_lowercase();
+    assert!(!s.contains("embedder"), "the error text stays in the log, not the record: {s}");
+    // The one builder both arms share: a decision and a failure are the same shape.
+    let ok = crate::shadow_route_event("t", false, "hello", &Ok((Vec::new(), mind_types::memory::PackRoute::Abstain { reason: mind_types::memory::AbstainReason::NoPacks, best: None })));
+    assert_eq!(ok.verdict.as_deref(), Some("abstain:no_packs"));
+    assert_eq!(ok.actor.as_deref(), Some("member"));
+    assert_eq!(ok.policy, routes[0].policy, "same policy line on both arms");
+    let _ = std::fs::remove_dir_all(&dir);
 }

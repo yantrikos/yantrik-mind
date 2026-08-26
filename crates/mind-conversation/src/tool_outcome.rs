@@ -282,30 +282,33 @@ pub(crate) fn malformed_call(
         other => return Some(refusal(vec![format!("a bare {} instead of an object of arguments", json_type(other))])),
     };
     let mut problems: Vec<String> = Vec::new();
-    let required: &[String] = contract.map(|c| c.required.as_slice()).unwrap_or(&[]);
-    // Required fields are enforced only when NOTHING usable was supplied. A handler may accept a
-    // name the catalog does not advertise (`calc {"expr"}` for `calc {expression}`), and refusing
-    // that would blame the planner for the tool's own tolerance — false attribution, the thing this
-    // boundary exists to prevent. `{}` and `{"name": null}` still cannot be made.
-    let supplied_any = obj.values().any(|v| !v.is_null());
-    if !supplied_any && !required.is_empty() {
-        problems.push(format!("missing required {}", required.join(", ")));
+    let none = crate::tool_catalog::ArgContract::default();
+    let c = contract.unwrap_or(&none);
+    // Required fields, per FIELD, satisfied by the documented name or by an alias the handler has
+    // always taken (`ArgContract::aliases`, from the catalog's ARG_ALIASES). `{}` and
+    // `{"name": null}` cannot be made; neither can `run_skill {"target": …}` without a name or
+    // `add_reminder {"text": …}` without a `when` (Codex's review of P.2d).
+    let missing: Vec<&str> = c.required.iter().filter(|r| !c.present(obj, r)).map(|r| r.as_str()).collect();
+    if !missing.is_empty() {
+        problems.push(format!("missing required {}", missing.join(", ")));
     }
     for (k, v) in obj {
         if v.is_null() {
             continue; // a null beside real arguments reads as absent
         }
-        let scalar_name = crate::tool_catalog::SCALAR_ARGS.contains(&k.as_str());
+        // An alias is judged as the field it stands for; `deals {"max": 500}` is a budget.
+        let field = c.canonical(k);
+        let scalar_name = crate::tool_catalog::SCALAR_ARGS.contains(&field);
         // Free text if the schema typed it so; declared scalars are not; an UNDECLARED field is
         // judged by its name alone, like a tool with no contract.
         let free_text = match contract {
-            Some(c) if c.strings.iter().any(|f| f == k) => true,
-            Some(c) if c.scalars.iter().any(|f| f == k) => false,
+            Some(c) if c.strings.iter().any(|f| f == field) => true,
+            Some(c) if c.scalars.iter().any(|f| f == field) => false,
             _ => !scalar_name,
         };
         match v {
             serde_json::Value::String(t) => {
-                if free_text && required.iter().any(|r| r == k) && t.trim().is_empty() {
+                if free_text && c.required.iter().any(|r| r == field) && t.trim().is_empty() {
                     problems.push(format!("`{k}` is empty"));
                 }
             }
@@ -317,6 +320,7 @@ pub(crate) fn malformed_call(
             serde_json::Value::Null => {}
         }
     }
+    let supplied_any = obj.values().any(|v| !v.is_null());
     if problems.is_empty() && !supplied_any && !obj.is_empty() {
         // A call whose EVERY argument is null asked for nothing (`discover_tools {"query":null}`,
         // seen live on 2026-08-26 right after P.2b shipped).
@@ -503,7 +507,7 @@ mod live_fixtures {
 mod malformed_tests {
     use super::*;
 
-    const SRC: &str = "- add_holding {ticker, shares, cost?}: record a position\n- deals {query, budget?, max?}: find deals\n- hunt {act?}: scan movers";
+    const SRC: &str = "- add_holding {ticker, shares, cost?}: record a position\n- deals {query, budget?, max?}: find deals\n- hunt {act?}: scan movers\n- calc {expression}: arithmetic\n- watch_price {query, target}: alert when a price crosses a target";
 
     fn contracts() -> std::collections::HashMap<String, crate::tool_catalog::ArgContract> {
         crate::tool_catalog::arg_contracts(SRC)
@@ -567,5 +571,38 @@ mod malformed_tests {
         assert_eq!(Outcome::classify("run_skill", "(no saved skill named '')"), Outcome::Malformed);
         assert_eq!(Outcome::classify("run_skill", "(no saved skill named 'foo')"), Outcome::Empty);
         assert_eq!(Outcome::classify("recall", "the note said: no saved skill named that"), Outcome::Ok);
+    }
+
+    /// P.2e (Codex's review of P.2d): required fields are enforced per FIELD, and a handler's
+    /// tolerance for a synonym is an explicit alias in the contract — never a reason to switch the
+    /// rule off. An alias is typed as the field it stands for.
+    #[test]
+    fn required_fields_are_held_per_field_and_aliases_are_explicit() {
+        let c = contracts();
+        // The contract carries the handler's aliases, read from one table.
+        assert_eq!(c["calc"].aliases, vec![("expression".to_string(), vec!["expr".to_string()])]);
+        assert_eq!(c["deals"].aliases, vec![("budget".to_string(), vec!["max".to_string()])]);
+        assert_eq!(c["watch_price"].aliases, vec![("target".to_string(), vec!["budget".to_string()])]);
+        assert!(c["run_skill"].aliases.is_empty(), "run_skill's handler takes no synonym: {:?}", c["run_skill"].aliases);
+        // calc {"expr"} is calc {expression}: the two bounded-loop tests that caught P.2d's first cut.
+        assert!(malformed_call("calc", &serde_json::json!({"expr": "6*7"}), c.get("calc")).is_none());
+        assert!(malformed_call("calc", &serde_json::json!({"expression": "6*7"}), c.get("calc")).is_none());
+        let r = malformed_call("calc", &serde_json::json!({"expr": 42}), c.get("calc")).expect("typed as its field");
+        assert!(r.contains("`expr`:number where text was expected"), "{r}");
+        assert!(malformed_call("calc", &serde_json::json!({}), c.get("calc")).unwrap().contains("missing required expression"));
+        assert!(malformed_call("calc", &serde_json::json!({"expr": null}), c.get("calc")).unwrap().contains("missing required expression"));
+        // A supplied value elsewhere no longer excuses a missing required field.
+        let r = malformed_call("run_skill", &serde_json::json!({"target": "https://example.org/x.csv"}), c.get("run_skill")).expect("no name");
+        assert!(r.contains("missing required name"), "{r}");
+        assert!(!r.contains("example.org"), "never a value: {r}");
+        let r = malformed_call("add_reminder", &serde_json::json!({"text": "call mum"}), c.get("add_reminder")).expect("no when");
+        assert!(r.contains("missing required when"), "{r}");
+        assert!(malformed_call("add_reminder", &serde_json::json!({"text": "call mum", "when": "tomorrow 9am"}), c.get("add_reminder")).is_none());
+        let r = malformed_call("watch_price", &serde_json::json!({"query": "rtx 4070"}), c.get("watch_price")).expect("no target");
+        assert!(r.contains("missing required target"), "{r}");
+        // The alias satisfies the requirement AND inherits the field's typing: a number is a budget.
+        assert!(malformed_call("watch_price", &serde_json::json!({"query": "rtx 4070", "budget": 450}), c.get("watch_price")).is_none());
+        assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "max": 300}), c.get("deals")).is_none(), "max is deals' budget");
+        assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "max": "300"}), c.get("deals")).is_none());
     }
 }

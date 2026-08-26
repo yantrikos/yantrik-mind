@@ -1037,7 +1037,40 @@ pub(crate) fn emit_detail(text: &str) {
 /// Unwrapped: a JSON string holding an object (the OpenAI convention), a `{type,content}` block, a
 /// list of such blocks (concatenated), and a single-element list wrapping the real value. Anything
 /// already plain is returned untouched.
-fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
+/// The shadow router's record of one turn — the ONE shape both arms write, so a failure is counted
+/// in the same denominator as a decision. `Err` carries no text into the event: an embedder's error
+/// can quote its input.
+pub(crate) fn shadow_route_event(
+    trace: &str,
+    primary_lane: bool,
+    user_text: &str,
+    routed: &std::result::Result<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute), mind_types::MindError>,
+) -> mind_observability::DecisionEvent {
+    let mut ev = mind_observability::DecisionEvent::span(trace, None, "pack_route_shadow");
+    ev.goal = Some(user_text.chars().take(160).collect());
+    ev.actor = Some(if primary_lane { "primary".into() } else { "member".into() });
+    ev.policy = vec![
+        mind_spec::coverage::COVERAGE_POLICY_ID.to_string(),
+        format!("floor={:.2}", mind_spec::coverage::COVERAGE_FLOOR),
+        format!("margin={:.2}", mind_spec::coverage::COVERAGE_MARGIN),
+        "shadow: nothing leased".to_string(),
+    ];
+    match routed {
+        Ok((ranked, route)) => {
+            ev.candidates = ranked.iter().take(5).map(|m| format!("{}@{:.2} ({})", m.pack_id, m.sim, m.phrase.chars().take(48).collect::<String>())).collect();
+            ev.chosen = route.leased().map(|p| format!("pack:{p}"));
+            ev.verdict = Some(route.label().to_string());
+            ev.confidence = ranked.first().map(|m| m.sim);
+        }
+        Err(_) => {
+            ev.verdict = Some("abstain:router_error".into());
+            ev.lesson = Some("the router failed on this turn; the turn still counts — see the log for the error".into());
+        }
+    }
+    ev
+}
+
+pub(crate) fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
 
     /// One argument VALUE, unwrapped to the scalar a tool can consume.
@@ -7202,10 +7235,18 @@ impl ConversationEngine {
 
     /// The argument boundary with the tool's CONTRACT — derived from the same catalog schemas the
     /// model was shown (`tool_catalog::arg_contracts`), so what is enforced is what was advertised.
-    pub(crate) fn refuse_malformed(&self, tool: &str, args: &serde_json::Value) -> Option<String> {
+    /// Judged on the NORMALIZED arguments — content-block wrappers unwrapped, the OpenAI string
+    /// form parsed — and the normalized value is what comes back: everything downstream (signature,
+    /// prediction, egress, dispatch) sees exactly the shape that was validated, never the raw call
+    /// (Codex's review of P.2d). Both loops and the direct dispatch reach the boundary through here.
+    pub(crate) fn admit_args(&self, tool: &str, raw: &serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+        let args = normalize_tool_args(raw.clone());
         let src = format!("{}\n{}", tool_catalog::CORE_HEAD, self.catalog_source());
         let contracts = tool_catalog::arg_contracts(&src);
-        crate::tool_outcome::malformed_call(tool, args, contracts.get(tool))
+        match crate::tool_outcome::malformed_call(tool, &args, contracts.get(tool)) {
+            Some(refusal) => Err(refusal),
+            None => Ok(args),
+        }
     }
 
     async fn run_agent_tool_as(&self, tool: &str, args: &serde_json::Value, id: &TurnIdentity) -> String {
@@ -7214,9 +7255,11 @@ impl ConversationEngine {
         // the tool's outcome. Every arm below reads its arguments as strings through `s`, which
         // turns a bare number into "" and lets the tool run on nothing and report "not found"; the
         // classifier then read that as Ok and credited the tool. Live, 2026-08-26, three times a turn.
-        if let Some(refused) = self.refuse_malformed(tool, args) {
-            return refused;
-        }
+        let args = match self.admit_args(tool, args) {
+            Ok(admitted) => admitted,
+            Err(refused) => return refused,
+        };
+        let args = &args;
         let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         // Plugin gate: a tool owned by a DISABLED plugin is refused here (one check covers every tool).
         // Core tools (owned by no plugin) always pass; MCP tools are governed by their own catalog.
@@ -8000,22 +8043,13 @@ impl ConversationEngine {
         // shadow's denominator is turns, and a turn skipped because nothing was routable or because
         // a member spoke is demand the record would silently lose (Codex's review of P.3). Leasing
         // is P.4's; until then the only thing this changes is the flight recorder.
-        if let Ok((ranked, route)) = self.memory.route_packs(user_text).await {
-            let mut ev = mind_observability::DecisionEvent::span(trace, None, "pack_route_shadow");
-            ev.goal = Some(user_text.chars().take(160).collect());
-            ev.actor = Some(if primary_lane { "primary".into() } else { "member".into() });
-            ev.candidates = ranked.iter().take(5).map(|m| format!("{}@{:.2} ({})", m.pack_id, m.sim, m.phrase.chars().take(48).collect::<String>())).collect();
-            ev.chosen = route.leased().map(|p| format!("pack:{p}"));
-            ev.verdict = Some(route.label().to_string());
-            ev.confidence = ranked.first().map(|m| m.sim);
-            ev.policy = vec![
-                mind_spec::coverage::COVERAGE_POLICY_ID.to_string(),
-                format!("floor={:.2}", mind_spec::coverage::COVERAGE_FLOOR),
-                format!("margin={:.2}", mind_spec::coverage::COVERAGE_MARGIN),
-                "shadow: nothing leased".to_string(),
-            ];
-            self.recorder.record(ev);
+        // A router FAILURE is a turn too (Codex's review of P.3a): recorded as abstain:router_error,
+        // with the error's text in the log and out of the record.
+        let routed = self.memory.route_packs(user_text).await;
+        if let Err(e) = &routed {
+            eprintln!("[packs] coverage router failed — the turn is recorded as abstain:router_error: {e}");
         }
+        self.recorder.record(shadow_route_event(trace, primary_lane, user_text, &routed));
         // Self-referential turn -> the instrument panel (fixes introspection myopia).
         if is_self_referential(user_text) {
             grounding.push_str(&self.self_model_block().await);
@@ -8514,17 +8548,22 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // model could not make properly is nothing for the broker to inspect and nothing to
             // predict. Recorded as its own outcome, excluded from the bandit, counted as a barren
             // step so a loop that keeps doing it still ends.
-            if let Some(msg) = self.refuse_malformed(&tool, &raw_args) {
-                eprintln!("[agent] step {step}: {tool} -> {}", msg.chars().take(120).collect::<String>());
-                emit_detail(&format!("[malformed] {msg}"));
-                scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
-                self.record_tool_observation(&run_trace, None, &tool, &format!("{tool}:malformed"), crate::tool_outcome::Outcome::Malformed, &msg, 0.0);
-                barren += 1;
-                if barren >= MAX_BARREN_STEPS {
-                    break;
+            // What the boundary admits is the NORMALIZED value, and that is what the broker
+            // inspects and the tool receives (Codex's review of P.2d).
+            let raw_args = match self.admit_args(&tool, &raw_args) {
+                Ok(admitted) => admitted,
+                Err(msg) => {
+                    eprintln!("[agent] step {step}: {tool} -> {}", msg.chars().take(120).collect::<String>());
+                    emit_detail(&format!("[malformed] {msg}"));
+                    scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
+                    self.record_tool_observation(&run_trace, None, &tool, &format!("{tool}:malformed"), crate::tool_outcome::Outcome::Malformed, &msg, 0.0);
+                    barren += 1;
+                    if barren >= MAX_BARREN_STEPS {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
-            }
+            };
             let args = match guards::pre(self, &guard_state, id, user_text, &tool, raw_args, &format!("step {step}")).await {
                 guards::PreVerdict::Proceed(a) => a,
                 guards::PreVerdict::Refuse { kind: guards::RefusalKind::Unavailable, msg } => {

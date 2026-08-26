@@ -658,7 +658,7 @@ fn available_packs(
     let mut out: Vec<mind_types::memory::PackCatalogEntry> = Vec::new();
     for p in db.mounted_packs() {
         let m = cached_manifest(manifests, &p.path);
-        out.push(mind_types::memory::PackCatalogEntry {
+        catalog_push(&mut out, mind_types::memory::PackCatalogEntry {
             pack_id: p.pack_id,
             path: p.path,
             content_digest: m.and_then(|m| m.content_digest.clone()),
@@ -670,18 +670,8 @@ fn available_packs(
     }
     for path in library_files(library) {
         let Some(m) = cached_manifest(manifests, &path) else { continue };
-        let pack_id = m.pack_id();
-        if let Some(prev) = out.iter().find(|e| e.pack_id == pack_id) {
-            // A mounted copy, or an earlier library file (sorted path order), already claims this
-            // id. First wins and the collision is named: two files claiming one id is either a
-            // duplicate or a conflict, and the catalog must not let a conflict pass silently.
-            if !prev.mounted && prev.path != path {
-                tracing::warn!(pack_id, kept = %prev.path, ignored = %path, "two library files claim one pack id — keeping the first by path");
-            }
-            continue;
-        }
-        out.push(mind_types::memory::PackCatalogEntry {
-            pack_id,
+        catalog_push(&mut out, mind_types::memory::PackCatalogEntry {
+            pack_id: m.pack_id(),
             path: path.clone(),
             content_digest: m.content_digest.clone(),
             coverage: m.coverage.clone(),
@@ -691,6 +681,23 @@ fn available_packs(
         });
     }
     out
+}
+
+/// One id, one entry. The first to claim an id keeps it — a mounted copy over a library file, an
+/// earlier mounted entry or an earlier library path over a later one — and a collision between two
+/// FILES is named, because two files claiming one id is a duplicate or a conflict and the catalog
+/// must not let a conflict pass silently. The engine keeps one mount per id, so a mounted
+/// duplicate should be impossible; the rule is applied to both loops anyway — "should be" is not a
+/// property the catalog gets to assume (Codex's review of P.3a). Same id with a different digest or
+/// signer is the conflict P.4's lease refuses outright; here it is only refused a second line.
+fn catalog_push(out: &mut Vec<mind_types::memory::PackCatalogEntry>, entry: mind_types::memory::PackCatalogEntry) {
+    if let Some(prev) = out.iter().find(|e| e.pack_id == entry.pack_id) {
+        if prev.path != entry.path {
+            tracing::warn!(pack_id = %entry.pack_id, kept = %prev.path, ignored = %entry.path, "two entries claim one pack id — keeping the first");
+        }
+        return;
+    }
+    out.push(entry);
 }
 
 /// The identity of a coverage list's vectors: the embedder and the phrases, nothing else. NOT the
@@ -771,29 +778,36 @@ fn route_packs(
     Ok((matches, route))
 }
 
-/// A mounted pack's manifest, read from its file on first use and cached by path — the FAILURE
-/// too: an unreadable manifest is warned about once and remembered as `None` until the next
-/// mount/unmount clears the cache, so a pack with a bad manifest costs one line, not one per recall.
+/// A pack's manifest, read from its file on first use and cached under the file's FINGERPRINT —
+/// canonical path | size | mtime in nanoseconds. The failure too: an unreadable manifest is warned
+/// about once per file version and remembered as `None`, so a pack with a bad manifest costs one
+/// line, not one per recall; mount, unmount and a library change clear the cache.
+///
+/// Why nanoseconds and not milliseconds (Codex's review of P.3a): a same-size re-seal inside one
+/// millisecond would have served the old coverage under the new file. Nanoseconds are the finest
+/// identity the filesystem offers without opening the file, and a seal — several writes and a
+/// sync — takes longer than any tick they round to. Older fingerprints of the same path are
+/// evicted on insert, so the cache holds one entry per file and cannot grow with re-seals.
 ///
 /// An unreadable manifest makes the pack get the host wall rather than no floor. Never a reason to
-/// skip the pack: the engine already vetted the file at mount, so an unreadable manifest here is a
-/// race with a replaced file, not a bad pack.
+/// skip a mounted pack: the engine already vetted the file at mount, so an unreadable manifest here
+/// is a race with a replaced file, not a bad pack.
 fn cached_manifest<'a>(
     cache: &'a mut std::collections::HashMap<String, Option<ManifestView>>,
     path: &str,
 ) -> Option<&'a ManifestView> {
-    // Keyed by path AND the file's size and mtime: a library file replaced in place (a re-seal
-    // to the same name) is re-read on the next scan, without a mount or unmount in between
-    // (Codex's review of P.3). Stale keys for the old version are harmless and few.
+    let canon = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string());
+    let prefix = format!("{canon}|");
     let key = match std::fs::metadata(path) {
         Ok(md) => format!(
-            "{path}|{}|{}",
+            "{prefix}{}|{}",
             md.len(),
-            md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis()).unwrap_or(0)
+            md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
         ),
-        Err(_) => path.to_string(),
+        Err(_) => format!("{prefix}?|?"),
     };
     if !cache.contains_key(&key) {
+        cache.retain(|k, _| !k.starts_with(&prefix));
         let read = match YantrikDB::read_manifest(path) {
             Ok(m) => Some(ManifestView::of(&m)),
             Err(e) => {
@@ -5693,7 +5707,81 @@ mod lane_experiment {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P.3b (Codex's review of P.3a): a same-size re-seal in place is read on the very next scan
+    /// with no sleep past any timestamp tick — the cache fingerprint is canonical path | size |
+    /// mtime in NANOSECONDS, and a seal takes longer than the tick those round to. The cache holds
+    /// one entry per file across re-seals, and the cost of a cold and a warm scan of a twelve-file
+    /// library is measured here, not assumed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_same_size_reseal_in_place_is_read_on_the_very_next_scan() {
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p3b_reseal_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("games.ydbpack");
+        let seal = |cov: &str| {
+            let _ = std::fs::remove_file(&dest);
+            fixtures::seal_fixture_pack_full(dest.to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["one row"], Some(&[cov]), None, None).unwrap()
+        };
+        seal("alpha bravo one");
+        let size1 = std::fs::metadata(&dest).unwrap().len();
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
+        assert_eq!(mem.available_packs().await.unwrap()[0].coverage, vec!["alpha bravo one".to_string()]);
+        // Immediately: same name, same size, new coverage.
+        seal("alpha bravo two");
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), size1, "the re-seal must be the same size for this to test anything");
+        assert_eq!(mem.available_packs().await.unwrap()[0].coverage, vec!["alpha bravo two".to_string()]);
+        // Bounded: two versions of one file, one cache entry. Third seal, then the pure function.
+        seal("alpha bravo six");
+        let mut cache: std::collections::HashMap<String, Option<ManifestView>> = Default::default();
+        assert!(cached_manifest(&mut cache, dest.to_str().unwrap()).is_some());
+        assert_eq!(cache.len(), 1);
+        seal("alpha bravo ten");
+        assert_eq!(cached_manifest(&mut cache, dest.to_str().unwrap()).map(|m| m.coverage.clone()), Some(vec!["alpha bravo ten".to_string()]));
+        assert_eq!(cache.len(), 1, "older fingerprints of the same path are evicted: {:?}", cache.keys().collect::<Vec<_>>());
+        // The bill: a twelve-file library, one cold scan and one warm scan.
+        for i in 0..11 {
+            let d = dir.join(format!("p{i:02}.ydbpack"));
+            fixtures::seal_fixture_pack_full(d.to_str().unwrap(), "yantrik", &format!("pack-{i}"), "0.1.0", &format!("ns_{i}"), &["one row"], Some(&["a phrase"]), None, None).unwrap();
+        }
+        let t = std::time::Instant::now();
+        let cat = mem.available_packs().await.unwrap();
+        let cold = t.elapsed();
+        let t = std::time::Instant::now();
+        let again = mem.available_packs().await.unwrap();
+        let warm = t.elapsed();
+        assert_eq!(cat.len(), 12);
+        assert_eq!(again.len(), 12);
+        eprintln!("catalog scan of {} library files: cold {cold:?}, warm {warm:?}", cat.len());
+        assert!(cold < std::time::Duration::from_secs(2) && warm < std::time::Duration::from_secs(1), "a scan must stay cheap: cold {cold:?} warm {warm:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P.3b: one id, one entry, on BOTH loops — a second mounted entry with the same id is dropped
+    /// deterministically (first wins), a library copy of a mounted pack is not listed twice, and a
+    /// later file claiming an earlier file's id is dropped and named.
+    #[test]
+    fn duplicate_ids_resolve_first_wins_across_mounted_entries_too() {
+        use mind_types::memory::PackCatalogEntry;
+        let entry = |id: &str, path: &str, mounted: bool| PackCatalogEntry {
+            pack_id: id.into(),
+            path: path.into(),
+            content_digest: Some(format!("d-{path}")),
+            coverage: vec![format!("c-{path}")],
+            floor: 0.55,
+            mounted,
+            signer: None,
+        };
+        let mut out = Vec::new();
+        catalog_push(&mut out, entry("yantrik.a@1", "/m/a.ydbpack", true));
+        catalog_push(&mut out, entry("yantrik.a@1", "/m/a-copy.ydbpack", true)); // a mounted duplicate
+        catalog_push(&mut out, entry("yantrik.a@1", "/m/a.ydbpack", false)); // the library copy of the mount
+        catalog_push(&mut out, entry("yantrik.b@1", "/lib/b.ydbpack", false));
+        catalog_push(&mut out, entry("yantrik.b@1", "/lib/b-later.ydbpack", false)); // a later file, same id
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out[0].mounted && out[0].path == "/m/a.ydbpack" && out[0].coverage == vec!["c-/m/a.ydbpack"], "{:?}", out[0]);
+        assert!(!out[1].mounted && out[1].path == "/lib/b.ydbpack", "{:?}", out[1]);
+    }
 }
-
-
-

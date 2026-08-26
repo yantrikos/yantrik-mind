@@ -396,14 +396,90 @@ pub(crate) fn tool_schemas(user_text: &str, gated_src: &str) -> Vec<Value> {
     out
 }
 
+/// Names a HANDLER accepts in place of a documented argument — the tool's own tolerance, written
+/// down so the boundary can hold a call to the contract the model was shown WITHOUT blaming the
+/// planner for a synonym the handler has always taken (`calc {"expr"}` for `calc {expression}`).
+/// Read off the dispatch's `s("a")`-then-`s("b")` fallbacks, not invented; every arm name is
+/// listed because the catalog may advertise any of them. A required field is satisfied by its own
+/// name or an alias, and an alias is TYPED as the field it stands for (`deals {"max": 500}` is a
+/// budget, not text). Codex's review of P.2d: the alias rationale is represented explicitly, not
+/// by switching per-field enforcement off whenever any value exists.
+pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
+    (&["calc", "calculate", "math"], "expression", &["expr"]),
+    (&["weather"], "place", &["city"]),
+    (&["wikipedia", "wiki"], "query", &["topic"]),
+    (&["search", "web_search"], "query", &["q"]),
+    (&["crypto", "coin"], "coin", &["query"]),
+    (&["stock", "ticker"], "symbol", &["ticker"]),
+    (&["translate"], "to", &["language"]),
+    (&["research"], "query", &["topic"]),
+    (&["code"], "task", &["query"]),
+    (&["revoke", "rm", "remove"], "url", &["repo", "query"]),
+    (&["deals", "shop", "shopping", "find_deals", "deal"], "budget", &["max"]),
+    (&["watch_price", "track_price", "pricewatch", "watch_deal"], "target", &["budget"]),
+    (&["photo_send", "send_photo", "find_photo"], "query", &["text"]),
+    (&["photo_patterns", "photo_pattern"], "name", &["query"]),
+    (&["growup_reel", "reel", "timelapse"], "name", &["query"]),
+    (&["photo_create", "collage", "compose_photo"], "request", &["query"]),
+    (&["taste_profile", "tastes", "preference_profile"], "name", &["query"]),
+    (&["person_items", "inventory", "closet"], "name", &["query"]),
+    (&["mail_search", "mailsearch", "search_mail"], "query", &["q"]),
+    (&["style_timeline", "style"], "person", &["name"]),
+    (&["share_with_member", "share"], "member", &["person"]),
+    (&["find_younger_self", "younger_self"], "person", &["name"]),
+    (&["then_and_now", "thennow"], "person", &["name"]),
+    (&["event_ledger", "events", "event"], "query", &["date"]),
+    (&["trip_ledger", "trips", "trip"], "query", &["place"]),
+    (&["bill_autopay", "autopay"], "name", &["bill"]),
+    (&["mail_rule", "mailrule"], "rule", &["text"]),
+    (&["gift_intel", "gift_ideas"], "name", &["query"]),
+    (&["calendar_remove", "remove_event"], "title", &["query"]),
+    (&["surf", "feeds"], "handles", &["spec"]),
+    (&["copy_trade", "copy_desk"], "url", &["link"]),
+    (&["watch", "watch_media", "listen"], "url", &["link"]),
+];
+
+/// The aliases a tool's handler accepts, as `(field, aliases)` pairs.
+pub(crate) fn aliases_for(tool: &str) -> Vec<(String, Vec<String>)> {
+    ARG_ALIASES
+        .iter()
+        .filter(|(names, _, _)| names.contains(&tool))
+        .map(|(_, field, aliases)| (field.to_string(), aliases.iter().map(|a| a.to_string()).collect()))
+        .collect()
+}
+
 /// What the runtime holds a tool call to: which args are required, which are free text (typed
-/// `string` in the schema the model saw) and which are declared scalars. Derived from the SAME
-/// schemas as the native tool-calling surface, so the contract enforced is the contract advertised.
+/// `string` in the schema the model saw), which are declared scalars, and which alternative names
+/// the handler takes for a field. Derived from the SAME schemas as the native tool-calling surface,
+/// so the contract enforced is the contract advertised; the aliases are the handler's, made explicit.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ArgContract {
     pub required: Vec<String>,
     pub strings: Vec<String>,
     pub scalars: Vec<String>,
+    pub aliases: Vec<(String, Vec<String>)>,
+}
+
+impl ArgContract {
+    /// The documented field a supplied key stands for: itself, unless it is a declared alias.
+    pub(crate) fn canonical<'a>(&'a self, key: &'a str) -> &'a str {
+        self.aliases
+            .iter()
+            .find(|(_, aliases)| aliases.iter().any(|a| a == key))
+            .map(|(field, _)| field.as_str())
+            .unwrap_or(key)
+    }
+
+    /// Is `field` supplied — by its own name or an alias — with something other than null?
+    pub(crate) fn present(&self, obj: &serde_json::Map<String, Value>, field: &str) -> bool {
+        let given = |k: &str| obj.get(k).map_or(false, |v| !v.is_null());
+        given(field)
+            || self
+                .aliases
+                .iter()
+                .filter(|(f, _)| f == field)
+                .any(|(_, aliases)| aliases.iter().any(|a| given(a)))
+    }
 }
 
 fn contract_of(schema: &Value) -> Option<(String, ArgContract)> {
@@ -423,7 +499,8 @@ fn contract_of(schema: &Value) -> Option<(String, ArgContract)> {
             }
         }
     }
-    Some((name, ArgContract { required, strings, scalars }))
+    let aliases = aliases_for(&name);
+    Some((name, ArgContract { required, strings, scalars, aliases }))
 }
 
 /// Every catalogued tool's contract: core + meta first, then each line of `src` — the FULL catalog,

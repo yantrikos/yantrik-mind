@@ -127,21 +127,29 @@ impl Bus for EngineBus {
         // and not invented. Events are spans UNDER the run's declared trace (declare_trace), so
         // `ym why run-…` reconstructs which calls served which goal.
         let trace = self.current_trace().unwrap_or_else(|| format!("toolcall-{}", mind_observability::now_ms()));
+        // THE ARGUMENT BOUNDARY, before prediction, before egress, and before anything derived from
+        // the arguments is written: `signature` embeds the arguments, and the refusal exists
+        // precisely to keep those out of the record — so a refused call carries a constant id. What
+        // the boundary admits is the NORMALIZED value (content-block wrappers unwrapped, the OpenAI
+        // string form parsed), and that is the only shape used from here on: the identity the
+        // legacy loop's guards compare, the broker's input, the tool's input (Codex's review of P.2d).
+        let args = match self.engine.admit_args(tool, args) {
+            Ok(admitted) => admitted,
+            Err(msg) => {
+                self.engine.recorder().record({
+                    let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_observed");
+                    e.object_id = Some(format!("{tool}:malformed"));
+                    e.outcome = Some(msg.chars().take(160).collect());
+                    e.verdict = Some("malformed".into());
+                    e.lesson = Some("malformed: excluded from reliability — the model's arguments did not fit the tool; the planner's failure, not the tool's".into());
+                    e
+                });
+                anyhow::bail!("{msg}");
+            }
+        };
+        let args = &args;
         let prior = self.empirical_prior(tool).await;
         let object_id = format!("{}:{}", tool, signature(tool, args));
-        // THE ARGUMENT BOUNDARY, before prediction and before egress (P.2d): a call the model could
-        // not make properly is nothing to predict and nothing for the broker to inspect.
-        if let Some(msg) = self.engine.refuse_malformed(tool, args) {
-            self.engine.recorder().record({
-                let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_observed");
-                e.object_id = Some(object_id);
-                e.outcome = Some(msg.chars().take(160).collect());
-                e.verdict = Some("malformed".into());
-                e.lesson = Some("malformed: excluded from reliability — the model's arguments did not fit the tool; the planner's failure, not the tool's".into());
-                e
-            });
-            anyhow::bail!("{msg}");
-        }
         let predicted = {
             let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_predicted");
             e.object_id = Some(object_id.clone());
@@ -1268,6 +1276,52 @@ mod goal_contribution_tests {
         assert_eq!(mind_observability::verify_log(&p), Ok(events.len()));
         let _ = std::fs::remove_file(&p);
     }
+
+    /// P.2e (Codex's review of P.2d): on the bounded loop's bus the boundary runs before ANYTHING is
+    /// derived from the arguments — no prediction, no object id built from the raw call — and it
+    /// judges the normalized form. Every recorded event is serialised whole and searched for the
+    /// sentinel: a leak through any field fails, not just through `outcome`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_malformed_call_on_the_bus_is_refused_before_prediction_and_no_field_carries_a_value() {
+        let dir = std::env::temp_dir().join(format!("ym_p2e_bus_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("bus.decisions.jsonl");
+        let _ = std::fs::remove_file(&log);
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let eng = Arc::new(
+            ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+                .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log))),
+        );
+        let bus = EngineBus::new(eng.clone(), TurnIdentity::primary());
+        // The sentinel is a PIN-shaped number the model might have copied from the person.
+        let r = bus.call("run_skill", &serde_json::json!({ "name": 447193, "target": 447193 })).await;
+        assert!(matches!(r.as_deref(), Err(e) if e.to_string().starts_with("(malformed call")), "{r:?}");
+        let r = bus.call("discover_tools", &serde_json::json!({ "query": null })).await;
+        assert!(r.is_err(), "{r:?}");
+        let r = bus.call("run_skill", &serde_json::json!({ "target": "https://example.org/x.csv" })).await;
+        assert!(matches!(r.as_deref(), Err(e) if e.to_string().contains("missing required name")), "{r:?}");
+        // Normalized BEFORE the boundary: a content-block name is a name, and the tool runs on it.
+        let r = bus.call("run_skill", &serde_json::json!({ "name": [{ "type": "text", "content": "csv-clean" }] })).await;
+        assert!(!format!("{r:?}").contains("malformed call"), "a content-block name is a name: {r:?}");
+
+        let events = eng.recorder().read_all();
+        let predicted: Vec<_> = events.iter().filter(|e| e.kind == "tool_predicted").collect();
+        let malformed: Vec<_> = events.iter().filter(|e| e.kind == "tool_observed" && e.verdict.as_deref() == Some("malformed")).collect();
+        assert_eq!(malformed.len(), 3, "{events:?}");
+        assert_eq!(predicted.len(), 1, "only the call that could be made was predicted: {events:?}");
+        assert!(predicted[0].object_id.as_deref().unwrap_or("").starts_with("run_skill"), "{predicted:?}");
+        assert!(malformed.iter().all(|e| matches!(e.object_id.as_deref(), Some("run_skill:malformed") | Some("discover_tools:malformed"))), "a refused call carries a constant id: {malformed:?}");
+        for e in &events {
+            let s = serde_json::to_string(e).unwrap();
+            assert!(!s.contains("447193"), "the sentinel reached the record through some field: {s}");
+            assert!(!s.contains("example.org"), "a value reached the record: {s}");
+        }
+        let track = mem.tool_track_record().await.unwrap();
+        assert!(!track.iter().any(|(t, _, _)| t == "discover_tools"), "a tool that never ran must not be on the record: {track:?}");
+        let _ = std::fs::remove_file(&log);
+    }
 }
-
-

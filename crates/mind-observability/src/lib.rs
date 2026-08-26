@@ -598,7 +598,7 @@ pub fn render_pack_evidence(events: &[DecisionEvent]) -> String {
 pub fn render_pack_routes(events: &[DecisionEvent]) -> String {
     let routes: Vec<&DecisionEvent> = events.iter().filter(|e| e.kind == "pack_route_shadow").collect();
     if routes.is_empty() {
-        return "No shadow routes recorded yet — one is written per primary turn once the catalog has packs.".into();
+        return "No shadow routes recorded yet — one is written per turn, every lane, even with no packs (abstain:no_packs) and when the router fails (abstain:router_error).".into();
     }
     let mut by_verdict: std::collections::BTreeMap<String, usize> = Default::default();
     for r in &routes {

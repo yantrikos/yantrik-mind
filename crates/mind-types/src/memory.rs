@@ -546,10 +546,42 @@ pub const DEFAULT_LEASE_DAYS: u32 = 7;
 /// The longest lease the console grants. Longer than this is `ym pack adopt` — an install — not a loan.
 pub const MAX_LEASE_DAYS: u32 = 90;
 
+/// Where a lease is in its lifecycle. Only `Active` is a healthy, serving lease; the other two are
+/// states a crash or a changed artifact can leave behind, and both are visible rather than silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LeaseState {
+    /// Granted, mounted (or deliberately not, when the pack was already mounted), serving turns.
+    Active,
+    /// The end is already durable and the unmount or the delete has not completed. Never served;
+    /// reconciliation finishes it at the next start or the next visibility check.
+    Releasing,
+    /// The artifact this lease was granted over is gone, or its digest or signer changed. NOT
+    /// mounted, never silently re-granted over a different artifact; the operator releases it.
+    Quarantined,
+}
+
+impl LeaseState {
+    pub fn label(self) -> &'static str {
+        match self {
+            LeaseState::Active => "active",
+            LeaseState::Releasing => "releasing",
+            LeaseState::Quarantined => "quarantined",
+        }
+    }
+    pub fn from_label(s: &str) -> LeaseState {
+        match s {
+            "releasing" => LeaseState::Releasing,
+            "quarantined" => LeaseState::Quarantined,
+            _ => LeaseState::Active,
+        }
+    }
+}
+
 /// A standing lease (ARCH-6 P.4 v1): who borrowed which expertise, why, until when. Operator state
 /// with a record, joinable to the pack's evidence rungs (E.PK2) by `pack_id` and `content_digest`.
 /// A leased pack is MOUNTED while the lease runs and unmounted when it ends, unless it is also
-/// installed — a lease never removes what the operator adopted.
+/// installed — a lease never removes what the operator adopted, and never unmounts a pack it did
+/// not attach (`mounted_by_lease`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PackLease {
     pub pack_id: String,
@@ -560,6 +592,12 @@ pub struct PackLease {
     pub granted_by: String,
     pub granted_ms: i64,
     pub expires_ms: i64,
+    /// Did THIS lease attach the pack? Release and expiry unmount only what they mounted, so an
+    /// independent operator mount survives a lease that happened to cover the same pack.
+    pub mounted_by_lease: bool,
+    pub state: LeaseState,
+    /// Why it is quarantined, when it is.
+    pub note: Option<String>,
 }
 
 impl PackLease {
@@ -569,6 +607,10 @@ impl PackLease {
     pub fn days_left(&self, now_ms: i64) -> f64 {
         (self.expires_ms - now_ms).max(0) as f64 / 86_400_000.0
     }
+    /// A lease that is actually serving turns right now.
+    pub fn is_serving(&self, now_ms: i64) -> bool {
+        self.state == LeaseState::Active && !self.expired_at(now_ms)
+    }
 }
 
 /// Why a lease ended — the recorder's verdict on `pack_released`.
@@ -576,6 +618,8 @@ impl PackLease {
 pub enum LeaseEnd {
     Released,
     Expired,
+    /// The artifact changed or vanished under an active lease.
+    Quarantined,
 }
 
 impl LeaseEnd {
@@ -583,8 +627,31 @@ impl LeaseEnd {
         match self {
             LeaseEnd::Released => "released",
             LeaseEnd::Expired => "expired",
+            LeaseEnd::Quarantined => "quarantined",
         }
     }
+    pub fn from_label(s: &str) -> LeaseEnd {
+        match s {
+            "expired" => LeaseEnd::Expired,
+            "quarantined" => LeaseEnd::Quarantined,
+            _ => LeaseEnd::Released,
+        }
+    }
+}
+
+/// One lease event waiting to reach the flight recorder. Written in the SAME transaction as the
+/// state change it describes, so a crash between "the lease ended" and "the record says so" is
+/// recovered on the next start instead of losing the evidence E.PK4 claims to keep (Codex's
+/// review of P.4). `event_id` is stable and derived from the lease's identity, so a replayed or
+/// duplicated drain cannot double-count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaseEvent {
+    pub event_id: String,
+    /// `leased` or `released`.
+    pub kind: String,
+    pub lease: PackLease,
+    pub end_reason: Option<LeaseEnd>,
+    pub ts_ms: i64,
 }
 
 /// A pack's local track record — counts, never a rate, because every rate here needs its own
@@ -837,12 +904,31 @@ pub trait MemoryFacade: Send + Sync {
     async fn release_pack(&self, _pack_id: &str, _end: LeaseEnd) -> Result<Option<PackLease>> {
         Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
     }
-    /// Every standing lease, soonest expiry first.
+    /// Every lease the operator holds, soonest expiry first — including quarantined ones, which
+    /// are not serving and must be visible rather than silent.
     async fn leases(&self) -> Result<Vec<PackLease>> {
         Ok(Vec::new())
     }
-    /// Release every lease whose expiry has passed `now_ms`; returns the leases that ended.
+    /// End every lease whose expiry has passed `now_ms`; returns the leases that ended. One lease's
+    /// failure never stops the sweep.
     async fn sweep_leases(&self, _now_ms: i64) -> Result<Vec<PackLease>> {
+        Ok(Vec::new())
+    }
+    /// Lease events written durably beside their state change and not yet recorded. Read, record,
+    /// then `ack_lease_event` each — at-least-once delivery with a stable id, so the recorder can
+    /// be replayed without double-counting.
+    async fn pending_lease_events(&self) -> Result<Vec<LeaseEvent>> {
+        Ok(Vec::new())
+    }
+    /// Forget a delivered lease event. Idempotent.
+    async fn ack_lease_event(&self, _event_id: &str) -> Result<()> {
+        Ok(())
+    }
+    /// Bring the lease table and the engine's mounts back into agreement — at startup, before
+    /// anything is served, and whenever a pack becomes visible. Finishes interrupted releases, ends
+    /// what expired while the process was down, remounts what is still owed, and quarantines a
+    /// lease whose artifact changed. Returns one line per action taken.
+    async fn reconcile_leases(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 

@@ -4446,9 +4446,10 @@ async fn a_hostile_pack_cannot_move_the_walls() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_lease_verbs_grant_record_release_and_scope_what_a_turn_sees() {
-    // P.4 v1 through the console verbs: a lease makes the pack's rows visible to a turn (mounted),
-    // a release makes them invisible again, and both leave their record on the flight recorder —
-    // the grant with who/why/until, the end with its verdict.
+    // P.4 through the console verbs, with P.4a's durable record: a lease makes the pack's rows
+    // visible to a turn, a release makes them invisible again, and BOTH records reach the flight
+    // recorder through the outbox — written beside the state change, drained afterwards, carrying
+    // the outbox's own id so a replay cannot write a second copy.
     use mind_types::memory::LeaseEnd;
     let dir = std::env::temp_dir().join(format!("ym_p4_verbs_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -4479,18 +4480,22 @@ async fn the_lease_verbs_grant_record_release_and_scope_what_a_turn_sees() {
     assert!(out.contains("Leased") && out.contains(&games), "{out}");
     assert!(mem.recall_from_packs(query, 4).await.unwrap().iter().any(|h| h.pack_id == games), "leased = visible to a turn");
     let list = conv.leases_render().await;
-    assert!(list.contains(&games) && list.contains("platformer week"), "{list}");
+    assert!(list.contains(&games) && list.contains("platformer week") && list.contains("1 serving"), "{list}");
     let lib_view = conv.packs_library().await;
     assert!(lib_view.contains("leased (") && lib_view.contains("platformer week"), "{lib_view}");
-    assert!(conv.sweep_leases().await.is_empty(), "nothing due: the sweep is silent");
+    assert!(conv.sweep_leases().await.is_empty(), "nothing due and nothing left to record: the sweep is silent");
+    // The grant was recorded when it happened, and the outbox is empty afterwards.
+    assert!(mem.pending_lease_events().await.unwrap().is_empty(), "the drain acknowledged what it recorded");
 
     let out = conv.pack_release(&games).await;
     assert!(out.contains("Released"), "{out}");
     assert!(mem.recall_from_packs(query, 4).await.unwrap().is_empty(), "released = invisible again");
-    assert!(conv.pack_release(&games).await.contains("no standing lease"));
-    assert!(conv.pack_lease("").await.starts_with("Usage"));
-    let out = conv.pack_lease("yantrik/nope@1.0.0 reason=x").await;
-    assert!(out.contains("no pack"), "{out}");
+    assert!(conv.pack_release(&games).await.contains("no lease on"));
+    // Loud argument parsing (P.4a): a usage error is said, not silently defaulted.
+    assert!(conv.pack_lease("").await.contains("usage"));
+    assert!(conv.pack_lease(&format!("{games} days=thirty reason=x")).await.contains("whole number of days"));
+    assert!(conv.pack_lease(&format!("{games} days=0 reason=x")).await.contains("between 1 and 90"));
+    assert!(conv.pack_lease("yantrik/nope@1.0.0 reason=x").await.contains("no pack"));
 
     let ev = conv.recorder().read_all();
     let leased: Vec<_> = ev.iter().filter(|e| e.kind == "pack_leased").collect();
@@ -4503,19 +4508,33 @@ async fn the_lease_verbs_grant_record_release_and_scope_what_a_turn_sees() {
     let released: Vec<_> = ev.iter().filter(|e| e.kind == "pack_released").collect();
     assert_eq!(released.len(), 1, "{ev:?}");
     assert_eq!(released[0].verdict.as_deref(), Some("released"));
-    assert_eq!(released[0].actor.as_deref(), Some("operator"));
-    // The sweep's end is the same record with the other verdict.
-    conv.record_lease_end(
-        &mind_types::memory::PackLease { pack_id: games.clone(), path: String::new(), content_digest: None, signer: None, reason: "platformer week".into(), granted_by: "operator".into(), granted_ms: 0, expires_ms: 1 },
-        LeaseEnd::Expired,
-    );
+    // Stable ids: one grant, one ending, whatever the drain does afterwards.
+    assert!(leased[0].event_id.as_deref().unwrap_or("").starts_with("lease:leased:"), "{:?}", leased[0].event_id);
+    assert!(released[0].event_id.as_deref().unwrap_or("").starts_with("lease:released:"), "{:?}", released[0].event_id);
+    assert!(conv.drain_lease_events().await.is_empty(), "a drain with nothing pending writes nothing");
+    let after = conv.recorder().read_all();
+    assert_eq!(after.iter().filter(|e| e.kind.starts_with("pack_le") || e.kind.starts_with("pack_re")).count(), 2, "no duplicate records: {after:?}");
+
+    // The expiry path records with its own verdict and actor, through the same outbox.
+    conv.pack_lease(&format!("{games} days=1 reason=will expire")).await;
+    let l = mem.leases().await.unwrap();
+    assert_eq!(l.len(), 1);
+    mem.sweep_leases(l[0].expires_ms + 1).await.unwrap();
+    let lines = conv.sweep_leases().await;
+    let _ = lines;
     let ev = conv.recorder().read_all();
-    assert!(ev.iter().any(|e| e.kind == "pack_released" && e.verdict.as_deref() == Some("expired") && e.actor.as_deref() == Some("sweep")), "{ev:?}");
+    assert!(
+        ev.iter().any(|e| e.kind == "pack_released" && e.verdict.as_deref() == Some("expired") && e.actor.as_deref() == Some("sweep")),
+        "the sweep's ending is recorded as its own: {ev:?}"
+    );
+    assert!(mem.leases().await.unwrap().is_empty());
+    let _ = LeaseEnd::Expired;
 
     // The argument grammar.
-    assert_eq!(crate::pack::parse_lease_args("yantrik/x@1 days=3 reason=two words here"), (Some("yantrik/x@1".into()), 3, "two words here".into()));
-    assert_eq!(crate::pack::parse_lease_args("yantrik/x@1"), (Some("yantrik/x@1".into()), mind_types::memory::DEFAULT_LEASE_DAYS, "unstated".into()));
-    assert_eq!(crate::pack::parse_lease_args("days=4").0, None);
+    assert_eq!(crate::pack::parse_lease_args("yantrik/x@1 days=3 reason=two words here").unwrap(), ("yantrik/x@1".to_string(), 3, "two words here".to_string()));
+    assert_eq!(crate::pack::parse_lease_args("yantrik/x@1").unwrap(), ("yantrik/x@1".to_string(), mind_types::memory::DEFAULT_LEASE_DAYS, "unstated".to_string()));
+    assert!(crate::pack::parse_lease_args("days=4").is_err(), "a lease needs a pack id");
+    assert!(crate::pack::parse_lease_args("a b").is_err(), "a stray token is a usage error, not a reason");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

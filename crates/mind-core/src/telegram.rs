@@ -1229,6 +1229,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
     let mut last_ics = 0u64; // external-calendar (ICS) refresh cadence
     let mut last_lease_sweep = 0u64; // standing-lease expiry sweep (ARCH-6 P.4)
+    // Leases, reconciled BEFORE the first turn is served: a restart drops transient mounts, and a
+    // lease that expired while the mind was down must not come back attached (P.4a).
+    for line in conv.reconcile_leases().await {
+        eprintln!("{line}");
+    }
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     let mut last_member_beat = 0u64; // member reminders + briefs cadence
     loop {

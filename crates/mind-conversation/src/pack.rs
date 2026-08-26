@@ -654,7 +654,8 @@ impl super::ConversationEngine {
                 for e in &cat {
                     let lease = leases.iter().find(|l| l.pack_id == e.pack_id);
                     let state = match (e.mounted, lease) {
-                        (_, Some(l)) => format!("leased ({:.1} d left — {})", l.days_left(now), l.reason),
+                        (_, Some(l)) if l.is_serving(now) => format!("leased ({:.1} d left — {})", l.days_left(now), l.reason),
+                        (_, Some(l)) => format!("{} lease — {}", l.state.label(), l.note.as_deref().unwrap_or(&l.reason)),
                         (true, None) => "mounted".to_string(),
                         (false, None) => "library (unmounted)".to_string(),
                     };
@@ -676,68 +677,61 @@ impl super::ConversationEngine {
     // ── standing expertise leases (ARCH-6 P.4 v1, E.PK4) ─────────────────────────────────────
 
     /// `ym pack lease <id> [days=N] [reason=…]` — a STANDING lease: mounted now, released by the
-    /// operator or by the sweep at expiry. Every grant is a `pack_leased` record: who, what, why,
-    /// until when — the row P.2's evidence rungs can be joined to.
+    /// operator or by expiry. The record comes from the DURABLE OUTBOX, not from this function: the
+    /// state change and its event are committed together, and the drain below turns the event into
+    /// a recorder entry. A crash between the two loses nothing (Codex's review of P.4).
     pub async fn pack_lease(&self, arg: &str) -> String {
-        let (id, days, reason) = parse_lease_args(arg);
-        let Some(id) = id else {
-            return "Usage: ym pack lease <pack-id> [days=N] [reason=why]".to_string();
+        let (id, days, reason) = match parse_lease_args(arg) {
+            Ok(parsed) => parsed,
+            Err(e) => return format!("({e})"),
         };
-        match self.memory.lease_pack(&id, days, &reason, "operator").await {
-            Ok(l) => {
-                let mut ev = mind_observability::DecisionEvent::span(format!("lease-{}", mind_observability::now_ms()), None, "pack_leased");
-                ev.object_id = Some(l.pack_id.clone());
-                ev.actor = Some(l.granted_by.clone());
-                ev.goal = Some(l.reason.clone());
-                ev.outcome = Some(format!("until {}", iso_utc(l.expires_ms)));
-                ev.evidence_ids = l.content_digest.iter().cloned().collect();
-                ev.policy = vec![
-                    "standing-lease-v1".to_string(),
-                    format!("cap={}", mind_types::memory::LEASE_CAP),
-                    "mounted at grant; unmounted at release or expiry unless installed".to_string(),
-                ];
-                self.recorder.record(ev);
-                format!(
-                    "📦 Leased [{}] until {} — {}. Mounted now: its rules join my prompt from the next turn and its rows are recallable. `ym pack release {}` returns it early; `ym leases` lists what I'm borrowing.",
-                    l.pack_id,
-                    iso_utc(l.expires_ms),
-                    l.reason,
-                    l.pack_id
-                )
-            }
+        let out = match self.memory.lease_pack(&id, days, &reason, "operator").await {
+            Ok(l) => format!(
+                "📦 Leased [{}] until {} — {}. Mounted now: its rules join my prompt from the next turn and its rows are recallable. `ym pack release {}` returns it early; `ym leases` lists what I'm borrowing.",
+                l.pack_id,
+                iso_utc(l.expires_ms),
+                l.reason,
+                l.pack_id
+            ),
             Err(e) => format!("(couldn't lease that: {e})"),
-        }
+        };
+        self.drain_lease_events().await;
+        out
     }
 
-    /// `ym pack release <id>` — return a leased pack now. Unmounts unless it is also installed.
+    /// `ym pack release <id>` — return a leased pack now. Also the way to clear a quarantined one.
     pub async fn pack_release(&self, id: &str) -> String {
         let id = id.trim();
-        match self.memory.release_pack(id, mind_types::memory::LeaseEnd::Released).await {
-            Ok(Some(l)) => {
-                self.record_lease_end(&l, mind_types::memory::LeaseEnd::Released);
-                format!("📦 Released [{}] — returned early ({}). Unmounted unless it was also adopted.", l.pack_id, l.reason)
-            }
-            Ok(None) => format!("(no standing lease on {id} — `ym leases` lists what I'm borrowing)"),
+        let out = match self.memory.release_pack(id, mind_types::memory::LeaseEnd::Released).await {
+            Ok(Some(l)) => format!("📦 Released [{}] — returned early ({}). Unmounted if this lease was what attached it.", l.pack_id, l.reason),
+            Ok(None) => format!("(no lease on {id} — `ym leases` lists what I'm borrowing)"),
             Err(e) => format!("(couldn't release that: {e})"),
-        }
+        };
+        self.drain_lease_events().await;
+        out
     }
 
-    /// `ym leases` — what I'm borrowing, soonest expiry first.
+    /// `ym leases` — what I'm borrowing, soonest expiry first. A lease that is NOT serving says so:
+    /// a quarantined artifact and an interrupted release are both visible, never silent.
     pub async fn leases_render(&self) -> String {
         match self.memory.leases().await {
             Err(e) => format!("(couldn't read the leases: {e})"),
             Ok(ls) if ls.is_empty() => format!("No standing leases. `ym pack lease <id> [days=N] [reason=…]` borrows a library pack (cap {}).", mind_types::memory::LEASE_CAP),
             Ok(ls) => {
                 let now = mind_observability::now_ms() as i64;
-                let mut out = format!("🔑 {} standing lease(s) (cap {})\n", ls.len(), mind_types::memory::LEASE_CAP);
+                let serving = ls.iter().filter(|l| l.is_serving(now)).count();
+                let mut out = format!("🔑 {} lease(s), {serving} serving (cap {})\n", ls.len(), mind_types::memory::LEASE_CAP);
                 for l in &ls {
+                    let state = match l.state {
+                        mind_types::memory::LeaseState::Active => format!("{:.1} d left (until {})", l.days_left(now), iso_utc(l.expires_ms)),
+                        other => format!("{}{}", other.label().to_uppercase(), l.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default()),
+                    };
                     out.push_str(&format!(
-                        "  {} · {:.1} d left (until {}) · {} · by {}{}\n",
+                        "  {} · {state} · {} · by {}{}{}\n",
                         l.pack_id,
-                        l.days_left(now),
-                        iso_utc(l.expires_ms),
                         l.reason,
                         l.granted_by,
+                        if l.mounted_by_lease { "" } else { " · attached by someone else" },
                         l.content_digest.as_deref().map(|d| format!(" · {}…", d.chars().take(16).collect::<String>())).unwrap_or_default()
                     ));
                 }
@@ -746,37 +740,74 @@ impl super::ConversationEngine {
         }
     }
 
-    /// The sweep the poll loop runs: every expired lease ends, each with its own `pack_released`
-    /// record (verdict `expired`). Returns log lines; silent when nothing was due.
+    /// The expiry sweep the poll loop runs — an OPTIMISATION, not the clock: expiry is also enforced
+    /// at the pack visibility boundary inside the memory actor, so a stopped loop or another
+    /// frontend can never serve an expired lease (Codex's review of P.4). Returns log lines.
     pub async fn sweep_leases(&self) -> Vec<String> {
         let now = mind_observability::now_ms() as i64;
-        match self.memory.sweep_leases(now).await {
+        let mut log = match self.memory.sweep_leases(now).await {
             Ok(ended) => ended
                 .iter()
-                .map(|l| {
-                    self.record_lease_end(l, mind_types::memory::LeaseEnd::Expired);
-                    format!("[lease] expired {} ({}) — returned; unmounted unless installed", l.pack_id, l.reason)
-                })
+                .map(|l| format!("[lease] expired {} ({}) — returned", l.pack_id, l.reason))
                 .collect(),
             Err(e) => vec![format!("[lease] sweep failed: {e}")],
-        }
+        };
+        log.extend(self.drain_lease_events().await);
+        log
     }
 
-    /// One record for every way a lease ends — the operator's return and the sweep's expiry are
-    /// the same event with a different verdict, so `ym why packs` can join them to the grant.
-    pub(crate) fn record_lease_end(&self, l: &mind_types::memory::PackLease, end: mind_types::memory::LeaseEnd) {
-        let mut ev = mind_observability::DecisionEvent::span(format!("lease-{}", mind_observability::now_ms()), None, "pack_released");
-        ev.object_id = Some(l.pack_id.clone());
-        ev.actor = Some(match end {
-            mind_types::memory::LeaseEnd::Released => "operator".to_string(),
-            mind_types::memory::LeaseEnd::Expired => "sweep".to_string(),
-        });
-        ev.goal = Some(l.reason.clone());
-        ev.verdict = Some(end.label().to_string());
-        ev.outcome = Some(format!("granted {} · was due {}", iso_utc(l.granted_ms), iso_utc(l.expires_ms)));
-        ev.evidence_ids = l.content_digest.iter().cloned().collect();
-        ev.policy = vec!["standing-lease-v1".to_string()];
-        self.recorder.record(ev);
+    /// Reconcile the lease table with what is actually mounted, then record whatever that produced.
+    /// Called once at startup, before the mind serves anything.
+    pub async fn reconcile_leases(&self) -> Vec<String> {
+        let mut log = self.memory.reconcile_leases().await.unwrap_or_else(|e| vec![format!("[lease] reconcile failed: {e}")]);
+        log.extend(self.drain_lease_events().await);
+        log
+    }
+
+    /// THE OUTBOX DRAIN. Every `pack_leased` / `pack_released` record is written from here and
+    /// nowhere else: the memory actor commits the event beside the state change, this turns it into
+    /// a flight-recorder entry, and only then is it acknowledged. The recorder event carries the
+    /// outbox's own id, so a re-drain after a crash writes the same id rather than a second event.
+    pub async fn drain_lease_events(&self) -> Vec<String> {
+        let events = match self.memory.pending_lease_events().await {
+            Ok(e) => e,
+            Err(e) => return vec![format!("[lease] could not read pending lease events: {e}")],
+        };
+        let mut log = Vec::new();
+        for ev in events {
+            let l = &ev.lease;
+            let kind = if ev.kind == "leased" { "pack_leased" } else { "pack_released" };
+            let mut d = mind_observability::DecisionEvent::span(format!("lease-{}", l.granted_ms), None, kind);
+            d.event_id = Some(ev.event_id.clone());
+            d.object_id = Some(l.pack_id.clone());
+            d.goal = Some(l.reason.clone());
+            d.evidence_ids = l.content_digest.iter().cloned().collect();
+            d.policy = vec![
+                "standing-lease-v1".to_string(),
+                format!("cap={}", mind_types::memory::LEASE_CAP),
+                "mounted at grant; unmounted at release or expiry, only what the lease attached".to_string(),
+            ];
+            match ev.end_reason {
+                None => {
+                    d.actor = Some(l.granted_by.clone());
+                    d.outcome = Some(format!("until {}", iso_utc(l.expires_ms)));
+                }
+                Some(end) => {
+                    d.actor = Some(match end {
+                        mind_types::memory::LeaseEnd::Released => l.granted_by.clone(),
+                        mind_types::memory::LeaseEnd::Expired => "sweep".to_string(),
+                        mind_types::memory::LeaseEnd::Quarantined => "reconciler".to_string(),
+                    });
+                    d.verdict = Some(end.label().to_string());
+                    d.outcome = Some(format!("granted {} · was due {}", iso_utc(l.granted_ms), iso_utc(l.expires_ms)));
+                }
+            }
+            self.recorder.record(d);
+            if let Err(e) = self.memory.ack_lease_event(&ev.event_id).await {
+                log.push(format!("[lease] recorded {} but could not acknowledge it: {e}", ev.event_id));
+            }
+        }
+        log
     }
 
     /// `ym pack stats` — every pack's local ladder from BOTH witnesses, side by side: the SQL
@@ -928,7 +959,9 @@ impl super::ConversationEngine {
 }
 
 /// `<id> [days=N] [reason=…]` — the reason runs to the end of the line, so it may have spaces.
-pub(crate) fn parse_lease_args(arg: &str) -> (Option<String>, u32, String) {
+/// An unreadable `days=` is an ERROR, not a silent default: an operator who typed `days=thirty`
+/// asked for a month and would otherwise get a week without being told (Codex's review of P.4).
+pub(crate) fn parse_lease_args(arg: &str) -> std::result::Result<(String, u32, String), String> {
     let arg = arg.trim();
     let (head, reason) = match arg.find("reason=") {
         Some(i) => (&arg[..i], arg[i + "reason=".len()..].trim().to_string()),
@@ -938,13 +971,21 @@ pub(crate) fn parse_lease_args(arg: &str) -> (Option<String>, u32, String) {
     let mut days = mind_types::memory::DEFAULT_LEASE_DAYS;
     for tok in head.split_whitespace() {
         if let Some(n) = tok.strip_prefix("days=") {
-            days = n.parse().unwrap_or(days);
+            days = n
+                .parse::<u32>()
+                .map_err(|_| format!("days= must be a whole number of days, got `{n}`"))?;
+            if days == 0 || days > mind_types::memory::MAX_LEASE_DAYS {
+                return Err(format!("days= must be between 1 and {}, got {days}", mind_types::memory::MAX_LEASE_DAYS));
+            }
         } else if id.is_none() {
             id = Some(tok.to_string());
+        } else {
+            return Err(format!("unexpected `{tok}` — usage: ym pack lease <pack-id> [days=N] [reason=why]"));
         }
     }
+    let id = id.ok_or_else(|| "usage: ym pack lease <pack-id> [days=N] [reason=why]".to_string())?;
     let reason = if reason.is_empty() { "unstated".to_string() } else { reason };
-    (id, days, reason)
+    Ok((id, days, reason))
 }
 
 fn iso_utc(ms: i64) -> String {

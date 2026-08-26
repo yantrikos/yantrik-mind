@@ -351,6 +351,7 @@ impl ConversationEngine {
                     runs: 0,
                     successes: 0,
                     graded: 0,
+                    judged_ok: 0,
                     created_ms: now,
                 };
                 if let Err(e) = self.memory.save_skill(s).await {
@@ -1065,7 +1066,9 @@ fn iso_utc(ms: i64) -> String {
 mod sec6_certification {
     use super::skill_reliable;
 
-    fn skill(runs: u64, successes: u64, graded: u64) -> mind_types::Skill {
+    /// `judged_ok` is the numerator, NOT the frozen `successes` column — the second argument was
+    /// always meant to be judged wins, and since E.P5c that is a different field.
+    fn skill(runs: u64, judged_ok: u64, graded: u64) -> mind_types::Skill {
         mind_types::Skill {
             name: "s".into(),
             lang: "md".into(),
@@ -1074,7 +1077,8 @@ mod sec6_certification {
             tags: vec![],
             status: "active".into(),
             runs,
-            successes,
+            successes: 0,
+            judged_ok,
             graded,
             created_ms: 0,
         }

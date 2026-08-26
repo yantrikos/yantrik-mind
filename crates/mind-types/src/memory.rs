@@ -349,8 +349,16 @@ pub struct Skill {
     pub status: String, // "candidate" | "active" | "quarantined"
     /// Every attempt, judged or not.
     pub runs: u64,
-    /// Attempts where the TASK was accomplished (`task_success == Some(true)`).
+    /// HISTORICAL. Frozen at its pre-split value and no longer written.
+    ///
+    /// It conflated "the executor finished" with "the task got done", and the two cannot be
+    /// separated retroactively — so it is kept for audit and never read for a decision. Reading it
+    /// was actively wrong: a legacy row with 5 of these and two JUDGED FAILURES reported
+    /// `rate = 1.0`, because the rate clamped 5 successes down to 2 graded runs and called it
+    /// perfect (E.P5c).
     pub successes: u64,
+    /// Runs judged to have accomplished the task, counted only since the split. The numerator.
+    pub judged_ok: u64,
     /// Attempts anybody actually JUDGED — the denominator `successes` belongs over.
     ///
     /// `runs` is the wrong denominator and always was: a document that ran fine and was never
@@ -374,7 +382,7 @@ impl Skill {
     /// hand-rolled guards and comments saying so. Now the ranking half is `rank_score()` and the
     /// truth is here (E.P5a).
     pub fn reliability(&self) -> crate::reliability::Reliability {
-        crate::reliability::Reliability::new(self.graded as u32, self.successes as u32)
+        crate::reliability::Reliability::new(self.graded as u32, self.judged_ok as u32)
     }
 
     /// How often the RUNNER got through, which is a different question and a different ledger.

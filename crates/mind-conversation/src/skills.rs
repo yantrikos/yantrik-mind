@@ -30,7 +30,7 @@ pub(crate) fn track_record(sk: &Skill) -> String {
     match sk.reliability().rate() {
         None if sk.runs > 0 => format!("{} runs, none judged yet", sk.runs),
         None => "untested".to_string(),
-        Some(_) => format!("{}/{} judged ok of {} runs", sk.successes, sk.graded, sk.runs),
+        Some(_) => format!("{}/{} judged ok of {} runs", sk.judged_ok, sk.graded, sk.runs),
     }
 }
 
@@ -486,6 +486,7 @@ impl super::ConversationEngine {
                 runs: 0,
                 successes: 0,
                 graded: 0,
+                judged_ok: 0,
                 created_ms: Self::now_ms(),
             };
             return Some(match self.memory.save_skill(skill).await {

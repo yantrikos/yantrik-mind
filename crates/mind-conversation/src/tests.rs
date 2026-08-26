@@ -1692,6 +1692,7 @@ async fn auto_select_suggests_a_matching_skill() {
             runs: 0,
             successes: 0,
             graded: 0,
+            judged_ok: 0,
             created_ms: 0,
         })
         .await
@@ -2799,7 +2800,7 @@ async fn pack_lifecycle_install_certify_demote_draft() {
     // 4. DRAFT: a proven banked skill self-authors into a certified pack.
     let now = chrono::Utc::now().timestamp_millis() as u64;
     memarc
-        .save_skill(mind_types::Skill { name: "csv summer".into(), lang: "md".into(), code: "Sum the csv.".into(), summary: "sums csv numbers".into(), tags: vec![], status: "active".into(), runs: 0, successes: 0, graded: 0, created_ms: now })
+        .save_skill(mind_types::Skill { name: "csv summer".into(), lang: "md".into(), code: "Sum the csv.".into(), summary: "sums csv numbers".into(), tags: vec![], status: "active".into(), runs: 0, successes: 0, graded: 0, judged_ok: 0, created_ms: now })
         .await
         .unwrap();
     memarc.record_skill_outcome("csv summer", mind_types::SkillOutcome::judged(true)).await.unwrap();
@@ -4995,6 +4996,7 @@ async fn an_instruction_document_runs_instead_of_being_refused() {
         runs: 0,
         successes: 0,
         graded: 0,
+        judged_ok: 0,
         created_ms: 0,
     })
     .await
@@ -5055,6 +5057,7 @@ fn banked(name: &str, lang: &str, code: &str) -> mind_types::Skill {
         runs: 0,
         successes: 0,
         graded: 0,
+        judged_ok: 0,
         created_ms: 0,
     }
 }
@@ -5367,9 +5370,11 @@ mod sec4 {
 fn a_track_record_never_prints_a_rate_it_does_not_have() {
     use crate::skills::track_record;
 
-    let sk = |runs: u64, successes: u64, graded: u64| mind_types::Skill {
+    // (runs, judged_ok, graded) — `successes` is the frozen pre-split column and is deliberately
+    // set to a NON-ZERO value the renderer must ignore, since reading it was the E.P5c defect.
+    let sk = |runs: u64, judged_ok: u64, graded: u64| mind_types::Skill {
         name: "s".into(), lang: "python".into(), code: "x".into(), summary: "x".into(),
-        tags: vec![], status: "active".into(), runs, successes, graded, created_ms: 0,
+        tags: vec![], status: "active".into(), runs, successes: 99, judged_ok, graded, created_ms: 0,
     };
 
     // THE LIVE DEFECT, found by running csv-sum on the box after deploying E.P5b: a legacy row

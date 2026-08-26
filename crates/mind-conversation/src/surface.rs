@@ -385,7 +385,13 @@ pub struct SkillRow {
     pub success_rate: Option<f64>,
     /// How many runs anybody actually JUDGED. `runs` is attempts; this is evidence. A rate without
     /// its denominator said aloud is how "2 successes" hid the fact that nothing was assessed.
+    ///
+    /// CODEX FOUND THIS HARDCODED TO 0 by driving the live cockpit: the row reported `graded = 0`
+    /// beside a non-null `success_rate`, so the surface contradicted itself and lied about the
+    /// denominator the rate was computed over (E.P5c).
     pub graded: u64,
+    /// Judged runs that SUCCEEDED — the numerator `success_rate` is actually computed from.
+    pub judged_ok: u64,
     /// Below half over four or more runs: the store's own quarantine rule, surfaced so the operator
     /// can see a skill on its way out rather than discovering it gone.
     pub failing: bool,
@@ -773,10 +779,13 @@ impl ConversationEngine {
                 tags: s.tags,
                 status: s.status,
                 runs: s.runs,
+                // HISTORICAL and frozen — the pre-split column that conflated two meanings. Kept
+                // visible for audit, never the numerator of anything (E.P5c).
                 successes: s.successes,
+                judged_ok: s.judged_ok,
                 success_rate,
                 failing,
-                graded: 0,
+                graded: s.graded,
                 created_ms: s.created_ms,
             });
         }
@@ -1331,7 +1340,9 @@ mod tests {
             tags: vec![],
             status: "active".into(),
             runs,
-            successes: ok,
+            // The frozen pre-split column plays no part; `judged_ok` is the numerator (E.P5c).
+            successes: 0,
+            judged_ok: ok,
             // These fixtures stand for a JUDGED track record — the whole point of the test is a
             // skill whose failures were observed. Since E.P5b the denominator is `graded`, not
             // `runs`: a run nobody assessed is not a failure, so leaving this 0 would have made an

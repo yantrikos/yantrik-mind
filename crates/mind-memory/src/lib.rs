@@ -2367,6 +2367,21 @@ fn ensure_skills_table(db: &YantrikDB) {
     for col in ["graded INTEGER NOT NULL DEFAULT 0", "executor_ok INTEGER NOT NULL DEFAULT 0"] {
         let _ = db.conn().execute(&format!("ALTER TABLE mind_skills ADD COLUMN {col}"), []);
     }
+    // `judged_ok` is the numerator `graded` always needed. Adding it succeeds exactly ONCE, which
+    // makes it the right place for a one-time reset: between the split and this fix, `successes`
+    // was still being incremented and then read as the numerator, so a legacy row's conflated wins
+    // were divided by the new judged denominator. Two judged FAILURES on such a row reported
+    // rate = 1.0. The post-split counters therefore restart clean rather than carry that forward —
+    // it discards the handful of observations recorded in between, which is a cost worth paying to
+    // never divide two different things by each other again. `successes` and `runs` are untouched
+    // and remain auditable (E.P5c).
+    if db
+        .conn()
+        .execute("ALTER TABLE mind_skills ADD COLUMN judged_ok INTEGER NOT NULL DEFAULT 0", [])
+        .is_ok()
+    {
+        let _ = db.conn().execute("UPDATE mind_skills SET graded = 0", []);
+    }
 }
 
 /// A knowledge pack's LOCAL track record (ARCH-6 P.2): the SQL witness beside the flight
@@ -3071,6 +3086,7 @@ fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
         runs: r.get::<_, i64>(6)? as u64,
         successes: r.get::<_, i64>(7)? as u64,
         graded: r.get::<_, i64>(9)? as u64,
+        judged_ok: r.get::<_, i64>(10)? as u64,
         created_ms: r.get::<_, i64>(8)? as u64,
     })
 }
@@ -3083,10 +3099,10 @@ fn save_skill(db: &YantrikDB, s: &Skill) -> std::result::Result<(), String> {
         .execute(
             // The ledger columns are set on INSERT and deliberately NOT touched by the conflict
             // update: re-saving a skill must not reset its track record.
-            "INSERT INTO mind_skills (name,lang,code,summary,tags,status,runs,successes,created_ms,graded) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
+            "INSERT INTO mind_skills (name,lang,code,summary,tags,status,runs,successes,created_ms,graded,judged_ok) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) \
              ON CONFLICT(name) DO UPDATE SET lang=?2,code=?3,summary=?4,tags=?5,status=?6",
-            rusqlite::params![s.name, s.lang, s.code, s.summary, tags, s.status, s.runs as i64, s.successes as i64, s.created_ms as i64, s.graded as i64],
+            rusqlite::params![s.name, s.lang, s.code, s.summary, tags, s.status, s.runs as i64, s.successes as i64, s.created_ms as i64, s.graded as i64, s.judged_ok as i64],
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3094,7 +3110,7 @@ fn save_skill(db: &YantrikDB, s: &Skill) -> std::result::Result<(), String> {
 
 fn get_skill(db: &YantrikDB, name: &str) -> std::result::Result<Option<Skill>, String> {
     db.conn()
-        .query_row("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms,graded FROM mind_skills WHERE name=?1", [name], skill_row)
+        .query_row("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms,graded,judged_ok FROM mind_skills WHERE name=?1", [name], skill_row)
         .optional()
         .map_err(|e| e.to_string())
 }
@@ -3102,7 +3118,7 @@ fn get_skill(db: &YantrikDB, name: &str) -> std::result::Result<Option<Skill>, S
 fn list_skills(db: &YantrikDB) -> std::result::Result<Vec<Skill>, String> {
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms,graded FROM mind_skills ORDER BY created_ms DESC")
+        .prepare("SELECT name,lang,code,summary,tags,status,runs,successes,created_ms,graded,judged_ok FROM mind_skills ORDER BY created_ms DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], skill_row).map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -3158,9 +3174,11 @@ fn record_skill_outcome(db: &YantrikDB, name: &str, outcome: mind_types::SkillOu
     // Three counters for three questions. `runs` is every attempt; `executor_ok` is how often the
     // RUNNER got through; `graded` is how often anybody judged the deliverable, and it is the only
     // honest denominator for `successes` (E.P5b).
+    // `successes` is NOT written any more: it is the frozen pre-split column. The numerator is
+    // `judged_ok`, which only ever counts runs somebody judged (E.P5c).
     conn.execute(
         "UPDATE mind_skills SET runs = runs + 1, executor_ok = executor_ok + ?2, \
-         graded = graded + ?3, successes = successes + ?4 WHERE name = ?1",
+         graded = graded + ?3, judged_ok = judged_ok + ?4 WHERE name = ?1",
         rusqlite::params![
             name,
             i64::from(outcome.executor_ok),
@@ -3177,10 +3195,10 @@ fn record_skill_outcome(db: &YantrikDB, name: &str, outcome: mind_types::SkillOu
     // Over GRADED runs, not attempts. Judging on attempts would quarantine every document after
     // four runs, because a document nobody assessed contributes an attempt and no success — it
     // would read as four straight failures when nothing had failed at all (E.P5b).
-    let (graded, successes): (i64, i64) = conn
-        .query_row("SELECT graded, successes FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
+    let (graded, judged_ok): (i64, i64) = conn
+        .query_row("SELECT graded, judged_ok FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(|e| e.to_string())?;
-    if mind_types::reliability::Reliability::new(graded.max(0) as u32, successes.max(0) as u32).is_discredited() {
+    if mind_types::reliability::Reliability::new(graded.max(0) as u32, judged_ok.max(0) as u32).is_discredited() {
         conn.execute("UPDATE mind_skills SET status='quarantined' WHERE name=?1", [name]).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -5289,6 +5307,7 @@ mod tests {
             runs: 4,
             successes: 4,
             graded: 0,
+            judged_ok: 0,
             created_ms: 0,
         })
         .await
@@ -6340,6 +6359,7 @@ mod tests {
                 runs: 3,
                 successes: 3,
                 graded: 0,
+                judged_ok: 0,
                 created_ms: 0,
             })
             .await
@@ -7713,6 +7733,7 @@ mod p5b_ledger {
             runs: 0,
             successes: 0,
             graded: 0,
+            judged_ok: 0,
             created_ms: 0,
         })
         .await
@@ -7737,7 +7758,7 @@ mod p5b_ledger {
         let s = get(&mem, "doc").await;
         assert_eq!(s.runs, 10, "every attempt is counted");
         assert_eq!(s.graded, 0, "and none of them is evidence");
-        assert_eq!(s.successes, 0);
+        assert_eq!(s.judged_ok, 0);
         assert_eq!(s.reliability().rate(), None, "no rate can be computed from nothing");
         assert!(!s.reliability().is_discredited());
 
@@ -7757,7 +7778,7 @@ mod p5b_ledger {
             mem.record_skill_outcome("flaky-provider", SkillOutcome::executor_failed()).await.unwrap();
         }
         let s = get(&mem, "flaky-provider").await;
-        assert_eq!(s.successes, 0, "an outage is never a success");
+        assert_eq!(s.judged_ok, 0, "an outage is never a success");
         assert_eq!(s.graded, 0, "and never evidence against the skill either");
         assert_eq!(s.status, "active", "the provider having a bad afternoon must not discredit a skill");
     }
@@ -7771,7 +7792,7 @@ mod p5b_ledger {
 
         mem.record_skill_outcome("code", SkillOutcome::from_exit(true)).await.unwrap();
         let s = get(&mem, "code").await;
-        assert_eq!((s.runs, s.graded, s.successes), (1, 1, 1));
+        assert_eq!((s.runs, s.graded, s.judged_ok), (1, 1, 1));
         assert_eq!(s.reliability().rate(), Some(1.0));
 
         // Four judged failures against one judged success: below the line, and quarantined.
@@ -7779,7 +7800,7 @@ mod p5b_ledger {
             mem.record_skill_outcome("code", SkillOutcome::from_exit(false)).await.unwrap();
         }
         let s = get(&mem, "code").await;
-        assert_eq!((s.runs, s.graded, s.successes), (5, 5, 1));
+        assert_eq!((s.runs, s.graded, s.judged_ok), (5, 5, 1));
         assert!(s.reliability().is_discredited(), "1 of 5 judged is below the line");
         assert_eq!(s.status, "quarantined");
     }
@@ -7801,5 +7822,62 @@ mod p5b_ledger {
         assert_eq!(s.reliability().rate(), Some(0.0), "and the rate is over those four");
         assert_eq!(s.status, "quarantined");
         assert_eq!(TaskBasis::StructuredJudge.label(), "structured_judge");
+    }
+}
+
+/// E.P5c — the numerator must be as uncontaminated as the denominator.
+#[cfg(test)]
+mod p5c_numerator {
+    use mind_types::{MemoryFacade, Skill, SkillOutcome};
+    use std::sync::Arc;
+
+    /// A row as the migration leaves one: legacy `successes` carried over, post-split counters at 0.
+    async fn legacy(mem: &Arc<dyn MemoryFacade>, name: &str, runs: u64, successes: u64) {
+        mem.save_skill(Skill {
+            name: name.into(), lang: "python".into(), code: "x".into(), summary: "x".into(),
+            tags: vec![], status: "active".into(),
+            runs, successes, judged_ok: 0, graded: 0, created_ms: 0,
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_successes_cannot_be_read_as_judged_ones() {
+        // THE BUG, found by Codex driving the live cockpit and then chased one level down.
+        // `reliability()` divided the frozen `successes` column by the new `graded` denominator,
+        // and `Reliability::new` clamps successes to runs — so a legacy row with 5 conflated wins
+        // and TWO JUDGED FAILURES computed 2/2 and reported rate = 1.0. Proven before the fix.
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        legacy(&mem, "poisoned", 8, 5).await;
+
+        for _ in 0..2 {
+            mem.record_skill_outcome("poisoned", SkillOutcome::judged(false)).await.unwrap();
+        }
+        let s = mem.get_skill("poisoned").await.unwrap().unwrap();
+        assert_eq!(s.successes, 5, "the historical column is frozen, not rewritten");
+        assert_eq!(s.judged_ok, 0, "and it is NOT the numerator");
+        assert_eq!(s.graded, 2);
+        assert_eq!(s.reliability().rate(), Some(0.0), "two judged failures are 0%, not 100%");
+        assert!(s.reliability().is_discredited() == false, "2 judged runs is below the floor to condemn on");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_judged_numerator_counts_only_judged_wins() {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        legacy(&mem, "mixed", 3, 3).await;
+
+        mem.record_skill_outcome("mixed", SkillOutcome::judged(true)).await.unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::judged(true)).await.unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::judged(false)).await.unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::ungraded()).await.unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::executor_failed()).await.unwrap();
+
+        let s = mem.get_skill("mixed").await.unwrap().unwrap();
+        assert_eq!(s.runs, 8, "3 legacy attempts + 5 new");
+        assert_eq!(s.graded, 3, "only the three judged runs are evidence");
+        assert_eq!(s.judged_ok, 2, "two of them succeeded");
+        assert_eq!(s.successes, 3, "the frozen column never moved");
+        assert!((s.reliability().rate().unwrap() - 2.0 / 3.0).abs() < 1e-9);
     }
 }

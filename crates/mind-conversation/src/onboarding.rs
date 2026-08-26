@@ -640,6 +640,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 runs: 0,
                 successes: 0,
                 graded: 0,
+                judged_ok: 0,
                 created_ms: 0,
             }).await;
         }

@@ -185,6 +185,7 @@ impl super::ConversationEngine {
             runs: 0,
             successes: 0,
             graded: 0,
+            judged_ok: 0,
             created_ms: now,
         };
         if let Err(e) = self.memory.save_skill(skill).await {

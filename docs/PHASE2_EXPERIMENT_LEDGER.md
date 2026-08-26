@@ -823,3 +823,18 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Actual metric | mind-evals 28/0 (+2), workspace 1029/0 (42 crates). |
 | Not claimed | That the split is now big enough to score anything. It has four labelled cases and a mechanism; the bar stays unwritten until the split is large enough that naming it cannot be fitting the target to the data. |
 | Decision | **KEEP.** The instrument exists, the protocol is enforced by tests rather than by intention, and the split can now grow without anyone remembering to copy rows. |
+
+## E.19 - track Cargo.lock: an application should ship the resolution it was tested against - pre-registered
+
+*Pre-registration, written before `.gitignore` is touched. Sequenced by Codex ahead of the live-split corpus design, and scoped by them: this slice changes NO source and NO dependency requirement. It writes down a resolution that already exists.*
+
+| Field | Entry |
+|---|---|
+| The residual this closes | E.18c pinned the ENGINE exactly (`=0.18.0`) and said plainly that the rest of the graph still floats, because `Cargo.lock` is in `.gitignore` (line 2). A `serde` or `rusqlite` point release can therefore still change this build with no commit anywhere, and the only evidence of what actually resolved lives in an ignored file on one machine. For a library that is correct; for an APPLICATION it is a gap, and this workspace builds a binary that runs unattended on a box. |
+| The change, exactly and only | (1) Remove `Cargo.lock` - and only that line - from `.gitignore`. (2) `git add Cargo.lock` as it already stands. Nothing else: no `Cargo.toml` edit, no version requirement touched, no source file, no `cargo update`. If adding the lockfile as it stands requires the resolver to change anything, that is a KILL rather than a thing to accept. |
+| Recorded in this entry, because a lockfile is evidence only if someone can check it | The SHA-256 of the committed `Cargo.lock`, and `yantrikdb 0.18.0` checksum `8ff1ffe72dc393998df748020b12134eaaa1a1fb85d653c632f28c6fb06bbb42` - the value already witnessed three times (this machine, Codex's own resolution, the box's independent fetch). |
+| Gates (Codex's, adopted verbatim) | `cargo metadata --locked` succeeds; the full workspace passes under `--locked` at its current count of **1029/0** across 42 crates (1027 in Codex's message, +2 from E.PK3d's tests since); the focused P.4 and pack-wall runs are unchanged; the BOX builds clean from a fresh reset with the lockfile in place and does not require an unlocked update; and a real turn is served afterwards. |
+| KILL criteria | (1) Any resolver or source change not already present - i.e. `--locked` failing, or the act of committing the lock altering a single resolved version. (2) Any test regression. (3) The box needing to update the lock to build. Any of these and `.gitignore` goes back as it was. |
+| RESIDUAL, stated now rather than discovered later (Codex's wording, adopted) | A lockfile freezes REGISTRY and GIT resolution. It does **not** freeze the local `path` dependencies into `../yantrik-companion` (`yantrik-ml`, `yantrik-os`, `yantrik-chat`) or the `[patch]` redirect: those carry no checksum, are whatever that working tree contains at build time, and are NOT made reproducible by this slice. The mind's engine is pinned and verified; three sibling crates remain mutable, and no amount of lockfile makes them otherwise. |
+| Not claimed | That the build becomes reproducible. It becomes reproducible IN ITS REGISTRY GRAPH, which is a real and checkable improvement and is not the same sentence - the mistake E.18b made by writing "reproducible" over a caret range. |
+| Decision | pending. |

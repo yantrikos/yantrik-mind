@@ -669,7 +669,16 @@ fn ctl_handle(
             // rendering. Never inferred: the same handler serves a terminal, a chat window and a
             // voice client, and guessing would read markdown aloud to one of them.
             let voice = head.lines().any(|l| l.to_ascii_lowercase().starts_with("x-ym-voice:") && l.contains('1'));
-            let ident = mind_conversation::TurnIdentity::new(effective_person, false).rendering_rich(rich).speaking(voice);
+            // OperatorPrivate: this is the control server on loopback — the owner's own console.
+            // Declared, not inferred from the port, for exactly the reason the line above says
+            // about `rich` (E.SEC8).
+            let ident = mind_conversation::TurnIdentity::new(
+                effective_person,
+                false,
+                mind_conversation::OutputScope::OperatorPrivate,
+            )
+            .rendering_rich(rich)
+            .speaking(voice);
             let r = if fast {
                 rt.block_on(conv.fast_reply(&body, ident))
             } else {
@@ -693,8 +702,14 @@ fn ctl_handle(
             if !authed.is_operator() {
                 ("403 Forbidden", "streaming chat is operator-only for now".to_string())
             } else {
-                let ident =
-                    mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false).rendering_rich(rich);
+                // The branch above refuses this route unless the device is an operator, so the
+                // scope is settled by the same check: OperatorPrivate.
+                let ident = mind_conversation::TurnIdentity::new(
+                    authed.chat_person().to_string(),
+                    false,
+                    mind_conversation::OutputScope::OperatorPrivate,
+                )
+                .rendering_rich(rich);
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 // Headers + manual chunked framing on the raw socket; ureq on the client side
                 // decodes chunking transparently, so the reader just sees the line protocol.
@@ -1129,7 +1144,13 @@ fn chat_handle(
         return;
     }
     // Principal-scoped turn as the device's bound person (never Operator).
-    let ident = mind_conversation::TurnIdentity::new(authed.chat_person().to_string(), false);
+    // HouseholdMember. The comment above says it: a Principal-scoped turn as the device's bound
+    // person, NEVER Operator — so the output scope must match the identity it is answering as.
+    let ident = mind_conversation::TurnIdentity::new(
+        authed.chat_person().to_string(),
+        false,
+        mind_conversation::OutputScope::HouseholdMember,
+    );
     let reply = rt.block_on(conv.turn(&body, ident)).unwrap_or_else(|e| format!("(error: {e})"));
     send(&mut stream, "200 OK", &reply);
 }
@@ -1434,7 +1455,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                     return;
                 }
-                let identity = mind_conversation::TurnIdentity::new(owner, shared_channel);
+                // Telegram is a REMOTE channel and mints a Principal, never Operator (see below),
+                // so even the primary reads resource-filtered here. HouseholdMember on the shared
+                // group channel; on a direct chat the owner is still on a remote surface, so this
+                // does NOT claim OperatorPrivate. Derived from what the surface knows about ITSELF
+                // (which channel this is), not guessed from an endpoint (E.SEC8).
+                let identity = mind_conversation::TurnIdentity::new(
+                    owner,
+                    shared_channel,
+                    mind_conversation::OutputScope::HouseholdMember,
+                );
                 // ARCH-1: Telegram is a REMOTE channel — it mints a Principal, never Operator.
                 // Even the primary over Telegram reads resource-filtered (their own + shared;
                 // other members' private facts stay invisible), and every read is receipted.

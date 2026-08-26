@@ -697,7 +697,7 @@ mod tests {
             Scope::Shared,
         ).await.unwrap();
 
-        let member_id = mind_conversation::TurnIdentity::new("asha", false);
+        let member_id = mind_conversation::TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
         let member_ctx = AccessContext::principal(member_id.viewer(), mind_types::Purpose::conversation(&member_id.owner));
 
         // :beliefs — filtered list; shared visible, secret absent

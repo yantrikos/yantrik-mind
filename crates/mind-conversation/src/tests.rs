@@ -826,7 +826,7 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
     ).await.unwrap();
 
     // Agent recall tool AS A MEMBER: shared fact recallable, secret unreachable on every lane.
-    let member = TurnIdentity::new("asha", false);
+    let member = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
     let args = serde_json::json!({ "query": "safe combination" });
     let out = conv.run_agent_tool_as("recall", &args, &member).await;
     assert!(!out.contains("47-12-33"), "MEMBER agent-recall leaked the secret: {out}");
@@ -3169,11 +3169,11 @@ async fn an_open_ended_intention_is_never_dropped() {
 fn a_plain_channel_gets_no_formatting_licence() {
     assert!(TurnIdentity::primary().format_note().is_none(), "the ym terminal must not be told to draw tables");
     assert!(
-        TurnIdentity::new("asha", false).format_note().is_none(),
+        TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember).format_note().is_none(),
         "a Telegram member must not be told to draw tables"
     );
     assert!(
-        TurnIdentity::new("asha", true).format_note().is_none(),
+        TurnIdentity::new("asha", true, mind_types::OutputScope::HouseholdMember).format_note().is_none(),
         "a shared group channel must not be told to draw tables either"
     );
 }
@@ -3195,8 +3195,8 @@ fn a_declared_rich_client_gets_the_licence() {
 fn rendering_rich_does_not_disturb_read_isolation() {
     // The flag is about presentation only. If it ever changed scope, a rich client would see another
     // member's private facts — so this pins the two apart.
-    let plain = TurnIdentity::new("asha", false);
-    let rich = TurnIdentity::new("asha", false).rendering_rich(true);
+    let plain = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
+    let rich = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember).rendering_rich(true);
     assert_eq!(format!("{:?}", plain.viewer()), format!("{:?}", rich.viewer()));
     assert_eq!(format!("{:?}", plain.write_scope()), format!("{:?}", rich.write_scope()));
 }
@@ -3668,7 +3668,7 @@ async fn a_members_turn_surfaces_pack_evidence_but_does_not_carry_it_to_the_grad
     let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS")
         .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)));
-    let member = TurnIdentity::new("asha", false);
+    let member = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
     conv.turn_grounding(row, &member, "run-p2-member").await;
     conv.note_turn_answer(row).await;
     conv.grade_previous_turn("thanks").await;
@@ -5391,4 +5391,76 @@ fn a_track_record_never_prints_a_rate_it_does_not_have() {
     let judged = track_record(&sk(9, 6, 1));
     assert!(judged.contains("6/1 judged ok"), "{judged}");
     assert!(judged.contains("9 runs"), "attempts are not hidden: {judged}");
+}
+
+/// E.SEC8 slice 3 — the scope rides on the turn, and every surface declares its own.
+#[cfg(test)]
+mod sec8_turn_scope {
+    use super::*;
+    use mind_types::{EntityClass, OutputScope};
+
+    #[test]
+    fn the_operator_identity_says_operator_rather_than_defaulting_to_it() {
+        // `primary()` IS the owner, so naming the scope there is a statement, not a fallback.
+        assert_eq!(TurnIdentity::primary().output_scope, OutputScope::OperatorPrivate);
+    }
+
+    #[test]
+    fn the_effective_policy_is_the_surface_narrowed_by_the_turn() {
+        // ONE computation, in one place, so a guard and a prompt cannot disagree about what was
+        // permitted — the failure shape Codex found twice this week in other forms.
+        let op = TurnIdentity::primary();
+        let plain = op.output_policy("what is on my calendar tomorrow");
+        assert!(plain.examples_allowed && plain.may_name(EntityClass::Task));
+
+        let asked = op.output_policy("summarize my posture but do not name current tasks");
+        assert!(!asked.examples_allowed, "the turn's own instruction narrows it");
+        assert!(!asked.may_name(EntityClass::Task));
+        assert_eq!(asked.scope, OutputScope::OperatorPrivate, "the SCOPE is the surface's; the permission is the turn's");
+
+        // A member surface is already narrower before anyone asks, and asking narrows it further.
+        let member = TurnIdentity::new("asha", false, OutputScope::HouseholdMember);
+        assert!(!member.output_policy("anything").may_name(EntityClass::Account));
+        assert!(!member.output_policy("do not reveal private facts").may_name(EntityClass::Person));
+    }
+
+    #[test]
+    fn the_strict_fallback_announces_itself() {
+        // A silent strict default would make the mind answer in generalities and look broken
+        // rather than careful. The fallback exists for boundaries that genuinely cannot tell —
+        // and it COUNTS, so "nobody declared" is visible instead of looking like caution.
+        let before = crate::STRICT_DEFAULT_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
+        let id = TurnIdentity::strictest("unknown-client", false);
+        let after = crate::STRICT_DEFAULT_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after, before + 1, "the fallback must be counted");
+        assert_eq!(id.output_scope, OutputScope::AuditRedacted, "and it must be the strictest");
+        assert!(id.output_policy("tell me everything").entity_classes.is_empty());
+    }
+
+    /// No PRODUCTION surface may take the strict fallback. Codex: "in tests, that should be zero
+    /// for known production surfaces."
+    ///
+    /// A source scan rather than a runtime counter, because the runtime one only proves the paths
+    /// a test happened to exercise, and the surfaces that matter are the ones no test drives.
+    #[test]
+    fn no_production_surface_falls_back_instead_of_declaring() {
+        use std::path::Path;
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        // The real surfaces: the control server, the member chat server, Telegram, voice.
+        for rel in ["mind-core/src/telegram.rs", "mind-conversation/src/say.rs"] {
+            let body = std::fs::read_to_string(crates.join(rel)).unwrap_or_default();
+            let live: Vec<&str> = body
+                .lines()
+                .filter(|l| l.contains("TurnIdentity::strictest") && !l.trim_start().starts_with("//"))
+                .collect();
+            assert!(
+                live.is_empty(),
+                "{rel} falls back instead of declaring its scope: {live:?}"
+            );
+            assert!(
+                body.contains("OutputScope::"),
+                "{rel} constructs turns but never names an OutputScope — it must state where its answers go"
+            );
+        }
+    }
 }

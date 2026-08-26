@@ -107,6 +107,17 @@ const VOICE_NOTE: &str = "SPOKEN CHANNEL: this reply is read aloud by a synthesi
 - Use 'it' and 'that' for things already mentioned rather than naming them again.
 - NEVER ask permission to look something up. Looking is free and undoes nothing — a price, a page, a stream, a filing. Look, then say what you found. 'Do you want me to check?' spends a whole turn to arrive back where you started, and in speech that is two turns and a wait. Ask first ONLY before something that changes the world: sending, buying, deleting.";
 
+/// Re-exported so a surface can declare its scope without depending on `mind-types` by name —
+/// `TurnIdentity` is the thing it is constructing, so the vocabulary travels with it (E.SEC8).
+pub use mind_types::{OutputPolicy, OutputScope};
+
+/// How many turns fell back to the strictest scope because no surface declared one.
+///
+/// Should be ZERO for known production surfaces, and a test asserts none of them call
+/// `TurnIdentity::strictest`. A silent strict default would make the mind answer in generalities
+/// and look broken rather than careful, so the fallback exists but announces itself (E.SEC8).
+pub static STRICT_DEFAULT_FALLBACKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Clone, Debug)]
 pub struct TurnIdentity {
     /// The speaker's person id ("primary", or a registered member's slug).
@@ -126,15 +137,56 @@ pub struct TurnIdentity {
     /// aloud is punctuation. Declared by the client exactly as `rich` is — the server never infers
     /// it, because the same handlers serve a terminal, a phone call and a chat window.
     pub voice: bool,
+    /// WHERE THIS ANSWER IS GOING, and therefore what it may name.
+    ///
+    /// Declared by the surface, never inferred — the same rule `rich` keeps, and for the same
+    /// reason: a terminal, a Telegram chat and a member device all reach `handle_turn_as` through
+    /// one function, so guessing from the endpoint is guessing. I proved how badly today, telling
+    /// a reviewer that port 8078 was the member chat when it was serving a photo frame.
+    ///
+    /// Unlike `rich`, this has NO safe silent default. `rich = false` is safe and still useful —
+    /// plain prose. A silently-strictest scope would be safe and USELESS: the mind would answer
+    /// every turn in generalities and look broken rather than careful. So it is a required
+    /// parameter of [`TurnIdentity::new`] and every surface states its own (E.SEC8).
+    pub output_scope: mind_types::OutputScope,
 }
 
 impl TurnIdentity {
     /// The primary member, private context — the `ym` CLI + every legacy single-user path.
+    /// The owner, internally. `OperatorPrivate` by definition rather than by default — this
+    /// constructor IS the operator, so naming the scope here is a statement, not a fallback.
     pub fn primary() -> Self {
-        Self { owner: mind_types::PRIMARY.to_string(), shared: false, rich: false, voice: false }
+        Self {
+            owner: mind_types::PRIMARY.to_string(),
+            shared: false,
+            rich: false,
+            voice: false,
+            output_scope: mind_types::OutputScope::OperatorPrivate,
+        }
     }
-    pub fn new(owner: impl Into<String>, shared: bool) -> Self {
-        Self { owner: owner.into(), shared, rich: false, voice: false }
+
+    /// The effective output policy for THIS turn: the surface's scope, narrowed by anything the
+    /// user asked for in the message itself.
+    ///
+    /// Computed in ONE place so a guard and a prompt cannot disagree about what was permitted —
+    /// which is the failure shape Codex found twice this week in other forms (a writer fixed and
+    /// its readers not; a surface contradicting its own denominator).
+    pub fn output_policy(&self, user_text: &str) -> mind_types::OutputPolicy {
+        mind_types::OutputPolicy::for_scope(self.output_scope)
+            .tighten(mind_types::detect_minimization(user_text))
+    }
+    /// A turn from a real surface. The scope is REQUIRED: every caller states where its answer is
+    /// going, and adding a surface that forgets to is a compile error rather than a disclosure.
+    pub fn new(owner: impl Into<String>, shared: bool, output_scope: mind_types::OutputScope) -> Self {
+        Self { owner: owner.into(), shared, rich: false, voice: false, output_scope }
+    }
+
+    /// For a boundary that genuinely CANNOT determine its scope — deserialization, an unknown
+    /// client. Falls back to the strictest and COUNTS it, so "nobody declared" is visible in the
+    /// dashboard instead of looking like a careful answer.
+    pub fn strictest(owner: impl Into<String>, shared: bool) -> Self {
+        STRICT_DEFAULT_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::new(owner, shared, mind_types::OutputScope::AuditRedacted)
     }
     /// Declare that this turn's reply will be RENDERED, not printed.
     pub fn rendering_rich(mut self, rich: bool) -> Self {
@@ -6354,7 +6406,12 @@ impl ConversationEngine {
                 if slug.is_empty() || msg.is_empty() {
                     "Usage: ym as <person-slug> <message>  (e.g. ym as wife what's my birthday gift?)".to_string()
                 } else {
-                    self.handle_turn_as(msg, TurnIdentity::new(slug, false)).await.unwrap_or_else(|e| format!("(error: {e})"))
+                    // `ym as <person>` impersonates a household member from the operator console.
+                    // It is scoped as that MEMBER would be, not as the operator — the point of the
+                    // verb is to see what they would see (E.SEC8).
+                    self.handle_turn_as(msg, TurnIdentity::new(slug, false, mind_types::OutputScope::HouseholdMember))
+                        .await
+                        .unwrap_or_else(|e| format!("(error: {e})"))
                 }
             }
             "packs" => self.pack_list().await,

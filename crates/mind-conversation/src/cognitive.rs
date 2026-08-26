@@ -1024,7 +1024,7 @@ mod tests {
         let eng = engine(&mem);
         eng.hold_for_next_turn("the surprise-gift research finished");
 
-        let member = TurnIdentity::new("guest", false);
+        let member = TurnIdentity::new("guest", false, mind_types::OutputScope::HouseholdMember);
         let a = eng.turn("hello", member).await.unwrap();
         assert!(!a.contains("surprise-gift"), "another member must not see the owner's result: {a}");
 

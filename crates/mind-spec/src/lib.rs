@@ -36,6 +36,7 @@
 
 pub mod capsule;
 pub mod control;
+pub mod coverage;
 pub mod goal;
 
 pub use capsule::{Capsule, Evidence, EvidenceRef, Observation, Progress, Uncertainty};

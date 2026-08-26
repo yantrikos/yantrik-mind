@@ -133,7 +133,7 @@ impl super::ConversationEngine {
             ev.object_id = Some(format!("pack:{}", p.pack_id));
             ev.verdict = Some(if used { "used" } else { "unused" }.to_string());
             ev.confidence = Some(share);
-            ev.lesson = Some("proxy: the share of the surfaced rows' informative words that reappear in the reply — not causal use".to_string());
+            ev.lesson = Some("proxy: the best-matching surfaced row's share of informative words reappearing in the reply (any row clearing counts as use) — not causal use".to_string());
             p.used_event_id = ev.event_id.clone();
             p.used = Some(used);
             self.recorder.record(ev);

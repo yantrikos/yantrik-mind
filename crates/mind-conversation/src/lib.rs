@@ -5360,6 +5360,9 @@ impl ConversationEngine {
                 if prefix == "packs" {
                     return mind_observability::render_pack_evidence(&self.recorder.read_all());
                 }
+                if prefix == "routes" {
+                    return mind_observability::render_pack_routes(&self.recorder.read_all());
+                }
                 let events = self.recorder.read_trace(prefix);
                 if events.is_empty() {
                     if prefix.is_empty() {
@@ -6324,8 +6327,12 @@ impl ConversationEngine {
                     // Every pack's local ladder from both witnesses — the SQL counters and a
                     // recount of the flight recorder — side by side.
                     "stats" | "evidence" => self.packs_stats().await,
+                    // The coverage router, asked directly: every pack's best phrase and the verdict
+                    // it WOULD give. Nothing is leased by asking.
+                    "route" if !parg.is_empty() => self.packs_route(&parg).await,
+                    "library" | "catalog" => self.packs_library().await,
                     "" | "list" | "ls" => self.pack_list().await,
-                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query> · stats".to_string(),
+                    _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query> · stats · route <query> · library".to_string(),
                 }
             }
             "plugins" => self.plugins.lock().unwrap().render_list(),
@@ -6573,7 +6580,7 @@ impl ConversationEngine {
             lines.push("ym device list · ym device pair <name> --person <slug>|--operator · ym device revoke <id>   paired-device trust".to_string());
         }
         lines.push("ym proposals             pending research proposals (shadow mode; read-only)".to_string());
-        lines.push("ym why [trace-prefix]    reconstruct a decision's causal path (flight recorder) · ym why calibration|contribution|flips|packs".to_string());
+        lines.push("ym why [trace-prefix]    reconstruct a decision's causal path (flight recorder) · ym why calibration|contribution|flips|packs|routes".to_string());
         lines.push("ym <anything else>       chat (full agent, shared memory)".to_string());
         format!("Plugins & commands (only what's wired shows here):\n  {}", lines.join("\n  "))
     }
@@ -7970,6 +7977,26 @@ impl ConversationEngine {
         // — censoring by household activity (Codex's review of P.2).
         if primary_lane {
             *self.turn_packs.lock().unwrap() = surfaced;
+            // THE COVERAGE ROUTER, SHADOWED (ARCH-6 P.3, E.PK3): which expertise this turn would
+            // have leased, decided from the publishers' coverage phrases and recorded — never acted
+            // on. Leasing is P.4's; until then the only thing this changes is the flight recorder.
+            if let Ok((ranked, route)) = self.memory.route_packs(user_text).await {
+                if !ranked.is_empty() {
+                    let mut ev = mind_observability::DecisionEvent::span(trace, None, "pack_route_shadow");
+                    ev.goal = Some(user_text.chars().take(160).collect());
+                    ev.candidates = ranked.iter().take(5).map(|m| format!("{}@{:.2} ({})", m.pack_id, m.sim, m.phrase.chars().take(48).collect::<String>())).collect();
+                    ev.chosen = route.leased().map(|p| format!("pack:{p}"));
+                    ev.verdict = Some(route.label().to_string());
+                    ev.confidence = ranked.first().map(|m| m.sim);
+                    ev.policy = vec![
+                        mind_spec::coverage::COVERAGE_POLICY_ID.to_string(),
+                        format!("floor={:.2}", mind_spec::coverage::COVERAGE_FLOOR),
+                        format!("margin={:.2}", mind_spec::coverage::COVERAGE_MARGIN),
+                        "shadow: nothing leased".to_string(),
+                    ];
+                    self.recorder.record(ev);
+                }
+            }
         }
         // Self-referential turn -> the instrument panel (fixes introspection myopia).
         if is_self_referential(user_text) {

@@ -476,3 +476,5 @@ mod tests {
 pub mod world_oracle;
 
 pub mod executive_oracle;
+/// ARCH-6 P.3 — the coverage router's labelled corpus and its pre-registered bar (ledger E.PK3).
+pub mod coverage_oracle;

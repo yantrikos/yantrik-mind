@@ -590,6 +590,53 @@ pub fn render_pack_evidence(events: &[DecisionEvent]) -> String {
     out
 }
 
+/// `ym why routes` — the shadowed coverage router's record: how often it would have leased and
+/// why it abstained, and the free consistency witness a shadow gives: per trace, did the pack it
+/// would have leased match the pack whose rows actually cleared the floor? Neither instrument is
+/// ground truth; where they disagree, one of them is reading coverage differently from the corpus,
+/// and the labelled set (E.PK3) says which.
+pub fn render_pack_routes(events: &[DecisionEvent]) -> String {
+    let routes: Vec<&DecisionEvent> = events.iter().filter(|e| e.kind == "pack_route_shadow").collect();
+    if routes.is_empty() {
+        return "No shadow routes recorded yet — one is written per primary turn once the catalog has packs.".into();
+    }
+    let mut by_verdict: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in &routes {
+        *by_verdict.entry(r.verdict.clone().unwrap_or_else(|| "?".into())).or_insert(0) += 1;
+    }
+    // Per trace: the pack that surfaced (P.2's witness) vs the pack the router would have leased.
+    let surfaced: std::collections::HashMap<&str, Vec<&str>> = events
+        .iter()
+        .filter(|e| e.kind == "pack_surfaced")
+        .fold(Default::default(), |mut m, e| {
+            if let Some(p) = e.object_id.as_deref() {
+                m.entry(e.trace_id.as_str()).or_default().push(p);
+            }
+            m
+        });
+    let (mut agree, mut lease_nothing_surfaced, mut abstain_something_surfaced, mut disagree) = (0usize, 0usize, 0usize, 0usize);
+    for r in &routes {
+        let s = surfaced.get(r.trace_id.as_str());
+        match (&r.chosen, s) {
+            (Some(c), Some(ps)) if ps.iter().any(|p| p == c) => agree += 1,
+            (Some(_), Some(_)) => disagree += 1,
+            (Some(_), None) => lease_nothing_surfaced += 1,
+            (None, Some(_)) => abstain_something_surfaced += 1,
+            (None, None) => agree += 1, // abstained, and nothing cleared the floor either
+        }
+    }
+    let policy = routes.last().and_then(|r| r.policy.first().cloned()).unwrap_or_else(|| "?".into());
+    let mut out = format!("SHADOW ROUTES ({policy}; recorded, never acted on) — {} primary turn(s):\n", routes.len());
+    for (v, n) in &by_verdict {
+        out.push_str(&format!("  {v}: {n}\n"));
+    }
+    out.push_str(&format!(
+        "  against the floor (P.2's witness, same trace): agree {agree} · would-lease but nothing surfaced {lease_nothing_surfaced} · abstained while something surfaced {abstain_something_surfaced} · different pack {disagree}\n"
+    ));
+    out.push_str("  (agreement here is consistency between two instruments, not correctness — the labelled set in mind-evals is the bar)");
+    out
+}
+
 /// POLICY-DISAGREEMENT cohort report: every recorded `selection_flipped` — the cases where the
 /// learned reliability ranking overruled the legacy semantic-only ranking. These are the only
 /// decisions where the two policies differ, so they are where a policy improvement (or rot)
@@ -735,6 +782,38 @@ mod tests {
         let r2 = render_pack_evidence(&ev);
         assert!(r2.contains("SELECTIVE OBSERVATION"), "{r2}");
         assert!(render_pack_evidence(&[]).contains("No pack evidence"));
+    }
+
+    /// `ym why routes`: verdict counts, and the per-trace consistency between the shadow route
+    /// and what P.2 saw surface.
+    #[test]
+    fn shadow_route_report_counts_verdicts_and_checks_them_against_the_floor() {
+        let mut ev = Vec::new();
+        let route = |trace: &str, chosen: Option<&str>, verdict: &str| {
+            let mut e = DecisionEvent::new(trace, "pack_route_shadow");
+            e.chosen = chosen.map(|c| format!("pack:{c}"));
+            e.verdict = Some(verdict.into());
+            e.policy = vec!["coverage-router-v1".into()];
+            e
+        };
+        let surfaced = |trace: &str, pack: &str| {
+            let mut e = DecisionEvent::new(trace, "pack_surfaced");
+            e.object_id = Some(format!("pack:{pack}"));
+            e
+        };
+        ev.push(route("t1", Some("a"), "lease"));
+        ev.push(surfaced("t1", "a")); // agree
+        ev.push(route("t2", Some("a"), "lease")); // nothing surfaced
+        ev.push(route("t3", None, "abstain:below_floor"));
+        ev.push(surfaced("t3", "b")); // abstained while something surfaced
+        ev.push(route("t4", Some("a"), "lease"));
+        ev.push(surfaced("t4", "b")); // different pack
+        ev.push(route("t5", None, "abstain:tie")); // nothing surfaced either → agree
+        let r = render_pack_routes(&ev);
+        assert!(r.contains("5 primary turn(s)"), "{r}");
+        assert!(r.contains("lease: 3") && r.contains("abstain:below_floor: 1") && r.contains("abstain:tie: 1"), "{r}");
+        assert!(r.contains("agree 2 · would-lease but nothing surfaced 1 · abstained while something surfaced 1 · different pack 1"), "{r}");
+        assert!(render_pack_routes(&[]).contains("No shadow routes"));
     }
 
     fn scratch(tag: &str) -> PathBuf {

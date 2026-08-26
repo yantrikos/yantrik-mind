@@ -612,6 +612,59 @@ fn floor_in_force(declared: Option<f64>) -> String {
 }
 
 impl super::ConversationEngine {
+    /// `ym pack route <query>` — the coverage router's verdict for a query and every pack's best
+    /// phrase behind it. Asking leases nothing; in P.3 the router is shadowed on every turn.
+    pub async fn packs_route(&self, query: &str) -> String {
+        use mind_types::memory::PackRoute;
+        match self.memory.route_packs(query).await {
+            Err(e) => format!("(pack routing failed: {e})"),
+            Ok((ranked, _)) if ranked.is_empty() => "No packs in the catalog — nothing to route to (`ym pack library`).".to_string(),
+            Ok((ranked, route)) => {
+                let verdict = match &route {
+                    PackRoute::Lease { pack_id, sim, margin } => format!("would LEASE {pack_id} (sim {sim:.2}, margin {margin:.2} over the runner-up)"),
+                    PackRoute::Abstain { reason, best } => format!(
+                        "would ABSTAIN — {} {}",
+                        match reason {
+                            mind_types::memory::AbstainReason::NoPacks => "no packs".to_string(),
+                            mind_types::memory::AbstainReason::BelowFloor => format!("best under the coverage floor {:.2}", mind_spec::coverage::COVERAGE_FLOOR),
+                            mind_types::memory::AbstainReason::Tie => format!("two packs within the margin {:.2}", mind_spec::coverage::COVERAGE_MARGIN),
+                        },
+                        best.as_ref().map(|(p, s)| format!("(best {p} at {s:.2})")).unwrap_or_default()
+                    ),
+                };
+                let mut out = format!("🧭 “{query}” — {verdict} · {} (shadow: nothing leased)\n", mind_spec::coverage::COVERAGE_POLICY_ID);
+                for m in ranked.iter().take(6) {
+                    out.push_str(&format!("  {:.2}  {}  ← “{}”\n", m.sim, m.pack_id, m.phrase.chars().take(70).collect::<String>()));
+                }
+                out
+            }
+        }
+    }
+
+    /// `ym pack library` — the catalog the router ranks over: mounted packs and library files,
+    /// with the floor in force and how much coverage each declares.
+    pub async fn packs_library(&self) -> String {
+        match self.memory.available_packs().await {
+            Err(e) => format!("(couldn't read the pack catalog: {e})"),
+            Ok(cat) if cat.is_empty() => "The pack catalog is empty: nothing mounted and no `.ydbpack` files in the library (YM_PACK_LIBRARY, default <db dir>/pack-library).".to_string(),
+            Ok(cat) => {
+                let mut out = format!("📚 {} pack(s) in the catalog\n", cat.len());
+                for e in &cat {
+                    out.push_str(&format!(
+                        "  {} {} · floor {:.2} · {} coverage phrase(s) · {}{}\n",
+                        if e.mounted { "▣" } else { "▢" },
+                        e.pack_id,
+                        e.floor,
+                        e.coverage.len(),
+                        if e.mounted { "mounted" } else { "library (unmounted)" },
+                        e.content_digest.as_deref().map(|d| format!(" · {}…", d.chars().take(16).collect::<String>())).unwrap_or_default()
+                    ));
+                }
+                out
+            }
+        }
+    }
+
     /// `ym pack stats` — every pack's local ladder from BOTH witnesses, side by side: the SQL
     /// counters in `mind_pack_stats` and a recount of the flight recorder. Both are written by the
     /// same code path, so agreement is not proof of truth — but disagreement is proof of a defect
@@ -697,11 +750,14 @@ impl super::ConversationEngine {
                     count(D::WithheldLimit)
                 );
                 for r in &rows {
+                    // Three decimals: a hairline miss rendered at two read "0.55 < 0.55", which is
+                    // an impossible sentence and hid the very boundary the operator was diagnosing
+                    // (Codex's review of the live evidence).
                     let (mark, why) = match r.disposition {
-                        D::Cleared => ("✓", format!("sim {:.2} ≥ {:.2}", r.similarity, r.floor)),
-                        D::WithheldFloor => ("✗", format!("sim {:.2} < {:.2}", r.similarity, r.floor)),
-                        D::WithheldPackCap => ("✗", format!("sim {:.2} ≥ {:.2} but over the pack's top_k", r.similarity, r.floor)),
-                        D::WithheldLimit => ("✗", format!("sim {:.2} ≥ {:.2} but beyond the turn's limit", r.similarity, r.floor)),
+                        D::Cleared => ("✓", format!("sim {:.3} ≥ {:.3}", r.similarity, r.floor)),
+                        D::WithheldFloor => ("✗", format!("sim {:.3} < {:.3}", r.similarity, r.floor)),
+                        D::WithheldPackCap => ("✗", format!("sim {:.3} ≥ {:.3} but over the pack's top_k", r.similarity, r.floor)),
+                        D::WithheldLimit => ("✗", format!("sim {:.3} ≥ {:.3} but beyond the turn's limit", r.similarity, r.floor)),
                     };
                     out.push_str(&format!(
                         "  {mark} [{}] {why} · score {:.2} · {}\n",

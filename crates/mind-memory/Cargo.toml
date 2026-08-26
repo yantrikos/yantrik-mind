@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 mind-types = { workspace = true }
+# The model-free half: the coverage router's ranking is pure arithmetic that lives there, so the
+# labelled corpus scores exactly the function the actor runs. mind-spec depends only on mind-types.
+mind-spec = { workspace = true }
 yantrikdb-core = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { workspace = true }

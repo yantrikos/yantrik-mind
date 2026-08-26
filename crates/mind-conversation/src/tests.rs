@@ -3601,7 +3601,14 @@ async fn pack_evidence_climbs_surfaced_used_graded_on_two_witnesses() {
     conv.note_turn_answer("I don't know.").await;
     conv.grade_previous_turn("no, that's wrong — it needs contrast").await;
 
-    let events = conv.recorder().read_all();
+    let all = conv.recorder().read_all();
+    // P.3's shadow router also writes one `pack_route_shadow` per primary grounding (the mounted
+    // pack is in the catalog); it is checked on its own below and excluded from the ladder here.
+    let shadows: Vec<&mind_observability::DecisionEvent> = all.iter().filter(|e| e.kind == "pack_route_shadow").collect();
+    assert_eq!(shadows.len(), 2, "one shadow route per primary grounding: {all:?}");
+    assert!(shadows.iter().all(|s| s.chosen.is_none() || s.chosen.as_deref() == Some(&format!("pack:{id}"))), "{shadows:?}");
+    assert!(shadows.iter().all(|s| s.policy.iter().any(|p| p == "shadow: nothing leased")), "{shadows:?}");
+    let events: Vec<mind_observability::DecisionEvent> = all.into_iter().filter(|e| e.kind != "pack_route_shadow").collect();
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
         kinds,

@@ -19,4 +19,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 
-
+[dev-dependencies]
+# Sealed-pack fixtures for the coverage-router oracle (E.PK3): real manifests, authored coverage.
+mind-memory = { workspace = true, features = ["fixtures"] }

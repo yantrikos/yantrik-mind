@@ -109,6 +109,10 @@ enum Cmd {
     ProbePacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackProbe>> },
     RecordPackEvent { pack_id: String, event: mind_types::memory::PackEvent, reply: Reply<()> },
     PackStats { reply: Reply<Vec<mind_types::memory::PackStats>> },
+    // The coverage router (P.3): a library of unmounted packs, read for manifests only.
+    SetPackLibrary { dir: String, reply: Reply<()> },
+    AvailablePacks { reply: Reply<Vec<mind_types::memory::PackCatalogEntry>> },
+    RoutePacks { query: String, reply: Reply<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute)> },
     // goals / preferences (plain text CRUD; no Bayesian revision)
     StoreGoalPref { kind: String, text: String, reply: Reply<()> },
     ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
@@ -588,6 +592,12 @@ fn seal_craft_pack(
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 struct ManifestView {
     #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    origin: String,
+    #[serde(default)]
     content_digest: Option<String>,
     #[serde(default)]
     coverage: Vec<String>,
@@ -603,6 +613,126 @@ impl ManifestView {
     fn of(m: &yantrikdb_core::PackManifest) -> Self {
         serde_json::to_value(m).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
     }
+    /// `origin@version`, the engine's own identity rule.
+    fn pack_id(&self) -> String {
+        format!("{}@{}", self.origin, self.version)
+    }
+}
+
+/// The pack LIBRARY: a directory of `.ydbpack` files the mind may lease but has not mounted, read
+/// for their manifests only. `YM_PACK_LIBRARY` names it; otherwise `<db dir>/pack-library`; an
+/// in-memory database has none until a test points one at a scratch dir.
+fn default_pack_library(db_path: &str) -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("YM_PACK_LIBRARY") {
+        if !p.trim().is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    if db_path == ":memory:" {
+        return None;
+    }
+    std::path::Path::new(db_path).parent().map(|d| d.join("pack-library"))
+}
+
+/// Every `.ydbpack` in the library, by path, in name order (deterministic catalog order).
+fn library_files(dir: Option<&std::path::Path>) -> Vec<String> {
+    let Some(dir) = dir else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("ydbpack"))
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// The catalog the router ranks over: every mounted pack first (it wins over a library copy with
+/// the same id), then every library file whose manifest reads.
+fn available_packs(
+    db: &YantrikDB,
+    manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    library: Option<&std::path::Path>,
+) -> Vec<mind_types::memory::PackCatalogEntry> {
+    let mut out: Vec<mind_types::memory::PackCatalogEntry> = Vec::new();
+    for p in db.mounted_packs() {
+        let m = cached_manifest(manifests, &p.path);
+        out.push(mind_types::memory::PackCatalogEntry {
+            pack_id: p.pack_id,
+            path: p.path,
+            content_digest: m.and_then(|m| m.content_digest.clone()),
+            coverage: m.map(|m| m.coverage.clone()).unwrap_or_default(),
+            floor: mind_types::memory::effective_pack_floor(m.and_then(|m| m.recommended_min_similarity)),
+            mounted: true,
+            signer: m.and_then(|m| m.publisher_pubkey.clone()),
+        });
+    }
+    for path in library_files(library) {
+        let Some(m) = cached_manifest(manifests, &path) else { continue };
+        let pack_id = m.pack_id();
+        if out.iter().any(|e| e.pack_id == pack_id) {
+            continue;
+        }
+        out.push(mind_types::memory::PackCatalogEntry {
+            pack_id,
+            path: path.clone(),
+            content_digest: m.content_digest.clone(),
+            coverage: m.coverage.clone(),
+            floor: mind_types::memory::effective_pack_floor(m.recommended_min_similarity),
+            mounted: false,
+            signer: m.publisher_pubkey.clone(),
+        });
+    }
+    out
+}
+
+/// Coverage vectors for one catalog entry, cached by content digest (a re-sealed pack embeds
+/// afresh; an unchanged one never embeds twice). A pack whose digest is unknown is embedded per
+/// call rather than cached under a key that could collide.
+fn coverage_vectors(
+    db: &YantrikDB,
+    cache: &mut std::collections::HashMap<String, Vec<Vec<f32>>>,
+    entry: &mind_types::memory::PackCatalogEntry,
+) -> mind_spec::coverage::CoverageVectors {
+    let embed_all = |db: &YantrikDB| -> Vec<Vec<f32>> {
+        entry.coverage.iter().map(|ph| db.embed(ph).unwrap_or_default()).collect()
+    };
+    let vectors = match &entry.content_digest {
+        Some(d) => {
+            if !cache.contains_key(d) {
+                let v = embed_all(db);
+                cache.insert(d.clone(), v);
+            }
+            cache.get(d).cloned().unwrap_or_default()
+        }
+        None => embed_all(db),
+    };
+    mind_spec::coverage::CoverageVectors { pack_id: entry.pack_id.clone(), phrases: entry.coverage.clone(), vectors }
+}
+
+/// `coverage-router-v1` over the catalog: embed the query once, rank every pack by its best
+/// coverage phrase, decide. Read-only — nothing is leased or mounted by asking (P.3 is SHADOWED).
+fn route_packs(
+    db: &YantrikDB,
+    manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
+    coverage_cache: &mut std::collections::HashMap<String, Vec<Vec<f32>>>,
+    library: Option<&std::path::Path>,
+    query: &str,
+) -> std::result::Result<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute), String> {
+    let catalog = available_packs(db, manifests, library);
+    if catalog.is_empty() {
+        return Ok((Vec::new(), mind_types::memory::PackRoute::Abstain { reason: mind_types::memory::AbstainReason::NoPacks, best: None }));
+    }
+    let q = db.embed(query).map_err(|e| e.to_string())?;
+    let packs: Vec<mind_spec::coverage::CoverageVectors> =
+        catalog.iter().map(|e| coverage_vectors(db, coverage_cache, e)).collect();
+    let (ranked, route) = mind_spec::coverage::decide(&q, &packs);
+    let matches = ranked
+        .into_iter()
+        .map(|r| mind_types::memory::CoverageMatch { pack_id: r.pack_id, sim: r.sim, phrase: r.phrase })
+        .collect();
+    Ok((matches, route))
 }
 
 /// A mounted pack's manifest, read from its file on first use and cached by path — the FAILURE
@@ -2279,6 +2409,11 @@ impl MemoryHandle {
                 // is re-read rather than served stale.
                 let mut pack_manifests: std::collections::HashMap<String, Option<ManifestView>> =
                     std::collections::HashMap::new();
+                // The coverage router's state: where the library is, and each pack's coverage
+                // phrases embedded once per content digest.
+                let mut pack_library: Option<std::path::PathBuf> = default_pack_library(&path);
+                let mut coverage_cache: std::collections::HashMap<String, Vec<Vec<f32>>> =
+                    std::collections::HashMap::new();
                 // THE PUMP: one FIFO, drained in arrival order. Causally transparent by
                 // construction (see the scheduling doctrine at the top of this file for why
                 // this stayed a single queue, and which escape hatch exists for heavy commands).
@@ -2535,6 +2670,16 @@ impl MemoryHandle {
                         }
                         Cmd::PackStats { reply } => {
                             let _ = reply.send(pack_stats(&db));
+                        }
+                        Cmd::SetPackLibrary { dir, reply } => {
+                            pack_library = Some(std::path::PathBuf::from(dir));
+                            let _ = reply.send(Ok(()));
+                        }
+                        Cmd::AvailablePacks { reply } => {
+                            let _ = reply.send(Ok(available_packs(&db, &mut pack_manifests, pack_library.as_deref())));
+                        }
+                        Cmd::RoutePacks { query, reply } => {
+                            let _ = reply.send(route_packs(&db, &mut pack_manifests, &mut coverage_cache, pack_library.as_deref(), &query));
                         }
                         Cmd::StoreGoalPref { kind, text, reply } => {
                             let _ = reply.send(store_goal_pref(&db, &kind, &text));
@@ -3387,6 +3532,17 @@ impl MemoryFacade for MemoryHandle {
     async fn pack_stats(&self) -> Result<Vec<mind_types::memory::PackStats>> {
         self.call(|reply| Cmd::PackStats { reply }).await
     }
+    async fn set_pack_library(&self, dir: &str) -> Result<()> {
+        let dir = dir.to_string();
+        self.call(|reply| Cmd::SetPackLibrary { dir, reply }).await
+    }
+    async fn available_packs(&self) -> Result<Vec<mind_types::memory::PackCatalogEntry>> {
+        self.call(|reply| Cmd::AvailablePacks { reply }).await
+    }
+    async fn route_packs(&self, query: &str) -> Result<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute)> {
+        let query = query.to_string();
+        self.call(|reply| Cmd::RoutePacks { query, reply }).await
+    }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {
         // Unscoped append = primary's private context (single-user default; never leaks to a member).
@@ -3487,6 +3643,23 @@ pub mod fixtures {
         recommended_min_similarity: Option<f64>,
         recommended_top_k: Option<u32>,
     ) -> std::result::Result<String, String> {
+        seal_fixture_pack_full(dest, "yantrik-mind-test", name, "0.1.0", namespace, rows, None, recommended_min_similarity, recommended_top_k)
+    }
+
+    /// The full-control variant: origin, version and AUTHORED coverage phrases (the router ranks
+    /// over these), so a corpus can name real pack ids and real coverage lists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_fixture_pack_full(
+        dest: &str,
+        origin_prefix: &str,
+        name: &str,
+        version: &str,
+        namespace: &str,
+        rows: &[&str],
+        coverage: Option<&[&str]>,
+        recommended_min_similarity: Option<f64>,
+        recommended_top_k: Option<u32>,
+    ) -> std::result::Result<String, String> {
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let staging = std::env::temp_dir().join(format!("ym_fixture_{}_{name}_{n}.db", std::process::id()));
         let staging_s = staging.to_string_lossy().to_string();
@@ -3505,15 +3678,19 @@ pub mod fixtures {
                 Ok(Some((ename, digest, dim))) => serde_json::json!({ "name": ename, "digest": digest, "dim": dim }),
                 _ => serde_json::json!({ "name": null, "digest": null, "dim": db.embedding_dim() }),
             };
+            let coverage: Vec<String> = match coverage {
+                Some(c) => c.iter().map(|s| s.to_string()).collect(),
+                None => rows.iter().map(|r| r.chars().take(60).collect::<String>()).collect(),
+            };
             let manifest: yantrikdb_core::PackManifest = serde_json::from_value(serde_json::json!({
                 "name": name,
-                "version": "0.1.0",
-                "origin": format!("yantrik-mind-test/{name}"),
+                "version": version,
+                "origin": format!("{origin_prefix}/{name}"),
                 "description": "test fixture",
                 "embedder": embedder,
                 "namespace": namespace,
                 "constitution": ["Fixture rule: say which fixture row you used."],
-                "coverage": rows.iter().map(|r| r.chars().take(60).collect::<String>()).collect::<Vec<_>>(),
+                "coverage": coverage,
                 "recommended_top_k": recommended_top_k,
                 "recommended_min_similarity": recommended_min_similarity,
             }))
@@ -3807,6 +3984,48 @@ mod tests {
         drop(mem);
         let _ = std::fs::remove_file(&pack);
         let _ = std::fs::remove_file(&host_db);
+    }
+
+    /// P.3: the catalog lists library packs by manifest WITHOUT mounting them, a mounted pack wins
+    /// over its library copy, and the router leases the clear winner, abstains on a no-pack query,
+    /// and mounts nothing by being asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_library_is_catalogued_unmounted_and_the_router_leases_only_a_clear_winner() {
+        use mind_types::memory::{AbstainReason, PackRoute};
+        use mind_types::MemoryFacade;
+        let dir = std::env::temp_dir().join(format!("ym_p3_lib_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |file: &str, name: &str, ns: &str, cov: &[&str]| {
+            let dest = dir.join(file);
+            fixtures::seal_fixture_pack_full(dest.to_str().unwrap(), "yantrik", name, "0.1.0", ns, &["one row"], Some(cov), None, None).unwrap()
+        };
+        let games = mk("games.ydbpack", "game-feel", "game_feel", &["tuning the feel of a 2D platformer", "coyote time, input buffering and jump forgiveness"]);
+        let wages = mk("wages.ydbpack", "uk-rates", "uk_rates", &["UK National Minimum Wage hourly rates by age band", "UK Statutory Sick Pay weekly rate"]);
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        assert!(mem.available_packs().await.unwrap().is_empty(), "an in-memory host has no library until told");
+        mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
+
+        let cat = mem.available_packs().await.unwrap();
+        assert_eq!(cat.iter().map(|e| e.pack_id.as_str()).collect::<Vec<_>>(), vec![games.as_str(), wages.as_str()]);
+        assert!(cat.iter().all(|e| !e.mounted && e.coverage.len() == 2 && e.floor == 0.55), "{cat:?}");
+        assert!(mem.mounted_packs().await.unwrap().is_empty(), "cataloguing mounts nothing");
+
+        let (ranked, route) = mem.route_packs("what coyote time and jump buffering should my platformer use").await.unwrap();
+        assert_eq!(ranked[0].pack_id, games, "{ranked:?}");
+        assert!(ranked[0].phrase.contains("coyote"), "the phrase that earned it is named: {ranked:?}");
+        assert_eq!(route.leased(), Some(games.as_str()), "{route:?} / {ranked:?}");
+        assert!(mem.mounted_packs().await.unwrap().is_empty(), "routing mounts nothing either");
+
+        let (_, off) = mem.route_packs("remind me to call the plumber on tuesday").await.unwrap();
+        assert!(matches!(off, PackRoute::Abstain { reason: AbstainReason::BelowFloor, .. } | PackRoute::Abstain { reason: AbstainReason::Tie, .. }), "an off-topic ask must abstain: {off:?}");
+
+        // Mount one: it now leads the catalog as mounted and its library copy is not listed twice.
+        mem.mount_pack(dir.join("wages.ydbpack").to_str().unwrap()).await.unwrap();
+        let cat = mem.available_packs().await.unwrap();
+        assert_eq!(cat.len(), 2);
+        assert!(cat[0].mounted && cat[0].pack_id == wages && !cat[1].mounted, "{cat:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// P.2's SQL witness: rungs count, and a pack re-sealed under the SAME id starts from zero —

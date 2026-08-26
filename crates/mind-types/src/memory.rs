@@ -470,6 +470,64 @@ impl PackProbe {
     }
 }
 
+/// One pack the mind COULD lease: mounted, or sitting in the pack library as a file whose manifest
+/// was read without mounting. The catalog the coverage router ranks over (ARCH-6 P.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackCatalogEntry {
+    pub pack_id: String,
+    pub path: String,
+    pub content_digest: Option<String>,
+    pub coverage: Vec<String>,
+    /// The floor in force (host wall, raised by a valid declaration).
+    pub floor: f64,
+    pub mounted: bool,
+    pub signer: Option<String>,
+}
+
+/// Why the coverage router did not lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbstainReason {
+    /// Nothing in the catalog.
+    NoPacks,
+    /// The best pack's best phrase did not reach the coverage floor.
+    BelowFloor,
+    /// Two packs were too close to call.
+    Tie,
+}
+
+/// The coverage router's answer for one query. SHADOWED in P.3: recorded, never acted on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PackRoute {
+    Lease { pack_id: String, sim: f64, margin: f64 },
+    Abstain { reason: AbstainReason, best: Option<(String, f64)> },
+}
+
+impl PackRoute {
+    pub fn leased(&self) -> Option<&str> {
+        match self {
+            PackRoute::Lease { pack_id, .. } => Some(pack_id),
+            PackRoute::Abstain { .. } => None,
+        }
+    }
+    /// A short stable label for events and reports: `lease` / `abstain:below_floor` / …
+    pub fn label(&self) -> &'static str {
+        match self {
+            PackRoute::Lease { .. } => "lease",
+            PackRoute::Abstain { reason: AbstainReason::NoPacks, .. } => "abstain:no_packs",
+            PackRoute::Abstain { reason: AbstainReason::BelowFloor, .. } => "abstain:below_floor",
+            PackRoute::Abstain { reason: AbstainReason::Tie, .. } => "abstain:tie",
+        }
+    }
+}
+
+/// One pack's best coverage match for a query, with the phrase that earned it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageMatch {
+    pub pack_id: String,
+    pub sim: f64,
+    pub phrase: String,
+}
+
 /// One thing that happened to a pack's evidence in a turn — the three rungs of the only ladder a
 /// knowledge pack can climb locally: it was SURFACED into a turn, the reply USED it (a proxy, see
 /// `pack_evidence_used`), and the person's next message GRADED the reply that used it.
@@ -695,6 +753,21 @@ pub trait MemoryFacade: Send + Sync {
     /// Every pack's local track record, most-surfaced first.
     async fn pack_stats(&self) -> Result<Vec<PackStats>> {
         Ok(Vec::new())
+    }
+    /// Point the pack LIBRARY at a directory of `.ydbpack` files whose manifests are read without
+    /// mounting. Production sets it once from the environment; tests point it at a scratch dir.
+    async fn set_pack_library(&self, _dir: &str) -> Result<()> {
+        Ok(())
+    }
+    /// The catalog the router ranks over: every mounted pack plus every library file, one entry per
+    /// pack id (a mounted pack wins over its library copy).
+    async fn available_packs(&self) -> Result<Vec<PackCatalogEntry>> {
+        Ok(Vec::new())
+    }
+    /// The coverage router's verdict for a query, with every pack's best match. Read-only: nothing
+    /// is leased or mounted by asking.
+    async fn route_packs(&self, _query: &str) -> Result<(Vec<CoverageMatch>, PackRoute)> {
+        Ok((Vec::new(), PackRoute::Abstain { reason: AbstainReason::NoPacks, best: None }))
     }
     /// The constitution + coverage block the engine assembles for the system prompt, or None when
     /// nothing is mounted. The ENGINE owns this text so every consumer injects an identical block

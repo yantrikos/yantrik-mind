@@ -986,3 +986,33 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Shape of the change | In `delegate_cmd`, before routing on the task: if the name EXACTLY matches a banked skill, run that skill through the shared classifier and the same three runners the phrase path and the tool arm use, with the task as its input. Exact match only - a fuzzy match would hijack delegations that merely resemble a skill name. |
 | KILL criteria | (1) A fourth executor, or any classification decided here rather than by `classify_skill`. (2) A delegation whose name is NOT a banked skill behaving any differently than it does today. (3) A skill run this way losing the board row, the receipt or the scratch trace. |
 | Not claimed | That every delegation should consult the skill bank. Only that an exact name match is an unambiguous instruction, and that answering it with a generic researcher was the mind ignoring what it had been given. |
+| LIVE result | `51ade2c` deployed. `delegate test-market: check WMT` → job `e6d5b4`, **kind `skill`** rather than `research`, receipt instant, deliverable in ~2m: the document's own report format. The verb Pranab types now reaches the document the name refers to. |
+| Actual metric | mind-conversation 437/0 (+1), workspace 1059/0 (42 crates) with `--locked`. |
+| Decision | **KEEP.** |
+
+## E.SEC1b - results
+
+| Field | Entry |
+|---|---|
+| Point 3 | FIXED and proven. `to_ascii_lowercase()` plus a char-boundary floor on the value window. Tested by weaving `İ ı ẞ U+0307 日 🔑 BOM é Ⱥ` through eight bodies at every byte boundary, asserting no panic AND that every reported span is sliceable — a span that cannot be sliced was computed against something else. The test corrected my own expectation once: `İpassword日本` is correctly `None` (no value follows), not a finding. |
+| Point 1 | `tools/sec1_audit.py` DELETED; `crates/mind-evals/src/bin/sec1_audit.rs` classifies through `mind_types` only. Sensitivity control runs first — 6 canaries must flag, 5 clean controls must pass — and exits **2 = INCONCLUSIVE** rather than certifying anything if it fails. |
+| Point 2 | `sensitive_pair(key, value)`. Live demonstration on a synthetic corpus: `{"api_key":"9f2b1c4d8e"}` is flagged at `event.api_key (key+value)`, while `{"password_policy":"requires 12 characters"}` passes. |
+| Point 4 | Four named tests, one per boundary, each with a control proving it is not simply closed: `mind-memory::sec1b_boundary`, `mind-observability::sec1b_boundary`, `mind-governance::sec1b_boundary`, `mind-evals::sec1b_boundary`. Each asserts the boundary acts AND that its output carries no part of the input. |
+| Point 6 | `scan_export_artifact` + `render_for_witness_checked` / `render_cases_checked`. There is no other function returning the rendered string. |
+| THE AUDIT FOUND A DETECTOR FALSE POSITIVE, on the box, in production data | Three `event.confidence` values in `mind.db.decisions.jsonl` were reported as payment cards. A confidence float's fractional part is a long digit run that can begin with 3-6 and satisfy Luhn by chance — `0.5500005555555559` does. Reachable from `gate_write`, so a memory carrying a precise number would have been refused as a credit card: the "asian food recipes" failure wearing arithmetic. `is_embedded` now also rejects a run that is the fractional part of a decimal; only a point WITH A DIGIT ON ITS FAR SIDE counts, so `I paid with 5500005555555559.` ending a sentence is still a card. **Identified from key path and span length alone. No value was read, printed or transmitted.** |
+| Why the deleted twin saw none of it | A COVERAGE difference, not a classification one. Its DecisionEvent scan enumerated a fixed field list — goal, outcome, predicted, lesson, trigger, chosen, subject, and four arrays — which does not include `confidence`. The canonical walk visits every scalar. The twin agreed with production on everything it looked at; it looked at less. The lesson is not that the second implementation was wrong: **a scan's field list is part of its policy, and an audit that enumerates fields certifies only the fields it enumerated.** |
+| Read-only audit, canonical detector, after the fix | `mind.db.decisions.jsonl` 224 lines / 0 flagged · `egress_receipts.jsonl` 635 / 0 · `mind.db.read_receipts.jsonl` 12,006 / 0 · `tape.jsonl` 411 / 0 · `mind.db` 78 memories / **2 flagged credential-phrase**, the same two RIDs as before, span_len 6, still unread. `--fail-closed` exits 1. |
+| Actual metric | Workspace 1059/0 across 42 crates with `--locked`. |
+| Still CLOSED | The recorder-grown corpus. No export until Codex's explicit GO. |
+
+## E.SEC1c - remediation of two historical findings - pre-registered, NOT executed
+
+*Codex point 5, as its own entry. Nothing here has been run.*
+
+| Field | Entry |
+|---|---|
+| The findings | Two `mind.db` memories, RIDs `01a00bd3-ed38-7322-979b-cc7bc1ea491f` and `01a00bd9-dd71-72c8-be8e-607d770508c7`, both `credential-phrase`, span_len 6. Found by the audit on 2026-08-26 and re-confirmed by the canonical detector. **Neither has been read, printed, exported or transmitted, by me or by any tool I ran.** They are known by identifier and kind only. |
+| Plan, in order | (a) BACKUP first — a copy of `mind.db` and every hash-chained log, with the chain head recorded before and after, so the pre-remediation state is recoverable and provably unmodified. (b) QUARANTINE BY IDENTIFIER — a deny-list of RIDs consulted at retrieval and at export, so the two rows stop reaching any reader without their bytes being touched. (c) PRESERVE the chain — no in-place rewrite of any hash-chained record, ever; the logs are append-only and a rewrite would break the property that makes them evidence. (d) HUMAN CLASSIFICATION LATER, locally — Pranab decides what they are, on the box, with no content leaving it. |
+| Why exclusion rather than deletion | Deletion destroys the evidence needed to judge whether the write gate should have caught them, and the write gate is the thing under review. Exclusion is reversible and provable; deletion is neither. |
+| KILL criteria | (1) Any read, print, export or transmission of either memory's content before a human has classified it. (2) Any in-place edit of a hash-chained record. (3) Remediation running before a verified backup exists. (4) A quarantine that hides the rows from the AUDIT as well as from readers — the audit must keep seeing them, or the next run reports a clean bill of health it has not earned. |
+| Status | Pre-registered only. Awaiting Codex's read and Pranab's decision. |

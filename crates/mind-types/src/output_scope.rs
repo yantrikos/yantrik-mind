@@ -131,6 +131,40 @@ impl OutputPolicy {
         }
     }
 
+    /// The policy stated to the model, as DEFENCE IN DEPTH — never as the boundary.
+    ///
+    /// Codex was explicit that this is secondary: the context has already been filtered by
+    /// [`admit_working_set`] before this sentence is written, so it explains a decision that has
+    /// already been enforced rather than requesting one. Telling a model not to reveal facts it can
+    /// still see IS the live failure; this line only exists so the answer reads as a deliberate
+    /// choice ("I can't cite private examples under this scope") instead of an unexplained blank.
+    ///
+    /// `None` when the policy constrains nothing, so an ordinary operator turn carries no extra
+    /// instruction and behaves exactly as it did before slice 4.
+    pub fn prompt_note(&self) -> Option<String> {
+        if self.scope == OutputScope::OperatorPrivate
+            && self.examples_allowed
+            && self.entity_classes.len() == EntityClass::ALL.len()
+        {
+            return None;
+        }
+        let body = if self.entity_classes.is_empty() {
+            "You may NOT cite concrete private details in this answer — no names, tasks, accounts, \
+             purchases, places or remembered facts. The supporting context has ALREADY been withheld \
+             from you, so do not guess at it or apologise for its absence: answer structurally, and \
+             say plainly that you can't cite private examples here."
+                .to_string()
+        } else {
+            format!(
+                "OUTPUT SCOPE: {}. Supporting context has already been limited to what this scope \
+                 permits{}. Answer from what you were given; do not speculate about what was withheld.",
+                self.scope.label(),
+                if self.examples_allowed { "" } else { ", and worked examples are not permitted" }
+            )
+        };
+        Some(body)
+    }
+
     /// Narrow this policy. NEVER widens — that is the invariant the whole module rests on.
     ///
     /// Takes the stricter of each field, so combining policies in any order lands in the same
@@ -171,6 +205,104 @@ impl OutputPolicy {
     pub fn may_name(&self, class: EntityClass) -> bool {
         self.entity_classes.contains(&class)
     }
+}
+
+/// The structural record of ONE policy decision. COUNTS AND ENUMS ONLY.
+///
+/// Codex's rule for operator-private telemetry, and the reason this type has no `String` in it and
+/// never will: production records what the policy DID, never what it saw. "Policy admitted 0 of 12
+/// on a household-member surface after a NoPrivateFacts request" is a fact about the mechanism.
+/// "The answer looked private" is a content judgement, and recording it would mean scanning the
+/// owner's own answers for private-looking strings — which is exactly what the scratch canary
+/// harness exists to do instead, with known tokens and a deterministic instrument (E.SEC8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvidenceDecision {
+    pub scope: OutputScope,
+    pub request: MinimizationRequest,
+    /// Every item hydrated, contradictions included.
+    pub before: usize,
+    pub admitted: usize,
+    pub dropped: usize,
+    /// Broken out because these are exempt from the budget and the distinction is the point.
+    pub contradictions_kept: usize,
+}
+
+/// Apply an output policy to the TYPED working set, before any of it becomes prompt text.
+///
+/// This is slice 4's mechanism and it sits where Codex said it must: over typed evidence items
+/// BEFORE rendering, not in the prompt as an instruction. The live failure was a model told not to
+/// reveal private facts while private facts sat in its context; a stronger instruction repeats that
+/// shape, a filter does not. A filter also has invariants checkable BEFORE generation, which an
+/// instruction can only ever be graded on afterwards.
+///
+/// # A CONSTRAINT IS NOT EVIDENCE
+///
+/// `active_contradictions` is not a disclosure — it is the instruction "ASK to resolve, do NOT
+/// assert either side". Dropping it to satisfy `max_evidence_items` would leave the model unaware a
+/// fact is contested and free to assert one side, so a PRIVACY filter would have caused a
+/// dishonest answer. Contradictions are therefore exempt from the budget, while still subject to
+/// total prohibition: under "reveal nothing" they carry belief text like anything else.
+///
+/// # What this does NOT do
+///
+/// No class-level filtering. Evidence items carry no entity-class labels, substring guesses for
+/// Person-vs-Account are the fuzzy-matcher failure this codebase has retired four times, and Codex
+/// ruled them out explicitly. A policy permitting SOME classes admits its already-retrieval-scoped
+/// items, capped. That gap is a recorded test, not a silence.
+pub fn admit_working_set(
+    policy: &OutputPolicy,
+    request: MinimizationRequest,
+    ws: &crate::memory::WorkingSet,
+) -> (crate::memory::WorkingSet, EvidenceDecision) {
+    let disclosive = ws.stable_facts.len()
+        + ws.preferences.len()
+        + ws.commitments.len()
+        + ws.recent_events.len()
+        + ws.uncertain_beliefs.len();
+    let before = disclosive + ws.active_contradictions.len();
+
+    // TOTAL PROHIBITION. Nothing survives, contradictions included — there is no answer to keep
+    // honest when there is no evidence to be honest about.
+    if policy.entity_classes.is_empty() || policy.max_evidence_items == 0 {
+        return (
+            crate::memory::WorkingSet::default(),
+            EvidenceDecision { scope: policy.scope, request, before, admitted: 0, dropped: before, contradictions_kept: 0 },
+        );
+    }
+
+    // Budget spent most-useful-first, deterministically, so the same turn always yields the same
+    // prompt. Stable facts before guesses; contradictions never compete for the budget at all.
+    let mut budget = policy.max_evidence_items;
+    let mut out = crate::memory::WorkingSet::default();
+    fn take<T: Clone>(dst: &mut Vec<T>, src: &[T], budget: &mut usize) {
+        let n = src.len().min(*budget);
+        dst.extend_from_slice(&src[..n]);
+        *budget -= n;
+    }
+    take(&mut out.stable_facts, &ws.stable_facts, &mut budget);
+    take(&mut out.preferences, &ws.preferences, &mut budget);
+    take(&mut out.commitments, &ws.commitments, &mut budget);
+    take(&mut out.recent_events, &ws.recent_events, &mut budget);
+    take(&mut out.uncertain_beliefs, &ws.uncertain_beliefs, &mut budget);
+    out.active_contradictions = ws.active_contradictions.clone();
+
+    let admitted = out.stable_facts.len()
+        + out.preferences.len()
+        + out.commitments.len()
+        + out.recent_events.len()
+        + out.uncertain_beliefs.len()
+        + out.active_contradictions.len();
+    (
+        out,
+        EvidenceDecision {
+            scope: policy.scope,
+            request,
+            before,
+            admitted,
+            dropped: before - admitted,
+            contradictions_kept: ws.active_contradictions.len(),
+        },
+    )
 }
 
 /// How many evidence items a policy permits, and which survive.
@@ -376,6 +508,117 @@ mod tests {
             1,
             "and the FILTER cannot yet tell what this item names — recorded, not hidden"
         );
+    }
+
+    /// The prompt line must stay SECONDARY: silent when nothing is constrained.
+    #[test]
+    fn an_unconstrained_operator_turn_carries_no_extra_instruction() {
+        assert!(
+            OutputPolicy::for_scope(OutputScope::OperatorPrivate).prompt_note().is_none(),
+            "an ordinary owner turn must read exactly as it did before slice 4"
+        );
+        // And once anything is asked for, it speaks.
+        let asked = OutputPolicy::for_scope(OutputScope::OperatorPrivate)
+            .tighten(MinimizationRequest::NoPrivateFacts);
+        let note = asked.prompt_note().expect("a total prohibition must be stated");
+        assert!(note.contains("ALREADY been withheld"), "it explains an enforced decision, not a request: {note}");
+    }
+
+    // ---- E.SEC8 slice 4: the typed gate ----
+
+    fn item(id: &str) -> crate::memory::MemoryItem {
+        crate::memory::MemoryItem {
+            id: id.into(),
+            kind: crate::memory::MemoryKind::Belief,
+            text: format!("fact {id}"),
+            confidence: 0.9,
+            certainty: 0.9,
+            updated_ms: 0,
+            evidence_count: 1,
+        }
+    }
+
+    fn contradiction(id: &str) -> crate::memory::Contradiction {
+        crate::memory::Contradiction {
+            id: id.into(),
+            belief_a: "dinner is at seven".into(),
+            belief_b: "dinner is at eight".into(),
+            severity: 0.8,
+            status: "open".into(),
+        }
+    }
+
+    fn ws(facts: usize, contradictions: usize) -> crate::memory::WorkingSet {
+        crate::memory::WorkingSet {
+            stable_facts: (0..facts).map(|i| item(&format!("f{i}"))).collect(),
+            active_contradictions: (0..contradictions).map(|i| contradiction(&format!("c{i}"))).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// KILL CRITERION 1 — the gate must be TRANSPARENT on the owner's own surface.
+    #[test]
+    fn an_operator_private_turn_admits_everything_it_hydrated() {
+        let set = ws(40, 3);
+        let policy = OutputPolicy::for_scope(OutputScope::OperatorPrivate);
+        let (out, d) = admit_working_set(&policy, MinimizationRequest::None, &set);
+        assert_eq!(d.dropped, 0, "filtering the owner's own surface is a bug, not caution");
+        assert_eq!(d.admitted, d.before);
+        assert_eq!(out.stable_facts.len(), 40);
+        assert_eq!(out.active_contradictions.len(), 3);
+    }
+
+    /// KILL CRITERION 2 — total prohibition takes everything, contradictions included.
+    #[test]
+    fn a_total_prohibition_admits_nothing_not_even_a_contradiction() {
+        let set = ws(12, 2);
+        // The live failure's exact shape: operator-private, plus "do not reveal private facts".
+        let policy = OutputPolicy::for_scope(OutputScope::OperatorPrivate)
+            .tighten(MinimizationRequest::NoPrivateFacts);
+        let (out, d) = admit_working_set(&policy, MinimizationRequest::NoPrivateFacts, &set);
+        assert_eq!(d.admitted, 0);
+        assert_eq!(d.dropped, 14, "all twelve facts and both contradictions");
+        assert!(out.stable_facts.is_empty() && out.active_contradictions.is_empty());
+
+        // And a surface that names nothing before anyone asks.
+        let public = OutputPolicy::for_scope(OutputScope::PublicShare);
+        let (out, d) = admit_working_set(&public, MinimizationRequest::None, &ws(5, 1));
+        assert_eq!(d.admitted, 0);
+        assert!(out.active_contradictions.is_empty());
+    }
+
+    /// KILL CRITERION 3 — the one way this filter could make an answer DISHONEST rather than vaguer.
+    ///
+    /// A contradiction is not a disclosure; it is "ASK, do not assert either side". If the budget
+    /// could evict it while facts survived, a PRIVACY filter would have licensed the mind to assert
+    /// a contested fact with no idea it was contested.
+    #[test]
+    fn the_budget_can_never_evict_a_contradiction_while_facts_survive() {
+        let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
+        assert!(member.max_evidence_items < 30, "this test needs the budget to actually bite");
+
+        let set = ws(30, 4);
+        let (out, d) = admit_working_set(&member, MinimizationRequest::None, &set);
+
+        assert_eq!(out.stable_facts.len(), member.max_evidence_items, "facts ARE capped");
+        assert!(d.dropped > 0, "and the cap really bit");
+        assert_eq!(
+            out.active_contradictions.len(),
+            4,
+            "every contradiction survives a budget that evicted facts"
+        );
+        assert_eq!(d.contradictions_kept, 4);
+    }
+
+    /// KILL CRITERION 4 — telemetry is structural, and the TYPE proves it.
+    ///
+    /// `Copy` cannot hold a `String`, so a decision record can never carry evidence text. This is a
+    /// compile-time proof rather than a promise in a comment, which matters because the promise is
+    /// the sort that erodes the first time someone wants "just the one field" for debugging.
+    #[test]
+    fn a_decision_record_cannot_carry_content() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<EvidenceDecision>();
     }
 
     #[test]

@@ -129,6 +129,38 @@ Ask me again in a moment.";
 /// and look broken rather than careful, so the fallback exists but announces itself (E.SEC8).
 pub static STRICT_DEFAULT_FALLBACKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// STRUCTURAL evidence telemetry: how many typed items the output policy saw, admitted and dropped.
+///
+/// Counts only, per Codex. Production records what the policy DID, never what it saw — no spans, no
+/// values, nothing derived from evidence text. "Admitted 0 of 12 on a member surface" is a fact
+/// about the mechanism and is safe to keep forever; "the answer looked private" is a content
+/// judgement, and producing it would mean scanning the owner's own answers for private-looking
+/// strings. That job belongs to the scratch canary harness, which has known tokens and a
+/// deterministic instrument (E.SEC8 slice 4).
+pub static EVIDENCE_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static EVIDENCE_ADMITTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static EVIDENCE_DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Record one policy decision. Takes the typed record, reads only its counts.
+pub(crate) fn record_evidence_decision(d: &mind_types::EvidenceDecision) {
+    use std::sync::atomic::Ordering::Relaxed;
+    EVIDENCE_SEEN.fetch_add(d.before, Relaxed);
+    EVIDENCE_ADMITTED.fetch_add(d.admitted, Relaxed);
+    EVIDENCE_DROPPED.fetch_add(d.dropped, Relaxed);
+    // Only a DROP is worth a line, and only as numbers plus two enum labels.
+    if d.dropped > 0 {
+        eprintln!(
+            "[output-scope] {} request={:?} evidence {}/{} admitted, {} dropped ({} contradictions kept)",
+            d.scope.label(),
+            d.request,
+            d.admitted,
+            d.before,
+            d.dropped,
+            d.contradictions_kept
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TurnIdentity {
     /// The speaker's person id ("primary", or a registered member's slug).
@@ -7186,11 +7218,20 @@ impl ConversationEngine {
         user_text: &str,
         format_note: Option<&str>,
         pack_context: Option<&str>,
+        policy: &mind_types::OutputPolicy,
     ) -> Vec<ChatMessage> {
         let mut messages = vec![ChatMessage::system(&self.persona)];
         // Straight after the persona, before any untrusted block: this is OUR instruction, and it must
         // not sit downstream of memory or web text that the model is told never to obey.
         if let Some(note) = format_note {
+            messages.push(ChatMessage::system(note));
+        }
+        // The output policy, DEFENCE IN DEPTH (E.SEC8 slice 4). It sits in the same trusted region
+        // as the format note and upstream of every untrusted block, because it is our instruction.
+        // It explains a decision `admit_working_set` has ALREADY enforced on the typed context —
+        // it is not what protects the data, and the difference is the whole finding: the live
+        // failure was a model told not to reveal private facts while private facts sat in context.
+        if let Some(note) = policy.prompt_note() {
             messages.push(ChatMessage::system(note));
         }
         // MOUNTED PACK RULES. Assembled by the ENGINE (`pack_context`) rather than composed here, so
@@ -9727,6 +9768,21 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Cheap immediate context: the last few raw turns (prior to this one), speaker-filtered.
         let recent = self.memory.recent_messages(self.recent_window, &turn_ctx).await.unwrap_or_default();
         let ws = self.memory.hydrate_working_set(user_text, &turn_ctx).await?;
+        // THE OUTPUT-SCOPE GATE (E.SEC8 slice 4). Codex's call: FILTER the typed context before
+        // generation; the prompt's own policy line is defence-in-depth, never the boundary. The
+        // live failure was a model told not to reveal private facts while private facts sat in its
+        // context — a stronger instruction repeats that shape, a filter does not.
+        //
+        // It sits HERE, between hydration and rendering, because this is the last point where the
+        // evidence is still typed. `build_prompt` was the obvious-looking home and is the wrong
+        // one: by the time it runs, the working set is already a string.
+        let policy = id.output_policy(user_text);
+        let (ws, evidence) = mind_types::admit_working_set(
+            &policy,
+            mind_types::detect_minimization(user_text),
+            &ws,
+        );
+        record_evidence_decision(&evidence);
         let mut grounding = Self::render_grounding(&ws);
         // Continuity beyond the raw-turn window: the rolling summary of everything older (compaction
         // absorbs aging turns into it in the background). Rides inside the untrusted memory block.
@@ -9799,6 +9855,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             user_text,
             id.format_note(),
             self.memory.pack_context().await.ok().flatten().as_deref(),
+            &policy,
         );
         // THE MAIN TURN, GROUNDED (E.SEC9). This is the most private prompt the mind assembles:
         // recalled grounding, PINNED FACTS naming people with certainties, the mail digest, the

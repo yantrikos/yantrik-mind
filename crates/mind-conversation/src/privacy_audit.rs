@@ -57,6 +57,15 @@ pub(crate) struct AllowedSite {
     pub why: &'static str,
 }
 
+/// Does this squashed source ride the HOUSEHOLD lane under a name that is not `chat(`?
+///
+/// Extracted so it can be tested against synthetic source rather than by editing real files. The
+/// by-hand mutation that first proved this works is not a test — it lives in a transcript, not in
+/// CI, and Codex asked for the permanent version.
+pub(crate) fn is_household_lane_call(squashed: &str) -> bool {
+    squashed.contains("PrivacyScope::Household)") || squashed.contains("chat_streaming_sink(")
+}
+
 /// Whitespace-stripped source, the form every comparison here uses.
 fn squash(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
@@ -206,6 +215,41 @@ mod tests {
                 out.push(p);
             }
         }
+    }
+
+    /// The audit must CATCH Household-by-another-name, and must not catch its siblings (E.SEC14).
+    ///
+    /// Codex asked for this as a permanent mutation test rather than the by-hand one I ran once.
+    /// Synthetic source, so it proves the RULE rather than the current state of a file — and it
+    /// keeps proving it after someone edits `lib.rs`.
+    #[test]
+    fn the_audit_catches_household_under_its_other_names() {
+        let squash = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+
+        // CAUGHT: the two spellings that hid ten call sites for as long as the guard existed.
+        for caught in [
+            "self.inference.chat_scoped(msgs, cfg, mind_inference::PrivacyScope::Household)",
+            ".chat_scoped(vec![ChatMessage::user(&p)], cfg, PrivacyScope::Household)",
+            "self.inference.chat_streaming_sink(messages, cfg, tok_tx, scope)",
+        ] {
+            assert!(is_household_lane_call(&squash(caught)), "must be caught: {caught}");
+        }
+
+        // NOT CAUGHT: the private lane, which is the whole point of distinguishing them.
+        for safe in [
+            "self.inference.chat_grounded(messages, cfg)",
+            "self.inference.chat_grounded_tools(messages, cfg, schemas)",
+            "self.inference.chat_scoped(m, c, PrivacyScope::Private)",
+        ] {
+            assert!(!is_household_lane_call(&squash(safe)), "must NOT be caught: {safe}");
+        }
+
+        // NOT CAUGHT: Public. Declaring content public is a different claim from letting household
+        // content ride the household lane, and `emissary.rs` makes both kinds of call.
+        assert!(
+            !is_household_lane_call(&squash("chat_scoped(m, c, mind_inference::PrivacyScope::Public)")),
+            "a Public declaration is not a Household leak"
+        );
     }
 
     /// A COPY of an allowlisted call, elsewhere, must NOT inherit the allow (Codex, E.SEC9).
@@ -396,8 +440,7 @@ mod tests {
                 // `PrivacyScope::Public` deliberately does NOT flag. Declaring content public is a
                 // different claim from letting household content ride the household lane.
                 let household_by_other_name = !HOUSEHOLD_DECLARED.iter().any(|(f, _)| *f == name)
-                    && (squashed.contains("PrivacyScope::Household)")
-                        || squashed.contains("chat_streaming_sink("));
+                    && is_household_lane_call(&squashed);
                 if squashed.contains(".chat(") || household_by_other_name {
                     // Report every `.chat(` in the file: the exact line of a wrapped call is
                     // ambiguous, and naming the candidates is more useful than guessing one.

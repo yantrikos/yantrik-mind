@@ -390,9 +390,13 @@ impl InferencePool {
         messages: Vec<ChatMessage>,
         config: GenerationConfig,
         sink: tokio::sync::mpsc::UnboundedSender<String>,
+        scope: PrivacyScope,
     ) -> anyhow::Result<LLMResponse> {
+        // SCOPE IS A PARAMETER (E.SEC14). It was hardcoded `Household`, which meant the streaming
+        // compose declared the same lane for a turn grounded in family memory as for one about the
+        // weather. A lane belongs to the MATERIAL, not to the transport that happens to carry it.
         let messages = merge_system_messages(messages);
-        let backend = self.gate_scope(PrivacyScope::Household)?;
+        let backend = self.gate_scope(scope)?;
         let permit = self
             .sem
             .clone()

@@ -5597,6 +5597,90 @@ mod sec8_canaries {
         }
     }
 
+    /// CODEX CRITERION 1 (E.SEC10) — member A admits A + shared, and NEVER member B.
+    ///
+    /// # What this test does and does not own
+    ///
+    /// It tests THE GATE end-to-end against real scoped writes and a real ctx-filtered hydration.
+    /// It tests READ-ISOLATION only as far as an in-memory store reproduces it — the isolation
+    /// itself lives in yantrikdb-core, and I said so to Codex rather than let a green tick here
+    /// imply I had verified their half. If this passes and the engine's isolation is wrong, this
+    /// test will still pass, which is exactly the limit worth writing down.
+    ///
+    /// # WHICH LAYER ACTUALLY EXCLUDES MEMBER B — measured, not assumed
+    ///
+    /// Read-isolation, at RETRIEVAL. Instrumenting the hydration showed `B_ONLY` is not in the
+    /// working set at all, so `admit_working_set` never sees it and cannot be what removed it —
+    /// the gate does no per-item scope filtering and never claimed to. This test therefore asserts
+    /// an OUTCOME whose mechanism is the isolation wall; the gate's contribution is provenance and
+    /// the budget, asserted separately.
+    ///
+    /// Recorded here because "the gate blocks cross-member leaks" is how this test would otherwise
+    /// be read the first time someone changes the gate and finds this still green.
+    ///
+    /// Seeded with canary tokens rather than plausible names so a cross-scope leak is unambiguous
+    /// and the scratch corpus carries nothing worth protecting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_member_turn_admits_its_own_and_shared_but_never_another_members() {
+        use mind_types::Scope;
+        const A_ONLY: &str = "ZQCANARY-MEMBERA-1a1";
+        const B_ONLY: &str = "ZQCANARY-MEMBERB-2b2";
+        const SHARED: &str = "ZQCANARY-SHARED-3c3";
+
+        let mem: Arc<dyn MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        for (scope, token) in [
+            (Scope::Private("asha".into()), A_ONLY),
+            (Scope::Private("dev".into()), B_ONLY),
+            (Scope::Shared, SHARED),
+        ] {
+            let _ = mem
+                .remember_as_belief_scoped(
+                    mind_types::BeliefAssertion {
+                        statement: format!("the rota note {token} is on the fridge"),
+                        polarity: 1.0,
+                        weight: 1.5,
+                        source_event: Some("sec10-scoped".into()),
+                        provenance: "told".into(),
+                    },
+                    scope,
+                )
+                .await;
+        }
+
+        // Hydrate AS member A, through the same ctx-filtered path a real member turn uses.
+        let ctx = mind_types::AccessContext::principal(
+            Scope::Private("asha".into()),
+            mind_types::Purpose::conversation("asha"),
+        );
+        let ws = mem.hydrate_working_set("rota note fridge", &ctx).await.unwrap_or_default();
+
+        // NON-VACUOUS FIRST: the hydration must have produced something, or every claim below is
+        // a statement about an empty vector. This is the trap my live `ym as <person>` probes fell
+        // into — a clean answer against an empty corpus proves nothing.
+        let hydrated = format!("{ws:?}");
+        assert!(
+            hydrated.contains(A_ONLY) || hydrated.contains(SHARED),
+            "member A's hydration reached neither her own fact nor the shared one — the test would be vacuous"
+        );
+
+        // The stamp must have travelled, or the gate will deny for the wrong reason and this test
+        // would pass while proving nothing about isolation.
+        let prov = ws.provenance.clone().expect("the hydrator must stamp the read (E.SEC10)");
+        assert!(prov.isolated_to_principal(), "a principal read must carry an isolated stamp");
+
+        let member = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::HouseholdMember);
+        let (kept, decision) =
+            mind_types::admit_working_set(&member, mind_types::MinimizationRequest::None, &ws);
+        let admitted = format!("{kept:?}");
+
+        assert!(
+            !admitted.contains(B_ONLY),
+            "another member's private fact reached member A's turn — the isolation wall failed"
+        );
+        assert!(decision.admitted > 0, "a properly isolated member read must still be usable");
+        assert_eq!(decision.scope, mind_types::OutputScope::HouseholdMember);
+    }
+
     /// SLICE 4 NOW ENFORCES IT, and this replaces the placeholder that said it could not.
     ///
     /// The old test asserted the contract and stated plainly that nothing consumed it. That was

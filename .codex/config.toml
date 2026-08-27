@@ -1,0 +1,10 @@
+[mcp_servers.swarmcode]
+command = "npx"
+args = ["-y", "swarmcode-mcp", "channel"]
+startup_timeout_sec = 30
+tool_timeout_sec = 300
+enabled = true
+
+[mcp_servers.swarmcode.env]
+SWARMCODE_REDIS_URL = "redis://192.168.4.161:30379"
+SWARMCODE_WORKSPACE_ID = "yantrik-mind-codex"

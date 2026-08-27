@@ -115,7 +115,15 @@ impl super::ConversationEngine {
             "You are a sharp, neutral news analyst briefing the user on \"{topic}\". Using ONLY the multi-source evidence below, write an IN-DEPTH brief that CONSOLIDATES across sources — do NOT just relay headlines.\n\n=== EVIDENCE ===\n{evidence}\n\n=== WRITE ===\n1. **What's happening** — the core development(s).\n2. **Why it matters** — context / background.\n3. **The angles** — how different outlets/sides frame it; note where they AGREE and where they DIFFER, attributing contested claims to a source.\n4. **What to watch** — what's next / still uncertain.\n{market_instr}\n\nRULES: factual + balanced; attribute contested claims; do NOT invent specifics, numbers, or quotes not in the evidence. Use the live market figures verbatim. Under 300 words. Do NOT list the source URLs yourself (they're appended separately)."
         );
         let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
-        let body = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let body = match self
+            .inference
+            .chat_household_attributed(
+                vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)],
+                cfg,
+                concat!(module_path!(), ":news-brief"),
+            )
+            .await
+        {
             Ok(r) => r.text.trim().to_string(),
             Err(e) => return format!("(couldn't complete the brief: {e})"),
         };

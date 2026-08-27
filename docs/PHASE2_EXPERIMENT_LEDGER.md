@@ -1696,6 +1696,16 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What it does NOT do, so it is not mistaken for the real fix | It names the PROVIDER, not the caller. A proper attribution — path plus call shape, reusing the identity `ALLOWED_SITES` already carries — remains unbuilt. This is the cheap 80%, chosen because household traffic is sparse enough that correlation works; if it ever becomes frequent, correlation stops working and the real tag is required. |
 | Actual metric | Workspace **1151/0** with `--locked`. |
 
+## E.SEC17a — replace timestamp correlation with dispatch-boundary call-site attribution
+
+| Field | Value |
+| --- | --- |
+| The gap it closes | E.SEC17's timestamp was only a correlation aid: it named the provider, not the producer. A Household count could still require reconstructing concurrent background activity by hand. |
+| The mechanism | Deliberate Household calls now use `chat_household_attributed` with a compile-time-static producer id (`concat!(module_path!(), ":purpose")`). The id is recorded at `gate_scope`, the actual dispatch boundary, and appears in `privacy_report` beside its count. User or retrieved text cannot become a label because the API accepts `&'static str`; an empty/whitespace static id is folded into the explicit `unattributed` bucket rather than creating a blank row that only looks attributable. |
+| The structural guard | The privacy source audit scans every production Rust source. The five reviewed Household producers must use the attributed API, may contain no bare `.chat(` call, and every attributed caller must appear in the reviewed list. Adding an unlabelled or unreviewed Household producer therefore fails a test before it can blur the dashboard. |
+| Compatibility | The public `chat` API remains for callers that are not deliberate Household producers and is recorded as `unattributed`; existing lane selection and fail-closed private routing are unchanged. |
+| Evidence | `cargo test -p mind-conversation --locked`: **476/0**. `cargo test -p mind-inference --locked`: **20/0**, one live-Ollama test ignored. The inference suite now proves both sides of attribution: served Household calls gain a producer row; charter-refused attempts do not. `git diff --check`: clean. |
+
 ## E.CTX1 — one gate for every evidence channel, so a fourteenth cannot arrive ungated
 
 | Field | Value |
@@ -1708,3 +1718,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | PREDICTION | Replacing the four ad-hoc expressions changes no behaviour: each already implements the same rule. The workspace stays green and the live probes stay clean. If behaviour DOES change, one of the four disagreed with the others — which would itself be the finding, and is the reason to do this before adding any new capability. |
 | KILL criteria | (1) All four expressions gone; a source scan asserts none survive. (2) Adding a `Channel` variant without a policy arm fails to COMPILE — verified by trying it. (3) The E.SEC8 live probe still returns shape-without-specifics, and the E.SEC13 contradiction leak stays closed. (4) Workspace green with `--locked`. (5) No new fuzzy matcher: the gate decides from typed policy, never from text. |
 | NOT claimed | That this makes the mind smarter or faster. It makes one class of mistake impossible to repeat, which is worth more than another fix of the same shape — but it buys no capability, and the ~22s model floor is untouched by it. |
+
+| E.CTX1 BUILT — one gate, and a fourteenth channel now fails the BUILD | `Channel` names all thirteen routes evidence takes to a prompt; `OutputPolicy::admits(Channel)` is the single place the question is answered, matched exhaustively with no `_ =>` arm. Every gate in the conversation crate defers to it. |
+| The core property, PROVEN rather than asserted | Added a `Channel::CalendarFeed` variant with no policy arm: **`error[E0004]: non-exhaustive patterns: Channel::CalendarFeed not covered`**. A new channel can no longer arrive ungated — it arrives as a compile error. That is the first mechanism in this whole line of work that catches the failure BEFORE a probe does. |
+| A correction to my own preregistration | I counted FOUR competing expressions. It is three: `names_anything` (9), `private_channels` (5), bare `entity_classes.is_empty()` (4). `COMPOSE_SCOPE` answers a different question — WHICH LANE carries the answer, not WHETHER a channel may appear — and conflating the two would have been the same category error I made when I first derived compose's lane from grounding emptiness. Left alone deliberately. |
+| Two guards, because they stop different things | The exhaustive match stops a channel arriving UNGATED. A source scan (`no_channel_gate_is_open_coded`) stops one arriving with its OWN gate — a local boolean is invisible to the compiler, and that is precisely how thirteen channels came to be gated one at a time. |
+| PREDICTION HELD | No behaviour change: workspace **1155/0**, every existing privacy test green, including the E.SEC8 canaries, the E.SEC11 hidden-conflict hedge and the E.SEC13 contradiction gate. All three open-coded expressions did implement the same rule — which is worth knowing, since if one had disagreed this refactor would have surfaced it as a test failure rather than a silent divergence. |
+| NOT DEPLOYED, on Codex's instruction | It asked for a named SHA for independent review and said not to merge or deploy on its behalf. This touches the privacy gating it reviews, so the box stays at `f6a5914` until it has looked. |

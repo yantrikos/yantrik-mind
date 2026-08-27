@@ -207,6 +207,84 @@ impl OutputPolicy {
     }
 }
 
+/// Every route by which evidence reaches a model on a turn (E.CTX1).
+///
+/// # Why this is an enum and not a set of booleans
+///
+/// Thirteen times in one session the same defect appeared: a channel gated, and the one beside it
+/// not. A line break, a variable name, one code path of three, one evidence channel of seven, one
+/// tool door of three, a contradiction fetched twice eight hundred lines apart. Each was fixed
+/// correctly and separately — which produced THREE different expressions all asking "may this turn
+/// name things?", in three different functions, each added the moment another ungated channel
+/// turned up.
+///
+/// The defect was never the missing check. It was that nothing forced the question to be ASKED for
+/// a new channel. An exhaustive match does: adding a variant here without giving it an arm below is
+/// a compile error, not something a probe discovers three hours later. That mechanism has already
+/// out-performed my attention once — the compiler, not I, found the second uncertainty renderer in
+/// E.SEC11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Channel {
+    /// The rendered working set — recalled beliefs and facts.
+    Grounding,
+    /// Recent dialogue. Carries the mind's own earlier, less-restricted answers.
+    Transcript,
+    MailDigest,
+    GithubDigest,
+    /// Per-turn scratch notes and the agent work log.
+    ScratchNotes,
+    /// The household roster, with names and relationships.
+    PeopleRoster,
+    /// The rolling summary of older turns — private conversation, distilled.
+    ConversationSummary,
+    /// Open contradictions. Two belief TEXTS, so a disclosure despite being an instruction.
+    Contradictions,
+    /// An inference about how the user lives, worn as a voice instruction.
+    RelationshipLens,
+    /// The tool catalogue and schemas — a channel because a model that can CALL recall can pull
+    /// what a filter withheld.
+    ToolSurface,
+    /// A fetched web page. Public by construction.
+    WebPage,
+    /// Mounted-pack knowledge: a labelled third-party publisher's claims, not the household's.
+    PackContext,
+    /// The MIND's own degraded-state note. About itself, not about the user.
+    MetacogNote,
+}
+
+impl OutputPolicy {
+    /// May this channel reach the model under this policy?
+    ///
+    /// THE one place the question is answered. Every gate in the conversation crate defers here, so
+    /// a fourteenth channel cannot arrive with its own private opinion about what "private" means.
+    ///
+    /// The match is exhaustive and deliberately un-defaulted: no `_ =>` arm, because a catch-all
+    /// would silently admit a new channel and reintroduce exactly the failure this exists to end.
+    pub fn admits(&self, channel: Channel) -> bool {
+        // A policy permitting no entity class is a total prohibition: the turn may name nothing.
+        let names_anything = !self.entity_classes.is_empty();
+        match channel {
+            // HOUSEHOLD CONTENT — everything that carries the user's own life.
+            Channel::Grounding
+            | Channel::Transcript
+            | Channel::MailDigest
+            | Channel::GithubDigest
+            | Channel::ScratchNotes
+            | Channel::PeopleRoster
+            | Channel::ConversationSummary
+            | Channel::Contradictions
+            | Channel::RelationshipLens
+            | Channel::ToolSurface => names_anything,
+
+            // NOT the household's life, and withholding them costs the answer for nothing:
+            // a fetched page is public, a pack is a labelled publisher's claims, and the metacog
+            // note reports the MIND's own state — telling the model to hedge when evidence is thin
+            // is exactly right on a turn that has been stripped of evidence.
+            Channel::WebPage | Channel::PackContext | Channel::MetacogNote => true,
+        }
+    }
+}
+
 /// The structural record of ONE policy decision. COUNTS AND ENUMS ONLY.
 ///
 /// Codex's rule for operator-private telemetry, and the reason this type has no `String` in it and

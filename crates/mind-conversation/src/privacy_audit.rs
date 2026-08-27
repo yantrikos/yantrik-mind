@@ -98,7 +98,12 @@ pub(crate) fn site_is_allowed(file: &str, lines: &[&str], idx: usize) -> bool {
     })
 }
 
-const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
+/// Deliberate Household callers that now use `chat_household_attributed`, each with the reason the
+/// prompt is eligible for that lane. Unlike the old per-file `UNSCOPED_ALLOWED`, these files are
+/// NOT skipped by `no_new_unscoped_inference_calls`: adding a bare `.chat(` beside an attributed
+/// call is still a build failure. A separate test below proves every attributed call supplies a
+/// code-authored `module_path!()` identity and that no unlisted file can introduce the API.
+const ATTRIBUTED_HOUSEHOLD: &[(&str, &str)] = &[
     (
         "mind-conversation/src/egress_planning.rs",
         "MUST stay unscoped BY DESIGN: the ARCH-3 egress-clean planner re-authors outbound tool args \
@@ -124,6 +129,10 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
          2026-07-25 sweep. Any NEW call here that touches self.memory must be grounded.",
     ),
 ];
+
+/// Kept as a distinct, intentionally empty category so a future genuinely-unattributed exception
+/// is conspicuous in review. Prefer `chat_household_attributed` + `ATTRIBUTED_HOUSEHOLD`.
+const UNSCOPED_ALLOWED: &[(&str, &str)] = &[];
 
 /// Files with unscoped calls that the WRAPPING-PROOF scan found on 2026-08-26, whose disposition is
 /// NOT YET DECIDED (E.SEC2).
@@ -333,6 +342,45 @@ mod tests {
         assert_ne!(context_hash(&lines, 2), context_hash(&moved, 2), "but the neighbours are");
     }
 
+    /// No channel may invent its own opinion of what "private" means (E.CTX1).
+    ///
+    /// Before this slice, THREE expressions decided whether a channel could reach a model —
+    /// `names_anything` (9 uses), `private_channels` (5), and bare `entity_classes.is_empty()` —
+    /// in three different functions, each added the moment another ungated channel turned up. Every
+    /// one was correct. Together they were a pattern of patching, and a fourteenth channel would
+    /// have arrived with a fourth spelling.
+    ///
+    /// The enum's exhaustive match stops a channel arriving UNGATED. This stops one arriving with
+    /// its own private gate, which the compiler cannot see.
+    #[test]
+    fn no_channel_gate_is_open_coded() {
+        let src = std::fs::read_to_string(
+            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+        )
+        .expect("lib.rs must be readable");
+        let squashed: String = crate::source_audit::strip_comments(&src)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        for banned in ["letnames_anything=", "letprivate_channels="] {
+            assert!(
+                !squashed.contains(banned),
+                "an open-coded channel gate is back ({banned}). Every channel decision goes through \
+                 `OutputPolicy::admits(Channel::…)`, so the exhaustive match can see it — a local \
+                 boolean is invisible to the compiler and is how thirteen channels came to be gated \
+                 one at a time."
+            );
+        }
+
+        // And the policy's own field must not be consulted directly outside the gate: that is the
+        // shape all three open-coded versions took.
+        assert!(
+            !squashed.contains("policy.entity_classes.is_empty()"),
+            "a channel is reading the policy's internals instead of asking `admits`"
+        );
+    }
+
     /// Hydrated evidence that reaches a PROMPT must pass the output-scope gate.
     ///
     /// This guard exists because fixing three call sites is not the lesson. `mind-conversation` had
@@ -500,16 +548,79 @@ mod tests {
              so if this prompt carries household memory it leaks AND reads as clean on the dashboard.\n\
              Fix one of two ways:\n  \
              (a) the prompt carries household memory  -> use `chat_grounded(...)` (private lane, fails closed)\n  \
-             (b) it genuinely cannot                  -> add the file to UNSCOPED_ALLOWED in privacy_audit.rs \
-             WITH the reason.",
+             (b) it genuinely cannot                  -> use `chat_household_attributed(...)` and add \
+             the file to ATTRIBUTED_HOUSEHOLD with the reason.",
             offenders.join("\n")
         );
+    }
+
+    /// Deliberate Household calls are attributable by construction and remain subject to the bare
+    /// `.chat(` guard. This closes the per-file allowlist hole: permission for one reviewed call no
+    /// longer makes a new adjacent unscoped call invisible.
+    #[test]
+    fn deliberate_household_calls_have_static_producer_ids() {
+        const MARKER: &str = ".chat_household_attributed(";
+        let listed: std::collections::HashSet<&str> =
+            ATTRIBUTED_HOUSEHOLD.iter().map(|(file, _)| *file).collect();
+
+        for (file, reason) in ATTRIBUTED_HOUSEHOLD {
+            assert!(reason.len() > 40, "{file} needs a substantive lane reason");
+            let path = crates_dir().join(file);
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read attributed Household file {file}: {e}"));
+            let squashed = crate::source_audit::strip_comments(&body)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>();
+            assert!(
+                !squashed.contains(".chat("),
+                "{file} regained a bare chat(); attribution permission must not hide it"
+            );
+            assert!(body.contains(MARKER), "{file} is listed but has no attributed Household call");
+            for (at, _) in body.match_indices(MARKER) {
+                let tail = &body[at..];
+                let end = tail.find(".await").unwrap_or_else(|| {
+                    panic!("{file} has an attributed call with no await terminator")
+                });
+                let call = &tail[..end];
+                assert!(
+                    call.contains("concat!(module_path!(),"),
+                    "{file} attributed call must use a stable module_path identity: {call}"
+                );
+            }
+        }
+
+        for krate in SCANNED {
+            let src = crates_dir().join(krate).join("src");
+            let mut files = Vec::new();
+            rs_files(&src, &mut files);
+            for path in files {
+                if matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("privacy_audit.rs" | "tests.rs")
+                ) {
+                    continue;
+                }
+                let Ok(body) = std::fs::read_to_string(&path) else { continue };
+                if !body.contains(MARKER) {
+                    continue;
+                }
+                let name = path
+                    .strip_prefix(crates_dir())
+                    .map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                    .unwrap_or_default();
+                assert!(
+                    listed.contains(name.as_str()),
+                    "{name} introduced deliberate Household inference without a reviewed decision"
+                );
+            }
+        }
     }
 
     /// The allowlist is a decision record, not a dumping ground: every entry needs a real reason.
     #[test]
     fn allowlist_entries_are_justified() {
-        for (file, reason) in UNSCOPED_ALLOWED {
+        for (file, reason) in UNSCOPED_ALLOWED.iter().chain(ATTRIBUTED_HOUSEHOLD) {
             assert!(
                 reason.len() > 40,
                 "allowlist entry '{file}' needs a substantive reason (why this prompt cannot carry \
@@ -546,7 +657,12 @@ mod sec2 {
     /// file it was protecting (E.SEC5).
     #[test]
     fn an_entry_for_one_crates_file_cannot_speak_for_another_crates_file() {
-        let listed: Vec<&str> = UNSCOPED_ALLOWED.iter().chain(UNSCOPED_PENDING).map(|(f, _)| *f).collect();
+        let listed: Vec<&str> = UNSCOPED_ALLOWED
+            .iter()
+            .chain(UNSCOPED_PENDING)
+            .chain(ATTRIBUTED_HOUSEHOLD)
+            .map(|(f, _)| *f)
+            .collect();
         for key in &listed {
             assert!(key.contains('/'), "keys must be crate-relative paths, not basenames: {key}");
             assert!(

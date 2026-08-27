@@ -210,7 +210,7 @@ impl super::ConversationEngine {
                  Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{sec_line}\nTEXT:\n{head}\n{tail}"
             );
             let cfg = GenerationConfig { max_tokens: 1100, ..GenerationConfig::default() };
-            let resp = match inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+            let resp = match inf.chat_household_attributed(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg, concat!(module_path!(), ":paper-study-distill")).await {
                 Ok(r) => r.text,
                 Err(e) => {
                     nq.lock().unwrap().push(format!("📄 Read {key2} but distillation failed: {e}"));
@@ -271,7 +271,7 @@ impl super::ConversationEngine {
                      naming both sides. Skip generic similarities. Output ONLY JSON: {{\"relations\":[\"...\"]}}."
                 );
                 let cfg2 = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-                if let Ok(r) = inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&rprompt)], cfg2).await {
+                if let Ok(r) = inf.chat_household_attributed(vec![ChatMessage::system(&persona), ChatMessage::user(&rprompt)], cfg2, concat!(module_path!(), ":paper-study-relate")).await {
                     let rels: Vec<String> = r.text
                         .find('{')
                         .and_then(|a| r.text.rfind('}').map(|b| r.text[a..=b].to_string()))
@@ -400,7 +400,7 @@ impl super::ConversationEngine {
              build goal. Output ONLY JSON: {{\"proposals\":[\"...\"]}}."
         );
         let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
-        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let resp = match self.inference.chat_household_attributed(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg, concat!(module_path!(), ":paper-adapt")).await {
             Ok(r) => r.text,
             Err(e) => return format!("(adapt failed: {e})"),
         };
@@ -567,14 +567,14 @@ impl super::ConversationEngine {
                                 "a product visionary (the wedge that makes it 10x, not 10%)"] {
                     let p = format!("As {persona}, give your sharpest 4-sentence take on this product idea — concrete, no fluff:\n{idea}");
                     let cfg = GenerationConfig { max_tokens: 260, ..GenerationConfig::default() };
-                    if let Ok(r) = self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                    if let Ok(r) = self.inference.chat_household_attributed(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg, concat!(module_path!(), ":forge-panel")).await {
                         takes.push(r.text.trim().to_string());
                     }
                 }
                 let panel = takes.iter().enumerate().map(|(i, t)| format!("PANELIST {}:\n{t}", i + 1)).collect::<Vec<_>>().join("\n\n");
                 let p = format!("Panel takes on \"{idea}\":\n\n{panel}\n\nSynthesize ONE chosen direction: the sharpest version of this product. Output ONLY JSON: {{\"direction\":\"2-3 sentences\",\"differentiator\":\"1 sentence\",\"biggest_risk\":\"1 sentence\"}}.");
                 let cfg = GenerationConfig { max_tokens: 350, ..GenerationConfig::default() };
-                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                match self.inference.chat_household_attributed(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg, concat!(module_path!(), ":forge-synthesize")).await {
                     Ok(r) => match Self::forge_json_grab(&r.text) {
                         Some(j) => {
                             all[&id]["brainstorm"] = j.clone();
@@ -616,7 +616,7 @@ impl super::ConversationEngine {
                      \"stack\":\"html|python\",\"acceptance\":[\"3-4 concrete checks a referee can verify\"]}}"
                 );
                 let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
-                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                match self.inference.chat_household_attributed(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg, concat!(module_path!(), ":forge-spec")).await {
                     Ok(r) => match Self::forge_json_grab(&r.text) {
                         Some(j) => {
                             let name = j.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string();
@@ -686,7 +686,7 @@ impl super::ConversationEngine {
                      Nothing else — no prose, no markdown fences."
                 );
                 let cfg = GenerationConfig { max_tokens: 7500, ..GenerationConfig::default() };
-                match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg).await {
+                match self.inference.chat_household_attributed(vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)], cfg, concat!(module_path!(), ":forge-build")).await {
                     Ok(r) => {
                         let dir = Self::forge_dir(&id);
                         let mut written: Vec<String> = Vec::new();
@@ -783,9 +783,9 @@ impl super::ConversationEngine {
                 // fall back to the default chain only if the judge provider is down.
                 let judge_label = std::env::var("YM_FORGE_JUDGE").unwrap_or_else(|_| "minimax".into());
                 let msgs = vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)];
-                let judged = match self.inference.clone().with_provider(&judge_label).chat(msgs.clone(), cfg.clone()).await {
+                let judged = match self.inference.clone().with_provider(&judge_label).chat_household_attributed(msgs.clone(), cfg.clone(), concat!(module_path!(), ":forge-judge-primary")).await {
                     Ok(r) => Ok(r),
-                    Err(_) => self.inference.chat(msgs, cfg).await,
+                    Err(_) => self.inference.chat_household_attributed(msgs, cfg, concat!(module_path!(), ":forge-judge-fallback")).await,
                 };
                 match judged {
                     Ok(r) => match Self::forge_json_grab(&r.text) {
@@ -974,7 +974,7 @@ impl super::ConversationEngine {
             );
             let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
             let mut synth_n = 0usize;
-            if let Ok(r) = inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&synth_prompt)], cfg).await {
+            if let Ok(r) = inf.chat_household_attributed(vec![ChatMessage::system(&persona), ChatMessage::user(&synth_prompt)], cfg, concat!(module_path!(), ":code-study-synthesize")).await {
                 let synth: Vec<String> = r.text
                     .find('{')
                     .and_then(|a| r.text.rfind('}').map(|b| r.text[a..=b].to_string()))
@@ -1052,7 +1052,7 @@ impl super::ConversationEngine {
                         module = m.name, repo = name2, src = chunk
                     );
                     let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
-                    let resp = match inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg).await {
+                    let resp = match inf.chat_household_attributed(vec![ChatMessage::system(&persona), ChatMessage::user(&prompt)], cfg, concat!(module_path!(), ":code-study-deep-module")).await {
                         Ok(r) => r.text,
                         Err(_) => continue,
                     };
@@ -1093,7 +1093,7 @@ impl super::ConversationEngine {
                  design decision. Each ONE specific sentence. Output ONLY JSON: {{\"facts\":[\"...\"]}}.\n\n{module_summary}"
             );
             let cfg = GenerationConfig { max_tokens: 800, ..GenerationConfig::default() };
-            if let Ok(r) = inf.chat(vec![ChatMessage::system(&persona), ChatMessage::user(&synth_prompt)], cfg).await {
+            if let Ok(r) = inf.chat_household_attributed(vec![ChatMessage::system(&persona), ChatMessage::user(&synth_prompt)], cfg, concat!(module_path!(), ":code-study-deep-synthesize")).await {
                 let synth: Vec<String> = r.text
                     .find('{')
                     .and_then(|a| r.text.rfind('}').map(|b| r.text[a..=b].to_string()))
@@ -1219,7 +1219,7 @@ impl super::ConversationEngine {
             if want_learn { " plus the targeted source below" } else { "" }
         );
         let cfg = GenerationConfig { max_tokens: 600, ..GenerationConfig::default() };
-        let resp = match self.inference.chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let resp = match self.inference.chat_household_attributed(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg, concat!(module_path!(), ":code-ask")).await {
             Ok(r) => r.text,
             Err(e) => return format!("(couldn't compose an answer: {e})"),
         };
@@ -1285,7 +1285,7 @@ impl super::ConversationEngine {
              p_merge must be between 0 and 1. Use only citations present in the report. If any field cannot be grounded, output null. This is a shadow proposal only; do not suggest executing it."
         );
         let cfg = GenerationConfig { max_tokens: 450, ..GenerationConfig::default() };
-        let Ok(response) = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await else { return };
+        let Ok(response) = self.inference.chat_household_attributed(vec![ChatMessage::user(&prompt)], cfg, concat!(module_path!(), ":work-proposal")).await else { return };
         let Some(start) = response.text.find('{') else { return };
         let Some(end) = response.text.rfind('}') else { return };
         if end <= start { return; }

@@ -115,7 +115,16 @@ impl ConversationEngine {
         let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
         // A plain (ungrounded) call — no private lane, no grounding, a FRESH message list with no
         // shared state carrying private context.
-        let text = self.inference.chat(vec![ChatMessage::system(sys), ChatMessage::user(&user)], cfg).await.ok()?.text;
+        let text = self
+            .inference
+            .chat_household_attributed(
+                vec![ChatMessage::system(sys), ChatMessage::user(&user)],
+                cfg,
+                concat!(module_path!(), ":egress-clean"),
+            )
+            .await
+            .ok()?
+            .text;
         let body_owned = crate::strip_reasoning(&text);
         let body = body_owned.as_str();
         let obj = match (body.find('{'), body.rfind('}')) {

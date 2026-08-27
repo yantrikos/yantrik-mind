@@ -106,6 +106,12 @@ static PRIVACY_REFUSED: [std::sync::atomic::AtomicU64; 3] = [
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
 ];
+/// Stable call-site identities for Household-lane calls. Unlike a timestamp that must be manually
+/// correlated with unrelated journal lines, this answers "what used the lane?" directly. Keys are
+/// supplied by code as `&'static str`, never derived from prompts, so private/user text cannot enter
+/// the audit surface.
+static HOUSEHOLD_CALLSITES: std::sync::Mutex<Option<HashMap<String, u64>>> =
+    std::sync::Mutex::new(None);
 /// Private-grounded turns that ESCALATED to the household (cloud) lane because no owned-hardware
 /// provider was configured. This is the honest audit of the privacy gap: it should be 0 once
 /// YM_PRIVATE_PROVIDERS names a local/on-device provider. A NON-zero value means private family
@@ -136,10 +142,42 @@ pub fn privacy_escalated_count() -> u64 {
     PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+fn record_household_callsite(callsite: &'static str) {
+    // A public caller can still supply an empty static string. Do not let that create a visually
+    // blank dashboard row that looks attributed while naming nobody; fold missing identities into
+    // the same explicit compatibility bucket as `chat()`.
+    let callsite = if callsite.trim().is_empty() { "unattributed" } else { callsite };
+    let mut guard = HOUSEHOLD_CALLSITES.lock().unwrap();
+    let sites = guard.get_or_insert_with(HashMap::new);
+    *sites.entry(callsite.to_string()).or_insert(0) += 1;
+}
+
+/// Household call sites observed since process start, most-used first. Exposed separately so an
+/// audit UI can render structured rows instead of parsing the human report.
+pub fn household_callsite_stats() -> Vec<(String, u64)> {
+    let guard = HOUSEHOLD_CALLSITES.lock().unwrap();
+    let mut rows: Vec<(String, u64)> = guard
+        .as_ref()
+        .map(|sites| sites.iter().map(|(site, count)| (site.clone(), *count)).collect())
+        .unwrap_or_default();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
 pub fn privacy_report(provider: &str) -> String {
     use std::sync::atomic::Ordering;
     let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
     let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+    let household_sites = household_callsite_stats();
+    let household_sites = if household_sites.is_empty() {
+        "(none)".to_string()
+    } else {
+        household_sites
+            .into_iter()
+            .map(|(site, count)| format!("{site} {count}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
     format!(
         "PRIVACY LANES (charter wall — every LLM call declares a scope)\n\
          provider: {provider}\n\
@@ -147,6 +185,7 @@ pub fn privacy_report(provider: &str) -> String {
          private allowlist (YM_PRIVATE_PROVIDERS): {}\n\
          served  — private {} · household {} · public {}\n\
          refused — private {} · household {} · public {}\n\
+         household call sites — {}\n\
          private-grounded turns ESCALATED to cloud: {}  ← should be 0; a non-zero count means private context reached a cloud provider\n\
          Configure YM_PRIVATE_PROVIDERS with an owned/on-device provider to keep private-grounded turns home (escalations auto-drop to 0).",
         if private.is_empty() { "(none — private lane HARD-REFUSES; deterministic fallback only)" } else { private.as_str() },
@@ -156,6 +195,7 @@ pub fn privacy_report(provider: &str) -> String {
         PRIVACY_REFUSED[0].load(Ordering::Relaxed),
         PRIVACY_REFUSED[1].load(Ordering::Relaxed),
         PRIVACY_REFUSED[2].load(Ordering::Relaxed),
+        household_sites,
         PRIVACY_ESCALATED.load(Ordering::Relaxed),
     )
 }
@@ -254,7 +294,27 @@ impl InferencePool {
         messages: Vec<ChatMessage>,
         config: GenerationConfig,
     ) -> anyhow::Result<LLMResponse> {
-        self.chat_scoped(messages, config, PrivacyScope::Household).await
+        self.chat_household_attributed(messages, config, "unattributed").await
+    }
+
+    /// Household chat with a stable, code-authored call-site identity. Use this instead of
+    /// [`chat`](Self::chat) for every deliberate Household call so `ym privacy` can name the
+    /// producer without reconstructing it from timestamps. `callsite` is static by type: prompts,
+    /// names and other user data cannot accidentally become audit labels.
+    pub async fn chat_household_attributed(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        callsite: &'static str,
+    ) -> anyhow::Result<LLMResponse> {
+        self.chat_scoped_tools_attributed(
+            messages,
+            config,
+            PrivacyScope::Household,
+            Vec::new(),
+            callsite,
+        )
+        .await
     }
 
     /// Scope-aware chat: routes or REFUSES per the privacy lanes. A refusal is an error the caller
@@ -279,7 +339,18 @@ impl InferencePool {
         scope: PrivacyScope,
         tools: Vec<serde_json::Value>,
     ) -> anyhow::Result<LLMResponse> {
-        use std::sync::atomic::Ordering;
+        self.chat_scoped_tools_attributed(messages, config, scope, tools, "chat_scoped_tools")
+            .await
+    }
+
+    async fn chat_scoped_tools_attributed(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        scope: PrivacyScope,
+        tools: Vec<serde_json::Value>,
+        callsite: &'static str,
+    ) -> anyhow::Result<LLMResponse> {
         // ONE SYSTEM MESSAGE. Every caller here builds its prompt as several system blocks —
         // persona, then agent instructions, with pack rules and a format note INSERTED at index 1 —
         // and some chat templates refuse that outright. Diagnosed 2026-08-15 through a logging
@@ -294,7 +365,7 @@ impl InferencePool {
         // order — and it makes the mind portable across templates instead of only working on the
         // ones that happen to be lenient.
         let messages = merge_system_messages(messages);
-        let backend = self.gate_scope(scope)?;
+        let backend = self.gate_scope(scope, callsite)?;
         let permit = self
             .sem
             .clone()
@@ -354,7 +425,11 @@ impl InferencePool {
     /// The explicit local-only lane is SANCTIONED BY CONSTRUCTION (built from the owned endpoint),
     /// which is stronger evidence than the env CSV ("a declaration, not evidence" — sol #5), so it
     /// bypasses the CSV allowlist; the CSV still gates the label-based (non-explicit) paths.
-    fn gate_scope(&self, scope: PrivacyScope) -> anyhow::Result<Arc<dyn LLMBackend>> {
+    fn gate_scope(
+        &self,
+        scope: PrivacyScope,
+        callsite: &'static str,
+    ) -> anyhow::Result<Arc<dyn LLMBackend>> {
         use std::sync::atomic::Ordering;
         let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
         let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
@@ -376,21 +451,14 @@ impl InferencePool {
                 label
             );
         }
-        // TIMESTAMP EVERY HOUSEHOLD CALL (E.SEC17). The dashboard counts per LANE and not per CALL
-        // SITE, so "household 3" was indistinguishable between an allowlisted news fetch and a
-        // regression — and this codebase has spent a long session learning that a counter which
-        // blurs those two is worse than no counter.
-        //
-        // A full call-site tag would mean threading a label through every wrapper; `#[track_caller]`
-        // does not survive `async fn` reliably. But household use is RARE — three calls in three
-        // hours — so a timestamped line costs nothing and makes each one correlatable against the
-        // `[news]` / `[research]` / `[briefing]` markers already in the journal. That converts
-        // "three sometime today" into "three at these moments", which is attributable by reading.
-        //
-        // Deliberately only Household. Private is the expected lane and would be pure noise; Public
-        // is an explicit declaration that the content is public.
+        // Household is the ambiguous lane: Private is expected and Public is an explicit
+        // declaration, but a Household count alone cannot distinguish an allowlisted public-facts
+        // caller from a regression. Record the code-authored identity at the dispatch boundary,
+        // where the lane decision becomes real. Journal timestamps remain useful chronology; this
+        // tag supplies the missing attribution without relying on correlation.
         if matches!(scope, PrivacyScope::Household) {
-            eprintln!("[privacy] household lane served by '{label}'");
+            record_household_callsite(callsite);
+            eprintln!("[privacy] household lane served by '{label}' at '{callsite}'");
         }
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
         Ok(backend)
@@ -412,7 +480,7 @@ impl InferencePool {
         // compose declared the same lane for a turn grounded in family memory as for one about the
         // weather. A lane belongs to the MATERIAL, not to the transport that happens to carry it.
         let messages = merge_system_messages(messages);
-        let backend = self.gate_scope(scope)?;
+        let backend = self.gate_scope(scope, "chat_streaming_sink")?;
         let permit = self
             .sem
             .clone()
@@ -452,7 +520,13 @@ impl InferencePool {
         tools: Vec<serde_json::Value>,
     ) -> anyhow::Result<LLMResponse> {
         match self
-            .chat_scoped_tools(messages.clone(), config.clone(), PrivacyScope::Private, tools.clone())
+            .chat_scoped_tools_attributed(
+                messages.clone(),
+                config.clone(),
+                PrivacyScope::Private,
+                tools.clone(),
+                "private-grounded",
+            )
             .await
         {
             Ok(r) => Ok(r), // served locally — private context stayed home
@@ -510,7 +584,14 @@ impl InferencePool {
                         _ => "EMPTY".to_string(),
                     }
                 );
-                self.chat_scoped_tools(messages, config, PrivacyScope::Household, tools).await
+                self.chat_scoped_tools_attributed(
+                    messages,
+                    config,
+                    PrivacyScope::Household,
+                    tools,
+                    "private-grounded escalation",
+                )
+                .await
             }
         }
     }
@@ -1615,6 +1696,139 @@ mod privacy_tests {
             .chat_scoped(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household)
             .await;
         assert!(ok.is_ok());
+    }
+
+    /// A lane counter without a producer identity cannot distinguish an allowlisted caller from a
+    /// regression. The attributed entry point must update both the structured rows and the report.
+    #[tokio::test]
+    async fn household_calls_are_attributed_at_dispatch() {
+        const SITE: &str = "mind-inference/test:household-attribution";
+        let before = household_callsite_stats()
+            .into_iter()
+            .find_map(|(site, count)| (site == SITE).then_some(count))
+            .unwrap_or(0);
+        let pool = InferencePool::new(
+            std::sync::Arc::new(ScriptedLLM::new("ok")) as std::sync::Arc<dyn LLMBackend>,
+            1,
+        );
+
+        let out = pool
+            .chat_household_attributed(
+                vec![ChatMessage::user("public test fact")],
+                GenerationConfig::default(),
+                SITE,
+            )
+            .await;
+
+        assert!(out.is_ok());
+        let after = household_callsite_stats()
+            .into_iter()
+            .find_map(|(site, count)| (site == SITE).then_some(count))
+            .unwrap_or(0);
+        assert_eq!(after, before + 1, "the serving boundary owns the count");
+        assert!(
+            privacy_report("scripted").contains(&format!("{SITE} {after}")),
+            "the operator-facing audit must name the producer"
+        );
+    }
+
+    /// Attribution describes traffic that actually crossed the lane gate, not attempts the charter
+    /// refused. Otherwise a denied provider would look like served Household traffic and send an
+    /// operator investigating a non-event.
+    #[tokio::test]
+    async fn refused_household_calls_do_not_create_attribution_rows() {
+        const SITE: &str = "mind-inference/test:refused-household-attribution";
+        let count = || {
+            household_callsite_stats()
+                .into_iter()
+                .find_map(|(site, count)| (site == SITE).then_some(count))
+                .unwrap_or(0)
+        };
+        let before = count();
+        let pool = InferencePool::new(
+            std::sync::Arc::new(ScriptedLLM::new("must not run"))
+                as std::sync::Arc<dyn LLMBackend>,
+            1,
+        )
+        .with_provider("not-on-the-household-allowlist");
+
+        let out = pool
+            .chat_household_attributed(
+                vec![ChatMessage::user("public refusal test fact")],
+                GenerationConfig::default(),
+                SITE,
+            )
+            .await;
+
+        assert!(out.is_err(), "the Household charter must refuse the provider");
+        assert_eq!(
+            count(),
+            before,
+            "a refusal is not served traffic and must not gain a call-site row"
+        );
+    }
+
+    /// The compatibility `chat` entry point must not create a blind remainder between the
+    /// Household lane total and the per-producer rows. Its producer is intentionally coarse, but
+    /// visible: callers can be migrated without making today's traffic unauditable meanwhile.
+    #[tokio::test]
+    async fn compatibility_household_calls_are_visibly_unattributed() {
+        let count = || {
+            household_callsite_stats()
+                .into_iter()
+                .find_map(|(site, count)| (site == "unattributed").then_some(count))
+                .unwrap_or(0)
+        };
+        let before = count();
+        let pool = InferencePool::new(
+            std::sync::Arc::new(ScriptedLLM::new("ok")) as std::sync::Arc<dyn LLMBackend>,
+            1,
+        );
+
+        let out = pool
+            .chat(
+                vec![ChatMessage::user("public compatibility test fact")],
+                GenerationConfig::default(),
+            )
+            .await;
+
+        assert!(out.is_ok());
+        assert!(
+            count() > before,
+            "a compatibility Household call must land in the visible unattributed bucket"
+        );
+    }
+
+    /// An attributed API with an empty code-authored label is attribution in name only. Keep the
+    /// operator surface honest by folding it into the visible compatibility bucket.
+    #[tokio::test]
+    async fn blank_household_attribution_is_never_a_blank_dashboard_row() {
+        let count = || {
+            household_callsite_stats()
+                .into_iter()
+                .find_map(|(site, count)| (site == "unattributed").then_some(count))
+                .unwrap_or(0)
+        };
+        let before = count();
+        let pool = InferencePool::new(
+            std::sync::Arc::new(ScriptedLLM::new("ok")) as std::sync::Arc<dyn LLMBackend>,
+            1,
+        );
+
+        let out = pool
+            .chat_household_attributed(
+                vec![ChatMessage::user("public blank-label test fact")],
+                GenerationConfig::default(),
+                "   ",
+            )
+            .await;
+
+        assert!(out.is_ok());
+        assert!(count() > before, "blank labels must join the unattributed bucket");
+        assert!(
+            household_callsite_stats().iter().all(|(site, _)| !site.trim().is_empty()),
+            "the audit surface must never contain an unnamed producer"
+        );
     }
 }
 

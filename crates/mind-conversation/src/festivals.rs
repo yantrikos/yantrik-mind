@@ -183,7 +183,16 @@ impl super::ConversationEngine {
                     "From these search results, find the {year} Gregorian START date of {name} (the Hindu/Bengali festival).\n\n{listing}\n\nOutput ONLY JSON: {{\"date\":\"YYYY-MM-DD\",\"confidence\":0.0-1.0}}. If the results don't clearly show the {year} date, use confidence 0."
                 );
                 let cfg = GenerationConfig { max_tokens: 80, think: mind_inference::think_for("festival_line", Some(false)), ..GenerationConfig::default() };
-                let Ok(resp) = inf.chat(vec![ChatMessage::user(&prompt)], cfg).await else { continue };
+                let Ok(resp) = inf
+                    .chat_household_attributed(
+                        vec![ChatMessage::user(&prompt)],
+                        cfg,
+                        concat!(module_path!(), ":festival-refresh"),
+                    )
+                    .await
+                else {
+                    continue;
+                };
                 let txt = resp.text;
                 let json = txt
                     .find('{')
@@ -302,7 +311,15 @@ impl super::ConversationEngine {
             "From these search results, write ONE short sentence about where/when {name} {year} is being celebrated near {city} — ONLY if a result actually shows a local celebration (association, temple, community event). If nothing local and concrete, output exactly NONE.\n\n{listing}"
         );
         let cfg = GenerationConfig { max_tokens: 90, think: mind_inference::think_for("festival_greeting", Some(false)), ..GenerationConfig::default() };
-        let resp = self.inference.chat(vec![ChatMessage::user(&prompt)], cfg).await.ok()?;
+        let resp = self
+            .inference
+            .chat_household_attributed(
+                vec![ChatMessage::user(&prompt)],
+                cfg,
+                concat!(module_path!(), ":festival-local-scout"),
+            )
+            .await
+            .ok()?;
         let line = resp.text.trim().to_string();
         if line.len() < 12 || line.to_uppercase().contains("NONE") {
             return None;

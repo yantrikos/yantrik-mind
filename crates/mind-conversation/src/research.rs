@@ -286,7 +286,16 @@ impl super::ConversationEngine {
             ChatMessage::system("You reconcile prior beliefs with fresh research. Output ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
-        let text = self.inference.chat(messages, GenerationConfig::default()).await.map_err(|e| MindError::Inference(e.to_string()))?.text;
+        let text = self
+            .inference
+            .chat_household_attributed(
+                messages,
+                GenerationConfig::default(),
+                concat!(module_path!(), ":research-revise"),
+            )
+            .await
+            .map_err(|e| MindError::Inference(e.to_string()))?
+            .text;
         let b_owned = crate::strip_reasoning(&text);
         let b = b_owned.as_str();
         let b = b.split("```").find(|s| s.contains('{')).unwrap_or(b);
@@ -366,7 +375,11 @@ impl super::ConversationEngine {
         ];
         let subs = self
             .inference
-            .chat(split, GenerationConfig::default())
+            .chat_household_attributed(
+                split,
+                GenerationConfig::default(),
+                concat!(module_path!(), ":deep-research-decompose"),
+            )
             .await
             .map_err(|e| MindError::Inference(e.to_string()))?;
         let mut tasks: Vec<String> = subs
@@ -405,7 +418,11 @@ impl super::ConversationEngine {
         ];
         let draft = self
             .inference
-            .chat(synth, GenerationConfig::default())
+            .chat_household_attributed(
+                synth,
+                GenerationConfig::default(),
+                concat!(module_path!(), ":deep-research-synthesize"),
+            )
             .await
             .map_err(|e| MindError::Inference(e.to_string()))?
             .text;
@@ -421,7 +438,11 @@ impl super::ConversationEngine {
         ];
         let verdict = self
             .inference
-            .chat(verify, GenerationConfig::default())
+            .chat_household_attributed(
+                verify,
+                GenerationConfig::default(),
+                concat!(module_path!(), ":deep-research-verify"),
+            )
             .await
             .map(|r| r.text.trim().to_string())
             .unwrap_or_else(|_| "(verification unavailable)".into());
@@ -468,7 +489,11 @@ impl super::ConversationEngine {
         );
         let draft = self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], GenerationConfig::default())
+            .chat_household_attributed(
+                vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)],
+                GenerationConfig::default(),
+                concat!(module_path!(), ":draft-grounded"),
+            )
             .await
             .map_err(|e| MindError::Inference(e.to_string()))?
             .text;
@@ -481,7 +506,11 @@ impl super::ConversationEngine {
         );
         let verdict = self
             .inference
-            .chat(vec![ChatMessage::system(&self.persona), ChatMessage::user(&verify)], GenerationConfig::default())
+            .chat_household_attributed(
+                vec![ChatMessage::system(&self.persona), ChatMessage::user(&verify)],
+                GenerationConfig::default(),
+                concat!(module_path!(), ":draft-grounded-verify"),
+            )
             .await
             .map(|r| r.text.trim().to_string())
             .unwrap_or_else(|_| "(grounding check unavailable)".into());

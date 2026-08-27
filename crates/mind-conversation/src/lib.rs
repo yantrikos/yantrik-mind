@@ -9153,6 +9153,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // other call site got — and it is the one that was missed. It is also the worst place to
         // miss: a short turn ends at the in-loop `answer` path, but every TOOL-HEAVY turn ends
         // here, so the leak survived on exactly the turns that reason the most.
+        // TIME THE COMPOSE CALL (E.LOOP2 residual). `max_wall_ms` bounds the tool LOOP and stops
+        // before this, so a 3-minute budget actually promises "three minutes of looking, plus
+        // however long the answer takes to write". One forced-budget turn suggested compose alone
+        // was around a minute, which would make the reserve larger than the loop — but one sample
+        // is an anecdote. Measured before any allowance is chosen, because the last two times I
+        // reasoned about this loop instead of measuring it I was wrong.
+        let compose_started = std::time::Instant::now();
         let composed = match self
             .chat_streamed_to_progress(vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)], cfg.clone())
             .await
@@ -9167,6 +9174,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 String::new()
             }
         };
+        eprintln!("[agent] compose took {}s", compose_started.elapsed().as_secs());
         // AN EMPTY COMPOSE IS NOT AN ANSWER — it is a blank bubble, which reads as the mind having
         // nothing to say after doing all the work. Two ordinary paths land here empty, and neither
         // is an error the `Err` arm can catch:

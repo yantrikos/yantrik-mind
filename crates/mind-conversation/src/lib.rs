@@ -8534,6 +8534,13 @@ Open reminders you're carrying for them:");
         // loop that is mostly spinning however it interleaves.
         const MAX_TOTAL_BARREN: usize = 5;
         let mut barren_total = 0usize;
+        // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
+        // the third candidate — a per-tool retrieval budget — must not be a third guess. This
+        // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
+        // my reading of them: how many times each tool ran, and how much genuinely new information
+        // the turn accumulated. Counts and tool NAMES only, never observation text.
+        let mut tool_calls: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut steps_used = 0usize;
         let mut scratch = String::new();
         let mut last_call = String::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -9003,6 +9010,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // CONTENT: did this step introduce a line we have not already seen? Reordering,
             // re-truncation and returning a subset are all correctly barren; a `web_fetch` of a
             // genuinely different page still carries new lines and is not.
+            *tool_calls.entry(tool.clone()).or_insert(0) += 1;
+            steps_used = step + 1;
             let obs_lines = observation_lines(&tool, &obs);
             let brought_something_new = obs_lines.iter().any(|l| !seen_obs.contains(l));
             if !brought_something_new {
@@ -9043,6 +9052,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 obs.chars().take(head).collect::<String>(),
                 outcome.note()
             ));
+        }
+        // WHAT THIS TURN COST, in one line (E.LOOP1). Distinct observation lines is the honest
+        // novelty measure: a turn that ran twenty tools and gathered eight facts was not working.
+        if !tool_calls.is_empty() {
+            let calls: Vec<String> = tool_calls.iter().map(|(t, n)| format!("{t}x{n}")).collect();
+            eprintln!(
+                "[agent] turn done: {steps_used} steps, {} distinct facts, {barren_total} barren — {}",
+                seen_obs.len(),
+                calls.join(" ")
+            );
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model
         // literally cannot weave in the gift deadline sitting next to the birthday it's reporting.

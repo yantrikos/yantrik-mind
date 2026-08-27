@@ -2918,6 +2918,108 @@ fn a_closing_tag_with_no_opener_is_still_reasoning() {
     assert_eq!(strip_reasoning("<think>hidden</think>\nVisible."), "Visible.");
 }
 
+/// E.SEC16 RUNTIME — with the private lane down, the household backend is NEVER called.
+///
+/// Codex asked for runtime cover beyond the source scan: "private unavailable -> constant refusal"
+/// and "Household invocation count unchanged/zero". This asserts the second, which is the property
+/// that actually protects anything — whatever message comes back, no household backend may see the
+/// turn.
+///
+/// # What building it discovered, which changes the first ask
+///
+/// `COMPOSE_LANE_UNAVAILABLE` is UNREACHABLE in the scenario it was written for. If the private lane
+/// is down, the loop's own dispatch (`chat_grounded_tools`) fails at step 0 and returns
+/// "(couldn't think just now: …)" — compose never runs. The refusal fires only when compose
+/// SPECIFICALLY fails while dispatch succeeded (a timeout on a long wrap, say).
+///
+/// So the constant is not dead, but it does not cover the case its own doc comment named, and a
+/// test asserting "private unavailable -> constant refusal" would have passed for the wrong reason
+/// or failed for a confusing one. Reported rather than papered over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_private_lane_never_falls_back_to_the_household_backend() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A stand-in cloud backend: counts every call and fails the test if it is ever reached.
+    struct HouseholdSpy(Arc<AtomicUsize>);
+    impl LLMBackend for HouseholdSpy {
+        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: "HOUSEHOLD-BACKEND-ANSWERED".into(),
+                prompt_tokens: 0, completion_tokens: 0,
+                tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> { Ok(t.len() / 4) }
+        fn backend_name(&self) -> &str { "household-spy" }
+    }
+
+    /// The owned lane, down — Ollama OOM, cluster unreachable, the case this all exists for.
+    struct PrivateDown;
+    impl LLMBackend for PrivateDown {
+        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            anyhow::bail!("local inference unavailable")
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> { Ok(t.len() / 4) }
+        fn backend_name(&self) -> &str { "private-down" }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(HouseholdSpy(calls.clone())) as Arc<dyn LLMBackend>,
+        1,
+    )
+    .with_private_backend(Arc::new(PrivateDown) as Arc<dyn LLMBackend>, "private-down");
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+
+    // Something worth protecting, so a fallback would be a real leak and not a hypothetical one.
+    let _ = mem
+        .remember_as_belief(mind_types::BeliefAssertion {
+            statement: "ZQCANARY-SEC16 the spare key is under the third pot".into(),
+            polarity: 1.0, weight: 2.0,
+            source_event: Some("sec16".into()), provenance: "told".into(),
+        })
+        .await;
+
+    let reply = conv.handle_turn("what do you know about the spare key?").await.unwrap_or_default();
+
+    // NON-VACUITY FIRST: the turn must actually have REACHED inference. A test that passes because
+    // nothing was attempted proves nothing, which is how a "no leak" result becomes a green tick
+    // over an empty code path.
+    assert!(
+        reply.contains("couldn't think just now"),
+        "the turn must have reached the model and failed there, or this test is about nothing: {reply}"
+    );
+    // And the pre-existing dispatch refusal already says the right thing, which is worth pinning:
+    // it names the refusal rather than blaming a generic outage.
+    assert!(
+        reply.contains("refusing to route private context to a cloud provider"),
+        "the failure must be reported as a REFUSAL, not as an unexplained error: {reply}"
+    );
+
+    // THE PROPERTY: no household backend saw this turn, whatever the mind ended up saying.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the household backend was called {} time(s) after the private lane failed — that is the \
+         cloud fallback this whole line of work exists to prevent. Reply was: {reply}",
+        calls.load(Ordering::SeqCst)
+    );
+    assert!(
+        !reply.contains("HOUSEHOLD-BACKEND-ANSWERED"),
+        "the answer came from the household backend: {reply}"
+    );
+    assert!(!reply.contains("ZQCANARY-SEC16"), "the canary must not be echoed back: {reply}");
+}
+
 /// E.SEC16 — compose is private BY INVARIANT, and the invariant is a relationship between two calls.
 ///
 /// Codex rejected "empty grounding => Household" and was right: the rule is the maximum sensitivity

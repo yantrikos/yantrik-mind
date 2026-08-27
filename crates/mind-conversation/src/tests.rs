@@ -2918,6 +2918,47 @@ fn a_closing_tag_with_no_opener_is_still_reasoning() {
     assert_eq!(strip_reasoning("<think>hidden</think>\nVisible."), "Visible.");
 }
 
+/// E.LOOP3 — the typed direct route must be a GRAMMAR, not a "looks simple" gate.
+///
+/// Codex's constraint: build the bypass only where intent is structurally parseable with high
+/// precision, and fail TO agentic when uncertain. "The bypass failure mode should be slightly
+/// slower but thoughtful, not fast and wrong or fast and silently ungrounded."
+///
+/// So this asserts the direction of failure, which is the whole safety argument: a sum routes
+/// direct, and anything that merely LOOKS arithmetic — or that needs the user's own context —
+/// falls through.
+#[test]
+fn the_direct_route_is_a_grammar_and_fails_toward_agentic() {
+    use super::spoken_arithmetic;
+
+    // Routes direct: exact ask grammar, an operator, nothing but arithmetic after it.
+    for sum in ["what is 17 times 23?", "what's 8 plus 9", "calculate 144 divided by 12", "how much is 5 x 6"] {
+        assert!(spoken_arithmetic(sum).is_some(), "should take the direct route: {sum:?}");
+    }
+
+    // CODEX'S SECOND ACCEPTANCE CASE: superficially similar, but context-dependent. A question
+    // about the USER's own material must never bypass grounding, however arithmetic it looks.
+    for agentic in [
+        "what synonym did I use for careful in my essay?",
+        "what is my budget times two",
+        "what is the total in my spreadsheet",
+        "what is a good synonym for careful?",
+        "how much is left on the Bun crash",
+        "what is 17 times 23 in the invoice Brishti sent",
+    ] {
+        assert!(
+            spoken_arithmetic(agentic).is_none(),
+            "must NOT bypass grounding — it needs context or a capability we do not have: {agentic:?}"
+        );
+    }
+
+    // And the capability contract: the route answers from CODE, so it is right where a model
+    // guessing in its head was not. The live failure that created the voice-path version was
+    // "what is 17 times 23?" answered as "one hundred and one".
+    let answer = spoken_arithmetic("what is 17 times 23?").expect("a sum must route");
+    assert!(answer.contains("391"), "the direct route must actually compute: {answer}");
+}
+
 /// E.LOOP1 — a step is barren when it brings NO NEW INFORMATION, not when its bytes repeat.
 ///
 /// The live failure: 21+ `recall` steps on one question, timing out with no answer, while a guard

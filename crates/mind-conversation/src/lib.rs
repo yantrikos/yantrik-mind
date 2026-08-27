@@ -9714,7 +9714,29 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 });
             }
         }
+        // ── TYPED DIRECT ROUTE: arithmetic (E.LOOP3, Codex's design) ───────────────────────────
+        //
+        // The SAME parser the voice path has had since 2026-08-11, applied to the path that carries
+        // every text turn. `fast_reply` got it and `handle_turn_as` did not — one more fix landed on
+        // one path of two, which is the shape that has cost this codebase all night.
+        //
+        // It meets the contract Codex set for a bypass: the intent is parseable with high precision
+        // (an exact ask-prefix, 60 chars, an operator, and NOTHING but digits and operators after
+        // that), the capability is REAL (arithmetic in code, which cannot be wrong), and anything
+        // not recognisably a sum falls straight through to the agentic path. It is a grammar, not a
+        // "looks simple" classifier — the fuzzy triviality gate Codex explicitly ruled out.
+        //
+        // What it buys: a sum costs zero model calls instead of the two-to-three ~11s dispatch
+        // steps the loop spends, and writes no beliefs on the way.
+        if let Some(answer) = spoken_arithmetic(user_text) {
+            eprintln!("[agent] route=direct_known_command kind=arithmetic steps=0");
+            let scope = id.write_scope();
+            let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &answer, scope).await;
+            return Ok(answer);
+        }
         if self.agent_primary {
+            eprintln!("[agent] route=agentic");
             if self.cognition_on() {
                 let arc = self.self_ref.lock().unwrap().upgrade();
                 if let Some(engine) = arc {

@@ -4547,9 +4547,15 @@ impl MemoryFacade for MemoryHandle {
         //
         // The hidden side is used ONLY to decide visibility. Its text is never copied anywhere,
         // which is the line between this and smuggling the belief into the working set.
+        // PROFILED, because Codex asked for a measurement rather than a refactor: this second
+        // `Cmd::Conflicts` is the only cost E.SEC11 adds to every turn, and "it feels redundant" is
+        // not a reason to duplicate a filter rule that could then diverge.
+        let mut hidden_conflict_ms = 0u128;
         if let Some(viewer) = ctx.viewer() {
+            let t0 = std::time::Instant::now();
             let unfiltered: Vec<Contradiction> =
                 self.call(|reply| Cmd::Conflicts { reply }).await.unwrap_or_default();
+            hidden_conflict_ms = t0.elapsed().as_millis();
             if !unfiltered.is_empty() {
                 let scopes = self.belief_scopes().await;
                 let sees = |stmt: &str| {
@@ -4589,6 +4595,12 @@ impl MemoryFacade for MemoryHandle {
                     }
                 }
             }
+        }
+        // Report only the SLOW tail, so an ordinary turn adds no log noise and the p95 is still
+        // visible. If this line is common, the single-fetch-with-one-canonical-evaluator fix that
+        // Codex described is warranted; until it appears, the redundant query is the safer trade.
+        if hidden_conflict_ms > 150 {
+            eprintln!("[memory] hidden-conflict scan took {hidden_conflict_ms}ms");
         }
         Ok(ws)
     }

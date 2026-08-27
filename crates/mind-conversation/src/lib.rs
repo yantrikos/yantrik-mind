@@ -9085,7 +9085,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         if !tool_calls.is_empty() {
             let calls: Vec<String> = tool_calls.iter().map(|(t, n)| format!("{t}x{n}")).collect();
             eprintln!(
-                "[agent] turn done: {steps_used} steps, {} distinct facts, {barren_total} barren — {}",
+                "[agent] turn done: {steps_used} steps in {}s, {} distinct facts, {barren_total} barren — {}",
+                started.elapsed().as_secs(),
                 seen_obs.len(),
                 calls.join(" ")
             );

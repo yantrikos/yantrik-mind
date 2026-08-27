@@ -90,7 +90,18 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
         );
     }
     let seq = Arc::new(seq);
-    let pool = InferencePool::new(seq.clone() as Arc<dyn LLMBackend>, 1);
+    // ATTACH THE SEQUENCED BACKEND AS THE PRIVATE LANE TOO (E.SEC14).
+    //
+    // Compose now derives its lane from what it carries, so a grounded scenario asks for the
+    // private lane — and an eval harness with no private lane configured gets the deterministic
+    // refusal instead of an answer. That is the fail-closed rule working, not a bug in it: a
+    // deployment that cannot do private inference genuinely cannot compose private material.
+    //
+    // So the harness declares one, which is also more honest about what it is simulating: a box
+    // with owned hardware. Weakening the rule to keep the eval green would have been fixing the
+    // thermometer.
+    let pool = InferencePool::new(seq.clone() as Arc<dyn LLMBackend>, 1)
+        .with_private_backend(seq.clone() as Arc<dyn LLMBackend>, "scripted");
     // agent_primary(true) is the default; web_fetch succeeds (ScriptedFetcher), while github/mail/home
     // are intentionally left UNCONFIGURED so calls to them return a failure observation — the harness
     // needs both a success and a failure tool path. NO egress broker / recipes are wired, so the loop

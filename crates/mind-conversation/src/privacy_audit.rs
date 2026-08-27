@@ -132,6 +132,42 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
 /// ollama-local`, qwen3.8:27b), so `chat_grounded` would move them off the cloud model AND fail
 /// closed when the local endpoint is down. That is a capability trade on features in daily use —
 /// the owner's call, not the auditor's.
+/// Files that DECLARE `PrivacyScope::Household` deliberately, and whose declaration is now an open
+/// question rather than an accident (E.SEC12).
+///
+/// A different class from `UNSCOPED_PENDING`, which held calls that defaulted to Household by
+/// SAYING NOTHING. Every entry here is someone choosing Household on purpose. The audit could not
+/// see any of them for as long as it has existed, because its pattern excludes `chat_scoped(` —
+/// correct for `chat_grounded(`, the private lane, and wrong for its Household sibling.
+///
+/// Listing a file here is NOT approval. It records that the declaration exists, that it has been
+/// read, and what the unresolved question is. The sweep is E.SEC12's second half and needs
+/// decisions that are not mine to make alone — compose in particular is on the live path for every
+/// turn, and `chat_grounded` fails closed, so re-laning it trades a conditional cloud failover for
+/// a hard outage whenever the owned cluster is down. Pranab has ruled on exactly that trade once
+/// already, for the main turn.
+const HOUSEHOLD_DECLARED: &[(&str, &str)] = &[
+    (
+        "mind-conversation/src/lib.rs",
+        "THE COMPOSE STEP, and the one that matters: it writes every final answer from the work log \
+         AND the grounding, so it carries whatever the turn recalled. Both branches are Household — \
+         `chat_streaming_sink` gates it internally, the fallback declares it. The code already flags \
+         this as 'a deliberate future sweep'. On the LIVE path: agent_primary defaults true.",
+    ),
+    (
+        "mind-conversation/src/emissary.rs",
+        "festival/birthday/trip readiness packets and the ops board. Birthdays and trips read as \
+         Private-class by the enum's own words ('family memories, names, sensitive household \
+         context'), not as the semi-private operational data Household is for. Six Household sites; \
+         the Public ones in the same file are a different and defensible claim.",
+    ),
+    (
+        "mind-conversation/src/delegate.rs",
+        "the critique judge over a delegated task's prompt and result — it carries whatever was \
+         delegated, which is unbounded. Two sites.",
+    ),
+];
+
 const UNSCOPED_PENDING: &[(&str, &str)] = &[
     // EMPTY, and that is the finding rather than the absence of one.
     //
@@ -347,13 +383,33 @@ mod tests {
                 // matching one spelling of a call and calling it coverage. Matching every `.chat(`
                 // over-triggers, and over-triggering is the safe direction here -- a false positive
                 // costs one allowlist line WITH a reason, which is the outcome we want anyway.
-                if squashed.contains(".chat(") {
+                // HOUSEHOLD BY ANOTHER NAME (E.SEC12). The pattern above excludes `chat_scoped(`
+                // because "the character after `chat` is `_`, not `(`" — which is right for
+                // `chat_grounded(`, the PRIVATE lane, and wrong for `chat_scoped(…, Household)`,
+                // which is the Household lane spelled differently. Twelve call sites lived in that
+                // blind spot, including the compose step that writes every answer from the work log.
+                //
+                // `chat_streaming_sink(` is named here too because it gates Household INSIDE its
+                // body: the call site says nothing, so no textual rule at the call site could ever
+                // find it. Naming the helper is the only honest way to see it.
+                //
+                // `PrivacyScope::Public` deliberately does NOT flag. Declaring content public is a
+                // different claim from letting household content ride the household lane.
+                let household_by_other_name = !HOUSEHOLD_DECLARED.iter().any(|(f, _)| *f == name)
+                    && (squashed.contains("PrivacyScope::Household)")
+                        || squashed.contains("chat_streaming_sink("));
+                if squashed.contains(".chat(") || household_by_other_name {
                     // Report every `.chat(` in the file: the exact line of a wrapped call is
                     // ambiguous, and naming the candidates is more useful than guessing one.
                     let sites: Vec<String> = body
                         .lines()
                         .enumerate()
-                        .filter(|(_, l)| l.contains(".chat(") && !l.trim_start().starts_with("//"))
+                        .filter(|(_, l)| {
+                            (l.contains(".chat(")
+                                || l.contains("PrivacyScope::Household")
+                                || l.contains("chat_streaming_sink("))
+                                && !l.trim_start().starts_with("//")
+                        })
                         .filter(|(i, _)| !site_is_allowed(&name, &raw_lines, *i))
                         .map(|(i, l)| format!("{}:{} — {}", name, i + 1, l.trim()))
                         .collect();

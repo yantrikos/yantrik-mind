@@ -250,6 +250,15 @@ pub enum Channel {
     PackContext,
     /// The MIND's own degraded-state note. About itself, not about the user.
     MetacogNote,
+    /// The next-7-days time spine: calendar entries and people's dates, by NAME (E.CTX2).
+    ///
+    /// Found by Codex reviewing E.CTX1, not by me and not by a probe. It was appended to grounding
+    /// unconditionally, AFTER the policy gate, so a turn told to reveal no private facts still
+    /// received household names and dates. My own probe missed it because I asked "summarize what
+    /// you know about me" — a question that never surfaces upcoming dates.
+    UpcomingDates,
+    /// Open reminders the mind is carrying for the user — task descriptions, verbatim.
+    OpenReminders,
 }
 
 impl OutputPolicy {
@@ -274,7 +283,9 @@ impl OutputPolicy {
             | Channel::ConversationSummary
             | Channel::Contradictions
             | Channel::RelationshipLens
-            | Channel::ToolSurface => names_anything,
+            | Channel::ToolSurface
+            | Channel::UpcomingDates
+            | Channel::OpenReminders => names_anything,
 
             // NOT the household's life, and withholding them costs the answer for nothing:
             // a fetched page is public, a pack is a labelled publisher's claims, and the metacog

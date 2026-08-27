@@ -342,43 +342,68 @@ mod tests {
         assert_ne!(context_hash(&lines, 2), context_hash(&moved, 2), "but the neighbours are");
     }
 
-    /// No channel may invent its own opinion of what "private" means (E.CTX1).
+    /// EVERY declared channel must have a consumer, and no gate may be open-coded (E.CTX2).
     ///
-    /// Before this slice, THREE expressions decided whether a channel could reach a model —
-    /// `names_anything` (9 uses), `private_channels` (5), and bare `entity_classes.is_empty()` —
-    /// in three different functions, each added the moment another ungated channel turned up. Every
-    /// one was correct. Together they were a pattern of patching, and a fourteenth channel would
-    /// have arrived with a fourth spelling.
+    /// Codex blocked E.CTX1 on b3eb32f7 and was right on every count. Two findings live here.
     ///
-    /// The enum's exhaustive match stops a channel arriving UNGATED. This stops one arriving with
-    /// its own private gate, which the compiler cannot see.
+    /// FIRST: five variants had ZERO consumer calls. A declared channel nothing routes through is
+    /// decorative — the enum claimed coverage the code did not have, and the exhaustive match made
+    /// that look rigorous. An inventory test is the only thing that catches a variant nobody uses.
+    ///
+    /// SECOND: my previous guard banned exactly ONE spelling, `policy.entity_classes.is_empty()`,
+    /// and two gates survived it by computing the policy inline and breaking the line differently.
+    /// That is the fourteenth instance of this session's one error — matching a spelling and calling
+    /// it coverage — and it happened INSIDE the guard written to end that very pattern. So the
+    /// check is now on the squashed, comment-stripped source, which no line break can defeat.
     #[test]
-    fn no_channel_gate_is_open_coded() {
-        let src = std::fs::read_to_string(
+    fn every_channel_has_a_consumer_and_no_gate_is_open_coded() {
+        let types_src = std::fs::read_to_string(
+            crates_dir().join("mind-types").join("src").join("output_scope.rs"),
+        )
+        .expect("output_scope.rs must be readable");
+        let conv_src = std::fs::read_to_string(
             crates_dir().join("mind-conversation").join("src").join("lib.rs"),
         )
         .expect("lib.rs must be readable");
-        let squashed: String = crate::source_audit::strip_comments(&src)
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
 
-        for banned in ["letnames_anything=", "letprivate_channels="] {
+        // Every variant declared between `pub enum Channel {` and its closing brace.
+        let body = types_src
+            .split_once("pub enum Channel {")
+            .expect("Channel enum must exist")
+            .1;
+        let body = body.split_once("\n}").expect("enum must close").0;
+        let variants: Vec<String> = body
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with("//") && l.ends_with(','))
+            .map(|l| l.trim_end_matches(',').to_string())
+            .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+            .collect();
+        assert!(variants.len() >= 13, "expected the full channel inventory, found {variants:?}");
+
+        for v in &variants {
             assert!(
-                !squashed.contains(banned),
-                "an open-coded channel gate is back ({banned}). Every channel decision goes through \
-                 `OutputPolicy::admits(Channel::…)`, so the exhaustive match can see it — a local \
-                 boolean is invisible to the compiler and is how thirteen channels came to be gated \
-                 one at a time."
+                conv_src.contains(&format!("Channel::{v}")),
+                "Channel::{v} is declared but NOTHING routes through it. A channel with no consumer \
+                 is decorative: the enum claims coverage the code does not have, and the exhaustive \
+                 match makes that look rigorous. Wire it at its insertion site or delete it."
             );
         }
 
-        // And the policy's own field must not be consulted directly outside the gate: that is the
-        // shape all three open-coded versions took.
-        assert!(
-            !squashed.contains("policy.entity_classes.is_empty()"),
-            "a channel is reading the policy's internals instead of asking `admits`"
-        );
+        // No open-coded gate, checked on SQUASHED source so a line break cannot hide one — which is
+        // exactly how two survived the previous version of this test.
+        let squashed: String = crate::source_audit::strip_comments(&conv_src)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for banned in ["letnames_anything=", "letprivate_channels=", ".entity_classes.is_empty()"] {
+            assert!(
+                !squashed.contains(banned),
+                "an open-coded channel gate is back ({banned}). Every channel decision goes through \
+                 `OutputPolicy::admits(Channel::…)` so the inventory test can see it; a local \
+                 boolean or an inline policy build is invisible to both the compiler and this check."
+            );
+        }
     }
 
     /// Hydrated evidence that reaches a PROMPT must pass the output-scope gate.

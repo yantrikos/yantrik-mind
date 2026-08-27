@@ -261,6 +261,22 @@ pub fn admit_working_set(
         + ws.uncertain_beliefs.len();
     let before = disclosive + ws.active_contradictions.len();
 
+    // ACCESS-PROVENANCE ADMISSION (E.SEC10, Codex). Read-isolation may authorise a member turn,
+    // but only when the proof TRAVELS: an unstamped set cannot show it was ever narrowed, and an
+    // OPERATOR-hydrated set carries a stamp proving the opposite — unfiltered by construction.
+    // Both are DENY here. Absence is not permission, and the endpoint identity is never consulted.
+    //
+    // The owner's own surface is exempt because it IS the operator: there is no slice to prove
+    // membership of when the reader is entitled to all of it.
+    if policy.scope != OutputScope::OperatorPrivate
+        && !ws.provenance.as_ref().is_some_and(|p| p.isolated_to_principal())
+    {
+        return (
+            crate::memory::WorkingSet::default(),
+            EvidenceDecision { scope: policy.scope, request, before, admitted: 0, dropped: before, contradictions_kept: 0 },
+        );
+    }
+
     // TOTAL PROHIBITION. Nothing survives, contradictions included — there is no answer to keep
     // honest when there is no evidence to be honest about.
     if policy.entity_classes.is_empty() || policy.max_evidence_items == 0 {
@@ -556,6 +572,82 @@ mod tests {
         }
     }
 
+    // ---- E.SEC10: access-provenance admission (Codex's acceptance list) ----
+
+    fn isolated_to(person: &str) -> crate::memory::ReadProvenance {
+        crate::memory::ReadProvenance {
+            viewer: Some(crate::memory::Scope::Private(person.into())),
+            purpose: "conversation".into(),
+        }
+    }
+
+    fn operator_read() -> crate::memory::ReadProvenance {
+        // A truthful stamp that proves the WRONG thing: the operator sees past every scope wall.
+        crate::memory::ReadProvenance { viewer: None, purpose: "audit".into() }
+    }
+
+    fn stamped(p: Option<crate::memory::ReadProvenance>, facts: usize, contradictions: usize) -> crate::memory::WorkingSet {
+        crate::memory::WorkingSet { provenance: p, ..ws(facts, contradictions) }
+    }
+
+    /// CODEX CRITERION 3 — missing provenance admits none, even on a member surface.
+    #[test]
+    fn an_unstamped_set_is_denied_on_a_member_surface() {
+        let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
+        let (kept, d) = admit_working_set(&member, MinimizationRequest::None, &stamped(None, 12, 2));
+        assert_eq!(d.admitted, 0, "absence of proof is not permission");
+        assert_eq!(d.dropped, 14);
+        assert!(kept.stable_facts.is_empty());
+        // CRITERION 5, first half: budget-exemption is not provenance-exemption.
+        assert!(kept.active_contradictions.is_empty(), "an unstamped contradiction is still unproven");
+    }
+
+    /// The case the rule exposed that I had not seen: a stamp that proves the WRONG thing.
+    #[test]
+    fn an_operator_hydrated_set_cannot_authorise_a_member_turn() {
+        let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
+        let (_, d) = admit_working_set(&member, MinimizationRequest::None, &stamped(Some(operator_read()), 10, 1));
+        assert_eq!(
+            d.admitted, 0,
+            "an operator read is unfiltered by construction; holding a member endpoint does not narrow it"
+        );
+    }
+
+    /// A properly isolated read IS admitted, capped. Without this the rule is just "deny always",
+    /// which would pass every other test here and make the product useless.
+    #[test]
+    fn an_isolated_member_read_is_admitted_and_capped() {
+        let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
+        let set = stamped(Some(isolated_to("asha")), 30, 3);
+        let (kept, d) = admit_working_set(&member, MinimizationRequest::None, &set);
+        assert_eq!(kept.stable_facts.len(), member.max_evidence_items, "admitted, and capped");
+        assert!(d.admitted > 0, "the whole rule must not collapse to deny-always");
+        assert_eq!(kept.active_contradictions.len(), 3, "contradictions still exempt from the BUDGET");
+        // CRITERION 4: deterministic.
+        let (again, _) = admit_working_set(&member, MinimizationRequest::None, &set);
+        assert_eq!(kept.stable_facts.len(), again.stable_facts.len());
+        assert_eq!(kept.stable_facts[0].id, again.stable_facts[0].id);
+    }
+
+    /// CODEX CRITERION 2 — public and audit admit none regardless of how good the provenance is.
+    #[test]
+    fn public_and_audit_admit_nothing_however_well_proven() {
+        for scope in [OutputScope::PublicShare, OutputScope::AuditRedacted] {
+            let p = OutputPolicy::for_scope(scope);
+            let (kept, d) = admit_working_set(&p, MinimizationRequest::None, &stamped(Some(isolated_to("asha")), 9, 2));
+            assert_eq!(d.admitted, 0, "{scope:?} names nothing before anyone asks");
+            assert!(kept.active_contradictions.is_empty());
+        }
+    }
+
+    /// The owner's own surface stays transparent — provenance is not required to read your own life.
+    #[test]
+    fn the_owner_is_not_asked_to_prove_membership_of_their_own_slice() {
+        let owner = OutputPolicy::for_scope(OutputScope::OperatorPrivate);
+        let (_, d) = admit_working_set(&owner, MinimizationRequest::None, &stamped(None, 20, 2));
+        assert_eq!(d.dropped, 0, "there is no slice to prove membership of when the reader owns all of it");
+    }
+
     /// KILL CRITERION 1 — the gate must be TRANSPARENT on the owner's own surface.
     #[test]
     fn an_operator_private_turn_admits_everything_it_hydrated() {
@@ -597,7 +689,10 @@ mod tests {
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
         assert!(member.max_evidence_items < 30, "this test needs the budget to actually bite");
 
-        let set = ws(30, 4);
+        // STAMPED: this test is about the BUDGET, not about provenance. Before E.SEC10 an
+        // unstamped set was admitted by default, so this read as a budget test while quietly
+        // relying on admit-by-default. The new rule broke it, which is the rule working.
+        let set = stamped(Some(isolated_to("asha")), 30, 4);
         let (out, d) = admit_working_set(&member, MinimizationRequest::None, &set);
 
         assert_eq!(out.stable_facts.len(), member.max_evidence_items, "facts ARE capped");

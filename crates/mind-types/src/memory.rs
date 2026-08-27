@@ -127,6 +127,35 @@ pub struct MemoryItem {
     pub evidence_count: u32,
 }
 
+/// Proof that a working set came through a specific isolated read path (E.SEC10).
+///
+/// Codex's rule: read-isolation CAN authorise member admission, but only when the proof travels
+/// with the evidence into the gate. The endpoint identity is not provenance — "this arrived on the
+/// member chat port" says nothing about which slice the records came from, and that inference is
+/// exactly the mistake this type exists to make impossible.
+///
+/// Stamped by the hydrator, which knows the isolation decision at the moment it makes it. Nothing
+/// downstream may construct one: re-deriving it from the surface would be the same guess wearing a
+/// struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadProvenance {
+    /// The viewer this hydration was filtered to. `None` means OPERATOR — unfiltered by
+    /// construction, which is a valid stamp that proves the WRONG thing for a member surface.
+    pub viewer: Option<Scope>,
+    /// The declared purpose of the read, for receipts.
+    pub purpose: String,
+}
+
+impl ReadProvenance {
+    /// Was this set actually narrowed to a principal's slice?
+    ///
+    /// The whole question a member surface needs answered. An operator hydration sees past every
+    /// scope wall, so it can never authorise a member turn no matter who is holding the endpoint.
+    pub fn isolated_to_principal(&self) -> bool {
+        self.viewer.is_some()
+    }
+}
+
 /// The retrieval/ranking moat bundle hydrated for a turn — this is where the moat lives in
 /// conversation. Built by `WorkingSetHydrator` in `mind-memory`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -137,6 +166,10 @@ pub struct WorkingSet {
     pub recent_events: Vec<MemoryItem>,
     pub preferences: Vec<MemoryItem>,
     pub commitments: Vec<MemoryItem>,
+    /// How this set was read (E.SEC10). `None` is DENY on any surface that is not the owner's own:
+    /// an unstamped set cannot prove it was ever isolated, and absence is not permission.
+    #[serde(default)]
+    pub provenance: Option<ReadProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

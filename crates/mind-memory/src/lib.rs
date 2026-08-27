@@ -4467,6 +4467,15 @@ impl MemoryFacade for MemoryHandle {
         let recalled = self.recall_typed(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }, ctx).await?;
         let open = self.conflicts(ctx).await?;
         let mut ws = WorkingSet::default();
+        // STAMP THE READ (E.SEC10). The isolation decision is known HERE, at the moment it is made,
+        // and used to be discarded. Everything downstream then had to infer it from the surface,
+        // which is precisely what "the endpoint identity is not provenance" forbids. `viewer()` is
+        // None for the operator, which is a truthful stamp saying "unfiltered" -- and that is what
+        // makes an operator-hydrated set correctly INELIGIBLE for a member surface.
+        ws.provenance = Some(mind_types::memory::ReadProvenance {
+            viewer: ctx.viewer(),
+            purpose: ctx.purpose().label().to_string(),
+        });
         let halflife_days: f64 = std::env::var("YM_BELIEF_HALFLIFE_DAYS")
             .ok()
             .and_then(|s| s.parse().ok())

@@ -513,6 +513,22 @@ fn pending_proposals() -> String {
 /// Parse a loose due expression ("tomorrow", "tonight", "next week", "in 3 days", "in 2 hours") to
 /// an absolute epoch-ms. None for null/empty/unparseable — the commitment still becomes an open task,
 /// just without an auto-reminder. Calendar dates + weekday names are a later refinement.
+/// The INFORMATION a tool observation carries, as tool-tagged lines (E.LOOP1).
+///
+/// Used to decide whether a loop step was barren. Keyed on content rather than on the exact
+/// observation string, because the previous byte-signature was defeated without effort: a model
+/// varying its query slightly got the same rows back reordered or re-truncated, every observation
+/// hashed differently, and the runaway guard reset on every step of a 21-step runaway.
+///
+/// Tool-tagged so two different tools returning the same sentence do not mask one another.
+pub(crate) fn observation_lines(tool: &str, obs: &str) -> std::collections::HashSet<String> {
+    obs.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| format!("{tool}|{l}"))
+        .collect()
+}
+
 /// Remove reasoning blocks from a model reply.
 ///
 /// Replaces the `text.rsplit("</think>").next()` idiom that was copy-pasted to a dozen call sites,
@@ -8959,8 +8975,23 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             //
             // The bound is on CONSECUTIVE barren steps, not the total, so a genuinely long research
             // turn that hits one repeat mid-way is not punished for it.
-            let obs_sig = format!("{tool}|{}", obs.trim());
-            if seen_obs.contains(&obs_sig) {
+            // BARREN MEANS NO NEW INFORMATION, NOT REPEATED BYTES (E.LOOP1).
+            //
+            // This was `format!("{tool}|{}", obs.trim())` — the exact concatenated observation —
+            // and the model defeated it without trying. Asked "what am I working on right now?" it
+            // ran 21+ `recall` steps and timed out with no answer: each step varied the query a
+            // little ("current projects active", "current projects priorities"), the same rows came
+            // back reordered or re-truncated, every observation was therefore a NEW byte-string,
+            // and a counter bounded at 2 reset on every single step.
+            //
+            // Tenth time this codebase has exact-matched a form that varies, and the first inside a
+            // guard written specifically to stop a runaway loop. So the question is now about
+            // CONTENT: did this step introduce a line we have not already seen? Reordering,
+            // re-truncation and returning a subset are all correctly barren; a `web_fetch` of a
+            // genuinely different page still carries new lines and is not.
+            let obs_lines = observation_lines(&tool, &obs);
+            let brought_something_new = obs_lines.iter().any(|l| !seen_obs.contains(l));
+            if !brought_something_new {
                 barren += 1;
                 eprintln!("[agent] step {step}: {tool} returned nothing new ({barren}/{MAX_BARREN_STEPS} barren)");
                 if barren >= MAX_BARREN_STEPS {
@@ -8973,7 +9004,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
             } else {
                 barren = 0;
-                seen_obs.insert(obs_sig);
+                seen_obs.extend(obs_lines);
             }
             // TERMINAL DELIVERY — one shared definition (see `terminal_delivery`), also served to
             // the bounded loop through `EngineBus::is_terminal` so the two loops cannot drift on

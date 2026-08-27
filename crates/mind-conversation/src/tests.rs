@@ -2918,6 +2918,49 @@ fn a_closing_tag_with_no_opener_is_still_reasoning() {
     assert_eq!(strip_reasoning("<think>hidden</think>\nVisible."), "Visible.");
 }
 
+/// E.LOOP1 — a step is barren when it brings NO NEW INFORMATION, not when its bytes repeat.
+///
+/// The live failure: 21+ `recall` steps on one question, timing out with no answer, while a guard
+/// bounded at 2 barren steps never fired. Barrenness was keyed on the exact concatenated
+/// observation, and the model varied its query enough to reorder the rows each time.
+#[test]
+fn a_barren_step_is_one_that_brought_nothing_new() {
+    use super::observation_lines;
+    use std::collections::HashSet;
+
+    let first = "- Pranab's wife is named Brishti\n- Pranab lives in Bentonville, AR\n- Pranab created YantrikDB";
+    let mut seen: HashSet<String> = observation_lines("recall", first);
+
+    let brought_new = |obs: &str, seen: &HashSet<String>| {
+        observation_lines("recall", obs).iter().any(|l| !seen.contains(l))
+    };
+
+    // KILL CRITERION 3: the same rows REORDERED are barren. This is the case that ran 21 times.
+    let reordered = "- Pranab created YantrikDB\n- Pranab's wife is named Brishti\n- Pranab lives in Bentonville, AR";
+    assert_ne!(reordered, first, "the test is only meaningful if the STRINGS differ");
+    assert!(!brought_new(reordered, &seen), "reordered rows carry no new information");
+
+    // KILL CRITERION 2: a strict SUBSET is barren — what re-truncation produces.
+    assert!(!brought_new("- Pranab's wife is named Brishti", &seen), "a subset is barren");
+
+    // Whitespace and indentation are not information either.
+    assert!(!brought_new("   - Pranab created YantrikDB   \n\n", &seen), "trimming is not novelty");
+
+    // KILL CRITERION 4: one genuinely new line makes the step productive, so a long research turn
+    // is not punished for hitting a repeat mid-way.
+    let with_new = "- Pranab's wife is named Brishti\n- Pranab is fixing a Bun crash";
+    assert!(brought_new(with_new, &seen), "a new fact must reset the counter");
+
+    // And a different TOOL returning the same sentence is not masked by what recall already saw.
+    assert!(
+        observation_lines("web_fetch", first).iter().any(|l| !seen.contains(l)),
+        "observations are tool-tagged so one tool cannot silence another"
+    );
+
+    seen.extend(observation_lines("recall", with_new));
+    assert!(!brought_new(with_new, &seen), "and once absorbed, the same step is barren");
+}
+
 /// Reasoning must not reach the user, including the case that actually leaked.
 ///
 /// The old idiom was `text.rsplit("</think>").next()`, copy-pasted to a dozen sites. It handled the

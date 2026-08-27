@@ -8388,8 +8388,18 @@ impl ConversationEngine {
             grounding.push_str(&self.self_model_block().await);
         }
         // The relationship, applied: bond-earned voice + their current mode + burst-awareness.
-        if let Ok(Some(lens)) = self.memory.relationship_lens().await {
-            grounding.push_str(&format!("RELATIONSHIP LENS (adapt your voice to this): {lens}.\n\n"));
+        // GATED TOO (E.SEC13). It reads as a voice instruction, but it carries an INFERENCE about
+        // the user's life -- the probe answered "bursts of work rather than steady drip, which I've
+        // been reading as 'you may be slammed'", which is the lens quoted back as an observation.
+        // Under a policy that may name nothing, an inference about how someone lives is a private
+        // fact wearing a style note's clothes.
+        //
+        // `metacog_note` below is NOT gated: it reports the MIND's own degraded state, not the
+        // user's, and telling the model to hedge when evidence is thin is right on this turn.
+        if names_anything {
+            if let Ok(Some(lens)) = self.memory.relationship_lens().await {
+                grounding.push_str(&format!("RELATIONSHIP LENS (adapt your voice to this): {lens}.\n\n"));
+            }
         }
         if let Ok(Some(note)) = self.memory.metacog_note().await {
             grounding.push_str(&format!(
@@ -8472,7 +8482,20 @@ Open reminders you're carrying for them:");
         // Self-vigilance: surface OPEN contradictions so the mind flags + asks to resolve them rather than
         // confidently stating one side. This is the typed-memory moat made felt — a companion that says
         // "I have conflicting info about X, which is right?" instead of silently guessing.
-        if let Ok(conflicts) = self.memory.conflicts(&ctx).await {
+        // GATED (E.SEC13). This block fetches conflicts SEPARATELY from the working set, so the
+        // output-scope filter never saw it: `admit_working_set` drops `active_contradictions` under
+        // total prohibition — a tested kill criterion — and this door handed the model both sides of
+        // every open conflict verbatim anyway.
+        //
+        // Caught by READING a probe's answer rather than its telemetry. The turn logged
+        // `evidence 0/111 admitted, 111 dropped` and used no tools, and still surfaced "which
+        // repositories you want me to watch" and "whether a patent is on record". Both are known
+        // contradictions. The counter was true and the answer still leaked.
+        //
+        // A contradiction is two belief TEXTS. Under a policy that may name nothing, they go.
+        if !names_anything {
+            // deliberately empty: a turn permitted to name nothing cannot flag WHICH facts conflict
+        } else if let Ok(conflicts) = self.memory.conflicts(&ctx).await {
             let relevant: Vec<_> = conflicts.iter().take(4).collect();
             if !relevant.is_empty() {
                 grounding.push_str("\nUNRESOLVED CONTRADICTIONS in my memory (if relevant to their message, flag the conflict + ask which is right — do NOT state one side as settled fact):");

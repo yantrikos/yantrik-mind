@@ -5589,16 +5589,103 @@ mod sec8_canaries {
     }
 
     #[test]
-    fn a_policy_that_forbids_a_class_still_needs_slice_4_to_enforce_it() {
-        // Honest placeholder, and deliberately not an assertion about behaviour that does not
-        // exist yet. The policy SAYS no classes may be named; nothing consumes it. This test
-        // records the gap so the harness cannot be mistaken for coverage.
+    fn the_contract_forbids_every_canary_class() {
         let p = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate)
             .tighten(mind_types::MinimizationRequest::NoPrivateFacts);
         for (class, _, _) in CANARIES {
             assert!(!p.may_name(*class), "the CONTRACT forbids {class:?}");
         }
-        // What is NOT asserted: that a turn honours it. That is slice 4, and pretending otherwise
-        // here would be the coverage theatre this harness exists to prevent.
+    }
+
+    /// SLICE 4 NOW ENFORCES IT, and this replaces the placeholder that said it could not.
+    ///
+    /// The old test asserted the contract and stated plainly that nothing consumed it. That was
+    /// honest when written and became stale the moment `admit_working_set` was wired, so it is
+    /// upgraded rather than left standing as a comfortable "recorded gap".
+    ///
+    /// Reachability is asserted FIRST and against the HYDRATED set — not the store. Checking the
+    /// store proves the canaries exist; checking the hydrated set proves they reach the thing the
+    /// filter operates on. That distinction is the whole reason this harness caught itself on its
+    /// first run, when canaries were seeded down one path and searched down another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slice_4_leaves_no_canary_in_a_prohibited_turn() {
+        let mem = scratch_with_canaries().await;
+        let ws = mem
+            .hydrate_working_set(
+                "rota Thursday utilities gathering schedule",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+
+        assert!(
+            !leaked(&format!("{ws:?}")).is_empty(),
+            "the HYDRATED set must contain canaries, or everything below is vacuous"
+        );
+
+        // TOTAL PROHIBITION: the live failure's own shape. Nothing survives.
+        let prohibited = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate)
+            .tighten(mind_types::MinimizationRequest::NoPrivateFacts);
+        let (kept, decision) = mind_types::admit_working_set(
+            &prohibited,
+            mind_types::MinimizationRequest::NoPrivateFacts,
+            &ws,
+        );
+        assert_eq!(decision.admitted, 0, "a prohibited turn admits nothing");
+        assert!(decision.dropped > 0, "and it really had something to drop");
+        assert!(
+            leaked(&format!("{kept:?}")).is_empty(),
+            "a canary survived a total prohibition: {:?}",
+            leaked(&format!("{kept:?}"))
+        );
+
+        // A PUBLIC surface names nothing before anyone even asks.
+        let public = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::PublicShare);
+        let (public_kept, _) = mind_types::admit_working_set(
+            &public,
+            mind_types::MinimizationRequest::None,
+            &ws,
+        );
+        assert!(leaked(&format!("{public_kept:?}")).is_empty(), "a canary reached a public surface");
+    }
+
+    /// The MEMBER surface, at the only level currently honest to claim.
+    ///
+    /// Live probes of `ym as <person>` were VACUOUS — a member slug has its own empty corpus under
+    /// read-isolation, so a clean answer proved nothing. This asserts what is actually true today:
+    /// the member budget bites. It does NOT assert that canaries are absent, because member policy
+    /// permits Person/Place/Task/Event and per-class filtering is unbuilt — evidence carries no
+    /// entity-class labels and a substring guess for Person-vs-Account is the failure this codebase
+    /// has retired repeatedly.
+    ///
+    /// Whether a member surface should admit its already-retrieval-scoped evidence at all is the
+    /// open question with Codex. When that lands, this test is where the answer gets asserted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_member_budget_bites_and_class_filtering_is_still_unbuilt() {
+        let mem = scratch_with_canaries().await;
+        let ws = mem
+            .hydrate_working_set(
+                "rota Thursday utilities gathering schedule",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+        let member = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::HouseholdMember);
+        let (kept, decision) = mind_types::admit_working_set(
+            &member,
+            mind_types::MinimizationRequest::None,
+            &ws,
+        );
+        let disclosive = kept.stable_facts.len()
+            + kept.preferences.len()
+            + kept.commitments.len()
+            + kept.recent_events.len()
+            + kept.uncertain_beliefs.len();
+        assert!(
+            disclosive <= member.max_evidence_items,
+            "the member budget must cap disclosive evidence: {disclosive} > {}",
+            member.max_evidence_items
+        );
+        assert_eq!(decision.scope, mind_types::OutputScope::HouseholdMember);
     }
 }

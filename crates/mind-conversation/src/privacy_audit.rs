@@ -23,21 +23,71 @@
 /// `mind-agents/src/lib.rs` and `mind-recipes/src/lib.rs` along with the one it was written for —
 /// and `mind-agents/src/lib.rs` is exactly where E.SEC2 grounded the sub-agent synthesis call. The
 /// guard had gone blind to the very file it was protecting (E.SEC5).
-/// Individual call sites that are not inference calls at all, matched by EXACT squashed source.
+/// Individual call sites that are not inference calls at all, identified by PATH + CALL SHAPE +
+/// a hash of their surrounding lines.
 ///
 /// Per-FILE allowlisting is too coarse here: `mind-agents/src/lib.rs` holds a test-double backend
 /// AND the real sub-agent synthesis call that E.SEC2 grounded. Listing the file would silently
 /// re-open the very call that audit closed.
 ///
-/// Keyed on the exact source text with whitespace removed, so ANY edit to the line stops the match
-/// and the guard fires again. That is the safe direction: this list can only go stale toward
-/// MORE noise, never toward less coverage.
-const ALLOWED_SITES: &[(&str, &str, &str)] = &[(
-    "mind-agents/src/lib.rs",
-    "letr=self.chat(messages,config,tools)?;",
-    "a #[cfg(test)] LLMBackend double that pops canned responses from a queue — it reaches no \
-     provider and carries no household data. Its `chat` is the trait method, not an inference call.",
-)];
+/// # This is SITE-SPECIFIC permission, not SEMANTIC permission
+///
+/// An entry says "this exact call, in this exact place, is not an inference call". It does NOT say
+/// "calls that look like this are fine". Codex's challenge to the first version was that exact
+/// squashed source is brittle AND spoofable: failing closed on formatting drift is not the same as
+/// being hard to imitate, and a second `self.chat(messages, config, tools)?` pasted anywhere in the
+/// same file would have inherited the allow for free.
+///
+/// So the identity is three things — crate-relative PATH, the normalized CALL SHAPE, and a hash of
+/// the lines AROUND it. A copy of the same call elsewhere has different neighbours and is not
+/// allowed; an edit to the call or its context stops the match and the guard fires. A test asserts
+/// the first of those properties directly, because "surely a hash would differ" is a guess.
+const ALLOWED_SITES: &[AllowedSite] = &[AllowedSite {
+    file: "mind-agents/src/lib.rs",
+    shape: "letr=self.chat(messages,config,tools)?;",
+    context: 0x6703_1dad_646d_819b,
+    why: "a #[cfg(test)] LLMBackend double that pops canned responses from a queue — it reaches no \
+          provider and carries no household data. Its `chat` is the trait method, not an inference call.",
+}];
+
+pub(crate) struct AllowedSite {
+    pub file: &'static str,
+    pub shape: &'static str,
+    pub context: u64,
+    pub why: &'static str,
+}
+
+/// Whitespace-stripped source, the form every comparison here uses.
+fn squash(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// A hash of the lines AROUND a call — what makes two identical calls in one file distinguishable.
+///
+/// Deliberately excludes the call line itself: that is `shape`, and folding it in would mean an
+/// entry could not say which of the two identities failed to match.
+pub(crate) fn context_hash(lines: &[&str], idx: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    const SPAN: usize = 3;
+    let lo = idx.saturating_sub(SPAN);
+    let hi = (idx + SPAN + 1).min(lines.len());
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (n, l) in lines[lo..hi].iter().enumerate() {
+        if lo + n == idx {
+            continue;
+        }
+        squash(l).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Is this specific call site allowlisted? PATH, SHAPE and CONTEXT must all agree.
+pub(crate) fn site_is_allowed(file: &str, lines: &[&str], idx: usize) -> bool {
+    let shape = squash(lines[idx]);
+    ALLOWED_SITES.iter().any(|a| {
+        a.file == file && shape.contains(a.shape) && context_hash(lines, idx) == a.context
+    })
+}
 
 const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
     (
@@ -120,6 +170,58 @@ mod tests {
                 out.push(p);
             }
         }
+    }
+
+    /// A COPY of an allowlisted call, elsewhere, must NOT inherit the allow (Codex, E.SEC9).
+    ///
+    /// The first version keyed a site on its exact squashed source alone. That fails closed on
+    /// formatting drift — any edit stops the match — but Codex's point was that failing closed is
+    /// not the same as being hard to IMITATE: a second `self.chat(messages, config, tools)?`
+    /// pasted anywhere in the same file would have inherited the permission for free, which is
+    /// semantic permission wearing a site-specific label.
+    ///
+    /// Identity is now path + call shape + a hash of the surrounding lines, and this asserts the
+    /// part that actually does the work rather than assuming "surely a hash would differ".
+    #[test]
+    fn an_identical_call_with_different_neighbours_is_a_different_site() {
+        let allowed: Vec<&str> = vec![
+            "impl LLMBackend for Fake {",
+            "    fn chat_streaming(&self, m: &[ChatMessage]) -> Result<LLMResponse> {",
+            "        // the test double",
+            "        let r = self.chat(messages, config, tools)?;",
+            "        on_token(&r.text);",
+            "        Ok(r)",
+            "    }",
+        ];
+        // Same line, byte for byte. Different company.
+        let impostor: Vec<&str> = vec![
+            "async fn synthesise(&self, task: &str) -> String {",
+            "    let messages = self.build_household_prompt(task);",
+            "    // looks identical, lives somewhere else entirely",
+            "        let r = self.chat(messages, config, tools)?;",
+            "    plain_prose(&r.text)",
+            "}",
+            "",
+        ];
+        assert_eq!(allowed[3], impostor[3], "the test is only meaningful if the LINES are identical");
+        assert_ne!(
+            context_hash(&allowed, 3),
+            context_hash(&impostor, 3),
+            "a copy of an allowlisted call must not inherit its permission"
+        );
+    }
+
+    /// ...and the identity must be STABLE, or the allowlist would need rewriting on every build.
+    #[test]
+    fn the_same_site_hashes_the_same_way_twice() {
+        let lines: Vec<&str> = vec!["a();", "b();", "let r = self.chat(m, c, t)?;", "d();", "e();"];
+        assert_eq!(context_hash(&lines, 2), context_hash(&lines, 2));
+        // Indentation and spacing are normalised away: reformatting is not a revocation, but any
+        // change to WHAT the neighbours are is.
+        let reindented: Vec<&str> = vec!["  a();", "\tb();", "let r = self.chat(m, c, t)?;", " d();", "  e();"];
+        assert_eq!(context_hash(&lines, 2), context_hash(&reindented, 2), "whitespace is not identity");
+        let moved: Vec<&str> = vec!["a();", "b();", "let r = self.chat(m, c, t)?;", "CHANGED();", "e();"];
+        assert_ne!(context_hash(&lines, 2), context_hash(&moved, 2), "but the neighbours are");
     }
 
     /// Hydrated evidence that reaches a PROMPT must pass the output-scope gate.
@@ -217,15 +319,23 @@ mod tests {
                 // either; whitespace is then removed entirely, which is what makes the match
                 // wrapping-proof. `chat_grounded(`/`chat_scoped(` do not match: the character after
                 // `chat` is `_`, not `(`.
-                let mut squashed: String =
-                    crate::source_audit::strip_comments(&body).chars().filter(|c| !c.is_whitespace()).collect();
-                // Remove the known non-inference sites FIRST, so one test double cannot excuse a
-                // whole file. An edit to any of these snippets stops the match and the guard fires.
-                for (f, snip, _) in ALLOWED_SITES {
-                    if *f == name {
-                        squashed = squashed.replace(snip, "");
-                    }
-                }
+                // Drop the allowlisted SITES before squashing, so the context hash is what decides
+                // whether a line is excused. The first version subtracted by file+shape from the
+                // whole-file text, which meant the hash was decorative: the guard passed with a
+                // deliberately WRONG hash because the subtraction never consulted it. Hardening the
+                // reporting filter while leaving the pass/fail path keyed on shape alone was the
+                // same half-measure this file keeps producing, so the exclusion now happens in ONE
+                // place that both the verdict and the report read.
+                let raw_lines: Vec<&str> = body.lines().collect();
+                let kept: String = raw_lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !site_is_allowed(&name, &raw_lines, *i))
+                    .map(|(_, l)| *l)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let squashed: String =
+                    crate::source_audit::strip_comments(&kept).chars().filter(|c| !c.is_whitespace()).collect();
                 // ANY receiver, not just one spelled `inference`. The pattern used to be
                 // `inference.chat(` and `book.rs` defeated it with a variable named `inf` --
                 // carrying a prompt that opens "You are writing one chapter of a family's private
@@ -244,10 +354,7 @@ mod tests {
                         .lines()
                         .enumerate()
                         .filter(|(_, l)| l.contains(".chat(") && !l.trim_start().starts_with("//"))
-                        .filter(|(_, l)| {
-                            let sq: String = l.chars().filter(|c| !c.is_whitespace()).collect();
-                            !ALLOWED_SITES.iter().any(|(f, snip, _)| *f == name && sq.contains(snip))
-                        })
+                        .filter(|(i, _)| !site_is_allowed(&name, &raw_lines, *i))
                         .map(|(i, l)| format!("{}:{} — {}", name, i + 1, l.trim()))
                         .collect();
                     if sites.is_empty() {

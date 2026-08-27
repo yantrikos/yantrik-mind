@@ -8726,11 +8726,26 @@ Open reminders you're carrying for them:");
             // budget that yields a blank bubble is worse than the overrun it replaced, and the
             // turn has real observations by now — it just has to stop looking for more.
             let elapsed_ms = started.elapsed().as_millis() as u64;
-            if step > 0 && elapsed_ms >= budget.max_wall_ms {
+            // RESERVE COMPOSE'S SHARE, so the budget describes the TURN and not just the loop
+            // (E.LOOP2 residual). `max_wall_ms` bounded the loop and stopped before compose, so a
+            // 180s promise delivered about 225s. Measured compose: 45s.
+            //
+            // The reserve only bites on turns that would otherwise run to the wall — which are
+            // exactly the turns that reach compose. Measured distribution: three of eight turns
+            // used ZERO tools and never composed at all, so charging every turn a 45s reserve up
+            // front would tax the common case for the rare one.
+            let reserve_ms = std::env::var("YM_COMPOSE_RESERVE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(45)
+                * 1000;
+            let loop_deadline_ms = budget.max_wall_ms.saturating_sub(reserve_ms).max(1_000);
+            if step > 0 && elapsed_ms >= loop_deadline_ms {
                 eprintln!(
-                    "[agent] step {step}: wall budget spent ({}s of {}s) — composing from the work log",
+                    "[agent] step {step}: wall budget spent ({}s of {}s, {}s reserved for compose) — composing from the work log",
                     elapsed_ms / 1000,
-                    budget.max_wall_ms / 1000
+                    budget.max_wall_ms / 1000,
+                    reserve_ms / 1000
                 );
                 scratch.push_str(
                     "\n(out of time for this turn — stop calling tools and answer from the log above)",
@@ -8740,7 +8755,7 @@ Open reminders you're carrying for them:");
             // A step-count nudge is a poor proxy when the clock is what will actually stop us, so
             // say whichever bound is nearer. A model told "97 steps left" while 8 seconds remain
             // has been told something true and useless.
-            let secs_left = budget.max_wall_ms.saturating_sub(elapsed_ms) / 1000;
+            let secs_left = loop_deadline_ms.saturating_sub(elapsed_ms) / 1000;
             let budget_note = if steps_left <= 1 || secs_left <= 15 {
                 "This is your LAST step — you MUST give the final answer now (no more tools).".to_string()
             } else if secs_left < (steps_left as u64) * 10 {

@@ -376,6 +376,22 @@ impl InferencePool {
                 label
             );
         }
+        // TIMESTAMP EVERY HOUSEHOLD CALL (E.SEC17). The dashboard counts per LANE and not per CALL
+        // SITE, so "household 3" was indistinguishable between an allowlisted news fetch and a
+        // regression — and this codebase has spent a long session learning that a counter which
+        // blurs those two is worse than no counter.
+        //
+        // A full call-site tag would mean threading a label through every wrapper; `#[track_caller]`
+        // does not survive `async fn` reliably. But household use is RARE — three calls in three
+        // hours — so a timestamped line costs nothing and makes each one correlatable against the
+        // `[news]` / `[research]` / `[briefing]` markers already in the journal. That converts
+        // "three sometime today" into "three at these moments", which is attributable by reading.
+        //
+        // Deliberately only Household. Private is the expected lane and would be pure noise; Public
+        // is an explicit declaration that the content is public.
+        if matches!(scope, PrivacyScope::Household) {
+            eprintln!("[privacy] household lane served by '{label}'");
+        }
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
         Ok(backend)
     }

@@ -7199,7 +7199,15 @@ impl ConversationEngine {
                         "conflicting info — say \"I have conflicting information about this\"",
                     Some(UncertaintyReason::Sparse) =>
                         "thin evidence — say \"I'm not certain, but I think\"",
-                    Some(UncertaintyReason::LowPrior) | None =>
+                    // E.SEC11: a hidden cross-scope conflict renders as ORDINARY low confidence.
+                    // Deliberately sharing the generic arm rather than getting a phrasing of its
+                    // own, so there is no string a future edit could make more "helpful" and
+                    // thereby leak the existence of the hidden side. The renderer is structurally
+                    // incapable of saying why — that was Codex's condition for choosing this over
+                    // a redacted marker.
+                    Some(UncertaintyReason::ScopeHiddenConflict)
+                    | Some(UncertaintyReason::LowPrior)
+                    | None =>
                         "low confidence — say \"I think\"",
                 };
                 s.push_str(&format!("- {} (confidence {:.2}; {hedge})\n", b.statement, b.confidence));
@@ -8336,7 +8344,14 @@ impl ConversationEngine {
                 Some(UncertaintyReason::Decayed) => "decayed",
                 Some(UncertaintyReason::Contradicted) => "contradicted",
                 Some(UncertaintyReason::Sparse) => "sparse",
-                Some(UncertaintyReason::LowPrior) | None => "low-prior",
+                // E.SEC11: shares the generic tag deliberately. This string reaches the model, so
+                // a tag of its own ("hidden-conflict") would tell it that something it cannot see
+                // disputes the belief -- the existence oracle Codex ruled out. The compiler found
+                // this second render site for me; a non-exhaustive match would have leaked here
+                // while the other path was carefully generic.
+                Some(UncertaintyReason::ScopeHiddenConflict)
+                | Some(UncertaintyReason::LowPrior)
+                | None => "low-prior",
             };
             grounding.push_str(&format!("\n- {} (uncertain:{rtag} {:.2})", b.statement, b.confidence));
         }

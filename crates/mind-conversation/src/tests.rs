@@ -5640,6 +5640,157 @@ mod sec8_canaries {
         }
     }
 
+    /// THE DETECTOR FIXTURE for criterion 5 (E.SEC11), built FIRST as Codex asked.
+    ///
+    /// Before anything can hedge on a hidden conflict, a hidden conflict has to be producible on
+    /// demand. This seeds two beliefs that contradict each other and live in DIFFERENT scopes, then
+    /// asserts the two properties the rest of the slice depends on:
+    ///
+    ///   1. the engine actually DETECTS the contradiction when nothing is filtering (or the fixture
+    ///      is vacuous and every later assertion is about an empty list);
+    ///   2. `conflicts()` refuses to list it for the member — the hard rule Codex told me to keep.
+    ///
+    /// Only when both hold is there something for the confidence downgrade to react to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cross_scope_contradiction_is_detected_but_never_listed_to_the_member() {
+        use mind_types::Scope;
+        let mem: Arc<dyn MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+
+        // Same claim, opposite polarity, different owners. Asha's side is in-slice for Asha; Dev's
+        // is not, and must never reach her.
+        for (scope, statement, polarity) in [
+            (Scope::Private("asha".into()), "the Friday dinner is at seven", 1.0f64),
+            (Scope::Private("dev".into()), "the Friday dinner is not at seven", 1.0f64),
+        ] {
+            let _ = mem
+                .remember_as_belief_scoped(
+                    mind_types::BeliefAssertion {
+                        statement: statement.into(),
+                        polarity,
+                        weight: 2.0,
+                        source_event: Some("sec11-fixture".into()),
+                        provenance: "told".into(),
+                    },
+                    scope,
+                )
+                .await;
+        }
+
+        // The contradiction is an explicit RELATION, not something inferred from polarity — the
+        // engine's detector wants the edge. Learned by writing the non-vacuity assertion first and
+        // watching it fail twice on beliefs that merely disagreed in wording.
+        mem.relate("the Friday dinner is at seven", "the Friday dinner is not at seven", "contradicts", 0.9)
+            .await
+            .unwrap();
+
+        // 1. NON-VACUITY: the operator, who is filtered by nothing, must see the conflict. If the
+        //    engine does not detect it, this fixture cannot support any later claim.
+        let seen_by_operator = mem
+            .conflicts(&mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap_or_default();
+        assert!(
+            !seen_by_operator.is_empty(),
+            "the fixture must actually produce a contradiction, or the rest of E.SEC11 tests nothing"
+        );
+
+        // 2. THE HARD RULE (Codex constraint 7): a member never gets it listed, because listing it
+        //    would carry the other side's text through its partner.
+        let member_ctx = mind_types::AccessContext::principal(
+            Scope::Private("asha".into()),
+            mind_types::Purpose::conversation("asha"),
+        );
+        let seen_by_member = mem.conflicts(&member_ctx).await.unwrap_or_default();
+        let blob = format!("{seen_by_member:?}");
+        assert!(
+            seen_by_member.is_empty(),
+            "a contradiction with one side out of slice must not be listed to the member: {blob}"
+        );
+    }
+
+    /// E.SEC11 — the member HEDGES on a conflict they cannot see, and is never told it exists.
+    ///
+    /// Codex's three requirements, asserted in order: no leak of the hidden side's text or its
+    /// existence; the visible belief reads as ordinary uncertainty rather than confident fact; and
+    /// the operator can still diagnose the structural event.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hidden_conflict_softens_the_visible_belief_without_announcing_itself() {
+        use mind_types::Scope;
+        const VISIBLE: &str = "the Friday dinner is at seven";
+        const HIDDEN: &str = "ZQHIDDEN-DEVSIDE the Friday dinner is not at seven";
+
+        let mem: Arc<dyn MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        for (scope, statement) in [
+            (Scope::Private("asha".into()), VISIBLE),
+            (Scope::Private("dev".into()), HIDDEN),
+        ] {
+            let _ = mem
+                .remember_as_belief_scoped(
+                    mind_types::BeliefAssertion {
+                        statement: statement.into(),
+                        polarity: 1.0,
+                        weight: 3.0,
+                        source_event: Some("sec11".into()),
+                        provenance: "told".into(),
+                    },
+                    scope,
+                )
+                .await;
+        }
+        mem.relate(VISIBLE, HIDDEN, "contradicts", 0.9).await.unwrap();
+
+        let asha = mind_types::AccessContext::principal(
+            Scope::Private("asha".into()),
+            mind_types::Purpose::conversation("asha"),
+        );
+        let ws = mem.hydrate_working_set("Friday dinner seven", &asha).await.unwrap();
+
+        // NON-VACUITY: Asha's own belief must actually be in her working set, or the assertions
+        // below are about an empty vector.
+        let carries_visible = ws.stable_facts.iter().any(|f| f.text == VISIBLE)
+            || ws.uncertain_beliefs.iter().any(|b| b.statement == VISIBLE);
+        assert!(carries_visible, "Asha's own belief must be hydrated, or this test proves nothing");
+
+        // 1. NO LEAK — not the hidden text, not its canary, nowhere in the whole working set.
+        let blob = format!("{ws:?}");
+        assert!(!blob.contains("ZQHIDDEN-DEVSIDE"), "the hidden side reached the member's working set");
+
+        // 2. HEDGED, not asserted: it moved out of the stable lane into the uncertain one.
+        assert!(
+            !ws.stable_facts.iter().any(|f| f.text == VISIBLE),
+            "a belief with a hidden contradiction must not stay a STABLE fact"
+        );
+        let hedged = ws
+            .uncertain_beliefs
+            .iter()
+            .find(|b| b.statement == VISIBLE)
+            .expect("the visible belief should have moved to the uncertain lane");
+        assert!(hedged.confidence <= 0.65, "confidence must actually drop: {}", hedged.confidence);
+
+        // 3. THE RENDERED GROUNDING MUST NOT EXPLAIN WHY. This is the existence oracle Codex ruled
+        //    out, and it is a rendering property rather than a prompt instruction.
+        let rendered = super::ConversationEngine::render_grounding(&ws);
+        assert!(rendered.contains(VISIBLE), "the belief itself is still grounded");
+        for tell in ["hidden", "conflict", "contradic", "cannot see", "another member", "ZQHIDDEN"] {
+            assert!(
+                !rendered.to_lowercase().contains(tell),
+                "the rendered grounding hinted at the hidden conflict via {tell:?}:\n{rendered}"
+            );
+        }
+        assert!(rendered.contains("I think"), "it should read as ordinary low confidence:\n{rendered}");
+
+        // 4. THE OPERATOR CAN STILL DIAGNOSE IT — the structural event is not erased, just not
+        //    exported to the member.
+        let seen_by_operator = mem
+            .conflicts(&mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap_or_default();
+        assert!(
+            seen_by_operator.iter().any(|c| c.belief_a == VISIBLE || c.belief_b == VISIBLE),
+            "the operator must still be able to see the conflict that caused the hedge"
+        );
+    }
+
     /// CODEX CRITERION 1 (E.SEC10) — member A admits A + shared, and NEVER member B.
     ///
     /// # What this test does and does not own

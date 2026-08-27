@@ -34,6 +34,18 @@ pub enum UncertaintyReason {
     Sparse,
     /// The asserted prior was already below the stable threshold; no single cause dominates.
     LowPrior,
+    /// A belief this viewer CAN see is contradicted by one they cannot (E.SEC11).
+    ///
+    /// INTERNAL ONLY. The member-facing renderer must map this to ordinary low confidence and must
+    /// never hint that hidden or conflicting information exists — saying "something you can't see
+    /// disputes this" would turn a silent drop into an existence oracle across the scope wall, and
+    /// "there is something about this you are not being told" is itself information, occasionally
+    /// the most sensitive kind.
+    ///
+    /// It exists so the mind hedges instead of asserting one side of a live conflict it cannot see
+    /// the whole of. Codex chose this over both keeping the silent drop and emitting a redacted
+    /// marker.
+    ScopeHiddenConflict,
 }
 
 /// The belief lifecycle (One Mind vision, organ #5) — the states a belief can

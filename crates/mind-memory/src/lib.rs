@@ -4495,6 +4495,10 @@ impl MemoryFacade for MemoryHandle {
                     UncertaintyReason::Contradicted => mind_types::BeliefStatus::Contradicted,
                     UncertaintyReason::Decayed => mind_types::BeliefStatus::Stale,
                     UncertaintyReason::Sparse | UncertaintyReason::LowPrior => mind_types::BeliefStatus::Active,
+                    // E.SEC11: NOT `Contradicted`. That status is derived from a conflict this
+                    // viewer can see, and stamping it here would put the word on a belief whose
+                    // partner is hidden -- visible in any operator dump the member might be shown.
+                    UncertaintyReason::ScopeHiddenConflict => mind_types::BeliefStatus::Active,
                 };
                 ws.uncertain_beliefs.push(Belief {
                     id: r.item.id.clone(),
@@ -4527,6 +4531,63 @@ impl MemoryFacade for MemoryHandle {
                     updated_ms: t.due_ms.unwrap_or(0),
                     evidence_count: 0,
                 });
+            }
+        }
+        // ── E.SEC11: HEDGE ON A CONFLICT THIS VIEWER CANNOT SEE ────────────────────────────────
+        //
+        // `conflicts()` correctly refuses to list a contradiction unless BOTH sides pass the scope
+        // wall — otherwise the partner's text rides out through the pair. But dropping it silently
+        // left the visible side sitting in the working set with nothing marking it contested, so
+        // the mind could assert one half of a live conflict with no idea it was doing so.
+        //
+        // Codex's ruling: hedge WITHOUT attribution. Soften the belief the viewer can see; never
+        // signal that a hidden one exists. A redacted marker would have been an existence oracle
+        // across the wall, and "there is something about this you are not being told" is itself
+        // information.
+        //
+        // The hidden side is used ONLY to decide visibility. Its text is never copied anywhere,
+        // which is the line between this and smuggling the belief into the working set.
+        if let Some(viewer) = ctx.viewer() {
+            let unfiltered: Vec<Contradiction> =
+                self.call(|reply| Cmd::Conflicts { reply }).await.unwrap_or_default();
+            if !unfiltered.is_empty() {
+                let scopes = self.belief_scopes().await;
+                let sees = |stmt: &str| {
+                    mind_types::Scope::visible_to(scopes.get(stmt).map(|s| s.as_str()), Some(&viewer))
+                };
+                for c in &unfiltered {
+                    let (a, b) = (sees(&c.belief_a), sees(&c.belief_b));
+                    // Exactly one side visible. Both-visible is already handled by `conflicts()`,
+                    // and neither-visible is none of this viewer's business.
+                    if a == b {
+                        continue;
+                    }
+                    let visible = if a { &c.belief_a } else { &c.belief_b };
+                    // A stable fact becomes an uncertain one. That IS the downgrade — hedging lives
+                    // in the uncertain lane, so leaving it among the stable facts would change
+                    // nothing about how the answer reads.
+                    if let Some(pos) = ws.stable_facts.iter().position(|f| &f.text == visible) {
+                        let item = ws.stable_facts.remove(pos);
+                        ws.uncertain_beliefs.push(Belief {
+                            id: item.id.clone(),
+                            statement: item.text.clone(),
+                            confidence: (item.confidence * 0.6).min(0.65),
+                            certainty: item.certainty,
+                            provenance: "recalled".into(),
+                            evidence_count: item.evidence_count,
+                            updated_ms: item.updated_ms,
+                            status: mind_types::BeliefStatus::Active.as_tag().into(),
+                            uncertainty_reason: Some(UncertaintyReason::ScopeHiddenConflict),
+                        });
+                    } else if let Some(bel) =
+                        ws.uncertain_beliefs.iter_mut().find(|b| &b.statement == visible)
+                    {
+                        // Already uncertain for some visible reason. Codex constraint 5: do NOT
+                        // rank the hidden conflict above a reason the viewer can actually be told
+                        // about — leave the existing reason, just lower the confidence.
+                        bel.confidence = (bel.confidence * 0.6).min(0.65);
+                    }
+                }
             }
         }
         Ok(ws)

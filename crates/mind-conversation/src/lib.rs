@@ -8541,6 +8541,12 @@ Open reminders you're carrying for them:");
         // the turn accumulated. Counts and tool NAMES only, never observation text.
         let mut tool_calls: std::collections::BTreeMap<String, usize> = Default::default();
         let mut steps_used = 0usize;
+        // THE WALL CLOCK, which was declared and never read (E.LOOP2). `Budget::interactive()` sets
+        // `max_wall_ms: 180_000` and `config_panel` asserts the bound with the comment "still a
+        // promise to whoever is waiting" — a promise this loop had no code to keep, so a turn ran
+        // to 100 steps or until the client gave up, whichever came first. Measured live at 5+
+        // minutes against a 3-minute contract.
+        let started = std::time::Instant::now();
         let mut scratch = String::new();
         let mut last_call = String::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -8569,8 +8575,29 @@ Open reminders you're carrying for them:");
             // steps remain either loops or gets truncated mid-thought. Surfacing "N left" makes it
             // commit to an answer before the hard cutoff. `max_steps - step` counts THIS step.
             let steps_left = max_steps - step;
-            let budget_note = if steps_left <= 1 {
+            // OUT OF TIME. Break and COMPOSE from the work log rather than erroring: an enforced
+            // budget that yields a blank bubble is worse than the overrun it replaced, and the
+            // turn has real observations by now — it just has to stop looking for more.
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if step > 0 && elapsed_ms >= budget.max_wall_ms {
+                eprintln!(
+                    "[agent] step {step}: wall budget spent ({}s of {}s) — composing from the work log",
+                    elapsed_ms / 1000,
+                    budget.max_wall_ms / 1000
+                );
+                scratch.push_str(
+                    "\n(out of time for this turn — stop calling tools and answer from the log above)",
+                );
+                break;
+            }
+            // A step-count nudge is a poor proxy when the clock is what will actually stop us, so
+            // say whichever bound is nearer. A model told "97 steps left" while 8 seconds remain
+            // has been told something true and useless.
+            let secs_left = budget.max_wall_ms.saturating_sub(elapsed_ms) / 1000;
+            let budget_note = if steps_left <= 1 || secs_left <= 15 {
                 "This is your LAST step — you MUST give the final answer now (no more tools).".to_string()
+            } else if secs_left < (steps_left as u64) * 10 {
+                format!("You have about {secs_left}s left before you must give the final answer — prefer answering as soon as you can.")
             } else {
                 format!("You have {steps_left} tool-steps left before you must give the final answer — prefer answering as soon as you can.")
             };

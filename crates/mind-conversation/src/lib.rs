@@ -8520,6 +8520,20 @@ Open reminders you're carrying for them:");
         // Consecutive steps that may return nothing new before the loop stops asking and composes.
         // Two, not one: a single repeat can be a legitimate re-check, three in a row cannot.
         const MAX_BARREN_STEPS: usize = 2;
+        // ...and a CUMULATIVE bound, because the consecutive one alone was still defeated.
+        //
+        // E.LOOP1's first fix keyed barrenness on information instead of bytes, which was right and
+        // was not enough: the retried query ran 25 steps and still timed out. The consecutive
+        // counter DID fire (1/2 at step 14) and then reset, because the model alternates — a few
+        // near-duplicate recalls, then one query that scrapes a single new row, then more
+        // duplicates. Consecutive-barren cannot see that shape, and my preregistered prediction
+        // that the turn would "terminate within a few steps" was falsified by the live retry.
+        //
+        // Diminishing returns is the real property. A turn allowed a handful of wasted steps in
+        // TOTAL keeps the long-research case the consecutive rule was protecting, while ending a
+        // loop that is mostly spinning however it interleaves.
+        const MAX_TOTAL_BARREN: usize = 5;
+        let mut barren_total = 0usize;
         let mut scratch = String::new();
         let mut last_call = String::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -8992,10 +9006,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let obs_lines = observation_lines(&tool, &obs);
             let brought_something_new = obs_lines.iter().any(|l| !seen_obs.contains(l));
             if !brought_something_new {
+                barren_total += 1;
                 barren += 1;
                 eprintln!("[agent] step {step}: {tool} returned nothing new ({barren}/{MAX_BARREN_STEPS} barren)");
-                if barren >= MAX_BARREN_STEPS {
-                    eprintln!("[agent] step {step}: barren limit reached — composing from the work log");
+                if barren >= MAX_BARREN_STEPS || barren_total >= MAX_TOTAL_BARREN {
+                    eprintln!("[agent] step {step}: barren limit reached ({barren} consecutive, {barren_total} total) — composing from the work log");
                     scratch.push_str(&format!(
                         "
 [{step}] {tool} -> (no new information; stop calling tools and answer from the log above)"

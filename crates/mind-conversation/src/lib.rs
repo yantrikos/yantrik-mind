@@ -8428,6 +8428,14 @@ Open reminders you're carrying for them:");
         // enabled, plus whatever MCP servers have connected. The household tools used to arrive as a
         // hand-written const appended here, which meant the registry did not actually know the whole
         // surface — so disabling one of them removed it from nothing.
+        // ONE flag for BOTH tool mechanisms. There are two, and passing empty schemas while leaving
+        // the prose catalog standing is what let the loop keep calling `recall` after the filter had
+        // already emptied its grounding: backends that ignore the `tools` param parse tools out of
+        // the prose, so removing the schemas removed half a door.
+        let names_nothing = mind_types::OutputPolicy::for_scope(id.output_scope)
+            .tighten(mind_types::detect_minimization(user_text))
+            .entity_classes
+            .is_empty();
         let gated_src = self.catalog_source();
         let (detailed, name_tail) = tool_catalog::gate_catalog(user_text, &gated_src);
         let tools = format!(
@@ -8436,6 +8444,13 @@ Open reminders you're carrying for them:");
             tool_catalog::NEVER_RULE,
             tool_catalog::SKILL_SECTION
         );
+        // THE PROSE HALF of the tool surface, withheld under total prohibition.
+        let tools = if names_nothing {
+            "TOOLS: none this turn. You have been asked not to reveal private facts, so the memory              and household tools are withheld - there is nothing to look up. Answer from what you              already have, and say plainly that you cannot cite private specifics here."
+                .to_string()
+        } else {
+            tools
+        };
         // NATIVE FUNCTION-CALLING: the structured OpenAI-format schemas for the SAME detailed set,
         // forwarded to the backend so a tool-capable model returns typed `tool_calls` instead of a
         // free-text JSON blob (killing the parse-fragility + publish_page-salvage hacks). Backends
@@ -8454,15 +8469,7 @@ Open reminders you're carrying for them:");
         // basename, a variable name, an opening tag, one code path, one evidence channel. A list of
         // "the tools that read memory" would be that same list a seventh time. A turn permitted to
         // name nothing has nothing to look up.
-        let schemas = if mind_types::OutputPolicy::for_scope(id.output_scope)
-            .tighten(mind_types::detect_minimization(user_text))
-            .entity_classes
-            .is_empty()
-        {
-            Vec::new()
-        } else {
-            schemas
-        };
+        let schemas = if names_nothing { Vec::new() } else { schemas };
         // WHAT THE MODEL ACTUALLY SEES. Set YM_DUMP_TOOLS=/path to write this turn's rendered tool
         // surface there. Built after chasing "the mind says it has no market-data tool" through four
         // wrong theories — enriched wording, pinning, a poisoned sibling plugin, the wrong endpoint —

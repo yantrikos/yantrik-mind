@@ -2787,6 +2787,52 @@ fn tz_label() -> String {
     std::env::var("YM_TZ_LABEL").unwrap_or_else(|_| "UTC".to_string())
 }
 
+/// What one agentic turn cost, reported on EVERY exit path (E.LOOP4).
+///
+/// The first version was an `eprintln!` after the loop, which measured only the turns that fell out
+/// of it — barren, budget-spent, or step-capped. The loop has SIX early returns, and its most
+/// common healthy exit is "no tool chosen, returning a direct reply", which never reached the line.
+/// So the numbers I had been quoting all night came from the unrepresentative tail: the turns that
+/// ran out, not the turns that worked.
+///
+/// Reporting from `Drop` instead of from a call site fixes the SHAPE rather than the instance. A
+/// seventh return added later cannot forget to log, because it does not have to remember to.
+struct TurnCost {
+    started: std::time::Instant,
+    steps: usize,
+    facts: usize,
+    barren: usize,
+    calls: std::collections::BTreeMap<String, usize>,
+}
+
+impl TurnCost {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            steps: 0,
+            facts: 0,
+            barren: 0,
+            calls: Default::default(),
+        }
+    }
+}
+
+impl Drop for TurnCost {
+    fn drop(&mut self) {
+        // A turn that reached no tool is a direct model answer; still worth a line, because "how
+        // often does the loop spend nothing" is exactly the number the biased version could not see.
+        let calls: Vec<String> = self.calls.iter().map(|(t, n)| format!("{t}x{n}")).collect();
+        eprintln!(
+            "[agent] turn done: {} steps in {}s, {} distinct facts, {} barren — {}",
+            self.steps,
+            self.started.elapsed().as_secs(),
+            self.facts,
+            self.barren,
+            if calls.is_empty() { "no tools".to_string() } else { calls.join(" ") }
+        );
+    }
+}
+
 /// A clock or date question and NOTHING ELSE, answered from the system clock (E.LOOP3).
 ///
 /// The second typed direct route, on Codex's whitelist and built to the same contract as the
@@ -8590,8 +8636,7 @@ Open reminders you're carrying for them:");
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
         // my reading of them: how many times each tool ran, and how much genuinely new information
         // the turn accumulated. Counts and tool NAMES only, never observation text.
-        let mut tool_calls: std::collections::BTreeMap<String, usize> = Default::default();
-        let mut steps_used = 0usize;
+        let mut cost = TurnCost::new();
         // THE WALL CLOCK, which was declared and never read (E.LOOP2). `Budget::interactive()` sets
         // `max_wall_ms: 180_000` and `config_panel` asserts the bound with the comment "still a
         // promise to whoever is waiting" — a promise this loop had no code to keep, so a turn ran
@@ -9088,8 +9133,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // CONTENT: did this step introduce a line we have not already seen? Reordering,
             // re-truncation and returning a subset are all correctly barren; a `web_fetch` of a
             // genuinely different page still carries new lines and is not.
-            *tool_calls.entry(tool.clone()).or_insert(0) += 1;
-            steps_used = step + 1;
+            *cost.calls.entry(tool.clone()).or_insert(0) += 1;
+            cost.steps = step + 1;
+            cost.facts = seen_obs.len();
+            cost.barren = barren_total;
             let obs_lines = observation_lines(&tool, &obs);
             let brought_something_new = obs_lines.iter().any(|l| !seen_obs.contains(l));
             if !brought_something_new {
@@ -9130,17 +9177,6 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 obs.chars().take(head).collect::<String>(),
                 outcome.note()
             ));
-        }
-        // WHAT THIS TURN COST, in one line (E.LOOP1). Distinct observation lines is the honest
-        // novelty measure: a turn that ran twenty tools and gathered eight facts was not working.
-        if !tool_calls.is_empty() {
-            let calls: Vec<String> = tool_calls.iter().map(|(t, n)| format!("{t}x{n}")).collect();
-            eprintln!(
-                "[agent] turn done: {steps_used} steps in {}s, {} distinct facts, {barren_total} barren — {}",
-                started.elapsed().as_secs(),
-                seen_obs.len(),
-                calls.join(" ")
-            );
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model
         // literally cannot weave in the gift deadline sitting next to the birthday it's reporting.

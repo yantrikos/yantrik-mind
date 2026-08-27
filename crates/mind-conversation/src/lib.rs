@@ -2787,6 +2787,42 @@ fn tz_label() -> String {
     std::env::var("YM_TZ_LABEL").unwrap_or_else(|_| "UTC".to_string())
 }
 
+/// A clock or date question and NOTHING ELSE, answered from the system clock (E.LOOP3).
+///
+/// The second typed direct route, on Codex's whitelist and built to the same contract as the
+/// arithmetic one: an exact grammar with a real capability behind it. The capability here is the
+/// clock, which cannot be wrong about the time in the way a model can.
+///
+/// # Whole-string equality, deliberately
+///
+/// The match is on the ENTIRE trimmed message, not a prefix or a substring. "what time is it in
+/// Tokyo" needs a timezone the clock alone does not answer; "what day is it good to post" is a
+/// judgement about the user's week. Both must reach the agentic path, and whole-string equality is
+/// the only rule that guarantees it without me reasoning case by case about which lookalikes exist.
+/// That is the strictest grammar available, which after tonight is the one worth having.
+fn spoken_clock(text: &str) -> Option<String> {
+    let t = text.trim().trim_end_matches(['?', '.', '!']).trim().to_lowercase();
+    const TIME: &[&str] = &[
+        "what time is it", "whats the time", "what's the time", "what is the time",
+        "do you have the time", "got the time", "time please",
+    ];
+    const DATE: &[&str] = &[
+        "what day is it", "what day is it today", "what day is today",
+        "whats the date", "what's the date", "what is the date",
+        "whats todays date", "what's today's date", "what is todays date", "what is today's date",
+    ];
+    let n = local_now();
+    if TIME.contains(&t.as_str()) {
+        let hhmm = n.format("%I:%M").to_string();
+        let hhmm = hhmm.strip_prefix('0').unwrap_or(&hhmm).to_string();
+        return Some(format!("{hhmm} {} {}.", n.format("%p"), tz_label()));
+    }
+    if DATE.contains(&t.as_str()) {
+        return Some(format!("{}, {}.", n.format("%A"), n.format("%-d %B %Y")));
+    }
+    None
+}
+
 /// Current date/time, human-readable — injected into the agent prompt every turn so it never guesses
 /// "now". Shown in the user's local timezone so date math + reminders line up with them.
 fn now_str() -> String {
@@ -9728,8 +9764,9 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         //
         // What it buys: a sum costs zero model calls instead of the two-to-three ~11s dispatch
         // steps the loop spends, and writes no beliefs on the way.
-        if let Some(answer) = spoken_arithmetic(user_text) {
-            eprintln!("[agent] route=direct_known_command kind=arithmetic steps=0");
+        if let Some(answer) = spoken_arithmetic(user_text).or_else(|| spoken_clock(user_text)) {
+            let kind = if spoken_clock(user_text).is_some() { "clock" } else { "arithmetic" };
+            eprintln!("[agent] route=direct_known_command kind={kind} steps=0");
             let scope = id.write_scope();
             let _ = self.memory.append_message_scoped("user", user_text, scope.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &answer, scope).await;

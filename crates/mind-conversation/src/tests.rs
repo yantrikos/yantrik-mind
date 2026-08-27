@@ -2952,6 +2952,25 @@ fn the_direct_route_is_a_grammar_and_fails_toward_agentic() {
         );
     }
 
+    // THE CLOCK ROUTE, same contract, whole-string grammar.
+    {
+        use super::spoken_clock;
+        for q in ["what time is it?", "What Time Is It", "what day is it", "what is today's date?"] {
+            assert!(spoken_clock(q).is_some(), "a bare clock question should route: {q:?}");
+        }
+        // Whole-string equality is what keeps these agentic: each needs something the clock alone
+        // cannot answer -- a timezone, a judgement, or the user's own calendar.
+        for q in [
+            "what time is it in Tokyo",
+            "what day is it good to post the reply",
+            "what time is my meeting",
+            "what is the date of the invoice Brishti sent",
+            "remind me what day it is when the draft is due",
+        ] {
+            assert!(spoken_clock(q).is_none(), "must stay agentic: {q:?}");
+        }
+    }
+
     // And the capability contract: the route answers from CODE, so it is right where a model
     // guessing in its head was not. The live failure that created the voice-path version was
     // "what is 17 times 23?" answered as "one hundred and one".

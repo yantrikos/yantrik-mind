@@ -86,7 +86,7 @@ impl super::ConversationEngine {
             );
             if let Ok(r) = self
                 .inference
-                .chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Household)
+                .chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Private)
                 .await
             {
                 self.packet_add(
@@ -247,7 +247,7 @@ impl super::ConversationEngine {
                 "Facts about a birthday gift decision (from stored, dated notes):\n{facts}\n\nBirthday: {date_str}. {collision_note}\n\n\
                  Write a GIFT STATUS packet: what's already decided, what still needs an action (order dates, budget), and ONE concrete recommendation for what to do in the next 48h. Use ONLY the facts above — never invent products, prices, or preferences. 6-9 lines, no preamble."
             );
-            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Household).await {
+            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Private).await {
                 let mut ev = evidence.clone();
                 ev.push(format!("date {date_str} from the family layer (told)"));
                 let pid = self.packet_add_observed(&node_id, Some("gift"), "plan", &format!("{who}'s birthday — gift status & next action"), r.text.trim(), "birthday within 14 days; gift criterion unmet", ev, 0.8, false, expiry).await;
@@ -285,7 +285,7 @@ impl super::ConversationEngine {
                  Household: two adults, one 7-year-old daughter who will want to be part of it.\n\
                  Give TWO options — one quiet/at-home, one out-but-low-logistics — each 3 lines (what, prep needed, why it fits the constraints). No preamble."
             );
-            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg, mind_inference::PrivacyScope::Household).await {
+            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg, mind_inference::PrivacyScope::Private).await {
                 let pid = self.packet_add_observed(&node_id, Some("plan"), "plan", &format!("{who}'s birthday — two celebration options"), r.text.trim(), "birthday within 14 days; plan criterion unmet", vec![format!("date {date_str} from the family layer (told)")], 0.75, false, expiry).await;
                 self.packet_mark_prepared(&pid, r.text.trim().len() > 80).await;
                 built.push("plan".into());
@@ -352,7 +352,7 @@ impl super::ConversationEngine {
                 "Packing list for a {nights}-night family trip to {dest} starting {date_str}. Family: two adults, one 7-year-old daughter.\n\
                  Forecast:\n{fc_block}\n\nGroup: adults / child / shared (chargers, meds, documents, snacks-for-the-drive). Weather-appropriate. 14-20 lines total, no preamble."
             );
-            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Household).await {
+            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Private).await {
                 self.packet_add(&node_id, Some("packing"), "checklist", &format!("{dest} trip — packing list"), r.text.trim(), "trip within 10 days; packing criterion unmet", evidence.clone(), 0.8, false, expiry).await;
                 built.push("packing".into());
             }
@@ -374,7 +374,7 @@ impl super::ConversationEngine {
                 "A family trip to {dest}, {nights} nights from {date_str}. Forecast:\n{fc_block}\n\n\
                  Write: (1) what the weather means for the trip in one line per day; (2) TWO indoor fallback activities in {dest} suitable for a 7-year-old, if rain hits. 8-10 lines, no preamble."
             );
-            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Household).await {
+            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg.clone(), mind_inference::PrivacyScope::Private).await {
                 self.packet_add(&node_id, Some("weather+fallback"), "plan", &format!("{dest} trip — weather & fallbacks"), &format!("FORECAST:\n{fc_block}\n\n{}", r.text.trim()), "trip within 10 days; weather criterion unmet", vec![], 0.8, false, expiry).await;
                 built.push("weather+fallback".into());
             }
@@ -386,7 +386,7 @@ impl super::ConversationEngine {
                 "Drive plan: Centerton/Bentonville AR to {dest}, family car trip with a 7-year-old, arriving {date_str}.\n{facts}\
                  Write: departure window recommendation, drive time estimate, ONE good rest stop pattern for a child, and arrival-day sequencing around any known appointment. 6-8 lines, no preamble."
             );
-            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg, mind_inference::PrivacyScope::Household).await {
+            if let Ok(r) = self.inference.chat_scoped(vec![ChatMessage::user(&prompt)], cfg, mind_inference::PrivacyScope::Private).await {
                 self.packet_add(&node_id, Some("route+timing"), "plan", &format!("{dest} trip — route & timing"), r.text.trim(), "trip within 10 days; route criterion unmet", evidence, 0.75, false, expiry).await;
                 built.push("route+timing".into());
             }

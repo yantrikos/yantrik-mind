@@ -155,27 +155,15 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
 /// turn, and `chat_grounded` fails closed, so re-laning it trades a conditional cloud failover for
 /// a hard outage whenever the owned cluster is down. Pranab has ruled on exactly that trade once
 /// already, for the main turn.
-const HOUSEHOLD_DECLARED: &[(&str, &str)] = &[
-    (
-        "mind-conversation/src/lib.rs",
-        "THE COMPOSE STEP, and the one that matters: it writes every final answer from the work log \
-         AND the grounding, so it carries whatever the turn recalled. Both branches are Household — \
-         `chat_streaming_sink` gates it internally, the fallback declares it. The code already flags \
-         this as 'a deliberate future sweep'. On the LIVE path: agent_primary defaults true.",
-    ),
-    (
-        "mind-conversation/src/emissary.rs",
-        "festival/birthday/trip readiness packets and the ops board. Birthdays and trips read as \
-         Private-class by the enum's own words ('family memories, names, sensitive household \
-         context'), not as the semi-private operational data Household is for. Six Household sites; \
-         the Public ones in the same file are a different and defensible claim.",
-    ),
-    (
-        "mind-conversation/src/delegate.rs",
-        "the critique judge over a delegated task's prompt and result — it carries whatever was \
-         delegated, which is unbounded. Two sites.",
-    ),
-];
+const HOUSEHOLD_DECLARED: &[(&str, &str)] = &[(
+    "mind-conversation/src/lib.rs",
+    "COMPOSE, and it is listed for a different reason than it used to be: the lane is no longer \
+     DECLARED Household, it is DERIVED from what the turn carries (E.SEC14). Household evidence in \
+     the grounding forces the private lane and a failure returns a code-written refusal. The entry \
+     survives only because `chat_streaming_sink(` is matched BY NAME — it gates internally, so no \
+     call-site rule can tell which scope it was handed. Struck when that helper takes its scope in a \
+     form the audit can read.",
+)];
 
 const UNSCOPED_PENDING: &[(&str, &str)] = &[
     // EMPTY, and that is the finding rather than the absence of one.

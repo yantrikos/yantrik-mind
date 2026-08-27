@@ -1187,7 +1187,7 @@ impl super::ConversationEngine {
                         ..GenerationConfig::default()
                     };
                     let mut critic_says = critic
-                        .chat_scoped(vec![ChatMessage::user(&critique_prompt)], cfg, mind_inference::PrivacyScope::Household)
+                        .chat_scoped(vec![ChatMessage::user(&critique_prompt)], cfg, mind_inference::PrivacyScope::Private)
                         .await
                         .map(|x| x.text.trim().to_string());
                     // AN EMPTY VERDICT IS NOT A REVIEW. It is neither SHIP nor findings, and feeding
@@ -1206,7 +1206,7 @@ impl super::ConversationEngine {
                         // pattern-matched the task text and continued it instead of reviewing it.
                         let retry = GenerationConfig { max_tokens: 15_000, think: Some(true), prefer_reasoner: true, ..GenerationConfig::default() };
                         critic_says = critic
-                            .chat_scoped(vec![ChatMessage::user(&critique_prompt)], retry, mind_inference::PrivacyScope::Household)
+                            .chat_scoped(vec![ChatMessage::user(&critique_prompt)], retry, mind_inference::PrivacyScope::Private)
                             .await
                             .map(|x| x.text.trim().to_string());
                     }

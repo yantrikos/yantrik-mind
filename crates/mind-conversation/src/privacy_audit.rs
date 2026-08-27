@@ -155,15 +155,38 @@ const UNSCOPED_ALLOWED: &[(&str, &str)] = &[
 /// turn, and `chat_grounded` fails closed, so re-laning it trades a conditional cloud failover for
 /// a hard outage whenever the owned cluster is down. Pranab has ruled on exactly that trade once
 /// already, for the main turn.
-const HOUSEHOLD_DECLARED: &[(&str, &str)] = &[(
-    "mind-conversation/src/lib.rs",
-    "COMPOSE, and it is listed for a different reason than it used to be: the lane is no longer \
-     DECLARED Household, it is DERIVED from what the turn carries (E.SEC14). Household evidence in \
-     the grounding forces the private lane and a failure returns a code-written refusal. The entry \
-     survives only because `chat_streaming_sink(` is matched BY NAME — it gates internally, so no \
-     call-site rule can tell which scope it was handed. Struck when that helper takes its scope in a \
-     form the audit can read.",
-)];
+/// One reviewed lane decision, machine-readable (Codex, E.SEC16).
+///
+/// Deliberately a small const record and NOT a runtime type: a one-entry inventory does not justify
+/// production abstraction, and Codex said so when I offered to build one. The value here is
+/// reviewability — every field a reviewer would otherwise have to reconstruct from prose is a
+/// column, and the `test` field means a claim without a test is visibly a claim without a test.
+pub(crate) struct LaneDecision {
+    pub file: &'static str,
+    /// The call shape that made the audit notice it.
+    pub call_shape: &'static str,
+    /// What lane it rides now.
+    pub lane: &'static str,
+    /// WHY that lane is correct — the invariant, not a vibe.
+    pub invariant: &'static str,
+    /// What happens when that lane is unavailable.
+    pub fallback: &'static str,
+    /// The test that holds it.
+    pub test: &'static str,
+}
+
+/// Files the audit still flags, each with a reviewed decision behind it.
+const HOUSEHOLD_DECLARED: &[LaneDecision] = &[LaneDecision {
+    file: "mind-conversation/src/lib.rs",
+    call_shape: "chat_streaming_sink(messages, cfg, tok_tx, scope)",
+    lane: "Private (constant)",
+    invariant: "compose's inputs are a SUPERSET of the loop dispatch's, and dispatch already ran on \
+                the private lane via chat_grounded_tools — so a weaker compose lane would send \
+                material this same turn already treated as private. Listed only because the helper \
+                is matched BY NAME: it gates internally, so no call-site rule can read its scope.",
+    fallback: "COMPOSE_LANE_UNAVAILABLE, a const status line; never a Household retry",
+    test: "compose_can_never_ride_a_weaker_lane_than_the_dispatch_that_preceded_it",
+}];
 
 const UNSCOPED_PENDING: &[(&str, &str)] = &[
     // EMPTY, and that is the finding rather than the absence of one.
@@ -202,6 +225,24 @@ mod tests {
             } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
                 out.push(p);
             }
+        }
+    }
+
+    /// Every inventory entry must carry a real decision, not a placeholder (E.SEC16).
+    ///
+    /// The prose version of this list drifted twice tonight — an entry that said "deliberate future
+    /// sweep" outlived the sweep. Fields make that visible: an entry with no invariant or no test
+    /// is a deferral wearing a decision's clothes.
+    #[test]
+    fn every_lane_decision_names_its_invariant_and_its_test() {
+        for d in HOUSEHOLD_DECLARED {
+            assert!(d.file.contains("/src/"), "{}: a crate-relative path", d.file);
+            assert!(!d.call_shape.is_empty(), "{}: name the call shape", d.file);
+            assert!(d.lane.contains("Private") || d.lane.contains("Household") || d.lane.contains("Public"),
+                "{}: state the lane", d.file);
+            assert!(d.invariant.len() > 60, "{}: an invariant, not a shrug", d.file);
+            assert!(!d.fallback.is_empty(), "{}: say what happens when the lane is gone", d.file);
+            assert!(d.test.len() > 10, "{}: name the test that holds it", d.file);
         }
     }
 
@@ -427,7 +468,7 @@ mod tests {
                 //
                 // `PrivacyScope::Public` deliberately does NOT flag. Declaring content public is a
                 // different claim from letting household content ride the household lane.
-                let household_by_other_name = !HOUSEHOLD_DECLARED.iter().any(|(f, _)| *f == name)
+                let household_by_other_name = !HOUSEHOLD_DECLARED.iter().any(|d| d.file == name)
                     && is_household_lane_call(&squashed);
                 if squashed.contains(".chat(") || household_by_other_name {
                     // Report every `.chat(` in the file: the exact line of a wrapped call is

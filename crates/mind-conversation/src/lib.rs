@@ -2802,18 +2802,26 @@ draws on your private context, and my own hardware is unreachable, so composing 
 sending that to a cloud model. Ask again in a moment, or tell me explicitly to answer without your \
 private context and I'll work from what's public.";
 
-/// Which lane may compose this turn's answer, decided by WHAT IT CARRIES (E.SEC14).
+/// Why compose is ALWAYS private (E.SEC16), stated as an invariant rather than a judgement.
 ///
-/// Not by the function's name, which is how `chat_streamed_to_progress` ended up declaring
-/// Household for every turn including the ones grounded in family memory.
+/// The first version asked whether grounding was empty. Codex rejected that and was right: the rule
+/// is the MAXIMUM sensitivity of every compose input, and grounding is only one of them. The wrap
+/// also carries `{scratch}` — the work log, which holds tool observations including `recall` output
+/// — and `{user_text}`. An empty grounding proves nothing about those.
 ///
-/// The signal is structural rather than a classifier: if household evidence reached the grounding,
-/// compose is carrying it — that is what grounding IS. No entity-class labels are needed and none
-/// are invented, which matters because Codex has twice ruled out substring guesses and this
-/// codebase has retired five text matchers.
-fn compose_needs_private_lane(grounding: &str) -> bool {
-    !grounding.trim().is_empty()
-}
+/// The settling argument needs no classifier and no provenance plumbing:
+///
+///   THE LOOP'S DISPATCH ALREADY SENT THIS MATERIAL, PRIVATELY.
+///
+/// Every step calls `chat_grounded_tools` with grounding + work log + user text — the private lane.
+/// Compose's input set is a SUPERSET of that (same three, plus whatever the last step observed). So
+/// a Household compose would send, on a weaker lane, material this very turn already treated as
+/// private. There is no state in which that is justified, which makes the lane a constant rather
+/// than a decision.
+///
+/// A source-scan test pins both halves, because the invariant lives in the RELATIONSHIP between two
+/// call sites and neither one alone shows it.
+const COMPOSE_SCOPE: mind_inference::PrivacyScope = mind_inference::PrivacyScope::Private;
 
 /// What one agentic turn cost, reported on EVERY exit path (E.LOOP4).
 ///
@@ -9266,11 +9274,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // evidence reached the grounding then this answer is built from it, and no cloud failover
         // may see it. A turn with empty grounding — a total prohibition, or a question that recalled
         // nothing — is carrying no household material and may use the household lane.
-        let compose_scope = if compose_needs_private_lane(&grounding) {
-            mind_inference::PrivacyScope::Private
-        } else {
-            mind_inference::PrivacyScope::Household
-        };
+        let compose_scope = COMPOSE_SCOPE;
         let composed = match self
             .chat_streamed_to_progress(
                 vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)],
@@ -9296,7 +9300,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 //
                 // The public-lane case keeps the old behaviour: an empty string falls through to
                 // the honest-line handling below, since nothing needed protecting.
-                if compose_scope == mind_inference::PrivacyScope::Private {
+                {
                     let reply = COMPOSE_LANE_UNAVAILABLE.to_string();
                     let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
                     let _ = self.memory.append_message_scoped("assistant", &reply, id.write_scope()).await;

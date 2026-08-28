@@ -1,7 +1,5 @@
 //! Proactive-mirror pace ledger -- tracks the mind's own proactive sends vs the user's reactions per domain. Extracted from lib.rs.
 
-use super::*;
-
 /// Does this message read as a correction of what was just said?
 ///
 /// Deliberately conservative: only openings and phrases that are overwhelmingly correction-shaped.

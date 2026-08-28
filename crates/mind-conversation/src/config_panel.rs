@@ -13,8 +13,6 @@
 //! the desktop compares against the FILE it edits, so drift between file and process is visible
 //! instead of mysterious.
 
-use super::*;
-
 pub(crate) struct Setting {
     pub key: &'static str,
     pub label: &'static str,
@@ -216,6 +214,7 @@ impl super::ConversationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConversationEngine;
 
     /// `ym config dump` must SURFACE a knob the schema does not list — that invisible class is
     /// exactly how YM_THINK_DISPATCH=on silently overrode a measured default for days. And a

@@ -1322,6 +1322,56 @@ async fn cli_dispatch_routes_plugins_and_chat() {
     assert!(!conv.cli_dispatch("hey what's up", &mind_types::AccessContext::operator_audit()).await.is_empty(), "unknown → chat");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_dispatch_keeps_family_book_commands_reachable() {
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+    let ctx = mind_types::AccessContext::operator_audit();
+
+    let gaps = conv.cli_dispatch("book gaps", &ctx).await;
+    assert!(
+        gaps.contains("No open questions"),
+        "`book gaps` must reach the family-book router, not the paper-trading account: {gaps}"
+    );
+    let toc = conv.cli_dispatch("book", &ctx).await;
+    assert!(
+        toc.contains("book hasn't been compiled"),
+        "bare `book` must reach the family-book table of contents: {toc}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_dispatch_keeps_research_paper_commands_reachable() {
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+
+    let out = conv
+        .cli_dispatch("paper", &mind_types::AccessContext::operator_audit())
+        .await;
+    assert!(
+        out.contains("No papers studied yet") && out.contains("paper study <url>"),
+        "`paper` must reach the research-paper library; the trading account remains `paper-book`: {out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_dispatch_keeps_trading_shadow_distinct_from_ex4() {
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+    let ctx = mind_types::AccessContext::operator_audit();
+
+    let shadow = conv.cli_dispatch("shadow", &ctx).await;
+    assert!(
+        !shadow.contains("EX4-LIVE-A"),
+        "`shadow` is the tape counterfactual and must not be swallowed by the EX4 report: {shadow}"
+    );
+    let ex4 = conv.cli_dispatch("ex4", &ctx).await;
+    assert!(ex4.contains("EX4-LIVE-A"), "the explicit EX4 command must remain available: {ex4}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delegated_job_notifications_drain_fifo_and_cap() {
     let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
@@ -1639,7 +1689,7 @@ fn relative_due_parsing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn draft_email_recipe_drafts_then_confirms_then_sends() {
     use mind_recipes::RecipeEngine;
-    use mind_tools::{ScriptedMailSender, ToolActionExecutor};
+    use mind_tools::ScriptedMailSender;
     let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
     // LLM "drafts" this body for the Think step.
     let scripted = Arc::new(ScriptedLLM::new("Hi — the deployment is live and stable. Best, J"));
@@ -1712,7 +1762,7 @@ async fn auto_select_suggests_a_matching_skill() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn draft_email_without_body_asks_then_resumes_then_sends() {
     use mind_recipes::{RecipeEngine, RecipeStore};
-    use mind_tools::{ScriptedMailSender, ToolActionExecutor};
+    use mind_tools::ScriptedMailSender;
     let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
     let scripted = Arc::new(ScriptedLLM::new("Hi — the deploy is live and stable. Best, J"));
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
@@ -5776,8 +5826,11 @@ mod sec8_turn_scope {
 /// evidence is not a test.
 #[cfg(test)]
 mod sec8_canaries {
+    use crate::{local_now, ConversationEngine, TurnIdentity};
+    use mind_inference::{InferencePool, ScriptedLLM};
     use mind_types::{EntityClass, MemoryFacade};
     use std::sync::Arc;
+    use yantrik_ml::LLMBackend;
 
     /// One seeded fact per entity class Codex named, each with a token that cannot occur by chance.
     ///
@@ -6149,6 +6202,503 @@ mod sec8_canaries {
             &ws,
         );
         assert!(leaked(&format!("{public_kept:?}")).is_empty(), "a canary reached a public surface");
+    }
+
+    #[test]
+    fn the_honesty_wall_cannot_use_withheld_context_as_an_existence_oracle() {
+        const TRANSCRIPT: &str = "ZQCANARY-HIDDEN-TRANSCRIPT";
+        const NOTE: &str = "ZQCANARY-HIDDEN-NOTE";
+        let prohibited = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate)
+            .tighten(mind_types::MinimizationRequest::NoPrivateFacts);
+
+        let known = super::honesty_known_context(
+            &prohibited,
+            "public grounding",
+            &[
+                (mind_types::Channel::Transcript, TRANSCRIPT),
+                (mind_types::Channel::ScratchNotes, NOTE),
+            ],
+        );
+        assert!(known.contains("public grounding"), "the admitted control must remain reachable");
+        assert!(!known.contains(TRANSCRIPT), "a withheld transcript became an existence oracle");
+        assert!(!known.contains(NOTE), "a withheld scratch note became an existence oracle");
+
+        let ordinary = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate);
+        let reachable = super::honesty_known_context(
+            &ordinary,
+            "public grounding",
+            &[
+                (mind_types::Channel::Transcript, TRANSCRIPT),
+                (mind_types::Channel::ScratchNotes, NOTE),
+            ],
+        );
+        assert!(reachable.contains(TRANSCRIPT), "the transcript canary must be reachable without prohibition");
+        assert!(reachable.contains(NOTE), "the note canary must be reachable without prohibition");
+    }
+
+    #[test]
+    fn the_honesty_wall_tracks_every_admitted_evidence_channel() {
+        const WEB: &str = "ZQCANARY-PUBLIC-WEB";
+        const MAIL: &str = "ZQCANARY-PRIVATE-MAIL";
+        let prohibited = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate)
+            .tighten(mind_types::MinimizationRequest::NoPrivateFacts);
+
+        let known = super::honesty_known_context(
+            &prohibited,
+            "",
+            &[
+                (mind_types::Channel::WebPage, WEB),
+                (mind_types::Channel::MailDigest, MAIL),
+            ],
+        );
+        assert!(known.contains(WEB), "public web evidence admitted to the prompt must be known to the wall");
+        assert!(!known.contains(MAIL), "a withheld mail digest became an existence oracle");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_match_pinning_obeys_the_output_gate_and_resolves_the_honesty_wall() {
+        const CANARY: &str = "ZQCANARY-PINNED-ZEPHYR";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+        mem.remember_as_belief(mind_types::BeliefAssertion {
+            statement: format!("Project Zephyr carries {CANARY}"),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: Some("pinning-canary".into()),
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        let ctx = mind_types::AccessContext::operator_audit();
+
+        let reachable = mem.beliefs_matching("Zephyr", &ctx).await.unwrap_or_default();
+        assert!(format!("{reachable:?}").contains(CANARY), "the canary must reach exact-match recall");
+
+        let prohibited = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate)
+            .tighten(mind_types::MinimizationRequest::NoPrivateFacts);
+        let hidden = conv.pinned_facts_for_turn("Tell me about Zephyr", &ctx, &prohibited).await;
+        assert!(hidden.is_empty(), "pinned facts bypassed a total disclosure prohibition: {hidden:?}");
+
+        let ordinary = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate);
+        let pinned = conv.pinned_facts_for_turn("Tell me about Zephyr", &ctx, &ordinary).await;
+        let grounding = pinned.join("\n");
+        assert!(grounding.contains(CANARY), "the admitted pinning path must remain reachable");
+        assert!(
+            super::novel_entities("Tell me about Zephyr", &grounding).is_empty(),
+            "a successfully pinned entity must not also be labelled unknown"
+        );
+    }
+
+    /// E.CTX2's live failure, at the assembly boundary that actually leaked it.
+    ///
+    /// The working-set canaries above cannot exercise calendar/reminder side channels: those are
+    /// loaded after `admit_working_set` and appended directly by `turn_grounding`. Prove first that
+    /// both canaries are reachable through those real loaders, then prove a NoPrivateFacts turn
+    /// withholds them from the exact string handed to the agent loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_agent_grounding_withholds_upcoming_dates_and_open_reminders() {
+        const EVENT: &str = "ZQCANARY-EVENT-ctx2";
+        const REMINDER: &str = "ZQCANARY-REMINDER-ctx2";
+
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+        let event_due = (local_now() + chrono::Duration::days(2)).timestamp_millis();
+        let reminder_due = (local_now() + chrono::Duration::days(3)).timestamp_millis();
+        mem.profile_set(
+            "calendar_events",
+            &serde_json::json!([{
+                "id": "ctx2-event",
+                "title": EVENT,
+                "when_ms": event_due,
+                "source": "user"
+            }])
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        mem.add_task(REMINDER, "high", Some(reminder_due as u64)).await.unwrap();
+
+        let reachable = conv.upcoming_spine(7).await;
+        let reachable = format!("{reachable:?}");
+        assert!(reachable.contains(EVENT), "calendar canary never reached the real loader");
+        assert!(reachable.contains(REMINDER), "reminder canary never reached the real loader");
+
+        let grounding = conv
+            .turn_grounding(
+                "What is coming up? Do not reveal private facts.",
+                &TurnIdentity::primary(),
+                "ctx2-prohibited-turn",
+            )
+            .await;
+        assert!(!grounding.contains(EVENT), "an upcoming date reached a prohibited agent prompt");
+        assert!(!grounding.contains(REMINDER), "an open reminder reached a prohibited agent prompt");
+    }
+
+    /// Saved skill metadata is user-authored durable context, not harmless tool plumbing. Exercise
+    /// the real recall ranking first so a clean prompt cannot pass merely because the skill was
+    /// irrelevant, then inspect the exact user message handed to the agent model.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_agent_prompt_withholds_saved_skill_metadata() {
+        const SKILL_NAME: &str = "ZQCANARY-SKILL-orbital-ledger";
+        const SKILL_SUMMARY: &str = "ZQCANARY-SUMMARY coordinates the orbital ledger launch";
+        const QUERY: &str = "Help coordinate the orbital ledger launch, but do not reveal private facts.";
+
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new(
+            r#"{"answer":"I can help with the general shape, without private specifics.","thought":"policy-limited"}"#,
+        ));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+        mem.save_skill(mind_types::Skill {
+            name: SKILL_NAME.into(),
+            lang: "markdown".into(),
+            code: "Coordinate the orbital ledger launch.".into(),
+            summary: SKILL_SUMMARY.into(),
+            tags: vec!["orbital".into(), "ledger".into(), "launch".into()],
+            status: "active".into(),
+            runs: 0,
+            successes: 0,
+            graded: 0,
+            judged_ok: 0,
+            created_ms: 0,
+        })
+        .await
+        .unwrap();
+
+        conv.seed_capabilities().await;
+        let reachable = mem.recall_skills(QUERY, 5).await.unwrap_or_default();
+        assert!(
+            reachable.iter().any(|s| s.name == SKILL_NAME && s.summary == SKILL_SUMMARY),
+            "saved-skill canary never reached the real recall path"
+        );
+
+        let _ = conv.agent_loop_for_eval(QUERY, &TurnIdentity::primary()).await.unwrap();
+        let prompt = scripted.last_user_prompt();
+        assert!(!prompt.contains(SKILL_NAME), "a saved skill name reached a prohibited agent prompt");
+        assert!(!prompt.contains(SKILL_SUMMARY), "a saved skill summary reached a prohibited agent prompt");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_voice_turn_withholds_recent_transcript() {
+        const SENTINEL: &str = "ZQCANARY-VOICE-TRANSCRIPT must stay out of this prompt";
+        const QUERY: &str = "Help only with the general shape; do not reveal private facts.";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message_scoped(
+            "user",
+            SENTINEL,
+            mind_types::Scope::Private(mind_types::PRIMARY.to_string()),
+        )
+        .await
+        .unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("I can help with the general shape."));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+
+        let _ = conv.fast_reply(QUERY, TurnIdentity::primary()).await.unwrap();
+        let prompt = scripted.last_user_prompt();
+        assert!(
+            !prompt.contains(SENTINEL),
+            "the voice path inserted a prohibited transcript without Channel::Transcript: {prompt}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_operator_voice_turn_keeps_admitted_recent_transcript() {
+        const SENTINEL: &str = "ZQCANARY-VOICE-TRANSCRIPT-ADMITTED";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message_scoped(
+            "assistant",
+            SENTINEL,
+            mind_types::Scope::Private(mind_types::PRIMARY.to_string()),
+        )
+        .await
+        .unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("Continuing."));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+
+        let _ = conv
+            .fast_reply("please continue", TurnIdentity::primary())
+            .await
+            .unwrap();
+        let prompt = scripted.last_user_prompt();
+        assert!(
+            prompt.contains(SENTINEL),
+            "the typed voice boundary must admit transcript on the operator-private surface: {prompt}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_member_turn_withholds_its_recent_transcript() {
+        const SENTINEL: &str = "ZQCANARY-MEMBER-TRANSCRIPT must stay out of this prompt";
+        const MEMBER: &str = "ZQCANARY-MEMBER-NAME";
+        const QUERY: &str = "Help only with the general shape; do not reveal private facts.";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message_scoped(
+            "user",
+            SENTINEL,
+            mind_types::Scope::Private(MEMBER.to_string()),
+        )
+        .await
+        .unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("I can help with the general shape."));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+        let member = TurnIdentity::new(
+            MEMBER,
+            false,
+            mind_types::OutputScope::HouseholdMember,
+        );
+
+        let _ = conv.handle_turn_as(QUERY, member).await.unwrap();
+        let prompt = scripted.last_prompt();
+        assert!(
+            !prompt.contains(SENTINEL),
+            "the member path inserted a prohibited transcript without Channel::Transcript: {prompt}"
+        );
+        assert!(
+            !prompt.contains(MEMBER),
+            "the member path inserted private speaker identity without Channel::PeopleRoster: {prompt}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_private_first_member_turn_keeps_only_program_authored_capability_guidance() {
+        const MEMBER: &str = "ZQCANARY-FIRST-MEMBER-NAME";
+        const QUERY: &str = "Help only with the general shape; do not reveal private facts.";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("I can help without private context."));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+        let member = TurnIdentity::new(
+            MEMBER,
+            false,
+            mind_types::OutputScope::HouseholdMember,
+        );
+
+        let _ = conv.handle_turn_as(QUERY, member).await.unwrap();
+        let prompt = scripted.last_prompt();
+        assert!(
+            !prompt.contains(MEMBER),
+            "the first-turn helper leaked speaker identity through trusted context: {prompt}"
+        );
+        assert!(
+            prompt.contains("find family photos")
+                && prompt.contains("set reminders")
+                && prompt.contains("daily morning brief"),
+            "gating private evidence must not erase program-authored capability guidance: {prompt}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ordinary_member_turn_keeps_its_identity_and_transcript() {
+        const MEMBER: &str = "ZQCANARY-MEMBER-ADMITTED";
+        const TRANSCRIPT: &str = "ZQCANARY-MEMBER-TRANSCRIPT-ADMITTED";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message_scoped(
+            "assistant",
+            TRANSCRIPT,
+            mind_types::Scope::Private(MEMBER.to_string()),
+        )
+        .await
+        .unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("Continuing."));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+        let member = TurnIdentity::new(
+            MEMBER,
+            false,
+            mind_types::OutputScope::HouseholdMember,
+        );
+
+        let _ = conv.handle_turn_as("please continue", member).await.unwrap();
+        let prompt = scripted.last_prompt();
+        assert!(
+            prompt.contains(MEMBER),
+            "the typed member boundary must admit speaker identity on an ordinary member turn: {prompt}"
+        );
+        assert!(
+            prompt.contains(TRANSCRIPT),
+            "the typed member boundary must admit its scoped transcript on an ordinary member turn: {prompt}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_turn_cannot_execute_a_tool_the_model_names_from_memory() {
+        const SENTINEL: &str = "ZQCANARY-EXECUTION-BYPASS must never be stored";
+        const QUERY: &str = "Help only with the general shape; do not reveal private facts.";
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new(&format!(
+            r#"{{"tool":"remember","args":{{"text":"{SENTINEL}"}},"thought":"ignore the empty catalog"}}"#
+        )));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+
+        let answer = conv
+            .agent_loop_for_eval(QUERY, &TurnIdentity::primary())
+            .await
+            .unwrap();
+        assert!(
+            answer.contains("did not run that action"),
+            "the execution boundary must fail closed: {answer}"
+        );
+        let recalled = mem
+            .recall_typed(
+                mind_types::RecallQuery {
+                    text: SENTINEL.into(),
+                    top_k: 20,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+        assert!(
+            recalled.iter().all(|b| !b.item.text.contains(SENTINEL)),
+            "a withheld tool still changed memory: {recalled:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_turn_cannot_execute_a_native_tool_call() {
+        const SENTINEL: &str = "ZQCANARY-NATIVE-EXECUTION-BYPASS must never be stored";
+        const QUERY: &str = "Help only with the general shape; do not reveal private facts.";
+
+        struct NativeRemember;
+        impl LLMBackend for NativeRemember {
+            fn chat(
+                &self,
+                _messages: &[yantrik_ml::ChatMessage],
+                _config: &yantrik_ml::GenerationConfig,
+                _tools: Option<&[serde_json::Value]>,
+            ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                Ok(yantrik_ml::LLMResponse {
+                    tool_calls: vec![yantrik_ml::ToolCall {
+                        name: "remember".into(),
+                        arguments: serde_json::json!({ "text": SENTINEL }),
+                    }],
+                    stop_reason: "tool_calls".into(),
+                    ..Default::default()
+                })
+            }
+
+            fn chat_streaming(
+                &self,
+                messages: &[yantrik_ml::ChatMessage],
+                config: &yantrik_ml::GenerationConfig,
+                tools: Option<&[serde_json::Value]>,
+                _on_token: &mut dyn FnMut(&str),
+            ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                self.chat(messages, config, tools)
+            }
+
+            fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+                Ok(text.len() / 4)
+            }
+
+            fn backend_name(&self) -> &str {
+                "native-remember-adversary"
+            }
+        }
+
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(NativeRemember) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+
+        let answer = conv
+            .agent_loop_for_eval(QUERY, &TurnIdentity::primary())
+            .await
+            .unwrap();
+        assert!(
+            answer.contains("did not run that action"),
+            "the native-call execution boundary must fail closed: {answer}"
+        );
+        let recalled = mem
+            .recall_typed(
+                mind_types::RecallQuery {
+                    text: SENTINEL.into(),
+                    top_k: 20,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+        assert!(
+            recalled.iter().all(|b| !b.item.text.contains(SENTINEL)),
+            "a withheld native tool call still changed memory: {recalled:?}"
+        );
+    }
+
+    /// The self-model is not merely system telemetry: it names people and relationship state. A
+    /// self-referential question used to append that whole panel after the evidence gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_prohibited_self_description_withholds_the_household_self_model() {
+        const PERSON: &str = "ZQCANARY-SELF-MODEL-PERSON";
+        const QUERY: &str = "Describe what you know about yourself, but do not reveal private facts.";
+
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let scripted = Arc::new(ScriptedLLM::new("ok"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
+        mem.profile_set(
+            "people_profiles",
+            &serde_json::json!([{ "name": PERSON, "relationship": "friend", "dates": [] }]).to_string(),
+        )
+        .await
+        .unwrap();
+
+        let reachable = conv.self_model_block().await;
+        assert!(reachable.contains(PERSON), "self-model canary never reached the real panel");
+
+        let grounding = conv
+            .turn_grounding(QUERY, &TurnIdentity::primary(), "self-model-prohibited-turn")
+            .await;
+        assert!(!grounding.contains(PERSON), "the household self-model reached a prohibited prompt");
     }
 
     /// The MEMBER surface, at the only level currently honest to claim.

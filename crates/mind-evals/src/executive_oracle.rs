@@ -30,14 +30,6 @@ impl Posture {
     }
 }
 
-/// Qualitative fixture costs (0=none .. 3=severe). NOT collapsed into one scalar yet (#5).
-#[derive(Clone, Copy)]
-pub struct Costs {
-    pub interrupt: u8,
-    pub execution: u8,
-    pub risk: u8,
-}
-
 #[derive(Clone)]
 pub struct Situation {
     pub id: &'static str,
@@ -48,8 +40,6 @@ pub struct Situation {
     /// Hand-authored ground-truth expected cost of each posture [ignore, monitor, act] (#13).
     pub outcomes: [u8; 3],
     pub window_open: bool,
-    pub conflicted_input: bool,
-    pub stale_or_resolved: bool,
     pub commitment_minutes: Option<i64>,
     pub resource_block: Option<&'static str>,
     pub user_in_meeting: bool,
@@ -63,8 +53,8 @@ impl Default for Situation {
     fn default() -> Self {
         Situation {
             id: "?", family: "?", facts: "", want: Posture::Monitor, reason: "",
-            outcomes: [3, 1, 3], window_open: true, conflicted_input: false,
-            stale_or_resolved: false, commitment_minutes: None, resource_block: None,
+            outcomes: [3, 1, 3], window_open: true,
+            commitment_minutes: None, resource_block: None,
             user_in_meeting: false, requires_user_interrupt: false, late_recovery: false,
             candidates: &[],
         }
@@ -136,7 +126,7 @@ fn situations() -> Vec<Situation> {
         let mut sit = s(id, "G-curve", "outdoor event; weak rain signal; renewal-style preparation task", want, reason, out);
         sit.requires_user_interrupt = interrupt;
         sit.late_recovery = late;
-        sit.window_open = !late || true; // window state carried in facts
+        sit.window_open = !late;
         let _ = days;
         v.push(sit);
     };
@@ -200,7 +190,7 @@ fn situations() -> Vec<Situation> {
     let mut late = s("alice_friday_passed_no_doc", "L-wait",
         "Friday end of day; document still missing; dependency meeting already started prep",
         Posture::Act, "late recovery; escalate differently", [3, 2, 1]);
-    late.late_recovery = true; late.requires_user_interrupt = true;
+    late.late_recovery = true; late.window_open = false; late.requires_user_interrupt = true;
     v.push(late);
     v
 }
@@ -229,17 +219,37 @@ async fn probe(mem: &MemoryHandle, sit: &Situation) -> ProbeDecision {
 fn self_check(sits: &[Situation]) -> usize {
     let mut errs = 0;
     for sit in sits {
+        if sit.id == "?" || sit.family == "?" || sit.facts.trim().is_empty() || sit.reason.trim().is_empty() {
+            println!("ORACLE_ERROR {} has incomplete fixture metadata", sit.id);
+            errs += 1;
+        }
+        if sit.outcomes.iter().any(|cost| *cost > 3) {
+            println!("ORACLE_ERROR {} has an outcome cost outside 0..=3: {:?}", sit.id, sit.outcomes);
+            errs += 1;
+        }
         let min = sit.outcomes.iter().min().copied().unwrap();
         if sit.outcomes[sit.want as usize] > min {
             println!("ORACLE_ERROR {} want={:?} not outcome-minimal {:?}", sit.id, sit.want, sit.outcomes);
             errs += 1;
         }
-        if sit.want == Posture::Act && (!sit.window_open || sit.outcomes[0] <= sit.outcomes[2]) {
+        if sit.late_recovery && sit.window_open {
+            println!("ORACLE_ERROR {} marks recovery while the original window is open", sit.id);
+            errs += 1;
+        }
+        if sit.want == Posture::Act
+            && ((!sit.window_open && !sit.late_recovery) || sit.outcomes[0] <= sit.outcomes[2])
+        {
             println!("ORACLE_ERROR {} ACT lacks open-window/cost justification", sit.id);
             errs += 1;
         }
     }
     errs
+}
+
+#[test]
+fn executive_fixture_truth_is_internally_consistent() {
+    let sits = situations();
+    assert_eq!(self_check(&sits), 0, "executive oracle fixtures must be coherent before scoring");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -268,7 +278,7 @@ async fn phase3b_red_executive_baseline() {
         }
     }
 
-    let mut matrix = [[0usize; 4]; 4]; // rows actual I/M/A, cols predicted I/M/A/UNREP
+    let mut matrix = [[0usize; 4]; 3]; // rows actual I/M/A, cols predicted I/M/A/UNREP
     let idx = |p: Posture| p as usize;
     for (_id, want, got) in &decisions {
         let g = match got {
@@ -306,8 +316,8 @@ async fn phase3b_red_executive_baseline() {
     println!("  IGNORE   precision {itp}/{} recall {}/{}", itp + ifp, itp, recall(Posture::Ignore));
     println!("  correct_silence={correct_silence} unnecessary_action={unnecessary_action} missed_intervention={missed_intervention}");
     println!("  confusion (rows=actual I/M/A, cols=pred I/M/A/UNREPRESENTABLE):");
-    for (i, r) in matrix.iter().enumerate() {
-        println!("    {:?}: {:?}  total={}", ["I", "M", "A", "UNREP"][i], r, r.iter().sum::<usize>());
+    for (posture, row) in [Posture::Ignore, Posture::Monitor, Posture::Act].into_iter().zip(&matrix) {
+        println!("    {}: {:?}  total={}", posture.name(), row, row.iter().sum::<usize>());
     }
     println!("  capability verification: executive choice abstraction ABSENT; central arbitration ABSENT;");
     println!("    silence credit ABSENT; monitor semantics ABSENT; cross-organ prioritization ABSENT;");

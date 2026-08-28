@@ -12,8 +12,6 @@
 //! that must yield. What is not yet instrumented is SAID, not smoothed over —
 //! a silent gap reads as "covered" when it isn't.
 
-use super::*;
-
 /// The turn-level reward channel: two counters, deliberately never a ratio —
 /// tacit acceptance is weaker evidence than an explicit correction, and a
 /// quotient would launder that asymmetry away.

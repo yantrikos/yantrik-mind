@@ -418,11 +418,7 @@ impl super::ConversationEngine {
                     continue;
                 }
                 let nml = nm.to_lowercase();
-                if ql.contains(&nml) {
-                    src_idx = Some(i);
-                    person_ids.push(p.id.clone());
-                    names.push(nm);
-                } else if wants_self && !self_name.is_empty() && nml == self_name {
+                if ql.contains(&nml) || (wants_self && !self_name.is_empty() && nml == self_name) {
                     src_idx = Some(i);
                     person_ids.push(p.id.clone());
                     names.push(nm);
@@ -486,7 +482,6 @@ impl super::ConversationEngine {
         // DATE-ANCHOR MEMORY (Pranab's insight): successful finds taught us WHEN things happened
         // ("wedding" → 2016-03). Widen the pool with that date window so "another one" has real
         // neighbors to draw from, not just the same CLIP top hits.
-        let mut cands = cands;
         if !desc.is_empty() {
             let anchors = self.photo_anchors().await;
             for w in desc.split_whitespace().filter(|w| w.len() >= 4) {
@@ -552,7 +547,7 @@ impl super::ConversationEngine {
             }
             chosen = hit;
         } else {
-            let n = cands.len().min(12).max(1);
+            let n = cands.len().clamp(1, 12);
             let pick = (chrono::Utc::now().timestamp_millis() as usize) % n;
             chosen = cands.get(pick);
             if let Some(a) = chosen {
@@ -1115,7 +1110,7 @@ impl super::ConversationEngine {
                 // ORGANIZE (default): file into auto-albums.
                 _ => {
                     let albums = im.list_albums().await.unwrap_or_default();
-                    let mut get_album = |name: &str| albums.iter().find(|(_, n)| n == name).map(|(i, _)| i.clone());
+                    let get_album = |name: &str| albums.iter().find(|(_, n)| n == name).map(|(i, _)| i.clone());
                     let shots_album = match get_album("📱 Screenshots (auto)") {
                         Some(a) => Some(a),
                         None => im.create_album("📱 Screenshots (auto)").await,

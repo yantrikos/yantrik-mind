@@ -362,7 +362,7 @@ async fn phase3a_red_baseline() {
         let got = probe(&mem, x).await;
         let verdict = match (&x.want, got) {
             (_, "UNREPRESENTABLE") => "FAIL:UNREPRESENTABLE",
-            (Val::Known(v), "FOUND_VIA_RECALL_BUT_NO_STATE_SEMANTICS") => {
+            (Val::Known(_), "FOUND_VIA_RECALL_BUT_NO_STATE_SEMANTICS") => {
                 // Recall proves memory-of-statement, not current-state semantics; still counts
                 // against precision-first because validity/conflict/stale cuts are absent.
                 "WEAK:RECALL_ONLY"
@@ -611,6 +611,7 @@ async fn phase3a_red_baseline() {
             ("dns.api-endpoint", "record", Val::Stale("203.0.113.10"))]),
         ("t4_compound_kill", day(26, 12), vec![
             ("alice.document", "status", Val::Conflicted(&["promised-by-Wednesday", "sent-yesterday", "attachment-uploaded"])),
+            ("rx.metformin", "refill", Val::Expired),
             ("visa_status", "attr", Val::Unknown), ("trip_ready", "attr", Val::Unknown), ("travel.dossier", "attr", Val::Unknown)]),
         ("t5_paid", day(27, 11), vec![
             ("expense.april", "status", Val::Known("paid")), ("travel.dossier", "attr", Val::Known("complete")),

@@ -457,7 +457,7 @@ impl Capsule {
     /// breaks.
     pub fn render(&self, max_chars: usize) -> String {
         let mut s = String::with_capacity(max_chars.min(4096));
-        let mut push = |section: String, s: &mut String| {
+        let push = |section: String, s: &mut String| {
             if s.len() + section.len() <= max_chars {
                 s.push_str(&section);
             }

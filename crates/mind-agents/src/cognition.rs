@@ -126,7 +126,10 @@ impl Cognition {
         let mut trace: Vec<Step> = Vec::new();
         let mut next_evidence = 1u32;
         let mut escalated = false;
-        let mut stopped_because = None;
+        // Every exit from the control loop assigns a concrete reason before breaking. Leave this
+        // uninitialized until that boundary so an impossible reasonless stop cannot masquerade as
+        // an ordinary `None` outcome.
+        let stopped_because: Option<ReasonCode>;
         let mut question = None;
         let mut delivered: Option<String> = None;
 

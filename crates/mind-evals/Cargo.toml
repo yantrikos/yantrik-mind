@@ -3,6 +3,12 @@ name = "mind-evals"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Expose the sealed-pack fixture builder outside unit tests and forward the capability to the
+# memory crate that implements it. Without this declaration, `--features fixtures` was impossible
+# even though the public fixture API was cfg-gated for exactly that use.
+fixtures = ["mind-memory/fixtures"]
+
 [dependencies]
 mind-types = { workspace = true }
 # The live router split is grown FROM the flight recorder (E.PK3d), so the harness reads it.

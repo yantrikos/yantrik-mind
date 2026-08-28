@@ -244,12 +244,18 @@ pub enum Channel {
     /// The tool catalogue and schemas — a channel because a model that can CALL recall can pull
     /// what a filter withheld.
     ToolSurface,
+    /// Names and summaries of user-banked skills. These are durable user-authored context even
+    /// when the executable tool catalogue itself is withheld.
+    SavedSkills,
     /// A fetched web page. Public by construction.
     WebPage,
     /// Mounted-pack knowledge: a labelled third-party publisher's claims, not the household's.
     PackContext,
     /// The MIND's own degraded-state note. About itself, not about the user.
     MetacogNote,
+    /// The self-description instrument panel. Despite its name it includes household profile names,
+    /// relationship state, recent corrections, and tracked topics.
+    SelfModel,
     /// The next-7-days time spine: calendar entries and people's dates, by NAME (E.CTX2).
     ///
     /// Found by Codex reviewing E.CTX1, not by me and not by a probe. It was appended to grounding
@@ -284,6 +290,8 @@ impl OutputPolicy {
             | Channel::Contradictions
             | Channel::RelationshipLens
             | Channel::ToolSurface
+            | Channel::SavedSkills
+            | Channel::SelfModel
             | Channel::UpcomingDates
             | Channel::OpenReminders => names_anything,
 
@@ -898,5 +906,35 @@ mod tests {
         assert!(no_examples.may_name(EntityClass::Task), "declining EXAMPLES is not declining to name anything");
         assert!(!no_private.may_name(EntityClass::Task), "declining private facts empties the classes");
         assert!(no_private.max_evidence_items <= no_examples.max_evidence_items);
+    }
+
+    #[test]
+    fn channel_admission_distinguishes_household_evidence_from_non_household_context() {
+        let no_private = OutputPolicy::for_scope(OutputScope::OperatorPrivate)
+            .tighten(MinimizationRequest::NoPrivateFacts);
+        for channel in [
+            Channel::Grounding,
+            Channel::Transcript,
+            Channel::MailDigest,
+            Channel::GithubDigest,
+            Channel::ScratchNotes,
+            Channel::PeopleRoster,
+            Channel::ConversationSummary,
+            Channel::Contradictions,
+            Channel::RelationshipLens,
+            Channel::ToolSurface,
+            Channel::SavedSkills,
+            Channel::SelfModel,
+            Channel::UpcomingDates,
+            Channel::OpenReminders,
+        ] {
+            assert!(!no_private.admits(channel), "{channel:?} survived a total prohibition");
+        }
+        for channel in [Channel::WebPage, Channel::PackContext, Channel::MetacogNote] {
+            assert!(
+                no_private.admits(channel),
+                "{channel:?} is deliberately non-household context and should remain usable"
+            );
+        }
     }
 }

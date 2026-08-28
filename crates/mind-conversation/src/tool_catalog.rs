@@ -79,6 +79,7 @@ pub(crate) fn tool_name_of_line(line: &str) -> Option<&str> {
 /// `tool_name_of_line` requires the leading "- " and so only ever sees the first tool on a line;
 /// a fragment after a `·` has no dash. Both readings are needed: the gate scores whole lines, while
 /// schema generation and any "is this tool advertised?" question must see every name.
+#[cfg(test)]
 pub(crate) fn tool_name_of_line_in_fragment(fragment: &str) -> Option<&str> {
     let body = fragment.trim().strip_prefix("- ").unwrap_or(fragment.trim());
     let name = body.split([' ', '{', ':']).next().unwrap_or("");

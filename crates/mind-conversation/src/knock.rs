@@ -53,6 +53,7 @@ impl KnockReply {
 }
 
 /// The coarse confidence bands. Nothing between these may be spoken.
+#[cfg(test)]
 pub(crate) const BANDS: [u8; 3] = [60, 75, 90];
 
 /// Snap a predicted engagement probability to a speakable band, or `None` when it is below the bar

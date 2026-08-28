@@ -115,6 +115,7 @@ impl Snapshot {
 
 /// Compare two snapshots. Returns None when either side lacks a usable scalar — an honest "cannot
 /// tell" rather than a comforting zero.
+#[cfg(test)]
 pub(crate) fn delta(before: &Snapshot, after: &Snapshot) -> Option<f64> {
     Some(after.scalar()? - before.scalar()?)
 }

@@ -308,8 +308,11 @@ impl PurposeGrant {
             && now_ms < self.expires_ms
             && self.owner == *owner
             && self.beneficiary == purpose.serves
-            && self.class.map_or(sensitivity != Sensitivity::Credentials, |c| c == sensitivity)
-            && self.activity.map_or(true, |a| a == purpose.activity)
+            && match self.class {
+                Some(class) => class == sensitivity,
+                None => sensitivity != Sensitivity::Credentials,
+            }
+            && self.activity.is_none_or(|a| a == purpose.activity)
     }
 }
 

@@ -863,7 +863,6 @@ mod tests {
     #[test]
     fn the_extractor_lifts_live_queries_without_touching_them() {
         use mind_observability::{DecisionEvent, DecisionLog};
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = mind_types::scratch::dir("pk3d");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

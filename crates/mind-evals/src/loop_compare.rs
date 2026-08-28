@@ -48,13 +48,13 @@ pub async fn run_pairs(pairs: &[LoopPair]) -> Vec<PairOutcome> {
 
 /// The side-by-side scoreboard, one row per pair.
 pub fn render(rows: &[PairOutcome]) -> String {
-    let mut s = String::from(format!(
+    let mut s = format!(
         "{:<44} {:>16} {:>16}\n{}\n",
         "scenario",
         "legacy",
         "cognitive",
         "-".repeat(78)
-    ));
+    );
     let (mut lp, mut lt, mut lc, mut cp, mut ct, mut cc) = (0, 0, 0, 0, 0, 0);
     for r in rows {
         s.push_str(&format!(

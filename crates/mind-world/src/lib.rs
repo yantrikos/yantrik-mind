@@ -275,7 +275,7 @@ impl WorldLog {
             }
         }
         let mut relevant: Vec<&WorldTransition> = self
-                .transitions()
+            .transitions()
             .iter()
             .filter(|t| {
                 t.entity == entity
@@ -287,10 +287,9 @@ impl WorldLog {
         if relevant.is_empty() {
             return StateAt::Unknown;
         }
-                relevant.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
-        match relevant.last().unwrap().kind {
-            Kind::Expire => return StateAt::Expired,
-            _ => {}
+        relevant.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
+        if relevant.last().unwrap().kind == Kind::Expire {
+            return StateAt::Expired;
         }
         // A SUPERSEDE at world-time T retires every earlier-occurred claim of this proposition,
         // WHATEVER source emitted it - otherwise a stale email from the same source as the
@@ -309,7 +308,7 @@ impl WorldLog {
             std::collections::HashMap::new();
         for t in &relevant {
             let e = latest_action.entry(t.source_id.as_str()).or_insert(t);
-            if (t.occurred_at, t.recorded_seq) >= ((*e).occurred_at, (*e).recorded_seq) {
+            if (t.occurred_at, t.recorded_seq) >= (e.occurred_at, e.recorded_seq) {
                 *e = t;
             }
         }
@@ -423,6 +422,7 @@ mod w1_tests {
     }
 }
 
+#[cfg(test)]
 fn wev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, val: &str) -> WorldEvent {
     WorldEvent {
         source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
@@ -430,7 +430,9 @@ fn wev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, val: &str) -> WorldE
         entity: ent.into(), attr: "status".into(), value: val.into(),
     }
 }
+#[cfg(test)]
 fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
+#[cfg(test)]
 const D: i64 = 86_400_000;
 
 #[cfg(test)]
@@ -506,15 +508,20 @@ mod w3_tests {
     /// 3. STALENESS is bi-temporal: judged against known_at, never wall clock.
     #[test]
     fn staleness_is_judged_from_the_querys_knowledge_time() {
-        let log = WorldLog::new().with_freshness_ms(48 * 3_600_000);
         let observed = base(10);
-        let log = WorldLog::replay(&[wev("api:wx", Kind::Assert, observed, observed, "weather.thursday", "rain")]);
-        // Fresh at known_at = T+47h; stale at T+49h — same fact, different knowledge cuts.
+        // Use a NON-DEFAULT horizon so the test proves `with_freshness_ms` is actually carried by
+        // the queried log. The old test configured one log, shadowed it with `replay`, then passed
+        // only because replay's default happened to equal the asserted 48-hour boundary.
+        let log = WorldLog::replay(&[
+            wev("api:wx", Kind::Assert, observed, observed, "weather.thursday", "rain"),
+        ])
+        .with_freshness_ms(36 * 3_600_000);
+        // Fresh at known_at = T+35h; stale at T+37h — same fact, different knowledge cuts.
         assert_eq!(
-            log.state_at("weather.thursday", "status", &q(observed + 47 * 3_600_000, observed + 47 * 3_600_000)),
+            log.state_at("weather.thursday", "status", &q(observed + 35 * 3_600_000, observed + 35 * 3_600_000)),
             StateAt::Known("rain".into())
         );
-        match log.state_at("weather.thursday", "status", &q(observed + 49 * 3_600_000, observed + 49 * 3_600_000)) {
+        match log.state_at("weather.thursday", "status", &q(observed + 37 * 3_600_000, observed + 37 * 3_600_000)) {
             StateAt::Stale { value, last_verified } => {
                 assert_eq!((value.as_str(), last_verified), ("rain", observed));
             }

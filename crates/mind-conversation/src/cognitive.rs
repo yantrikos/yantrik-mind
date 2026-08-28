@@ -44,6 +44,17 @@ impl EngineBus {
         self.trace_root.lock().unwrap().clone()
     }
 
+    fn tool_surface_allowed(&self, fallback_goal: &str) -> bool {
+        let request = if self.user_text.is_empty() {
+            fallback_goal
+        } else {
+            &self.user_text
+        };
+        self.identity
+            .output_policy(request)
+            .admits(mind_types::Channel::ToolSurface)
+    }
+
     /// Carry the user's literal request so per-call guards can distinguish "the user typed this
     /// value" from "the model injected it".
     pub fn for_turn(mut self, user_text: &str) -> Self {
@@ -82,6 +93,9 @@ impl Bus for EngineBus {
     /// The relevance-gated catalog for this goal — the same one the legacy loop sees, so the two
     /// paths cannot disagree about what tools exist.
     fn catalog(&self, goal: &str) -> String {
+        if !self.tool_surface_allowed(goal) {
+            return String::new();
+        }
         let src = self.engine.catalog_source();
         let (detailed, tail) = tool_catalog::gate_catalog(goal, &src);
         if tail.is_empty() {
@@ -121,6 +135,19 @@ impl Bus for EngineBus {
     }
 
     async fn call(&self, tool: &str, args: &Value) -> anyhow::Result<String> {
+        // The catalog is discovery, not authority. A planner can retain a tool name from an earlier
+        // turn or its training even when this turn's catalog is empty, so execution re-checks the
+        // typed policy before prediction, logging, guards, or dispatch.
+        if self.user_text.trim().is_empty() {
+            anyhow::bail!(
+                "tool execution requires a bound user request; construct the bus with for_turn"
+            );
+        }
+        if !self.tool_surface_allowed("") {
+            anyhow::bail!(
+                "tools and private memory are withheld for this privacy-restricted turn"
+            );
+        }
         // ── THE CLOSED LEARNING CHAIN, one tool call wide (Phase-2 §2). ────────────────────────
         // PREDICTION first — from the EMPIRICAL PRIOR only: the tool's own measured track record
         // (the bandit's Beta(1,1)-smoothed posterior). The model's confidence is NOT consulted
@@ -828,13 +855,61 @@ mod tests {
         assert!(cat.contains("OTHER TOOLS"), "the name-only tail must survive:\n{cat}");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_privacy_restricted_bus_hides_and_refuses_even_a_remembered_tool() {
+        const QUERY: &str = "Help with the shape, but do not reveal private facts.";
+        const SENTINEL: &str = "ZQCANARY-COGNITIVE-EXECUTION must never be stored";
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary()).for_turn(QUERY);
+
+        assert!(
+            bus.catalog(QUERY).is_empty(),
+            "a prohibited cognitive turn must expose no tool surface"
+        );
+        let result = bus
+            .call("remember", &serde_json::json!({ "text": SENTINEL }))
+            .await;
+        assert!(
+            matches!(&result, Err(e) if e.to_string().contains("withheld")),
+            "a tool name retained outside the catalog must still fail closed: {result:?}"
+        );
+        let recalled = mem
+            .recall_typed(
+                mind_types::RecallQuery {
+                    text: SENTINEL.into(),
+                    top_k: 20,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+        assert!(
+            recalled.iter().all(|b| !b.item.text.contains(SENTINEL)),
+            "the cognitive execution gate still changed memory: {recalled:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unbound_bus_refuses_tool_execution() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+
+        let result = bus.call("calc", &serde_json::json!({ "expr": "6*7" })).await;
+        assert!(
+            matches!(&result, Err(e) if e.to_string().contains("bound user request")),
+            "a future caller must not inherit tool authority from an empty fallback request: {result:?}"
+        );
+    }
+
     /// ONE definition of "worked" across both loops: the bus classifies with the same five-way
     /// `tool_outcome` the legacy loop uses. The old private boolean here counted "(no results)" as
     /// a failure — so five honest empty searches killed a cognitive run with "tools keep failing".
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_empty_result_is_not_a_failure_on_the_cognitive_path() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
+            .for_turn("exercise tool outcome classification");
         // discover_tools over a query nothing matches: the tool WORKED, the world was empty.
         let r = bus.call("discover_tools", &serde_json::json!({ "query": "zzqx warp drive" })).await;
         assert!(r.is_ok(), "an honest empty answer must not be classified as a break: {r:?}");
@@ -1141,7 +1216,8 @@ mod learning_chain_tests {
             )
             .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
         );
-        let bus = EngineBus::new(engine.clone(), TurnIdentity::primary());
+        let bus = EngineBus::new(engine.clone(), TurnIdentity::primary())
+            .for_turn("calculate 6 times 7");
         // The loop declares its run trace; every tool span must land UNDER it as children.
         Bus::declare_trace(&bus, "run-test");
 
@@ -1205,7 +1281,8 @@ mod learning_chain_tests {
             )
             .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
         );
-        let bus = EngineBus::new(engine, TurnIdentity::primary());
+        let bus = EngineBus::new(engine, TurnIdentity::primary())
+            .for_turn("show repository items for acme/x");
 
         let r = Bus::call(&bus, "github_repo_items", &serde_json::json!({ "repo": "acme/x" })).await;
         assert!(r.is_err(), "unconfigured capability must surface as a dead end");
@@ -1300,7 +1377,8 @@ mod goal_contribution_tests {
             ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
                 .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log))),
         );
-        let bus = EngineBus::new(eng.clone(), TurnIdentity::primary());
+        let bus = EngineBus::new(eng.clone(), TurnIdentity::primary())
+            .for_turn("exercise malformed-call handling");
         // The sentinel is a PIN-shaped number the model might have copied from the person.
         let r = bus.call("run_skill", &serde_json::json!({ "name": 447193, "target": 447193 })).await;
         assert!(matches!(r.as_deref(), Err(e) if e.to_string().starts_with("(malformed call")), "{r:?}");

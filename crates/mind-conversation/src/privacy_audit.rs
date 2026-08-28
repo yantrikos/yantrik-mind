@@ -255,6 +255,31 @@ mod tests {
         }
     }
 
+    /// An exception without a rationale is permission that cannot be reviewed. Keep the reason
+    /// machine-checked so future allowlist entries cannot silence the guard with an empty label.
+    #[test]
+    fn every_allowed_site_explains_why_it_is_safe() {
+        for site in ALLOWED_SITES {
+            assert!(site.file.contains("/src/"), "{}: use a crate-relative source path", site.file);
+            assert!(!site.shape.is_empty(), "{}: identify the exact call shape", site.file);
+            assert!(
+                site.why.len() > 60,
+                "{}: explain the safety invariant, not merely that the site is allowed",
+                site.file
+            );
+        }
+    }
+
+    fn has_channel_consumer(squashed_source: &str, variant: &str) -> bool {
+        ["admits", "grounding.push", "messages.evidence"]
+            .iter()
+            .any(|boundary| {
+                squashed_source.contains(&format!("{boundary}(Channel::{variant}"))
+                    || squashed_source
+                        .contains(&format!("{boundary}(mind_types::Channel::{variant}"))
+            })
+    }
+
     /// The audit must CATCH Household-by-another-name, and must not catch its siblings (E.SEC14).
     ///
     /// Codex asked for this as a permanent mutation test rather than the by-hand one I ran once.
@@ -361,10 +386,29 @@ mod tests {
             crates_dir().join("mind-types").join("src").join("output_scope.rs"),
         )
         .expect("output_scope.rs must be readable");
-        let conv_src = std::fs::read_to_string(
-            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
-        )
-        .expect("lib.rs must be readable");
+        let conv_dir = crates_dir().join("mind-conversation").join("src");
+        let mut conv_files = Vec::new();
+        rs_files(&conv_dir, &mut conv_files);
+        // `tests.rs` and this audit module are not prompt producers; letting their test-only
+        // references satisfy the inventory would turn the guard decorative again (and this module
+        // necessarily contains the banned needles it searches for). Inline comments are stripped
+        // for the same reason. All prompt-capable source modules are included so a new builder
+        // outside lib.rs cannot sit beyond the open-coding scan.
+        let conv_src = conv_files
+            .into_iter()
+            .filter(|path| {
+                !matches!(
+                    path.file_name().and_then(|n| n.to_str()),
+                    Some("tests.rs" | "privacy_audit.rs")
+                )
+            })
+            .map(|path| {
+                let body = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+                crate::source_audit::strip_comments(&body)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         // Every variant declared between `pub enum Channel {` and its closing brace.
         let body = types_src
@@ -381,27 +425,225 @@ mod tests {
             .collect();
         assert!(variants.len() >= 13, "expected the full channel inventory, found {variants:?}");
 
+        let squashed: String = conv_src.chars().filter(|c| !c.is_whitespace()).collect();
         for v in &variants {
             assert!(
-                conv_src.contains(&format!("Channel::{v}")),
-                "Channel::{v} is declared but NOTHING routes through it. A channel with no consumer \
-                 is decorative: the enum claims coverage the code does not have, and the exhaustive \
-                 match makes that look rigorous. Wire it at its insertion site or delete it."
+                has_channel_consumer(&squashed, v),
+                "Channel::{v} is declared but no production call routes it through an approved \
+                 typed insertion boundary. A bare enum reference is not a consumer: it can live in \
+                 an unrelated tuple or match and make the inventory look complete. Wire an admits, \
+                 GatedGrounding::push, or GatedPrompt::evidence boundary at its insertion site, or \
+                 delete the variant."
             );
         }
 
         // No open-coded gate, checked on SQUASHED source so a line break cannot hide one — which is
         // exactly how two survived the previous version of this test.
-        let squashed: String = crate::source_audit::strip_comments(&conv_src)
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
         for banned in ["letnames_anything=", "letprivate_channels=", ".entity_classes.is_empty()"] {
             assert!(
                 !squashed.contains(banned),
                 "an open-coded channel gate is back ({banned}). Every channel decision goes through \
                  `OutputPolicy::admits(Channel::…)` so the inventory test can see it; a local \
                  boolean or an inline policy build is invisible to both the compiler and this check."
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_channel_reference_cannot_fake_an_inventory_consumer() {
+        let variant = "SavedSkills";
+        assert!(!has_channel_consumer(
+            "letinventory=[mind_types::Channel::SavedSkills];",
+            variant
+        ));
+        assert!(has_channel_consumer(
+            "policy.admits(mind_types::Channel::SavedSkills)",
+            variant
+        ));
+        assert!(has_channel_consumer("policy.admits(Channel::SavedSkills)", variant));
+        assert!(has_channel_consumer(
+            "grounding.push(mind_types::Channel::SavedSkills,\"x\")",
+            variant
+        ));
+        assert!(has_channel_consumer(
+            "messages.evidence(Channel::SavedSkills,message)",
+            variant
+        ));
+    }
+
+    #[test]
+    fn the_agent_grounding_buffer_enforces_the_channel_at_insertion() {
+        let policy = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::AuditRedacted);
+        let mut grounding = crate::GatedGrounding::new(&policy);
+        grounding.push(mind_types::Channel::Grounding, "private");
+        grounding.push(mind_types::Channel::MetacogNote, "safe");
+        assert_eq!(grounding.finish(), "safe");
+    }
+
+    #[test]
+    fn a_withheld_voice_transcript_cannot_steer_a_followup_lookup() {
+        let policy = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::AuditRedacted);
+        let mut transcript = crate::GatedGrounding::new(&policy);
+        transcript.push(
+            mind_types::Channel::Transcript,
+            "assistant: Want me to pull the Nifty 50 to compare?",
+        );
+        let admitted = transcript.finish();
+        let resolver_context: Vec<String> = admitted.lines().map(str::to_string).collect();
+
+        assert!(admitted.is_empty(), "the transcript itself must be withheld");
+        assert!(
+            mind_tools::asked::symbols_with_context("yes please", &resolver_context).is_empty(),
+            "withheld transcript still steered a deterministic follow-up lookup"
+        );
+    }
+
+    #[test]
+    fn turn_grounding_has_no_untyped_append_escape_hatch() {
+        let lib = std::fs::read_to_string(
+            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+        )
+        .expect("lib.rs must be readable");
+        let body = lib
+            .split_once("async fn turn_grounding(")
+            .expect("turn_grounding must exist")
+            .1
+            .split_once("#[deny(unreachable_code)]")
+            .expect("agent_loop boundary must remain visible")
+            .0;
+        let squashed: String = crate::source_audit::strip_comments(body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            squashed.contains("letmutgrounding=GatedGrounding::new(&policy);"),
+            "turn_grounding must build through the typed insertion boundary"
+        );
+        for escape in ["grounding.push_str(", "grounding.rendered"] {
+            assert!(
+                !squashed.contains(escape),
+                "turn_grounding bypasses its typed insertion boundary via {escape}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_reply_has_no_untyped_grounding_escape_hatch() {
+        let lib = std::fs::read_to_string(
+            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+        )
+        .expect("lib.rs must be readable");
+        let body = lib
+            .split_once("pub async fn fast_reply(")
+            .expect("fast_reply must exist")
+            .1
+            .split_once("// ESCALATE RATHER THAN REFUSE.")
+            .expect("fast_reply generation boundary must remain visible")
+            .0;
+        let squashed: String = crate::source_audit::strip_comments(body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            squashed.contains("letmutgrounding=GatedGrounding::new(&policy);"),
+            "fast_reply must build voice evidence through the typed insertion boundary"
+        );
+        for escape in ["grounding.push_str(", "grounding.rendered"] {
+            assert!(
+                !squashed.contains(escape),
+                "fast_reply bypasses its typed insertion boundary via {escape}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_prompt_buffer_gates_evidence_but_keeps_trusted_context() {
+        let policy = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::AuditRedacted);
+        let mut prompt = crate::GatedPrompt::new(&policy, "persona");
+        prompt.trusted_system("policy");
+        prompt.evidence(mind_types::Channel::Grounding, yantrik_ml::ChatMessage::system("private"));
+        prompt.evidence(
+            mind_types::Channel::Grounding,
+            yantrik_ml::ChatMessage::user("private-user-role"),
+        );
+        prompt.evidence(
+            mind_types::Channel::Grounding,
+            yantrik_ml::ChatMessage::assistant("private-assistant-role"),
+        );
+        prompt.evidence(mind_types::Channel::WebPage, yantrik_ml::ChatMessage::system("public"));
+        let messages = prompt.finish("request");
+        let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(contents, ["persona", "policy", "public", "request"]);
+        assert_eq!(
+            roles,
+            ["system", "system", "system", "user"],
+            "trusted context and admitted evidence must remain upstream of the current user turn"
+        );
+    }
+
+    #[test]
+    fn build_prompt_has_no_untyped_message_escape_hatch() {
+        let lib = std::fs::read_to_string(
+            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+        )
+        .expect("lib.rs must be readable");
+        let body = lib
+            .split_once("fn build_prompt(")
+            .expect("build_prompt must exist")
+            .1
+            .split_once("/// Pull an explicitly-taught fact")
+            .expect("build_prompt boundary must remain visible")
+            .0;
+        let squashed: String = crate::source_audit::strip_comments(body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            squashed.contains("letmutmessages=GatedPrompt::new(policy,&self.persona);"),
+            "build_prompt must build through the typed message boundary"
+        );
+        for escape in ["messages.push(", "messages.messages"] {
+            assert!(
+                !squashed.contains(escape),
+                "build_prompt bypasses its typed message boundary via {escape}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_turn_has_no_untyped_message_escape_hatch() {
+        let members = std::fs::read_to_string(
+            crates_dir().join("mind-conversation").join("src").join("members.rs"),
+        )
+        .expect("members.rs must be readable");
+        let body = members
+            .split_once("pub(crate) async fn member_turn(")
+            .expect("member_turn must exist")
+            .1;
+        let squashed: String = crate::source_audit::strip_comments(body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            squashed.contains(
+                "letmutmessages=crate::GatedPrompt::new(&policy,&self.persona);"
+            ),
+            "member_turn must build through the typed message boundary"
+        );
+        assert_eq!(
+            squashed.matches(".chat_grounded(").count(),
+            1,
+            "member_turn must keep one auditable model boundary"
+        );
+        assert!(
+            squashed.contains(".chat_grounded(messages,cfg)"),
+            "member_turn must send only the prompt returned by GatedPrompt::finish"
+        );
+        for escape in ["messages.push(", "messages.messages", "chat_grounded(vec!["] {
+            assert!(
+                !squashed.contains(escape),
+                "member_turn bypasses its typed message boundary via {escape}"
             );
         }
     }

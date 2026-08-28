@@ -473,8 +473,12 @@ mod tests {
     }
 }
 
-pub mod world_oracle;
+// These red-oracle fixtures are executable tests, not part of the library API. Keeping them
+// test-only prevents the production crate from compiling dormant benchmark machinery.
+#[cfg(test)]
+mod world_oracle;
 
-pub mod executive_oracle;
+#[cfg(test)]
+mod executive_oracle;
 /// ARCH-6 P.3 — the coverage router's labelled corpus and its pre-registered bar (ledger E.PK3).
 pub mod coverage_oracle;

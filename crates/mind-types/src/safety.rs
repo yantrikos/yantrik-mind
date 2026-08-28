@@ -127,7 +127,10 @@ const CREDENTIAL_PHRASES: &[&str] = &[
 
 /// Is this byte offset the start of a token (rather than the middle of a word)?
 fn at_token_start(text: &str, at: usize) -> bool {
-    text[..at].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+    text[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
 }
 
 /// The maximal token beginning at `at`.
@@ -177,7 +180,7 @@ fn luhn_ok(digits: &str) -> bool {
         }
         sum += n;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Runs of digits that may be grouped with spaces or hyphens, as `(start, byte_len, digit_count)`.
@@ -454,14 +457,20 @@ impl ProvenanceCategory {
         !matches!(self, Self::Human)
     }
 
-    pub fn from_str(s: &str) -> Self {
+}
+
+impl std::str::FromStr for ProvenanceCategory {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "sandboxed_skill" => Self::SandboxedSkill,
-            "tool_result" => Self::ToolResult,
-            "sub_agent" => Self::SubAgent,
-            "web_content" => Self::WebContent,
-            "llm_inference" => Self::LlmInference,
-            _ => Self::Human,
+            "human" => Ok(Self::Human),
+            "sandboxed_skill" => Ok(Self::SandboxedSkill),
+            "tool_result" => Ok(Self::ToolResult),
+            "sub_agent" => Ok(Self::SubAgent),
+            "web_content" => Ok(Self::WebContent),
+            "llm_inference" => Ok(Self::LlmInference),
+            _ => Err("unknown provenance category"),
         }
     }
 }
@@ -484,7 +493,11 @@ mod tests {
         assert!(!ProvenanceCategory::SandboxedSkill.is_trusted());
         assert!(ProvenanceCategory::SubAgent.is_human_independent());
         assert!(!ProvenanceCategory::Human.is_human_independent());
-        assert_eq!(ProvenanceCategory::from_str(ProvenanceCategory::WebContent.as_str()), ProvenanceCategory::WebContent);
+        assert_eq!(
+            ProvenanceCategory::WebContent.as_str().parse::<ProvenanceCategory>(),
+            Ok(ProvenanceCategory::WebContent)
+        );
+        assert!("typoed_machine_source".parse::<ProvenanceCategory>().is_err());
     }
 }
 

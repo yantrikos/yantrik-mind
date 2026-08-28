@@ -23,7 +23,6 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -1060,7 +1059,6 @@ mod tests {
         // blamed multiple test binaries; the real cause was a stray `#[test]` this patch left
         // stacked on the function — Codex found it. The comment is corrected rather than removed
         // because the wrong diagnosis is the more useful half of the story.)
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = mind_types::scratch::dir("rec_once");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1100,7 +1098,6 @@ mod tests {
     /// honestly contain.
     #[test]
     fn durable_delivery_survives_corruption_forgery_and_concurrency() {
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = mind_types::scratch::dir("p4f");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1177,7 +1174,6 @@ mod tests {
     /// or re-writes an id it never saw land. This is that exact interleaving.
     #[test]
     fn a_warm_handle_cannot_write_over_what_another_handle_appended() {
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = mind_types::scratch::dir("p4g_warm");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1212,7 +1208,6 @@ mod tests {
     /// writer to a path now takes the same lock; the chain is the proof.
     #[test]
     fn ordinary_records_and_durable_deliveries_share_one_chain_under_contention() {
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = mind_types::scratch::dir("p4g_mix");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1257,7 +1252,6 @@ mod tests {
     /// so the handle that created the log and the next handle locked different things.
     #[test]
     fn a_handle_made_before_the_file_exists_shares_the_lock_with_one_made_after() {
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = mind_types::scratch::dir("p4g_key");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

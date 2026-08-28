@@ -74,14 +74,6 @@ struct Hit {
     len: usize,
 }
 
-/// Every kind present in one scalar. Never returns any part of it.
-fn kinds_of(text: &str) -> Vec<&'static str> {
-    let mut k: Vec<&'static str> = mind_types::sensitive_findings(text).iter().map(|f| f.kind.label()).collect();
-    k.sort_unstable();
-    k.dedup();
-    k
-}
-
 fn hits_of(path: &str, text: &str) -> Vec<Hit> {
     mind_types::sensitive_findings(text)
         .iter()

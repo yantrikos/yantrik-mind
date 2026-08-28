@@ -18,7 +18,6 @@ use mind_inference::{InferencePool, SequencedLLM};
 use mind_memory::MemoryHandle;
 use mind_spec::control::ReasonCode;
 use mind_spec::goal::{Budget, CompletionCriteria, Contract, GoalSpec, OutputContract};
-use mind_types::MemoryFacade;
 use yantrik_ml::LLMBackend;
 
 use crate::{CheckResult, ScenarioResult, Scorecard};
@@ -87,7 +86,9 @@ pub async fn run_cognition_scenario(s: &CognitionScenario) -> ScenarioResult {
             "WEBDOC: Teal is a cyan-family blue-green color.",
         ))),
     );
-    let bus = Arc::new(EngineBus::new(engine, TurnIdentity::primary()));
+    let bus = Arc::new(
+        EngineBus::new(engine, TurnIdentity::primary()).for_turn(&s.goal),
+    );
     let cognition = Cognition::new(pool.clone(), pool, bus, "JARVIS");
     let out = cognition.run(&goal_spec(s), &mind_types::clock::SystemClock).await;
 

@@ -25,7 +25,6 @@ use mind_types::{
 };
 
 use yantrikdb_core::belief::{BeliefRevisionConfig, Evidence as YEvidence};
-use yantrikdb_core::belief_query::BeliefPattern;
 use yantrikdb_core::contradiction::ContradictionConfig;
 use yantrikdb_core::state::{
     sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EpisodePayload,
@@ -5659,7 +5658,7 @@ mod tests {
     /// invariant every second channel depends on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn arch1_member_cannot_recover_primary_secret_via_any_read_path() {
-        use mind_types::{AccessContext, Scope};
+        use mind_types::Scope;
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
 
         // A secret only the primary should ever see, and a genuinely shared fact.

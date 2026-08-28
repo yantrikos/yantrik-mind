@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Yantrik</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g' cx='35%25' cy='30%25'%3E%3Cstop offset='0%25' stop-color='%23a78bfa'/%3E%3Cstop offset='100%25' stop-color='%230ea5e9'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='28' fill='url(%23g)'/%3E%3C/svg%3E">
+</head>
+<body>
+  <!-- Pairing (first-time registration) -->
+  <section id="pair-screen" class="screen hidden" aria-label="First-time registration">
+    <div class="pair-card glass">
+      <div class="orb big" aria-hidden="true"></div>
+      <h1>Yantrik</h1>
+      <p class="sub">This mind is not paired with a browser yet.<br>Enter the registration code from the installation output.</p>
+      <form id="pair-form" autocomplete="off">
+        <input id="pair-code" class="code-input" inputmode="latin" maxlength="9"
+               placeholder="XXXX-XXXX" spellcheck="false" aria-label="Registration code" required>
+        <input id="pair-name" class="name-input" maxlength="32"
+               placeholder="Name this device (e.g. study laptop)" aria-label="Device name">
+        <button id="pair-btn" type="submit">Register</button>
+      </form>
+      <p id="pair-error" class="error hidden" role="alert"></p>
+      <p class="hint">The code is single-use and printed once in the install log.<br>Wrong attempts lock registration for a while.</p>
+    </div>
+  </section>
+
+  <!-- Chat -->
+  <section id="chat-screen" class="screen hidden" aria-label="Conversation">
+    <header class="topbar glass">
+      <div class="identity">
+        <div class="orb" id="status-orb" aria-hidden="true"></div>
+        <div class="who">
+          <span class="mind-name">Yantrik</span>
+          <span class="mind-state" id="mind-state">at home · private by default</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="person-chip" id="person-chip" title="Who this device speaks as"></span>
+        <button id="clear-btn" class="ghost" title="Clear this browser's transcript">Clear</button>
+        <button id="logout-btn" class="ghost" title="Sign out on this browser">Sign out</button>
+      </div>
+    </header>
+
+    <main id="feed" class="feed" aria-live="polite"></main>
+
+    <footer class="composer-wrap">
+      <div class="composer glass">
+        <textarea id="input" rows="1" placeholder="Talk to the mind…" aria-label="Message"></textarea>
+        <button id="send-btn" title="Send (Enter)" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 11.5 21 3l-8.5 18-2.3-7.2L3 11.5z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <p class="finestone">memory-bearing · privacy-laned · every turn on the record</p>
+    </footer>
+  </section>
+
+  <script src="/app.js"></script>
+</body>
+</html>

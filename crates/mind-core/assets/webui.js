@@ -1,21 +1,25 @@
-// Yantrik web client. One rule above all others: MODEL OUTPUT IS HOSTILE INPUT. Nothing the mind
+// Mind web client. One rule above all others: MODEL OUTPUT IS HOSTILE INPUT. Nothing the mind
 // says ever reaches innerHTML — the markdown renderer below builds DOM nodes and assigns text via
-// textContent only, so a prompt-injected "<script>" arrives on screen as seven harmless glyphs.
+// textContent only. And one rule of identity: the UI never asserts the mind's name — it asks
+// (/api/me carries it, paired or not) and displays what the mind calls itself.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 const feed = $("feed");
 const input = $("input");
 const HDRS = { "Content-Type": "application/json", "X-YM-Web": "1" };
+let MIND = "the mind";
 
-/* ── boot: paired or not? ─────────────────────────────────────────────── */
+/* ── boot ─────────────────────────────────────────────────────────────── */
 async function boot() {
   try {
     const r = await fetch("/api/me", { headers: { "X-YM-Web": "1" } });
+    const me = await r.json().catch(() => ({}));
+    if (me.mind) setMindName(me.mind);
     if (r.ok) {
-      const me = await r.json();
       $("person-chip").textContent = me.person || "operator";
-      showChat();
+      if (!me.operator) hideOperatorPanels();
+      showApp();
       return;
     }
   } catch (_) { /* fall through to pairing */ }
@@ -23,14 +27,61 @@ async function boot() {
   $("pair-code").focus();
 }
 
-function showChat() {
+function setMindName(name) {
+  MIND = name;
+  document.title = name;
+  $("mind-name").textContent = name;
+  $("name-prompt").replaceChildren(
+    document.createTextNode("Paired. One more thing —"),
+    document.createElement("br"),
+    document.createTextNode(`what should ${name} call you?`)
+  );
+}
+
+function hideOperatorPanels() {
+  document.querySelectorAll('[data-panel="settings"], [data-panel="devices"]').forEach((n) => n.remove());
+}
+
+function showApp() {
   $("pair-screen").classList.add("hidden");
-  $("chat-screen").classList.remove("hidden");
+  $("app").classList.remove("hidden");
   restoreHistory();
+  refreshWelcome();
   input.focus();
 }
 
-/* ── pairing ──────────────────────────────────────────────────────────── */
+function refreshWelcome() {
+  const empty = history.length === 0;
+  $("welcome").classList.toggle("hidden", !empty);
+  if (!empty) return;
+  const h = new Date().getHours();
+  const part = h < 5 ? "night" : h < 12 ? "morning" : h < 17 ? "afternoon" : "evening";
+  $("welcome-line").textContent = `Good ${part}. ${MIND} is listening.`;
+  const sug = $("suggest");
+  sug.replaceChildren();
+  for (const s of ["What can you do?", "What do you remember about this household?", "What's on today?", "How do you keep things private?"]) {
+    const b = document.createElement("button");
+    b.textContent = s;
+    b.addEventListener("click", () => { input.value = s; sendTurn(); });
+    sug.appendChild(b);
+  }
+}
+
+/* ── panel navigation ─────────────────────────────────────────────────── */
+document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+    btn.classList.add("active");
+    $("panel-" + btn.dataset.panel).classList.add("active");
+    if (btn.dataset.panel === "capabilities") loadCapabilities();
+    if (btn.dataset.panel === "settings") loadSettings();
+    if (btn.dataset.panel === "devices") loadDevices();
+    if (btn.dataset.panel === "chat") input.focus();
+  });
+});
+
+/* ── pairing: step 1, the code ────────────────────────────────────────── */
 $("pair-code").addEventListener("input", (e) => {
   let v = e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 8);
   e.target.value = v.length > 4 ? v.slice(0, 4) + "-" + v.slice(4) : v;
@@ -43,9 +94,15 @@ $("pair-form").addEventListener("submit", async (e) => {
   try {
     const r = await fetch("/api/pair", {
       method: "POST", headers: HDRS,
-      body: JSON.stringify({ code: $("pair-code").value.trim(), name: $("pair-name").value.trim() }),
+      body: JSON.stringify({ code: $("pair-code").value.trim(), name: "browser" }),
     });
-    if (r.ok) { showChat(); return; }
+    if (r.ok) {
+      $("pair-title").textContent = "Welcome.";
+      $("pair-step-code").classList.add("hidden");
+      $("pair-step-name").classList.remove("hidden");
+      $("user-name").focus();
+      return;
+    }
     err.textContent = r.status === 429
       ? "Too many wrong codes — registration is locked out for a while."
       : "That code is wrong or expired.";
@@ -57,32 +114,166 @@ $("pair-form").addEventListener("submit", async (e) => {
   } finally { btn.disabled = false; }
 });
 
+/* ── pairing: step 2, who are you ─────────────────────────────────────── */
+// The name is NOT a config write. It goes to the mind as the first conversational turn, so the
+// mind learns it the way it learns everything — through its own memory, revisable in conversation.
+$("name-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("user-name").value.trim();
+  $("pair-screen").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  restoreHistory();
+  refreshWelcome();
+  const me = await fetch("/api/me", { headers: { "X-YM-Web": "1" } }).then((r) => r.json()).catch(() => ({}));
+  if (me.person) $("person-chip").textContent = me.person;
+  if (me.mind) setMindName(me.mind);
+  if (me.operator === false) hideOperatorPanels();
+  if (name) {
+    input.value = `Hi, I'm ${name} — that's what you should call me.`;
+    sendTurn();
+  } else {
+    input.focus();
+  }
+});
+
 /* ── transcript persistence (this browser only — the mind's memory is its own) ── */
 const STORE = "ym-transcript-v1";
 let history = [];
 function persist() { try { localStorage.setItem(STORE, JSON.stringify(history.slice(-200))); } catch (_) {} }
 function restoreHistory() {
   try { history = JSON.parse(localStorage.getItem(STORE) || "[]"); } catch (_) { history = []; }
-  feed.replaceChildren();
+  [...feed.querySelectorAll(".msg")].forEach((n) => n.remove());
   for (const m of history) {
     if (m.role === "user") addUserMsg(m.text, m.ts, false);
-    else { const b = addMindMsg(false); renderMarkdown(b.md, m.text); b.stamp.textContent = fmtTs(m.ts); }
+    else { const b = addMindMsg(); renderMarkdown(b.md, m.text); b.stamp.textContent = fmtTs(m.ts); }
   }
   scrollToEnd(true);
 }
 $("clear-btn").addEventListener("click", () => {
-  if (!confirm("Clear this browser's transcript? (The mind's own memory is unaffected.)")) return;
-  history = []; persist(); feed.replaceChildren();
+  if (!confirm(`Clear this browser's transcript? (${MIND}'s own memory is unaffected.)`)) return;
+  history = []; persist();
+  [...feed.querySelectorAll(".msg")].forEach((n) => n.remove());
+  refreshWelcome();
 });
 $("logout-btn").addEventListener("click", async () => {
   try { await fetch("/api/logout", { method: "POST", headers: HDRS }); } catch (_) {}
   location.reload();
 });
 
+/* ── panels ───────────────────────────────────────────────────────────── */
+async function loadCapabilities() {
+  const host = $("cap-cards");
+  try {
+    const r = await fetch("/api/capabilities", { headers: { "X-YM-Web": "1" } });
+    const rep = await r.json();
+    host.replaceChildren();
+    $("cap-counts").textContent = `${rep.connected} ready · ${rep.unavailable} missing something · ${rep.disabled} off`;
+    const byCat = new Map();
+    for (const c of rep.capabilities || []) {
+      if (!byCat.has(c.category)) byCat.set(c.category, []);
+      byCat.get(c.category).push(c);
+    }
+    for (const [cat, caps] of [...byCat.entries()].sort()) {
+      const g = el("div", "cap-group"); g.textContent = cat; host.appendChild(g);
+      for (const c of caps) {
+        const card = el("div", "card");
+        const avail = String(c.availability?.kind ?? c.availability ?? "").toLowerCase() || "ready";
+        card.appendChild(el("span", "dot " + (avail.includes("ready") ? "ready" : avail.includes("disab") ? "disabled" : "unavailable")));
+        const main = el("div", "card-main");
+        const t = el("div", "card-title"); t.textContent = c.title || c.id; main.appendChild(t);
+        const d = el("div", "card-desc");
+        d.textContent = c.missing ? `missing: ${c.missing}` : (c.tools || []).join(" · ");
+        main.appendChild(d);
+        card.appendChild(main);
+        const side = el("div", "card-side");
+        const sec = el("span", "tag" + (c.security === "gated_write" ? " write" : ""));
+        sec.textContent = c.security; side.appendChild(sec);
+        if (c.provenance && c.provenance !== "builtin") {
+          const p = el("span", "tag self"); p.textContent = c.provenance; side.appendChild(p);
+        }
+        card.appendChild(side);
+        host.appendChild(card);
+      }
+    }
+    if (!byCat.size) host.appendChild(textP("No capabilities reported."));
+  } catch (_) { host.replaceChildren(textP("Could not read the capability report.")); }
+}
+
+async function loadSettings() {
+  const host = $("settings-cards");
+  try {
+    const r = await fetch("/api/settings", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    const byGroup = new Map();
+    for (const s of data.settings || []) {
+      if (!byGroup.has(s.group)) byGroup.set(s.group, []);
+      byGroup.get(s.group).push(s);
+    }
+    for (const [group, items] of byGroup.entries()) {
+      const g = el("div", "cap-group"); g.textContent = group; host.appendChild(g);
+      for (const s of items) {
+        const card = el("div", "card setting-row");
+        const main = el("div", "card-main");
+        const t = el("div", "card-title"); t.textContent = s.label; main.appendChild(t);
+        const d = el("div", "card-desc"); d.textContent = s.desc; main.appendChild(d);
+        const k = el("div", "setting-key"); k.textContent = s.key; main.appendChild(k);
+        card.appendChild(main);
+        const side = el("div", "card-side");
+        const v = el("span", "setting-val" + (s.set ? "" : " unset"));
+        v.textContent = s.kind === "secret" ? (s.set ? "●●●●●●" : "—") : (s.set ? s.value : "—");
+        v.title = v.textContent;
+        side.appendChild(v);
+        if (s.restart) { const rb = el("span", "tag restart"); rb.textContent = "restart"; side.appendChild(rb); }
+        card.appendChild(side);
+        host.appendChild(card);
+      }
+    }
+  } catch (_) { host.replaceChildren(textP("Could not read configuration.")); }
+}
+
+async function loadDevices() {
+  const host = $("device-cards");
+  try {
+    const r = await fetch("/api/devices", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    for (const d of data.devices || []) {
+      const card = el("div", "card" + (d.revoked ? " revoked" : ""));
+      card.appendChild(el("span", "dot " + (d.revoked ? "disabled" : "ready")));
+      const main = el("div", "card-main");
+      const t = el("div", "card-title"); t.textContent = d.name; main.appendChild(t);
+      const meta = el("div", "dev-meta");
+      meta.textContent = `${d.role} · paired ${new Date(d.created_ms).toLocaleDateString()}${d.revoked ? " · revoked" : ""}`;
+      main.appendChild(meta);
+      card.appendChild(main);
+      const side = el("div", "card-side");
+      if (d.this_device) { const y = el("span", "tag you"); y.textContent = "this device"; side.appendChild(y); }
+      else if (!d.revoked) {
+        const b = el("button", "revoke-btn"); b.textContent = "Revoke";
+        b.addEventListener("click", async () => {
+          if (!confirm(`Revoke '${d.name}'? Its access ends immediately.`)) return;
+          await fetch("/api/revoke", { method: "POST", headers: HDRS, body: JSON.stringify({ id: d.id }) });
+          loadDevices();
+        });
+        side.appendChild(b);
+      }
+      card.appendChild(side);
+      host.appendChild(card);
+    }
+    if (!(data.devices || []).length) host.appendChild(textP("No devices."));
+  } catch (_) { host.replaceChildren(textP("Could not read the device store.")); }
+}
+
+function textP(s) { const p = el("p", "loading"); p.textContent = s; return p; }
+
 /* ── message DOM ──────────────────────────────────────────────────────── */
 const fmtTs = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function addUserMsg(text, ts, save = true) {
+  $("welcome").classList.add("hidden");
   const msg = el("div", "msg user");
   const bubble = el("div", "bubble");
   bubble.textContent = text;
@@ -116,7 +307,7 @@ function el(tag, cls) { const n = document.createElement(tag); if (cls) n.classN
 
 /* keep the view pinned to the end unless the reader scrolled up on purpose */
 let pinned = true;
-feed && feed.addEventListener("scroll", () => {
+feed.addEventListener("scroll", () => {
   pinned = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 60;
 });
 function scrollToEnd(force) { if (pinned || force) feed.scrollTop = feed.scrollHeight; }
@@ -141,9 +332,9 @@ async function sendTurn() {
     if (!r.ok || !r.body) throw new Error("turn failed: " + r.status);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    // Line protocol: p:/t:/d:/k: lines separated by real newlines (their payloads carry  in
-    // place of newlines), then one terminal "f:" whose payload MAY contain real newlines — so the
-    // moment an "f:" line starts, everything after it to the end of the stream is the final reply.
+    // Line protocol: p:/t:/d:/k: lines separated by real newlines (payloads carry \u0001 in place
+    // of newlines), then one terminal "f:" whose payload MAY contain real newlines — so once an
+    // "f:" line starts, everything to the end of the stream is the final reply.
     let carry = "", inFinal = false;
     for (;;) {
       const { done, value } = await reader.read();
@@ -167,7 +358,7 @@ async function sendTurn() {
     finalText = "*(could not reach the mind — is it running?)*";
   }
 
-  // settle the message: steps stay as the visible record, reasoning folds shut, tail is replaced
+  // settle: steps stay as the visible record, reasoning folds shut, tail is replaced by the reply
   b.tail.classList.add("hidden");
   if (b.think.open) b.think.open = false;
   document.querySelectorAll(".step.live").forEach((n) => n.classList.remove("live"));
@@ -176,7 +367,7 @@ async function sendTurn() {
   b.stamp.textContent = fmtTs(ts);
   history.push({ role: "mind", text: finalText ?? "(no reply)", ts }); persist();
   orb.classList.remove("thinking"); b.avatar.classList.remove("thinking");
-  $("mind-state").textContent = "at home · private by default";
+  $("mind-state").textContent = "at home";
   busy = false; $("send-btn").disabled = false;
   scrollToEnd(); input.focus();
 }
@@ -184,7 +375,7 @@ async function sendTurn() {
 function handleLine(line, b) {
   if (!line) return;
   const kind = line.slice(0, 2);
-  const rest = line.slice(2).replaceAll("\x01", "\n");
+  const rest = line.slice(2).replaceAll("\u0001", "\n");
   if (kind === "p:") {
     b.steps.classList.remove("hidden");
     document.querySelectorAll(".step.live").forEach((n) => n.classList.remove("live"));
@@ -198,7 +389,6 @@ function handleLine(line, b) {
     b.tail.classList.remove("hidden");
     b.tail.textContent += rest;
   } else if (kind === "d:") {
-    // step detail: attach as a tooltip on the live chip — depth without noise
     const live = b.steps.querySelector(".step.live");
     if (live) live.title = ((live.title || "") + "\n" + rest).trim();
   }
@@ -223,14 +413,13 @@ function renderMarkdown(root, src) {
   while (i < lines.length) {
     let line = lines[i];
 
-    // fenced code
     const fence = line.match(/^```(\w*)\s*$/);
     if (fence) {
       closeList();
       const buf = [];
       i++;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
-      i++; // consume closing fence
+      i++;
       const pre = el("pre"); const code = el("code");
       if (fence[1]) code.className = "lang-" + fence[1];
       code.textContent = buf.join("\n");
@@ -244,13 +433,11 @@ function renderMarkdown(root, src) {
       continue;
     }
 
-    // table: a header row followed by a separator row
     if (/^\s*\|.+\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
       closeList();
       const table = el("table");
-      const headCells = splitRow(line);
       const thead = el("thead"); const hr = el("tr");
-      for (const c of headCells) { const th = el("th"); inline(th, c); hr.appendChild(th); }
+      for (const c of splitRow(line)) { const th = el("th"); inline(th, c); hr.appendChild(th); }
       thead.appendChild(hr); table.appendChild(thead);
       i += 2;
       const tbody = el("tbody");
@@ -304,7 +491,6 @@ function inline(parent, text) {
     else if ((m = t.match(/^\*([^*]+)\*$/))) { const it = el("em"); it.textContent = m[1]; parent.appendChild(it); }
     else if ((m = t.match(/^`([^`]+)`$/))) { const c = el("code"); c.textContent = m[1]; parent.appendChild(c); }
     else if ((m = t.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/))) {
-      // only web links become anchors; anything else stays literal text
       if (/^https?:\/\//i.test(m[2])) {
         const a = el("a"); a.textContent = m[1]; a.href = m[2];
         a.target = "_blank"; a.rel = "noopener noreferrer";

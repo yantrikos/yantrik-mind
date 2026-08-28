@@ -43,6 +43,12 @@ const APP_JS: &str = include_str!("../assets/webui.js");
 /// is a question the store can answer without a new field.
 const WEB_DEVICE_PREFIX: &str = "web:";
 
+/// The mind's OWN name, as the UI must display it. One authority for the web surface; the persona
+/// uses the same name in prose across the engine, and unifying every crate onto a single const is
+/// a separate (worthwhile) slice. The client fetches this — it never asserts a name of its own,
+/// because a UI that contradicts the mind's self-introduction reads as two products.
+const MIND_NAME: &str = "JARVIS";
+
 const PAIRING_CODE_FILE: &str = "web-pairing.code";
 
 /// Wrong-code attempts allowed before the pairing endpoint locks out.
@@ -296,6 +302,7 @@ fn handle(
                 "200 OK",
                 "",
                 &serde_json::json!({
+                    "mind": MIND_NAME,
                     "device": d.id,
                     "person": d.chat_person(),
                     "operator": d.is_operator(),
@@ -304,9 +311,94 @@ fn handle(
             None => {
                 let dir = crate::telegram::state_dir();
                 let open = std::path::Path::new(&dir).join(PAIRING_CODE_FILE).exists();
-                send_json(&mut stream, "401 Unauthorized", "", &serde_json::json!({ "registration_open": open }));
+                send_json(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "",
+                    &serde_json::json!({ "mind": MIND_NAME, "registration_open": open }),
+                );
             }
         },
+        // Panels below are read surfaces over structures the engine already maintains. Settings and
+        // devices are operator-only: a member browser gets the chat, not the cockpit.
+        ("GET", "/api/capabilities") => {
+            let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(&mut stream, "401 Unauthorized", "text/plain", "", "not paired");
+                return;
+            };
+            let report = conv.capability_report();
+            match serde_json::to_value(&report) {
+                Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                Err(_) => send(&mut stream, "500 Internal Server Error", "text/plain", "", "report failed"),
+            }
+        }
+        ("GET", "/api/settings") => {
+            let authed = session_cookie(&head).and_then(|t| devices.authenticate(&t));
+            let Some(d) = authed else {
+                send(&mut stream, "401 Unauthorized", "text/plain", "", "not paired");
+                return;
+            };
+            if !d.is_operator() {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "operator only");
+                return;
+            }
+            // `config schema` nulls secret values itself — the redaction lives beside the schema,
+            // not here, so a new secret knob cannot leak by web-route omission.
+            let schema = rt.block_on(conv.config_panel("schema"));
+            match serde_json::from_str::<serde_json::Value>(&schema) {
+                Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                Err(_) => send(&mut stream, "500 Internal Server Error", "text/plain", "", "schema failed"),
+            }
+        }
+        ("GET", "/api/devices") => {
+            let Some(d) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(&mut stream, "401 Unauthorized", "text/plain", "", "not paired");
+                return;
+            };
+            if !d.is_operator() {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "operator only");
+                return;
+            }
+            let list: Vec<serde_json::Value> = devices
+                .list()
+                .iter()
+                .map(|dev| {
+                    serde_json::json!({
+                        "id": dev.id, "name": dev.name, "role": dev.role,
+                        "created_ms": dev.created_ms, "revoked": dev.revoked,
+                        "this_device": dev.id == d.id,
+                    })
+                })
+                .collect();
+            send_json(&mut stream, "200 OK", "", &serde_json::json!({ "devices": list }));
+        }
+        ("POST", "/api/revoke") => {
+            if !has_client_header {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");
+                return;
+            }
+            let Some(d) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(&mut stream, "401 Unauthorized", "text/plain", "", "not paired");
+                return;
+            };
+            if !d.is_operator() {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "operator only");
+                return;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let id = parsed["id"].as_str().unwrap_or("").trim();
+            if id == d.id {
+                // Refusing self-revocation keeps a browser from locking itself out mid-session;
+                // the store separately refuses to strand the last operator.
+                send(&mut stream, "400 Bad Request", "text/plain", "", "cannot revoke the device you are using");
+                return;
+            }
+            match devices.revoke(id) {
+                Ok(true) => send_json(&mut stream, "200 OK", "", &serde_json::json!({ "ok": true })),
+                Ok(false) => send(&mut stream, "404 Not Found", "text/plain", "", "no such device"),
+                Err(e) => send(&mut stream, "400 Bad Request", "text/plain", "", &format!("{e}")),
+            }
+        }
         ("POST", "/api/pair") => {
             if !has_client_header {
                 send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");

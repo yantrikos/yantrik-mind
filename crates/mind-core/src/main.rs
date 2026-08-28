@@ -175,6 +175,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // No phone channel and no terminal either (a service manager's null stdin): run the headless
+    // daemon instead of a REPL that would read EOF and exit into a restart loop (E.STG1). The check
+    // is on stdin, not a flag: a human at a tty always gets the console, configured or not.
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            println!("yantrik-mind — backend: {name} · db: {db} · channel: headless");
+            return mind_core::telegram::run_headless(mem, conv).await;
+        }
+    }
+
     println!("yantrik-mind — backend: {name} · db: {db}");
     println!("type :help for a list of commands  (else = chat)\n");
 

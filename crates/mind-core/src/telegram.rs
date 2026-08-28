@@ -1225,6 +1225,39 @@ fn frame_handle(mut stream: std::net::TcpStream, conv: Arc<ConversationEngine>, 
     }
 }
 
+/// Run as a daemon with NO phone channel: the same authenticated local surfaces `run` starts —
+/// device store, control endpoint, chat/frame/HA listeners (each fail-closed without its config),
+/// lease reconciliation — then park until killed. This is what a service manager gets when no
+/// telegram token is configured: without it, a channel-less mind fell through to the stdin REPL,
+/// read EOF from the null stdin, and exited — a restart loop that no health probe can pass (E.STG1,
+/// found on the first staging box ever built). Deliberately absent: the poll loop and every
+/// proactive cadence riding on it — they target chats that do not exist here, so a headless
+/// instance exercises turn paths only.
+pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
+    let devices = arch2_open_device_store();
+    let conv = match &devices {
+        Some(d) => conv.with_devices(d.clone()),
+        None => conv,
+    };
+    let conv = Arc::new(conv);
+    match &devices {
+        Some(d) => {
+            warn_on_port_collisions();
+            spawn_control_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
+            spawn_chat_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
+        }
+        None => eprintln!("[ctl] control + chat endpoints DISABLED — device store unavailable (fail-closed). Fix the store, then restart."),
+    }
+    spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
+    spawn_ha_event_listener(conv.clone(), tokio::runtime::Handle::current());
+    for line in conv.reconcile_leases().await {
+        eprintln!("{line}");
+    }
+    println!("headless daemon — no phone channel; console surface only (the `ym` CLI on 127.0.0.1)");
+    std::future::pending::<()>().await;
+    unreachable!("pending() never resolves")
+}
+
 /// Run the telegram channel until killed. `chat_lock` (YM_TELEGRAM_CHAT) optionally restricts to a
 /// single chat id; if unset, the first chatter is accepted (single-user companion).
 pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {

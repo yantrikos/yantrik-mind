@@ -1770,6 +1770,17 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Verification and release state | `mind-conversation` is **504/0** with `--locked`; full workspace verification is required immediately before commit. No deploy is authorised. The deployed box remains deliberately behind this work until a separate deployment decision. |
 | Full release gate completed | `cargo test --workspace --locked`: **1186 passed / 0 failed / 5 ignored** across 43 test/doc-test binaries. `git diff --check` is clean apart from the repository's existing LF→CRLF notices. No deploy performed. |
 
+## E.CTX6 — ToolSurface direction A: restore only capabilities that cannot become an oracle — pre-registered
+
+| Field | Value |
+| --- | --- |
+| Why this is a new slice | E.CTX4 deliberately made `ToolSurface` all-or-nothing. That is safe but coarse: a request that withholds private facts also loses capabilities whose output cannot depend on private context. Restoring any tool before classifying what it can observe would trade a visible limitation for a silent oracle. |
+| Taxonomy, fixed before code | `PureLocal`: deterministic compute whose result depends only on normalized arguments; no memory/profile/transcript/config/files/network/clock reads and no writes. `PublicRead`: reads an external public source and therefore still performs egress. `PrivateRead`: can observe household, account, setup, or durable mind state. `Mutating`: changes mind state or the outside world. Unknown, dynamic, imported, and MCP tools default to denied until explicitly certified; `read_only` is not sufficient because a read can reveal the very fact the turn withheld. |
+| Initial restoration boundary | Only `PureLocal` is eligible, and the first candidate is `calc`. Even `now` stays denied initially because local time/timezone can disclose setup or location. Public search/fetch/quotes stay denied until argument provenance proves their query comes solely from the current user turn; personal reads, catalog discovery, `myself`, memory tools, and every write remain denied. Small and provable is the point. |
+| Structural design constraint | Capability class belongs beside the tool declaration and is checked by the same execution boundary in both loops. Core tools need an explicit declaration table; registry tools carry the class in `PluginSpec`; dynamic/imported tools cannot inherit permission from a prose badge. Adding a compiled tool without a class must fail a source/inventory test, and a missing runtime lookup must fail closed. |
+| Existence-oracle kill criterion | Seed reachable private transcript/memory with a unique ticker, person, and tool-shaped instruction. On a restricted generic/follow-up turn: no non-`PureLocal` call may execute, no hidden value may influence arguments, result, telemetry, or whether a call occurred, and `quote`/search/recall/`myself` must remain refused. In the paired positive, an explicit restricted arithmetic request executes `calc` and returns the same answer as an ordinary turn. Mutating one private/public tool to `PureLocal` must make the oracle test fail. |
+| Release bar | Both legacy free-text and native calls plus the cognitive bus pass the same paired matrix; workspace green with `--locked`; source inventory complete; no staging or production deploy until the independent staging canary suite reports its evidence. |
+
 ## E.STG1 — a channel-less mind must still be a daemon — pre-registered before code
 
 | Field | Value |

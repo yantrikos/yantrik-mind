@@ -118,10 +118,18 @@
           <p class="panel-sub">Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Results wait on the board until you keep or drop them.</p>
         </header>
         <div class="cards" id="tasks-cards">
+          <div class="agent-tabs">
+            <button id="tab-delegate" class="agent-tab active" type="button">Delegate</button>
+            <button id="tab-import" class="agent-tab" type="button">Import agent document</button>
+          </div>
           <form id="agent-form" class="agent-form glass" autocomplete="off">
-            <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check)" aria-label="Agent name" required>
-            <input id="agent-task" class="agent-input wide" maxlength="500" placeholder="what should it do?" aria-label="Task" required>
-            <button id="agent-btn" type="submit">Run</button>
+            <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check) — a banked skill's name runs that skill" aria-label="Agent name" required>
+            <textarea id="agent-task" class="agent-desc" rows="4" maxlength="8000" placeholder="Describe the task as broadly as you like — goal, constraints, sources to prefer, what a good result looks like. The agent gets all of it." aria-label="Task description" required></textarea>
+            <button id="agent-btn" type="submit">Run agent</button>
+          </form>
+          <form id="import-form" class="agent-form glass hidden" autocomplete="off">
+            <textarea id="import-doc" class="agent-desc tall" rows="12" maxlength="64000" placeholder="Paste a full agent document (SKILL.md style): name, instructions, and optional schedule: frontmatter to make it a standing order." aria-label="Agent document" required></textarea>
+            <button id="import-btn" type="submit">Import</button>
           </form>
           <p id="agent-reply" class="loading hidden"></p>
           <div id="job-cards"><p class="loading">reading the board…</p></div>

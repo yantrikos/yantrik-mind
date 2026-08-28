@@ -340,8 +340,18 @@ async function loadOrders() {
   } catch (_) { pre.textContent = "(could not read standing orders)"; }
 }
 
+$("tab-delegate").addEventListener("click", () => {
+  $("tab-delegate").classList.add("active"); $("tab-import").classList.remove("active");
+  $("agent-form").classList.remove("hidden"); $("import-form").classList.add("hidden");
+});
+$("tab-import").addEventListener("click", () => {
+  $("tab-import").classList.add("active"); $("tab-delegate").classList.remove("active");
+  $("import-form").classList.remove("hidden"); $("agent-form").classList.add("hidden");
+});
+
 $("agent-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  // A broad description is the point — newlines are the agent's brief, so they ride verbatim.
   const name = $("agent-name").value.trim(), task = $("agent-task").value.trim();
   if (!name || !task) return;
   const btn = $("agent-btn"), reply = $("agent-reply");
@@ -352,6 +362,23 @@ $("agent-form").addEventListener("submit", async (e) => {
     const data = await r.json().catch(() => ({}));
     reply.textContent = data.reply || "delegated.";
     $("agent-name").value = ""; $("agent-task").value = "";
+  } catch (_) { reply.textContent = "could not reach the mind."; }
+  btn.disabled = false;
+  loadTasks();
+});
+
+$("import-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const doc = $("import-doc").value.trim();
+  if (!doc) return;
+  const btn = $("import-btn"), reply = $("agent-reply");
+  btn.disabled = true;
+  reply.classList.remove("hidden"); reply.textContent = "importing…";
+  try {
+    const r = await fetch("/api/import-agent", { method: "POST", headers: HDRS, body: JSON.stringify({ doc }) });
+    const data = await r.json().catch(() => ({}));
+    reply.textContent = data.reply || "imported.";
+    if (r.ok) $("import-doc").value = "";
   } catch (_) { reply.textContent = "could not reach the mind."; }
   btn.disabled = false;
   loadTasks();

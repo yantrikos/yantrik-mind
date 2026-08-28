@@ -407,6 +407,27 @@ fn handle(
                 }
             }
         }
+        ("POST", "/api/import-agent") => {
+            if !has_client_header {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let doc = parsed["doc"].as_str().unwrap_or("").trim();
+                    if doc.is_empty() {
+                        send(&mut stream, "400 Bad Request", "text/plain", "", "an agent document is required");
+                        return;
+                    }
+                    // The whole document rides as the verb's argument — the same `ym import` the
+                    // desktop app uses, schedule: frontmatter and all.
+                    let out = rt.block_on(conv.cli_dispatch(&format!("import {doc}"), &mind_types::AccessContext::operator_audit()));
+                    send_json(&mut stream, "200 OK", "", &serde_json::json!({ "reply": out }));
+                }
+            }
+        }
         ("POST", "/api/task-action") => {
             if !has_client_header {
                 send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");

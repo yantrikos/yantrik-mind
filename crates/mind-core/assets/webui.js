@@ -28,14 +28,10 @@ async function boot() {
 }
 
 function setMindName(name) {
-  MIND = name;
-  document.title = name;
-  $("mind-name").textContent = name;
-  $("name-prompt").replaceChildren(
-    document.createTextNode("Paired. One more thing —"),
-    document.createElement("br"),
-    document.createTextNode(`what should ${name} call you?`)
-  );
+  // Null until setup names it: the UI stays neutral rather than inventing an identity.
+  MIND = name || "your mind";
+  document.title = name || "Mind";
+  $("mind-name").textContent = name || "unnamed mind";
 }
 
 function hideOperatorPanels() {
@@ -77,6 +73,7 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
     if (btn.dataset.panel === "capabilities") loadCapabilities();
     if (btn.dataset.panel === "settings") loadSettings();
     if (btn.dataset.panel === "devices") loadDevices();
+    if (btn.dataset.panel === "tasks") loadTasks();
     if (btn.dataset.panel === "chat") input.focus();
   });
 });
@@ -114,26 +111,39 @@ $("pair-form").addEventListener("submit", async (e) => {
   } finally { btn.disabled = false; }
 });
 
-/* ── pairing: step 2, who are you ─────────────────────────────────────── */
-// The name is NOT a config write. It goes to the mind as the first conversational turn, so the
-// mind learns it the way it learns everything — through its own memory, revisable in conversation.
+/* ── pairing: step 2, the two names — both REQUIRED ───────────────────── */
+// The mind's name is a setup write (one file, every surface reads it). The USER's name is not: it
+// goes to the mind as the first conversational turn, so it is learned through memory and stays
+// revisable by simply talking. Two names, two mechanisms, each the honest one for what it names.
 $("name-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const name = $("user-name").value.trim();
+  const mindName = $("mind-name-input").value.trim();
+  const userName = $("user-name").value.trim();
+  const err = $("setup-error");
+  err.classList.add("hidden");
+  if (!mindName || !userName) {
+    err.textContent = "Both names are required.";
+    err.classList.remove("hidden");
+    return;
+  }
+  try {
+    const r = await fetch("/api/setup", { method: "POST", headers: HDRS, body: JSON.stringify({ mind_name: mindName }) });
+    if (!r.ok) throw new Error(String(r.status));
+  } catch (_) {
+    err.textContent = "Could not save the mind's name — try again.";
+    err.classList.remove("hidden");
+    return;
+  }
+  setMindName(mindName);
   $("pair-screen").classList.add("hidden");
   $("app").classList.remove("hidden");
   restoreHistory();
   refreshWelcome();
   const me = await fetch("/api/me", { headers: { "X-YM-Web": "1" } }).then((r) => r.json()).catch(() => ({}));
   if (me.person) $("person-chip").textContent = me.person;
-  if (me.mind) setMindName(me.mind);
   if (me.operator === false) hideOperatorPanels();
-  if (name) {
-    input.value = `Hi, I'm ${name} — that's what you should call me.`;
-    sendTurn();
-  } else {
-    input.focus();
-  }
+  input.value = `Hi, I'm ${userName} — that's what you should call me. And we've named you ${mindName}: that's your name now, please use it when you talk about yourself.`;
+  sendTurn();
 });
 
 /* ── transcript persistence (this browser only — the mind's memory is its own) ── */
@@ -268,6 +278,84 @@ async function loadDevices() {
 }
 
 function textP(s) { const p = el("p", "loading"); p.textContent = s; return p; }
+
+/* ── agents & standing orders ─────────────────────────────────────────── */
+let tasksTimer = null;
+async function loadTasks() {
+  const host = $("job-cards");
+  try {
+    const r = await fetch("/api/tasks", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    const jobs = data.jobs || [];
+    let anyRunning = false;
+    // newest first — the board reads like a feed
+    for (const j of [...jobs].reverse()) {
+      const state = String(j.state || j.status || "?").toLowerCase();
+      if (state.includes("run")) anyRunning = true;
+      const card = el("div", "card setting-row");
+      const main = el("div", "card-main");
+      const t = el("div", "card-title"); t.textContent = j.name || j.id; main.appendChild(t);
+      const d = el("div", "card-desc"); d.textContent = j.task || j.goal || ""; main.appendChild(d);
+      if (j.result) {
+        const res = el("div", "job-result"); res.textContent = String(j.result); main.appendChild(res);
+      }
+      const notes = Array.isArray(j.notes) ? j.notes.length : 0;
+      const meta = el("div", "setting-key");
+      meta.textContent = `${j.id}${notes ? ` · ${notes} note${notes > 1 ? "s" : ""}` : ""}`;
+      main.appendChild(meta);
+      const actions = el("div", "job-actions");
+      for (const [verb, label, ask] of [["keep", "Keep", null], ["drop", "Drop scratch", null], ["delete", "Delete", "Delete this job's record from the board?"]]) {
+        const b = el("button"); b.textContent = label;
+        b.addEventListener("click", async () => {
+          if (ask && !confirm(ask)) return;
+          await fetch("/api/task-action", { method: "POST", headers: HDRS, body: JSON.stringify({ verb, id: j.id }) });
+          loadTasks();
+        });
+        actions.appendChild(b);
+      }
+      main.appendChild(actions);
+      card.appendChild(main);
+      const side = el("div", "card-side");
+      const st = el("span", "job-state " + (state.includes("run") ? "running" : state.includes("fail") ? "failed" : "done"));
+      st.textContent = state; side.appendChild(st);
+      card.appendChild(side);
+      host.appendChild(card);
+    }
+    if (!jobs.length) host.appendChild(textP("The board is empty — delegate something above."));
+    // A running agent keeps the board live; a quiet board stops polling.
+    clearTimeout(tasksTimer);
+    if (anyRunning && $("panel-tasks").classList.contains("active")) tasksTimer = setTimeout(loadTasks, 5000);
+  } catch (_) { host.replaceChildren(textP("Could not read the board.")); }
+  loadOrders();
+}
+
+async function loadOrders() {
+  const pre = $("orders-text");
+  try {
+    const r = await fetch("/api/orders", { headers: { "X-YM-Web": "1" } });
+    const data = await r.json();
+    pre.textContent = data.text || "(none)";
+  } catch (_) { pre.textContent = "(could not read standing orders)"; }
+}
+
+$("agent-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("agent-name").value.trim(), task = $("agent-task").value.trim();
+  if (!name || !task) return;
+  const btn = $("agent-btn"), reply = $("agent-reply");
+  btn.disabled = true;
+  reply.classList.remove("hidden"); reply.textContent = "delegating…";
+  try {
+    const r = await fetch("/api/agent", { method: "POST", headers: HDRS, body: JSON.stringify({ name, task }) });
+    const data = await r.json().catch(() => ({}));
+    reply.textContent = data.reply || "delegated.";
+    $("agent-name").value = ""; $("agent-task").value = "";
+  } catch (_) { reply.textContent = "could not reach the mind."; }
+  btn.disabled = false;
+  loadTasks();
+});
 
 /* ── message DOM ──────────────────────────────────────────────────────── */
 const fmtTs = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

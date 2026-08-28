@@ -28,12 +28,14 @@
       </div>
 
       <div id="pair-step-name" class="hidden">
-        <p class="sub" id="name-prompt">Paired. One more thing —<br>what should the mind call you?</p>
+        <p class="sub">Paired. Now the two names that make this a companion,<br>not an appliance — both are required.</p>
         <form id="name-form" autocomplete="off">
-          <input id="user-name" class="name-input" maxlength="40" placeholder="Your name" aria-label="Your name">
-          <button id="name-btn" type="submit">Start talking</button>
+          <input id="mind-name-input" class="name-input" maxlength="40" placeholder="Name your mind (e.g. Vega, Muni, Jarvis)" aria-label="The mind's name" required>
+          <input id="user-name" class="name-input" maxlength="40" placeholder="Your name" aria-label="Your name" required>
+          <button id="name-btn" type="submit">Begin</button>
         </form>
-        <p class="hint">This goes to the mind as your introduction — it remembers<br>the way it remembers everything: in its own memory, on your hardware.</p>
+        <p id="setup-error" class="error hidden" role="alert"></p>
+        <p class="hint">The mind's name is written to its own state and used everywhere.<br>Yours goes to it as your introduction — remembered in its memory, on your hardware.</p>
       </div>
     </div>
   </section>
@@ -62,8 +64,10 @@
         <button class="nav-item" data-panel="devices">
           <span class="nav-ico">▣</span> Devices
         </button>
+        <button class="nav-item" data-panel="tasks">
+          <span class="nav-ico">◷</span> Agents
+        </button>
         <div class="nav-soon" title="Being built next">
-          <span class="nav-item soon"><span class="nav-ico">◷</span> Tasks <em>soon</em></span>
           <span class="nav-item soon"><span class="nav-ico">✦</span> Memory <em>soon</em></span>
         </div>
       </div>
@@ -105,6 +109,25 @@
           <p class="panel-sub">What this mind can do right now — and what's missing when it can't. <span id="cap-counts"></span></p>
         </header>
         <div class="cards" id="cap-cards"><p class="loading">reading the capability report…</p></div>
+      </div>
+
+      <!-- Agents & standing orders -->
+      <div class="panel" id="panel-tasks">
+        <header class="panel-head">
+          <h2>Agents</h2>
+          <p class="panel-sub">Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Results wait on the board until you keep or drop them.</p>
+        </header>
+        <div class="cards" id="tasks-cards">
+          <form id="agent-form" class="agent-form glass" autocomplete="off">
+            <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check)" aria-label="Agent name" required>
+            <input id="agent-task" class="agent-input wide" maxlength="500" placeholder="what should it do?" aria-label="Task" required>
+            <button id="agent-btn" type="submit">Run</button>
+          </form>
+          <p id="agent-reply" class="loading hidden"></p>
+          <div id="job-cards"><p class="loading">reading the board…</p></div>
+          <div class="cap-group">Standing orders</div>
+          <pre id="orders-text" class="orders glass">…</pre>
+        </div>
       </div>
 
       <!-- Settings -->

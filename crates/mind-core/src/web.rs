@@ -43,11 +43,19 @@ const APP_JS: &str = include_str!("../assets/webui.js");
 /// is a question the store can answer without a new field.
 const WEB_DEVICE_PREFIX: &str = "web:";
 
-/// The mind's OWN name, as the UI must display it. One authority for the web surface; the persona
-/// uses the same name in prose across the engine, and unifying every crate onto a single const is
-/// a separate (worthwhile) slice. The client fetches this — it never asserts a name of its own,
-/// because a UI that contradicts the mind's self-introduction reads as two products.
-const MIND_NAME: &str = "JARVIS";
+/// The mind's name is CHOSEN AT SETUP, not compiled in. It lives beside the console token, written
+/// once by the registration ceremony and readable by every surface. The engine's prose still says
+/// its legacy name in places — unifying those onto this file is the engine-side half of the slice
+/// (tracked with Codex); the web surface reads only this.
+const MIND_NAME_FILE: &str = "mind.name";
+
+fn mind_name() -> Option<String> {
+    let dir = crate::telegram::state_dir();
+    std::fs::read_to_string(std::path::Path::new(&dir).join(MIND_NAME_FILE))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 const PAIRING_CODE_FILE: &str = "web-pairing.code";
 
@@ -203,6 +211,19 @@ fn send_json(stream: &mut std::net::TcpStream, status: &str, extra: &str, body: 
     send(stream, status, "application/json; charset=utf-8", extra, &body.to_string());
 }
 
+/// Authenticate the request's cookie and require the operator role — the shared gate for every
+/// cockpit route. Returns the ready-to-send refusal on failure so call sites stay one line.
+fn operator(
+    head: &str,
+    devices: &mind_governance::devices::DeviceStore,
+) -> std::result::Result<mind_governance::devices::AuthedDevice, (&'static str, &'static str)> {
+    match session_cookie(head).and_then(|t| devices.authenticate(&t)) {
+        None => Err(("401 Unauthorized", "not paired")),
+        Some(d) if !d.is_operator() => Err(("403 Forbidden", "operator only")),
+        Some(d) => Ok(d),
+    }
+}
+
 /// The session cookie's value, if the request carries one. Only `ym_session` is read; everything
 /// else in the Cookie header is someone else's business.
 fn session_cookie(head: &str) -> Option<String> {
@@ -302,7 +323,7 @@ fn handle(
                 "200 OK",
                 "",
                 &serde_json::json!({
-                    "mind": MIND_NAME,
+                    "mind": mind_name(),
                     "device": d.id,
                     "person": d.chat_person(),
                     "operator": d.is_operator(),
@@ -315,10 +336,127 @@ fn handle(
                     &mut stream,
                     "401 Unauthorized",
                     "",
-                    &serde_json::json!({ "mind": MIND_NAME, "registration_open": open }),
+                    &serde_json::json!({ "mind": mind_name(), "registration_open": open }),
                 );
             }
         },
+        // Setup: the mind's name, chosen once at registration. Required by the ceremony; changing
+        // it later is the same call (operator-only), and the file is the single source every
+        // surface reads.
+        ("POST", "/api/setup") => {
+            if !has_client_header {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");
+                return;
+            }
+            let Some(d) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(&mut stream, "401 Unauthorized", "text/plain", "", "not paired");
+                return;
+            };
+            if !d.is_operator() {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "operator only");
+                return;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let name: String = parsed["mind_name"].as_str().unwrap_or("").trim().chars().take(40).collect();
+            if name.is_empty() {
+                send(&mut stream, "400 Bad Request", "text/plain", "", "a name is required");
+                return;
+            }
+            let dir = crate::telegram::state_dir();
+            match std::fs::write(std::path::Path::new(&dir).join(MIND_NAME_FILE), &name) {
+                Ok(()) => {
+                    eprintln!("[web-ui] the mind is named '{name}' (setup)");
+                    send_json(&mut stream, "200 OK", "", &serde_json::json!({ "ok": true, "mind": name }));
+                }
+                Err(e) => send(&mut stream, "500 Internal Server Error", "text/plain", "", &format!("could not persist the name: {e}")),
+            }
+        }
+        // Agents & standing orders: thin passthroughs to the SAME console verbs the `ym` CLI and
+        // the desktop cockpit use — one dispatcher, several faces, no second executor (E.SK4's
+        // rule applied to surfaces). All operator-only.
+        ("GET", "/api/tasks") => {
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let out = rt.block_on(conv.cli_dispatch("jobs json", &mind_types::AccessContext::operator_audit()));
+                    match serde_json::from_str::<serde_json::Value>(&out) {
+                        Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                        Err(_) => send(&mut stream, "500 Internal Server Error", "text/plain", "", "jobs report failed"),
+                    }
+                }
+            }
+        }
+        ("POST", "/api/agent") => {
+            if !has_client_header {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let name = parsed["name"].as_str().unwrap_or("").trim();
+                    let task = parsed["task"].as_str().unwrap_or("").trim();
+                    if name.is_empty() || task.is_empty() {
+                        send(&mut stream, "400 Bad Request", "text/plain", "", "name and task are both required");
+                        return;
+                    }
+                    let line = format!("delegate {name}: {task}");
+                    let out = rt.block_on(conv.cli_dispatch(&line, &mind_types::AccessContext::operator_audit()));
+                    send_json(&mut stream, "200 OK", "", &serde_json::json!({ "reply": out }));
+                }
+            }
+        }
+        ("POST", "/api/task-action") => {
+            if !has_client_header {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let verb = parsed["verb"].as_str().unwrap_or("");
+                    let id = parsed["id"].as_str().unwrap_or("").trim();
+                    // A closed verb set: the web forwards known actions, never free text.
+                    if !matches!(verb, "keep" | "drop" | "delete") || id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                        send(&mut stream, "400 Bad Request", "text/plain", "", "unknown action");
+                        return;
+                    }
+                    let out = rt.block_on(conv.cli_dispatch(&format!("jobs {verb} {id}"), &mind_types::AccessContext::operator_audit()));
+                    send_json(&mut stream, "200 OK", "", &serde_json::json!({ "reply": out }));
+                }
+            }
+        }
+        ("GET", "/api/orders") => {
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let out = rt.block_on(conv.cli_dispatch("orders", &mind_types::AccessContext::operator_audit()));
+                    send_json(&mut stream, "200 OK", "", &serde_json::json!({ "text": out }));
+                }
+            }
+        }
+        ("POST", "/api/order-action") => {
+            if !has_client_header {
+                send(&mut stream, "403 Forbidden", "text/plain", "", "missing client header");
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let verb = parsed["verb"].as_str().unwrap_or("");
+                    let id = parsed["id"].as_str().unwrap_or("").trim();
+                    if !matches!(verb, "pause" | "resume" | "run" | "cancel") || id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                        send(&mut stream, "400 Bad Request", "text/plain", "", "unknown action");
+                        return;
+                    }
+                    let out = rt.block_on(conv.cli_dispatch(&format!("orders {verb} {id}"), &mind_types::AccessContext::operator_audit()));
+                    send_json(&mut stream, "200 OK", "", &serde_json::json!({ "reply": out }));
+                }
+            }
+        }
         // Panels below are read surfaces over structures the engine already maintains. Settings and
         // devices are operator-only: a member browser gets the chat, not the cockpit.
         ("GET", "/api/capabilities") => {

@@ -313,3 +313,34 @@ body {
   .panel-head { padding: 18px 14px 6px; }
   .cards { padding: 8px 14px 20px; }
 }
+
+/* ── agents panel ──────────────────────────────────────────────────────── */
+.agent-form { display: flex; gap: 8px; padding: 10px; border-radius: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+.agent-input {
+  flex: 1; min-width: 140px; padding: 10px 13px; font-size: 14px;
+  color: var(--ink); background: rgba(0,0,0,.3);
+  border: 1px solid var(--line); border-radius: 10px; outline: none;
+}
+.agent-input.wide { flex: 2.5; }
+.agent-input:focus { border-color: var(--accent-a); }
+#agent-btn {
+  padding: 10px 22px; font-size: 14px; font-weight: 600; color: #0a0e1e;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+  border: 0; border-radius: 10px; cursor: pointer;
+}
+#agent-btn:disabled { filter: grayscale(.6) brightness(.7); cursor: wait; }
+.job-state { font-size: 11px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); }
+.job-state.running { color: #9fe8f7; border-color: rgba(34,211,238,.5); }
+.job-state.done { color: var(--ok); border-color: rgba(52,211,153,.4); }
+.job-state.failed { color: var(--danger); border-color: rgba(248,113,113,.4); }
+.job-result { color: var(--ink-dim); font-size: 13px; margin-top: 6px; white-space: pre-wrap; max-height: 130px; overflow-y: auto; }
+.job-actions { display: flex; gap: 6px; margin-top: 8px; }
+.job-actions button {
+  padding: 4px 12px; font-size: 12px; border-radius: 8px; cursor: pointer;
+  background: transparent; border: 1px solid var(--line); color: var(--ink-dim);
+}
+.job-actions button:hover { color: var(--ink); border-color: rgba(255,255,255,.3); }
+.orders {
+  font: 12.5px var(--mono); color: var(--ink-dim); padding: 14px 16px;
+  border-radius: 14px; white-space: pre-wrap; overflow-x: auto;
+}

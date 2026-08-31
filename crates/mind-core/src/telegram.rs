@@ -1799,6 +1799,21 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
     for line in conv.reconcile_leases().await {
         eprintln!("{line}");
     }
+    // The horizon/recipe heartbeat (E.STG2). In telegram mode the poll loop ticks delegations
+    // between updates; headless had no beat at all, and a due durable goal sat "due now" for eight
+    // hours on staging. Same tick, journal instead of chat: receipts persist in SQLite either way.
+    let ticker = conv.clone();
+    tokio::spawn(async move {
+        let mut beat = tokio::time::interval(std::time::Duration::from_secs(30));
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            beat.tick().await;
+            for note in ticker.tick_delegations().await {
+                eprintln!("[headless-tick] {note}");
+            }
+        }
+    });
+
     println!(
         "headless daemon — no phone channel; console surface only (the `ym` CLI on 127.0.0.1)"
     );

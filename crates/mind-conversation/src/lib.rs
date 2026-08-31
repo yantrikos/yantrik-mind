@@ -9936,8 +9936,19 @@ impl ConversationEngine {
                 if t.len() < 4 || !t.chars().any(|c| c.is_alphabetic()) {
                     return "(nothing to remember)".to_string();
                 }
-                let _ = self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await;
-                "(remembered)".to_string()
+                match self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await {
+                    Ok(_) => "(remembered)".to_string(),
+                    // The memory boundary deliberately returns only a secret-free KIND on a
+                    // write-gate refusal. Preserve that distinction without echoing the rejected
+                    // value: the old `let _ = ...; (remembered)` turned a refusal into a false
+                    // success before the model even saw the observation.
+                    Err(e) if e.to_string().contains("write-gate") => {
+                        "(refused by memory write-gate: memory was not changed)".to_string()
+                    }
+                    // A broken store is not a refusal, but it is still never a successful write.
+                    // Keep the status code-owned and content-free for the same reason.
+                    Err(_) => "(remember failed: memory was not changed)".to_string(),
+                }
             }
             // github_repo_items/github_notifications dispatch via the capability registry above.
             // home/home_status/house/smart_home tools dispatch via the capability registry above.

@@ -1952,6 +1952,71 @@ async fn agent_loop_reasons_then_answers() {
         .any(|(role, t)| role == "assistant" && t.contains("Pranab")));
 }
 
+/// The E.LOOP6 controller can correct a denied mutation only when the tool tells the truth about
+/// its result. `remember` used to discard this write error and return `(remembered)`, bypassing
+/// both Outcome::Denied and the correction even though typed memory stayed unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_remember_reports_denial_and_a_clean_remember_still_succeeds() {
+    const REJECTED: &str = "my password is hunter2";
+    const CLEAN: &str = "favorite color is teal";
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new("unused")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+        pool,
+        "JARVIS",
+    );
+
+    let denied = conv
+        .run_agent_tool_as(
+            "remember",
+            &serde_json::json!({ "text": REJECTED }),
+            &TurnIdentity::primary(),
+        )
+        .await;
+    assert!(
+        denied.contains("refused by") && denied.contains("memory was not changed"),
+        "the tool must surface the write-gate postcondition: {denied}"
+    );
+    assert_eq!(
+        crate::tool_outcome::Outcome::classify("remember", &denied),
+        crate::tool_outcome::Outcome::Denied,
+        "E.LOOP6 keys on this classification"
+    );
+    assert!(
+        !denied.contains("hunter2"),
+        "the secret-free refusal echoed the rejected credential: {denied}"
+    );
+    let rejected = mem
+        .beliefs_matching(REJECTED, &mind_types::AccessContext::operator_audit())
+        .await
+        .unwrap_or_default();
+    assert!(
+        rejected.is_empty(),
+        "the refusal said no write but the secret reached typed memory: {rejected:?}"
+    );
+
+    let remembered = conv
+        .run_agent_tool_as(
+            "remember",
+            &serde_json::json!({ "text": CLEAN }),
+            &TurnIdentity::primary(),
+        )
+        .await;
+    assert_eq!(remembered, "(remembered)");
+    let clean = mem
+        .beliefs_matching(CLEAN, &mind_types::AccessContext::operator_audit())
+        .await
+        .unwrap_or_default();
+    assert!(
+        clean.iter().any(|belief| belief.statement == CLEAN),
+        "the control write did not land: {clean:?}"
+    );
+}
+
 /// ARCH-1 slice 2 acceptance — the agent `recall` tool was COMMENTED read-isolated but called
 /// unscoped memory (sol's finding #2). Now every lane (semantic, deep lexical, exact-match)
 /// carries the speaker's Principal ctx, and the shared recipe/researcher host reads egress-clean

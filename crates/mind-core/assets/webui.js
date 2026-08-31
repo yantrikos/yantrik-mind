@@ -283,7 +283,7 @@ async function loadDevices() {
           if (!confirm(`Revoke '${d.name}'? Its access ends immediately.`)) return;
           const res = await postJson("/api/revoke", { id: d.id });
           if (!res.ok) alert(`revoke failed (${res.status || "offline"}): ${res.text}`);
-          loadDevices();
+          else loadDevices();
         });
         side.appendChild(b);
       }
@@ -329,7 +329,7 @@ async function loadTasks() {
           if (ask && !confirm(ask)) return;
           const res = await postJson("/api/task-action", { verb, id: j.id });
           if (!res.ok) alert(`${verb} failed (${res.status || "offline"}): ${res.text}`);
-          loadTasks();
+          else loadTasks();
         });
         actions.appendChild(b);
       }
@@ -423,7 +423,7 @@ $("agent-form").addEventListener("submit", async (e) => {
     reply.textContent = `delegation failed (${res.status || "offline"}): ${res.text}`;
   }
   btn.disabled = false;
-  loadTasks();
+  if (res.ok) loadTasks();
 });
 
 $("horizon-form").addEventListener("submit", async (e) => {
@@ -442,7 +442,7 @@ $("horizon-form").addEventListener("submit", async (e) => {
     reply.textContent = `scheduling failed (${res.status || "offline"}): ${res.text}`;
   }
   btn.disabled = false;
-  loadHorizons();
+  if (res.ok) loadHorizons();
 });
 
 $("import-form").addEventListener("submit", async (e) => {

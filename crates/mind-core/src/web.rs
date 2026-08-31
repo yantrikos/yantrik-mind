@@ -122,53 +122,40 @@ pub(crate) fn ensure_pairing_code(devices: &mind_governance::devices::DeviceStor
     }
 }
 
-/// Eight bytes of OS-seeded entropy, std-only — no crate dependency, so this compiles identically
-/// in every environment (a direct `getrandom` dep collided with three transitively-resolved
-/// versions on one box, and a registration code is not worth that fragility).
+/// A readable one-time code: 8 chars from an unambiguous alphabet, grouped 4-4. ~39.6 bits over a
+/// 31-symbol space — plenty against 5 attempts and a 15-minute lockout, and short enough to type
+/// from a journal line.
 ///
-/// Each `RandomState::new()` is keyed by the OS with a fresh random SipHash seed per instance
-/// (that is the whole point of HashDoS resistance); hashing distinct inputs through eight
-/// independent instances, folded with the nanosecond clock and the address of a heap allocation,
-/// yields a byte apiece. This is NOT a general CSPRNG — it is exactly enough unpredictability for a
-/// SINGLE-USE code guarded by a 5-attempt / 15-minute lockout, where an online attacker gets ~5
-/// guesses per quarter hour against a 30^8 space. For anything reused or unthrottled, use a real
-/// CSPRNG.
-fn os_seed_bytes() -> [u8; 8] {
-    use std::hash::{BuildHasher, Hash, Hasher};
-    let mut out = [0u8; 8];
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let heap = Box::new(0u8);
-    let addr = (&*heap as *const u8) as u64;
-    for (i, slot) in out.iter_mut().enumerate() {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        (i as u64).hash(&mut h);
-        nanos.hash(&mut h);
-        addr.hash(&mut h);
-        std::thread::current().id().hash(&mut h);
-        let v = h.finish();
-        *slot = (v ^ (v >> 32)) as u8;
-    }
-    out
-}
-
-/// A readable one-time code: 8 chars from an unambiguous alphabet, grouped 4-4. ~39 bits over a
-/// 30-symbol space — plenty against 5 attempts and a 15-minute lockout, short enough to type from
-/// a journal line.
+/// Entropy comes from the OS CSPRNG via `rand_core::OsRng` — already in this crate's dependency
+/// graph through the declared `rand_core = { features = ["getrandom"] }`, so no new dependency
+/// edge and no version-resolution fragility (a direct `getrandom` dep collided with three resolved
+/// versions on one box; a `RandomState`-based substitute was then rightly BLOCKED in review:
+/// std randomizes hash keys but promises no CryptoRng contract, and a pairing code is an
+/// authentication credential). Symbols are drawn by rejection sampling so every alphabet character
+/// is equally likely — a modulo over 31 would bias the first eight.
 fn mint_code() -> String {
+    use rand_core::RngCore;
     // Excludes 0/O/1/I/L: a code someone reads off a terminal must not have look-alikes.
     const ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-    let raw = os_seed_bytes();
-    let chars: Vec<char> = raw
-        .iter()
-        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
-        .collect();
-    format!(
-        "{}{}{}{}-{}{}{}{}",
-        chars[0], chars[1], chars[2], chars[3], chars[4], chars[5], chars[6], chars[7]
-    )
+    let n = ALPHABET.len() as u16; // 31
+    let limit = (256 / n) * n; // 248: bytes at or above this would bias the low symbols
+    let mut chars = [0u8; 8];
+    let mut filled = 0;
+    while filled < chars.len() {
+        let mut raw = [0u8; 16];
+        rand_core::OsRng.fill_bytes(&mut raw);
+        for b in raw {
+            if (b as u16) < limit {
+                chars[filled] = ALPHABET[(b as usize) % ALPHABET.len()];
+                filled += 1;
+                if filled == chars.len() {
+                    break;
+                }
+            }
+        }
+    }
+    let c: Vec<char> = chars.iter().map(|b| *b as char).collect();
+    format!("{}{}{}{}-{}{}{}{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
 }
 
 /// Constant-time string equality — the pairing code is a credential and gets credential handling.

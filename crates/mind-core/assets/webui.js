@@ -574,7 +574,12 @@ function handleLine(line, b) {
   if (kind === "l:") {
     // The lane badge's ONLY source: the dispatch boundary's own l: event (scope:label). The
     // client renders what the server declared and never infers a lane from anything else.
-    const [scope, label] = rest.split(":", 2);
+    // First delimiter ONLY — the label itself may carry colons (nanogpt:deepseek/deepseek-v4-pro),
+    // and JS split-with-limit DISCARDS the remainder, which would misname the serving provider on
+    // the one chip whose whole job is naming it truthfully (Codex's E.OBS1 review).
+    const cut = rest.indexOf(":");
+    const scope = cut < 0 ? rest : rest.slice(0, cut);
+    const label = cut < 0 ? "" : rest.slice(cut + 1);
     const key = scope + ":" + (label || "");
     if (!b.laneSeen.has(key)) {
       b.laneSeen.add(key);

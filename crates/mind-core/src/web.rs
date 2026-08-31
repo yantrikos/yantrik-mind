@@ -1339,6 +1339,16 @@ mod tests {
             1,
             "lane chips must have exactly one construction site (the l: arm)"
         );
+        // Labels carry colons (nanogpt:deepseek/deepseek-v4-pro): the parse must cut at the FIRST
+        // delimiter and keep the remainder. JS split-with-limit DISCARDS the tail — banned here.
+        assert!(
+            !arm.contains("split(\":\""),
+            "the l: arm must not parse with split(\":\") — it truncates colon-bearing labels"
+        );
+        assert!(
+            arm.contains("indexOf(\":\")"),
+            "the l: arm parses scope/label at the first delimiter, preserving the remainder"
+        );
     }
 
     #[test]

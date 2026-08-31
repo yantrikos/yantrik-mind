@@ -460,7 +460,7 @@ $("import-form").addEventListener("submit", async (e) => {
     reply.textContent = `import failed (${res.status || "offline"}): ${res.text}`;
   }
   btn.disabled = false;
-  loadTasks();
+  if (res.ok) loadTasks();
 });
 
 /* ── message DOM ──────────────────────────────────────────────────────── */

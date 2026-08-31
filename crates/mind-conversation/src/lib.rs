@@ -1470,6 +1470,26 @@ pub(crate) fn shadow_route_event(
     ev
 }
 
+/// E.LOOP6: the deterministic correction appended after a denied mutating tool.
+///
+/// The model already receives Outcome::Denied's note ("tell the user, do not work around it") and
+/// the compose prompt already forbids claiming unperformed actions — and a live probe still
+/// answered "noted" over a refused `remember`. So the postcondition is code's: whatever the prose
+/// claims, the final answer states plainly that the refused action did not happen. Appending
+/// (rather than rewriting) keeps this deterministic — detecting WHICH sentence lied is a language
+/// problem, but making the answer truthful-in-total is not.
+pub(crate) fn apply_denied_write_correction(answer: &mut String, denied: &[String]) {
+    if denied.is_empty() {
+        return;
+    }
+    let list = denied.join(", ");
+    answer.push_str(&format!(
+        "
+
+⚠️ To be clear (from the system, not the model): {list} was refused by the safety gate this turn — nothing was saved, sent, or changed by it, regardless of anything above."
+    ));
+}
+
 /// The media URL a watch request actually names: the `url` field when there is one, otherwise the
 /// first URL found INSIDE a `query` sentence. A transformation, which is why `query` is not
 /// declared an alias of `url` — an alias substitutes a value, and this one has to extract it.
@@ -11031,6 +11051,11 @@ Open reminders you're carrying for them:",
         // minutes against a 3-minute contract.
         let started = std::time::Instant::now();
         let mut scratch = String::new();
+        // E.LOOP6: mutating tools the safety gates refused this turn. The postcondition on a
+        // denied write is owned by CODE — the model is already told (Outcome::Denied's note) and
+        // the live sweep proved words do not bind, so every composing exit appends a deterministic
+        // correction the model cannot talk over.
+        let mut denied_mutations: Vec<String> = Vec::new();
         let mut last_call = String::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
         // seen. Both exist because comparing against `last_call` alone was not enough — see the
@@ -11299,6 +11324,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             }
                         }
                     }
+                    apply_denied_write_correction(&mut a, &denied_mutations);
                     let _ = self
                         .memory
                         .append_message_scoped("user", user_text, id.write_scope())
@@ -11331,8 +11357,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // clock with an empty reply. Raising the iteration limit did not cause this bug; it
             // removed the thing that was hiding it.
             if tool == "answer" {
-                let ans = args_text(&v);
+                let mut ans = args_text(&v);
                 if !ans.trim().is_empty() {
+                    apply_denied_write_correction(&mut ans, &denied_mutations);
                     let _ = self
                         .memory
                         .append_message_scoped("user", user_text, id.write_scope())
@@ -11639,6 +11666,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // The pipeline's post side: reliability ledger, unavailable set, egress provenance —
             // and the five-way outcome for this loop's own rendering.
             let outcome = guards::post(self, &guard_state, &tool, &obs).await;
+            if outcome == crate::tool_outcome::Outcome::Denied
+                && self.plugins.lock().unwrap().restricted_turn_class_for_tool(&tool)
+                    == Some(crate::plugins::RestrictedTurnClass::Mutating)
+                && !denied_mutations.contains(&tool)
+            {
+                denied_mutations.push(tool.clone());
+            }
             self.record_tool_observation(
                 &run_trace,
                 predicted.as_deref(),
@@ -11844,6 +11878,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 ans.push_str(&format!("\n\nBtw — {q}"));
             }
         }
+        apply_denied_write_correction(&mut ans, &denied_mutations);
         let _ = self
             .memory
             .append_message_scoped("user", user_text, id.write_scope())

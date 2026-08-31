@@ -178,6 +178,11 @@ impl Outcome {
             "needs the user's confirmation",
             "requires confirmation",
             "denied by",
+            // The action runtime's own deny wrapper: ActionDecision::Deny renders as
+            // "(I can't do that — <reason>)", and reasons like the secret tripwire's carry no
+            // other gate word — so the wrapper itself is the marker (found by E.LOOP6's fixture:
+            // the flagship denial classified as not-Denied and slipped the postcondition).
+            "can't do that —",
             "safe outbound request",
             "not executed",
         ]) {

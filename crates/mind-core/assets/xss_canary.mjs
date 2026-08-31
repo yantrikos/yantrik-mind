@@ -1,6 +1,19 @@
 // E.WEB0 XSS kill criterion, run in a REAL headless browser against the REAL served assets.
 // A prompt-injected page's output must be inert in the mind's own UI. We render hostile model
 // output through the actual renderMarkdown and trip a global flag if any injected script executes.
+//
+// RUNNER DECLARATION (release-hardening slice, per Codex review): this is a DEVELOPMENT/CI
+// harness. It is NEVER executed by self_deploy.sh and nothing may be downloaded or installed
+// during a deployment to run it. Requirements, declared not fetched:
+//   - node >= 20
+//   - the `playwright` npm package resolvable from this file (npm i -D playwright, or NODE-side
+//     resolution to an existing install)
+//   - a Playwright-managed Chromium already downloaded (npx playwright install chromium), or
+//     chromium.launch({ executablePath }) pointed at an existing build
+// Invocation, from the repo root:
+//   node crates/mind-core/assets/xss_canary.mjs crates/mind-core/assets
+// Exit 0 = every payload inert (PASS printed as JSON); exit 1 = a payload executed or produced a
+// live attack node — treat as a release blocker for the web surface.
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 

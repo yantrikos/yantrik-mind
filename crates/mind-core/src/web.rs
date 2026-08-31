@@ -155,7 +155,10 @@ fn mint_code() -> String {
         }
     }
     let c: Vec<char> = chars.iter().map(|b| *b as char).collect();
-    format!("{}{}{}{}-{}{}{}{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
+    format!(
+        "{}{}{}{}-{}{}{}{}",
+        c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]
+    )
 }
 
 /// Constant-time string equality — the pairing code is a credential and gets credential handling.
@@ -1145,7 +1148,10 @@ mod tests {
     fn minted_codes_do_not_repeat() {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..200 {
-            assert!(seen.insert(mint_code()), "mint_code repeated within 200 draws");
+            assert!(
+                seen.insert(mint_code()),
+                "mint_code repeated within 200 draws"
+            );
         }
     }
 

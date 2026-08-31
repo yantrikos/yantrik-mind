@@ -132,6 +132,16 @@ fn spawn_web_server() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Build provenance, answered before ANYTHING boots (no DB, no backend, no listener): the
+    // deploy gate compares this against the checked-out SHA and refuses the swap on mismatch.
+    // A binary that cannot name its source commit is exactly the artifact the stale-binary
+    // incident shipped — cargo skipped a rebuild after `git reset --hard` moved mtimes backward,
+    // printed "Finished", and the service ran week-old code while every check reported success.
+    if std::env::args().nth(1).as_deref() == Some("--build-commit") {
+        println!("{}", mind_core::build_commit());
+        return Ok(());
+    }
+
     // Wallet custody is an operator-only bootstrap path. Handle it before model, memory, web, or
     // channel startup so key material cannot accidentally enter a prompt, trace, or live memory.
     if std::env::args().nth(1).as_deref() == Some("wallet") {

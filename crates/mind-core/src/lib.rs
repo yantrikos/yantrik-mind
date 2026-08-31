@@ -15,6 +15,31 @@ pub mod telegram;
 pub mod wallet_setup;
 pub mod web;
 
+/// The full source commit this binary was compiled from, stamped by the deploy pipeline via
+/// `YM_BUILD_COMMIT` at build time. `option_env!` makes the env var part of this crate's compile
+/// fingerprint, so a changed SHA forces mind-core to recompile even when `git reset --hard` has
+/// dragged source mtimes backward — the invalidation the stale-binary incident proved cargo will
+/// not do on its own. A binary built outside the pipeline honestly answers "unstamped" rather
+/// than guessing; the deploy gate treats anything but an exact SHA match as a refusal.
+pub fn build_commit() -> &'static str {
+    option_env!("YM_BUILD_COMMIT").unwrap_or("unstamped")
+}
+
+#[cfg(test)]
+mod build_commit_tests {
+    /// Dev/test builds run without the pipeline's stamp: the honest answer is the sentinel,
+    /// never an empty string (an empty stamp would compare equal to an empty expectation —
+    /// exactly the kind of vacuous match the deploy gate must not accept).
+    #[test]
+    fn unstamped_build_names_itself_unstamped() {
+        let c = super::build_commit();
+        assert!(!c.is_empty(), "build_commit must never be empty");
+        if std::env::var("YM_BUILD_COMMIT").is_err() {
+            assert_eq!(c, "unstamped");
+        }
+    }
+}
+
 /// Parse the two conflicting belief statements from a Contradiction tension's `about` field.
 /// Handles both formats emitted by the memory layer:
 ///   "conflict: A vs B"   (assert-belief auto-detection path)

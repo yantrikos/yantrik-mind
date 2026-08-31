@@ -56,10 +56,30 @@ fi
 echo "==> self-deploy: senses ffmpeg=$(command -v ffmpeg >/dev/null 2>&1 && echo yes || echo NO) yt-dlp=$(command -v yt-dlp >/dev/null 2>&1 && echo yes || echo NO)"
 
 echo "==> self-deploy: building main @ $COMMIT"
+# BUILD PROVENANCE (the stale-binary incident, 2026-08-31): `git reset --hard` drags source mtimes
+# BACKWARD, cargo's fingerprint then judges the cached artifact current, prints "Finished", and the
+# swap ships week-old code while every check reports success. Two independent defenses:
+#   1. The full checked-out SHA rides into the build as YM_BUILD_COMMIT; mind-core compiles it in
+#      via option_env!, which makes the env var part of the crate fingerprint — a new SHA forces a
+#      recompile regardless of mtimes.
+#   2. Before the swap, the BUILT BINARY is asked for its stamp (--build-commit answers before any
+#      boot) and anything but an exact match with the checkout — including "unstamped" — refuses
+#      the deploy. The binary proves its own provenance; the build log's word is not accepted.
+# Defense in depth: touch mind-core sources so even a cargo that ignores env fingerprints rebuilds.
+COMMIT_FULL=$(git rev-parse HEAD)
+export YM_BUILD_COMMIT="$COMMIT_FULL"
+find crates/mind-core/src -name '*.rs' -exec touch {} +
 if ! cargo build --release -p mind-core 2>&1 | tail -3; then
   echo "$(date -u +%FT%TZ) | deploy | ABORT-BUILD | $COMMIT" >> "$EVLOG"
   exit 1
 fi
+BUILT_COMMIT=$("$CARGO_TARGET_DIR/release/mind-core" --build-commit 2>/dev/null || echo "unreadable")
+if [ "$BUILT_COMMIT" != "$COMMIT_FULL" ]; then
+  echo "==> STALE/UNSTAMPED BINARY — built binary reports '$BUILT_COMMIT', checkout is '$COMMIT_FULL'. REFUSING the swap."
+  echo "$(date -u +%FT%TZ) | deploy | ABORT-STALE-BINARY | checkout=$COMMIT built=$BUILT_COMMIT" >> "$EVLOG"
+  exit 1
+fi
+echo "==> self-deploy: binary provenance verified ($BUILT_COMMIT)"
 
 # stop -> cp -> start (NEVER cp over a running binary — Text file busy).
 systemctl stop yantrik-mind

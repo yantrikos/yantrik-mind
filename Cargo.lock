@@ -2054,7 +2054,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "chrono-tz",
- "getrandom 0.2.17",
  "hex",
  "k256",
  "keyring",

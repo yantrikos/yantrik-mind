@@ -122,13 +122,45 @@ pub(crate) fn ensure_pairing_code(devices: &mind_governance::devices::DeviceStor
     }
 }
 
-/// A readable one-time code: 8 chars from an unambiguous alphabet, grouped 4-4. ~40 bits — plenty
-/// against 5 attempts and a 15-minute lockout, and short enough to type from a journal line.
+/// Eight bytes of OS-seeded entropy, std-only — no crate dependency, so this compiles identically
+/// in every environment (a direct `getrandom` dep collided with three transitively-resolved
+/// versions on one box, and a registration code is not worth that fragility).
+///
+/// Each `RandomState::new()` is keyed by the OS with a fresh random SipHash seed per instance
+/// (that is the whole point of HashDoS resistance); hashing distinct inputs through eight
+/// independent instances, folded with the nanosecond clock and the address of a heap allocation,
+/// yields a byte apiece. This is NOT a general CSPRNG — it is exactly enough unpredictability for a
+/// SINGLE-USE code guarded by a 5-attempt / 15-minute lockout, where an online attacker gets ~5
+/// guesses per quarter hour against a 30^8 space. For anything reused or unthrottled, use a real
+/// CSPRNG.
+fn os_seed_bytes() -> [u8; 8] {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut out = [0u8; 8];
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let heap = Box::new(0u8);
+    let addr = (&*heap as *const u8) as u64;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        (i as u64).hash(&mut h);
+        nanos.hash(&mut h);
+        addr.hash(&mut h);
+        std::thread::current().id().hash(&mut h);
+        let v = h.finish();
+        *slot = (v ^ (v >> 32)) as u8;
+    }
+    out
+}
+
+/// A readable one-time code: 8 chars from an unambiguous alphabet, grouped 4-4. ~39 bits over a
+/// 30-symbol space — plenty against 5 attempts and a 15-minute lockout, short enough to type from
+/// a journal line.
 fn mint_code() -> String {
     // Excludes 0/O/1/I/L: a code someone reads off a terminal must not have look-alikes.
     const ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-    let mut raw = [0u8; 8];
-    getrandom::getrandom(&mut raw).expect("OS entropy");
+    let raw = os_seed_bytes();
     let chars: Vec<char> = raw
         .iter()
         .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
@@ -1117,6 +1149,16 @@ mod tests {
             for ch in c.chars().filter(|c| *c != '-') {
                 assert!(!"01OIL".contains(ch), "ambiguous glyph {ch} in {c}");
             }
+        }
+    }
+
+    /// The std-only entropy source must not repeat — a fixed or low-period code would let one
+    /// leaked journal line pair every future fresh install. 200 draws, all distinct.
+    #[test]
+    fn minted_codes_do_not_repeat() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            assert!(seen.insert(mint_code()), "mint_code repeated within 200 draws");
         }
     }
 

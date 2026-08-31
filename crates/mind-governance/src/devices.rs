@@ -108,11 +108,7 @@ struct StoreDoc {
 
 impl Default for StoreDoc {
     fn default() -> Self {
-        StoreDoc {
-            version: STORE_VERSION,
-            initialized: false,
-            devices: vec![],
-        }
+        StoreDoc { version: STORE_VERSION, initialized: false, devices: vec![] }
     }
 }
 
@@ -199,7 +195,7 @@ fn mint_token() -> std::result::Result<Secret, DeviceError> {
     let mut acc = 0u32;
     let mut bits = 0u32;
     for &b in &bytes {
-        acc = (acc << 8) | u32::from(b);
+        acc = (acc << 8) | b as u32;
         bits += 8;
         while bits >= 6 {
             bits -= 6;
@@ -236,11 +232,7 @@ impl DeviceStore {
         } else {
             StoreDoc::default()
         };
-        Ok(DeviceStore {
-            path,
-            console_token_path,
-            inner: Mutex::new(doc),
-        })
+        Ok(DeviceStore { path, console_token_path, inner: Mutex::new(doc) })
     }
 
     /// Mint the console operator device EXACTLY ONCE, for a provably-new store (`initialized=false`
@@ -255,17 +247,13 @@ impl DeviceStore {
         }
         if !doc.devices.is_empty() {
             // initialized=false but devices present = an inconsistent store we did not create.
-            return Err(DeviceError::Corrupt(
-                "uninitialized store already holds devices".into(),
-            ));
+            return Err(DeviceError::Corrupt("uninitialized store already holds devices".into()));
         }
         let token = mint_token()?;
         let device = Device {
             id: "console".to_string(),
             name: "local console".to_string(),
-            role: DeviceRole::Operator {
-                default_person: primary.to_string(),
-            },
+            role: DeviceRole::Operator { default_person: primary.to_string() },
             token_sha256: hash_token(token.expose()),
             created_ms: now_ms(),
             revoked_ms: None,
@@ -289,10 +277,7 @@ impl DeviceStore {
         doc.devices
             .iter()
             .find(|d| d.is_active() && ct_eq(&d.token_sha256, &want))
-            .map(|d| AuthedDevice {
-                id: d.id.clone(),
-                role: d.role.clone(),
-            })
+            .map(|d| AuthedDevice { id: d.id.clone(), role: d.role.clone() })
     }
 
     /// Pair a new device, returning its raw token ONCE (never recoverable afterward). Operator-console
@@ -304,10 +289,7 @@ impl DeviceStore {
             return Err(DeviceError::Invalid("device name required".into()));
         }
         match &role {
-            DeviceRole::Operator { default_person }
-            | DeviceRole::Member {
-                person: default_person,
-            } => {
+            DeviceRole::Operator { default_person } | DeviceRole::Member { person: default_person } => {
                 if default_person.trim().is_empty() {
                     return Err(DeviceError::Invalid("device person/scope required".into()));
                 }
@@ -317,14 +299,8 @@ impl DeviceStore {
         if doc.devices.len() >= MAX_DEVICES {
             return Err(DeviceError::Invalid("device cap reached".into()));
         }
-        if doc
-            .devices
-            .iter()
-            .any(|d| d.is_active() && d.name.eq_ignore_ascii_case(name))
-        {
-            return Err(DeviceError::Invalid(format!(
-                "a device named '{name}' already exists"
-            )));
+        if doc.devices.iter().any(|d| d.is_active() && d.name.eq_ignore_ascii_case(name)) {
+            return Err(DeviceError::Invalid(format!("a device named '{name}' already exists")));
         }
         let token = mint_token()?;
         let token_sha256 = hash_token(token.expose());
@@ -351,11 +327,7 @@ impl DeviceStore {
     /// console with no recovery path in this slice).
     pub fn revoke(&self, id: &str) -> Result<bool> {
         let mut doc = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let active_ops = doc
-            .devices
-            .iter()
-            .filter(|d| d.is_active() && d.is_operator())
-            .count();
+        let active_ops = doc.devices.iter().filter(|d| d.is_active() && d.is_operator()).count();
         let Some(target) = doc.devices.iter().position(|d| d.id == id && d.is_active()) else {
             return Ok(false);
         };
@@ -405,50 +377,29 @@ pub struct DeviceInfo {
 /// must fail closed, not authenticate something ambiguous.
 fn validate(doc: &StoreDoc) -> Result<()> {
     if doc.version != STORE_VERSION {
-        return Err(DeviceError::Corrupt(format!(
-            "unknown store version {}",
-            doc.version
-        )));
+        return Err(DeviceError::Corrupt(format!("unknown store version {}", doc.version)));
     }
     let mut ids = std::collections::HashSet::new();
     let mut hashes = std::collections::HashSet::new();
     for d in &doc.devices {
-        if d.id.trim().is_empty()
-            || d.token_sha256.len() != 64
-            || !d.token_sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err(DeviceError::Corrupt(format!(
-                "malformed device record '{}'",
-                d.id
-            )));
+        if d.id.trim().is_empty() || d.token_sha256.len() != 64 || !d.token_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(DeviceError::Corrupt(format!("malformed device record '{}'", d.id)));
         }
         if !ids.insert(&d.id) {
-            return Err(DeviceError::Corrupt(format!(
-                "duplicate device id '{}'",
-                d.id
-            )));
+            return Err(DeviceError::Corrupt(format!("duplicate device id '{}'", d.id)));
         }
         if !hashes.insert(&d.token_sha256) {
             return Err(DeviceError::Corrupt("duplicate token hash".into()));
         }
         match &d.role {
-            DeviceRole::Operator { default_person }
-            | DeviceRole::Member {
-                person: default_person,
-            } => {
+            DeviceRole::Operator { default_person } | DeviceRole::Member { person: default_person } => {
                 if default_person.trim().is_empty() {
-                    return Err(DeviceError::Corrupt(format!(
-                        "device '{}' has empty person",
-                        d.id
-                    )));
+                    return Err(DeviceError::Corrupt(format!("device '{}' has empty person", d.id)));
                 }
             }
         }
     }
-    if doc.initialized
-        && doc.devices.iter().all(|d| d.revoked_ms.is_some())
-        && !doc.devices.is_empty()
-    {
+    if doc.initialized && doc.devices.iter().all(|d| d.revoked_ms.is_some()) && !doc.devices.is_empty() {
         // Every device revoked: not "corrupt", but the caller should notice there's no way in.
         // We still load it (so `device list` works); authentication simply returns None for all.
     }
@@ -458,9 +409,7 @@ fn validate(doc: &StoreDoc) -> Result<()> {
 /// Atomic, durable write of the store doc: temp file (owner-only) → fsync → rename → fsync dir.
 fn persist(path: &Path, doc: &StoreDoc) -> Result<()> {
     let json = serde_json::to_string_pretty(doc).map_err(|e| DeviceError::Io(e.to_string()))?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| DeviceError::Io("store has no parent dir".into()))?;
+    let dir = path.parent().ok_or_else(|| DeviceError::Io("store has no parent dir".into()))?;
     std::fs::create_dir_all(dir).map_err(|e| DeviceError::Io(e.to_string()))?;
     let tmp = path.with_extension("json.tmp");
     write_owner_only(&tmp, &json)?;
@@ -482,11 +431,8 @@ fn write_owner_only(path: &Path, contents: &str) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts
-        .open(path)
-        .map_err(|e| DeviceError::Io(format!("create {}: {e}", path.display())))?;
-    f.write_all(contents.as_bytes())
-        .map_err(|e| DeviceError::Io(e.to_string()))?;
+    let mut f = opts.open(path).map_err(|e| DeviceError::Io(format!("create {}: {e}", path.display())))?;
+    f.write_all(contents.as_bytes()).map_err(|e| DeviceError::Io(e.to_string()))?;
     f.sync_all().map_err(|e| DeviceError::Io(e.to_string()))?;
     Ok(())
 }
@@ -515,24 +461,13 @@ mod tests {
     fn console_init_is_one_time_and_authenticates() {
         let dir = scratch("init");
         let store = DeviceStore::open(&dir).unwrap();
-        assert!(
-            store.init_console_once("primary").unwrap(),
-            "first init mints the console"
-        );
-        assert!(
-            !store.init_console_once("primary").unwrap(),
-            "second init is a no-op"
-        );
+        assert!(store.init_console_once("primary").unwrap(), "first init mints the console");
+        assert!(!store.init_console_once("primary").unwrap(), "second init is a no-op");
         let token = std::fs::read_to_string(dir.join("console.token")).unwrap();
-        let authed = store
-            .authenticate(token.trim())
-            .expect("console token authenticates");
+        let authed = store.authenticate(token.trim()).expect("console token authenticates");
         assert!(authed.is_operator());
         assert_eq!(authed.chat_person(), "primary");
-        assert!(
-            store.authenticate("not-the-token").is_none(),
-            "a bogus token never authenticates"
-        );
+        assert!(store.authenticate("not-the-token").is_none(), "a bogus token never authenticates");
     }
 
     #[test]
@@ -543,47 +478,28 @@ mod tests {
             let store = DeviceStore::open(&dir).unwrap();
             store.init_console_once("primary").unwrap();
             // Pair a SECOND operator so we're allowed to revoke the console (last-operator guard).
-            store
-                .pair(
-                    "second",
-                    DeviceRole::Operator {
-                        default_person: "primary".into(),
-                    },
-                )
-                .unwrap();
+            store.pair("second", DeviceRole::Operator { default_person: "primary".into() }).unwrap();
             store.revoke("console").unwrap();
             std::fs::read_to_string(dir.join("console.token")).unwrap()
         };
         // Reopen: init is a no-op (already initialized), the revoked console stays dead.
         let store2 = DeviceStore::open(&dir).unwrap();
-        assert!(
-            !store2.init_console_once("primary").unwrap(),
-            "already-initialized store must not re-init"
-        );
-        assert!(
-            store2.authenticate(token.trim()).is_none(),
-            "revoked console must not authenticate after reopen"
-        );
+        assert!(!store2.init_console_once("primary").unwrap(), "already-initialized store must not re-init");
+        assert!(store2.authenticate(token.trim()).is_none(), "revoked console must not authenticate after reopen");
     }
 
     #[test]
     fn corrupt_store_fails_closed() {
         let dir = scratch("corrupt");
         std::fs::write(dir.join("devices.json"), "{ this is not valid json").unwrap();
-        assert!(
-            DeviceStore::open(&dir).is_err(),
-            "a corrupt store must fail closed, not open empty"
-        );
+        assert!(DeviceStore::open(&dir).is_err(), "a corrupt store must fail closed, not open empty");
         // Semantically-inconsistent (duplicate id) also fails closed.
         let dir2 = scratch("dupid");
         let doc = r#"{"version":1,"initialized":true,"devices":[
           {"id":"a","name":"x","role":{"kind":"operator","default_person":"primary"},"token_sha256":"aa","created_ms":1},
           {"id":"a","name":"y","role":{"kind":"member","person":"asha"},"token_sha256":"bb","created_ms":2}]}"#;
         std::fs::write(dir2.join("devices.json"), doc).unwrap();
-        assert!(
-            DeviceStore::open(&dir2).is_err(),
-            "duplicate device id must fail closed"
-        );
+        assert!(DeviceStore::open(&dir2).is_err(), "duplicate device id must fail closed");
     }
 
     #[test]
@@ -591,27 +507,15 @@ mod tests {
         let dir = scratch("pair");
         let store = DeviceStore::open(&dir).unwrap();
         store.init_console_once("primary").unwrap();
-        let tok = store
-            .pair(
-                "asha-phone",
-                DeviceRole::Member {
-                    person: "asha".into(),
-                },
-            )
-            .unwrap();
-        let authed = store
-            .authenticate(tok.expose())
-            .expect("member token authenticates");
+        let tok = store.pair("asha-phone", DeviceRole::Member { person: "asha".into() }).unwrap();
+        let authed = store.authenticate(tok.expose()).expect("member token authenticates");
         assert!(!authed.is_operator());
         assert_eq!(authed.chat_person(), "asha");
         // list carries no hashes
         let ids: Vec<_> = store.list().into_iter().map(|d| d.id).collect();
         let dev_id = ids.iter().find(|i| i.starts_with("dev-")).cloned().unwrap();
         assert!(store.revoke(&dev_id).unwrap(), "revoke succeeds");
-        assert!(
-            store.authenticate(tok.expose()).is_none(),
-            "revoked token is immediately dead"
-        );
+        assert!(store.authenticate(tok.expose()).is_none(), "revoked token is immediately dead");
         assert!(!store.revoke(&dev_id).unwrap(), "double-revoke is a no-op");
     }
 
@@ -620,10 +524,7 @@ mod tests {
         let dir = scratch("lastop");
         let store = DeviceStore::open(&dir).unwrap();
         store.init_console_once("primary").unwrap();
-        assert!(
-            store.revoke("console").is_err(),
-            "the last operator must not be revocable"
-        );
+        assert!(store.revoke("console").is_err(), "the last operator must not be revocable");
     }
 
     #[test]
@@ -631,22 +532,8 @@ mod tests {
         let dir = scratch("dupname");
         let store = DeviceStore::open(&dir).unwrap();
         store.init_console_once("primary").unwrap();
-        store
-            .pair(
-                "phone",
-                DeviceRole::Member {
-                    person: "asha".into(),
-                },
-            )
-            .unwrap();
-        assert!(store
-            .pair(
-                "phone",
-                DeviceRole::Member {
-                    person: "bob".into()
-                }
-            )
-            .is_err());
+        store.pair("phone", DeviceRole::Member { person: "asha".into() }).unwrap();
+        assert!(store.pair("phone", DeviceRole::Member { person: "bob".into() }).is_err());
     }
 
     #[test]
@@ -654,31 +541,10 @@ mod tests {
         let dir = scratch("entropy");
         let store = DeviceStore::open(&dir).unwrap();
         store.init_console_once("primary").unwrap();
-        let a = store
-            .pair(
-                "a",
-                DeviceRole::Member {
-                    person: "asha".into(),
-                },
-            )
-            .unwrap();
-        let b = store
-            .pair(
-                "b",
-                DeviceRole::Member {
-                    person: "bob".into(),
-                },
-            )
-            .unwrap();
+        let a = store.pair("a", DeviceRole::Member { person: "asha".into() }).unwrap();
+        let b = store.pair("b", DeviceRole::Member { person: "bob".into() }).unwrap();
         assert_ne!(a.expose(), b.expose());
-        assert!(
-            a.expose().len() >= 40,
-            "256-bit token encodes to >=40 chars"
-        );
-        assert_eq!(
-            format!("{a:?}"),
-            "Secret(********)",
-            "Debug must not leak the token"
-        );
+        assert!(a.expose().len() >= 40, "256-bit token encodes to >=40 chars");
+        assert_eq!(format!("{a:?}"), "Secret(********)", "Debug must not leak the token");
     }
 }

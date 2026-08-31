@@ -20,23 +20,13 @@ fn a_verdict_lands_as_a_signed_note() {
         subject: "pack:live_check".into(),
         verdict: true,
         digest: Attestation::digest_of(doc),
-        evidence: vec![
-            "   ✓ skill_exists(live)".into(),
-            "   ✓ tool_contains(calc ⊇ \"4\")".into(),
-        ],
+        evidence: vec!["   ✓ skill_exists(live)".into(), "   ✓ tool_contains(calc ⊇ \"4\")".into()],
     };
     let oid = a.attest(&pass).expect("certification must land");
-    assert_eq!(
-        oid.len(),
-        64,
-        "a weft oid is a 32-byte content address: {oid}"
-    );
+    assert_eq!(oid.len(), 64, "a weft oid is a 32-byte content address: {oid}");
 
     // A demotion of the SAME subject lands as its own claim — trust history is append-only.
-    let fail = Attestation {
-        verdict: false,
-        ..pass
-    };
+    let fail = Attestation { verdict: false, ..pass };
     let oid2 = a.attest(&fail).expect("demotion must land");
     assert_ne!(oid, oid2, "distinct verdicts are distinct objects");
 
@@ -46,20 +36,8 @@ fn a_verdict_lands_as_a_signed_note() {
         .expect("read notes")
         .into_string()
         .expect("body");
-    assert!(
-        notes.contains("CERTIFIED pack:live_check"),
-        "certification is on the ledger"
-    );
-    assert!(
-        notes.contains("DEMOTED pack:live_check"),
-        "demotion is on the ledger"
-    );
-    assert!(
-        notes.contains(&Attestation::digest_of(doc)),
-        "the claim is bound to the document digest"
-    );
-    println!(
-        "landed: {oid} (certified) / {oid2} (demoted), identity {}",
-        a.identity()
-    );
+    assert!(notes.contains("CERTIFIED pack:live_check"), "certification is on the ledger");
+    assert!(notes.contains("DEMOTED pack:live_check"), "demotion is on the ledger");
+    assert!(notes.contains(&Attestation::digest_of(doc)), "the claim is bound to the document digest");
+    println!("landed: {oid} (certified) / {oid2} (demoted), identity {}", a.identity());
 }

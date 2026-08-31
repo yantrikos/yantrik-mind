@@ -7769,6 +7769,61 @@ fn rendering_rich_does_not_disturb_read_isolation() {
 // exactly that: the same tool, never the same arguments twice. It fails against the old guard (which
 // would run all 30 scripted steps) and passes against the observation-based one.
 
+// ── E.WEB5: HISTORY IS SERVED UNDER THE DEVICE'S OWN SCOPE ──────────────────────────────────────
+
+/// The web history route builds the same identity the WG chat listener builds; the memory layer's
+/// filter does the rest. A member identity must not read the primary's private lines, and the
+/// operator's own read still sees them — asserted through `web_recent_history` itself, the exact
+/// function the route calls.
+#[tokio::test]
+async fn web_history_is_scoped_to_the_device_identity() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new("unused")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+        pool,
+        "JARVIS",
+    );
+
+    let op = TurnIdentity::new(
+        mind_types::PRIMARY.to_string(),
+        false,
+        OutputScope::OperatorPrivate,
+    );
+    let member = TurnIdentity::new("brishti".to_string(), false, OutputScope::HouseholdMember);
+    const OP_LINE: &str = "operator-private sentinel: the safe code discussion";
+    const MEMBER_LINE: &str = "member line: brishti asked about dinner";
+    let _ = mem
+        .append_message_scoped("user", OP_LINE, op.write_scope())
+        .await;
+    let _ = mem
+        .append_message_scoped("user", MEMBER_LINE, member.write_scope())
+        .await;
+
+    let op_view = conv.web_recent_history(&op, 50).await;
+    assert!(
+        op_view
+            .iter()
+            .any(|(_, t)| t.contains("safe code discussion")),
+        "the operator reads their own lines: {op_view:?}"
+    );
+
+    let member_view = conv.web_recent_history(&member, 50).await;
+    assert!(
+        !member_view
+            .iter()
+            .any(|(_, t)| t.contains("safe code discussion")),
+        "a member identity must not read operator-private lines: {member_view:?}"
+    );
+    assert!(
+        member_view.iter().any(|(_, t)| t.contains("dinner")),
+        "the member still reads their own lines: {member_view:?}"
+    );
+}
+
 // ── E.OBS1: THE LANE BADGE'S SINGLE SOURCE OF TRUTH ─────────────────────────────────────────────
 
 /// Criterion (1): a turn's lane events name the scope and serving label exactly as the dispatch

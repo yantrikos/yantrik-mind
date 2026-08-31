@@ -11918,6 +11918,26 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         Ok(ans)
     }
 
+    /// The web surface's scoped transcript read (E.WEB5): the SAME lines the engine itself would
+    /// see for this identity — an operator reads under the primary's private scope, a member under
+    /// their own. Scoping is the memory layer's filter, exercised through the identity, so a route
+    /// cannot widen what a device may see by constructing a different context.
+    pub async fn web_recent_history(
+        &self,
+        id: &TurnIdentity,
+        limit: usize,
+    ) -> Vec<(String, String)> {
+        let limit = limit.clamp(1, 200);
+        let ctx = mind_types::AccessContext::principal(
+            id.viewer(),
+            mind_types::Purpose::conversation(&id.owner),
+        );
+        self.memory
+            .recent_messages(limit, &ctx)
+            .await
+            .unwrap_or_default()
+    }
+
     // ---------- MEMBER PRODUCT SURFACE ----------
     // Per-member reminders/tasks and an opt-in daily brief — owner-keyed KVs (`m:<owner>:…`),
     // delivered to the member's own chat. Structurally isolated from the primary's task spine;

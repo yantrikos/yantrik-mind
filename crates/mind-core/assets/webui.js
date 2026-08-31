@@ -291,6 +291,28 @@ async function loadDevices() {
       host.appendChild(card);
     }
     if (!(data.devices || []).length) host.appendChild(textP("No devices."));
+    // E.WEB5: member invites — operator mints a single-use, 15-minute code bound to a person;
+    // the member enters it on the SAME pairing screen.
+    const inviteWrap = el("div", "card setting-row");
+    const imain = el("div", "card-main");
+    const it = el("div", "card-title"); it.textContent = "Invite a member"; imain.appendChild(it);
+    const idesc = el("div", "card-desc"); idesc.textContent = "Mints a single-use code (15 min) that pairs a browser as this person — member scope, never operator."; imain.appendChild(idesc);
+    const irow = el("div", "job-actions");
+    const iinp = document.createElement("input");
+    iinp.className = "agent-input"; iinp.placeholder = "person id (e.g. brishti)"; iinp.maxLength = 24;
+    const ibtn = el("button"); ibtn.textContent = "Mint invite";
+    const iout = el("div", "setting-key");
+    ibtn.addEventListener("click", async () => {
+      const person = iinp.value.trim();
+      if (!person) return;
+      const res = await postJson("/api/invite", { person });
+      iout.textContent = res.ok
+        ? `code for ${res.data.person}: ${res.data.code}  (single use, ${res.data.ttl_minutes} min — share it now)`
+        : `invite failed (${res.status || "offline"}): ${res.text}`;
+    });
+    irow.append(iinp, ibtn); imain.append(irow, iout);
+    inviteWrap.appendChild(imain);
+    host.appendChild(inviteWrap);
   } catch (_) { host.replaceChildren(textP("Could not read the device store.")); }
 }
 
@@ -562,7 +584,7 @@ async function sendTurn() {
   b.stamp.textContent = fmtTs(ts);
   history.push({ role: "mind", text: finalText ?? "(no reply)", ts }); persist();
   orb.classList.remove("thinking"); b.avatar.classList.remove("thinking");
-  $("mind-state").textContent = "at home";
+  if (b.laneSeen.size === 0) $("mind-state").textContent = "at home";
   busy = false; $("send-btn").disabled = false;
   scrollToEnd(); input.focus();
 }

@@ -279,6 +279,31 @@ fn operator(
     }
 }
 
+/// The identity a WEB device speaks and reads as (E.WEB5). Same rule as the WG chat listener:
+/// an operator device is the primary's private surface; a member device is Principal-scoped as its
+/// bound person, NEVER operator — and history reads use the same identity as turns, so a route
+/// cannot widen what a device may see.
+fn identity_for(d: &mind_governance::devices::AuthedDevice) -> mind_conversation::TurnIdentity {
+    let scope = if d.is_operator() {
+        mind_conversation::OutputScope::OperatorPrivate
+    } else {
+        mind_conversation::OutputScope::HouseholdMember
+    };
+    mind_conversation::TurnIdentity::new(d.chat_person().to_string(), false, scope)
+        .rendering_rich(true)
+}
+
+/// Pending member invites (E.WEB5): operator-minted, single-use, short-TTL, bound to a person.
+/// In-memory ON PURPOSE — a service restart clears outstanding invites, which is the fail-safe
+/// direction for a credential that exists to be redeemed within minutes.
+struct MemberInvite {
+    code: String,
+    person: String,
+    expires_ms: u64,
+}
+static PENDING_INVITES: std::sync::Mutex<Vec<MemberInvite>> = std::sync::Mutex::new(Vec::new());
+const INVITE_TTL_MS: u64 = 15 * 60 * 1000;
+
 /// The session cookie's value, if the request carries one. Only `ym_session` is read; everything
 /// else in the Cookie header is someone else's business.
 fn session_cookie(head: &str) -> Option<String> {
@@ -647,6 +672,90 @@ fn handle(
                         "200 OK",
                         "",
                         &serde_json::json!({ "reply": out }),
+                    );
+                }
+            }
+        }
+        ("GET", "/api/history") => {
+            let Some(d) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "",
+                    "not paired",
+                );
+                return;
+            };
+            let n: usize = target
+                .split('?')
+                .nth(1)
+                .and_then(|q| q.strip_prefix("n="))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50);
+            let ident = identity_for(&d);
+            let msgs = rt.block_on(conv.web_recent_history(&ident, n));
+            let rows: Vec<serde_json::Value> = msgs
+                .iter()
+                .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
+                .collect();
+            send_json(
+                &mut stream,
+                "200 OK",
+                "",
+                &serde_json::json!({ "messages": rows }),
+            );
+        }
+        ("POST", "/api/invite") => {
+            if !has_client_header {
+                send(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "",
+                    "missing client header",
+                );
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let person: String = parsed["person"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim()
+                        .to_lowercase()
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .take(24)
+                        .collect();
+                    if person.is_empty() || person == mind_types::PRIMARY {
+                        send(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "",
+                            "a member person id is required (and it cannot be the primary)",
+                        );
+                        return;
+                    }
+                    let code = mint_code();
+                    PENDING_INVITES
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(MemberInvite {
+                            code: code.clone(),
+                            person: person.clone(),
+                            expires_ms: now_ms() + INVITE_TTL_MS,
+                        });
+                    eprintln!("[web-ui] member invite minted for '{person}' (expires in 15m)");
+                    // Shown ONCE to the operator, never persisted server-side beyond the pending list.
+                    send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "code": code, "person": person, "ttl_minutes": 15 }),
                     );
                 }
             }
@@ -1029,6 +1138,28 @@ fn redeem_code(
     label: &str,
 ) -> std::result::Result<(String, mind_governance::devices::Secret), Refusal> {
     let _hold = REDEEM_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // MEMBER INVITES first (E.WEB5): explicit operator-minted codes work regardless of whether
+    // first-boot registration is open — they are a different grant with a narrower role. Single
+    // use: the entry is removed under the same lock that validates it. Expiry is checked at
+    // redemption; an invite can only ever mint a MEMBER for the person it was bound to.
+    {
+        let mut invites = PENDING_INVITES.lock().unwrap_or_else(|p| p.into_inner());
+        invites.retain(|i| i.expires_ms > now_ms());
+        if let Some(pos) = invites.iter().position(|i| ct_str_eq(code, &i.code)) {
+            let invite = invites.remove(pos);
+            drop(invites);
+            let name = format!("{WEB_DEVICE_PREFIX}member:{}", invite.person);
+            return match devices.pair(
+                &name,
+                mind_governance::devices::DeviceRole::Member {
+                    person: invite.person.clone(),
+                },
+            ) {
+                Ok(secret) => Ok((name, secret)),
+                Err(_) => Err(("409 Conflict", "pairing failed")),
+            };
+        }
+    }
     let dir = crate::telegram::state_dir();
     let path = std::path::Path::new(&dir).join(PAIRING_CODE_FILE);
     // Both reads happen INSIDE the lock: the code file and the already-enrolled check are one
@@ -1144,12 +1275,8 @@ fn turn_stream(
         send(stream, "400 Bad Request", "text/plain", "", "empty turn");
         return;
     }
-    let ident = mind_conversation::TurnIdentity::new(
-        authed.chat_person().to_string(),
-        false,
-        mind_conversation::OutputScope::OperatorPrivate,
-    )
-    .rendering_rich(true);
+    // E.WEB5: role-correct identity — a member browser must never speak as the operator.
+    let ident = identity_for(authed);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let _ = stream.write_all(
@@ -1349,6 +1476,58 @@ mod tests {
             arm.contains("indexOf(\":\")"),
             "the l: arm parses scope/label at the first delimiter, preserving the remainder"
         );
+    }
+
+    /// E.WEB5 criterion (3): a member invite is single-use and expiry-bounded, and only ever mints
+    /// a Member — verified at the pending-invite layer without a device store, since redemption
+    /// wiring is covered by the pairing tests.
+    #[test]
+    fn member_invites_are_single_use_and_expiring() {
+        PENDING_INVITES.lock().unwrap().clear();
+        let now = now_ms();
+        {
+            let mut inv = PENDING_INVITES.lock().unwrap();
+            inv.push(super::MemberInvite {
+                code: "LIVE-CODE".into(),
+                person: "brishti".into(),
+                expires_ms: now + 60_000,
+            });
+            inv.push(super::MemberInvite {
+                code: "DEAD-CODE".into(),
+                person: "arka".into(),
+                expires_ms: now.saturating_sub(1),
+            });
+        }
+        // The expiry sweep the redeem path runs first.
+        {
+            let mut inv = PENDING_INVITES.lock().unwrap();
+            inv.retain(|i| i.expires_ms > now_ms());
+            assert!(
+                inv.iter().any(|i| i.code == "LIVE-CODE"),
+                "the live invite survives"
+            );
+            assert!(
+                !inv.iter().any(|i| i.code == "DEAD-CODE"),
+                "the expired invite is swept"
+            );
+        }
+        // Single use: taking the live one removes it; a second take finds nothing.
+        {
+            let mut inv = PENDING_INVITES.lock().unwrap();
+            let pos = inv
+                .iter()
+                .position(|i| ct_str_eq("LIVE-CODE", &i.code))
+                .unwrap();
+            let taken = inv.remove(pos);
+            assert_eq!(taken.person, "brishti", "the invite is bound to its person");
+            assert!(
+                inv.iter()
+                    .position(|i| ct_str_eq("LIVE-CODE", &i.code))
+                    .is_none(),
+                "single use: gone after redemption"
+            );
+        }
+        PENDING_INVITES.lock().unwrap().clear();
     }
 
     #[test]

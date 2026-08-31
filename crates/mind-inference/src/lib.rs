@@ -147,10 +147,11 @@ pub fn privacy_escalated_count() -> u64 {
     PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// E.OBS1: the process-wide lane observer — installed once by the conversation engine, fired at
-/// the dispatch boundary beside `PRIVACY_SERVED`, with the same two facts the boundary already
-/// prints: the scope served and the provider label that served it. Content never rides this hook.
-/// One emit site means a UI badge can never assert a lane the dispatcher did not declare.
+/// E.OBS1: the process-wide lane observer — installed once by the conversation engine, fired
+/// POST-SUCCESS from the pool wrapper with the scope and the label of the link that ACTUALLY
+/// ANSWERED (not the pre-dispatch route). Content never rides this hook. One emit site means a UI
+/// badge can never assert a lane no provider served — and it is deliberately NOT beside
+/// `PRIVACY_SERVED`, which is the conservative pre-dispatch EXPOSURE count, a different fact.
 static LANE_OBSERVER: std::sync::OnceLock<Box<dyn Fn(&str, &str) + Send + Sync>> =
     std::sync::OnceLock::new();
 
@@ -228,9 +229,9 @@ pub fn privacy_report(provider: &str) -> String {
          provider: {provider}\n\
          household allowlist (YM_HOUSEHOLD_PROVIDERS): {household}\n\
          private allowlist (YM_PRIVATE_PROVIDERS): {}\n\
-         served  — private {} · household {} · public {}\n\
+         dispatched (exposure — a scope-authorized call was sent; NOT a usable answer) — private {} · household {} · public {}\n\
          refused — private {} · household {} · public {}\n\
-         household call sites — {}\n\
+         household dispatch sites — {}\n\
          private-grounded turns ESCALATED to cloud: {}  ← should be 0; a non-zero count means private context reached a cloud provider\n\
          Configure YM_PRIVATE_PROVIDERS with an owned/on-device provider to keep private-grounded turns home (escalations auto-drop to 0).",
         if private.is_empty() { "(none — private lane HARD-REFUSES; deterministic fallback only)" } else { private.as_str() },
@@ -489,8 +490,9 @@ impl InferencePool {
     }
 
     /// The privacy gate, shared by the plain and STREAMING call paths so they can never drift:
-    /// resolves which backend may serve this scope, refuses what the allowlists refuse, and keeps
-    /// the served/refused counters honest.
+    /// resolves which backend may serve this scope, refuses what the allowlists refuse, and records
+    /// the authorized-DISPATCH (exposure) and refusal counts BEFORE the call — the answer-serving
+    /// fact is emitted separately, post-success, by the pool wrapper.
     ///
     /// A PRIVATE call, when a dedicated local-owned lane exists, is served ONLY by that local-only
     /// backend — cloud is unreachable for it by construction (sol 019f8287: enforce at dispatch).
@@ -532,7 +534,7 @@ impl InferencePool {
         // tag supplies the missing attribution without relying on correlation.
         if matches!(scope, PrivacyScope::Household) {
             record_household_callsite(callsite);
-            eprintln!("[privacy] household lane served by '{label}' at '{callsite}'");
+            eprintln!("[privacy] household lane dispatch attempted via '{label}' at '{callsite}'");
         }
         // EXPOSURE, not service (E.OBS1c, Codex's split): this pre-dispatch count is the
         // conservative privacy record — a failed cloud request may still have TRANSMITTED the
@@ -2358,6 +2360,22 @@ mod tests {
         );
     }
 
+    /// E.OBS follow-on (Codex): the exposure counters must never be RENDERED as "served" — that
+    /// word is reserved for the post-success answer fact, and calling a pre-dispatch count "served"
+    /// misleads an operator even while the chip is correct.
+    #[test]
+    fn the_privacy_report_never_calls_the_exposure_count_served() {
+        let report = privacy_report("cloud-main");
+        assert!(
+            !report.to_lowercase().contains("served"),
+            "the exposure count must render as dispatched/exposure, never served: {report}"
+        );
+        assert!(
+            report.contains("dispatched") || report.contains("exposure"),
+            "the exposure semantics must be named: {report}"
+        );
+    }
+
     /// Codex's c504228 review fixture: a PRIVATE call served by the private lane must badge the
     /// PRIVATE label — never the pool's main provider, which on that path is the household/cloud
     /// backend's name and would be a privacy-misleading badge on exactly the turn that stayed home.
@@ -2367,7 +2385,9 @@ mod tests {
         install_lane_collector();
         LANE_EVENTS.lock().unwrap().clear();
 
-        std::env::set_var("YM_PRIVATE_PROVIDERS", "owned-fixture");
+        // No YM_PRIVATE_PROVIDERS set: the dedicated private backend is SANCTIONED by construction
+        // and needs no allowlist value — and mutating a process-global env var would leak into
+        // parallel/later tests (Codex's test-hygiene finding).
         let pool = InferencePool::new(
             Arc::new(ScriptedLLM::new("cloud answer")) as Arc<dyn LLMBackend>,
             1,

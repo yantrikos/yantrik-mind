@@ -1171,7 +1171,9 @@ fn turn_stream(
     });
     rt.block_on(async {
         while let Some(p) = rx.recv().await {
-            if let Some(t) = p.strip_prefix(mind_conversation::THINKING_MARK) {
+            if let Some(l) = p.strip_prefix(mind_conversation::LANE_MARK) {
+                chunk(&format!("l:{}\n", l.replace('\n', " ")));
+            } else if let Some(t) = p.strip_prefix(mind_conversation::THINKING_MARK) {
                 chunk(&format!("t:{}\n", t.replace('\n', "\u{1}")));
             } else if let Some(d) = p.strip_prefix(mind_conversation::DETAIL_MARK) {
                 chunk(&format!("d:{}\n", d.replace('\n', "\u{1}")));
@@ -1315,6 +1317,27 @@ mod tests {
         assert!(
             !handler.contains("$(\"agent-reply\")"),
             "horizon handler must not write the delegation reply area"
+        );
+    }
+
+    /// E.OBS1 criterion (3): the client renders lane chips ONLY from the dispatcher's `l:` lines —
+    /// no client-side lane inference, no default badge.
+    #[test]
+    fn lane_chips_render_only_from_dispatcher_lane_lines() {
+        assert!(APP_JS.contains("lane-chip"), "the chip renderer exists");
+        let l_arm = APP_JS
+            .find("if (kind === \"l:\")")
+            .expect("the l: arm exists");
+        let arm = &APP_JS[l_arm..APP_JS.len().min(l_arm + 900)];
+        assert!(
+            arm.contains("lane-chip"),
+            "chips are created inside the l: arm"
+        );
+        // Exactly one construction site for lane chips — the l: arm's.
+        assert_eq!(
+            APP_JS.matches("lane-chip lane-").count(),
+            1,
+            "lane chips must have exactly one construction site (the l: arm)"
         );
     }
 

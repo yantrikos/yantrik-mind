@@ -1179,7 +1179,9 @@ fn ctl_handle(
                         // back — and "p:" the step label itself. A client that knows only "p:"
                         // still sees exactly the timeline it saw before, which is what lets the
                         // cockpit gain detail without the terminal or Telegram changing at all.
-                        if let Some(t) = p.strip_prefix(mind_conversation::THINKING_MARK) {
+                        if let Some(l) = p.strip_prefix(mind_conversation::LANE_MARK) {
+                            chunk(&format!("l:{}\n", l.replace('\n', " ")));
+                        } else if let Some(t) = p.strip_prefix(mind_conversation::THINKING_MARK) {
                             chunk(&format!("t:{}\n", t.replace('\n', "\u{1}")));
                         } else if let Some(d) = p.strip_prefix(mind_conversation::DETAIL_MARK) {
                             chunk(&format!("d:{}\n", d.replace('\n', "\u{1}")));

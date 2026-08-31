@@ -483,6 +483,7 @@ function addMindMsg() {
   const avatar = el("div", "orb avatar");
   const bubble = el("div", "bubble");
   const steps = el("div", "steps hidden");
+  const lanes = el("div", "lanes hidden");
   const think = document.createElement("details"); think.className = "think hidden";
   const sum = document.createElement("summary"); sum.textContent = "reasoning";
   const thinkBody = el("div", "think-body");
@@ -490,11 +491,11 @@ function addMindMsg() {
   const tail = el("div", "tail hidden");
   const md = el("div", "md");
   const stamp = el("div", "stamp");
-  bubble.append(steps, think, tail, md, stamp);
+  bubble.append(lanes, steps, think, tail, md, stamp);
   msg.append(avatar, bubble);
   feed.appendChild(msg);
   scrollToEnd();
-  return { msg, avatar, steps, think, thinkBody, tail, md, stamp };
+  return { msg, avatar, steps, lanes, laneSeen: new Set(), think, thinkBody, tail, md, stamp };
 }
 
 function el(tag, cls) { const n = document.createElement(tag); if (cls) n.className = cls; return n; }
@@ -570,7 +571,20 @@ function handleLine(line, b) {
   if (!line) return;
   const kind = line.slice(0, 2);
   const rest = line.slice(2).replaceAll("\u0001", "\n");
-  if (kind === "p:") {
+  if (kind === "l:") {
+    // The lane badge's ONLY source: the dispatch boundary's own l: event (scope:label). The
+    // client renders what the server declared and never infers a lane from anything else.
+    const [scope, label] = rest.split(":", 2);
+    const key = scope + ":" + (label || "");
+    if (!b.laneSeen.has(key)) {
+      b.laneSeen.add(key);
+      b.lanes.classList.remove("hidden");
+      const chip = el("span", "lane-chip lane-" + scope);
+      chip.textContent = scope === "private" ? "private · stayed home" : scope + " · " + (label || "?");
+      chip.title = "This model call was served on the " + scope + " lane by '" + (label || "?") + "' — declared by the dispatch boundary, not inferred.";
+      b.lanes.appendChild(chip);
+    }
+  } else if (kind === "p:") {
     b.steps.classList.remove("hidden");
     document.querySelectorAll(".step.live").forEach((n) => n.classList.remove("live"));
     const chip = el("span", "step live"); chip.textContent = rest;

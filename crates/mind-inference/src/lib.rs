@@ -147,6 +147,19 @@ pub fn privacy_escalated_count() -> u64 {
     PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// E.OBS1: the process-wide lane observer — installed once by the conversation engine, fired at
+/// the dispatch boundary beside `PRIVACY_SERVED`, with the same two facts the boundary already
+/// prints: the scope served and the provider label that served it. Content never rides this hook.
+/// One emit site means a UI badge can never assert a lane the dispatcher did not declare.
+static LANE_OBSERVER: std::sync::OnceLock<Box<dyn Fn(&str, &str) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Install the lane observer. First install wins (process-wide, like the stats it rides beside);
+/// a second install is a no-op rather than an error so tests and multi-engine setups stay simple.
+pub fn set_lane_observer(observer: Box<dyn Fn(&str, &str) + Send + Sync>) {
+    let _ = LANE_OBSERVER.set(observer);
+}
+
 fn record_household_callsite(callsite: &'static str) {
     // A public caller can still supply an empty static string. Do not let that create a visually
     // blank dashboard row that looks attributed while naming nobody; fold missing identities into
@@ -479,6 +492,9 @@ impl InferencePool {
             eprintln!("[privacy] household lane served by '{label}' at '{callsite}'");
         }
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
+        if let Some(observe) = LANE_OBSERVER.get() {
+            observe(scope.as_str(), &label);
+        }
         Ok(backend)
     }
 

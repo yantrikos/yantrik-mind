@@ -1286,6 +1286,12 @@ pub(crate) fn emit_thinking(text: &str) {
 /// reasoning, the final reply) supersede them — tokens are the heartbeat, never the record.
 pub const TOKEN_MARK: &str = "\u{1}tok\u{1}";
 
+/// Marks a LANE event — which privacy lane a model call was served on, and by which provider —
+/// emitted from the inference dispatch boundary itself (E.OBS1), never asserted by a client. Same
+/// sentinel-on-the-shared-channel pattern as the other marks. Payload is `scope:label`, content
+/// never rides it.
+pub const LANE_MARK: &str = "\u{1}lane\u{1}";
+
 impl ConversationEngine {
     /// Run a tool-less model call, streaming its tokens to the turn's progress channel when one is
     /// attached (the cockpit), and exactly the plain call when none is (Telegram, console, tests).
@@ -4962,6 +4968,13 @@ impl ConversationEngine {
         inference: InferencePool,
         persona: impl Into<String>,
     ) -> Self {
+        // E.OBS1: the lane badge's single source of truth. The dispatch boundary fires with the
+        // scope it enforced and the provider that served; this forwards it onto the turn's own
+        // progress channel (a no-op outside a streaming scope). First install wins process-wide,
+        // which is exactly right: every engine forwards identically.
+        mind_inference::set_lane_observer(Box::new(|scope, label| {
+            emit_progress(&format!("{LANE_MARK}{scope}:{label}"));
+        }));
         Self {
             memory,
             inference,
@@ -11667,7 +11680,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // and the five-way outcome for this loop's own rendering.
             let outcome = guards::post(self, &guard_state, &tool, &obs).await;
             if outcome == crate::tool_outcome::Outcome::Denied
-                && self.plugins.lock().unwrap().restricted_turn_class_for_tool(&tool)
+                && self
+                    .plugins
+                    .lock()
+                    .unwrap()
+                    .restricted_turn_class_for_tool(&tool)
                     == Some(crate::plugins::RestrictedTurnClass::Mutating)
                 && !denied_mutations.contains(&tool)
             {

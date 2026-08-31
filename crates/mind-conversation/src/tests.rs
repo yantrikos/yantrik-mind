@@ -7704,6 +7704,79 @@ fn rendering_rich_does_not_disturb_read_isolation() {
 // exactly that: the same tool, never the same arguments twice. It fails against the old guard (which
 // would run all 30 scripted steps) and passes against the observation-based one.
 
+// ── E.OBS1: THE LANE BADGE'S SINGLE SOURCE OF TRUTH ─────────────────────────────────────────────
+
+/// Criterion (1): a turn's lane events name the scope and serving label exactly as the dispatch
+/// boundary declared them — collected from the SAME progress channel the ctl and web streams ship,
+/// with a scripted pool whose serving label is known ("scripted").
+#[tokio::test]
+async fn lane_events_name_the_scope_and_the_serving_provider() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let script: Vec<String> = vec![r#"{"answer":"here is a plain answer"}"#.to_string()];
+    let llm = Arc::new(mind_inference::SequencedLLM::new(script));
+    let pool = InferencePool::new(llm as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let out = crate::TURN_PROGRESS
+        .scope(tx, async {
+            conv.agent_loop_for_eval("tell me something plain", &TurnIdentity::primary())
+                .await
+        })
+        .await
+        .unwrap();
+    assert!(!out.is_empty());
+
+    let mut lanes: Vec<String> = Vec::new();
+    while let Ok(p) = rx.try_recv() {
+        if let Some(l) = p.strip_prefix(crate::LANE_MARK) {
+            lanes.push(l.to_string());
+        }
+    }
+    assert!(
+        !lanes.is_empty(),
+        "a model-calling turn must declare its lane(s) on the progress channel"
+    );
+    for lane in &lanes {
+        let (scope, label) = lane.split_once(':').expect("lane events are scope:label");
+        assert!(
+            matches!(scope, "private" | "household" | "public"),
+            "unknown scope in lane event: {lane}"
+        );
+        assert_eq!(
+            label, "scripted",
+            "the label is the SERVING provider's: {lane}"
+        );
+    }
+}
+
+/// Criterion (2): a typed direct route makes no model call and therefore declares NO lane — honest
+/// absence, never a default badge.
+#[tokio::test]
+async fn a_typed_route_turn_declares_no_lane() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let llm = Arc::new(ScriptedLLM::new("should never be called"));
+    let pool = InferencePool::new(llm as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let out = crate::TURN_PROGRESS
+        .scope(tx, async { conv.handle_turn("what is 17*23").await })
+        .await
+        .unwrap();
+    assert!(
+        out.contains("391"),
+        "the typed arithmetic route answers: {out}"
+    );
+
+    while let Ok(p) = rx.try_recv() {
+        assert!(
+            !p.starts_with(crate::LANE_MARK),
+            "a zero-model-call turn must not declare a lane: {p}"
+        );
+    }
+}
+
 // ── E.LOOP6: A DENIED WRITE MUST NOT BE AFFIRMABLE ──────────────────────────────────────────────
 //
 // The live sweep (2026-08-31): a refused `remember` and the prose "teal is noted". The model is
@@ -7754,7 +7827,8 @@ async fn a_denied_mutating_tool_cannot_be_affirmed_by_the_answer() {
 async fn a_permitted_write_still_affirms_without_the_correction() {
     let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
     let script: Vec<String> = vec![
-        r#"{"thought":"noting","tool":"remember","args":{"text":"favorite color is teal"}}"#.to_string(),
+        r#"{"thought":"noting","tool":"remember","args":{"text":"favorite color is teal"}}"#
+            .to_string(),
         r#"{"answer":"Got it — teal it is."}"#.to_string(),
     ];
     let llm = Arc::new(mind_inference::SequencedLLM::new(script));
@@ -7762,7 +7836,10 @@ async fn a_permitted_write_still_affirms_without_the_correction() {
     let conv = ConversationEngine::new(Arc::new(mem), pool, "You are JARVIS.");
 
     let out = conv
-        .agent_loop_for_eval("remember my favorite color is teal", &TurnIdentity::primary())
+        .agent_loop_for_eval(
+            "remember my favorite color is teal",
+            &TurnIdentity::primary(),
+        )
         .await
         .unwrap();
 
@@ -7770,7 +7847,10 @@ async fn a_permitted_write_still_affirms_without_the_correction() {
         !out.contains("refused by the safety gate"),
         "a permitted write must not be corrected: {out}"
     );
-    assert!(out.contains("teal"), "the ordinary affirmation survives: {out}");
+    assert!(
+        out.contains("teal"),
+        "the ordinary affirmation survives: {out}"
+    );
 }
 
 #[tokio::test]

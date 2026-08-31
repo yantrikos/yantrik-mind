@@ -15,7 +15,7 @@ impl super::ConversationEngine {
         let asked = self.closure_asks().await;
         let today = local_now();
         let now = today.timestamp_millis();
-        let open: Vec<Task> = self
+        let (mut personal, internal): (Vec<Task>, Vec<Task>) = self
             .memory
             .list_tasks(false)
             .await
@@ -27,9 +27,7 @@ impl super::ConversationEngine {
                 let a = asked.get(&t.id).and_then(|v| v.as_i64());
                 crate::followthrough::classify(t, now, dl, a).is_carried()
             })
-            .collect();
-        let (mut personal, internal): (Vec<Task>, Vec<Task>) =
-            open.into_iter().partition(|t| is_personal_reminder(&t.description));
+            .partition(|t| is_personal_reminder(&t.description));
         // Keep the most informative representative of each cluster: due-dated first, then longest.
         personal.sort_by(|a, b| {
             (a.due_ms.is_none(), std::cmp::Reverse(a.description.len()))
@@ -37,7 +35,10 @@ impl super::ConversationEngine {
         });
         let mut kept: Vec<Task> = Vec::new();
         for t in personal {
-            if !kept.iter().any(|k| task_similar(&k.description, &t.description)) {
+            if !kept
+                .iter()
+                .any(|k| task_similar(&k.description, &t.description))
+            {
                 kept.push(t);
             }
         }
@@ -60,7 +61,8 @@ impl super::ConversationEngine {
         //    configurable (YM_WEATHER_PLACE), defaults to home. A network call, but once/day and it
         //    degrades to nothing on error/timeout, so it never blocks or breaks the briefing.
         if let Some(w) = &self.weather {
-            let place = std::env::var("YM_WEATHER_PLACE").unwrap_or_else(|_| "Bentonville".to_string());
+            let place =
+                std::env::var("YM_WEATHER_PLACE").unwrap_or_else(|_| "Bentonville".to_string());
             if let Ok(rep) = w.report(&place).await {
                 out.push_str(&format!("\n\n{}", rep.trim()));
             }
@@ -68,7 +70,13 @@ impl super::ConversationEngine {
 
         // 0b) The night shift's done-board: what was prepared while everyone slept (charter: the
         // morning message is a DONE board, not a plan). Consumed once — tomorrow's shift rewrites it.
-        if let Some(rep) = self.memory.profile_get("nightshift_report").await.ok().flatten() {
+        if let Some(rep) = self
+            .memory
+            .profile_get("nightshift_report")
+            .await
+            .ok()
+            .flatten()
+        {
             if !rep.trim().is_empty() {
                 out.push_str(&format!("\n\n{rep}"));
             }
@@ -83,7 +91,8 @@ impl super::ConversationEngine {
                 .iter()
                 .filter_map(|e| {
                     let ms = e.get("when_ms").and_then(|x| x.as_i64())?;
-                    let t = chrono::DateTime::from_timestamp_millis(ms)?.with_timezone(now.offset());
+                    let t =
+                        chrono::DateTime::from_timestamp_millis(ms)?.with_timezone(now.offset());
                     if t.format("%Y-%m-%d").to_string() == today_str {
                         let title = e.get("title").and_then(|x| x.as_str())?;
                         Some(format!("{} — {}", t.format("%H:%M"), title))
@@ -115,14 +124,26 @@ impl super::ConversationEngine {
                             .filter_map(|f| f.as_str())
                             .find(|f| {
                                 let l = f.to_lowercase();
-                                l.contains("gift") || l.contains("watch") || l.contains("budget")
-                                    || l.contains("plan") || l.contains('$') || l.contains("idea")
+                                l.contains("gift")
+                                    || l.contains("watch")
+                                    || l.contains("budget")
+                                    || l.contains("plan")
+                                    || l.contains('$')
+                                    || l.contains("idea")
                             })
                             .map(String::from)
                     })
                     .unwrap_or_default();
-                let when = if *days == 0 { "today 🎉".to_string() } else { format!("in {days} days ({mmdd})") };
-                let plan_s = if plan.is_empty() { String::new() } else { format!(" — {plan}") };
+                let when = if *days == 0 {
+                    "today 🎉".to_string()
+                } else {
+                    format!("in {days} days ({mmdd})")
+                };
+                let plan_s = if plan.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {plan}")
+                };
                 out.push_str(&format!("\n  • {name}'s {label} {when}{plan_s}"));
             }
         }
@@ -140,7 +161,10 @@ impl super::ConversationEngine {
                     let date = chrono::DateTime::from_timestamp_millis(when)
                         .map(|t| t.with_timezone(now.offset()).format("%b %-d").to_string())
                         .unwrap_or_default();
-                    out.push_str(&format!("\n  • {} {title} in {days} day(s) ({date})", if kind == "festival" { "🪔" } else { "🧳" }));
+                    out.push_str(&format!(
+                        "\n  • {} {title} in {days} day(s) ({date})",
+                        if kind == "festival" { "🪔" } else { "🧳" }
+                    ));
                 }
             }
         }
@@ -165,10 +189,19 @@ impl super::ConversationEngine {
             out.push_str("\n\n📰 Watching:");
             for topic in topics.iter().take(3) {
                 if let Some((summary, as_of)) = self.held_understanding(topic).await {
-                    let as_of_tag = if as_of.is_empty() || as_of == "unknown" { String::new() } else { format!(" (as of {as_of})") };
-                    out.push_str(&format!("\n  • {topic}{as_of_tag}: {}", brief_excerpt(&summary, 260)));
+                    let as_of_tag = if as_of.is_empty() || as_of == "unknown" {
+                        String::new()
+                    } else {
+                        format!(" (as of {as_of})")
+                    };
+                    out.push_str(&format!(
+                        "\n  • {topic}{as_of_tag}: {}",
+                        brief_excerpt(&summary, 260)
+                    ));
                 } else {
-                    out.push_str(&format!("\n  • {topic} — say \"catch me up on {topic}\" for a read."));
+                    out.push_str(&format!(
+                        "\n  • {topic} — say \"catch me up on {topic}\" for a read."
+                    ));
                 }
             }
         }
@@ -178,9 +211,11 @@ impl super::ConversationEngine {
         {
             let off = now.offset().local_minus_utc() / 3600;
             if let Ok(Some(r)) = self.memory.activity_rhythm(off).await {
-                out.push_str(&format!("
+                out.push_str(&format!(
+                    "
 
-🕐 Your rhythm: {r}."));
+🕐 Your rhythm: {r}."
+                ));
             }
         }
 
@@ -199,13 +234,25 @@ impl super::ConversationEngine {
     pub async fn briefing_due(&self) -> Option<String> {
         let now = local_now();
         let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(12);
-        let start_h: u32 = std::env::var("YM_BRIEF_HOUR").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
-        let end_h: u32 = std::env::var("YM_BRIEF_UNTIL").ok().and_then(|s| s.parse().ok()).unwrap_or(11);
+        let start_h: u32 = std::env::var("YM_BRIEF_HOUR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
+        let end_h: u32 = std::env::var("YM_BRIEF_UNTIL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(11);
         if hour < start_h || hour >= end_h {
             return None;
         }
         let today = now.format("%Y-%m-%d").to_string();
-        let last = self.memory.profile_get("briefing_last_date").await.ok().flatten().unwrap_or_default();
+        let last = self
+            .memory
+            .profile_get("briefing_last_date")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         if last == today {
             return None;
         }
@@ -221,7 +268,10 @@ impl super::ConversationEngine {
     /// consolidation uses) and persisted in the profile KV — so continuity survives restarts and
     /// spans sessions. Runs from the poll loop's background lane, never on the reply hot path.
     pub async fn compact_conversation(&self) -> bool {
-        let threshold: usize = std::env::var("YM_COMPACT_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
+        let threshold: usize = std::env::var("YM_COMPACT_EVERY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(24);
         let keep_tail: usize = 12;
         let cursor: i64 = self
             .memory
@@ -231,17 +281,26 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let msgs = match self.memory.messages_since(cursor, threshold + keep_tail).await {
-            Ok(m) => m,
-            Err(_) => return false,
+        let Ok(msgs) = self
+            .memory
+            .messages_since(cursor, threshold + keep_tail)
+            .await
+        else {
+            return false;
         };
         if msgs.len() < threshold + keep_tail {
             return false; // not enough new conversation yet — stay cheap
         }
         let cut = msgs.len() - keep_tail;
         let older = &msgs[..cut];
-        let new_cursor = older.last().map(|(id, _, _)| *id).unwrap_or(cursor);
-        let prior = self.memory.profile_get("conversation_summary").await.ok().flatten().unwrap_or_default();
+        let new_cursor = older.last().map_or(cursor, |(id, _, _)| *id);
+        let prior = self
+            .memory
+            .profile_get("conversation_summary")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mut transcript = String::new();
         for (_, role, text) in older {
             let t: String = text.chars().take(400).collect();
@@ -256,8 +315,21 @@ impl super::ConversationEngine {
              summary text.\n\n=== PRIOR SUMMARY ===\n{}\n\n=== NEW TURNS (oldest first) ===\n{transcript}",
             if prior.trim().is_empty() { "(none yet)" } else { prior.as_str() },
         );
-        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let cfg = GenerationConfig {
+            max_tokens: 500,
+            ..GenerationConfig::default()
+        };
+        match self
+            .inference
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
+            .await
+        {
             Ok(r) => {
                 let sum = r.text.trim();
                 if sum.chars().count() < 20 {
@@ -265,8 +337,14 @@ impl super::ConversationEngine {
                 }
                 let sum: String = sum.chars().take(2200).collect();
                 let _ = self.memory.profile_set("conversation_summary", &sum).await;
-                let _ = self.memory.profile_set("compact_cursor", &new_cursor.to_string()).await;
-                eprintln!("[compact] absorbed {} older turns into the rolling summary", older.len());
+                let _ = self
+                    .memory
+                    .profile_set("compact_cursor", &new_cursor.to_string())
+                    .await;
+                eprintln!(
+                    "[compact] absorbed {} older turns into the rolling summary",
+                    older.len()
+                );
                 true
             }
             Err(_) => false,
@@ -313,11 +391,23 @@ impl super::ConversationEngine {
         if let Some(p) = preds
             .iter()
             .filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open")
-            .min_by_key(|p| p.get("resolve_by_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX))
+            .min_by_key(|p| {
+                p.get("resolve_by_ms")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(i64::MAX)
+            })
         {
-            let claim: String = p.get("claim").and_then(|x| x.as_str()).unwrap_or("").chars().take(110).collect();
+            let claim: String = p
+                .get("claim")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(110)
+                .collect();
             let by = p.get("resolve_by").and_then(|x| x.as_str()).unwrap_or("?");
-            out.push_str(&format!("\n\n🔮 My nearest self-graded call: {claim}… (grades {by})"));
+            out.push_str(&format!(
+                "\n\n🔮 My nearest self-graded call: {claim}… (grades {by})"
+            ));
             any = true;
         }
         if !any {
@@ -330,13 +420,25 @@ impl super::ConversationEngine {
     pub async fn evening_due(&self) -> Option<String> {
         let now = local_now();
         let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);
-        let start: u32 = std::env::var("YM_EVENING_HOUR").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-        let end: u32 = std::env::var("YM_EVENING_UNTIL").ok().and_then(|s| s.parse().ok()).unwrap_or(22);
+        let start: u32 = std::env::var("YM_EVENING_HOUR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let end: u32 = std::env::var("YM_EVENING_UNTIL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(22);
         if hour < start || hour >= end {
             return None;
         }
         let today = now.format("%Y-%m-%d").to_string();
-        let last = self.memory.profile_get("evening_last_date").await.ok().flatten().unwrap_or_default();
+        let last = self
+            .memory
+            .profile_get("evening_last_date")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         if last == today {
             return None;
         }
@@ -347,10 +449,18 @@ impl super::ConversationEngine {
     /// Does this turn ask for a briefing/catch-up? Tight match.
     pub(crate) fn wants_briefing(text: &str) -> bool {
         let l = text.trim().to_lowercase();
-        ["good morning", "morning briefing", "brief me", "give me a briefing", "my briefing",
-         "daily briefing", "catch me up", "the rundown"]
-            .iter()
-            .any(|p| l.contains(p))
+        [
+            "good morning",
+            "morning briefing",
+            "brief me",
+            "give me a briefing",
+            "my briefing",
+            "daily briefing",
+            "catch me up",
+            "the rundown",
+        ]
+        .iter()
+        .any(|p| l.contains(p))
             || l == "briefing"
     }
 
@@ -379,13 +489,19 @@ impl super::ConversationEngine {
         let mut notes: Vec<String> = Vec::new();
         if let Some(m) = &self.mail {
             match m.inbox(10).await {
-                Ok(msgs) => blocks.push(format!("INBOX:\n{}", mind_tools::render_inbox_digest(&msgs))),
+                Ok(msgs) => blocks.push(format!(
+                    "INBOX:\n{}",
+                    mind_tools::render_inbox_digest(&msgs)
+                )),
                 Err(e) => notes.push(format!("(could not read inbox: {e})")),
             }
         }
         if let Some(g) = &self.github {
             match g.notifications(15).await {
-                Ok(items) => blocks.push(format!("GITHUB:\n{}", mind_tools::render_github_digest(&items))),
+                Ok(items) => blocks.push(format!(
+                    "GITHUB:\n{}",
+                    mind_tools::render_github_digest(&items)
+                )),
                 Err(e) => notes.push(format!("(could not read github: {e})")),
             }
         }
@@ -393,7 +509,7 @@ impl super::ConversationEngine {
         let soon = Self::now_ms() + 18 * 3_600_000; // due within ~18h
         let due: Vec<String> = tasks
             .iter()
-            .filter(|t| t.due_ms.map(|d| d <= soon).unwrap_or(false))
+            .filter(|t| t.due_ms.is_some_and(|d| d <= soon))
             .map(|t| format!("- {}", t.description))
             .collect();
         if !due.is_empty() {
@@ -404,7 +520,11 @@ impl super::ConversationEngine {
             return Ok("Nothing to brief — no inbox/github configured and no tasks due.".into());
         }
         let data = blocks.join("\n\n");
-        let note_line = if notes.is_empty() { String::new() } else { format!("\n{}", notes.join("\n")) };
+        let note_line = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", notes.join("\n"))
+        };
         let messages = vec![
             ChatMessage::system(&self.persona),
             ChatMessage::system(format!(
@@ -423,5 +543,4 @@ impl super::ConversationEngine {
             .map_err(|e| MindError::Inference(e.to_string()))?;
         Ok(resp.text)
     }
-
 }

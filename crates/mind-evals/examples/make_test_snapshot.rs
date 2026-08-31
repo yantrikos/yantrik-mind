@@ -6,7 +6,9 @@ use mind_types::{BeliefAssertion, MemoryFacade};
 
 #[tokio::main]
 async fn main() {
-    let out = std::env::args().nth(1).expect("usage: make_test_snapshot <out.db>");
+    let out = std::env::args()
+        .nth(1)
+        .expect("usage: make_test_snapshot <out.db>");
     let mem = mind_memory::MemoryHandle::spawn(&out, 64).expect("spawn");
     for s in [
         "Asha's birthday is March 3",

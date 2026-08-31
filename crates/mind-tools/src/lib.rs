@@ -14,9 +14,9 @@ pub use onedrive::{DeviceCode, OdItem, OneDriveClient};
 pub mod gphotos;
 pub use gphotos::{GPhotosClient, GpItem, PickSession};
 pub mod code;
-pub mod paper;
-pub mod mail;
 pub mod ha_events;
+pub mod mail;
+pub mod paper;
 pub use mail::{
     render_inbox_digest, EmailMsg, ImapClient, MailClient, MailSender, ScriptedMailClient,
     ScriptedMailSender, SmtpMailSender,
@@ -82,12 +82,23 @@ pub mod refusal;
 /// Trading on the mind's own read of the tape: what moved, why, and is it tradeable.
 pub mod hunt;
 
+pub mod crypto;
+/// Deterministic intraday setup recognition and risk-derived paper sizing.
+pub mod daytrade;
+
 /// The half of a trade that was missing: when to close it.
 pub mod exit;
 
 /// The record linking a position to the prediction that opened it.
 pub mod trades;
-pub use market::{resolve as resolve_claim, Bar, Direction, MarketClient, ResolvableClaim, Verdict};
+
+/// Fail-closed validation for wallet swap intents. No signing or broadcasting capability lives in
+/// this crate boundary.
+pub mod wallet;
+pub use market::{
+    resolve as resolve_claim, Bar, CryptoMarketClient, Direction, MarketClient, ResolvableClaim,
+    Verdict,
+};
 
 pub mod newsflow;
 pub use newsflow::{peek as peek_headline, peek_batch, Interest, PeekPass, Watchlist};
@@ -96,7 +107,9 @@ pub mod tape;
 pub use tape::{parse_bar, transitions, Side, TapeSample, TraderState, Transition};
 
 pub mod shadow;
-pub use shadow::{lag_curve, render_curve, simulate as simulate_shadow, ShadowConfig, ShadowReport};
+pub use shadow::{
+    lag_curve, render_curve, simulate as simulate_shadow, ShadowConfig, ShadowReport,
+};
 
 pub mod yquote;
 pub use yquote::{is_indian, series as yahoo_series, Series};
@@ -148,9 +161,9 @@ pub trait Fetcher: Send + Sync {
 
 /// Pull the host out of an http(s) URL (handles userinfo + bracketed IPv6).
 fn host_of(url: &str) -> Option<String> {
-    let after = url.splitn(2, "://").nth(1)?;
+    let after = url.split_once("://")?.1;
     let authority = after.split(['/', '?', '#']).next()?;
-    let authority = authority.rsplitn(2, '@').next()?; // drop userinfo
+    let authority = authority.rsplit('@').next()?; // drop userinfo
     let host = if let Some(rest) = authority.strip_prefix('[') {
         rest.split(']').next()?.to_string() // IPv6 literal
     } else {
@@ -163,8 +176,12 @@ fn host_of(url: &str) -> Option<String> {
 fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
-            v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified()
-                || v.is_broadcast() || v.is_documentation()
+            v.is_loopback()
+                || v.is_private()
+                || v.is_link_local()
+                || v.is_unspecified()
+                || v.is_broadcast()
+                || v.is_documentation()
         }
         IpAddr::V6(v) => {
             let s = v.segments();
@@ -212,7 +229,10 @@ fn strip_block(html: &str, tag: &str) -> String {
                 let start = i + rel;
                 let after = lower[start + open.len()..].chars().next();
                 // require a real tag boundary after "<tag"
-                if !matches!(after, Some('>') | Some('/') | Some(' ') | Some('\t') | Some('\n') | Some('\r') | None) {
+                if !matches!(
+                    after,
+                    Some('>') | Some('/') | Some(' ') | Some('\t') | Some('\n') | Some('\r') | None
+                ) {
                     out.push_str(&html[i..start + open.len()]);
                     i = start + open.len();
                     continue;
@@ -236,7 +256,10 @@ fn strip_block(html: &str, tag: &str) -> String {
 /// <head> so html2text still emits the page <title>.
 fn declutter(html: &str) -> String {
     let mut s = html.to_string();
-    for tag in ["script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form", "iframe", "button", "select"] {
+    for tag in [
+        "script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form", "iframe",
+        "button", "select",
+    ] {
         s = strip_block(&s, tag);
     }
     s
@@ -273,7 +296,9 @@ fn meta_content(html: &str, key: &str) -> Option<String> {
     let mut i = 0usize;
     while let Some(rel) = lower[i..].find("<meta") {
         let start = i + rel;
-        let end = lower[start..].find('>').map(|e| start + e + 1).unwrap_or(html.len());
+        let end = lower[start..]
+            .find('>')
+            .map_or(html.len(), |e| start + e + 1);
         let tag = &html[start..end];
         if tag.to_ascii_lowercase().contains(key) {
             if let Some(v) = tag_attr(tag, "content") {
@@ -291,7 +316,12 @@ fn meta_content(html: &str, key: &str) -> Option<String> {
 }
 
 fn unescape_entities(s: &str) -> String {
-    s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
+    s.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
 }
 
 /// Unescape a JSON string body (the value is read raw out of embedded page JSON).
@@ -338,7 +368,11 @@ fn json_string_field(html: &str, key: &str) -> Option<String> {
         end += 1;
     }
     let v = unescape_json(&rest[..end]);
-    if v.trim().is_empty() { None } else { Some(v) }
+    if v.trim().is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// THE PAGE'S IDENTITY, taken from the HTML it actually served.
@@ -358,14 +392,22 @@ fn page_identity(raw: &str) -> String {
         .filter(|t| !t.is_empty())
         .or_else(|| meta_content(raw, "og:title"));
     if let Some(t) = title {
-        lines.push(format!("TITLE: {}", t.chars().take(300).collect::<String>()));
+        lines.push(format!(
+            "TITLE: {}",
+            t.chars().take(300).collect::<String>()
+        ));
     }
     // YouTube keeps the real description in page JSON; prefer it over the truncated og: one.
     let desc = json_string_field(raw, "shortDescription").or_else(|| {
-        meta_content(raw, "og:description").or_else(|| meta_content(raw, "name=\"description\"")).or_else(|| meta_content(raw, "description"))
+        meta_content(raw, "og:description")
+            .or_else(|| meta_content(raw, "name=\"description\""))
+            .or_else(|| meta_content(raw, "description"))
     });
     if let Some(d) = desc {
-        lines.push(format!("DESCRIPTION: {}", d.chars().take(1200).collect::<String>()));
+        lines.push(format!(
+            "DESCRIPTION: {}",
+            d.chars().take(1200).collect::<String>()
+        ));
     }
     if raw.contains("\"isLiveNow\":true") || raw.contains("\"isLive\":true") {
         lines.push("NOTE: this is a LIVE broadcast — there is no finished recording or transcript to read.".to_string());
@@ -439,7 +481,10 @@ fn fetch_direct(url: &str) -> anyhow::Result<String> {
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(20))
         .set("User-Agent", BROWSER_UA)
-        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .set(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        )
         .set("Accept-Language", "en-US,en;q=0.9")
         .call()?;
     let mut bytes = Vec::new();
@@ -452,12 +497,16 @@ fn fetch_direct(url: &str) -> anyhow::Result<String> {
 /// proxy. A no-op (bails) when the helper script isn't present, so non-box builds are unaffected.
 /// `timeout` hard-kills a hung chromium; the script also bounds its own navigation.
 fn fetch_headless(url: &str) -> anyhow::Result<String> {
-    let script = std::env::var("YM_HEADLESS_SCRIPT").unwrap_or_else(|_| "/opt/yantrik-mind/headless_fetch.js".to_string());
+    let script = std::env::var("YM_HEADLESS_SCRIPT")
+        .unwrap_or_else(|_| "/opt/yantrik-mind/headless_fetch.js".to_string());
     if !std::path::Path::new(&script).exists() {
         anyhow::bail!("headless fetch not available");
     }
-    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH").unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
-    let dir = std::path::Path::new(&script).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH")
+        .unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
+    let dir = std::path::Path::new(&script)
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from("."), |p| p.to_path_buf());
     let out = std::process::Command::new("timeout")
         .arg("45")
         .arg("node")
@@ -477,12 +526,16 @@ fn fetch_headless(url: &str) -> anyhow::Result<String> {
 /// block tier-3 (Amazon, Target render real product grids under headful where headless gets 0 chars).
 /// Slower + heavier, so it's only used deliberately (hostile retail), never in the default `fetch` ladder.
 fn fetch_headful(url: &str) -> anyhow::Result<String> {
-    let script = std::env::var("YM_HEADFUL_SCRIPT").unwrap_or_else(|_| "/opt/yantrik-mind/headful_fetch.js".to_string());
+    let script = std::env::var("YM_HEADFUL_SCRIPT")
+        .unwrap_or_else(|_| "/opt/yantrik-mind/headful_fetch.js".to_string());
     if !std::path::Path::new(&script).exists() {
         anyhow::bail!("headful fetch not available");
     }
-    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH").unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
-    let dir = std::path::Path::new(&script).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH")
+        .unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
+    let dir = std::path::Path::new(&script)
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from("."), |p| p.to_path_buf());
     let out = std::process::Command::new("timeout")
         .arg("85")
         .arg("xvfb-run")
@@ -544,7 +597,9 @@ impl Fetcher for HttpFetcher {
             if let Ok(t) = fetch_headless(&url) {
                 return Ok(t);
             }
-            direct.or_else(|_| anyhow::bail!("couldn't fetch (direct + reader + headless all failed)"))
+            direct.or_else(|_| {
+                anyhow::bail!("couldn't fetch (direct + reader + headless all failed)")
+            })
         })
         .await??;
         let mut t = text.trim().to_string();
@@ -640,7 +695,10 @@ mod tests {
 
     #[test]
     fn first_url_extracts_and_trims() {
-        assert_eq!(first_url("see https://example.com/x, thanks").as_deref(), Some("https://example.com/x"));
+        assert_eq!(
+            first_url("see https://example.com/x, thanks").as_deref(),
+            Some("https://example.com/x")
+        );
         assert_eq!(first_url("no link here"), None);
         assert_eq!(first_url("(http://a.b/c)").as_deref(), Some("http://a.b/c"));
     }
@@ -663,7 +721,10 @@ mod tests {
             <footer>copyright junk</footer>\
             <navbar>keep this</navbar></body></html>";
         let out = declutter(html);
-        assert!(out.contains("The real article text."), "keeps article: {out}");
+        assert!(
+            out.contains("The real article text."),
+            "keeps article: {out}"
+        );
         assert!(out.contains("<title>Hi</title>"), "keeps head/title");
         assert!(!out.contains("track()"), "drops script");
         assert!(!out.contains("menu home about"), "drops nav");
@@ -687,16 +748,35 @@ mod tests {
             <footer>About Press Copyright</footer></body></html>";
         let out = extract_readable(html);
         // The identity survives, entity- and JSON-unescaped.
-        assert!(out.contains("TITLE: MARKETS PAUSE & $SPY Flat"), "title must survive: {out}");
-        assert!(out.contains("TraderTV Live is a professional day trading broadcast & two active traders"),
-            "the page's own description must survive, unescaped: {out}");
-        assert!(out.contains("real money, live from our Toronto trading floor"), "newline escapes decode: {out}");
+        assert!(
+            out.contains("TITLE: MARKETS PAUSE & $SPY Flat"),
+            "title must survive: {out}"
+        );
+        assert!(
+            out.contains(
+                "TraderTV Live is a professional day trading broadcast & two active traders"
+            ),
+            "the page's own description must survive, unescaped: {out}"
+        );
+        assert!(
+            out.contains("real money, live from our Toronto trading floor"),
+            "newline escapes decode: {out}"
+        );
         // The richer in-page description beats the truncated og: one.
-        assert!(!out.contains("truncated og copy"), "prefer the page's full description: {out}");
+        assert!(
+            !out.contains("truncated og copy"),
+            "prefer the page's full description: {out}"
+        );
         // A live broadcast says so — there is no recording to transcribe.
-        assert!(out.contains("LIVE broadcast"), "live status must be reported: {out}");
+        assert!(
+            out.contains("LIVE broadcast"),
+            "live status must be reported: {out}"
+        );
         // And an empty EXTRACTION must never read as an empty PAGE.
-        assert!(out.contains("rendered by JavaScript"), "the reader must know why the body is thin: {out}");
+        assert!(
+            out.contains("rendered by JavaScript"),
+            "the reader must know why the body is thin: {out}"
+        );
     }
 
     #[test]
@@ -710,8 +790,14 @@ mod tests {
         let out = extract_readable(html);
         assert!(out.contains("TITLE: A Real Article"), "{out}");
         assert!(out.contains("DESCRIPTION: what it is about"), "{out}");
-        assert!(out.contains("The real article text"), "body still extracted: {out}");
-        assert!(!out.contains("rendered by JavaScript"), "a real body is not flagged as JS-empty: {out}");
+        assert!(
+            out.contains("The real article text"),
+            "body still extracted: {out}"
+        );
+        assert!(
+            !out.contains("rendered by JavaScript"),
+            "a real body is not flagged as JS-empty: {out}"
+        );
     }
 
     #[test]
@@ -729,8 +815,14 @@ mod tests {
 
     #[test]
     fn host_of_handles_userinfo_ports_and_ipv6() {
-        assert_eq!(host_of("https://example.com/x").as_deref(), Some("example.com"));
-        assert_eq!(host_of("http://u:p@10.0.0.5:8080/x").as_deref(), Some("10.0.0.5"));
+        assert_eq!(
+            host_of("https://example.com/x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            host_of("http://u:p@10.0.0.5:8080/x").as_deref(),
+            Some("10.0.0.5")
+        );
         assert_eq!(host_of("http://[::1]:7438/health").as_deref(), Some("::1"));
     }
 
@@ -751,8 +843,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn http_fetcher_refuses_internal_targets() {
         let f = HttpFetcher::new();
-        let err = f.fetch("http://192.168.4.140:7438/v1/health").await.unwrap_err();
-        assert!(err.to_string().contains("SSRF"), "expected SSRF refusal, got: {err}");
+        let err = f
+            .fetch("http://192.168.4.140:7438/v1/health")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("SSRF"),
+            "expected SSRF refusal, got: {err}"
+        );
     }
 }
 
@@ -772,13 +870,25 @@ impl VisionClient {
     pub fn from_env() -> Option<VisionClient> {
         // Default: LOCAL vision on the LAN GPU box — zero cloud cost, via ollama's native format so
         // vision-capable text-flagships (qwen3.6) work. "provider:model" (model may contain ':').
-        let spec = std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-local:qwen3.6:27b".into());
-        let (prov, model) = spec.split_once(':').unwrap_or(("ollama-local", spec.as_str()));
+        let spec =
+            std::env::var("YM_VISION_MODEL").unwrap_or_else(|_| "ollama-local:qwen3.6:27b".into());
+        let (prov, model) = spec
+            .split_once(':')
+            .unwrap_or(("ollama-local", spec.as_str()));
         if prov == "ollama-local" || prov == "local" {
             // base = ollama root (strip a trailing /v1 if present) — native calls hit /api/chat.
-            let raw = std::env::var("YM_OLLAMA_LOCAL_URL").unwrap_or_else(|_| "http://192.168.4.35:11434".into());
-            let base = raw.trim_end_matches("/v1").trim_end_matches('/').to_string();
-            return Some(VisionClient { base, key: "ollama".into(), model: model.to_string(), native: true });
+            let raw = std::env::var("YM_OLLAMA_LOCAL_URL")
+                .unwrap_or_else(|_| "http://192.168.4.35:11434".into());
+            let base = raw
+                .trim_end_matches("/v1")
+                .trim_end_matches('/')
+                .to_string();
+            return Some(VisionClient {
+                base,
+                key: "ollama".into(),
+                model: model.to_string(),
+                native: true,
+            });
         }
         let (base, key_env) = match prov {
             "ollama-cloud" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY"),
@@ -786,14 +896,31 @@ impl VisionClient {
             "grok" => ("https://api.x.ai/v1", "GROK_API_KEY"),
             _ => ("https://nano-gpt.com/api/v1", "NANOGPT_KEY"),
         };
-        let key = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty())?;
-        Some(VisionClient { base: base.into(), key, model: model.to_string(), native: false })
+        let key = std::env::var(key_env)
+            .ok()
+            .filter(|k| !k.trim().is_empty())?;
+        Some(VisionClient {
+            base: base.into(),
+            key,
+            model: model.to_string(),
+            native: false,
+        })
     }
 
-    pub async fn analyze(&self, prompt: &str, image: Vec<u8>, _mime: &str) -> anyhow::Result<String> {
+    pub async fn analyze(
+        &self,
+        prompt: &str,
+        image: Vec<u8>,
+        _mime: &str,
+    ) -> anyhow::Result<String> {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&image);
-        let (base, key, model, native) = (self.base.clone(), self.key.clone(), self.model.clone(), self.native);
+        let (base, key, model, native) = (
+            self.base.clone(),
+            self.key.clone(),
+            self.model.clone(),
+            self.native,
+        );
         let prompt = prompt.to_string();
         let mime = _mime.to_string();
         let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
@@ -872,7 +999,11 @@ pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
             .take(8_000_000)
             .read_to_end(&mut buf)
             .ok()?;
-        if buf.len() < 1000 { None } else { Some(buf) }
+        if buf.len() < 1000 {
+            None
+        } else {
+            Some(buf)
+        }
     })
     .await
     .ok()?
@@ -884,12 +1015,16 @@ pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         ssrf_check(&url).ok()?;
-        let script = std::env::var("YM_SNAP_SCRIPT").unwrap_or_else(|_| "/opt/yantrik-mind/snap_page.js".into());
+        let script = std::env::var("YM_SNAP_SCRIPT")
+            .unwrap_or_else(|_| "/opt/yantrik-mind/snap_page.js".into());
         let dir = std::path::Path::new(&script).parent()?.to_path_buf();
         let out = std::env::temp_dir().join(format!(
             "ym_snap_{}_{}.jpg",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis()
         ));
         let st = std::process::Command::new("timeout")
             .arg("60")
@@ -924,29 +1059,46 @@ pub struct FbClient {
 
 impl FbClient {
     pub fn from_env() -> Option<FbClient> {
-        std::env::var("FB_USER_TOKEN").ok().filter(|t| t.len() > 20).map(|token| FbClient { token })
+        std::env::var("FB_USER_TOKEN")
+            .ok()
+            .filter(|t| t.len() > 20)
+            .map(|token| FbClient { token })
     }
 
-    async fn get(&self, path: &str, fields: &str, limit: usize) -> anyhow::Result<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        fields: &str,
+        limit: usize,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = format!(
             "https://graph.facebook.com/v19.0/{path}?fields={}&limit={limit}&access_token={}",
             urlencoding::encode(fields),
             self.token
         );
         tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-            Ok(ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call()?.into_json()?)
+            Ok(ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(30))
+                .call()?
+                .into_json()?)
         })
         .await?
     }
 
     pub async fn profile(&self) -> anyhow::Result<serde_json::Value> {
-        self.get("me", "name,birthday,hometown,location{name},email", 1).await
+        self.get("me", "name,birthday,hometown,location{name},email", 1)
+            .await
     }
     pub async fn likes(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
         self.get("me/likes", "name,category", limit).await
     }
     pub async fn events(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
-        self.get("me/events", "name,start_time,place{name},rsvp_status", limit).await
+        self.get(
+            "me/events",
+            "name,start_time,place{name},rsvp_status",
+            limit,
+        )
+        .await
     }
     pub async fn posts(&self, limit: usize) -> anyhow::Result<serde_json::Value> {
         self.get("me/posts", "message,created_time", limit).await
@@ -958,7 +1110,10 @@ impl FbClient {
             self.token
         );
         tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-            Ok(ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call()?.into_json()?)
+            Ok(ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(30))
+                .call()?
+                .into_json()?)
         })
         .await?
     }
@@ -968,17 +1123,24 @@ impl FbClient {
             "https://graph.facebook.com/v19.0/debug_token?input_token={t}&access_token={t}",
             t = self.token
         );
-        let v: serde_json::Value = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-            Ok(ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call()?.into_json()?)
-        })
-        .await
-        .ok()?
-        .ok()?;
+        let v: serde_json::Value =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+                Ok(ureq::get(&url)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .call()?
+                    .into_json()?)
+            })
+            .await
+            .ok()?
+            .ok()?;
         let exp = v["data"]["expires_at"].as_i64()?;
         if exp == 0 {
             return Some(9999); // never-expiring
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
         Some((exp - now) / 86_400)
     }
 }
@@ -988,6 +1150,18 @@ impl FbClient {
 /// Env: IMMICH_SERVER (host or URL), IMMICH_USER_API_KEY (x-api-key). The ONLY writes ever
 /// performed are person naming + merging — both driven by the user's own who-is-this answers
 /// (opt-in granted 2026-07-02); nothing is ever deleted or uploaded.
+/// Raw Immich asset metadata: (id, date, place, filename, has-camera-make).
+pub type ImmichAssetRecord = (String, String, String, String, bool);
+
+/// A face rectangle normalized to the 0..1 image coordinate space.
+pub type NormalizedFaceRect = (f32, f32, f32, f32);
+
+/// One source image, face rectangle, and label for a generated reel frame.
+pub type FaceReelFrame = (Vec<u8>, NormalizedFaceRect, String);
+
+/// One source image and its optional normalized face rectangle for a collage cell.
+pub type CollageCell = (Vec<u8>, Option<NormalizedFaceRect>);
+
 pub struct ImmichClient {
     base: String,
     key: String,
@@ -1000,8 +1174,14 @@ impl ImmichClient {
         if raw.is_empty() {
             return None;
         }
-        let base = if raw.starts_with("http") { raw.to_string() } else { format!("http://{raw}") };
-        let key = std::env::var("IMMICH_USER_API_KEY").ok().filter(|k| k.len() > 8)?;
+        let base = if raw.starts_with("http") {
+            raw.to_string()
+        } else {
+            format!("http://{raw}")
+        };
+        let key = std::env::var("IMMICH_USER_API_KEY")
+            .ok()
+            .filter(|k| k.len() > 8)?;
         Some(ImmichClient { base, key })
     }
 
@@ -1015,14 +1195,21 @@ impl ImmichClient {
 
     pub async fn people(&self) -> anyhow::Result<serde_json::Value> {
         let (b, k) = (self.base.clone(), self.key.clone());
-        tokio::task::spawn_blocking(move || Self::get_blocking(&b, &k, "/api/people?withHidden=false")).await?
+        tokio::task::spawn_blocking(move || {
+            Self::get_blocking(&b, &k, "/api/people?withHidden=false")
+        })
+        .await?
     }
 
     /// Photo assets (IMAGE only) for a recognized person, newest first. Returns Vec<(asset_id,
     /// date, place)> for the caller to thumbnail + vision-analyze.
-    pub async fn assets_of_person(&self, person_id: &str, size: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+    pub async fn assets_of_person(
+        &self,
+        person_id: &str,
+        size: usize,
+    ) -> anyhow::Result<Vec<ImmichAssetRecord>> {
         let (b, k, pid) = (self.base.clone(), self.key.clone(), person_id.to_string());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ImmichAssetRecord>> {
             let body = serde_json::json!({ "personIds": [pid], "size": size, "type": "IMAGE", "withExif": true });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
@@ -1050,7 +1237,11 @@ impl ImmichClient {
                 .take(8_000_000)
                 .read_to_end(&mut buf)
                 .ok()?;
-            if buf.len() < 500 { None } else { Some(buf) }
+            if buf.len() < 500 {
+                None
+            } else {
+                Some(buf)
+            }
         })
         .await
         .ok()?
@@ -1095,11 +1286,15 @@ pub fn is_screenish(a: &PhotoAsset) -> bool {
 /// (3) high-contrast horizontal transitions (text edges). Returns true for graphic/texty images.
 pub fn looks_graphic(bytes: &[u8]) -> Option<bool> {
     let img = image::load_from_memory(bytes).ok()?;
-    let small = img.resize_exact(128, 128, image::imageops::FilterType::Triangle).to_rgb8();
+    let small = img
+        .resize_exact(128, 128, image::imageops::FilterType::Triangle)
+        .to_rgb8();
     // 1. distinct quantized colors (4 bits/channel).
     let mut colors: std::collections::HashSet<u16> = std::collections::HashSet::new();
     for p in small.pixels() {
-        let q = ((p.0[0] as u16 >> 4) << 8) | ((p.0[1] as u16 >> 4) << 4) | (p.0[2] as u16 >> 4);
+        let q = ((u16::from(p.0[0]) >> 4) << 8)
+            | ((u16::from(p.0[1]) >> 4) << 4)
+            | (u16::from(p.0[2]) >> 4);
         colors.insert(q);
     }
     // 2. flat-run share + 3. strong horizontal transitions (text edges) on luma.
@@ -1107,8 +1302,8 @@ pub fn looks_graphic(bytes: &[u8]) -> Option<bool> {
     let (mut flat, mut strong, mut n) = (0u32, 0u32, 0u32);
     for y in 0..128u32 {
         for x in 1..128u32 {
-            let a = luma.get_pixel(x - 1, y).0[0] as i32;
-            let b = luma.get_pixel(x, y).0[0] as i32;
+            let a = i32::from(luma.get_pixel(x - 1, y).0[0]);
+            let b = i32::from(luma.get_pixel(x, y).0[0]);
             let d = (a - b).abs();
             if d <= 2 {
                 flat += 1;
@@ -1122,7 +1317,7 @@ pub fn looks_graphic(bytes: &[u8]) -> Option<bool> {
     let color_ratio = colors.len() as f32 / 4096.0; // photos: high; graphics: low
     let flat_share = flat as f32 / n as f32; // graphics: high (flat fills)
     let text_share = strong as f32 / n as f32; // text/graphics: high-contrast edges
-    // Graphic when: few colors AND (very flat OR text-heavy). Tuned conservative.
+                                               // Graphic when: few colors AND (very flat OR text-heavy). Tuned conservative.
     Some(color_ratio < 0.10 && (flat_share > 0.55 || text_share > 0.02))
 }
 
@@ -1198,7 +1393,13 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
+                .map(|(id, date, place, file, camera)| PhotoAsset {
+                    id,
+                    date,
+                    place,
+                    file,
+                    camera,
+                })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
@@ -1212,16 +1413,37 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
+                .map(|(id, date, place, file, camera)| PhotoAsset {
+                    id,
+                    date,
+                    place,
+                    file,
+                    camera,
+                })
                 .collect(),
             PhotoSource::Facebook(fb) => {
                 let mut out: Vec<PhotoAsset> = Vec::new();
                 for kind in ["uploaded", "tagged"] {
                     if let Ok(r) = fb.photos(kind, n).await {
-                        for p in r.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                            if let Some(src) = p["images"].as_array().and_then(|a| a.first()).and_then(|im| im["source"].as_str()) {
+                        for p in r
+                            .get("data")
+                            .and_then(|x| x.as_array())
+                            .cloned()
+                            .unwrap_or_default()
+                        {
+                            if let Some(src) = p["images"]
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .and_then(|im| im["source"].as_str())
+                            {
                                 if !out.iter().any(|a| a.id == src) {
-                                    out.push(PhotoAsset { id: src.to_string(), date: String::new(), place: String::new(), file: String::new(), camera: true });
+                                    out.push(PhotoAsset {
+                                        id: src.to_string(),
+                                        date: String::new(),
+                                        place: String::new(),
+                                        file: String::new(),
+                                        camera: true,
+                                    });
                                 }
                             }
                         }
@@ -1246,21 +1468,38 @@ impl PhotoSource {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
+                .map(|(id, date, place, file, camera)| PhotoAsset {
+                    id,
+                    date,
+                    place,
+                    file,
+                    camera,
+                })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
     }
 
     /// Photos containing ALL the given people (couple/group shots).
-    pub async fn assets_of_people(&self, person_ids: &[String], n: usize, oldest_first: bool) -> Vec<PhotoAsset> {
+    pub async fn assets_of_people(
+        &self,
+        person_ids: &[String],
+        n: usize,
+        oldest_first: bool,
+    ) -> Vec<PhotoAsset> {
         match self {
             PhotoSource::Immich(im) => im
                 .assets_of_people(person_ids, n, oldest_first)
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
+                .map(|(id, date, place, file, camera)| PhotoAsset {
+                    id,
+                    date,
+                    place,
+                    file,
+                    camera,
+                })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
@@ -1292,21 +1531,37 @@ impl PhotoSource {
     }
 
     /// Assets taken in a date range (face-aware sources; empty elsewhere).
-    pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], n: usize) -> Vec<PhotoAsset> {
+    pub async fn taken_between(
+        &self,
+        after: &str,
+        before: &str,
+        person_ids: &[String],
+        n: usize,
+    ) -> Vec<PhotoAsset> {
         match self {
             PhotoSource::Immich(im) => im
                 .taken_between(after, before, person_ids, n)
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(id, date, place, file, camera)| PhotoAsset { id, date, place, file, camera })
+                .map(|(id, date, place, file, camera)| PhotoAsset {
+                    id,
+                    date,
+                    place,
+                    file,
+                    camera,
+                })
                 .collect(),
             PhotoSource::Facebook(_) => Vec::new(),
         }
     }
 
     /// One person's face box in one asset (normalized 0..1 + pixel width), from saved face data.
-    pub async fn face_box(&self, asset_id: &str, person_id: &str) -> Option<(f32, f32, f32, f32, f32)> {
+    pub async fn face_box(
+        &self,
+        asset_id: &str,
+        person_id: &str,
+    ) -> Option<(f32, f32, f32, f32, f32)> {
         match self {
             PhotoSource::Immich(im) => im.face_box(asset_id, person_id).await,
             PhotoSource::Facebook(_) => None,
@@ -1366,7 +1621,11 @@ impl ImmichClient {
                 .take(4_000_000)
                 .read_to_end(&mut buf)
                 .ok()?;
-            if buf.len() < 300 { None } else { Some(buf) }
+            if buf.len() < 300 {
+                None
+            } else {
+                Some(buf)
+            }
         })
         .await
         .ok()?
@@ -1374,10 +1633,21 @@ impl ImmichClient {
 
     /// Semantic (CLIP) search over the whole library, optionally person-filtered. This is the
     /// "our wedding" lane: meaning-based recall across years of photos, not just recency.
-    pub async fn smart_search(&self, query: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
-        let (b, k, q, pids) = (self.base.clone(), self.key.clone(), query.to_string(), person_ids.to_vec());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
-            let mut body = serde_json::json!({ "query": q, "size": size, "type": "IMAGE", "withExif": true });
+    pub async fn smart_search(
+        &self,
+        query: &str,
+        person_ids: &[String],
+        size: usize,
+    ) -> anyhow::Result<Vec<ImmichAssetRecord>> {
+        let (b, k, q, pids) = (
+            self.base.clone(),
+            self.key.clone(),
+            query.to_string(),
+            person_ids.to_vec(),
+        );
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ImmichAssetRecord>> {
+            let mut body =
+                serde_json::json!({ "query": q, "size": size, "type": "IMAGE", "withExif": true });
             if !pids.is_empty() {
                 body["personIds"] = serde_json::json!(pids);
             }
@@ -1393,9 +1663,14 @@ impl ImmichClient {
     }
 
     /// Photo assets containing ALL the given people (AND filter) — couples/groups.
-    pub async fn assets_of_people(&self, person_ids: &[String], size: usize, oldest_first: bool) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+    pub async fn assets_of_people(
+        &self,
+        person_ids: &[String],
+        size: usize,
+        oldest_first: bool,
+    ) -> anyhow::Result<Vec<ImmichAssetRecord>> {
         let (b, k, pids) = (self.base.clone(), self.key.clone(), person_ids.to_vec());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ImmichAssetRecord>> {
             let body = serde_json::json!({ "personIds": pids, "size": size, "type": "IMAGE", "withExif": true, "order": if oldest_first { "asc" } else { "desc" } });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
@@ -1408,7 +1683,7 @@ impl ImmichClient {
         .await?
     }
 
-    /// WHO is in one image, from the saved face data (GET /api/faces?id=<asset>): named people
+    /// WHO is in one image, from the saved face data (`GET /api/faces?id=<asset>`): named people
     /// first, plus a count of faces the library hasn't identified yet.
     pub async fn people_in_asset(&self, asset_id: &str) -> (Vec<String>, usize) {
         let (b, k, id) = (self.base.clone(), self.key.clone(), asset_id.to_string());
@@ -1419,7 +1694,11 @@ impl ImmichClient {
             let mut names: Vec<String> = Vec::new();
             let mut unknown = 0usize;
             for face in v.as_array().cloned().unwrap_or_default() {
-                let name = face["person"]["name"].as_str().unwrap_or("").trim().to_string();
+                let name = face["person"]["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if name.is_empty() {
                     unknown += 1;
                 } else if !names.contains(&name) {
@@ -1434,9 +1713,21 @@ impl ImmichClient {
 
     /// Assets taken in a date range (ISO strings), optionally filtered to people — powers the
     /// month-by-month reel walk and "on this day N years ago".
-    pub async fn taken_between(&self, after: &str, before: &str, person_ids: &[String], size: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
-        let (b, k, af, bf, pids) = (self.base.clone(), self.key.clone(), after.to_string(), before.to_string(), person_ids.to_vec());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+    pub async fn taken_between(
+        &self,
+        after: &str,
+        before: &str,
+        person_ids: &[String],
+        size: usize,
+    ) -> anyhow::Result<Vec<ImmichAssetRecord>> {
+        let (b, k, af, bf, pids) = (
+            self.base.clone(),
+            self.key.clone(),
+            after.to_string(),
+            before.to_string(),
+            person_ids.to_vec(),
+        );
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ImmichAssetRecord>> {
             let mut body = serde_json::json!({ "takenAfter": af, "takenBefore": bf, "size": size, "type": "IMAGE", "withExif": true });
             if !pids.is_empty() {
                 body["personIds"] = serde_json::json!(pids);
@@ -1454,8 +1745,17 @@ impl ImmichClient {
 
     /// The bounding box of ONE person's face in ONE asset, normalized to 0..1 — plus the face's
     /// pixel width in the original image (a quality floor for reel frames). Largest match wins.
-    pub async fn face_box(&self, asset_id: &str, person_id: &str) -> Option<(f32, f32, f32, f32, f32)> {
-        let (b, k, aid, pid) = (self.base.clone(), self.key.clone(), asset_id.to_string(), person_id.to_string());
+    pub async fn face_box(
+        &self,
+        asset_id: &str,
+        person_id: &str,
+    ) -> Option<(f32, f32, f32, f32, f32)> {
+        let (b, k, aid, pid) = (
+            self.base.clone(),
+            self.key.clone(),
+            asset_id.to_string(),
+            person_id.to_string(),
+        );
         tokio::task::spawn_blocking(move || -> Option<(f32, f32, f32, f32, f32)> {
             let v = Self::get_blocking(&b, &k, &format!("/api/faces?id={aid}")).ok()?;
             let mut best: Option<(f32, f32, f32, f32, f32)> = None;
@@ -1463,7 +1763,10 @@ impl ImmichClient {
                 if face["person"]["id"].as_str() != Some(pid.as_str()) {
                     continue;
                 }
-                let (w, h) = (face["imageWidth"].as_f64()? as f32, face["imageHeight"].as_f64()? as f32);
+                let (w, h) = (
+                    face["imageWidth"].as_f64()? as f32,
+                    face["imageHeight"].as_f64()? as f32,
+                );
                 if w < 1.0 || h < 1.0 {
                     continue;
                 }
@@ -1474,7 +1777,7 @@ impl ImmichClient {
                     face["boundingBoxY2"].as_f64().unwrap_or(0.0) as f32,
                 );
                 let pxw = x2 - x1;
-                if best.as_ref().map_or(true, |b| pxw > b.4) {
+                if best.as_ref().is_none_or(|b| pxw > b.4) {
                     best = Some((x1 / w, y1 / h, x2 / w, y2 / h, pxw));
                 }
             }
@@ -1485,14 +1788,19 @@ impl ImmichClient {
     }
 
     /// Shared response walk: (asset_id, YYYY-MM-DD, "City, Country", filename, has-camera-make).
-    fn parse_asset_items(v: &serde_json::Value) -> Vec<(String, String, String, String, bool)> {
+    fn parse_asset_items(v: &serde_json::Value) -> Vec<ImmichAssetRecord> {
         let mut out = Vec::new();
         for a in v["assets"]["items"].as_array().cloned().unwrap_or_default() {
             let id = a["id"].as_str().unwrap_or("").to_string();
             if id.is_empty() {
                 continue;
             }
-            let date = a["fileCreatedAt"].as_str().unwrap_or("").chars().take(10).collect();
+            let date = a["fileCreatedAt"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(10)
+                .collect();
             let ex = &a["exifInfo"];
             let place = match (ex["city"].as_str(), ex["country"].as_str()) {
                 (Some(c), Some(co)) => format!("{c}, {co}"),
@@ -1500,7 +1808,7 @@ impl ImmichClient {
                 _ => String::new(),
             };
             let file = a["originalFileName"].as_str().unwrap_or("").to_string();
-            let camera = ex["make"].as_str().map(|m| !m.trim().is_empty()).unwrap_or(false);
+            let camera = ex["make"].as_str().is_some_and(|m| !m.trim().is_empty());
             out.push((id, date, place, file, camera));
         }
         out
@@ -1516,7 +1824,10 @@ impl ImmichClient {
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|a| {
-                    Some((a["id"].as_str()?.to_string(), a["albumName"].as_str().unwrap_or("").to_string()))
+                    Some((
+                        a["id"].as_str()?.to_string(),
+                        a["albumName"].as_str().unwrap_or("").to_string(),
+                    ))
                 })
                 .collect())
         })
@@ -1546,7 +1857,12 @@ impl ImmichClient {
         if ids.is_empty() {
             return true;
         }
-        let (b, k, aid, ids) = (self.base.clone(), self.key.clone(), album_id.to_string(), ids.to_vec());
+        let (b, k, aid, ids) = (
+            self.base.clone(),
+            self.key.clone(),
+            album_id.to_string(),
+            ids.to_vec(),
+        );
         tokio::task::spawn_blocking(move || -> bool {
             ureq::put(&format!("{b}/api/albums/{aid}/assets"))
                 .set("x-api-key", &k)
@@ -1590,7 +1906,12 @@ impl ImmichClient {
 
     /// Name a face cluster (PUT /api/people/{id}) — the who-is-who write-back.
     pub async fn rename_person(&self, person_id: &str, name: &str) -> bool {
-        let (b, k, id, nm) = (self.base.clone(), self.key.clone(), person_id.to_string(), name.to_string());
+        let (b, k, id, nm) = (
+            self.base.clone(),
+            self.key.clone(),
+            person_id.to_string(),
+            name.to_string(),
+        );
         tokio::task::spawn_blocking(move || -> bool {
             ureq::put(&format!("{b}/api/people/{id}"))
                 .set("x-api-key", &k)
@@ -1606,7 +1927,12 @@ impl ImmichClient {
     /// Merge face clusters INTO a target person (POST /api/people/{id}/merge) — an unnamed cluster
     /// the user identified as an already-named person folds into them (stronger recognition anchor).
     pub async fn merge_person(&self, target_id: &str, source_ids: &[String]) -> bool {
-        let (b, k, id, ids) = (self.base.clone(), self.key.clone(), target_id.to_string(), source_ids.to_vec());
+        let (b, k, id, ids) = (
+            self.base.clone(),
+            self.key.clone(),
+            target_id.to_string(),
+            source_ids.to_vec(),
+        );
         tokio::task::spawn_blocking(move || -> bool {
             ureq::post(&format!("{b}/api/people/{id}/merge"))
                 .set("x-api-key", &k)
@@ -1620,9 +1946,9 @@ impl ImmichClient {
     }
 
     /// Recent IMAGE assets regardless of person — same shape as assets_of_person, no filter.
-    pub async fn recent_assets(&self, n: usize) -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+    pub async fn recent_assets(&self, n: usize) -> anyhow::Result<Vec<ImmichAssetRecord>> {
         let (b, k) = (self.base.clone(), self.key.clone());
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String, String, String, bool)>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ImmichAssetRecord>> {
             let body = serde_json::json!({ "size": n, "type": "IMAGE", "order": "desc", "withExif": true });
             let v: serde_json::Value = ureq::post(&format!("{b}/api/search/metadata"))
                 .set("x-api-key", &k)
@@ -1639,7 +1965,7 @@ impl ImmichClient {
 /// Render a "growing up" reel, cinematic cut: each face-centered frame becomes a ~0.87s clip with
 /// a slow Ken Burns zoom and a month/year label, crossfaded into the next — 720p30 H.264. Frames
 /// arrive as (image bytes, normalized face box, label). None if too few frames or encoding fails.
-pub async fn face_reel_video(frames: Vec<(Vec<u8>, (f32, f32, f32, f32), String)>) -> Option<Vec<u8>> {
+pub async fn face_reel_video(frames: Vec<FaceReelFrame>) -> Option<Vec<u8>> {
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         let tag = format!("{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis());
         let dir = std::env::temp_dir().join(format!("ym_reel_{tag}"));
@@ -1649,7 +1975,7 @@ pub async fn face_reel_video(frames: Vec<(Vec<u8>, (f32, f32, f32, f32), String)
             let Ok(img) = image::load_from_memory(bytes) else { continue };
             let (w, h) = (img.width() as f32, img.height() as f32);
             let (x1, y1, x2, y2) = (nx1 * w, ny1 * h, nx2 * w, ny2 * h);
-            let (cx, cy) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+            let (cx, cy) = (f32::midpoint(x1, x2), f32::midpoint(y1, y2));
             let side = ((x2 - x1).max(y2 - y1) * 1.9).min(w.min(h)).max(32.0);
             let half = side / 2.0;
             let left = (cx - half).clamp(0.0, (w - side).max(0.0));
@@ -1740,21 +2066,26 @@ pub async fn enhance_photo(bytes: Vec<u8>, mode: &str) -> Option<Vec<u8>> {
             "warm" => {
                 let mut rgb = img.to_rgb8();
                 for p in rgb.pixels_mut() {
-                    p.0[0] = (p.0[0] as f32 * 1.07).min(255.0) as u8;
-                    p.0[2] = (p.0[2] as f32 * 0.93) as u8;
+                    p.0[0] = (f32::from(p.0[0]) * 1.07).min(255.0) as u8;
+                    p.0[2] = (f32::from(p.0[2]) * 0.93) as u8;
                 }
                 image::DynamicImage::ImageRgb8(rgb).brighten(5)
             }
             _ => {
                 let mut rgb = img.to_rgb8();
                 for p in rgb.pixels_mut() {
-                    let l = 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32;
+                    let l = 0.299 * f32::from(p.0[0])
+                        + 0.587 * f32::from(p.0[1])
+                        + 0.114 * f32::from(p.0[2]);
                     for c in 0..3 {
-                        let v = l + (p.0[c] as f32 - l) * 1.22;
+                        let v = l + (f32::from(p.0[c]) - l) * 1.22;
                         p.0[c] = v.clamp(0.0, 255.0) as u8;
                     }
                 }
-                image::DynamicImage::ImageRgb8(rgb).adjust_contrast(9.0).brighten(4).unsharpen(1.2, 3)
+                image::DynamicImage::ImageRgb8(rgb)
+                    .adjust_contrast(9.0)
+                    .brighten(4)
+                    .unsharpen(1.2, 3)
             }
         };
         let mut buf = std::io::Cursor::new(Vec::new());
@@ -1771,7 +2102,9 @@ pub async fn enhance_photo(bytes: Vec<u8>, mode: &str) -> Option<Vec<u8>> {
 /// model spends time on them. Rough thresholds: sharpness <30 blurry; luma <35 dark, >220 blown.
 pub fn photo_quality(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     let img = image::load_from_memory(bytes).ok()?;
-    let g = img.resize(256, 256, image::imageops::FilterType::Triangle).to_luma8();
+    let g = img
+        .resize(256, 256, image::imageops::FilterType::Triangle)
+        .to_luma8();
     let (w, h) = g.dimensions();
     if w < 8 || h < 8 {
         return None;
@@ -1779,12 +2112,12 @@ pub fn photo_quality(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     let (mut sum, mut sum2, mut n) = (0f64, 0f64, 0f64);
     for y in 1..h - 1 {
         for x in 1..w - 1 {
-            let c = g.get_pixel(x, y).0[0] as f64;
+            let c = f64::from(g.get_pixel(x, y).0[0]);
             let lap = 4.0 * c
-                - g.get_pixel(x - 1, y).0[0] as f64
-                - g.get_pixel(x + 1, y).0[0] as f64
-                - g.get_pixel(x, y - 1).0[0] as f64
-                - g.get_pixel(x, y + 1).0[0] as f64;
+                - f64::from(g.get_pixel(x - 1, y).0[0])
+                - f64::from(g.get_pixel(x + 1, y).0[0])
+                - f64::from(g.get_pixel(x, y - 1).0[0])
+                - f64::from(g.get_pixel(x, y + 1).0[0]);
             sum += lap;
             sum2 += lap * lap;
             n += 1.0;
@@ -1793,9 +2126,9 @@ pub fn photo_quality(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     let mean = sum / n;
     let sharpness = ((sum2 / n) - mean * mean).max(0.0) as f32;
     let (mut ls, mut ls2) = (0f64, 0f64);
-    let ln = (w * h) as f64;
+    let ln = f64::from(w * h);
     for p in g.pixels() {
-        let v = p.0[0] as f64;
+        let v = f64::from(p.0[0]);
         ls += v;
         ls2 += v * v;
     }
@@ -1811,16 +2144,16 @@ fn polish_cell(img: &image::RgbImage, target_luma: f32) -> image::RgbImage {
     let n = (img.width() * img.height()).max(1) as f32;
     let mean: f32 = img
         .pixels()
-        .map(|p| 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32)
+        .map(|p| 0.299 * f32::from(p.0[0]) + 0.587 * f32::from(p.0[1]) + 0.114 * f32::from(p.0[2]))
         .sum::<f32>()
         / n;
     let delta = ((target_luma - mean) * 0.5).clamp(-22.0, 22.0) as i32;
     let mut out = image::imageops::colorops::brighten(img, delta);
     image::imageops::colorops::contrast_in_place(&mut out, 7.0);
     for p in out.pixels_mut() {
-        let l = 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32;
+        let l = 0.299 * f32::from(p.0[0]) + 0.587 * f32::from(p.0[1]) + 0.114 * f32::from(p.0[2]);
         for c in 0..3 {
-            p.0[c] = (l + (p.0[c] as f32 - l) * 1.10).clamp(0.0, 255.0) as u8;
+            p.0[c] = (l + (f32::from(p.0[c]) - l) * 1.10).clamp(0.0, 255.0) as u8;
         }
     }
     image::imageops::unsharpen(&out, 0.8, 2)
@@ -1828,7 +2161,7 @@ fn polish_cell(img: &image::RgbImage, target_luma: f32) -> image::RgbImage {
 
 /// Compose a collage: face-centered square cells (when a face box is known) on a warm gutter grid.
 /// 2→2x1, 3→3x1, 4→2x2, 5-6→3x2, 7+→3x3. Returns JPEG bytes.
-pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -> Option<Vec<u8>> {
+pub async fn make_collage(cells: Vec<CollageCell>) -> Option<Vec<u8>> {
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         let n = cells.len().min(9);
         if n < 2 {
@@ -1850,7 +2183,9 @@ pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -
         // Phase 1: face-centered crops.
         let mut crops: Vec<image::RgbImage> = Vec::new();
         for (bytes, bbox) in cells.iter().take(n_used) {
-            let Ok(img) = image::load_from_memory(bytes) else { continue };
+            let Ok(img) = image::load_from_memory(bytes) else {
+                continue;
+            };
             let (iw, ih) = (img.width() as f32, img.height() as f32);
             let (cx, cy, side) = match bbox {
                 Some((x1, y1, x2, y2)) => {
@@ -1877,17 +2212,28 @@ pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -
             .iter()
             .map(|c| {
                 let n = (c.width() * c.height()).max(1) as f32;
-                c.pixels().map(|p| 0.299 * p.0[0] as f32 + 0.587 * p.0[1] as f32 + 0.114 * p.0[2] as f32).sum::<f32>() / n
+                c.pixels()
+                    .map(|p| {
+                        0.299 * f32::from(p.0[0])
+                            + 0.587 * f32::from(p.0[1])
+                            + 0.114 * f32::from(p.0[2])
+                    })
+                    .sum::<f32>()
+                    / n
             })
             .collect();
         lumas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let target = lumas.get(lumas.len() / 2).copied().unwrap_or(128.0).clamp(95.0, 165.0);
+        let target = lumas
+            .get(lumas.len() / 2)
+            .copied()
+            .unwrap_or(128.0)
+            .clamp(95.0, 165.0);
         let mut placed = 0u32;
         for crop in &crops {
             let polished = polish_cell(crop, target);
             let ox = gut + (placed % cols) * (cell + gut);
             let oy = gut + (placed / cols) * (cell + gut);
-            image::imageops::overlay(&mut canvas, &polished, ox as i64, oy as i64);
+            image::imageops::overlay(&mut canvas, &polished, i64::from(ox), i64::from(oy));
             placed += 1;
         }
         if placed < 2 {
@@ -1895,7 +2241,9 @@ pub async fn make_collage(cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)>) -
         }
         let mut buf = std::io::Cursor::new(Vec::new());
         let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
-        image::DynamicImage::ImageRgb8(canvas).write_with_encoder(enc).ok()?;
+        image::DynamicImage::ImageRgb8(canvas)
+            .write_with_encoder(enc)
+            .ok()?;
         Some(buf.into_inner())
     })
     .await
@@ -1919,8 +2267,12 @@ pub struct DetectedFace {
 
 impl FaceEngine {
     pub fn from_env() -> Option<FaceEngine> {
-        let url = std::env::var("YM_FACE_ML_URL").ok().filter(|u| !u.trim().is_empty())?;
-        Some(FaceEngine { url: url.trim().trim_end_matches('/').to_string() })
+        let url = std::env::var("YM_FACE_ML_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty())?;
+        Some(FaceEngine {
+            url: url.trim().trim_end_matches('/').to_string(),
+        })
     }
 
     /// Detect + embed every face in an image (hand-built multipart — ureq has none).
@@ -1978,7 +2330,7 @@ pub async fn crop_person_region(bytes: Vec<u8>, face: (f32, f32, f32, f32)) -> O
         let (w, h) = (img.width() as f32, img.height() as f32);
         let (fx1, fy1, fx2, fy2) = (face.0 * w, face.1 * h, face.2 * w, face.3 * h);
         let (fw, fh) = ((fx2 - fx1).max(8.0), (fy2 - fy1).max(8.0));
-        let cx = (fx1 + fx2) / 2.0;
+        let cx = f32::midpoint(fx1, fx2);
         let left = (cx - fw * 1.6).clamp(0.0, w - 1.0);
         let right = (cx + fw * 1.6).clamp(1.0, w);
         let top = (fy1 - fh * 0.6).clamp(0.0, h - 1.0);
@@ -1986,7 +2338,12 @@ pub async fn crop_person_region(bytes: Vec<u8>, face: (f32, f32, f32, f32)) -> O
         if right - left < 32.0 || bottom - top < 32.0 {
             return None;
         }
-        let crop = img.crop_imm(left as u32, top as u32, (right - left) as u32, (bottom - top) as u32);
+        let crop = img.crop_imm(
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        );
         let mut buf = std::io::Cursor::new(Vec::new());
         let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
         crop.write_with_encoder(enc).ok()?;
@@ -2014,20 +2371,20 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-
 /// Anthropic Max subscription usage — the /status meters (five_hour + seven_day utilization),
 /// queryable with the Claude Code OAuth token. None = no token or request failed;
 /// Some(json) may be an {"type":"error"} body (expired token) — caller renders both honestly.
 pub fn anthropic_subscription_usage() -> Option<serde_json::Value> {
-    let tok = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|k| !k.trim().is_empty())?;
+    let tok = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .ok()
+        .filter(|k| !k.trim().is_empty())?;
     let resp = ureq::get("https://api.anthropic.com/api/oauth/usage")
         .set("Authorization", &format!("Bearer {tok}"))
         .set("anthropic-beta", "oauth-2025-04-20")
         .timeout(std::time::Duration::from_secs(12))
         .call();
     match resp {
-        Ok(r) => r.into_json().ok(),
-        Err(ureq::Error::Status(_, r)) => r.into_json().ok(), // 401 body says "expired" — render it
+        Ok(r) | Err(ureq::Error::Status(_, r)) => r.into_json().ok(), // 401 body says "expired" — render it
         Err(_) => None,
     }
 }
@@ -2035,7 +2392,9 @@ pub fn anthropic_subscription_usage() -> Option<serde_json::Value> {
 /// NanoGPT subscription usage — the REAL quota (weekly input tokens used/remaining/reset).
 /// GET /api/subscription/v1/usage with x-api-key. Blocking (ureq); call via spawn_blocking.
 pub fn nanogpt_quota() -> Option<serde_json::Value> {
-    let key = std::env::var("NANOGPT_KEY").ok().filter(|k| !k.trim().is_empty())?;
+    let key = std::env::var("NANOGPT_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())?;
     ureq::get("https://nano-gpt.com/api/subscription/v1/usage")
         .set("x-api-key", &key)
         .timeout(std::time::Duration::from_secs(12))
@@ -2048,7 +2407,9 @@ pub fn nanogpt_quota() -> Option<serde_json::Value> {
 /// NanoGPT is the one chain provider with a REAL balance API. Returns (usd, nano) — the ground
 /// truth `ym providers` renders. Blocking (ureq); call via spawn_blocking.
 pub fn nanogpt_balance() -> Option<(f64, f64)> {
-    let key = std::env::var("NANOGPT_KEY").ok().filter(|k| !k.trim().is_empty())?;
+    let key = std::env::var("NANOGPT_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())?;
     let resp: serde_json::Value = ureq::post("https://nano-gpt.com/api/check-balance")
         .set("x-api-key", &key)
         .timeout(std::time::Duration::from_secs(12))
@@ -2056,6 +2417,11 @@ pub fn nanogpt_balance() -> Option<(f64, f64)> {
         .ok()?
         .into_json()
         .ok()?;
-    let f = |k: &str| resp.get(k).and_then(|x| x.as_str()).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+    let f = |k: &str| {
+        resp.get(k)
+            .and_then(|x| x.as_str())
+            .and_then(|x| x.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
     Some((f("usd_balance"), f("nano_balance")))
 }

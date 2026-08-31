@@ -15,13 +15,20 @@ impl super::ConversationEngine {
 
     pub(crate) async fn save_calendar(&self, evs: &[serde_json::Value]) {
         let mut evs: Vec<serde_json::Value> = evs.to_vec();
-        evs.sort_by_key(|e| e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX));
+        evs.sort_by_key(|e| {
+            e.get("when_ms")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(i64::MAX)
+        });
         if evs.len() > 400 {
             evs.truncate(400); // bound growth (soonest-first, far future trimmed)
         }
         let _ = self
             .memory
-            .profile_set("calendar_events", &serde_json::to_string(&evs).unwrap_or_else(|_| "[]".into()))
+            .profile_set(
+                "calendar_events",
+                &serde_json::to_string(&evs).unwrap_or_else(|_| "[]".into()),
+            )
             .await;
     }
 
@@ -31,9 +38,10 @@ impl super::ConversationEngine {
         let text = text.trim();
         let today = local_now();
         let (mut title, when) = match text.to_lowercase().rfind(" on ") {
-            Some(i) if parse_text_date_ms(&text[i + 4..], &today).is_some() => {
-                (text[..i].trim().to_string(), parse_text_date_ms(&text[i + 4..], &today))
-            }
+            Some(i) if parse_text_date_ms(&text[i + 4..], &today).is_some() => (
+                text[..i].trim().to_string(),
+                parse_text_date_ms(&text[i + 4..], &today),
+            ),
             _ => (text.to_string(), parse_text_date_ms(text, &today)),
         };
         // Optional clock time ("at 6pm" / "at 18:30"): applied to the parsed date, or to today when
@@ -49,11 +57,15 @@ impl super::ConversationEngine {
             (None, Some((h, m))) => {
                 let mut dt = today.date_naive().and_hms_opt(h, m, 0);
                 if let Some(d) = dt {
-                    if d.and_local_timezone(*today.offset()).single().map(|t| t.timestamp_millis() <= today.timestamp_millis()).unwrap_or(false) {
+                    if d.and_local_timezone(*today.offset())
+                        .single()
+                        .is_some_and(|t| t.timestamp_millis() <= today.timestamp_millis())
+                    {
                         dt = (today.date_naive() + chrono::Duration::days(1)).and_hms_opt(h, m, 0);
                     }
                 }
-                dt.and_then(|d| d.and_local_timezone(*today.offset()).single()).map(|t| t.timestamp_millis())
+                dt.and_then(|d| d.and_local_timezone(*today.offset()).single())
+                    .map(|t| t.timestamp_millis())
             }
             (ms, None) => ms,
         };
@@ -79,7 +91,11 @@ impl super::ConversationEngine {
         }));
         self.save_calendar(&evs).await;
         let date = chrono::DateTime::from_timestamp_millis(ms)
-            .map(|t| t.with_timezone(today.offset()).format("%A, %B %-d").to_string())
+            .map(|t| {
+                t.with_timezone(today.offset())
+                    .format("%A, %B %-d")
+                    .to_string()
+            })
             .unwrap_or_default();
         format!("📅 Added: {title} — {date}. It'll show in the morning briefing and I'll bring it up around the day.")
     }
@@ -101,19 +117,35 @@ impl super::ConversationEngine {
             let ms = e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
             if ms >= now - 86_400_000 / 2 && ms <= horizon {
                 let title = e.get("title").and_then(|x| x.as_str()).unwrap_or("?");
-                let src = if e.get("source").and_then(|x| x.as_str()) == Some("ics") { " (ext)" } else { "" };
+                let src = if e.get("source").and_then(|x| x.as_str()) == Some("ics") {
+                    " (ext)"
+                } else {
+                    ""
+                };
                 let when = chrono::DateTime::from_timestamp_millis(ms)
-                    .map(|t| t.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                    .map(|t| {
+                        t.with_timezone(today.offset())
+                            .format("%a %b %-d")
+                            .to_string()
+                    })
                     .unwrap_or_default();
                 out.push((ms, format!("{when}: {title}{src}"), None));
             }
         }
         for (name, label, d, mmdd) in self.upcoming_people_dates(days).await {
-            out.push((now + d * 86_400_000, format!("{mmdd}: {name}'s {label}"), None));
+            out.push((
+                now + d * 86_400_000,
+                format!("{mmdd}: {name}'s {label}"),
+                None,
+            ));
         }
         let (reminders, _) = self.split_tasks().await;
         for t in &reminders {
-            if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
+            if let Some(ms) = t
+                .due_ms
+                .map(|m| m as i64)
+                .or_else(|| parse_text_date_ms(&t.description, &today))
+            {
                 // A reminder whose date has PASSED is not upcoming. This branch had only the upper
                 // bound while the calendar branch above had both, so reminders from any distance in
                 // the past sat under "Next 7 days" — live on 2026-08-13 the panel showed six items
@@ -126,7 +158,11 @@ impl super::ConversationEngine {
                         short.push('…'); // a silent mid-phrase cut ("…by July 1") reads as wrong data
                     }
                     let when = chrono::DateTime::from_timestamp_millis(ms)
-                        .map(|x| x.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                        .map(|x| {
+                            x.with_timezone(today.offset())
+                                .format("%a %b %-d")
+                                .to_string()
+                        })
                         .unwrap_or_default();
                     out.push((ms, format!("{when}: ⏰ {short}"), Some(t.id.clone())));
                 }
@@ -145,8 +181,7 @@ impl super::ConversationEngine {
         // colon, minus the reminder bell.
         fn subject(line: &str) -> String {
             line.split_once(": ")
-                .map(|(_, rest)| rest)
-                .unwrap_or(line)
+                .map_or(line, |(_, rest)| rest)
                 .trim()
                 .trim_start_matches('⏰')
                 .trim()
@@ -158,7 +193,8 @@ impl super::ConversationEngine {
         // different days, so the duplicate survived. Same trap as `in_days` in surface.rs, made
         // again an hour after fixing it there; "which day is this" is never a division.
         let local_day = |ms: i64| -> Option<chrono::NaiveDate> {
-            chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(today.offset()).date_naive())
+            chrono::DateTime::from_timestamp_millis(ms)
+                .map(|t| t.with_timezone(today.offset()).date_naive())
         };
         let mut deduped: Vec<(i64, String, Option<String>)> = Vec::new();
         for (ms, line, id) in out {
@@ -211,14 +247,27 @@ impl super::ConversationEngine {
     /// Re-pull the external ICS feed (if connected): replaces all `source:"ics"` events with the
     /// fresh window. Read-only — we never write to the external calendar.
     pub async fn refresh_ics(&self) -> usize {
-        let Some(url) = self.memory.profile_get("calendar_ics_url").await.ok().flatten() else {
+        let Some(url) = self
+            .memory
+            .profile_get("calendar_ics_url")
+            .await
+            .ok()
+            .flatten()
+        else {
             return 0;
         };
         let Some(web) = &self.web else { return 0 };
-        let Ok(body) = web.fetch(&url).await else { return 0 };
+        let Ok(body) = web.fetch(&url).await else {
+            return 0;
+        };
         let today = local_now();
         let now = today.timestamp_millis();
-        let fresh = parse_ics_events(&body, *today.offset(), now - 86_400_000, now + 60 * 86_400_000);
+        let fresh = parse_ics_events(
+            &body,
+            *today.offset(),
+            now - 86_400_000,
+            now + 60 * 86_400_000,
+        );
         let n = fresh.len();
         let mut evs: Vec<serde_json::Value> = self
             .load_calendar()
@@ -227,7 +276,9 @@ impl super::ConversationEngine {
             .filter(|e| e.get("source").and_then(|x| x.as_str()) != Some("ics"))
             .collect();
         for (title, ms) in fresh {
-            evs.push(serde_json::json!({ "id": ms, "title": title, "when_ms": ms, "source": "ics" }));
+            evs.push(
+                serde_json::json!({ "id": ms, "title": title, "when_ms": ms, "source": "ics" }),
+            );
         }
         self.save_calendar(&evs).await;
         n
@@ -243,7 +294,9 @@ impl super::ConversationEngine {
         }
         let evs = self.load_calendar().await;
         let (gone, keep): (Vec<_>, Vec<_>) = evs.into_iter().partition(|e| {
-            e.get("title").and_then(|x| x.as_str()).map(|t| t.to_lowercase().contains(&q)).unwrap_or(false)
+            e.get("title")
+                .and_then(|x| x.as_str())
+                .is_some_and(|t| t.to_lowercase().contains(&q))
         });
         if gone.is_empty() {
             return format!("No calendar event matches \"{}\".", text.trim());
@@ -260,7 +313,10 @@ impl super::ConversationEngine {
     /// (YM_PREP_LEAD_MIN, default 90) that haven't been prepped — marked immediately (persisted)
     /// so each event preps exactly once, restart-safe. The poll loop composes+sends detached.
     pub async fn events_needing_prep(&self) -> Vec<(String, i64)> {
-        let lead_min: i64 = std::env::var("YM_PREP_LEAD_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+        let lead_min: i64 = std::env::var("YM_PREP_LEAD_MIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(90);
         let now = local_now().timestamp_millis();
         let evs = self.load_calendar().await;
         let mut prepped: Vec<String> = self
@@ -273,11 +329,16 @@ impl super::ConversationEngine {
             .unwrap_or_default();
         let mut due = Vec::new();
         for e in &evs {
-            let Some(ms) = e.get("when_ms").and_then(|x| x.as_i64()) else { continue };
-            let Some(title) = e.get("title").and_then(|x| x.as_str()) else { continue };
+            let Some(ms) = e.get("when_ms").and_then(|x| x.as_i64()) else {
+                continue;
+            };
+            let Some(title) = e.get("title").and_then(|x| x.as_str()) else {
+                continue;
+            };
             let key = format!("{title}|{ms}");
             let locally_done = self.prepped_local.lock().unwrap().contains(&key);
-            if ms > now && ms - now <= lead_min * 60_000 && !prepped.contains(&key) && !locally_done {
+            if ms > now && ms - now <= lead_min * 60_000 && !prepped.contains(&key) && !locally_done
+            {
                 self.prepped_local.lock().unwrap().insert(key.clone());
                 prepped.push(key);
                 let _ = self.memory.record_episode("calendar-event").await;
@@ -291,7 +352,10 @@ impl super::ConversationEngine {
             }
             let _ = self
                 .memory
-                .profile_set("events_prepped", &serde_json::to_string(&prepped).unwrap_or_else(|_| "[]".into()))
+                .profile_set(
+                    "events_prepped",
+                    &serde_json::to_string(&prepped).unwrap_or_else(|_| "[]".into()),
+                )
                 .await;
         }
         due
@@ -307,30 +371,51 @@ impl super::ConversationEngine {
         // Memories relevant to the event text (semantic recall over the typed store).
         let recalled = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: title.to_string(), top_k: 6, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Conversation)))
+            .recall_typed(
+                mind_types::RecallQuery {
+                    text: title.to_string(),
+                    top_k: 6,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                    mind_types::Activity::Conversation,
+                )),
+            )
             .await
             .unwrap_or_default();
         let mut ctx = String::new();
         for r in recalled.iter().take(6) {
-            ctx.push_str(&format!("- {}\n", r.item.text.chars().take(200).collect::<String>()));
+            ctx.push_str(&format!(
+                "- {}\n",
+                r.item.text.chars().take(200).collect::<String>()
+            ));
         }
         // People layer: anyone named in the event title brings their living profile along.
         let tl = title.to_lowercase();
         for p in self.load_people_profiles().await {
             let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
             let hit = !name.is_empty() && tl.contains(&name.to_lowercase())
-                || p.get("aliases").and_then(|x| x.as_array()).map(|a| {
-                    a.iter().filter_map(|x| x.as_str()).any(|al| al.len() > 2 && tl.contains(&al.to_lowercase()))
-                }).unwrap_or(false);
+                || p.get("aliases")
+                    .and_then(|x| x.as_array())
+                    .is_some_and(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .any(|al| al.len() > 2 && tl.contains(&al.to_lowercase()))
+                    });
             if hit {
                 let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-                let facts: Vec<&str> = p.get("facts").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+                let facts: Vec<&str> = p
+                    .get("facts")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
+                    .unwrap_or_default();
                 ctx.push_str(&format!("About {name} ({rel}): {}\n", facts.join("; ")));
             }
         }
         // Practicals: today's weather, for the leave-early / bring-an-umbrella note.
         if let Some(w) = &self.weather {
-            let place = std::env::var("YM_WEATHER_PLACE").unwrap_or_else(|_| "Bentonville".to_string());
+            let place =
+                std::env::var("YM_WEATHER_PLACE").unwrap_or_else(|_| "Bentonville".to_string());
             if let Ok(rep) = w.report(&place).await {
                 ctx.push_str(&format!("Weather now: {}\n", rep));
             }
@@ -345,10 +430,19 @@ impl super::ConversationEngine {
              genuinely relevant personal details a great assistant would remember, and one practical note \
              (weather/timing) only if actually relevant. Do not invent anything.\n\n=== CONTEXT ===\n{ctx}"
         );
-        let cfg = GenerationConfig { max_tokens: 260, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 260,
+            ..GenerationConfig::default()
+        };
         let body = self
             .inference
-            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
             .await
             .ok()?
             .text
@@ -356,5 +450,4 @@ impl super::ConversationEngine {
             .to_string();
         Some(format!("🎗 {title} — in {in_min} min.\n\n{body}"))
     }
-
 }

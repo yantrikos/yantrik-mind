@@ -31,12 +31,14 @@ const HA_DENY_DOMAINS: [&str; 5] = ["lock", "cover", "alarm_control_panel", "cam
 /// `media_player.living_*`). No allowlist configured = NOTHING allowed — the hand is opt-in per
 /// entity class, fail-closed by construction.
 pub(crate) fn ha_entity_allowed(entity: &str, allowlist: &str) -> bool {
-    allowlist.split(',').map(str::trim).filter(|p| !p.is_empty()).any(|pat| {
-        match pat.strip_suffix('*') {
+    allowlist
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .any(|pat| match pat.strip_suffix('*') {
             Some(prefix) => entity.starts_with(prefix),
             None => entity == pat,
-        }
-    })
+        })
 }
 
 impl ToolActionExecutor {
@@ -99,8 +101,12 @@ impl ActionExecutor for ToolActionExecutor {
                     .github
                     .as_ref()
                     .ok_or_else(|| MindError::Other("no github writer configured".into()))?;
-                let (repo, number) = parse_repo_target(&req.intent.target)
-                    .ok_or_else(|| MindError::Other(format!("bad github target '{}' (want owner/repo#N)", req.intent.target)))?;
+                let (repo, number) = parse_repo_target(&req.intent.target).ok_or_else(|| {
+                    MindError::Other(format!(
+                        "bad github target '{}' (want owner/repo#N)",
+                        req.intent.target
+                    ))
+                })?;
                 let body = req.intent.payload.as_deref().unwrap_or("");
                 let url = writer
                     .comment(&repo, number, body)
@@ -112,10 +118,18 @@ impl ActionExecutor for ToolActionExecutor {
             // the JSON arguments. The harm-gate has already approved (and `execute` re-checks it). The
             // blocking JSON-RPC call runs on the blocking pool.
             "mcp_call" => {
-                let hub = self.mcp.as_ref().ok_or_else(|| MindError::Other("no MCP hub configured".into()))?.clone();
+                let hub = self
+                    .mcp
+                    .as_ref()
+                    .ok_or_else(|| MindError::Other("no MCP hub configured".into()))?
+                    .clone();
                 let qualified = req.intent.target.clone();
-                let args: serde_json::Value =
-                    req.intent.payload.as_deref().and_then(|p| serde_json::from_str(p).ok()).unwrap_or(serde_json::json!({}));
+                let args: serde_json::Value = req
+                    .intent
+                    .payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str(p).ok())
+                    .unwrap_or(serde_json::json!({}));
                 tokio::task::spawn_blocking(move || hub.call_blocking(&qualified, &args))
                     .await
                     .map_err(|e| MindError::Other(e.to_string()))?
@@ -126,15 +140,19 @@ impl ActionExecutor for ToolActionExecutor {
             // of what any upstream layer believed: security domains are denied outright, and the
             // entity must match the operator's allowlist — which, unset, allows NOTHING.
             "ha_call" => {
-                let home = self.home.as_ref().ok_or_else(|| MindError::Other("no home writer configured".into()))?;
-                let (svc, entity) = req
-                    .intent
-                    .target
-                    .split_once(' ')
-                    .ok_or_else(|| MindError::Other(format!("bad ha target '{}' (want 'domain.service entity_id')", req.intent.target)))?;
-                let (domain, service) = svc
-                    .split_once('.')
-                    .ok_or_else(|| MindError::Other(format!("bad service '{svc}' (want domain.service)")))?;
+                let home = self
+                    .home
+                    .as_ref()
+                    .ok_or_else(|| MindError::Other("no home writer configured".into()))?;
+                let (svc, entity) = req.intent.target.split_once(' ').ok_or_else(|| {
+                    MindError::Other(format!(
+                        "bad ha target '{}' (want 'domain.service entity_id')",
+                        req.intent.target
+                    ))
+                })?;
+                let (domain, service) = svc.split_once('.').ok_or_else(|| {
+                    MindError::Other(format!("bad service '{svc}' (want domain.service)"))
+                })?;
                 let entity = entity.trim();
                 let entity_domain = entity.split('.').next().unwrap_or("");
                 if HA_DENY_DOMAINS.contains(&domain) || HA_DENY_DOMAINS.contains(&entity_domain) {
@@ -154,7 +172,9 @@ impl ActionExecutor for ToolActionExecutor {
                     .map_err(|e| MindError::Other(e.to_string()))?;
                 Ok(format!("done: {receipt}"))
             }
-            other => Err(MindError::Other(format!("no executor for action kind '{other}'"))),
+            other => Err(MindError::Other(format!(
+                "no executor for action kind '{other}'"
+            ))),
         }
     }
 }
@@ -186,7 +206,10 @@ mod tests {
     async fn mcp_call_without_a_hub_errors_cleanly() {
         // No hub configured → the action fails with a clear error (never a silent "success").
         let exec = ToolActionExecutor::new();
-        let err = exec.perform(&mcp_req("mcp.github.create_issue", "{}")).await.unwrap_err();
+        let err = exec
+            .perform(&mcp_req("mcp.github.create_issue", "{}"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("no MCP hub"), "got: {err}");
     }
 
@@ -196,7 +219,9 @@ mod tests {
         let mut bad = mcp_req("x", "{}");
         bad.intent.kind = "teleport".into();
         let err = exec.perform(&bad).await.unwrap_err();
-        assert!(err.to_string().contains("no executor for action kind 'teleport'"));
+        assert!(err
+            .to_string()
+            .contains("no executor for action kind 'teleport'"));
     }
 }
 
@@ -233,32 +258,45 @@ mod ha_policy_tests {
     }
 
     /// Env vars are process-global; these tests must not interleave.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn exec_with_home() -> (ToolActionExecutor, Arc<RecordingHome>) {
         let home = Arc::new(RecordingHome(std::sync::Mutex::new(Vec::new())));
-        (ToolActionExecutor::new().with_home_writer(home.clone()), home)
+        (
+            ToolActionExecutor::new().with_home_writer(home.clone()),
+            home,
+        )
     }
 
     /// THE line that must never move: security domains are refused regardless of any allowlist.
     #[tokio::test]
     async fn security_domains_are_denied_even_when_allowlisted() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().await;
         std::env::set_var("YM_HA_ACTIONS_ALLOW", "lock.*,light.*,cover.*");
         let (ex, home) = exec_with_home();
-        for t in ["lock.unlock lock.front_door", "cover.open_cover cover.garage", "light.turn_on lock.front_door"] {
+        for t in [
+            "lock.unlock lock.front_door",
+            "cover.open_cover cover.garage",
+            "light.turn_on lock.front_door",
+        ] {
             let r = ex.perform(&ha_req(t)).await;
             assert!(r.is_err(), "{t} must be refused");
-            assert!(r.unwrap_err().to_string().contains("security domain"), "{t}: wrong refusal reason");
+            assert!(
+                r.unwrap_err().to_string().contains("security domain"),
+                "{t}: wrong refusal reason"
+            );
         }
-        assert!(home.0.lock().unwrap().is_empty(), "nothing may reach the transport");
+        assert!(
+            home.0.lock().unwrap().is_empty(),
+            "nothing may reach the transport"
+        );
         std::env::remove_var("YM_HA_ACTIONS_ALLOW");
     }
 
     /// No allowlist = NOTHING allowed. The hand is opt-in per entity, fail-closed by construction.
     #[tokio::test]
     async fn unset_allowlist_allows_nothing() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().await;
         std::env::remove_var("YM_HA_ACTIONS_ALLOW");
         let (ex, home) = exec_with_home();
         let r = ex.perform(&ha_req("light.turn_off light.porch")).await;
@@ -268,11 +306,17 @@ mod ha_policy_tests {
 
     #[tokio::test]
     async fn allowlisted_entity_executes_and_glob_scopes_it() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().await;
         std::env::set_var("YM_HA_ACTIONS_ALLOW", "light.*, switch.porch");
         let (ex, home) = exec_with_home();
-        assert!(ex.perform(&ha_req("light.turn_off light.kitchen")).await.is_ok());
-        assert!(ex.perform(&ha_req("switch.turn_on switch.porch")).await.is_ok());
+        assert!(ex
+            .perform(&ha_req("light.turn_off light.kitchen"))
+            .await
+            .is_ok());
+        assert!(ex
+            .perform(&ha_req("switch.turn_on switch.porch"))
+            .await
+            .is_ok());
         let r = ex.perform(&ha_req("switch.turn_on switch.heater")).await;
         assert!(r.is_err(), "glob must not leak past its prefix");
         assert_eq!(home.0.lock().unwrap().len(), 2);

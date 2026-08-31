@@ -4,9 +4,7 @@ use super::*;
 
 impl super::ConversationEngine {
     pub(crate) fn plugin_manifests() -> Vec<serde_json::Value> {
-        let m = |name: &str, kind: &str, status: &str, does: &str, needs: &str| {
-            serde_json::json!({ "name": name, "kind": kind, "status": status, "does": does, "needs": needs })
-        };
+        let m = |name: &str, kind: &str, status: &str, does: &str, needs: &str| serde_json::json!({ "name": name, "kind": kind, "status": status, "does": does, "needs": needs });
         vec![
             m("immich-photos", "photo_source", "live", "self-hosted family photo archive: people/faces, CLIP search, EXIF dates+places, albums, archive curation", "YM_IMMICH_URL, YM_IMMICH_KEY"),
             m("facebook-photos", "photo_source", "parked", "FB tagged-photo read (album crawl)", "FB_USER_TOKEN (long-lived)"),
@@ -38,9 +36,18 @@ impl super::ConversationEngine {
         let manifests = Self::plugin_manifests();
         let _ = self
             .memory
-            .profile_set("plugin_registry", &serde_json::Value::Array(manifests.clone()).to_string())
+            .profile_set(
+                "plugin_registry",
+                &serde_json::Value::Array(manifests.clone()).to_string(),
+            )
             .await;
-        let seeded = self.memory.profile_get("plugin_seed_ver").await.ok().flatten().unwrap_or_default();
+        let seeded = self
+            .memory
+            .profile_get("plugin_seed_ver")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mut wrote = 0usize;
         if seeded != "v2" {
             for p in &manifests {
@@ -52,7 +59,12 @@ impl super::ConversationEngine {
                     p["does"].as_str().unwrap_or(""),
                     p["needs"].as_str().unwrap_or("")
                 );
-                if self.memory.remember_observation(&line, mind_types::safety::ProvenanceCategory::Human).await.is_ok() {
+                if self
+                    .memory
+                    .remember_observation(&line, mind_types::safety::ProvenanceCategory::Human)
+                    .await
+                    .is_ok()
+                {
                     wrote += 1;
                 }
             }
@@ -73,8 +85,9 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.as_array().cloned())
-            .unwrap_or_else(|| Self::plugin_manifests());
-        let mut by_kind: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            .unwrap_or_else(Self::plugin_manifests);
+        let mut by_kind: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         for p in &reg {
             let icon = match p["status"].as_str().unwrap_or("") {
                 "live" => "🟢",
@@ -85,13 +98,23 @@ impl super::ConversationEngine {
             by_kind
                 .entry(p["kind"].as_str().unwrap_or("other").to_string())
                 .or_default()
-                .push(format!("{icon} {} — {}", p["name"].as_str().unwrap_or(""), p["does"].as_str().unwrap_or("")));
+                .push(format!(
+                    "{icon} {} — {}",
+                    p["name"].as_str().unwrap_or(""),
+                    p["does"].as_str().unwrap_or("")
+                ));
         }
         let mut out = String::from("🧩 PLUGIN STORE (substrate registry)\n");
         for (kind, items) in by_kind {
-            out.push_str(&format!("\n{}:\n{}\n", kind.to_uppercase(), items.join("\n")));
+            out.push_str(&format!(
+                "\n{}:\n{}\n",
+                kind.to_uppercase(),
+                items.join("\n")
+            ));
         }
-        out.push_str("\n🟢 live · 🔐 gated · ⏸ parked · 🔵 planned — `plugin search <what>` to discover");
+        out.push_str(
+            "\n🟢 live · 🔐 gated · ⏸ parked · 🔵 planned — `plugin search <what>` to discover",
+        );
         out
     }
 
@@ -103,7 +126,16 @@ impl super::ConversationEngine {
         let mut hits: Vec<String> = Vec::new();
         if let Ok(rs) = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: format!("plugin connector {q}"), top_k: 12, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Conversation)))
+            .recall_typed(
+                mind_types::RecallQuery {
+                    text: format!("plugin connector {q}"),
+                    top_k: 12,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                    mind_types::Activity::Conversation,
+                )),
+            )
             .await
         {
             for r in rs {
@@ -114,7 +146,11 @@ impl super::ConversationEngine {
         }
         if hits.len() < 3 {
             let ql = q.to_lowercase();
-            let words: Vec<String> = ql.split_whitespace().filter(|w| w.len() >= 3).map(String::from).collect();
+            let words: Vec<String> = ql
+                .split_whitespace()
+                .filter(|w| w.len() >= 3)
+                .map(String::from)
+                .collect();
             let reg: Vec<serde_json::Value> = self
                 .memory
                 .profile_get("plugin_registry")
@@ -161,7 +197,10 @@ impl super::ConversationEngine {
         // Corrections + lessons this week (verbatim — these are the gold).
         let lessons: Vec<String> = l
             .iter()
-            .filter(|e| e["ts"].as_i64().unwrap_or(0) >= week_ago && e["outcome"].as_str() == Some("corrected"))
+            .filter(|e| {
+                e["ts"].as_i64().unwrap_or(0) >= week_ago
+                    && e["outcome"].as_str() == Some("corrected")
+            })
             .filter_map(|e| {
                 let what = e["what"].as_str().unwrap_or("?");
                 e["lesson"].as_str().map(|le| format!("{what} → {le}"))
@@ -169,12 +208,20 @@ impl super::ConversationEngine {
             .collect();
         // Growth counters: beliefs, taught mail rules, face names learned.
         let beliefs_now = self.memory.belief_count().await.unwrap_or(0) as i64;
-        let beliefs_prev: i64 = self.memory.profile_get("report_beliefs").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(beliefs_now);
+        let beliefs_prev: i64 = self
+            .memory
+            .profile_get("report_beliefs")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(beliefs_now);
         let rules_n = self.mail_rules().await.len();
         let faces_n = self.face_names().await.len();
         // MOVE 5 — visible self-extension: what the mind built/changed in ITSELF this week
         // (the self-build loop's evolution log + deploy count). The awe-tier line, made routine.
-        let evo_path = std::env::var("YM_EVOLUTION_LOG").unwrap_or_else(|_| "/var/lib/yantrik-mind/evolution.log".to_string());
+        let evo_path = std::env::var("YM_EVOLUTION_LOG")
+            .unwrap_or_else(|_| "/var/lib/yantrik-mind/evolution.log".to_string());
         let mut built: Vec<String> = Vec::new();
         let mut deploys = 0u32;
         if let Ok(txt) = std::fs::read_to_string(&evo_path) {
@@ -184,7 +231,9 @@ impl super::ConversationEngine {
                 if parts.len() < 4 {
                     continue;
                 }
-                let Ok(ts) = chrono::DateTime::parse_from_rfc3339(parts[0].trim()) else { continue };
+                let Ok(ts) = chrono::DateTime::parse_from_rfc3339(parts[0].trim()) else {
+                    continue;
+                };
                 if ts.with_timezone(&chrono::Utc) < cutoff {
                     break;
                 }
@@ -208,19 +257,31 @@ impl super::ConversationEngine {
             for (d, (sends, eng, ign, _, _)) in &stats {
                 if *sends >= 4 {
                     let cur = self.domain_pace(d).await;
-                    if *ign as f64 >= *sends as f64 * 0.75 && cur < 4.0 {
+                    if f64::from(*ign) >= f64::from(*sends) * 0.75 && cur < 4.0 {
                         let new = (cur * 1.5).min(4.0);
-                        let _ = self.memory.profile_set(&format!("pace:{d}"), &format!("{new:.2}")).await;
+                        let _ = self
+                            .memory
+                            .profile_set(&format!("pace:{d}"), &format!("{new:.2}"))
+                            .await;
                         policy_notes.push(format!("{d}: mostly ignored ({ign}/{sends}) — slowing myself down ({cur:.1}x → {new:.1}x)"));
-                    } else if *eng as f64 >= *sends as f64 * 0.6 && cur > 1.0 {
+                    } else if f64::from(*eng) >= f64::from(*sends) * 0.6 && cur > 1.0 {
                         let new = (cur / 1.5).max(1.0);
-                        let _ = self.memory.profile_set(&format!("pace:{d}"), &format!("{new:.2}")).await;
+                        let _ = self
+                            .memory
+                            .profile_set(&format!("pace:{d}"), &format!("{new:.2}"))
+                            .await;
                         policy_notes.push(format!("{d}: engaging again ({eng}/{sends}) — speeding back up ({cur:.1}x → {new:.1}x)"));
                     }
                 }
             }
-            let _ = self.memory.profile_set("report_beliefs", &beliefs_now.to_string()).await;
-            let _ = self.memory.profile_set("report_last", &now.to_string()).await;
+            let _ = self
+                .memory
+                .profile_set("report_beliefs", &beliefs_now.to_string())
+                .await;
+            let _ = self
+                .memory
+                .profile_set("report_last", &now.to_string())
+                .await;
         }
         // Rates stand on the RESOLVED denominator, with pending counted — an
         // engagement % over self-chosen sends is the silence-gated metric the
@@ -241,7 +302,10 @@ impl super::ConversationEngine {
         let self_built = if built.is_empty() {
             format!("{deploys} self-deployments; no separate self-build entries logged")
         } else {
-            format!("{deploys} self-deployments; self-built: {}", built.join(" · "))
+            format!(
+                "{deploys} self-deployments; self-built: {}",
+                built.join(" · ")
+            )
         };
         let facts = format!(
             "WEEK SCOREBOARD (my proactive predictions vs your reactions):\n{scoreboard}\n\nCORRECTIONS I ABSORBED ({}):\n{}\n\nGROWTH: {} durable beliefs ({}); {} taught mail rules; {} faces I can name.\n\nWHAT I BUILT/CHANGED IN MYSELF THIS WEEK:\n{self_built}\n\nPOLICY CHANGES THIS REVIEW:\n{}",
@@ -257,12 +321,21 @@ impl super::ConversationEngine {
         let prompt = format!(
             "You are writing your OWN weekly self-review to the person you serve — first person, honest, warm, terse (max 220 words), plain text no markdown. Use ONLY these facts (never invent): \n\n{facts}\n\nStructure: what I learned about you this week; where I was wrong (own the misses concretely); what I built in myself (from the BUILT section — mention it with quiet pride); what I'm changing. If the ledger is thin, say plainly this is week one and the numbers start now."
         );
-        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 500,
+            ..GenerationConfig::default()
+        };
         match self
             .inference
             // Private: the user's corrections, taught mail rules, and how many faces I can name (E.SEC9).
             // Refusal degrades to the deterministic path below rather than propagating.
-            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
             .await
         {
             Ok(r) => format!("🪞 Week {week} self-report\n\n{}", r.text.trim()),
@@ -277,7 +350,14 @@ impl super::ConversationEngine {
         if !(8..=11).contains(&now.hour()) {
             return false;
         }
-        let last: i64 = self.memory.profile_get("report_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let last: i64 = self
+            .memory
+            .profile_get("report_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= 7 * 86_400_000
     }
 
@@ -286,9 +366,18 @@ impl super::ConversationEngine {
     pub async fn taste_continues(&self) -> Vec<String> {
         let mut out = Vec::new();
         for p in &self.load_people_profiles().await {
-            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else {
+                continue;
+            };
             let key = format!("taste_target:{}", name.to_lowercase());
-            let target: i64 = self.memory.profile_get(&key).await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let target: i64 = self
+                .memory
+                .profile_get(&key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             if target <= 0 {
                 continue;
             }
@@ -301,7 +390,13 @@ impl super::ConversationEngine {
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .and_then(|v| v["total"].as_i64())
                 .unwrap_or(0);
-            if total < target && !self.studies.lock().unwrap().contains(&format!("tastes:{}", name.to_lowercase())) {
+            if total < target
+                && !self
+                    .studies
+                    .lock()
+                    .unwrap()
+                    .contains(&format!("tastes:{}", name.to_lowercase()))
+            {
                 out.push(name.to_string());
             }
         }
@@ -320,5 +415,4 @@ impl super::ConversationEngine {
             )
         }
     }
-
 }

@@ -93,9 +93,9 @@ pub(crate) fn context_hash(lines: &[&str], idx: usize) -> u64 {
 /// Is this specific call site allowlisted? PATH, SHAPE and CONTEXT must all agree.
 pub(crate) fn site_is_allowed(file: &str, lines: &[&str], idx: usize) -> bool {
     let shape = squash(lines[idx]);
-    ALLOWED_SITES.iter().any(|a| {
-        a.file == file && shape.contains(a.shape) && context_hash(lines, idx) == a.context
-    })
+    ALLOWED_SITES
+        .iter()
+        .any(|a| a.file == file && shape.contains(a.shape) && context_hash(lines, idx) == a.context)
 }
 
 /// Deliberate Household callers that now use `chat_household_attributed`, each with the reason the
@@ -189,7 +189,8 @@ const HOUSEHOLD_DECLARED: &[LaneDecision] = &[LaneDecision {
     file: "mind-conversation/src/lib.rs",
     call_shape: "chat_streaming_sink(messages, cfg, tok_tx, scope)",
     lane: "Private (constant)",
-    invariant: "compose's inputs are a SUPERSET of the loop dispatch's, and dispatch already ran on \
+    invariant:
+        "compose's inputs are a SUPERSET of the loop dispatch's, and dispatch already ran on \
                 the private lane via chat_grounded_tools — so a weaker compose lane would send \
                 material this same turn already treated as private. Listed only because the helper \
                 is matched BY NAME: it gates internally, so no call-site rule can read its scope.",
@@ -222,11 +223,16 @@ mod tests {
 
     fn crates_dir() -> PathBuf {
         // CARGO_MANIFEST_DIR = <repo>/crates/mind-conversation
-        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
     }
 
     fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -245,12 +251,29 @@ mod tests {
     #[test]
     fn every_lane_decision_names_its_invariant_and_its_test() {
         for d in HOUSEHOLD_DECLARED {
-            assert!(d.file.contains("/src/"), "{}: a crate-relative path", d.file);
+            assert!(
+                d.file.contains("/src/"),
+                "{}: a crate-relative path",
+                d.file
+            );
             assert!(!d.call_shape.is_empty(), "{}: name the call shape", d.file);
-            assert!(d.lane.contains("Private") || d.lane.contains("Household") || d.lane.contains("Public"),
-                "{}: state the lane", d.file);
-            assert!(d.invariant.len() > 60, "{}: an invariant, not a shrug", d.file);
-            assert!(!d.fallback.is_empty(), "{}: say what happens when the lane is gone", d.file);
+            assert!(
+                d.lane.contains("Private")
+                    || d.lane.contains("Household")
+                    || d.lane.contains("Public"),
+                "{}: state the lane",
+                d.file
+            );
+            assert!(
+                d.invariant.len() > 60,
+                "{}: an invariant, not a shrug",
+                d.file
+            );
+            assert!(
+                !d.fallback.is_empty(),
+                "{}: say what happens when the lane is gone",
+                d.file
+            );
             assert!(d.test.len() > 10, "{}: name the test that holds it", d.file);
         }
     }
@@ -260,8 +283,16 @@ mod tests {
     #[test]
     fn every_allowed_site_explains_why_it_is_safe() {
         for site in ALLOWED_SITES {
-            assert!(site.file.contains("/src/"), "{}: use a crate-relative source path", site.file);
-            assert!(!site.shape.is_empty(), "{}: identify the exact call shape", site.file);
+            assert!(
+                site.file.contains("/src/"),
+                "{}: use a crate-relative source path",
+                site.file
+            );
+            assert!(
+                !site.shape.is_empty(),
+                "{}: identify the exact call shape",
+                site.file
+            );
             assert!(
                 site.why.len() > 60,
                 "{}: explain the safety invariant, not merely that the site is allowed",
@@ -295,7 +326,10 @@ mod tests {
             ".chat_scoped(vec![ChatMessage::user(&p)], cfg, PrivacyScope::Household)",
             "self.inference.chat_streaming_sink(messages, cfg, tok_tx, scope)",
         ] {
-            assert!(is_household_lane_call(&squash(caught)), "must be caught: {caught}");
+            assert!(
+                is_household_lane_call(&squash(caught)),
+                "must be caught: {caught}"
+            );
         }
 
         // NOT CAUGHT: the private lane, which is the whole point of distinguishing them.
@@ -304,13 +338,18 @@ mod tests {
             "self.inference.chat_grounded_tools(messages, cfg, schemas)",
             "self.inference.chat_scoped(m, c, PrivacyScope::Private)",
         ] {
-            assert!(!is_household_lane_call(&squash(safe)), "must NOT be caught: {safe}");
+            assert!(
+                !is_household_lane_call(&squash(safe)),
+                "must NOT be caught: {safe}"
+            );
         }
 
         // NOT CAUGHT: Public. Declaring content public is a different claim from letting household
         // content ride the household lane, and `emissary.rs` makes both kinds of call.
         assert!(
-            !is_household_lane_call(&squash("chat_scoped(m, c, mind_inference::PrivacyScope::Public)")),
+            !is_household_lane_call(&squash(
+                "chat_scoped(m, c, mind_inference::PrivacyScope::Public)"
+            )),
             "a Public declaration is not a Household leak"
         );
     }
@@ -346,7 +385,10 @@ mod tests {
             "}",
             "",
         ];
-        assert_eq!(allowed[3], impostor[3], "the test is only meaningful if the LINES are identical");
+        assert_eq!(
+            allowed[3], impostor[3],
+            "the test is only meaningful if the LINES are identical"
+        );
         assert_ne!(
             context_hash(&allowed, 3),
             context_hash(&impostor, 3),
@@ -357,14 +399,40 @@ mod tests {
     /// ...and the identity must be STABLE, or the allowlist would need rewriting on every build.
     #[test]
     fn the_same_site_hashes_the_same_way_twice() {
-        let lines: Vec<&str> = vec!["a();", "b();", "let r = self.chat(m, c, t)?;", "d();", "e();"];
+        let lines: Vec<&str> = vec![
+            "a();",
+            "b();",
+            "let r = self.chat(m, c, t)?;",
+            "d();",
+            "e();",
+        ];
         assert_eq!(context_hash(&lines, 2), context_hash(&lines, 2));
         // Indentation and spacing are normalised away: reformatting is not a revocation, but any
         // change to WHAT the neighbours are is.
-        let reindented: Vec<&str> = vec!["  a();", "\tb();", "let r = self.chat(m, c, t)?;", " d();", "  e();"];
-        assert_eq!(context_hash(&lines, 2), context_hash(&reindented, 2), "whitespace is not identity");
-        let moved: Vec<&str> = vec!["a();", "b();", "let r = self.chat(m, c, t)?;", "CHANGED();", "e();"];
-        assert_ne!(context_hash(&lines, 2), context_hash(&moved, 2), "but the neighbours are");
+        let reindented: Vec<&str> = vec![
+            "  a();",
+            "\tb();",
+            "let r = self.chat(m, c, t)?;",
+            " d();",
+            "  e();",
+        ];
+        assert_eq!(
+            context_hash(&lines, 2),
+            context_hash(&reindented, 2),
+            "whitespace is not identity"
+        );
+        let moved: Vec<&str> = vec![
+            "a();",
+            "b();",
+            "let r = self.chat(m, c, t)?;",
+            "CHANGED();",
+            "e();",
+        ];
+        assert_ne!(
+            context_hash(&lines, 2),
+            context_hash(&moved, 2),
+            "but the neighbours are"
+        );
     }
 
     /// EVERY declared channel must have a consumer, and no gate may be open-coded (E.CTX2).
@@ -383,7 +451,10 @@ mod tests {
     #[test]
     fn every_channel_has_a_consumer_and_no_gate_is_open_coded() {
         let types_src = std::fs::read_to_string(
-            crates_dir().join("mind-types").join("src").join("output_scope.rs"),
+            crates_dir()
+                .join("mind-types")
+                .join("src")
+                .join("output_scope.rs"),
         )
         .expect("output_scope.rs must be readable");
         let conv_dir = crates_dir().join("mind-conversation").join("src");
@@ -423,7 +494,10 @@ mod tests {
             .map(|l| l.trim_end_matches(',').to_string())
             .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
             .collect();
-        assert!(variants.len() >= 13, "expected the full channel inventory, found {variants:?}");
+        assert!(
+            variants.len() >= 13,
+            "expected the full channel inventory, found {variants:?}"
+        );
 
         let squashed: String = conv_src.chars().filter(|c| !c.is_whitespace()).collect();
         for v in &variants {
@@ -439,7 +513,11 @@ mod tests {
 
         // No open-coded gate, checked on SQUASHED source so a line break cannot hide one — which is
         // exactly how two survived the previous version of this test.
-        for banned in ["letnames_anything=", "letprivate_channels=", ".entity_classes.is_empty()"] {
+        for banned in [
+            "letnames_anything=",
+            "letprivate_channels=",
+            ".entity_classes.is_empty()",
+        ] {
             assert!(
                 !squashed.contains(banned),
                 "an open-coded channel gate is back ({banned}). Every channel decision goes through \
@@ -460,7 +538,10 @@ mod tests {
             "policy.admits(mind_types::Channel::SavedSkills)",
             variant
         ));
-        assert!(has_channel_consumer("policy.admits(Channel::SavedSkills)", variant));
+        assert!(has_channel_consumer(
+            "policy.admits(Channel::SavedSkills)",
+            variant
+        ));
         assert!(has_channel_consumer(
             "grounding.push(mind_types::Channel::SavedSkills,\"x\")",
             variant
@@ -491,7 +572,10 @@ mod tests {
         let admitted = transcript.finish();
         let resolver_context: Vec<String> = admitted.lines().map(str::to_string).collect();
 
-        assert!(admitted.is_empty(), "the transcript itself must be withheld");
+        assert!(
+            admitted.is_empty(),
+            "the transcript itself must be withheld"
+        );
         assert!(
             mind_tools::asked::symbols_with_context("yes please", &resolver_context).is_empty(),
             "withheld transcript still steered a deterministic follow-up lookup"
@@ -501,7 +585,10 @@ mod tests {
     #[test]
     fn turn_grounding_has_no_untyped_append_escape_hatch() {
         let lib = std::fs::read_to_string(
-            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+            crates_dir()
+                .join("mind-conversation")
+                .join("src")
+                .join("lib.rs"),
         )
         .expect("lib.rs must be readable");
         let body = lib
@@ -530,7 +617,10 @@ mod tests {
     #[test]
     fn fast_reply_has_no_untyped_grounding_escape_hatch() {
         let lib = std::fs::read_to_string(
-            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+            crates_dir()
+                .join("mind-conversation")
+                .join("src")
+                .join("lib.rs"),
         )
         .expect("lib.rs must be readable");
         let body = lib
@@ -561,7 +651,10 @@ mod tests {
         let policy = mind_types::OutputPolicy::for_scope(mind_types::OutputScope::AuditRedacted);
         let mut prompt = crate::GatedPrompt::new(&policy, "persona");
         prompt.trusted_system("policy");
-        prompt.evidence(mind_types::Channel::Grounding, yantrik_ml::ChatMessage::system("private"));
+        prompt.evidence(
+            mind_types::Channel::Grounding,
+            yantrik_ml::ChatMessage::system("private"),
+        );
         prompt.evidence(
             mind_types::Channel::Grounding,
             yantrik_ml::ChatMessage::user("private-user-role"),
@@ -570,7 +663,10 @@ mod tests {
             mind_types::Channel::Grounding,
             yantrik_ml::ChatMessage::assistant("private-assistant-role"),
         );
-        prompt.evidence(mind_types::Channel::WebPage, yantrik_ml::ChatMessage::system("public"));
+        prompt.evidence(
+            mind_types::Channel::WebPage,
+            yantrik_ml::ChatMessage::system("public"),
+        );
         let messages = prompt.finish("request");
         let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
         let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
@@ -585,7 +681,10 @@ mod tests {
     #[test]
     fn build_prompt_has_no_untyped_message_escape_hatch() {
         let lib = std::fs::read_to_string(
-            crates_dir().join("mind-conversation").join("src").join("lib.rs"),
+            crates_dir()
+                .join("mind-conversation")
+                .join("src")
+                .join("lib.rs"),
         )
         .expect("lib.rs must be readable");
         let body = lib
@@ -614,7 +713,10 @@ mod tests {
     #[test]
     fn member_turn_has_no_untyped_message_escape_hatch() {
         let members = std::fs::read_to_string(
-            crates_dir().join("mind-conversation").join("src").join("members.rs"),
+            crates_dir()
+                .join("mind-conversation")
+                .join("src")
+                .join("members.rs"),
         )
         .expect("members.rs must be readable");
         let body = members
@@ -626,9 +728,7 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(
-            squashed.contains(
-                "letmutmessages=crate::GatedPrompt::new(&policy,&self.persona);"
-            ),
+            squashed.contains("letmutmessages=crate::GatedPrompt::new(&policy,&self.persona);"),
             "member_turn must build through the typed message boundary"
         );
         assert_eq!(
@@ -672,7 +772,10 @@ mod tests {
         // further away than this, something else is reading the raw working set in between.
         const WINDOW: usize = 16;
 
-        let src = crates_dir().join("mind-conversation").join("src").join("lib.rs");
+        let src = crates_dir()
+            .join("mind-conversation")
+            .join("src")
+            .join("lib.rs");
         let body = std::fs::read_to_string(&src).expect("lib.rs must be readable");
         let lines: Vec<&str> = body.lines().collect();
         let mut offenders: Vec<String> = Vec::new();
@@ -682,11 +785,16 @@ mod tests {
                 continue;
             }
             let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-            if DIAGNOSTIC_ONLY.iter().any(|(snip, _)| squashed.contains(snip)) {
+            if DIAGNOSTIC_ONLY
+                .iter()
+                .any(|(snip, _)| squashed.contains(snip))
+            {
                 continue;
             }
             let end = (i + WINDOW).min(lines.len());
-            let gated = lines[i..end].iter().any(|l| l.contains("admit_working_set"));
+            let gated = lines[i..end]
+                .iter()
+                .any(|l| l.contains("admit_working_set"));
             if !gated {
                 offenders.push(format!("lib.rs:{} — {}", i + 1, line.trim()));
             }
@@ -715,7 +823,11 @@ mod tests {
             let mut files = Vec::new();
             rs_files(&src, &mut files);
             for f in files {
-                let base = f.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+                let base = f
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_string();
                 // tests may call chat() freely — they carry no real household data.
                 if base == "tests.rs" || base == "privacy_audit.rs" {
                     continue;
@@ -726,7 +838,9 @@ mod tests {
                     .strip_prefix(crates_dir())
                     .map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
                     .unwrap_or_else(|_| base.clone());
-                let Ok(body) = std::fs::read_to_string(&f) else { continue };
+                let Ok(body) = std::fs::read_to_string(&f) else {
+                    continue;
+                };
                 if UNSCOPED_ALLOWED.iter().any(|(f, _)| *f == name)
                     || UNSCOPED_PENDING.iter().any(|(f, _)| *f == name)
                 {
@@ -758,8 +872,10 @@ mod tests {
                     .map(|(_, l)| *l)
                     .collect::<Vec<_>>()
                     .join("\n");
-                let squashed: String =
-                    crate::source_audit::strip_comments(&kept).chars().filter(|c| !c.is_whitespace()).collect();
+                let squashed: String = crate::source_audit::strip_comments(&kept)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
                 // ANY receiver, not just one spelled `inference`. The pattern used to be
                 // `inference.chat(` and `book.rs` defeated it with a variable named `inf` --
                 // carrying a prompt that opens "You are writing one chapter of a family's private
@@ -801,7 +917,9 @@ mod tests {
                         .map(|(i, l)| format!("{}:{} — {}", name, i + 1, l.trim()))
                         .collect();
                     if sites.is_empty() {
-                        offenders.push(format!("{name} — unscoped inference.chat( found (wrapped across lines)"));
+                        offenders.push(format!(
+                            "{name} — unscoped inference.chat( found (wrapped across lines)"
+                        ));
                     } else {
                         offenders.extend(sites);
                     }
@@ -843,7 +961,10 @@ mod tests {
                 !squashed.contains(".chat("),
                 "{file} regained a bare chat(); attribution permission must not hide it"
             );
-            assert!(body.contains(MARKER), "{file} is listed but has no attributed Household call");
+            assert!(
+                body.contains(MARKER),
+                "{file} is listed but has no attributed Household call"
+            );
             for (at, _) in body.match_indices(MARKER) {
                 let tail = &body[at..];
                 let end = tail.find(".await").unwrap_or_else(|| {
@@ -868,7 +989,9 @@ mod tests {
                 ) {
                     continue;
                 }
-                let Ok(body) = std::fs::read_to_string(&path) else { continue };
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
                 if !body.contains(MARKER) {
                     continue;
                 }
@@ -903,11 +1026,17 @@ mod sec2 {
     use std::path::{Path, PathBuf};
 
     fn crates_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
     }
 
     fn squash(body: &str) -> String {
-        crate::source_audit::strip_comments(body).chars().filter(|c| !c.is_whitespace()).collect()
+        crate::source_audit::strip_comments(body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
     }
 
     /// A pending entry that no longer has an unscoped call must be REMOVED, not left standing.
@@ -931,12 +1060,18 @@ mod sec2 {
             .map(|(f, _)| *f)
             .collect();
         for key in &listed {
-            assert!(key.contains('/'), "keys must be crate-relative paths, not basenames: {key}");
+            assert!(
+                key.contains('/'),
+                "keys must be crate-relative paths, not basenames: {key}"
+            );
             assert!(
                 SCANNED.iter().any(|c| key.starts_with(&format!("{c}/"))),
                 "{key} names no scanned crate, so it silences nothing and hides a typo"
             );
-            assert!(crates_dir().join(key).exists(), "{key} does not exist — a stale entry is a hole");
+            assert!(
+                crates_dir().join(key).exists(),
+                "{key} does not exist — a stale entry is a hole"
+            );
         }
         // The concrete collision, asserted rather than argued: for every listed file, the SAME
         // basename in another scanned crate must not be covered by it.
@@ -948,7 +1083,8 @@ mod sec2 {
                     continue;
                 }
                 assert!(
-                    !listed.contains(&sibling.as_str()) || listed.iter().filter(|k| **k == sibling).count() == 1,
+                    !listed.contains(&sibling.as_str())
+                        || listed.iter().filter(|k| **k == sibling).count() == 1,
                     "{sibling} must earn its own entry, never inherit {key}'s"
                 );
             }
@@ -959,7 +1095,9 @@ mod sec2 {
     fn a_pending_file_still_has_the_call_it_was_deferred_for() {
         for (file, why) in UNSCOPED_PENDING {
             let path = crates_dir().join(file);
-            let found = std::fs::read_to_string(&path).map(|b| squash(&b).contains("inference.chat(")).unwrap_or(false);
+            let found = std::fs::read_to_string(&path)
+                .map(|b| squash(&b).contains("inference.chat("))
+                .unwrap_or(false);
             assert!(found, "{file} is on the E.SEC2 pending list ({why}) but has no unscoped inference.chat( left — strike it from UNSCOPED_PENDING.");
         }
     }
@@ -973,23 +1111,38 @@ mod sec2 {
     .inference
     .chat(messages, cfg)
     .await;";
-        assert!(squash(wrapped).contains("inference.chat("), "a wrapped chain must still match");
+        assert!(
+            squash(wrapped).contains("inference.chat("),
+            "a wrapped chain must still match"
+        );
         let single = "let x = self.inference.chat(messages, cfg).await;";
         assert!(squash(single).contains("inference.chat("));
         // A comment mid-chain must not split it either.
         let commented = "let x = self
     .inference // note
     .chat(messages, cfg);";
-        assert!(squash(commented).contains("inference.chat("), "a line comment must not switch the guard off");
+        assert!(
+            squash(commented).contains("inference.chat("),
+            "a line comment must not switch the guard off"
+        );
         // Codex's note: a matcher that only understands `//` can be hidden from by a BLOCK comment.
         let blocked = "let x = self.inference /* sneaky */ .chat(messages, cfg);";
-        assert!(squash(blocked).contains("inference.chat("), "nor a block comment");
+        assert!(
+            squash(blocked).contains("inference.chat("),
+            "nor a block comment"
+        );
         let blocked_multi = "let x = self.inference /* one
    two */ .chat(messages, cfg);";
-        assert!(squash(blocked_multi).contains("inference.chat("), "nor a multi-line block comment");
+        assert!(
+            squash(blocked_multi).contains("inference.chat("),
+            "nor a multi-line block comment"
+        );
         // And the grounded forms must NOT match, or everything is an offender.
         assert!(!squash("self.inference.chat_grounded(m, c)").contains("inference.chat("));
-        assert!(!squash("self.inference
-  .chat_scoped(m, c, s)").contains("inference.chat("));
+        assert!(!squash(
+            "self.inference
+  .chat_scoped(m, c, s)"
+        )
+        .contains("inference.chat("));
     }
 }

@@ -54,14 +54,21 @@ pub(crate) fn stuck_goals(entries: &[Value]) -> Vec<String> {
             continue;
         }
         let ok = merged(e.get("outcome").and_then(|x| x.as_str()).unwrap_or(""));
-        let slot = tries.entry(goal_key(goal)).or_insert((0, false, goal.to_string()));
+        let slot = tries
+            .entry(goal_key(goal))
+            .or_insert((0, false, goal.to_string()));
         slot.0 += 1;
         slot.1 |= ok;
     }
     let mut out: Vec<String> = tries
         .values()
         .filter(|(n, ever_merged, _)| *n >= STUCK_AFTER && !*ever_merged)
-        .map(|(n, _, g)| format!("{} (tried {n}x, never merged)", g.chars().take(80).collect::<String>()))
+        .map(|(n, _, g)| {
+            format!(
+                "{} (tried {n}x, never merged)",
+                g.chars().take(80).collect::<String>()
+            )
+        })
         .collect();
     out.sort();
     out
@@ -77,11 +84,24 @@ pub(crate) fn render(entries: &[Value]) -> String {
     let mut s = String::from("WHAT MY PREVIOUS TICKS DID (including the ones that did NOT merge — the commit log hides these):\n");
     for e in &recent {
         let when = e.get("when").and_then(|x| x.as_str()).unwrap_or("");
-        let goal: String = e.get("goal").and_then(|x| x.as_str()).unwrap_or("").chars().take(90).collect();
+        let goal: String = e
+            .get("goal")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(90)
+            .collect();
         let outcome = e.get("outcome").and_then(|x| x.as_str()).unwrap_or("?");
         s.push_str(&format!("- [{when}] {outcome}: {goal}\n"));
-        if let Some(n) = e.get("note").and_then(|x| x.as_str()).filter(|n| !n.trim().is_empty()) {
-            s.push_str(&format!("    note to self: {}\n", n.chars().take(240).collect::<String>()));
+        if let Some(n) = e
+            .get("note")
+            .and_then(|x| x.as_str())
+            .filter(|n| !n.trim().is_empty())
+        {
+            s.push_str(&format!(
+                "    note to self: {}\n",
+                n.chars().take(240).collect::<String>()
+            ));
         }
     }
     let stuck = stuck_goals(entries);
@@ -127,7 +147,10 @@ impl super::ConversationEngine {
         }
         let _ = self
             .memory
-            .profile_set("selfbuild_handoff", &serde_json::to_string(&log).unwrap_or_default())
+            .profile_set(
+                "selfbuild_handoff",
+                &serde_json::to_string(&log).unwrap_or_default(),
+            )
             .await;
         format!("handoff recorded ({outcome})")
     }
@@ -143,7 +166,10 @@ impl super::ConversationEngine {
         if log.is_empty() {
             return "🧵 Self-build handoff: no ticks recorded yet — the next one will leave the first note.".into();
         }
-        let merged_n = log.iter().filter(|e| merged(e.get("outcome").and_then(|x| x.as_str()).unwrap_or(""))).count();
+        let merged_n = log
+            .iter()
+            .filter(|e| merged(e.get("outcome").and_then(|x| x.as_str()).unwrap_or("")))
+            .count();
         format!(
             "🧵 Self-build handoff — the thread between ticks\n\n{}\n{} tick(s) recorded, {merged_n} merged.",
             render(&log),
@@ -168,8 +194,14 @@ mod tests {
             e("Normalise belief text", "MERGED", ""),
         ];
         let s = render(&log);
-        assert!(s.contains("ABORT-COMPILE"), "a failed tick must be visible to the next one: {s}");
-        assert!(s.contains("the commit log hides these"), "the point is stated: {s}");
+        assert!(
+            s.contains("ABORT-COMPILE"),
+            "a failed tick must be visible to the next one: {s}"
+        );
+        assert!(
+            s.contains("the commit log hides these"),
+            "the point is stated: {s}"
+        );
     }
 
     /// The loop must notice it is spinning. Six identical GOAL-REJECTED ticks actually happened
@@ -182,7 +214,11 @@ mod tests {
             e("Fix the contradiction  detector", "ABORT-COMPILE", ""),
         ];
         let stuck = stuck_goals(&log);
-        assert_eq!(stuck.len(), 1, "trivial rewordings must collide, not read as variety: {stuck:?}");
+        assert_eq!(
+            stuck.len(),
+            1,
+            "trivial rewordings must collide, not read as variety: {stuck:?}"
+        );
         assert!(stuck[0].contains("tried 3x, never merged"));
         assert!(render(&log).contains("I AM SPINNING ON THESE"));
     }
@@ -194,7 +230,10 @@ mod tests {
             e("Add retention to the spool", "DRAFT-FOR-HUMAN", ""),
             e("Add retention to the spool", "MERGED", ""),
         ];
-        assert!(stuck_goals(&log).is_empty(), "success clears the spinning flag");
+        assert!(
+            stuck_goals(&log).is_empty(),
+            "success clears the spinning flag"
+        );
     }
 
     #[test]
@@ -206,16 +245,24 @@ mod tests {
         )];
         let s = render(&log);
         assert!(s.contains("note to self:"), "{s}");
-        assert!(s.contains("derive it from actual read volume"), "unfinished intent survives: {s}");
+        assert!(
+            s.contains("derive it from actual read volume"),
+            "unfinished intent survives: {s}"
+        );
         assert!(s.contains("prefer finishing it over starting something new"));
     }
 
     #[test]
     fn the_window_is_bounded_and_shows_the_newest() {
-        let log: Vec<Value> = (0..20).map(|i| e(&format!("goal {i}"), "MERGED", "")).collect();
+        let log: Vec<Value> = (0..20)
+            .map(|i| e(&format!("goal {i}"), "MERGED", ""))
+            .collect();
         let s = render(&log);
         assert!(s.contains("goal 19"), "newest shown");
-        assert!(!s.contains("goal 0"), "oldest dropped — a note nobody reads is not a note");
+        assert!(
+            !s.contains("goal 0"),
+            "oldest dropped — a note nobody reads is not a note"
+        );
         assert_eq!(s.matches("] MERGED:").count(), WINDOW);
     }
 }

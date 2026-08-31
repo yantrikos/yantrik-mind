@@ -31,14 +31,20 @@ pub(crate) const FUNNEL_KEEP_DAYS: usize = 14;
 ///   knock:no-candidate        packets existed but none survived the search
 ///   knock:muted / knock:daily-cap / knock:unreceptive / knock:below-band   gate holds (escrowed)
 ///   knock:sent                a knock went out
-pub(crate) fn prune(mut counters: serde_json::Map<String, serde_json::Value>, today: &str) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn prune(
+    mut counters: serde_json::Map<String, serde_json::Value>,
+    today: &str,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut days: Vec<String> = counters.keys().cloned().collect();
     days.sort();
     // Keep the newest FUNNEL_KEEP_DAYS buckets. `today` is included even if not yet present so a
     // fresh day never evicts itself.
     let mut keep: Vec<&String> = days.iter().filter(|d| d.as_str() <= today).collect();
     if keep.len() > FUNNEL_KEEP_DAYS {
-        let cut: Vec<String> = keep.drain(..keep.len() - FUNNEL_KEEP_DAYS).map(|s| s.clone()).collect();
+        let cut: Vec<String> = keep
+            .drain(..keep.len() - FUNNEL_KEEP_DAYS)
+            .cloned()
+            .collect();
         for d in cut {
             counters.remove(&d);
         }
@@ -62,7 +68,11 @@ pub(crate) fn render(counters: &serde_json::Map<String, serde_json::Value>) -> S
         return "📊 Funnel: no data yet — the counters only started with this deploy. Give it a day.".to_string();
     }
     let get = |k: &str| totals.get(k).copied().unwrap_or(0);
-    let events: u64 = totals.iter().filter(|(k, _)| k.starts_with("event:")).map(|(_, v)| *v).sum();
+    let events: u64 = totals
+        .iter()
+        .filter(|(k, _)| k.starts_with("event:"))
+        .map(|(_, v)| *v)
+        .sum();
     let kills: Vec<(&str, u64)> = [
         "knock:no-packets",
         "knock:not-knockworthy",
@@ -83,10 +93,19 @@ pub(crate) fn render(counters: &serde_json::Map<String, serde_json::Value>) -> S
     let mut out = format!("📊 PROACTIVE FUNNEL — last {days} day(s)\n\n");
     out.push_str(&format!("  events noticed        {events:>6}\n"));
     for (k, v) in totals.iter().filter(|(k, _)| k.starts_with("event:")) {
-        out.push_str(&format!("    {:<20} {v:>6}\n", k.strip_prefix("event:").unwrap()));
+        out.push_str(&format!(
+            "    {:<20} {v:>6}\n",
+            k.strip_prefix("event:").unwrap()
+        ));
     }
-    out.push_str(&format!("  twitch evaluations    {:>6}\n", get("twitch:eval")));
-    out.push_str(&format!("  twitch alerts sent    {:>6}\n", get("twitch:alert")));
+    out.push_str(&format!(
+        "  twitch evaluations    {:>6}\n",
+        get("twitch:eval")
+    ));
+    out.push_str(&format!(
+        "  twitch alerts sent    {:>6}\n",
+        get("twitch:alert")
+    ));
     out.push_str(&format!("  knock attempts killed {total_kills:>6}\n"));
     for (k, v) in &kills {
         out.push_str(&format!("    {k:<20} {v:>6}\n"));
@@ -125,7 +144,9 @@ impl super::ConversationEngine {
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        let day = counters.entry(today.clone()).or_insert_with(|| serde_json::json!({}));
+        let day = counters
+            .entry(today.clone())
+            .or_insert_with(|| serde_json::json!({}));
         if let Some(m) = day.as_object_mut() {
             let mut bump = |k: &str, by: u64| {
                 let n = m.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -139,7 +160,10 @@ impl super::ConversationEngine {
             }
         }
         let counters = prune(counters, &today);
-        let _ = self.memory.profile_set(FUNNEL_KEY, &serde_json::Value::Object(counters).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(FUNNEL_KEY, &serde_json::Value::Object(counters).to_string())
+            .await;
     }
 
     /// `ym funnel` — the per-gate kill report.
@@ -167,12 +191,18 @@ mod tests {
     fn prune_keeps_newest_window() {
         let mut m = serde_json::Map::new();
         for d in 1..=20 {
-            m.insert(format!("2026-07-{d:02}"), serde_json::json!({"knock:sent": 1}));
+            m.insert(
+                format!("2026-07-{d:02}"),
+                serde_json::json!({"knock:sent": 1}),
+            );
         }
         let out = prune(m, "2026-07-20");
         assert_eq!(out.len(), FUNNEL_KEEP_DAYS);
         assert!(out.contains_key("2026-07-20"), "newest bucket must survive");
-        assert!(!out.contains_key("2026-07-01"), "oldest bucket must be pruned");
+        assert!(
+            !out.contains_key("2026-07-01"),
+            "oldest bucket must be pruned"
+        );
     }
 
     #[test]
@@ -183,8 +213,14 @@ mod tests {
             serde_json::json!({"event:ha:lock": 40, "twitch:eval": 3, "knock:not-knockworthy": 9, "knock:sent": 1}),
         );
         let out = render(&m);
-        assert!(out.contains("not-knockworthy") && out.contains("9"), "kill reason missing:\n{out}");
-        assert!(out.contains("90% of knock attempts died"), "kill rate missing:\n{out}");
+        assert!(
+            out.contains("not-knockworthy") && out.contains("9"),
+            "kill reason missing:\n{out}"
+        );
+        assert!(
+            out.contains("90% of knock attempts died"),
+            "kill rate missing:\n{out}"
+        );
     }
 
     #[test]

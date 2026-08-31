@@ -5,47 +5,53 @@
 //! `HarmGate`, `TurnContext`, `ActionRuntime`; plus the `Clock` seam for deterministic time.
 //! See BUILD.md.
 
-pub mod error;
-pub mod clock;
-pub mod event;
-pub mod memory;
-pub mod candidate;
 pub mod action;
+pub mod candidate;
+pub mod clock;
+pub mod error;
+pub mod event;
 pub mod harm;
-pub mod turn;
-pub mod task;
-pub mod safety;
+pub mod memory;
 pub mod purpose;
+pub mod safety;
+pub mod task;
+pub mod turn;
 
-pub use error::{AuthError, MemoryError, MindError, Result};
-pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
-pub use event::{Event, EventBody, EventSource};
-pub use memory::{
-    AccessContext, Belief, BeliefAssertion, BeliefStatus, Contradiction, Evidence, MemoryFacade, MemoryItem,
-    MemoryKind, Recalled, RecallQuery, Reflection, Scope, Skill, Tension, TensionKind, UncertaintyReason,
-    WorkingSet, PRIMARY,
-};
-pub use candidate::{Candidate, CandidateKind, ScoreAxes};
 pub use action::{
     ActionDecision, ActionExecutor, ActionIntent, ActionReceipt, ActionRequest, ActionRuntime,
     Capability, RiskLevel,
 };
+pub use candidate::{Candidate, CandidateKind, ScoreAxes};
+pub use clock::{Clock, SystemClock, TestClock, UnixMillis};
+pub use error::{AuthError, MemoryError, MindError, Result};
+pub use event::{Event, EventBody, EventSource};
 pub use harm::{Decision, HarmGate};
-pub use turn::TurnContext;
+pub use memory::{
+    AccessContext, Belief, BeliefAssertion, BeliefStatus, Contradiction, Evidence,
+    MemoryCurationBaseline, MemoryFacade, MemoryItem, MemoryKind, NamespaceBacklog, RecallQuery,
+    Recalled, Reflection, Scope, Skill, Tension, TensionKind, UncertaintyReason, WorkingSet,
+    PRIMARY,
+};
 pub use task::Task;
+pub use turn::TurnContext;
+pub mod output_scope;
 pub mod reliability;
 pub mod scratch;
-pub mod output_scope;
-pub use output_scope::{admit_working_set, admitted_evidence, Channel, detect_minimization, EntityClass, EvidenceDecision, MinimizationRequest, OutputPolicy, OutputScope};
+pub use output_scope::{
+    admit_working_set, admitted_evidence, detect_minimization, Channel, EntityClass,
+    EvidenceDecision, MinimizationRequest, OutputPolicy, OutputScope,
+};
 pub mod skill_outcome;
-pub use skill_outcome::{SkillOutcome, TaskBasis};
 pub use reliability::{Reliability, Verdict};
+pub use skill_outcome::{SkillOutcome, TaskBasis};
 
+pub use purpose::{
+    purpose_allows, Activity, Purpose, PurposeGrant, PurposeGrantSpec, Sensitivity, Subject,
+};
 pub use safety::{
     contains_secret, first_sensitive, sensitive_findings, sensitive_pair, ProvenanceCategory,
     SensitiveFinding, SensitiveKind, SECRET_MARKERS,
 };
-pub use purpose::{purpose_allows, Activity, Purpose, PurposeGrant, PurposeGrantSpec, Sensitivity, Subject};
 
 /// The default persona — and, deliberately, the communication spine. Most of what makes a reply
 /// land is *how* it's said; these are the habits distilled into directives the model follows every

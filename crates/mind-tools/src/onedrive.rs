@@ -44,18 +44,22 @@ impl OneDriveClient {
     /// Configured only when a public-client app id is present (YM_OD_CLIENT_ID). Absent → the
     /// `onedrive` surface explains the one-time Azure app registration instead of failing silently.
     pub fn from_env() -> Option<OneDriveClient> {
-        let client_id = std::env::var("YM_OD_CLIENT_ID").ok().filter(|s| !s.trim().is_empty())?;
+        let client_id = std::env::var("YM_OD_CLIENT_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())?;
         let token_path = std::env::var("YM_OD_TOKEN_PATH")
             .unwrap_or_else(|_| "/var/lib/yantrik-mind/onedrive.json".to_string());
-        Some(OneDriveClient { client_id: client_id.trim().to_string(), token_path })
+        Some(OneDriveClient {
+            client_id: client_id.trim().to_string(),
+            token_path,
+        })
     }
 
     pub fn is_authed(&self) -> bool {
         std::fs::read_to_string(&self.token_path)
             .ok()
             .and_then(|s| serde_json::from_str::<OdToken>(&s).ok())
-            .map(|t| !t.refresh_token.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|t| !t.refresh_token.is_empty())
     }
 
     /// Step 1 of device-code auth: get the code + URL the user enters on their phone.
@@ -68,7 +72,10 @@ impl OneDriveClient {
                 .into_json()?;
             Ok(DeviceCode {
                 user_code: resp["user_code"].as_str().unwrap_or("").to_string(),
-                verification_uri: resp["verification_uri"].as_str().unwrap_or("https://microsoft.com/devicelogin").to_string(),
+                verification_uri: resp["verification_uri"]
+                    .as_str()
+                    .unwrap_or("https://microsoft.com/devicelogin")
+                    .to_string(),
                 device_code: resp["device_code"].as_str().unwrap_or("").to_string(),
                 interval: resp["interval"].as_u64().unwrap_or(5),
                 expires_in: resp["expires_in"].as_u64().unwrap_or(900),
@@ -78,11 +85,21 @@ impl OneDriveClient {
     }
 
     /// Step 2: poll until the user approves (or timeout). Persists the token on success.
-    pub async fn poll_auth(&self, device_code: &str, interval: u64, expires_in: u64, now_secs: i64) -> anyhow::Result<bool> {
-        let (client_id, token_path, device_code) =
-            (self.client_id.clone(), self.token_path.clone(), device_code.to_string());
+    pub async fn poll_auth(
+        &self,
+        device_code: &str,
+        interval: u64,
+        expires_in: u64,
+        now_secs: i64,
+    ) -> anyhow::Result<bool> {
+        let (client_id, token_path, device_code) = (
+            self.client_id.clone(),
+            self.token_path.clone(),
+            device_code.to_string(),
+        );
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(expires_in.min(900));
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(expires_in.min(900));
             loop {
                 if std::time::Instant::now() >= deadline {
                     return Ok(false);
@@ -109,7 +126,10 @@ impl OneDriveClient {
                             #[cfg(unix)]
                             {
                                 use std::os::unix::fs::PermissionsExt;
-                                let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+                                let _ = std::fs::set_permissions(
+                                    &token_path,
+                                    std::fs::Permissions::from_mode(0o600),
+                                );
                             }
                             return Ok(true);
                         }
@@ -162,14 +182,21 @@ impl OneDriveClient {
                 let id = it["id"].as_str()?.to_string();
                 let name = it["name"].as_str().unwrap_or("").to_string();
                 let is_image = it.get("image").is_some()
-                    || it["file"]["mimeType"].as_str().map(|m| m.starts_with("image/")).unwrap_or(false);
+                    || it["file"]["mimeType"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("image/"));
                 let taken = it["photo"]["takenDateTime"]
                     .as_str()
                     .or_else(|| it["fileSystemInfo"]["lastModifiedDateTime"].as_str())
                     .or_else(|| it["lastModifiedDateTime"].as_str())
                     .map(|d| d.chars().take(10).collect::<String>())
                     .unwrap_or_default();
-                Some(OdItem { id, name, taken, is_image })
+                Some(OdItem {
+                    id,
+                    name,
+                    taken,
+                    is_image,
+                })
             })
             .collect()
     }
@@ -179,19 +206,29 @@ impl OneDriveClient {
         let this = self.dupe();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<OdItem>> {
             let token = this.access(now_secs)?;
-            let j: serde_json::Value = ureq::get(&format!("{GRAPH}/me/drive/recent?$top={}", n.clamp(1, 200)))
-                .set("Authorization", &format!("Bearer {token}"))
-                .timeout(std::time::Duration::from_secs(30))
-                .call()?
-                .into_json()?;
-            Ok(OneDriveClient::parse_items(&j).into_iter().filter(|i| i.is_image).collect())
+            let j: serde_json::Value =
+                ureq::get(&format!("{GRAPH}/me/drive/recent?$top={}", n.clamp(1, 200)))
+                    .set("Authorization", &format!("Bearer {token}"))
+                    .timeout(std::time::Duration::from_secs(30))
+                    .call()?
+                    .into_json()?;
+            Ok(OneDriveClient::parse_items(&j)
+                .into_iter()
+                .filter(|i| i.is_image)
+                .collect())
         })
         .await?
     }
 
     /// Images whose taken/modified date falls in [after, before] (YYYY-MM-DD). Searches by year
     /// tokens to keep the query cheap, then filters client-side — the Branson/pre-Immich hunt.
-    pub async fn taken_between(&self, after: &str, before: &str, n: usize, now_secs: i64) -> anyhow::Result<Vec<OdItem>> {
+    pub async fn taken_between(
+        &self,
+        after: &str,
+        before: &str,
+        n: usize,
+        now_secs: i64,
+    ) -> anyhow::Result<Vec<OdItem>> {
         let (this, after, before) = (self.dupe(), after.to_string(), before.to_string());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<OdItem>> {
             let token = this.access(now_secs)?;
@@ -243,7 +280,10 @@ impl OneDriveClient {
                 .ok()?;
             let mut buf: Vec<u8> = Vec::new();
             use std::io::Read;
-            resp.into_reader().take(20 * 1024 * 1024).read_to_end(&mut buf).ok()?;
+            resp.into_reader()
+                .take(20 * 1024 * 1024)
+                .read_to_end(&mut buf)
+                .ok()?;
             Some(buf)
         })
         .await
@@ -252,6 +292,9 @@ impl OneDriveClient {
     }
 
     fn dupe(&self) -> OneDriveClient {
-        OneDriveClient { client_id: self.client_id.clone(), token_path: self.token_path.clone() }
+        OneDriveClient {
+            client_id: self.client_id.clone(),
+            token_path: self.token_path.clone(),
+        }
     }
 }

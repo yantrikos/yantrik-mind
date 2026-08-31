@@ -26,9 +26,14 @@ impl super::ConversationEngine {
                 let mut muted = self.support_muted_people().await;
                 if !muted.contains(&who) {
                     muted.push(who.clone());
-                    let _ = self.memory.profile_set("snr_muted_people", &muted.join(",")).await;
+                    let _ = self
+                        .memory
+                        .profile_set("snr_muted_people", &muted.join(","))
+                        .await;
                 }
-                format!("Muted support nudges for {who}. I'll never raise them for that person again.")
+                format!(
+                    "Muted support nudges for {who}. I'll never raise them for that person again."
+                )
             }
             "mute" => {
                 let _ = self.memory.profile_set("snr_class_mute", "1").await;
@@ -52,11 +57,20 @@ impl super::ConversationEngine {
                     let p = person.to_lowercase();
                     if !muted.contains(&p) {
                         muted.push(p);
-                        let _ = self.memory.profile_set("snr_muted_people", &muted.join(",")).await;
+                        let _ = self
+                            .memory
+                            .profile_set("snr_muted_people", &muted.join(","))
+                            .await;
                     }
                 }
                 let health = support_nudge::class_health(&audits);
-                let _ = self.memory.profile_set("snr_audits", &serde_json::to_string(&audits).unwrap_or_default()).await;
+                let _ = self
+                    .memory
+                    .profile_set(
+                        "snr_audits",
+                        &serde_json::to_string(&audits).unwrap_or_default(),
+                    )
+                    .await;
                 if health == support_nudge::ClassHealth::KillDisabled {
                     let _ = self.memory.profile_set("snr_class_mute", "1").await;
                     return "Understood — and that's twice recently, so I've disabled support nudges entirely pending your review (`support on` re-enables). Thank you for telling me.".into();
@@ -68,7 +82,14 @@ impl super::ConversationEngine {
                 }
             }
             _ => {
-                let on = self.memory.profile_get("snr_optin").await.ok().flatten().as_deref() == Some("1");
+                let on = self
+                    .memory
+                    .profile_get("snr_optin")
+                    .await
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("1");
                 let muted = self.support_muted_people().await;
                 let audits = self.support_audits().await;
                 let health = support_nudge::class_health(&audits);
@@ -84,25 +105,58 @@ impl super::ConversationEngine {
     }
 
     async fn support_muted_people(&self) -> Vec<String> {
-        self.memory.profile_get("snr_muted_people").await.ok().flatten()
-            .map(|s| s.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect())
+        self.memory
+            .profile_get("snr_muted_people")
+            .await
+            .ok()
+            .flatten()
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_lowercase())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     async fn support_audits(&self) -> Vec<support_nudge::NudgeAudit> {
-        self.memory.profile_get("snr_audits").await.ok().flatten()
-            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        self.memory
+            .profile_get("snr_audits")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
     }
 
     /// Build the one eligible support nudge, if any — a candidate for the
     /// proactive path. Reuses the birthday horizon (observed/told events),
     /// applies the full [`support_nudge::NudgeGate`], renders opportunity-first,
     /// and writes an audit record. Returns None (silence) by default.
-    pub async fn support_nudge_candidate(&self, quiet_hours: bool, emotion_heavy: bool) -> Option<String> {
-        if self.memory.profile_get("snr_optin").await.ok().flatten().as_deref() != Some("1") {
+    pub async fn support_nudge_candidate(
+        &self,
+        quiet_hours: bool,
+        emotion_heavy: bool,
+    ) -> Option<String> {
+        if self
+            .memory
+            .profile_get("snr_optin")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some("1")
+        {
             return None; // opt-out by default
         }
-        let class_muted = self.memory.profile_get("snr_class_mute").await.ok().flatten().as_deref() == Some("1");
+        let class_muted = self
+            .memory
+            .profile_get("snr_class_mute")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
         if class_muted {
             return None;
         }
@@ -111,38 +165,63 @@ impl super::ConversationEngine {
         if support_nudge::class_health(&audits) == support_nudge::ClassHealth::KillDisabled {
             return None; // kill switch tripped — stay silent pending review
         }
-        let sent_keys: std::collections::HashSet<String> = audits.iter().map(|a| a.event_key.clone()).collect();
+        let sent_keys: std::collections::HashSet<String> =
+            audits.iter().map(|a| a.event_key.clone()).collect();
 
         // Observed/told birthdays within the next 9 days whose prep is unmet.
         for n in self.future_scan(9).await {
             if n.get("kind").and_then(|x| x.as_str()) != Some("birthday") {
                 continue;
             }
-            let title = n.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let person = title.split(['\u{2019}', '\'']).next().unwrap_or(&title).trim().to_string();
+            let title = n
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let person = title
+                .split(['\u{2019}', '\''])
+                .next()
+                .unwrap_or(&title)
+                .trim()
+                .to_string();
             if person.is_empty() || muted.contains(&person.to_lowercase()) {
                 continue;
             }
             let when = n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
             let key = support_nudge::event_key(&person, when);
-            let readiness_unmet = n.get("readiness").and_then(|r| r.get("prepared-note"))
-                .and_then(|v| v.as_bool()) != Some(true);
+            let readiness_unmet = n
+                .get("readiness")
+                .and_then(|r| r.get("prepared-note"))
+                .and_then(|v| v.as_bool())
+                != Some(true);
             let gate = support_nudge::NudgeGate {
-                opted_in: true, class_muted: false,
+                opted_in: true,
+                class_muted: false,
                 person_muted: false, // filtered above
                 already_sent: sent_keys.contains(&key),
                 readiness_unmet,
                 provenance_authorized: true, // birthday horizon is observed/told by construction
-                quiet_hours, emotion_heavy,
+                quiet_hours,
+                emotion_heavy,
             };
             if !gate.eligible() {
                 continue;
             }
             let today = local_now();
-            let date_phrase = chrono::DateTime::from_timestamp_millis(when)
-                .map(|t| t.with_timezone(today.offset()).format("%A").to_string())
-                .unwrap_or_else(|| "coming up".into());
-            let gift_hint = self.memory.beliefs_matching(&format!("{person} likes"), &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive))).await.ok()
+            let date_phrase = chrono::DateTime::from_timestamp_millis(when).map_or_else(
+                || "coming up".into(),
+                |t| t.with_timezone(today.offset()).format("%A").to_string(),
+            );
+            let gift_hint = self
+                .memory
+                .beliefs_matching(
+                    &format!("{person} likes"),
+                    &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                        mind_types::Activity::Proactive,
+                    )),
+                )
+                .await
+                .ok()
                 .and_then(|b| b.first().map(|x| x.statement.clone()));
             let rendered = support_nudge::render(&person, &date_phrase, gift_hint.as_deref());
             if !support_nudge::is_clean(&rendered) {
@@ -150,7 +229,9 @@ impl super::ConversationEngine {
             }
             // Audit BEFORE returning — captures eligibility/provenance/controls, never a predicted action.
             audits.push(support_nudge::NudgeAudit {
-                event_key: key, person: person.clone(), provenance: "told".into(),
+                event_key: key,
+                person: person.clone(),
+                provenance: "told".into(),
                 controls_shown: true,
                 ts_ms: chrono::Utc::now().timestamp_millis(),
                 feedback: None,
@@ -158,10 +239,15 @@ impl super::ConversationEngine {
             // Keep the audit trail bounded.
             let n_keep = audits.len().saturating_sub(200);
             let trimmed = audits[n_keep..].to_vec();
-            let _ = self.memory.profile_set("snr_audits", &serde_json::to_string(&trimmed).unwrap_or_default()).await;
+            let _ = self
+                .memory
+                .profile_set(
+                    "snr_audits",
+                    &serde_json::to_string(&trimmed).unwrap_or_default(),
+                )
+                .await;
             return Some(rendered);
         }
         None
     }
-
 }

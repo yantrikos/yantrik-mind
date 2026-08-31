@@ -30,14 +30,24 @@ pub(crate) fn parse_delegation(rest: &str) -> Option<(String, String, &'static s
     }
     let (name, task) = match rest.split_once(':') {
         // A colon names the job — but "https://..." is not a name:task split.
-        Some((n, t)) if !n.contains("http") && n.split_whitespace().count() <= 5 && !t.trim().is_empty() => {
+        Some((n, t))
+            if !n.contains("http") && n.split_whitespace().count() <= 5 && !t.trim().is_empty() =>
+        {
             (n.trim().to_string(), t.trim().to_string())
         }
         _ => {
             // Derived label: the first few PLAIN words — URLs stay in the task, not the label.
-            let name: String =
-                rest.split_whitespace().filter(|w| !w.contains("://")).take(4).collect::<Vec<_>>().join(" ");
-            let name = if name.is_empty() { "job".to_string() } else { name };
+            let name: String = rest
+                .split_whitespace()
+                .filter(|w| !w.contains("://"))
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let name = if name.is_empty() {
+                "job".to_string()
+            } else {
+                name
+            };
             (name, rest.to_string())
         }
     };
@@ -48,10 +58,40 @@ pub(crate) fn parse_delegation(rest: &str) -> Option<(String, String, &'static s
 /// The improvement verbs were missing at first, so "improve the dashboard" routed to research:
 /// a delegation asking for work was answered with reading.
 const MAKE_VERBS: &[&str] = &[
-    "build", "create", "make", "write", "design", "generate", "draft", "produce", "implement",
-    "code", "develop", "set up", "put together", "publish", "prototype", "mock up", "scaffold",
-    "refactor", "patch", "fix", "add", "port", "convert", "rewrite", "improve", "redesign",
-    "restyle", "rework", "revamp", "polish", "modernize", "enhance", "extend", "upgrade",
+    "build",
+    "create",
+    "make",
+    "write",
+    "design",
+    "generate",
+    "draft",
+    "produce",
+    "implement",
+    "code",
+    "develop",
+    "set up",
+    "put together",
+    "publish",
+    "prototype",
+    "mock up",
+    "scaffold",
+    "refactor",
+    "patch",
+    "fix",
+    "add",
+    "port",
+    "convert",
+    "rewrite",
+    "improve",
+    "redesign",
+    "restyle",
+    "rework",
+    "revamp",
+    "polish",
+    "modernize",
+    "enhance",
+    "extend",
+    "upgrade",
 ];
 
 /// Signals that the task points at an EXISTING body of source, which makes it code work no matter
@@ -65,15 +105,27 @@ fn mentions_codebase(tl: &str) -> bool {
     // page ABOUT repositories, not an edit to one — the noun has to be where the work happens
     // ("in the repo"), not what the artifact displays.
     const MARKERS: &[&str] = &[
-        "codebase", "source tree", "source files", "the source", "existing code", "our code",
-        "crates/", "in the repo", "in our repo", "in this repo", "in my repo",
+        "codebase",
+        "source tree",
+        "source files",
+        "the source",
+        "existing code",
+        "our code",
+        "crates/",
+        "in the repo",
+        "in our repo",
+        "in this repo",
+        "in my repo",
     ];
     if MARKERS.iter().any(|m| tl.contains(m)) {
         return true;
     }
     // A concrete source-file extension is as decisive as naming the repo. Word-boundary on the
     // right so ".jsx" or ".rsync" can't false-positive off a shorter suffix.
-    const EXTS: &[&str] = &[".rs", ".js", ".ts", ".py", ".css", ".html", ".go", ".c", ".cpp", ".java", ".sh", ".toml", ".yaml", ".yml"];
+    const EXTS: &[&str] = &[
+        ".rs", ".js", ".ts", ".py", ".css", ".html", ".go", ".c", ".cpp", ".java", ".sh", ".toml",
+        ".yaml", ".yml",
+    ];
     EXTS.iter().any(|e| {
         tl.match_indices(e).any(|(at, _)| {
             tl[at + e.len()..]
@@ -87,16 +139,55 @@ fn mentions_codebase(tl: &str) -> bool {
 
 /// Things that are produced as a FILE or a PAGE — the artifact nouns.
 const ARTIFACT_NOUNS: &[&str] = &[
-    "website", "web site", "site", "page", "landing", "portfolio", "resume", "cv", "app",
-    "application", "dashboard", "script", "program", "tool", "cli", "api", "server", "bot",
-    "component", "form", "game", "chart", "diagram", "slide", "deck", "template", "prototype",
-    "mockup", "readme", "doc site", "blog",
+    "website",
+    "web site",
+    "site",
+    "page",
+    "landing",
+    "portfolio",
+    "resume",
+    "cv",
+    "app",
+    "application",
+    "dashboard",
+    "script",
+    "program",
+    "tool",
+    "cli",
+    "api",
+    "server",
+    "bot",
+    "component",
+    "form",
+    "game",
+    "chart",
+    "diagram",
+    "slide",
+    "deck",
+    "template",
+    "prototype",
+    "mockup",
+    "readme",
+    "doc site",
+    "blog",
 ];
 
 /// Verbs that ask for INFORMATION, which beat an artifact noun when they lead the sentence —
 /// "research portfolio websites" wants reading, not a website.
-const FIND_VERBS: &[&str] =
-    &["research", "find", "look up", "search", "compare", "review", "summarize", "check", "list", "investigate", "explain", "analyze"];
+const FIND_VERBS: &[&str] = &[
+    "research",
+    "find",
+    "look up",
+    "search",
+    "compare",
+    "review",
+    "summarize",
+    "check",
+    "list",
+    "investigate",
+    "explain",
+    "analyze",
+];
 
 /// The DETERMINISTIC FLOOR of routing — not the routing itself.
 ///
@@ -106,7 +197,7 @@ const FIND_VERBS: &[&str] =
 /// tools only, and came back with six links.
 ///
 /// A LONGER table is the same defect with a further-away boundary — it would miss the next phrasing
-/// instead of this one. So this function is no longer the decision: [`route`] asks the model, which
+/// instead of this one. So this function is no longer the decision: `route` asks the model, which
 /// has no vocabulary limit, and falls back here only when there is no model or its answer is
 /// unusable. What a table CAN do well is be instant, free, and predictable, which is exactly what a
 /// fallback should be.
@@ -137,7 +228,11 @@ pub fn classify(task: &str) -> &'static str {
         // the recipe chain (research → author → publish) delivers exactly that in one pass.
         // UNLESS the task points at existing source: then the page noun is describing the thing
         // being edited, not the deliverable, and the coder is the right executor.
-        return if mentions(PAGE_NOUNS) && !mentions_codebase(&tl) { "page" } else { "code" };
+        return if mentions(PAGE_NOUNS) && !mentions_codebase(&tl) {
+            "page"
+        } else {
+            "code"
+        };
     }
     "research"
 }
@@ -175,8 +270,20 @@ pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
 
 /// Artifact nouns that are a hosted PAGE rather than a codebase.
 const PAGE_NOUNS: &[&str] = &[
-    "website", "web site", "site", "page", "landing", "portfolio", "resume", "cv", "dashboard",
-    "blog", "deck", "slides", "one-pager", "onepager",
+    "website",
+    "web site",
+    "site",
+    "page",
+    "landing",
+    "portfolio",
+    "resume",
+    "cv",
+    "dashboard",
+    "blog",
+    "deck",
+    "slides",
+    "one-pager",
+    "onepager",
 ];
 
 /// The chain that turns "make me a portfolio site" into a URL.
@@ -196,10 +303,14 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
     // actually writes pages was the one left out. Verified live: a page built with web-craft mounted
     // contained none of its markers.
     let rules = pack_rules
-        .map(|r| format!("HOUSE RULES from a mounted knowledge pack — follow them:
+        .map(|r| {
+            format!(
+                "HOUSE RULES from a mounted knowledge pack — follow them:
 {r}
 
-"))
+"
+            )
+        })
         .unwrap_or_default();
     Recipe {
         id: "delegate-page".into(),
@@ -281,11 +392,54 @@ pub(crate) async fn ledger_artifacts(
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    if let Some(r) = rows.iter_mut().find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id)) {
+    if let Some(r) = rows
+        .iter_mut()
+        .find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id))
+    {
         r["workdir"] = serde_json::json!(workdir);
         r["files"] = serde_json::json!(files);
     }
-    let _ = memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
+    let _ = memory
+        .profile_set(
+            LEDGER_KEY,
+            &serde_json::to_string(&rows).unwrap_or_default(),
+        )
+        .await;
+}
+
+/// Attach a pre-round artifact checkpoint to the job row. Bounded by the already-bounded round
+/// count; duplicate IDs are ignored so a retry cannot manufacture extra history.
+pub(crate) async fn ledger_checkpoint(memory: &Arc<dyn MemoryFacade>, id: &str, checkpoint: &str) {
+    let mut rows: Vec<serde_json::Value> = memory
+        .profile_get(LEDGER_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.get("id").and_then(|x| x.as_str()) == Some(id))
+    {
+        let checkpoints = row
+            .as_object_mut()
+            .expect("delegation rows are objects")
+            .entry("checkpoints")
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(items) = checkpoints.as_array_mut() {
+            if items.len() < CHECKPOINT_HISTORY_CAP
+                && !items.iter().any(|item| item.as_str() == Some(checkpoint))
+            {
+                items.push(serde_json::json!(checkpoint));
+            }
+        }
+    }
+    let _ = memory
+        .profile_set(
+            LEDGER_KEY,
+            &serde_json::to_string(&rows).unwrap_or_default(),
+        )
+        .await;
 }
 
 pub(crate) async fn ledger_update(
@@ -301,14 +455,22 @@ pub(crate) async fn ledger_update(
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    if let Some(r) = rows.iter_mut().find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id)) {
+    if let Some(r) = rows
+        .iter_mut()
+        .find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id))
+    {
         r["status"] = serde_json::json!(status);
         r["finished_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
         if let Some(head) = result_head {
             r["result"] = serde_json::json!(head.chars().take(RESULT_HEAD).collect::<String>());
         }
     }
-    let _ = memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
+    let _ = memory
+        .profile_set(
+            LEDGER_KEY,
+            &serde_json::to_string(&rows).unwrap_or_default(),
+        )
+        .await;
 }
 
 /// Does a critique verdict mean "good enough, stop iterating"? Tolerant of critics that dress the
@@ -388,9 +550,21 @@ pub(crate) fn verdict_is_usable(v: &str) -> bool {
     // legitimate finding that happens to say "I would tighten this" still passes.
     let low = t.to_lowercase();
     const AGENT_VOICE: &[&str] = &[
-        "i'll start", "i will start", "i'll begin", "i will begin", "let me start", "let me begin",
-        "let me first", "let me read", "i'll read", "i will read", "i need to read", "i'll look",
-        "first, let me", "first i'll", "i'll examine",
+        "i'll start",
+        "i will start",
+        "i'll begin",
+        "i will begin",
+        "let me start",
+        "let me begin",
+        "let me first",
+        "let me read",
+        "i'll read",
+        "i will read",
+        "i need to read",
+        "i'll look",
+        "first, let me",
+        "first i'll",
+        "i'll examine",
     ];
     if AGENT_VOICE.iter().any(|p| low.starts_with(p)) {
         return false;
@@ -401,7 +575,10 @@ pub(crate) fn verdict_is_usable(v: &str) -> bool {
         l.starts_with("- ")
             || l.starts_with("* ")
             || l.starts_with("• ")
-            || l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            || l.chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
     })
 }
 
@@ -418,7 +595,11 @@ pub(crate) fn verdict_is_usable(v: &str) -> bool {
 /// UNMEASURED IS NOT FREE. A round whose CLI returned no usage block is recorded as UNMEASURED
 /// rather than skipped or zeroed: a silent gap reads as "nothing was spent", which is the exact
 /// misreading that let this go unnoticed.
-pub(crate) fn record_round_spend(spend: Option<&mind_tools::coder::RoundSpend>, job: &str, round: usize) {
+pub(crate) fn record_round_spend(
+    spend: Option<&mind_tools::coder::RoundSpend>,
+    job: &str,
+    round: usize,
+) {
     let dir = std::env::var("YM_STATE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind".to_string());
     let when = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let lane = format!("delegate:{job}#{round}");
@@ -428,7 +609,11 @@ pub(crate) fn record_round_spend(spend: Option<&mind_tools::coder::RoundSpend>, 
     };
     // Best effort by design: a delegation must not fail because its meter could not write. The
     // loss is visible either way — a missing line is a gap in the ledger, not a silent zero.
-    if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{dir}/token_ledger.log")) {
+    if let Ok(mut fh) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{dir}/token_ledger.log"))
+    {
         use std::io::Write;
         let _ = writeln!(fh, "{line}");
     }
@@ -490,7 +675,10 @@ pub(crate) fn artifact_excerpt(workdir: &str, files: &[String], budget: usize) -
         let path = format!("{}/{}", workdir.trim_end_matches('/'), name);
         match std::fs::read(&path) {
             Ok(bytes) if bytes.iter().take(512).any(|b| *b == 0) => {
-                out.push_str(&format!("=== {name} ({} bytes, binary — not shown)\n", bytes.len()));
+                out.push_str(&format!(
+                    "=== {name} ({} bytes, binary — not shown)\n",
+                    bytes.len()
+                ));
             }
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
@@ -555,7 +743,9 @@ impl super::ConversationEngine {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         // A single malformed row must not blank the whole board — skip it and keep the rest.
-        raw.into_iter().filter_map(|v| serde_json::from_value::<JobRow>(v).ok()).collect()
+        raw.into_iter()
+            .filter_map(|v| serde_json::from_value::<JobRow>(v).ok())
+            .collect()
     }
 
     /// Close out jobs that were running when the service last stopped. Call ONCE at startup.
@@ -603,6 +793,9 @@ fn scratch_key(id: &str) -> String {
     format!("job_scratch:{id}")
 }
 const SCRATCH_NOTE_CAP: usize = 200;
+/// Ledger-backed recovery points must stay bounded even when an operator repeatedly rolls a job
+/// backward and forward. Normal delegated runs use only a handful; this ceiling is defensive.
+const CHECKPOINT_HISTORY_CAP: usize = 32;
 /// Un-promoted scratch older than this is junk by definition — purged by the board on render.
 const SCRATCH_STALE_MS: i64 = 7 * 24 * 3600 * 1000;
 
@@ -619,7 +812,9 @@ pub(crate) async fn scratch_note(memory: &Arc<dyn MemoryFacade>, id: &str, text:
         return; // a runaway job must not grow an unbounded blob
     }
     notes.push(serde_json::json!({ "t": chrono::Utc::now().timestamp_millis(), "note": text }));
-    let _ = memory.profile_set(&key, &serde_json::to_string(&notes).unwrap_or_default()).await;
+    let _ = memory
+        .profile_set(&key, &serde_json::to_string(&notes).unwrap_or_default())
+        .await;
 }
 
 pub(crate) fn render_board(rows: &[serde_json::Value], now_ms: i64) -> String {
@@ -646,20 +841,171 @@ pub(crate) fn render_board(rows: &[serde_json::Value], now_ms: i64) -> String {
             "done" => "✅ done".to_string(),
             _ => "❌ failed".to_string(),
         };
-        out.push_str(&format!("\n[{}] {} · {} · {}\n    task: {}\n", g("id"), g("name"), g("kind"), badge, g("task")));
+        out.push_str(&format!(
+            "\n[{}] {} · {} · {}\n    task: {}\n",
+            g("id"),
+            g("name"),
+            g("kind"),
+            badge,
+            g("task")
+        ));
         if status != "running" {
             let head = g("result");
             if head != "?" && !head.is_empty() {
                 let first: String = head.lines().take(3).collect::<Vec<_>>().join(" / ");
-                out.push_str(&format!("    {}\n", first.chars().take(180).collect::<String>()));
+                out.push_str(&format!(
+                    "    {}\n",
+                    first.chars().take(180).collect::<String>()
+                ));
             }
+        }
+        let checkpoints = r
+            .get("checkpoints")
+            .and_then(|value| value.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(latest) = checkpoints.last().and_then(|value| value.as_str()) {
+            out.push_str(&format!(
+                "    recovery: {} checkpoint(s), latest {latest}\n",
+                checkpoints.len()
+            ));
         }
     }
     out.push_str(
         "\nA finished job's scratch waits 7 days: `ym jobs keep <id>` promotes it into memory \
-         (as a sub-agent observation), `ym jobs drop <id>` destroys it unkept.",
+         (as a sub-agent observation), `ym jobs drop <id>` destroys it unkept. Multi-round code \
+         jobs can inspect recovery with `ym jobs checkpoints <id>`, restore a pre-round artifact \
+         with `ym jobs rollback <id> [checkpoint]`, or continue a restart-interrupted code job \
+         with `ym jobs resume <id> [checkpoint]`.",
     );
     out
+}
+
+fn render_checkpoint_history(rows: &[serde_json::Value], id: &str) -> String {
+    let Some(row) = rows
+        .iter()
+        .find(|row| row.get("id").and_then(|value| value.as_str()) == Some(id))
+    else {
+        return format!("No job [{id}] on the board.");
+    };
+    let checkpoints: Vec<&str> = row
+        .get("checkpoints")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .collect();
+    if checkpoints.is_empty() {
+        return format!("[{id}] has no recovery points.");
+    }
+    let restored = row
+        .get("restored_checkpoint")
+        .and_then(|value| value.as_str());
+    let mut out = format!("↩ [{id}] RECOVERY POINTS\n");
+    for (index, checkpoint) in checkpoints.iter().enumerate() {
+        let latest = if index + 1 == checkpoints.len() {
+            " · latest"
+        } else {
+            ""
+        };
+        let current = if restored == Some(*checkpoint) {
+            " · restored"
+        } else {
+            ""
+        };
+        out.push_str(&format!("  {}. {checkpoint}{latest}{current}\n", index + 1));
+    }
+    out.push_str(&format!(
+        "Restore with `ym jobs rollback {id} <checkpoint-id>`."
+    ));
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeResumeSpec {
+    index: usize,
+    name: String,
+    task: String,
+    workdir: String,
+    checkpoint: String,
+    attempt: usize,
+}
+
+/// Validate a persistent resume request without trusting the loose JSON ledger. Only jobs that the
+/// startup reconciler explicitly marked interrupted are eligible; an arbitrary failed job may have
+/// failed because its inputs or executor were invalid, and retrying it silently changes semantics.
+fn code_resume_spec(
+    rows: &[serde_json::Value],
+    id: &str,
+    requested: Option<&str>,
+) -> std::result::Result<CodeResumeSpec, String> {
+    let Some((index, row)) = rows
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.get("id").and_then(|value| value.as_str()) == Some(id))
+    else {
+        return Err(format!("No job [{id}] on the board."));
+    };
+    if row.get("status").and_then(|value| value.as_str()) == Some("running") {
+        return Err(format!("[{id}] is already running."));
+    }
+    if row.get("kind").and_then(|value| value.as_str()) != Some("code") {
+        return Err(format!("[{id}] is not a resumable code job."));
+    }
+    let interrupted = row
+        .get("result")
+        .and_then(|value| value.as_str())
+        .is_some_and(|result| result.contains("interrupted"));
+    if row.get("status").and_then(|value| value.as_str()) != Some("failed") || !interrupted {
+        return Err(format!(
+            "[{id}] was not interrupted by a restart; resume is limited to restart-reconciled jobs."
+        ));
+    }
+    let workdir = row
+        .get("workdir")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("[{id}] has no recorded artifact workspace to resume."))?;
+    let checkpoints: Vec<&str> = row
+        .get("checkpoints")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .collect();
+    if checkpoints.len() >= CHECKPOINT_HISTORY_CAP {
+        return Err(format!(
+            "[{id}] already has the maximum {CHECKPOINT_HISTORY_CAP} recovery points; resume is refused rather than growing scratch without bound."
+        ));
+    }
+    let checkpoint = requested
+        .map(str::to_string)
+        .or_else(|| checkpoints.last().map(|value| (*value).to_string()))
+        .ok_or_else(|| format!("[{id}] has no checkpoint to resume from."))?;
+    if !checkpoints.contains(&checkpoint.as_str()) {
+        return Err(format!("[{id}] does not contain checkpoint {checkpoint}."));
+    }
+    Ok(CodeResumeSpec {
+        index,
+        name: row
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("code job")
+            .to_string(),
+        task: row
+            .get("task")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("[{id}] has no original task to resume."))?
+            .to_string(),
+        workdir: workdir.to_string(),
+        checkpoint,
+        attempt: row
+            .get("resume_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize
+            + 1,
+    })
 }
 
 impl super::ConversationEngine {
@@ -703,12 +1049,20 @@ impl super::ConversationEngine {
              a codebase (code) or wants a new standalone page whose deliverable is a link (page) — \
              not whether words like site, page or dashboard appear in it."
         );
-        let cfg = GenerationConfig { max_tokens: 12, think: mind_inference::think_for("dispatch", Some(false)), ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 12,
+            think: mind_inference::think_for("dispatch", Some(false)),
+            ..GenerationConfig::default()
+        };
         // GROUNDED, not a bare chat(): the prompt carries the user's own words verbatim, which is
         // household content, so it takes the private lane first and any escalation is audited. The
         // privacy audit caught this as an unscoped call — correctly; a one-word routing answer is not
         // a reason to send someone's request to a cloud provider unrecorded.
-        let reply = match self.inference.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await {
+        let reply = match self
+            .inference
+            .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+            .await
+        {
             Ok(r) => r.text,
             Err(_) => return floor,
         };
@@ -744,35 +1098,74 @@ impl super::ConversationEngine {
         let Some(recipes) = self.recipes.clone() else {
             return "(the recipe engine isn't configured on this box)".to_string();
         };
-        let var = spec.get("var").and_then(|x| x.as_str()).unwrap_or("out").to_string();
-        let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&sk.name).to_string();
+        let var = spec
+            .get("var")
+            .and_then(|x| x.as_str())
+            .unwrap_or("out")
+            .to_string();
+        let label = spec
+            .get("label")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&sk.name)
+            .to_string();
         if target.len() < 2 {
             return format!(
                 "(\"{}\" watches the {label} for something you name -- say \"run skill {}: <target>\")",
                 sk.name, sk.name
             );
         }
-        let mut targs = spec.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
-        if spec.get("needs_url").and_then(|x| x.as_bool()).unwrap_or(false) {
+        let mut targs = spec
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if spec
+            .get("needs_url")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false)
+        {
             targs = serde_json::json!({ "url": url });
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let rec = Recipe {
             id: "skill".into(),
             name: format!("run {}: {target}", sk.name),
             steps: vec![
-                RecipeStep::WaitForCondition { tool_name: tool_name.into(), args: targs, store_as: var.clone(), condition: Condition::VarContains { var, substring: target.to_string() }, poll_secs: 120, expire_ms: now + 24 * 3600 * 1000 },
-                RecipeStep::Notify { message: format!("📡 the {label} now matches \"{target}\".") },
+                RecipeStep::WaitForCondition {
+                    tool_name: tool_name.into(),
+                    args: targs,
+                    store_as: var.clone(),
+                    condition: Condition::VarContains {
+                        var,
+                        substring: target.to_string(),
+                    },
+                    poll_secs: 120,
+                    expire_ms: now + 24 * 3600 * 1000,
+                },
+                RecipeStep::Notify {
+                    message: format!("📡 the {label} now matches \"{target}\"."),
+                },
             ],
         };
         // The outcome is recorded AFTER the run and reports what happened (E.SK1).
-        let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+        let out = recipes
+            .run_with(&rec, std::collections::HashMap::new())
+            .await;
         // The recipe completing is EXECUTOR news. Whether the monitor actually told the household
         // anything useful is unjudged, so it stays out of the success denominator (E.P5b).
-        let outcome = if out.ok { mind_types::SkillOutcome::ungraded() } else { mind_types::SkillOutcome::executor_failed() };
+        let outcome = if out.ok {
+            mind_types::SkillOutcome::ungraded()
+        } else {
+            mind_types::SkillOutcome::executor_failed()
+        };
         let _ = self.memory.record_skill_outcome(&sk.name, outcome).await;
         if out.sleeping_until.is_some() {
-            format!("Running skill '{}' — watching {label} for \"{target}\".", sk.name)
+            format!(
+                "Running skill '{}' — watching {label} for \"{target}\".",
+                sk.name
+            )
         } else if !out.notifications.is_empty() {
             out.notifications.join("\n")
         } else {
@@ -780,7 +1173,12 @@ impl super::ConversationEngine {
         }
     }
 
-    pub(crate) async fn run_instruction_skill(&self, sk: &mind_types::Skill, instructions: &str, target: &str) -> String {
+    pub(crate) async fn run_instruction_skill(
+        &self,
+        sk: &mind_types::Skill,
+        instructions: &str,
+        target: &str,
+    ) -> String {
         // EITHER executor will do, but one of them must exist before a row is written -- the
         // executor-presence rule `delegate_cmd` keeps: a ledger row for a job that cannot run is a
         // lie on the board.
@@ -794,7 +1192,11 @@ impl super::ConversationEngine {
         }
         let id = format!("{:x}", chrono::Utc::now().timestamp_millis() & 0xffffff);
         let now = chrono::Utc::now().timestamp_millis();
-        let task = if target.trim().is_empty() { sk.summary.clone() } else { target.trim().to_string() };
+        let task = if target.trim().is_empty() {
+            sk.summary.clone()
+        } else {
+            target.trim().to_string()
+        };
         let mut rows: Vec<serde_json::Value> = self
             .memory
             .profile_get(LEDGER_KEY)
@@ -811,10 +1213,20 @@ impl super::ConversationEngine {
             let cut = rows.len() - LEDGER_CAP;
             rows.drain(..cut);
         }
-        let _ = self.memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                LEDGER_KEY,
+                &serde_json::to_string(&rows).unwrap_or_default(),
+            )
+            .await;
 
         let prompt = crate::import_skill::instruction_prompt(instructions, Some(target));
-        let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
+        let (q, jobs, mem) = (
+            self.notify_queue.clone(),
+            self.bg_jobs.clone(),
+            self.memory.clone(),
+        );
         let (id2, name2, task2) = (id.clone(), sk.name.clone(), task.clone());
         let trace = format!("skill:{}:{}", sk.name, id);
         tokio::spawn(async move {
@@ -845,7 +1257,10 @@ impl super::ConversationEngine {
                     let mut m = if ok {
                         format!("📥 [{name2}] {}", res.answer)
                     } else {
-                        let why = res.error.clone().unwrap_or_else(|| "the instructions produced nothing".into());
+                        let why = res
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "the instructions produced nothing".into());
                         scratch_note(&mem, &id2, &format!("failed: {why}")).await;
                         format!("📥 [{name2}] I couldn't finish it: {why}")
                     };
@@ -864,8 +1279,14 @@ impl super::ConversationEngine {
                 (None, Some(recipes)) => {
                     scratch_note(&mem, &id2, "following banked instructions").await;
                     let steps = crate::import_skill::instruction_steps_from_prompt(&name2, prompt);
-                    let rec = Recipe { id: format!("skill:{name2}"), name: format!("run {name2}: {task2}"), steps };
-                    let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                    let rec = Recipe {
+                        id: format!("skill:{name2}"),
+                        name: format!("run {name2}: {task2}"),
+                        steps,
+                    };
+                    let out = recipes
+                        .run_with(&rec, std::collections::HashMap::new())
+                        .await;
                     if out.ok {
                         let m = out
                             .notifications
@@ -874,7 +1295,10 @@ impl super::ConversationEngine {
                             .unwrap_or_else(|| format!("📥 [{name2}] done."));
                         (true, m)
                     } else {
-                        let why = out.error.clone().unwrap_or_else(|| "the instructions produced nothing".into());
+                        let why = out
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "the instructions produced nothing".into());
                         scratch_note(&mem, &id2, &format!("failed: {why}")).await;
                         (false, format!("📥 [{name2}] I couldn't finish it: {why}"))
                     }
@@ -890,9 +1314,19 @@ impl super::ConversationEngine {
             // and the case that started this was a document that ran perfectly and answered "I
             // cannot perform this task". Ungraded until something competent judges it; a generated
             // refusal must never strengthen a skill (E.P5b, Codex's acceptance test 1).
-            let outcome = if ok { mind_types::SkillOutcome::ungraded() } else { mind_types::SkillOutcome::executor_failed() };
+            let outcome = if ok {
+                mind_types::SkillOutcome::ungraded()
+            } else {
+                mind_types::SkillOutcome::executor_failed()
+            };
             let _ = mem.record_skill_outcome(&name2, outcome).await;
-            ledger_update(&mem, &id2, if ok { "done" } else { "failed" }, Some(msg.clone())).await;
+            ledger_update(
+                &mem,
+                &id2,
+                if ok { "done" } else { "failed" },
+                Some(msg.clone()),
+            )
+            .await;
             q.lock().unwrap().push(msg);
             jobs.fetch_sub(1, Ordering::Relaxed);
         });
@@ -920,10 +1354,15 @@ impl super::ConversationEngine {
         // (E.SK4).
         if let Ok(Some(sk)) = self.memory.get_skill(&name).await {
             return match crate::skills::classify_skill(&sk) {
-                crate::skills::SkillBody::Code { lang, source } => self.run_code_skill(&sk, lang, &source).await,
-                crate::skills::SkillBody::Instructions { text } => self.run_instruction_skill(&sk, &text, &task).await,
+                crate::skills::SkillBody::Code { lang, source } => {
+                    self.run_code_skill(&sk, lang, &source).await
+                }
+                crate::skills::SkillBody::Instructions { text } => {
+                    self.run_instruction_skill(&sk, &text, &task).await
+                }
                 crate::skills::SkillBody::Capability { tool, spec } => {
-                    self.run_capability_skill(&sk, &tool, &spec, &task, "").await
+                    self.run_capability_skill(&sk, &tool, &spec, &task, "")
+                        .await
                 }
             };
         }
@@ -958,9 +1397,19 @@ impl super::ConversationEngine {
             let cut = rows.len() - LEDGER_CAP;
             rows.drain(..cut);
         }
-        let _ = self.memory.profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                LEDGER_KEY,
+                &serde_json::to_string(&rows).unwrap_or_default(),
+            )
+            .await;
 
-        let (q, jobs, mem) = (self.notify_queue.clone(), self.bg_jobs.clone(), self.memory.clone());
+        let (q, jobs, mem) = (
+            self.notify_queue.clone(),
+            self.bg_jobs.clone(),
+            self.memory.clone(),
+        );
         let (id2, name2, task2) = (id.clone(), name.clone(), task.clone());
         if kind == "page" {
             let engine = self.recipes.clone().unwrap();
@@ -968,10 +1417,20 @@ impl super::ConversationEngine {
             tokio::spawn(async move {
                 scratch_note(&mem, &id2, &format!("task: {task2}")).await;
                 scratch_note(&mem, &id2, "chain: research → author → publish").await;
-                let out = engine.run_with(&page_recipe(&name2, &task2, pack_rules.as_deref()), std::collections::HashMap::new()).await;
+                let out = engine
+                    .run_with(
+                        &page_recipe(&name2, &task2, pack_rules.as_deref()),
+                        std::collections::HashMap::new(),
+                    )
+                    .await;
                 // The URL is the deliverable. A chain that "succeeded" without one has not built
                 // anything, so that is reported as a failure rather than as a cheerful empty result.
-                let url = out.vars.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let url = out
+                    .vars
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let msg = if out.ok && !url.is_empty() {
                     scratch_note(&mem, &id2, &format!("published: {url}")).await;
                     out.notifications
@@ -979,11 +1438,23 @@ impl super::ConversationEngine {
                         .cloned()
                         .unwrap_or_else(|| format!("🌐 [{name2}] it's live — {url}"))
                 } else {
-                    let why = out.error.unwrap_or_else(|| "the page step produced no document".into());
+                    let why = out
+                        .error
+                        .unwrap_or_else(|| "the page step produced no document".into());
                     scratch_note(&mem, &id2, &format!("failed: {why}")).await;
                     format!("🌐 [{name2}] I couldn't finish the page: {why}")
                 };
-                ledger_update(&mem, &id2, if out.ok && !url.is_empty() { "done" } else { "failed" }, Some(msg.clone())).await;
+                ledger_update(
+                    &mem,
+                    &id2,
+                    if out.ok && !url.is_empty() {
+                        "done"
+                    } else {
+                        "failed"
+                    },
+                    Some(msg.clone()),
+                )
+                .await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             });
@@ -1002,7 +1473,10 @@ impl super::ConversationEngine {
             // going until the work is good, and a ~15-min round on a cached subscription makes 50
             // affordable. (When the cap DOES fire, the result says "round limit" and carries the
             // last review, so a stuck loop is visible, not silent.)
-            let rounds: usize = std::env::var("YM_DELEGATE_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+            let rounds: usize = std::env::var("YM_DELEGATE_ROUNDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50);
             // COLD by default. Warm `--continue` resume was measured to be the loop's dominant cost:
             // it replays the accumulated transcript on every tool call of every later round, so spend
             // grows with the SQUARE of total turns. The trade it bought — a builder that remembers its
@@ -1042,7 +1516,15 @@ impl super::ConversationEngine {
                 // previous round's session, and it is the whole reason a cold builder is viable.
                 let mut trail: Vec<String> = Vec::new();
                 for round in 1..=rounds {
-                    scratch_note(&mem, &id2, &format!("round {round}: building — {}", brief.chars().take(160).collect::<String>())).await;
+                    scratch_note(
+                        &mem,
+                        &id2,
+                        &format!(
+                            "round {round}: building — {}",
+                            brief.chars().take(160).collect::<String>()
+                        ),
+                    )
+                    .await;
                     // The builder is told where it stands: what round, how many remain, and that
                     // the clock is real. It cannot triage what it does not know — the first run
                     // spent its whole budget reading because nothing told it there was a budget.
@@ -1067,7 +1549,8 @@ impl super::ConversationEngine {
                             // is the only path that still fails the round outright. If an earlier
                             // round produced work, fall through and let it be judged instead of
                             // discarding it.
-                            scratch_note(&mem, &id2, &format!("round {round}: build error — {e}")).await;
+                            scratch_note(&mem, &id2, &format!("round {round}: build error — {e}"))
+                                .await;
                             if last.is_some() {
                                 break;
                             }
@@ -1079,6 +1562,21 @@ impl super::ConversationEngine {
                         }
                     };
                     wd = Some(r.workdir.clone());
+                    // Persist the recovery seam after EVERY completed round, not only after the
+                    // whole loop. If the service stops during the next round, startup can now
+                    // reconcile the row and `jobs resume` still knows which isolated tree owns it.
+                    ledger_artifacts(&mem, &id2, &r.workdir, &r.files).await;
+                    if let Some(checkpoint) = r.checkpoint.as_deref() {
+                        ledger_checkpoint(&mem, &id2, checkpoint).await;
+                        scratch_note(
+                            &mem,
+                            &id2,
+                            &format!(
+                                "round {round}: checkpoint {checkpoint} captured before edits"
+                            ),
+                        )
+                        .await;
+                    }
                     // Meter EVERY round, before any of the early-exit paths below — a round that
                     // failed still burned whatever it burned getting there, and those are exactly
                     // the rounds a cost review wants to see.
@@ -1086,10 +1584,17 @@ impl super::ConversationEngine {
                     if let Some(s) = r.spend.as_ref() {
                         // Also on the job's own trail, so `ym jobs` shows the cost next to the work
                         // instead of making you cross-reference a separate ledger.
-                        scratch_note(&mem, &id2, &format!(
-                            "round {round}: spend — {} tokens (cache_r={}), ${:.4}",
-                            s.total_tokens(), s.cache_read, s.usd
-                        )).await;
+                        scratch_note(
+                            &mem,
+                            &id2,
+                            &format!(
+                                "round {round}: spend — {} tokens (cache_r={}), ${:.4}",
+                                s.total_tokens(),
+                                s.cache_read,
+                                s.usd
+                            ),
+                        )
+                        .await;
                     }
                     // A round that FAILED and touched NOTHING is a dead provider, not a bad build:
                     // iterating cannot help, and each retry costs a full-session replay. Keep the
@@ -1133,7 +1638,16 @@ impl super::ConversationEngine {
                             return;
                         }
                     } else {
-                        scratch_note(&mem, &id2, &format!("round {round}: built {} file(s) — {}", r.files.len(), r.summary.chars().take(200).collect::<String>())).await;
+                        scratch_note(
+                            &mem,
+                            &id2,
+                            &format!(
+                                "round {round}: built {} file(s) — {}",
+                                r.files.len(),
+                                r.summary.chars().take(200).collect::<String>()
+                            ),
+                        )
+                        .await;
                     }
                     // CRITIQUE — a separate set of eyes, judging against the ORIGINAL task (not the
                     // round brief, which narrows every iteration). The critic reads the ARTIFACT
@@ -1146,7 +1660,11 @@ impl super::ConversationEngine {
                     let round_touched = if r.files.is_empty() {
                         "touched no files".to_string()
                     } else if r.files.len() > 8 {
-                        format!("touched {} (+{} more)", r.files[..8].join(", "), r.files.len() - 8)
+                        format!(
+                            "touched {} (+{} more)",
+                            r.files[..8].join(", "),
+                            r.files.len() - 8
+                        )
                     } else {
                         format!("touched {}", r.files.join(", "))
                     };
@@ -1187,7 +1705,11 @@ impl super::ConversationEngine {
                         ..GenerationConfig::default()
                     };
                     let mut critic_says = critic
-                        .chat_scoped(vec![ChatMessage::user(&critique_prompt)], cfg, mind_inference::PrivacyScope::Private)
+                        .chat_scoped(
+                            vec![ChatMessage::user(&critique_prompt)],
+                            cfg,
+                            mind_inference::PrivacyScope::Private,
+                        )
                         .await
                         .map(|x| x.text.trim().to_string());
                     // AN EMPTY VERDICT IS NOT A REVIEW. It is neither SHIP nor findings, and feeding
@@ -1196,7 +1718,11 @@ impl super::ConversationEngine {
                     // with no guidance at all. The generous budget above is the real fix; this is the
                     // backstop for the case it does not cover: retry with thinking OFF, so the entire
                     // budget goes to the answer and no reasoning can crowd it out.
-                    if critic_says.as_deref().map(|v| !verdict_is_usable(v)).unwrap_or(false) {
+                    if critic_says
+                        .as_deref()
+                        .map(|v| !verdict_is_usable(v))
+                        .unwrap_or(false)
+                    {
                         scratch_note(&mem, &id2, &format!(
                             "round {round}: critic did not return a review (got {:?}) — retrying",
                             critic_says.as_deref().unwrap_or("").chars().take(120).collect::<String>()
@@ -1204,9 +1730,18 @@ impl super::ConversationEngine {
                         // Thinking stays ON for the retry. Turning it off is what produced the
                         // builder-voice reply in the first place: with no room to reason the judge
                         // pattern-matched the task text and continued it instead of reviewing it.
-                        let retry = GenerationConfig { max_tokens: 15_000, think: Some(true), prefer_reasoner: true, ..GenerationConfig::default() };
+                        let retry = GenerationConfig {
+                            max_tokens: 15_000,
+                            think: Some(true),
+                            prefer_reasoner: true,
+                            ..GenerationConfig::default()
+                        };
                         critic_says = critic
-                            .chat_scoped(vec![ChatMessage::user(&critique_prompt)], retry, mind_inference::PrivacyScope::Private)
+                            .chat_scoped(
+                                vec![ChatMessage::user(&critique_prompt)],
+                                retry,
+                                mind_inference::PrivacyScope::Private,
+                            )
                             .await
                             .map(|x| x.text.trim().to_string());
                     }
@@ -1228,7 +1763,12 @@ impl super::ConversationEngine {
                         Err(e) => {
                             // Fail CLOSED: no review happened, so nothing may claim to have passed
                             // one. Keep the artifact, end the loop, and say so out loud.
-                            scratch_note(&mem, &id2, &format!("round {round}: critic unavailable — {e}")).await;
+                            scratch_note(
+                                &mem,
+                                &id2,
+                                &format!("round {round}: critic unavailable — {e}"),
+                            )
+                            .await;
                             reviewed = false;
                             verdict.clear();
                             break;
@@ -1238,13 +1778,25 @@ impl super::ConversationEngine {
                         scratch_note(&mem, &id2, &format!("round {round}: critique — SHIP")).await;
                         break;
                     }
-                    scratch_note(&mem, &id2, &format!("round {round}: critique — {}", verdict.chars().take(400).collect::<String>())).await;
+                    scratch_note(
+                        &mem,
+                        &id2,
+                        &format!(
+                            "round {round}: critique — {}",
+                            verdict.chars().take(400).collect::<String>()
+                        ),
+                    )
+                    .await;
                     // Record the round before briefing the next one. Flattened to a single line so
                     // twenty rounds of history stay readable and bounded — the next builder needs the
                     // SHAPE of what was tried, not a replay of it.
                     trail.push(format!(
                         "round {round}: {round_touched}{} → critic still said: {}",
-                        if round_cut { " (cut off mid-edit by the wall clock)" } else { "" },
+                        if round_cut {
+                            " (cut off mid-edit by the wall clock)"
+                        } else {
+                            ""
+                        },
                         verdict
                             .lines()
                             .map(|l| l.trim())
@@ -1275,7 +1827,11 @@ impl super::ConversationEngine {
                 let msg = format!(
                     "🛠️ [{name2}] {status_line}:\n\n{}{}",
                     mind_tools::render_coder(&r),
-                    if shipped || verdict.is_empty() { String::new() } else { format!("\n\nOutstanding review notes:\n{verdict}") }
+                    if shipped || verdict.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n\nOutstanding review notes:\n{verdict}")
+                    }
                 );
                 ledger_update(&mem, &id2, "done", Some(msg.clone())).await;
                 q.lock().unwrap().push(msg);
@@ -1298,7 +1854,10 @@ impl super::ConversationEngine {
                 let mut msg = if ok {
                     format!("🔎 [{name2}] {}", res.answer)
                 } else {
-                    let why = res.error.clone().unwrap_or_else(|| "the research produced nothing".into());
+                    let why = res
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "the research produced nothing".into());
                     scratch_note(&mem, &id2, &format!("failed: {why}")).await;
                     format!("🔎 [{name2}] I couldn't finish it: {why}")
                 };
@@ -1308,7 +1867,13 @@ impl super::ConversationEngine {
                         msg.push_str(&format!("- {u}\n"));
                     }
                 }
-                ledger_update(&mem, &id2, if ok { "done" } else { "failed" }, Some(msg.clone())).await;
+                ledger_update(
+                    &mem,
+                    &id2,
+                    if ok { "done" } else { "failed" },
+                    Some(msg.clone()),
+                )
+                .await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             });
@@ -1316,8 +1881,8 @@ impl super::ConversationEngine {
         format!("🧰 Delegated [{id}] \"{name}\" ({kind}). It's on the board — `ym jobs` — and the result lands in chat.")
     }
 
-    /// `ym jobs [json | keep <id> | drop <id>]` — the board, its machine-readable form (the
-    /// desktop's channel view), and the two ends of a job's scratch memory.
+    /// `ym jobs [json | checkpoints/resume/rollback <id> | keep/drop/delete <id>]` — the board,
+    /// its machine-readable form, restart-safe code recovery, and the job scratch lifecycle.
     pub async fn jobs_report_cmd(&self, rest: &str) -> String {
         let rest = rest.trim();
         if rest == "json" {
@@ -1347,18 +1912,412 @@ impl super::ConversationEngine {
             }
             return serde_json::json!({ "jobs": out }).to_string();
         }
+        if let Some(args) = rest.strip_prefix("resume ") {
+            let mut args = args.split_whitespace();
+            let id = args.next().unwrap_or("");
+            let requested = args.next();
+            if id.is_empty() || args.next().is_some() {
+                return "Usage: jobs resume <job-id> [checkpoint-id]".to_string();
+            }
+            let mut rows: Vec<serde_json::Value> = self
+                .memory
+                .profile_get(LEDGER_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let spec = match code_resume_spec(&rows, id, requested) {
+                Ok(spec) => spec,
+                Err(message) => return message,
+            };
+            let resume_rounds = std::env::var("YM_DELEGATE_RESUME_ROUNDS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(3)
+                .clamp(1, 5);
+            let Some(coder) = self.coder.as_ref().cloned() else {
+                return "The sandboxed coder is unavailable, so resume is fail-closed.".to_string();
+            };
+            if !self.try_acquire_bg(3) {
+                return "(the job board is full — a few delegations are already running; `ym jobs` to see them)".to_string();
+            }
+
+            // Re-enter from a known snapshot, never from an unverified half-edited tree. Preserve
+            // that tree first so even choosing the wrong recovery point is reversible.
+            let undo = match coder.create_checkpoint(&spec.workdir) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    self.bg_jobs.fetch_sub(1, Ordering::Relaxed);
+                    return format!("[{id}] could not checkpoint the interrupted tree: {error}");
+                }
+            };
+            let restored_files = match coder.restore_checkpoint(&spec.workdir, &spec.checkpoint) {
+                Ok(files) => files,
+                Err(error) => {
+                    let _ = coder.restore_checkpoint(&spec.workdir, &undo);
+                    self.bg_jobs.fetch_sub(1, Ordering::Relaxed);
+                    return format!(
+                        "[{id}] could not restore {}: {error}; the interrupted tree was restored from {undo}.",
+                        spec.checkpoint
+                    );
+                }
+            };
+            let now = chrono::Utc::now().timestamp_millis();
+            let row = &mut rows[spec.index];
+            row["status"] = serde_json::json!("running");
+            row["started_ms"] = serde_json::json!(now);
+            row["finished_ms"] = serde_json::Value::Null;
+            row["result"] = serde_json::json!(format!(
+                "(resuming attempt {} from {})",
+                spec.attempt, spec.checkpoint
+            ));
+            row["resume_count"] = serde_json::json!(spec.attempt);
+            row["resumed_from"] = serde_json::json!(&spec.checkpoint);
+            row["restored_checkpoint"] = serde_json::json!(&spec.checkpoint);
+            row["files"] = serde_json::json!(&restored_files);
+            if let Some(checkpoints) = row
+                .as_object_mut()
+                .and_then(|row| row.get_mut("checkpoints"))
+                .and_then(|value| value.as_array_mut())
+            {
+                checkpoints.push(serde_json::json!(&undo));
+            }
+            if self
+                .memory
+                .profile_set(
+                    LEDGER_KEY,
+                    &serde_json::to_string(&rows).unwrap_or_default(),
+                )
+                .await
+                .is_err()
+            {
+                let _ = coder.restore_checkpoint(&spec.workdir, &undo);
+                self.bg_jobs.fetch_sub(1, Ordering::Relaxed);
+                return format!(
+                    "[{id}] resume ledger update failed; the interrupted tree was restored from {undo}."
+                );
+            }
+
+            let memory = self.memory.clone();
+            let queue = self.notify_queue.clone();
+            let jobs = self.bg_jobs.clone();
+            let house = self.inference.clone();
+            let named_critic = critic_from_env();
+            let id = id.to_string();
+            let receipt_id = id.clone();
+            let name = spec.name.clone();
+            let task = spec.task.clone();
+            let workdir = spec.workdir.clone();
+            let checkpoint = spec.checkpoint.clone();
+            let attempt = spec.attempt;
+            let undo_for_job = undo.clone();
+            tokio::spawn(async move {
+                scratch_note(
+                    &memory,
+                    &id,
+                    &format!(
+                        "resume attempt {attempt}: restored {checkpoint}; undo checkpoint is {undo_for_job}"
+                    ),
+                )
+                .await;
+                let (critic, critic_label) = match &named_critic {
+                    Some((pool, label)) => (pool, label.clone()),
+                    None => (&house, format!("{} (household route)", house.provider())),
+                };
+                scratch_note(
+                    &memory,
+                    &id,
+                    &format!("resume attempt {attempt}: critic: {critic_label}"),
+                )
+                .await;
+                let rounds = resume_rounds;
+                let mut brief = format!(
+                    "Resume this interrupted delegated build. The existing artifact tree is authoritative. Re-read it, preserve completed work, and finish the ORIGINAL TASK below. Do not start over.\n\nORIGINAL TASK:\n{task}"
+                );
+                let mut last: Option<mind_tools::coder::CoderResult> = None;
+                let mut verdict = String::new();
+                let mut reviewed = false;
+                let mut inconclusive = false;
+
+                for round in 1..=rounds {
+                    scratch_note(
+                        &memory,
+                        &id,
+                        &format!("resume attempt {attempt}, round {round}: building"),
+                    )
+                    .await;
+                    let situated = format!(
+                        "(Recovery round {round} of at most {rounds}. The wall clock is bounded; land complete changes and run proportionate tests.)\n\n{brief}"
+                    );
+                    let result = match coder.run_in(&situated, workdir.clone()).await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let message = format!(
+                                "🛠️ [{name}] resume attempt {attempt} failed in round {round}: {error}"
+                            );
+                            scratch_note(&memory, &id, &format!("resume failed: {error}")).await;
+                            ledger_update(&memory, &id, "failed", Some(message.clone())).await;
+                            queue.lock().unwrap().push(message);
+                            jobs.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+                    ledger_artifacts(&memory, &id, &result.workdir, &result.files).await;
+                    if let Some(checkpoint) = result.checkpoint.as_deref() {
+                        ledger_checkpoint(&memory, &id, checkpoint).await;
+                    }
+                    record_round_spend(
+                        result.spend.as_ref(),
+                        &id,
+                        attempt.saturating_mul(100).saturating_add(round),
+                    );
+                    if result.files.is_empty() && (!result.ok || result.timed_out) {
+                        let message = format!(
+                            "🛠️ [{name}] resume attempt {attempt} produced no recoverable artifact in round {round}."
+                        );
+                        ledger_update(&memory, &id, "failed", Some(message.clone())).await;
+                        queue.lock().unwrap().push(message);
+                        jobs.fetch_sub(1, Ordering::Relaxed);
+                        return;
+                    }
+
+                    let excerpt = artifact_excerpt(&result.workdir, &result.files, 12_000);
+                    let critique_prompt = format!(
+                        "You are the QUALITY BAR for a recovered delegated build.\n\nORIGINAL TASK:\n{task}\n\nARTIFACT:\n{excerpt}\nBUILDER SUMMARY: {}\n\nReply exactly SHIP only if this is finished. Otherwise list up to 4 concrete imperative findings, one per line.",
+                        result.summary.chars().take(1200).collect::<String>()
+                    );
+                    let cfg = GenerationConfig {
+                        max_tokens: 15_000,
+                        think: mind_inference::think_for("critique", None),
+                        prefer_reasoner: true,
+                        ..GenerationConfig::default()
+                    };
+                    let critic_says = critic
+                        .chat_scoped(
+                            vec![ChatMessage::user(&critique_prompt)],
+                            cfg,
+                            mind_inference::PrivacyScope::Private,
+                        )
+                        .await
+                        .map(|reply| reply.text.trim().to_string());
+                    last = Some(result);
+                    match critic_says {
+                        Ok(value) if verdict_is_usable(&value) => {
+                            reviewed = true;
+                            verdict = value;
+                        }
+                        Ok(_) => {
+                            inconclusive = true;
+                            verdict.clear();
+                            break;
+                        }
+                        Err(error) => {
+                            scratch_note(
+                                &memory,
+                                &id,
+                                &format!("resume attempt {attempt}: critic unavailable — {error}"),
+                            )
+                            .await;
+                            verdict.clear();
+                            break;
+                        }
+                    }
+                    if verdict_ships(&verdict) {
+                        break;
+                    }
+                    brief = format!(
+                        "Continue improving the existing recovered build. Fix these review findings without starting over:\n{verdict}\n\nORIGINAL TASK:\n{task}"
+                    );
+                }
+
+                let Some(result) = last else {
+                    let message =
+                        format!("🛠️ [{name}] resume attempt {attempt} produced no result.");
+                    ledger_update(&memory, &id, "failed", Some(message.clone())).await;
+                    queue.lock().unwrap().push(message);
+                    jobs.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                };
+                let shipped = reviewed && verdict_ships(&verdict) && !inconclusive;
+                let status = if shipped {
+                    "resumed and passed review"
+                } else if inconclusive {
+                    "resumed, but review was inconclusive — treat as a draft"
+                } else if reviewed {
+                    "resumed to the recovery-round limit — outstanding review follows"
+                } else {
+                    "resumed, but the critic was unavailable — treat as an unreviewed draft"
+                };
+                let message = format!(
+                    "🛠️ [{name}] {status}:\n\n{}{}",
+                    mind_tools::render_coder(&result),
+                    if shipped || verdict.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n\nOutstanding review notes:\n{verdict}")
+                    }
+                );
+                ledger_update(&memory, &id, "done", Some(message.clone())).await;
+                scratch_note(&memory, &id, &format!("resume attempt {attempt}: {status}")).await;
+                queue.lock().unwrap().push(message);
+                jobs.fetch_sub(1, Ordering::Relaxed);
+            });
+            return format!(
+                "↻ Resuming [{receipt_id}] from {} in its isolated artifact workspace (attempt {}). Up to {resume_rounds} recovery round(s) will run, with a fresh critic and rollback preserved as {undo}.",
+                spec.checkpoint, spec.attempt,
+            );
+        }
+        if let Some(id) = rest.strip_prefix("checkpoints ") {
+            let id = id.trim();
+            if id.is_empty() || id.split_whitespace().count() != 1 {
+                return "Usage: jobs checkpoints <job-id>".to_string();
+            }
+            let rows: Vec<serde_json::Value> = self
+                .memory
+                .profile_get(LEDGER_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            return render_checkpoint_history(&rows, id);
+        }
+        if let Some(args) = rest.strip_prefix("rollback ") {
+            let mut args = args.split_whitespace();
+            let id = args.next().unwrap_or("");
+            let requested = args.next();
+            if id.is_empty() || args.next().is_some() {
+                return "Usage: jobs rollback <job-id> [checkpoint-id]".to_string();
+            }
+            let mut rows: Vec<serde_json::Value> = self
+                .memory
+                .profile_get(LEDGER_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let Some(index) = rows
+                .iter()
+                .position(|row| row.get("id").and_then(|x| x.as_str()) == Some(id))
+            else {
+                return format!("No job [{id}] on the board.");
+            };
+            if rows[index].get("status").and_then(|x| x.as_str()) == Some("running") {
+                return format!(
+                    "[{id}] is still running — rollback is refused while a builder can edit the same files."
+                );
+            }
+            let Some(workdir) = rows[index]
+                .get("workdir")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+            else {
+                return format!("[{id}] has no artifact workspace to restore.");
+            };
+            let checkpoints: Vec<String> = rows[index]
+                .get("checkpoints")
+                .and_then(|x| x.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let target = requested
+                .map(String::from)
+                .or_else(|| checkpoints.last().cloned());
+            let Some(target) = target else {
+                return format!(
+                    "[{id}] has no checkpoint yet — checkpoints begin before its second build round."
+                );
+            };
+            if !checkpoints.iter().any(|checkpoint| checkpoint == &target) {
+                return format!("[{id}] does not contain checkpoint {target}.");
+            }
+            if checkpoints.len() >= CHECKPOINT_HISTORY_CAP {
+                return format!(
+                    "[{id}] already has the maximum {CHECKPOINT_HISTORY_CAP} recovery points; rollback is refused rather than growing scratch without bound."
+                );
+            }
+            let Some(coder) = self.coder.as_ref() else {
+                return "The sandboxed coder is unavailable, so rollback is fail-closed."
+                    .to_string();
+            };
+            // Snapshot the current tree first. Even rollback is reversible: the operator can
+            // restore this undo checkpoint if the older state was not the one they wanted.
+            let undo = match coder.create_checkpoint(&workdir) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    return format!("[{id}] could not checkpoint the current tree: {error}")
+                }
+            };
+            // Record the undo point before touching the tree. If copying the requested snapshot
+            // fails halfway through, the operator still has a ledger-backed route to recovery.
+            ledger_checkpoint(&self.memory, id, &undo).await;
+            let files = match coder.restore_checkpoint(&workdir, &target) {
+                Ok(files) => files,
+                Err(error) => {
+                    return format!(
+                        "[{id}] rollback did not complete: {error}. The tree may be partial; recover with undo checkpoint {undo}."
+                    )
+                }
+            };
+            let row = &mut rows[index];
+            row["files"] = serde_json::json!(files);
+            row["restored_checkpoint"] = serde_json::json!(&target);
+            let history = row
+                .as_object_mut()
+                .expect("delegation rows are objects")
+                .entry("checkpoints")
+                .or_insert_with(|| serde_json::json!([]));
+            if let Some(items) = history.as_array_mut() {
+                items.push(serde_json::json!(&undo));
+            }
+            if self
+                .memory
+                .profile_set(
+                    LEDGER_KEY,
+                    &serde_json::to_string(&rows).unwrap_or_default(),
+                )
+                .await
+                .is_err()
+            {
+                return format!(
+                    "[{id}] files restored to {target}, but the ledger update failed — artifact state changed; inspect before continuing."
+                );
+            }
+            scratch_note(
+                &self.memory,
+                id,
+                &format!("restored checkpoint {target}; undo checkpoint is {undo}"),
+            )
+            .await;
+            return format!(
+                "↩ [{id}] restored {target} ({} visible artifact(s)). Undo is {undo}.",
+                files.len()
+            );
+        }
         if let Some(id) = rest.strip_prefix("keep ") {
             return self.job_promote(id.trim()).await;
         }
         if let Some(id) = rest.strip_prefix("drop ") {
             let n = self.job_purge_scratch(id.trim()).await;
-            return format!("🗑 Dropped [{}] scratch ({n} note(s)) — nothing entered memory.", id.trim());
+            return format!(
+                "🗑 Dropped [{}] scratch ({n} note(s)) — nothing entered memory.",
+                id.trim()
+            );
         }
         // `drop` only ever purged the SCRATCH; the ledger row survived, so a finished or failed
         // agent stayed on the board with no way to remove it. Deleting the row is a separate,
         // louder verb because it is the destructive one: the scratch is a working note, the row is
         // the record that the job happened.
-        if let Some(id) = rest.strip_prefix("delete ").or_else(|| rest.strip_prefix("forget ")) {
+        if let Some(id) = rest
+            .strip_prefix("delete ")
+            .or_else(|| rest.strip_prefix("forget "))
+        {
             let id = id.trim();
             let mut rows: Vec<serde_json::Value> = self
                 .memory
@@ -1385,7 +2344,10 @@ impl super::ConversationEngine {
             let n = self.job_purge_scratch(id).await;
             let _ = self
                 .memory
-                .profile_set(LEDGER_KEY, &serde_json::to_string(&rows).unwrap_or_default())
+                .profile_set(
+                    LEDGER_KEY,
+                    &serde_json::to_string(&rows).unwrap_or_default(),
+                )
                 .await;
             return format!("🗑 Deleted [{id}] from the board, with its {n} scratch note(s).");
         }
@@ -1401,7 +2363,10 @@ impl super::ConversationEngine {
         // junk by definition (the promotion window has clearly passed).
         let now = chrono::Utc::now().timestamp_millis();
         for r in rows.iter() {
-            let finished = r.get("finished_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+            let finished = r
+                .get("finished_ms")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(i64::MAX);
             if now - finished > SCRATCH_STALE_MS {
                 if let Some(id) = r.get("id").and_then(|x| x.as_str()) {
                     let _ = self.job_purge_scratch(id).await;
@@ -1424,12 +2389,21 @@ impl super::ConversationEngine {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         if notes.is_empty() {
-            return format!("[{id}] has no scratch to keep (already promoted, dropped, or never noted).");
+            return format!(
+                "[{id}] has no scratch to keep (already promoted, dropped, or never noted)."
+            );
         }
-        let body: Vec<&str> = notes.iter().filter_map(|n| n.get("note").and_then(|x| x.as_str())).collect();
+        let body: Vec<&str> = notes
+            .iter()
+            .filter_map(|n| n.get("note").and_then(|x| x.as_str()))
+            .collect();
         let text = format!("Delegated job [{id}] findings: {}", body.join(" | "));
         let text: String = text.chars().take(4000).collect();
-        match self.memory.remember_observation(&text, mind_types::safety::ProvenanceCategory::SubAgent).await {
+        match self
+            .memory
+            .remember_observation(&text, mind_types::safety::ProvenanceCategory::SubAgent)
+            .await
+        {
             Ok(_) => {
                 let n = self.job_purge_scratch(id).await;
                 format!("📥 Kept [{id}] — {n} note(s) promoted into memory as a sub-agent observation; scratch destroyed.")
@@ -1468,33 +2442,193 @@ mod tests {
 
     #[test]
     fn code_shaped_tasks_route_to_the_coder() {
-        let (_, _, k) = parse_delegation("log-tool: build a CLI for parsing the tick logs").unwrap();
+        let (_, _, k) =
+            parse_delegation("log-tool: build a CLI for parsing the tick logs").unwrap();
         assert_eq!(k, "code");
     }
 
     #[test]
     fn a_url_colon_is_not_a_name_split() {
         let (n, t, _) = parse_delegation("summarize https://example.com/post fully").unwrap();
-        assert!(t.contains("https://example.com/post"), "task lost the url: {t}");
-        assert!(!n.contains("https"), "name should be derived words, got {n}");
+        assert!(
+            t.contains("https://example.com/post"),
+            "task lost the url: {t}"
+        );
+        assert!(
+            !n.contains("https"),
+            "name should be derived words, got {n}"
+        );
     }
 
     #[test]
     fn board_shows_running_before_done_and_says_so() {
         let rows = vec![
             serde_json::json!({"id":"a1","name":"old","task":"x","kind":"research","status":"done","started_ms":1000,"result":"found it"}),
-            serde_json::json!({"id":"b2","name":"live","task":"y","kind":"code","status":"running","started_ms":2000}),
+            serde_json::json!({"id":"b2","name":"live","task":"y","kind":"code","status":"running","started_ms":2000,"checkpoints":["cp-100","cp-200"]}),
         ];
         let out = render_board(&rows, 8_000_000);
         let live = out.find("live").unwrap();
         let old = out.find("old").unwrap();
         assert!(live < old, "running job must render first:\n{out}");
         assert!(out.contains("⏳ running") && out.contains("✅ done"));
+        assert!(
+            out.contains("2 checkpoint(s), latest cp-200"),
+            "the operator must be able to discover rollback state:\n{out}"
+        );
+        assert!(
+            out.contains("ym jobs rollback <id> [checkpoint]"),
+            "the board must teach the recovery command:\n{out}"
+        );
     }
 
     #[test]
     fn empty_board_teaches_the_verb() {
         assert!(render_board(&[], 0).contains("ym delegate"));
+    }
+
+    #[test]
+    fn checkpoint_history_is_operator_readable_and_marks_state() {
+        let rows = vec![serde_json::json!({
+            "id": "job-7",
+            "checkpoints": ["cp-100", "cp-200", "cp-300"],
+            "restored_checkpoint": "cp-200"
+        })];
+        let out = render_checkpoint_history(&rows, "job-7");
+        assert!(out.contains("1. cp-100"));
+        assert!(out.contains("2. cp-200 · restored"));
+        assert!(out.contains("3. cp-300 · latest"));
+        assert!(out.contains("ym jobs rollback job-7 <checkpoint-id>"));
+        assert_eq!(
+            render_checkpoint_history(&rows, "missing"),
+            "No job [missing] on the board."
+        );
+    }
+
+    #[test]
+    fn only_restart_interrupted_code_jobs_can_resume_from_owned_checkpoints() {
+        let rows = vec![serde_json::json!({
+            "id": "job-9",
+            "name": "builder",
+            "task": "finish the parser",
+            "kind": "code",
+            "status": "failed",
+            "result": "(interrupted — the service restarted while this was running, so it never finished)",
+            "workdir": "/scratch/run-9",
+            "checkpoints": ["cp-100", "cp-200"],
+            "resume_count": 1
+        })];
+        let latest = code_resume_spec(&rows, "job-9", None).unwrap();
+        assert_eq!(latest.checkpoint, "cp-200");
+        assert_eq!(latest.attempt, 2);
+        let selected = code_resume_spec(&rows, "job-9", Some("cp-100")).unwrap();
+        assert_eq!(selected.checkpoint, "cp-100");
+        assert!(code_resume_spec(&rows, "job-9", Some("cp-999"))
+            .unwrap_err()
+            .contains("does not contain"));
+
+        let mut ordinary_failure = rows.clone();
+        ordinary_failure[0]["result"] = serde_json::json!("provider unavailable");
+        assert!(code_resume_spec(&ordinary_failure, "job-9", None)
+            .unwrap_err()
+            .contains("not interrupted"));
+
+        let mut research = rows.clone();
+        research[0]["kind"] = serde_json::json!("research");
+        assert!(code_resume_spec(&research, "job-9", None)
+            .unwrap_err()
+            .contains("not a resumable code job"));
+    }
+
+    #[test]
+    fn resume_refuses_unbounded_checkpoint_history() {
+        let checkpoints: Vec<String> = (0..CHECKPOINT_HISTORY_CAP)
+            .map(|index| format!("cp-{index}"))
+            .collect();
+        let rows = vec![serde_json::json!({
+            "id": "job-cap",
+            "task": "finish it",
+            "kind": "code",
+            "status": "failed",
+            "result": "interrupted",
+            "workdir": "/scratch/run-cap",
+            "checkpoints": checkpoints
+        })];
+        assert!(code_resume_spec(&rows, "job-cap", None)
+            .unwrap_err()
+            .contains("maximum 32 recovery points"));
+    }
+
+    #[test]
+    fn interrupted_build_resumes_tests_and_rolls_back_to_pre_resume_hash() {
+        let root = mind_types::scratch::dir("interrupted-build-e2e");
+        let _ = std::fs::remove_dir_all(&root);
+        let run = root.join("run-recovery");
+        std::fs::create_dir_all(&run).unwrap();
+        let source = run.join("fixture.rs");
+        std::fs::write(&source, "fn main() { assert_eq!(2 + 2, 5); }\n").unwrap();
+        let coder = mind_tools::coder::Coder::new(
+            "fixture-token",
+            "fixture-model",
+            "https://example.invalid",
+            root.to_string_lossy(),
+        );
+
+        // A completed round owns a recovery point. The next round is interrupted after leaving a
+        // syntactically invalid file, then the loose ledger crosses a real serialize/reload boundary.
+        let completed_round = coder.create_checkpoint(&run.to_string_lossy()).unwrap();
+        std::fs::write(&source, "fn main() { let = interrupted; }\n").unwrap();
+        std::fs::write(run.join("PARTIAL.txt"), "unfinished round\n").unwrap();
+        let pre_resume_sha256 = coder.artifact_sha256(&run.to_string_lossy()).unwrap();
+        let persisted = serde_json::to_string(&vec![serde_json::json!({
+            "id": "job-e2e",
+            "name": "recovery-fixture",
+            "task": "make the frozen arithmetic test pass",
+            "kind": "code",
+            "status": "failed",
+            "result": "(interrupted — the service restarted while this was running)",
+            "workdir": run.to_string_lossy(),
+            "checkpoints": [completed_round]
+        })])
+        .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&persisted).unwrap();
+        let spec = code_resume_spec(&rows, "job-e2e", None).unwrap();
+
+        // This is the same fail-safe order as the runtime: preserve the interrupted tree, restore
+        // a named owned checkpoint, then resume. No provider or network process is involved.
+        let undo = coder.create_checkpoint(&spec.workdir).unwrap();
+        coder
+            .restore_checkpoint(&spec.workdir, &spec.checkpoint)
+            .unwrap();
+        std::fs::write(&source, "fn main() { assert_eq!(2 + 2, 4); }\n").unwrap();
+        let binary = run.join(format!("fixture-test{}", std::env::consts::EXE_SUFFIX));
+        let compile = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("the Rust test toolchain is available");
+        assert!(
+            compile.status.success(),
+            "resumed fixture must compile: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        assert!(
+            std::process::Command::new(&binary)
+                .status()
+                .expect("compiled frozen test runs")
+                .success(),
+            "the resumed artifact must pass its frozen test"
+        );
+
+        coder.restore_checkpoint(&spec.workdir, &undo).unwrap();
+        assert_eq!(
+            coder.artifact_sha256(&spec.workdir).unwrap(),
+            pre_resume_sha256,
+            "rollback must reproduce the exact pre-resume visible artifact"
+        );
+        assert!(run.join("PARTIAL.txt").is_file());
+        assert!(!binary.exists(), "rollback removes post-resume artifacts");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -1507,7 +2641,11 @@ mod iterate_tests {
         for v in ["SHIP", "ship", "  Ship.  ", "SHIP — looks solid"] {
             assert!(verdict_ships(v), "{v:?} should ship");
         }
-        for v in ["Fix the contrast before you ship", "1. broken nav\n2. SHIP the fixed css", "needs work"] {
+        for v in [
+            "Fix the contrast before you ship",
+            "1. broken nav\n2. SHIP the fixed css",
+            "needs work",
+        ] {
             assert!(!verdict_ships(v), "{v:?} must keep iterating");
         }
     }
@@ -1523,14 +2661,22 @@ mod iterate_tests {
             "rewrite the landing page component in crates/mind-web",
             "polish the settings page in the repo",
         ] {
-            assert_eq!(classify(t), "code", "existing source must go to the coder: {t}");
+            assert_eq!(
+                classify(t),
+                "code",
+                "existing source must go to the coder: {t}"
+            );
         }
         // Without a codebase signal the page nouns still mean a page.
         for t in [
             "create a stunning portfolio website for me",
             "make me a landing page for the product",
         ] {
-            assert_eq!(classify(t), "page", "a new standalone page stays a page: {t}");
+            assert_eq!(
+                classify(t),
+                "page",
+                "a new standalone page stays a page: {t}"
+            );
         }
     }
 
@@ -1538,7 +2684,12 @@ mod iterate_tests {
     /// work, not for reading. "improve the dashboard" used to route to research.
     #[test]
     fn improvement_verbs_are_make_verbs() {
-        for t in ["improve the dashboard", "redesign the cockpit app", "polish the CLI tool", "modernize the settings form"] {
+        for t in [
+            "improve the dashboard",
+            "redesign the cockpit app",
+            "polish the CLI tool",
+            "modernize the settings form",
+        ] {
             assert_ne!(classify(t), "research", "an improvement ask is work: {t}");
         }
     }
@@ -1548,8 +2699,12 @@ mod iterate_tests {
     #[test]
     fn a_verdict_must_look_like_a_review() {
         assert!(verdict_is_usable("SHIP"), "ship is always usable");
-        assert!(verdict_is_usable("1. Tune line-height to at least 1.6\n2. Differentiate the sub-line"));
-        assert!(verdict_is_usable("- the empty state hangs from the top\n- the fade erases data"));
+        assert!(verdict_is_usable(
+            "1. Tune line-height to at least 1.6\n2. Differentiate the sub-line"
+        ));
+        assert!(verdict_is_usable(
+            "- the empty state hangs from the top\n- the fade erases data"
+        ));
         // The exact reply that broke the loop.
         assert!(!verdict_is_usable(
             "I'll start by reading the current state of the files and understanding what we're working with, then write IDEAS.md before making any changes."
@@ -1558,9 +2713,13 @@ mod iterate_tests {
         assert!(!verdict_is_usable(""));
         assert!(!verdict_is_usable("   \n  "));
         // Prose with no enumerated finding is not the requested format.
-        assert!(!verdict_is_usable("This looks generally fine to me overall."));
+        assert!(!verdict_is_usable(
+            "This looks generally fine to me overall."
+        ));
         // A finding that uses first person mid-text is still a finding.
-        assert!(verdict_is_usable("1. I would tighten the rail hairlines; they read as borders."));
+        assert!(verdict_is_usable(
+            "1. I would tighten the rail hairlines; they read as borders."
+        ));
     }
 
     /// The dead-provider guard's sensor: identical snapshots mean no work happened; any size or
@@ -1578,7 +2737,10 @@ mod iterate_tests {
         assert_ne!(s1, s3, "an edit must change the fingerprint");
         std::fs::write(wd.join(".hidden"), "x").unwrap();
         let s4 = workdir_snapshot(&wd.to_string_lossy());
-        assert_eq!(s3, s4, "dotfiles are the agent's own state, not the artifact");
+        assert_eq!(
+            s3, s4,
+            "dotfiles are the agent's own state, not the artifact"
+        );
         std::fs::remove_dir_all(&wd).ok();
     }
 
@@ -1587,27 +2749,54 @@ mod iterate_tests {
     /// so the brief reads forward, and say out loud when it dropped something.
     #[test]
     fn history_block_is_bounded_and_keeps_the_newest_rounds() {
-        assert_eq!(history_block(&[], 4_000), "", "no rounds yet means no history section at all");
+        assert_eq!(
+            history_block(&[], 4_000),
+            "",
+            "no rounds yet means no history section at all"
+        );
 
-        let trail: Vec<String> = (1..=6).map(|n| format!("round {n}: touched a.js → critic still said: fix {n}")).collect();
+        let trail: Vec<String> = (1..=6)
+            .map(|n| format!("round {n}: touched a.js → critic still said: fix {n}"))
+            .collect();
 
         // Generous budget: every round survives, oldest first.
         let full = history_block(&trail, 4_000);
         let pos1 = full.find("round 1:").expect("oldest round present");
         let pos6 = full.find("round 6:").expect("newest round present");
-        assert!(pos1 < pos6, "rounds must read oldest-first so the brief runs forward into the findings");
-        assert!(!full.contains("omitted"), "nothing was dropped, so nothing should claim to be");
+        assert!(
+            pos1 < pos6,
+            "rounds must read oldest-first so the brief runs forward into the findings"
+        );
+        assert!(
+            !full.contains("omitted"),
+            "nothing was dropped, so nothing should claim to be"
+        );
 
         // Tight budget: the RECENT rounds are the ones that stop a repeated approach, so they win.
         let tight = history_block(&trail, 120);
-        assert!(tight.len() < full.len(), "a tight budget must actually bind");
-        assert!(tight.contains("round 6:"), "the newest round is the one a builder most needs");
-        assert!(!tight.contains("round 1:"), "the oldest round is dropped first");
-        assert!(tight.contains("omitted"), "a silent drop would misrepresent the history as complete");
+        assert!(
+            tight.len() < full.len(),
+            "a tight budget must actually bind"
+        );
+        assert!(
+            tight.contains("round 6:"),
+            "the newest round is the one a builder most needs"
+        );
+        assert!(
+            !tight.contains("round 1:"),
+            "the oldest round is dropped first"
+        );
+        assert!(
+            tight.contains("omitted"),
+            "a silent drop would misrepresent the history as complete"
+        );
 
         // Never drop everything: one oversized entry still comes through rather than vanishing.
         let huge = vec![format!("round 9: {}", "x".repeat(5_000))];
-        assert!(history_block(&huge, 100).contains("round 9:"), "a single oversized round must not be silently swallowed");
+        assert!(
+            history_block(&huge, 100).contains("round 9:"),
+            "a single oversized round must not be silently swallowed"
+        );
     }
 
     /// The critic reads the artifact itself. Excerpts respect the budget, mark binary files
@@ -1622,8 +2811,14 @@ mod iterate_tests {
         let ex = artifact_excerpt(&wd.to_string_lossy(), &files, 4_000);
         assert!(ex.len() <= 4_600, "budget overshot: {} bytes", ex.len());
         assert!(ex.contains("café"), "text content must be quoted");
-        assert!(ex.contains("binary — not shown"), "binary must be named, not quoted");
-        assert!(std::str::from_utf8(ex.as_bytes()).is_ok(), "must never split a UTF-8 char");
+        assert!(
+            ex.contains("binary — not shown"),
+            "binary must be named, not quoted"
+        );
+        assert!(
+            std::str::from_utf8(ex.as_bytes()).is_ok(),
+            "must never split a UTF-8 char"
+        );
         std::fs::remove_dir_all(&wd).ok();
     }
 }

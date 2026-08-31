@@ -37,6 +37,7 @@ pub const OFFER_EVERY_N_TURNS: u32 = 4;
 
 /// How long the listener will sit in silence before the exchange feels broken.
 pub const PATIENCE_MS: u64 = 900;
+const _: () = assert!(PATIENCE_MS < 1000);
 
 /// Estimated seconds of speech.
 pub fn spoken_secs(text: &str) -> f64 {
@@ -51,7 +52,14 @@ pub fn is_a_breath(text: &str) -> bool {
 /// Does the reply end by handing the conversation back with a question or an offer?
 pub fn ends_with_an_offer(text: &str) -> bool {
     let t = text.trim().to_lowercase();
-    let tail: String = t.chars().rev().take(140).collect::<String>().chars().rev().collect();
+    let tail: String = t
+        .chars()
+        .rev()
+        .take(140)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     // The list is what real replies actually end with, extended each time one slips through. It
     // missed "Want to start there?" on the very first live sample — the checker was written from
     // the forms I remembered rather than the forms the mind uses, which is the same mistake as
@@ -94,7 +102,7 @@ pub fn opens_with_preamble(text: &str) -> bool {
 
 /// Should this turn be allowed to end with an offer?
 pub fn may_offer(turn_index: u32) -> bool {
-    turn_index > 0 && turn_index % OFFER_EVERY_N_TURNS == 0
+    turn_index > 0 && turn_index.is_multiple_of(OFFER_EVERY_N_TURNS)
 }
 
 /// What is wrong with this turn, spoken aloud. Empty means it is fine to say.
@@ -113,7 +121,8 @@ pub fn faults(text: &str, turn_index: u32) -> Vec<&'static str> {
 }
 
 /// The instruction that produces a turn like this, given to the model when it will be heard.
-pub const FLOW_RULES: &str = "This is a spoken conversation, so answer like a person on the phone. \
+pub const FLOW_RULES: &str =
+    "This is a spoken conversation, so answer like a person on the phone. \
 Give the answer in the first sentence. Keep the whole turn to a couple of sentences — if there is \
 more, say the important part and let them ask. Do not open with an agenda or a summary of what you \
 are carrying. Do not end every turn by offering to do something; most turns should simply end. Use \
@@ -155,7 +164,10 @@ now, or shall I re-pull a live RELIANCE quote first?";
         assert!(!is_a_breath(REAL_REPLY));
         let f = faults(REAL_REPLY, 1);
         assert!(f.iter().any(|x| x.contains("too long")), "{f:?}");
-        assert!(f.iter().any(|x| x.contains("offer")), "it ends with a two-part offer: {f:?}");
+        assert!(
+            f.iter().any(|x| x.contains("offer")),
+            "it ends with a two-part offer: {f:?}"
+        );
     }
 
     #[test]
@@ -164,18 +176,26 @@ now, or shall I re-pull a live RELIANCE quote first?";
         // never met "Want to start there?" — written from the forms I remembered instead of the
         // forms the mind actually uses.
         assert!(ends_with_an_offer("If you give me your one entry rule, I can frame the first test trade. Want to start there?"));
-        assert!(ends_with_an_offer("It's flat. Let me know if you want Reliance too."));
+        assert!(ends_with_an_offer(
+            "It's flat. Let me know if you want Reliance too."
+        ));
         // A turn that simply stops is the target.
-        assert!(!ends_with_an_offer("Twenty four thousand and fifty three, down about a quarter percent."));
+        assert!(!ends_with_an_offer(
+            "Twenty four thousand and fifty three, down about a quarter percent."
+        ));
     }
 
     #[test]
     fn an_agenda_opening_is_caught() {
         // Real opening from the same conversation.
-        assert!(opens_with_preamble("Two things I'm carrying for you right now:"));
+        assert!(opens_with_preamble(
+            "Two things I'm carrying for you right now:"
+        ));
         assert!(opens_with_preamble("Here's the state: nothing changed."));
         // A plain answer is not a preamble.
-        assert!(!opens_with_preamble("It's at twenty four thousand fifty three, down a bit."));
+        assert!(!opens_with_preamble(
+            "It's at twenty four thousand fifty three, down a bit."
+        ));
     }
 
     #[test]
@@ -193,7 +213,10 @@ now, or shall I re-pull a live RELIANCE quote first?";
         assert!(may_offer(4));
         let with_offer = "It's flat. Want me to pull Reliance too?";
         assert!(ends_with_an_offer(with_offer));
-        assert!(faults(with_offer, 4).is_empty(), "allowed on the fourth turn");
+        assert!(
+            faults(with_offer, 4).is_empty(),
+            "allowed on the fourth turn"
+        );
         assert!(!faults(with_offer, 5).is_empty(), "not on the fifth");
     }
 
@@ -202,15 +225,11 @@ now, or shall I re-pull a live RELIANCE quote first?";
         // They are spoken BEFORE anything is known, so any content would be invention. They are also
         // pre-rendered, so they cost no time when the wait is already the problem.
         for l in HOLD_LINES {
-            assert!(l.split_whitespace().count() <= 4, "a hold line is short: {l}");
+            assert!(
+                l.split_whitespace().count() <= 4,
+                "a hold line is short: {l}"
+            );
             assert!(!crate::banter::asserts_the_pending_answer(l), "{l}");
         }
-    }
-
-    #[test]
-    fn the_latency_budget_is_stated_where_it_can_be_checked() {
-        // First token ~1000ms + whisper ~300ms + synth ~200ms is past what a caller tolerates, which
-        // is WHY hold lines are pre-rendered rather than generated.
-        assert!(PATIENCE_MS < 1000, "a caller does not wait a full second in silence");
     }
 }

@@ -66,7 +66,8 @@ fn cases() -> Vec<Case> {
             turn: "thanks, that's great",
             expect_tool: None,
             expect_arg: None,
-            why: "ACID TEST: a turn needing no tool must call none. Tool-happy models fail here and \
+            why:
+                "ACID TEST: a turn needing no tool must call none. Tool-happy models fail here and \
                   every spurious call costs a step, a second, and a chance to confabulate",
         },
         Case {
@@ -83,7 +84,10 @@ fn cases() -> Vec<Case> {
 fn schemas() -> Vec<serde_json::Value> {
     let t = |name: &str, desc: &str, arg: Option<&str>| {
         let (props, req) = match arg {
-            Some(a) => (serde_json::json!({ a: { "description": a } }), serde_json::json!([a])),
+            Some(a) => (
+                serde_json::json!({ a: { "description": a } }),
+                serde_json::json!([a]),
+            ),
             None => (serde_json::json!({}), serde_json::json!([])),
         };
         serde_json::json!({"type":"function","function":{
@@ -91,16 +95,40 @@ fn schemas() -> Vec<serde_json::Value> {
             "parameters": {"type":"object","properties": props, "required": req, "additionalProperties": true}}})
     };
     vec![
-        t("recall", "search your typed memory for what you already know about the user", Some("query")),
-        t("remember", "store a durable fact about the user or their world", Some("text")),
+        t(
+            "recall",
+            "search your typed memory for what you already know about the user",
+            Some("query"),
+        ),
+        t(
+            "remember",
+            "store a durable fact about the user or their world",
+            Some("text"),
+        ),
         t("now", "the current date and time", None),
-        t("weather", "current conditions and today's forecast for a city or town", Some("place")),
-        t("deals", "find and compare REAL purchasable deals on something", Some("query")),
+        t(
+            "weather",
+            "current conditions and today's forecast for a city or town",
+            Some("place"),
+        ),
+        t(
+            "deals",
+            "find and compare REAL purchasable deals on something",
+            Some("query"),
+        ),
         t("search", "web search — find pages or facts", Some("query")),
         t("web_fetch", "read a specific web page by URL", Some("url")),
         t("calendar", "the unified upcoming calendar view", None),
-        t("family", "the people tracked in the user's life and their key dates", None),
-        t("photo_send", "find a real photo in the user's library and send it", Some("query")),
+        t(
+            "family",
+            "the people tracked in the user's life and their key dates",
+            None,
+        ),
+        t(
+            "photo_send",
+            "find a real photo in the user's library and send it",
+            Some("query"),
+        ),
     ]
 }
 
@@ -118,7 +146,11 @@ pub struct BenchResult {
 
 impl BenchResult {
     pub fn render(&self) -> String {
-        let pct = if self.total == 0 { 0.0 } else { self.correct as f64 * 100.0 / self.total as f64 };
+        let pct = if self.total == 0 {
+            0.0
+        } else {
+            self.correct as f64 * 100.0 / self.total as f64
+        };
         let mut s = format!(
             "\n=== BRAIN BENCH — {} ===\n  tool selection: {}/{} ({pct:.0}%)\n",
             self.model, self.correct, self.total
@@ -166,7 +198,8 @@ impl BenchResult {
 /// the URL before the model.
 pub async fn bench(url: &str, key: Option<String>, model: &str) -> BenchResult {
     let backend = yantrik_ml::ApiLLM::new(url, key, model);
-    let pool = InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1).with_provider("bench");
+    let pool =
+        InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1).with_provider("bench");
     let tools = schemas();
     let mut r = BenchResult {
         model: model.to_string(),
@@ -184,12 +217,14 @@ pub async fn bench(url: &str, key: Option<String>, model: &str) -> BenchResult {
                        call a tool for the sake of it.";
     for c in cases() {
         r.total += 1;
-        let messages =
-            vec![ChatMessage::system(SYS), ChatMessage::user(c.turn)];
+        let messages = vec![ChatMessage::system(SYS), ChatMessage::user(c.turn)];
         let resp = pool
             .chat_scoped_tools(
                 messages,
-                GenerationConfig { max_tokens: 400, ..GenerationConfig::default() },
+                GenerationConfig {
+                    max_tokens: 400,
+                    ..GenerationConfig::default()
+                },
                 mind_inference::PrivacyScope::Public,
                 tools.clone(),
             )
@@ -198,24 +233,31 @@ pub async fn bench(url: &str, key: Option<String>, model: &str) -> BenchResult {
             r.missed.push(format!("{:?} — request failed", c.turn));
             continue;
         };
-        let called = resp.tool_calls.first().map(|t| (t.name.clone(), t.arguments.to_string()));
+        let called = resp
+            .tool_calls
+            .first()
+            .map(|t| (t.name.clone(), t.arguments.to_string()));
         if called.is_some() {
             r.no_native_calls = false;
         }
         match (called, c.expect_tool) {
             (None, None) => r.correct += 1, // correctly stayed quiet
-            (None, Some(want)) => r.missed.push(format!("{:?} — wanted {want} ({})", c.turn, c.why)),
-            (Some((got, _)), None) => {
-                r.spurious.push(format!("{:?} — called {got} ({})", c.turn, c.why))
-            }
+            (None, Some(want)) => r
+                .missed
+                .push(format!("{:?} — wanted {want} ({})", c.turn, c.why)),
+            (Some((got, _)), None) => r
+                .spurious
+                .push(format!("{:?} — called {got} ({})", c.turn, c.why)),
             (Some((got, args)), Some(want)) => {
                 if got != want {
-                    r.wrong_tool.push(format!("{:?} — got {got}, wanted {want}", c.turn));
+                    r.wrong_tool
+                        .push(format!("{:?} — got {got}, wanted {want}", c.turn));
                 } else if let Some(a) = c.expect_arg {
                     if args.to_lowercase().contains(a) {
                         r.correct += 1;
                     } else {
-                        r.bad_args.push(format!("{:?} — {got} args missing {a:?}: {args}", c.turn));
+                        r.bad_args
+                            .push(format!("{:?} — {got} args missing {a:?}: {args}", c.turn));
                     }
                 } else {
                     r.correct += 1;
@@ -238,7 +280,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "needs a live provider endpoint; costs tokens"]
     async fn brain_bench_candidate() {
-        let url = std::env::var("YM_BENCH_URL").unwrap_or_else(|_| "http://192.168.4.35:11434".into());
+        let url =
+            std::env::var("YM_BENCH_URL").unwrap_or_else(|_| "http://192.168.4.35:11434".into());
         let key = std::env::var("YM_BENCH_KEY").ok().filter(|k| !k.is_empty());
         let model = std::env::var("YM_BENCH_MODEL").unwrap_or_else(|_| "qwen3.6:27b".into());
         let r = bench(&url, key, &model).await;
@@ -253,22 +296,39 @@ mod tests {
     #[test]
     fn a_spurious_call_is_counted_against_a_candidate() {
         let mut r = BenchResult {
-            model: "x".into(), correct: 5, total: 6, wrong_tool: vec![],
+            model: "x".into(),
+            correct: 5,
+            total: 6,
+            wrong_tool: vec![],
             spurious: vec!["\"thanks, that's great\" — called search".into()],
-            missed: vec![], bad_args: vec![], no_native_calls: false,
+            missed: vec![],
+            bad_args: vec![],
+            no_native_calls: false,
         };
         let out = r.render();
         assert!(out.contains("called a tool when NONE was needed"), "{out}");
         assert!(out.contains("83%"), "score reflects the miss: {out}");
         r.no_native_calls = true;
-        assert!(r.render().contains("ignored the `tools` parameter"), "a non-tool-calling endpoint is flagged");
+        assert!(
+            r.render().contains("ignored the `tools` parameter"),
+            "a non-tool-calling endpoint is flagged"
+        );
     }
 
     #[test]
     fn the_workload_covers_selection_abstention_and_args() {
         let cs = cases();
-        assert!(cs.iter().any(|c| c.expect_tool.is_none()), "must test ABSTENTION, not just selection");
-        assert!(cs.iter().any(|c| c.expect_arg.is_some()), "must test that ARGS are usable");
-        assert!(schemas().len() >= 8, "candidates must choose from many similar tools, not one");
+        assert!(
+            cs.iter().any(|c| c.expect_tool.is_none()),
+            "must test ABSTENTION, not just selection"
+        );
+        assert!(
+            cs.iter().any(|c| c.expect_arg.is_some()),
+            "must test that ARGS are usable"
+        );
+        assert!(
+            schemas().len() >= 8,
+            "candidates must choose from many similar tools, not one"
+        );
     }
 }

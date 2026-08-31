@@ -50,9 +50,21 @@ pub fn parse_chart(body: &serde_json::Value) -> anyhow::Result<Series> {
             anyhow::anyhow!("{desc}")
         })?;
     let meta = result.get("meta").cloned().unwrap_or_default();
-    let symbol = meta.get("symbol").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    let currency = meta.get("currency").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    let exchange_tz = meta.get("exchangeTimezoneName").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let symbol = meta
+        .get("symbol")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let currency = meta
+        .get("currency")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let exchange_tz = meta
+        .get("exchangeTimezoneName")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let stamps: Vec<i64> = result
         .get("timestamp")
         .and_then(|t| t.as_array())
@@ -66,14 +78,25 @@ pub fn parse_chart(body: &serde_json::Value) -> anyhow::Result<Series> {
         .cloned()
         .unwrap_or_default();
     let col = |name: &str| -> Vec<Option<f64>> {
-        q.get(name).and_then(|v| v.as_array()).map(|a| a.iter().map(|x| x.as_f64()).collect()).unwrap_or_default()
+        q.get(name)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|x| x.as_f64()).collect())
+            .unwrap_or_default()
     };
-    let (o, h, l, c, v) = (col("open"), col("high"), col("low"), col("close"), col("volume"));
+    let (o, h, l, c, v) = (
+        col("open"),
+        col("high"),
+        col("low"),
+        col("close"),
+        col("volume"),
+    );
     let mut bars = Vec::new();
     for (i, ts) in stamps.iter().enumerate() {
         // A bar with no close is a gap in Yahoo's series (halts, holidays, pre-open padding).
         // Dropping it keeps the series honest; carrying it forward would invent a print.
-        let Some(close) = c.get(i).copied().flatten() else { continue };
+        let Some(close) = c.get(i).copied().flatten() else {
+            continue;
+        };
         bars.push(Bar {
             time: iso_from_epoch(*ts),
             open: o.get(i).copied().flatten().unwrap_or(close),
@@ -83,7 +106,12 @@ pub fn parse_chart(body: &serde_json::Value) -> anyhow::Result<Series> {
             volume: v.get(i).copied().flatten().unwrap_or(0.0),
         });
     }
-    Ok(Series { symbol, currency, exchange_tz, bars })
+    Ok(Series {
+        symbol,
+        currency,
+        exchange_tz,
+        bars,
+    })
 }
 
 /// Epoch seconds → the RFC-3339 form the rest of the pipeline speaks.
@@ -100,7 +128,15 @@ pub fn iso_from_epoch(secs: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 /// Fetch a series. `range` like "1d"/"5d"/"1mo"; `interval` like "1m"/"5m"/"1d".
@@ -156,7 +192,12 @@ mod tests {
     #[test]
     fn a_gap_bar_is_dropped_rather_than_invented() {
         let s = parse_chart(&envelope()).unwrap();
-        assert_eq!(s.bars.len(), 2, "the null-close bar is a gap, not a print: {:?}", s.bars);
+        assert_eq!(
+            s.bars.len(),
+            2,
+            "the null-close bar is a gap, not a print: {:?}",
+            s.bars
+        );
         assert_eq!(s.bars[0].close, 1313.9);
         assert_eq!(s.bars[1].close, 1315.5);
     }
@@ -166,7 +207,10 @@ mod tests {
         assert_eq!(iso_from_epoch(0), "1970-01-01T00:00:00Z");
         // And the round trip through the shadow parser must agree, or every timing is off.
         let iso = iso_from_epoch(1_787_047_200);
-        assert_eq!(crate::shadow::parse_rfc3339_ms(&iso), Some(1_787_047_200_000));
+        assert_eq!(
+            crate::shadow::parse_rfc3339_ms(&iso),
+            Some(1_787_047_200_000)
+        );
     }
 
     #[test]

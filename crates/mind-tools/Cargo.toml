@@ -3,6 +3,9 @@ name = "mind-tools"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -15,6 +18,7 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = "0.10"
 ureq = { version = "2", features = ["json"] }
 html2text = "0.12"
 imap = "2"

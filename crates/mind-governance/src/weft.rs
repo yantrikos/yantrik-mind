@@ -84,7 +84,9 @@ impl WeftAttestor {
 
     pub fn new(base: &str, key_hex: &str) -> Result<Self, String> {
         let seed = unhexs(key_hex.trim())?;
-        let seed: [u8; 32] = seed.try_into().map_err(|_| "YM_WEFT_KEY must be 32 bytes (64 hex chars)".to_string())?;
+        let seed: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| "YM_WEFT_KEY must be 32 bytes (64 hex chars)".to_string())?;
         let sk = SigningKey::from_bytes(&seed);
         let pub_hex = hexs(sk.verifying_key().as_bytes());
         Ok(Self {
@@ -125,7 +127,11 @@ impl WeftAttestor {
             return Ok(r);
         }
         let p = self.get("/policy")?;
-        let repo = p.get("repo").and_then(|r| r.as_str()).ok_or("weft has no repository yet")?.to_string();
+        let repo = p
+            .get("repo")
+            .and_then(|r| r.as_str())
+            .ok_or("weft has no repository yet")?
+            .to_string();
         *self.repo.lock().unwrap() = Some(repo.clone());
         Ok(repo)
     }
@@ -156,7 +162,10 @@ impl Attestor for WeftAttestor {
         // weftd canonicalizes and returns the exact bytes to sign — the client never guesses the
         // encoding, which is why this needs no CBOR implementation here.
         let prep = self.post("/prepare", &env)?;
-        let payload_hex = prep.get("payload").and_then(|p| p.as_str()).ok_or("prepare: no payload")?;
+        let payload_hex = prep
+            .get("payload")
+            .and_then(|p| p.as_str())
+            .ok_or("prepare: no payload")?;
         let payload = unhexs(payload_hex)?;
         let sig = self.sk.sign(&payload).to_bytes();
         let mut signed = env;
@@ -165,7 +174,14 @@ impl Attestor for WeftAttestor {
         out.get("oid")
             .and_then(|o| o.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| format!("submit: {}", out.get("error").and_then(|e| e.as_str()).unwrap_or("no oid")))
+            .ok_or_else(|| {
+                format!(
+                    "submit: {}",
+                    out.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("no oid")
+                )
+            })
     }
 }
 
@@ -175,7 +191,7 @@ fn hexs(b: &[u8]) -> String {
 
 fn unhexs(s: &str) -> Result<Vec<u8>, String> {
     let s = s.strip_prefix("hex:").unwrap_or(s);
-    if s.len() % 2 != 0 {
+    if s.len() & 1 != 0 {
         return Err("odd-length hex".into());
     }
     (0..s.len())
@@ -201,7 +217,10 @@ mod tests {
         assert!(t.contains("digest: sha256:"));
         assert!(t.contains("✓ skill_exists(csv summer)"));
         // a demotion is legible as its own claim
-        let d = Attestation { verdict: false, ..a };
+        let d = Attestation {
+            verdict: false,
+            ..a
+        };
         assert!(d.note_text().starts_with("DEMOTED"));
     }
 

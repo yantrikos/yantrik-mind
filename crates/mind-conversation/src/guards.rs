@@ -93,20 +93,26 @@ pub(crate) async fn pre(
     // The provenance snapshot is cloned out of the lock; append-only, so the worst staleness can
     // do is clean-author a URL it could have passed through — the safe direction.
     let provenance = state.lock().unwrap().external_obs.clone();
-    let args = match engine.egress_clean_args(tool, user_text, grounded, &provenance).await {
-        Some(a) => a,
-        None => {
-            return PreVerdict::Refuse {
-                kind: RefusalKind::EgressUnsafe,
-                msg: format!("(I couldn't compose a safe outbound request for {tool} without pulling in private context — tell me the exact terms you want me to search/fetch)"),
-            }
-        }
+    let Some(args) = engine
+        .egress_clean_args(tool, user_text, grounded, &provenance)
+        .await
+    else {
+        return PreVerdict::Refuse {
+            kind: RefusalKind::EgressUnsafe,
+            msg: format!("(I couldn't compose a safe outbound request for {tool} without pulling in private context — tell me the exact terms you want me to search/fetch)"),
+        };
     };
     // The high-precision exact-value tripwire — a distinctive stored private value the model
     // injected that the user did not type. Catches the residue clean planning can't.
-    if let Some(msg) = engine.model_injected_private_value(tool, &args, user_text, id).await {
+    if let Some(msg) = engine
+        .model_injected_private_value(tool, &args, user_text, id)
+        .await
+    {
         eprintln!("[egress] {ctx}: blocked exact-value exfil via {tool}");
-        return PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, msg };
+        return PreVerdict::Refuse {
+            kind: RefusalKind::EgressUnsafe,
+            msg,
+        };
     }
     PreVerdict::Proceed(args)
 }
@@ -134,7 +140,10 @@ pub(crate) async fn post(
     // already outside.
     // A malformed-call refusal is the runtime's own text, not something that came back from outside.
     if outcome != crate::tool_outcome::Outcome::Malformed
-        && matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_)))
+        && matches!(
+            mind_governance::egress::classify(tool),
+            Some(mind_governance::egress::EgressClass::External(_))
+        )
     {
         s.external_obs.push_str(obs);
         s.external_obs.push('\n');
@@ -158,10 +167,16 @@ mod tests {
 
     fn engine(mem: &MemoryHandle) -> ConversationEngine {
         let pool = mind_inference::InferencePool::new(
-            Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"clean authored"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+            Arc::new(mind_inference::ScriptedLLM::new(
+                r#"{"query":"clean authored"}"#,
+            )) as Arc<dyn yantrik_ml::LLMBackend>,
             1,
         );
-        ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+        ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        )
     }
 
     /// The ban lifecycle across pre and post: first call proceeds, the unavailable observation
@@ -173,7 +188,17 @@ mod tests {
         let state = Mutex::new(GuardState::default());
         let id = TurnIdentity::primary();
 
-        match pre(&eng, &state, &id, "check my PRs", "github_repo_items", serde_json::json!({"repo":"a/x"}), "t").await {
+        match pre(
+            &eng,
+            &state,
+            &id,
+            "check my PRs",
+            "github_repo_items",
+            serde_json::json!({"repo":"a/x"}),
+            "t",
+        )
+        .await
+        {
             PreVerdict::Proceed(_) => {}
             PreVerdict::Refuse { msg, .. } => panic!("first call must dispatch: {msg}"),
         }
@@ -181,8 +206,21 @@ mod tests {
         assert_eq!(o, Outcome::Unavailable);
         assert!(is_unavailable(&state, "github_repo_items"));
 
-        match pre(&eng, &state, &id, "check my PRs", "github_repo_items", serde_json::json!({"repo":"a/DIFFERENT"}), "t").await {
-            PreVerdict::Refuse { kind: RefusalKind::Unavailable, .. } => {}
+        match pre(
+            &eng,
+            &state,
+            &id,
+            "check my PRs",
+            "github_repo_items",
+            serde_json::json!({"repo":"a/DIFFERENT"}),
+            "t",
+        )
+        .await
+        {
+            PreVerdict::Refuse {
+                kind: RefusalKind::Unavailable,
+                ..
+            } => {}
             _ => panic!("a known-unavailable tool must never re-dispatch, whatever the args"),
         }
     }
@@ -199,29 +237,67 @@ mod tests {
             let pool = mind_inference::InferencePool::new(
                 // The clean planner is scripted to MANGLE any url — pass-through is only provable
                 // when this reply does NOT come back.
-                Arc::new(mind_inference::ScriptedLLM::new(r#"{"url":"https://mangled.example/x"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+                Arc::new(mind_inference::ScriptedLLM::new(
+                    r#"{"url":"https://mangled.example/x"}"#,
+                )) as Arc<dyn yantrik_ml::LLMBackend>,
                 1,
             );
-            ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
-                .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+            ConversationEngine::new(
+                Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+                pool,
+                "JARVIS",
+            )
+            .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
         };
         let state = Mutex::new(GuardState::default());
         let id = TurnIdentity::primary();
 
         // An external search "returned" a link this turn.
-        let _ = post(&eng, &state, "search", "1. An article — https://example.com/article-42").await;
+        let _ = post(
+            &eng,
+            &state,
+            "search",
+            "1. An article — https://example.com/article-42",
+        )
+        .await;
 
         // Fetching that link passes through untouched…
-        let v = pre(&eng, &state, &id, "research the thing", "web_fetch", serde_json::json!({"url":"https://example.com/article-42"}), "t").await;
+        let v = pre(
+            &eng,
+            &state,
+            &id,
+            "research the thing",
+            "web_fetch",
+            serde_json::json!({"url":"https://example.com/article-42"}),
+            "t",
+        )
+        .await;
         match v {
-            PreVerdict::Proceed(args) => assert_eq!(args["url"], "https://example.com/article-42", "provenanced URL must dispatch exactly as chosen"),
+            PreVerdict::Proceed(args) => assert_eq!(
+                args["url"], "https://example.com/article-42",
+                "provenanced URL must dispatch exactly as chosen"
+            ),
             PreVerdict::Refuse { msg, .. } => panic!("must proceed: {msg}"),
         }
         // …while an invented one is re-authored by the clean planner.
-        let v = pre(&eng, &state, &id, "research the thing", "web_fetch", serde_json::json!({"url":"https://invented.example/nowhere"}), "t").await;
+        let v = pre(
+            &eng,
+            &state,
+            &id,
+            "research the thing",
+            "web_fetch",
+            serde_json::json!({"url":"https://invented.example/nowhere"}),
+            "t",
+        )
+        .await;
         match v {
-            PreVerdict::Proceed(args) => assert_eq!(args["url"], "https://mangled.example/x", "an unprovenanced URL must be clean-authored"),
-            PreVerdict::Refuse { msg, .. } => panic!("clean-authoring should have produced args: {msg}"),
+            PreVerdict::Proceed(args) => assert_eq!(
+                args["url"], "https://mangled.example/x",
+                "an unprovenanced URL must be clean-authored"
+            ),
+            PreVerdict::Refuse { msg, .. } => {
+                panic!("clean-authoring should have produced args: {msg}")
+            }
         }
     }
 
@@ -240,19 +316,31 @@ mod tests {
                 provenance: "told".into(),
             })
             .await;
-        let eng = engine(&mem).with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+        let eng =
+            engine(&mem).with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
         let state = Mutex::new(GuardState::default());
         let id = TurnIdentity::primary();
 
         // github is external but NOT clean-authored (not eligible) — exactly the residue the
         // tripwire exists for.
-        let v = pre(&eng, &state, &id, "check the repo", "github_repo_items", serde_json::json!({"repo":"a/x","query":"secret.owner@example.com"}), "t").await;
+        let v = pre(
+            &eng,
+            &state,
+            &id,
+            "check the repo",
+            "github_repo_items",
+            serde_json::json!({"repo":"a/x","query":"secret.owner@example.com"}),
+            "t",
+        )
+        .await;
         match v {
             PreVerdict::Refuse { kind, msg } => {
                 assert_eq!(kind, RefusalKind::EgressUnsafe);
                 assert!(msg.contains("private detail"), "{msg}");
             }
-            PreVerdict::Proceed(a) => panic!("a stored private value the user never typed must not leave: {a}"),
+            PreVerdict::Proceed(a) => {
+                panic!("a stored private value the user never typed must not leave: {a}")
+            }
         }
     }
 
@@ -264,9 +352,23 @@ mod tests {
         let eng = engine(&mem);
         let state = Mutex::new(GuardState::default());
         let wrapped = serde_json::json!({"text": [2026, 8, 15]});
-        match pre(&eng, &state, &TurnIdentity::primary(), "hi", "remember", wrapped, "t").await {
+        match pre(
+            &eng,
+            &state,
+            &TurnIdentity::primary(),
+            "hi",
+            "remember",
+            wrapped,
+            "t",
+        )
+        .await
+        {
             PreVerdict::Proceed(args) => {
-                assert_eq!(args, normalize_tool_args(serde_json::json!({"text": [2026, 8, 15]})), "the pipeline output IS the normalized form");
+                assert_eq!(
+                    args,
+                    normalize_tool_args(serde_json::json!({"text": [2026, 8, 15]})),
+                    "the pipeline output IS the normalized form"
+                );
             }
             PreVerdict::Refuse { msg, .. } => panic!("{msg}"),
         }

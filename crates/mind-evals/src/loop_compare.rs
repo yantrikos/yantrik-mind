@@ -95,7 +95,8 @@ fn answer(text: &str) -> String {
     serde_json::json!({ "thought": "done", "answer": text }).to_string()
 }
 fn verb_call(t: &str, args: serde_json::Value) -> String {
-    serde_json::json!({ "verb": "CALL_TOOL", "target": t, "args": args, "why": "NEED_EVIDENCE" }).to_string()
+    serde_json::json!({ "verb": "CALL_TOOL", "target": t, "args": args, "why": "NEED_EVIDENCE" })
+        .to_string()
 }
 fn learned_finish(claim: &str, ev: &str) -> String {
     format!(
@@ -103,7 +104,12 @@ fn learned_finish(claim: &str, ev: &str) -> String {
     )
 }
 fn budget(max_steps: u32) -> Budget {
-    Budget { max_steps, max_model_calls: 12, max_wall_ms: 60_000, max_usd: None }
+    Budget {
+        max_steps,
+        max_model_calls: 12,
+        max_wall_ms: 60_000,
+        max_usd: None,
+    }
 }
 
 /// The paired suite. Each pair states its equalized goal and its graded outcome.
@@ -228,8 +234,16 @@ mod tests {
         let rows = run_pairs(&pairs()).await;
         let table = render(&rows);
         for r in &rows {
-            assert_eq!(r.legacy.passed, r.legacy.total, "legacy failed '{}':\n{table}", r.name);
-            assert_eq!(r.cognitive.passed, r.cognitive.total, "cognitive failed '{}':\n{table}", r.name);
+            assert_eq!(
+                r.legacy.passed, r.legacy.total,
+                "legacy failed '{}':\n{table}",
+                r.name
+            );
+            assert_eq!(
+                r.cognitive.passed, r.cognitive.total,
+                "cognitive failed '{}':\n{table}",
+                r.name
+            );
         }
     }
 }

@@ -67,8 +67,12 @@ impl GPhotosClient {
     /// Configured only when the OAuth client env is present. Absent → the `gphotos` surface explains
     /// the one-time Google Cloud setup instead of failing silently.
     pub fn from_env() -> Option<GPhotosClient> {
-        let client_id = std::env::var("YM_GPHOTOS_CLIENT_ID").ok().filter(|s| !s.trim().is_empty())?;
-        let client_secret = std::env::var("YM_GPHOTOS_CLIENT_SECRET").ok().filter(|s| !s.trim().is_empty())?;
+        let client_id = std::env::var("YM_GPHOTOS_CLIENT_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())?;
+        let client_secret = std::env::var("YM_GPHOTOS_CLIENT_SECRET")
+            .ok()
+            .filter(|s| !s.trim().is_empty())?;
         let token_path = std::env::var("YM_GPHOTOS_TOKEN_PATH")
             .unwrap_or_else(|_| "/var/lib/yantrik-mind/gphotos.json".to_string());
         Some(GPhotosClient {
@@ -82,8 +86,7 @@ impl GPhotosClient {
         std::fs::read_to_string(&self.token_path)
             .ok()
             .and_then(|s| serde_json::from_str::<GpToken>(&s).ok())
-            .map(|t| !t.refresh_token.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|t| !t.refresh_token.is_empty())
     }
 
     /// Step 1 of device-code auth: the code + URL the user enters on their phone.
@@ -122,7 +125,13 @@ impl GPhotosClient {
     }
 
     /// Step 2: poll until the user approves (or timeout). Persists the token on success.
-    pub async fn poll_auth(&self, device_code: &str, interval: u64, expires_in: u64, now_secs: i64) -> anyhow::Result<bool> {
+    pub async fn poll_auth(
+        &self,
+        device_code: &str,
+        interval: u64,
+        expires_in: u64,
+        now_secs: i64,
+    ) -> anyhow::Result<bool> {
         let (client_id, client_secret, token_path, device_code) = (
             self.client_id.clone(),
             self.client_secret.clone(),
@@ -130,18 +139,21 @@ impl GPhotosClient {
             device_code.to_string(),
         );
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(expires_in.min(900));
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(expires_in.min(900));
             loop {
                 if std::time::Instant::now() >= deadline {
                     return Ok(false);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(interval.max(5)));
-                let resp = ureq::post(TOKEN).timeout(std::time::Duration::from_secs(20)).send_form(&[
-                    ("client_id", &client_id),
-                    ("client_secret", &client_secret),
-                    ("device_code", &device_code),
-                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                ]);
+                let resp = ureq::post(TOKEN)
+                    .timeout(std::time::Duration::from_secs(20))
+                    .send_form(&[
+                        ("client_id", &client_id),
+                        ("client_secret", &client_secret),
+                        ("device_code", &device_code),
+                        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    ]);
                 match resp {
                     Ok(r) => {
                         let j: serde_json::Value = r.into_json()?;
@@ -155,7 +167,10 @@ impl GPhotosClient {
                             #[cfg(unix)]
                             {
                                 use std::os::unix::fs::PermissionsExt;
-                                let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+                                let _ = std::fs::set_permissions(
+                                    &token_path,
+                                    std::fs::Permissions::from_mode(0o600),
+                                );
                             }
                             return Ok(true);
                         }
@@ -212,8 +227,7 @@ impl GPhotosClient {
             let poll = j["pollingConfig"]["pollInterval"]
                 .as_str()
                 .and_then(|s| s.trim_end_matches('s').parse::<f64>().ok())
-                .map(|f| f.ceil() as u64)
-                .unwrap_or(5);
+                .map_or(5, |f| f.ceil() as u64);
             Ok(PickSession {
                 id: j["id"].as_str().unwrap_or("").to_string(),
                 picker_uri: j["pickerUri"].as_str().unwrap_or("").to_string(),
@@ -224,7 +238,12 @@ impl GPhotosClient {
     }
 
     /// Poll a picker session until the user has finished picking (mediaItemsSet) or timeout.
-    pub async fn poll_session(&self, session_id: &str, poll_interval: u64, now_secs: i64) -> anyhow::Result<bool> {
+    pub async fn poll_session(
+        &self,
+        session_id: &str,
+        poll_interval: u64,
+        now_secs: i64,
+    ) -> anyhow::Result<bool> {
         let (this, sid) = (self.dupe(), session_id.to_string());
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
@@ -251,7 +270,12 @@ impl GPhotosClient {
     }
 
     /// The photos the user picked in this session (paged, capped).
-    pub async fn list_picked(&self, session_id: &str, cap: usize, now_secs: i64) -> anyhow::Result<Vec<GpItem>> {
+    pub async fn list_picked(
+        &self,
+        session_id: &str,
+        cap: usize,
+        now_secs: i64,
+    ) -> anyhow::Result<Vec<GpItem>> {
         let (this, sid) = (self.dupe(), session_id.to_string());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<GpItem>> {
             let token = this.access(now_secs)?;
@@ -272,7 +296,10 @@ impl GPhotosClient {
                     out.push(GpItem {
                         id: it["id"].as_str().unwrap_or("").to_string(),
                         filename: mf["filename"].as_str().unwrap_or("photo.jpg").to_string(),
-                        created: it["createTime"].as_str().map(|d| d.chars().take(10).collect()).unwrap_or_default(),
+                        created: it["createTime"]
+                            .as_str()
+                            .map(|d| d.chars().take(10).collect())
+                            .unwrap_or_default(),
                         mime: mf["mimeType"].as_str().unwrap_or("image/jpeg").to_string(),
                         base_url: mf["baseUrl"].as_str().unwrap_or("").to_string(),
                     });
@@ -304,7 +331,10 @@ impl GPhotosClient {
                 .ok()?;
             let mut buf: Vec<u8> = Vec::new();
             use std::io::Read;
-            resp.into_reader().take(20 * 1024 * 1024).read_to_end(&mut buf).ok()?;
+            resp.into_reader()
+                .take(20 * 1024 * 1024)
+                .read_to_end(&mut buf)
+                .ok()?;
             Some(buf)
         })
         .await

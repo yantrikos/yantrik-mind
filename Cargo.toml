@@ -26,7 +26,7 @@ async-trait = "0.1"
 uuid7 = "1"
 
 # reused foundations (local path to the yantrik-companion workspace crates)
-# yantrikdb-core: upgraded to standalone yantrikdb 0.9.0 (package `yantrikdb`), which ships
+# yantrikdb-core: pinned to standalone yantrikdb 0.18.0 (package `yantrikdb`), which ships
 # the in-process BundledEmbedder (potion-base-2M, dim 64) ON BY DEFAULT — so `record_text`/
 # `recall_text` and semantic recall Just Work with no external server, no candle, no download.
 # `package=` rename keeps every `use yantrikdb_core::…` site compiling unchanged.
@@ -36,13 +36,12 @@ uuid7 = "1"
 # whenever someone worked there. 0.18.0 also fixes the pack-mount regression that made E.PK4's
 # attach-harm wall unrunnable in this repo's own harness (0.16 could mount no 0.15-sealed pack).
 # To test against an unpublished engine, override this ONE line locally and say so in the ledger.
-# EXACT, not a range. `version = "0.18"` is caret `^0.18` to Cargo, so a future 0.18.1 would have
-# changed the substrate silently — and this repo does not track Cargo.lock (.gitignore:2), so there
-# would be no committed evidence of what was actually resolved. `=0.18.0` is the pin the comment
-# above already claimed to be (Codex's review of E.18b). Resolved artifact, recorded in E.18c:
+# EXACT, not a range. `version = "0.18"` is caret `^0.18` to Cargo, so before E.19 tracked
+# Cargo.lock a future 0.18.1 could have changed the substrate silently. `=0.18.0` is the pin the
+# comment above already claimed to be (Codex's review of E.18b). Resolved artifact, recorded in E.18c:
 # yantrikdb 0.18.0, checksum 8ff1ffe72dc393998df748020b12134eaaa1a1fb85d653c632f28c6fb06bbb42.
-# NOTE the limit: this pins the ENGINE exactly. The rest of the dependency graph still floats,
-# because the lockfile is untracked — see E.18c's residual.
+# Cargo.lock is tracked for this application workspace (E.19), committing the full tested resolution;
+# the exact requirement additionally makes the engine substrate choice visible here.
 yantrikdb-core = { version = "=0.18.0", package = "yantrikdb" }
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml", default-features = false }
 yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
@@ -69,17 +68,8 @@ mind-identity = { path = "crates/mind-identity" }
 # see the crate docs for why that boundary is load-bearing.
 mind-spec = { path = "crates/mind-spec" }
 
-# yantrikdb-core git-deps yantrik-ml; redirect both git URLs to the local crates
-# (mirrors the yantrik-companion workspace patch set).
+# The published engine still reaches yantrik-ml through its historical git source; redirect that
+# one dependency to the companion workspace. The former yantrikdb-core patch was removed after the
+# package became `yantrikdb`: Cargo could never select the old 0.1.0 package and warned on every run.
 [patch."https://github.com/yantrikos/yantrik-ml.git"]
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml" }
-[patch."https://github.com/yantrikos/yantrikdb.git"]
-yantrikdb-core = { path = "../yantrik-companion/crates/yantrikdb-core" }
-
-# keep heavy local-inference deps optimized even in dev (matches companion)
-[profile.dev.package.candle-core]
-opt-level = 2
-[profile.dev.package.candle-nn]
-opt-level = 2
-[profile.dev.package.candle-transformers]
-opt-level = 2

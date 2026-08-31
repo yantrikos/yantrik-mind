@@ -10,7 +10,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Kind { Assert, Supersede, Retract, Expire }
+pub enum Kind {
+    Assert,
+    Supersede,
+    Retract,
+    Expire,
+}
 
 /// A fact arriving from an authoritative source. Identity is the SOURCE EVENT's id — the same
 /// id arriving twice is one semantic event, whatever its payload (I6).
@@ -48,16 +53,21 @@ pub enum IngestResult {
     /// Same source_event_id already ingested — no second semantic event.
     Duplicate,
     /// New evidence; `corroborates` counts PRIOR independent witnesses of the same proposition.
-    Applied { transition_id: u64, corroborates: usize },
+    Applied {
+        transition_id: u64,
+        corroborates: usize,
+    },
 }
 
 /// A NAMED deterministic conflict-resolution rule (E1: registered only, never implicit
 /// last-write-wins). Applies only when multiple distinct-source claims are live.
+pub type ResolutionFn = dyn Fn(&[Claim]) -> Option<String> + Send + Sync;
+
 pub struct ResolutionRule {
     pub id: &'static str,
     pub version: u32,
     /// Some(winning_value) iff this rule resolves the claim set.
-    pub apply: Box<dyn Fn(&[Claim]) -> Option<String> + Send + Sync>,
+    pub apply: Box<ResolutionFn>,
 }
 
 /// One live claim handed to resolution rules.
@@ -69,13 +79,15 @@ pub struct Claim<'a> {
 
 /// A REGISTERED deterministic derivation (E1/W4): named + versioned + declared inputs. The
 /// producer re-runs against currently warranted inputs on every query.
+pub type DerivationFn = dyn Fn(&[Option<&StateAt>]) -> Option<String> + Send + Sync;
+
 pub struct DerivationRule {
     pub id: &'static str,
     pub version: u32,
     pub entity: String,
     pub attr: String,
     pub consumes: Vec<(String, String)>,
-    pub produce: Box<dyn Fn(&[Option<&StateAt>]) -> Option<String> + Send + Sync>,
+    pub produce: Box<DerivationFn>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +110,9 @@ pub enum StateAt {
     Expired,
 }
 
+pub type PurposeGate = dyn Fn(&mind_types::AccessContext, &str) -> bool + Send + Sync;
+pub type Lineage<'a> = (&'a str, u32, &'a [(String, String)]);
+
 pub struct WorldLog {
     transitions: Vec<WorldTransition>,
     seen_event_ids: HashSet<String>,
@@ -112,7 +127,7 @@ pub struct WorldLog {
     derivations: Vec<DerivationRule>,
     /// Purpose gate at the world boundary (A6/I5): None = construction-phase allow-all;
     /// production logs set this BEFORE any consumer query exists (W5).
-    gate: Option<Box<dyn Fn(&mind_types::AccessContext, &str) -> bool + Send + Sync>>,
+    gate: Option<Box<PurposeGate>>,
 }
 
 impl Default for WorldLog {
@@ -131,7 +146,9 @@ impl Default for WorldLog {
 }
 
 impl WorldLog {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Register a named resolution rule (the ONLY way many claims become one value).
     pub fn with_rule(mut self, rule: ResolutionRule) -> Self {
@@ -153,7 +170,7 @@ impl WorldLog {
     /// Install the purpose gate (W5). After this call, EVERY state_at query is checked against
     /// the caller's AccessContext; denied entities read as Unknown — absence of authorization
     /// is indistinguishable from absence of fact, exactly as A6 requires.
-    pub fn with_gate(mut self, g: Box<dyn Fn(&mind_types::AccessContext, &str) -> bool + Send + Sync>) -> Self {
+    pub fn with_gate(mut self, g: Box<PurposeGate>) -> Self {
         self.gate = Some(g);
         self
     }
@@ -180,9 +197,14 @@ impl WorldLog {
             return StateAt::Unknown; // cyclic derivation graph: refuse, never loop
         }
         for d in self.derivations.iter().filter(|d| d.entity == entity) {
-            let inputs: Vec<Option<StateAt>> = d.consumes.iter()
+            let inputs: Vec<Option<StateAt>> = d
+                .consumes
+                .iter()
                 .map(|(e, a)| {
-                    let has_raw = self.transitions.iter().any(|t| t.entity == *e && t.attr == *a);
+                    let has_raw = self
+                        .transitions
+                        .iter()
+                        .any(|t| t.entity == *e && t.attr == *a);
                     if has_raw || depth > 8 {
                         Some(self.state_at(e, a, q))
                     } else if self.derivations.iter().any(|d2| d2.entity == *e) {
@@ -201,7 +223,7 @@ impl WorldLog {
     }
 
     /// W5 helper: lineage of one derivation, for `world why`.
-    pub fn lineage_of(&self, entity: &str) -> Option<(&str, u32, &[(String, String)])> {
+    pub fn lineage_of(&self, entity: &str) -> Option<Lineage<'_>> {
         self.derivations
             .iter()
             .find(|d| d.entity == entity)
@@ -209,7 +231,7 @@ impl WorldLog {
     }
 
     /// Ingest one event. Deterministic: identity dedup first; everything else becomes a
-    /// transition with the next stable seq/tid. Ordering authority lives in [`replay`].
+    /// transition with the next stable seq/tid. Ordering authority lives in [`Self::replay`].
     pub fn ingest(&mut self, ev: &WorldEvent) -> IngestResult {
         if !self.seen_event_ids.insert(ev.source_event_id.clone()) {
             return IngestResult::Duplicate;
@@ -217,7 +239,12 @@ impl WorldLog {
         let corroborates = self
             .transitions
             .iter()
-            .filter(|t| t.kind == Kind::Assert && t.entity == ev.entity && t.attr == ev.attr && t.value == ev.value)
+            .filter(|t| {
+                t.kind == Kind::Assert
+                    && t.entity == ev.entity
+                    && t.attr == ev.attr
+                    && t.value == ev.value
+            })
             .count();
         self.next_tid += 1;
         self.next_seq += 1;
@@ -235,7 +262,10 @@ impl WorldLog {
         };
         let tid = t.transition_id;
         self.transitions.push(t);
-        IngestResult::Applied { transition_id: tid, corroborates }
+        IngestResult::Applied {
+            transition_id: tid,
+            corroborates,
+        }
     }
 
     /// Canonical deterministic replay (I6): same event SET, any arrival order/batching →
@@ -243,8 +273,11 @@ impl WorldLog {
     pub fn replay(events: &[WorldEvent]) -> WorldLog {
         let mut sorted: Vec<&WorldEvent> = events.iter().collect();
         sorted.sort_by(|a, b| {
-            (a.occurred_at, a.observed_at, a.source_event_id.as_str())
-                .cmp(&(b.occurred_at, b.observed_at, b.source_event_id.as_str()))
+            (a.occurred_at, a.observed_at, a.source_event_id.as_str()).cmp(&(
+                b.occurred_at,
+                b.observed_at,
+                b.source_event_id.as_str(),
+            ))
         });
         let mut log = WorldLog::new();
         for ev in sorted {
@@ -253,9 +286,15 @@ impl WorldLog {
         log
     }
 
-    pub fn transitions(&self) -> &[WorldTransition] { &self.transitions }
-    pub fn len(&self) -> u64 { self.next_seq }
-    pub fn is_empty(&self) -> bool { self.transitions.is_empty() }
+    pub fn transitions(&self) -> &[WorldTransition] {
+        &self.transitions
+    }
+    pub fn len(&self) -> u64 {
+        self.next_seq
+    }
+    pub fn is_empty(&self) -> bool {
+        self.transitions.is_empty()
+    }
 
     /// THE BI-TEMPORAL CUT + EPISTEMIC STATE (W2+W3).
     ///
@@ -313,11 +352,14 @@ impl WorldLog {
             }
         }
         // Per-source newest claim (each live witness speaks once).
-        let mut per_source: std::collections::HashMap<&str, &WorldTransition> = std::collections::HashMap::new();
+        let mut per_source: std::collections::HashMap<&str, &WorldTransition> =
+            std::collections::HashMap::new();
         for t in &relevant {
             match t.kind {
                 Kind::Assert | Kind::Supersede => {
-                    if latest_action.get(t.source_id.as_str()).map(|la| la.kind) == Some(Kind::Retract) {
+                    if latest_action.get(t.source_id.as_str()).map(|la| la.kind)
+                        == Some(Kind::Retract)
+                    {
                         continue; // this witness has withdrawn itself
                     }
                     if let Some(sup) = latest_supersede {
@@ -335,7 +377,8 @@ impl WorldLog {
         }
         if per_source.is_empty() {
             return StateAt::Unknown; // every witness withdrew; nothing warrants a value
-        }        let mut claims: Vec<&WorldTransition> = per_source.values().copied().collect();
+        }
+        let mut claims: Vec<&WorldTransition> = per_source.values().copied().collect();
         claims.sort_by_key(|t| (t.occurred_at, t.recorded_seq));
         // Collapse same-value witnesses; differing remaining values = live conflict.
         // Found by the W7 adversarial month (classified MISSING SEMANTIC before fixing):
@@ -357,14 +400,21 @@ impl WorldLog {
             let winner = *distinct.last().unwrap();
             let age = q.known_at.saturating_sub(winner.observed_at);
             return if age > self.freshness_ms {
-                StateAt::Stale { value: winner.value.clone(), last_verified: winner.observed_at }
+                StateAt::Stale {
+                    value: winner.value.clone(),
+                    last_verified: winner.observed_at,
+                }
             } else {
                 StateAt::Known(winner.value.clone())
             };
         }
         let claim_view: Vec<Claim> = distinct
             .iter()
-            .map(|t| Claim { source_id: t.source_id.as_str(), value: t.value.as_str(), occurred_at: t.occurred_at })
+            .map(|t| Claim {
+                source_id: t.source_id.as_str(),
+                value: t.value.as_str(),
+                occurred_at: t.occurred_at,
+            })
             .collect();
         for rule in &self.resolution_rules {
             if let Some(winner) = (rule.apply)(&claim_view) {
@@ -376,16 +426,21 @@ impl WorldLog {
         StateAt::Conflicted(distinct.iter().map(|t| t.value.clone()).collect())
     }
 }
- 
+
 #[cfg(test)]
 mod w1_tests {
     use super::*;
 
     fn ev(id: &str, ent: &str, val: &str) -> WorldEvent {
         WorldEvent {
-            source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
-            kind: Kind::Assert, occurred_at: 100, observed_at: 110,
-            entity: ent.into(), attr: "status".into(), value: val.into(),
+            source_event_id: id.into(),
+            source_id: id.split(':').next().unwrap().into(),
+            kind: Kind::Assert,
+            occurred_at: 100,
+            observed_at: 110,
+            entity: ent.into(),
+            attr: "status".into(),
+            value: val.into(),
         }
     }
 
@@ -394,14 +449,28 @@ mod w1_tests {
     #[test]
     fn duplicate_identity_and_corroboration_are_opposites() {
         let mut log = WorldLog::new();
-        assert!(matches!(log.ingest(&ev("email:501", "interview", "Thursday")), IngestResult::Applied { corroborates: 0, .. }));
-        assert_eq!(log.ingest(&ev("email:501", "interview", "Thursday")), IngestResult::Duplicate);
+        assert!(matches!(
+            log.ingest(&ev("email:501", "interview", "Thursday")),
+            IngestResult::Applied {
+                corroborates: 0,
+                ..
+            }
+        ));
+        assert_eq!(
+            log.ingest(&ev("email:501", "interview", "Thursday")),
+            IngestResult::Duplicate
+        );
         match log.ingest(&ev("calendar:88", "interview", "Thursday")) {
-            IngestResult::Applied { corroborates: 1, .. } => {}
+            IngestResult::Applied {
+                corroborates: 1, ..
+            } => {}
             other => panic!("corroboration must be counted, got {other:?}"),
         }
         assert_eq!(log.transitions().len(), 2);
-        assert_eq!(log.ingest(&ev("calendar:88", "interview", "Thursday")), IngestResult::Duplicate);
+        assert_eq!(
+            log.ingest(&ev("calendar:88", "interview", "Thursday")),
+            IngestResult::Duplicate
+        );
     }
 
     /// I6: replay determinism — same event SET in any arrival order yields one history.
@@ -415,9 +484,18 @@ mod w1_tests {
         let canonical = WorldLog::replay(&events);
         events.reverse();
         let shuffled = WorldLog::replay(&events);
-        let render = |l: &WorldLog| l.transitions().iter()
-            .map(|t| format!("{}|{}|{}|{}", t.recorded_seq, t.transition_id, t.source_event_id, t.value))
-            .collect::<Vec<_>>().join(";");
+        let render = |l: &WorldLog| {
+            l.transitions()
+                .iter()
+                .map(|t| {
+                    format!(
+                        "{}|{}|{}|{}",
+                        t.recorded_seq, t.transition_id, t.source_event_id, t.value
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";")
+        };
         assert_eq!(render(&canonical), render(&shuffled));
     }
 }
@@ -425,13 +503,20 @@ mod w1_tests {
 #[cfg(test)]
 fn wev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, val: &str) -> WorldEvent {
     WorldEvent {
-        source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
-        kind, occurred_at: occ, observed_at: obs,
-        entity: ent.into(), attr: "status".into(), value: val.into(),
+        source_event_id: id.into(),
+        source_id: id.split(':').next().unwrap().into(),
+        kind,
+        occurred_at: occ,
+        observed_at: obs,
+        entity: ent.into(),
+        attr: "status".into(),
+        value: val.into(),
     }
 }
 #[cfg(test)]
-fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
+fn base(n: i64) -> i64 {
+    1_787_400_000_000 + n * D
+}
 #[cfg(test)]
 const D: i64 = 86_400_000;
 
@@ -442,22 +527,67 @@ mod w2_tests {
     /// THE NO-HINDSIGHT-LEAKAGE PROPERTY (W2). Never regresses for Yantrik's lifetime.
     #[test]
     fn later_information_cannot_leak_into_earlier_knowledge() {
-        let log = WorldLog::replay(&[wev("carrier:771", Kind::Assert, base(20), base(22), "package", "delayed")]);
-        let q = |known: i64| WorldQuery { valid_at: base(20), known_at: known, access: mind_types::AccessContext::operator_audit() };
-        assert_eq!(log.state_at("package", "status", &q(base(20))), StateAt::Unknown);
-        assert_eq!(log.state_at("package", "status", &q(base(22))), StateAt::Known("delayed".into()));
+        let log = WorldLog::replay(&[wev(
+            "carrier:771",
+            Kind::Assert,
+            base(20),
+            base(22),
+            "package",
+            "delayed",
+        )]);
+        let q = |known: i64| WorldQuery {
+            valid_at: base(20),
+            known_at: known,
+            access: mind_types::AccessContext::operator_audit(),
+        };
+        assert_eq!(
+            log.state_at("package", "status", &q(base(20))),
+            StateAt::Unknown
+        );
+        assert_eq!(
+            log.state_at("package", "status", &q(base(22))),
+            StateAt::Known("delayed".into())
+        );
     }
 
     /// A LATE-ARRIVING OLD FACT cannot resurrect a superseded proposition.
     #[test]
     fn a_late_old_email_does_not_resurrect_a_superseded_state() {
         let log = WorldLog::replay(&[
-            wev("email:501", Kind::Assert, base(20), base(20), "interview", "Tuesday"),
-            wev("email:923", Kind::Supersede, base(22), base(22), "interview", "Thursday"),
-            wev("email:old", Kind::Assert, base(20), base(23), "interview", "Tuesday"),
+            wev(
+                "email:501",
+                Kind::Assert,
+                base(20),
+                base(20),
+                "interview",
+                "Tuesday",
+            ),
+            wev(
+                "email:923",
+                Kind::Supersede,
+                base(22),
+                base(22),
+                "interview",
+                "Thursday",
+            ),
+            wev(
+                "email:old",
+                Kind::Assert,
+                base(20),
+                base(23),
+                "interview",
+                "Tuesday",
+            ),
         ]);
-        let q = WorldQuery { valid_at: base(23), known_at: base(23), access: mind_types::AccessContext::operator_audit() };
-        assert_eq!(log.state_at("interview", "status", &q), StateAt::Known("Thursday".into()));
+        let q = WorldQuery {
+            valid_at: base(23),
+            known_at: base(23),
+            access: mind_types::AccessContext::operator_audit(),
+        };
+        assert_eq!(
+            log.state_at("interview", "status", &q),
+            StateAt::Known("Thursday".into())
+        );
     }
 }
 
@@ -466,7 +596,11 @@ mod w3_tests {
     use super::*;
 
     fn q(valid: i64, known: i64) -> WorldQuery {
-        WorldQuery { valid_at: valid, known_at: known, access: mind_types::AccessContext::operator_audit() }
+        WorldQuery {
+            valid_at: valid,
+            known_at: known,
+            access: mind_types::AccessContext::operator_audit(),
+        }
     }
 
     /// 1. CONFLICT PRESERVATION (I4): two distinct sources, two live values, NO rule ⇒
@@ -474,8 +608,22 @@ mod w3_tests {
     #[test]
     fn conflicting_claims_stay_conflicted_without_a_rule() {
         let log = WorldLog::replay(&[
-            wev("email:961", Kind::Assert, base(24), base(24), "meeting", "Room4"),
-            wev("chat:962", Kind::Assert, base(24) + 3_600_000, base(24) + 3_600_000, "meeting", "Zoom"),
+            wev(
+                "email:961",
+                Kind::Assert,
+                base(24),
+                base(24),
+                "meeting",
+                "Room4",
+            ),
+            wev(
+                "chat:962",
+                Kind::Assert,
+                base(24) + 3_600_000,
+                base(24) + 3_600_000,
+                "meeting",
+                "Zoom",
+            ),
         ]);
         assert_eq!(
             log.state_at("meeting", "status", &q(base(25), base(25))),
@@ -487,14 +635,31 @@ mod w3_tests {
     #[test]
     fn a_named_rule_resolves_and_history_keeps_both_claims() {
         let log = WorldLog::replay(&[
-            wev("email:eta", Kind::Assert, base(24), base(24), "package", "maybe-Saturday-ETA-Monday"),
-            wev("carrier:deliv", Kind::Supersede, base(24) + 6 * 3_600_000, base(24) + 7 * 3_600_000, "package", "delivered-Saturday"),
+            wev(
+                "email:eta",
+                Kind::Assert,
+                base(24),
+                base(24),
+                "package",
+                "maybe-Saturday-ETA-Monday",
+            ),
+            wev(
+                "carrier:deliv",
+                Kind::Supersede,
+                base(24) + 6 * 3_600_000,
+                base(24) + 7 * 3_600_000,
+                "package",
+                "delivered-Saturday",
+            ),
         ])
         .with_rule(ResolutionRule {
             id: "carrier-delivered-scan-overrides-estimate",
             version: 1,
             apply: Box::new(|claims: &[Claim]| {
-                claims.iter().find(|c| c.source_id == "carrier" && c.value.starts_with("delivered")).map(|c| c.value.to_string())
+                claims
+                    .iter()
+                    .find(|c| c.source_id == "carrier" && c.value.starts_with("delivered"))
+                    .map(|c| c.value.to_string())
             }),
         });
         // Rule-based, NOT arrival-order-based: prove by querying where the ETA is the LATER claim.
@@ -502,7 +667,11 @@ mod w3_tests {
             log.state_at("package", "status", &q(base(25), base(25))),
             StateAt::Known("delivered-Saturday".into())
         );
-        assert_eq!(log.transitions().len(), 2, "both original claims remain in history");
+        assert_eq!(
+            log.transitions().len(),
+            2,
+            "both original claims remain in history"
+        );
     }
 
     /// 3. STALENESS is bi-temporal: judged against known_at, never wall clock.
@@ -512,17 +681,33 @@ mod w3_tests {
         // Use a NON-DEFAULT horizon so the test proves `with_freshness_ms` is actually carried by
         // the queried log. The old test configured one log, shadowed it with `replay`, then passed
         // only because replay's default happened to equal the asserted 48-hour boundary.
-        let log = WorldLog::replay(&[
-            wev("api:wx", Kind::Assert, observed, observed, "weather.thursday", "rain"),
-        ])
+        let log = WorldLog::replay(&[wev(
+            "api:wx",
+            Kind::Assert,
+            observed,
+            observed,
+            "weather.thursday",
+            "rain",
+        )])
         .with_freshness_ms(36 * 3_600_000);
         // Fresh at known_at = T+35h; stale at T+37h — same fact, different knowledge cuts.
         assert_eq!(
-            log.state_at("weather.thursday", "status", &q(observed + 35 * 3_600_000, observed + 35 * 3_600_000)),
+            log.state_at(
+                "weather.thursday",
+                "status",
+                &q(observed + 35 * 3_600_000, observed + 35 * 3_600_000)
+            ),
             StateAt::Known("rain".into())
         );
-        match log.state_at("weather.thursday", "status", &q(observed + 37 * 3_600_000, observed + 37 * 3_600_000)) {
-            StateAt::Stale { value, last_verified } => {
+        match log.state_at(
+            "weather.thursday",
+            "status",
+            &q(observed + 37 * 3_600_000, observed + 37 * 3_600_000),
+        ) {
+            StateAt::Stale {
+                value,
+                last_verified,
+            } => {
                 assert_eq!((value.as_str(), last_verified), ("rain", observed));
             }
             other => panic!("expected Stale, got {other:?}"),
@@ -530,17 +715,34 @@ mod w3_tests {
     }
 
     /// 4. EXPIRATION follows the query's WORLD-time cut — and the adversarial inverse catches
-    /// any accidental use of current wall time.
+    ///    any accidental use of current wall time.
     #[test]
     fn expiry_follows_valid_at_not_wall_clock() {
         let expire_at = base(25);
         // Freshness policy widened so the inverse cut tests EXPIRY, not staleness.
         let log = WorldLog::replay(&[
-            wev("cal:flight", Kind::Assert, base(21), base(21), "flight", "Thursday-window"),
-            wev("cal:flightx", Kind::Expire, expire_at, expire_at, "flight", "cancelled"),
+            wev(
+                "cal:flight",
+                Kind::Assert,
+                base(21),
+                base(21),
+                "flight",
+                "Thursday-window",
+            ),
+            wev(
+                "cal:flightx",
+                Kind::Expire,
+                expire_at,
+                expire_at,
+                "flight",
+                "cancelled",
+            ),
         ])
         .with_freshness_ms(i64::MAX);
-        assert_eq!(log.state_at("flight", "status", &q(expire_at + D, expire_at + D)), StateAt::Expired);
+        assert_eq!(
+            log.state_at("flight", "status", &q(expire_at + D, expire_at + D)),
+            StateAt::Expired
+        );
         assert_eq!(
             log.state_at("flight", "status", &q(expire_at - D, expire_at - D)),
             StateAt::Known("Thursday-window".into()),
@@ -549,48 +751,91 @@ mod w3_tests {
     }
 }
 
-
-
- 
 #[cfg(test)]
 mod w4_w6_tests {
     use super::*;
 
-    fn wev(id: &str, kind: Kind, occ: i64, obs: i64, ent: &str, attr: &str, val: &str) -> WorldEvent {
+    fn wev(
+        id: &str,
+        kind: Kind,
+        occ: i64,
+        obs: i64,
+        ent: &str,
+        attr: &str,
+        val: &str,
+    ) -> WorldEvent {
         WorldEvent {
-            source_event_id: id.into(), source_id: id.split(':').next().unwrap().into(),
-            kind, occurred_at: occ, observed_at: obs,
-            entity: ent.into(), attr: attr.into(), value: val.into(),
+            source_event_id: id.into(),
+            source_id: id.split(':').next().unwrap().into(),
+            kind,
+            occurred_at: occ,
+            observed_at: obs,
+            entity: ent.into(),
+            attr: attr.into(),
+            value: val.into(),
         }
     }
     const D: i64 = 86_400_000;
-    fn base(n: i64) -> i64 { 1_787_400_000_000 + n * D }
+    fn base(n: i64) -> i64 {
+        1_787_400_000_000 + n * D
+    }
 
     /// W4 — THE DEFINING 3A TEST (I3): a derived conflict exists only while BOTH inputs are
     /// warranted; superseding one input kills the derivation WITHOUT sweeping history.
     #[test]
     fn superseding_an_input_kills_the_derived_conclusion_but_not_the_history() {
         let overlap = DerivationRule {
-            id: "overlap-rule", version: 1,
-            entity: "travel_conflict".into(), attr: "status".into(),
-            consumes: vec![("interview".into(), "date".into()), ("flight".into(), "window".into())],
-            produce: Box::new(|inputs: &[Option<&StateAt>]| {
-                match (inputs[0], inputs[1]) {
-                    (Some(StateAt::Known(i)), Some(StateAt::Known(_))) if i.contains("Thursday") => {
-                        Some("Thursday-travel-conflict".into())
-                    }
-                    _ => None,
+            id: "overlap-rule",
+            version: 1,
+            entity: "travel_conflict".into(),
+            attr: "status".into(),
+            consumes: vec![
+                ("interview".into(), "date".into()),
+                ("flight".into(), "window".into()),
+            ],
+            produce: Box::new(|inputs: &[Option<&StateAt>]| match (inputs[0], inputs[1]) {
+                (Some(StateAt::Known(i)), Some(StateAt::Known(_))) if i.contains("Thursday") => {
+                    Some("Thursday-travel-conflict".into())
                 }
+                _ => None,
             }),
         };
         let log = WorldLog::replay(&[
-            wev("email:501", Kind::Assert, base(20), base(20), "interview", "date", "Thursday"),
-            wev("cal:flight", Kind::Assert, base(21), base(21), "flight", "window", "Thursday"),
-            wev("email:923", Kind::Supersede, base(22), base(22), "interview", "date", "Friday"),
+            wev(
+                "email:501",
+                Kind::Assert,
+                base(20),
+                base(20),
+                "interview",
+                "date",
+                "Thursday",
+            ),
+            wev(
+                "cal:flight",
+                Kind::Assert,
+                base(21),
+                base(21),
+                "flight",
+                "window",
+                "Thursday",
+            ),
+            wev(
+                "email:923",
+                Kind::Supersede,
+                base(22),
+                base(22),
+                "interview",
+                "date",
+                "Friday",
+            ),
         ])
         .with_freshness_ms(i64::MAX)
         .with_derivation(overlap);
-        let q = |v: i64| WorldQuery { valid_at: v, known_at: v, access: mind_types::AccessContext::operator_audit() };
+        let q = |v: i64| WorldQuery {
+            valid_at: v,
+            known_at: v,
+            access: mind_types::AccessContext::operator_audit(),
+        };
 
         // While Thursday was live: conflict warranted.
         assert_eq!(
@@ -598,7 +843,10 @@ mod w4_w6_tests {
             StateAt::Known("Thursday-travel-conflict".into())
         );
         // After the correction: warrant GONE — no zombie conclusion.
-        assert_eq!(log.derived_state("travel_conflict", &q(base(23))), StateAt::Unknown);
+        assert_eq!(
+            log.derived_state("travel_conflict", &q(base(23))),
+            StateAt::Unknown
+        );
         // Yet the epistemic history survives: the old interview claim is still queryable at its cut.
         assert_eq!(
             log.state_at("interview", "date", &q(base(21))),
@@ -610,18 +858,39 @@ mod w4_w6_tests {
     /// indistinguishable from absence of fact (A6). The authorized reader sees truth.
     #[test]
     fn unauthorized_readers_cannot_distinguish_fact_from_absence() {
-        let log = WorldLog::replay(&[wev("email:9", Kind::Assert, base(1), base(1), "interview", "date", "Friday")])
-            .with_gate(Box::new(|ctx: &mind_types::AccessContext, _entity: &str| {
+        let log = WorldLog::replay(&[wev(
+            "email:9",
+            Kind::Assert,
+            base(1),
+            base(1),
+            "interview",
+            "date",
+            "Friday",
+        )])
+        .with_gate(Box::new(
+            |ctx: &mind_types::AccessContext, _entity: &str| {
                 ctx.purpose().label().starts_with("audit") // only audit lanes read private world state
-            }));
-        let ok = WorldQuery { valid_at: base(2), known_at: base(2), access: mind_types::AccessContext::operator_audit() };
-        assert_eq!(log.state_at("interview", "date", &ok), StateAt::Known("Friday".into()));
+            },
+        ));
+        let ok = WorldQuery {
+            valid_at: base(2),
+            known_at: base(2),
+            access: mind_types::AccessContext::operator_audit(),
+        };
+        assert_eq!(
+            log.state_at("interview", "date", &ok),
+            StateAt::Known("Friday".into())
+        );
         // A non-audit context: structurally requires a ctx, gate denies, reads as Unknown.
         let member = mind_types::AccessContext::principal(
             mind_types::Scope::Private("asha".into()),
             mind_types::Purpose::conversation("asha"),
         );
-        let denied = WorldQuery { valid_at: base(2), known_at: base(2), access: member };
+        let denied = WorldQuery {
+            valid_at: base(2),
+            known_at: base(2),
+            access: member,
+        };
         assert_eq!(log.state_at("interview", "date", &denied), StateAt::Unknown);
     }
 
@@ -631,24 +900,46 @@ mod w4_w6_tests {
     fn restart_split_replay_equals_uninterrupted_replay() {
         let mk = |from: usize, to: usize| -> Vec<WorldEvent> {
             (from..to)
-                .map(|i| wev(&format!("e:{i:03}"), Kind::Assert, base(i as i64), base(i as i64), "ent", "status", &format!("v{i}")))
+                .map(|i| {
+                    wev(
+                        &format!("e:{i:03}"),
+                        Kind::Assert,
+                        base(i as i64),
+                        base(i as i64),
+                        "ent",
+                        "status",
+                        &format!("v{i}"),
+                    )
+                })
                 .collect()
         };
-        let render = |l: &WorldLog| l.transitions().iter()
-            .map(|t| format!("{}|{}|{}|{}", t.recorded_seq, t.transition_id, t.source_event_id, t.value))
-            .collect::<Vec<_>>().join(";");
+        let render = |l: &WorldLog| {
+            l.transitions()
+                .iter()
+                .map(|t| {
+                    format!(
+                        "{}|{}|{}|{}",
+                        t.recorded_seq, t.transition_id, t.source_event_id, t.value
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";")
+        };
         let s1 = WorldLog::replay(&mk(0, 75));
         let mut s2 = WorldLog::replay(&mk(0, 37));
         for e in mk(37, 75) {
             s2.ingest(&e); // the "restart": fresh process continues from its own prefix log
         }
-        assert_eq!(render(&s1), render(&s2), "restart must be invisible in logical state");
+        assert_eq!(
+            render(&s1),
+            render(&s2),
+            "restart must be invisible in logical state"
+        );
         // Snapshot-loss leg: rebuild from authoritative transitions alone.
         let rebuilt = WorldLog::replay(&mk(0, 75)); // transitions ARE the authority here
         assert_eq!(render(&s1), render(&rebuilt));
     }
 }
-
 
 #[cfg(test)]
 mod w7_metamorphic_tests {
@@ -659,29 +950,72 @@ mod w7_metamorphic_tests {
     /// landing AFTER all volume (so each termination dominates its own entity cleanly).
     fn stream() -> Vec<WorldEvent> {
         let mut v = Vec::new();
-        for (i, ent) in ["alpha", "beta", "gamma", "delta", "epsilon"].iter().enumerate() {
+        for (i, ent) in ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .iter()
+            .enumerate()
+        {
             for k in 0..15_i64 {
                 let late = if k % 3 == 0 { 3_600_000 } else { 0 }; // every third arrives late
                 v.push(wev(
-                    &format!("src{}:{}", i, k), Kind::Assert,
-                    base(10 + k) + k * 1000, base(10 + k) + late,
-                    ent, &format!("v{k}"),
+                    &format!("src{}:{}", i, k),
+                    Kind::Assert,
+                    base(10 + k) + k * 1000,
+                    base(10 + k) + late,
+                    ent,
+                    &format!("v{k}"),
                 ));
             }
         }
-        v.push(wev("src0:sup", Kind::Supersede, base(30), base(30), "alpha", "final-alpha"));
-        v.push(wev("src1:ret", Kind::Retract, base(30), base(30), "beta", "withdrawn"));
-        v.push(wev("src2:exp", Kind::Expire, base(30), base(30), "gamma", "terminated"));
+        v.push(wev(
+            "src0:sup",
+            Kind::Supersede,
+            base(30),
+            base(30),
+            "alpha",
+            "final-alpha",
+        ));
+        v.push(wev(
+            "src1:ret",
+            Kind::Retract,
+            base(30),
+            base(30),
+            "beta",
+            "withdrawn",
+        ));
+        v.push(wev(
+            "src2:exp",
+            Kind::Expire,
+            base(30),
+            base(30),
+            "gamma",
+            "terminated",
+        ));
         v
     }
 
     fn render(l: &WorldLog) -> String {
-        l.transitions().iter()
-            .map(|t| format!("{}|{}|{}|{:?}|{}|{}", t.recorded_seq, t.transition_id, t.source_event_id, t.kind, t.occurred_at, t.value))
-            .collect::<Vec<_>>().join(";")
+        l.transitions()
+            .iter()
+            .map(|t| {
+                format!(
+                    "{}|{}|{}|{:?}|{}|{}",
+                    t.recorded_seq,
+                    t.transition_id,
+                    t.source_event_id,
+                    t.kind,
+                    t.occurred_at,
+                    t.value
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";")
     }
     fn q(kn: i64) -> WorldQuery {
-        WorldQuery { valid_at: kn, known_at: kn, access: mind_types::AccessContext::operator_audit() }
+        WorldQuery {
+            valid_at: kn,
+            known_at: kn,
+            access: mind_types::AccessContext::operator_audit(),
+        }
     }
 
     /// Canonical identity of a history: transitions projected through the replay sort key
@@ -689,11 +1023,22 @@ mod w7_metamorphic_tests {
     /// bookkeeping — a resumed log numbers post-restart events by arrival, which is correct
     /// knowledge-time bookkeeping, so equivalence must be judged HERE, not on raw seq.
     fn canonical(l: &WorldLog) -> String {
-        let mut rows: Vec<(i64, i64, String)> = l.transitions().iter()
-            .map(|t| (t.occurred_at, t.observed_at, format!("{}|{:?}|{}", t.source_event_id, t.kind, t.value)))
+        let mut rows: Vec<(i64, i64, String)> = l
+            .transitions()
+            .iter()
+            .map(|t| {
+                (
+                    t.occurred_at,
+                    t.observed_at,
+                    format!("{}|{:?}|{}", t.source_event_id, t.kind, t.value),
+                )
+            })
             .collect();
         rows.sort();
-        rows.iter().map(|r| format!("{}|{}|{}", r.0, r.1, r.2)).collect::<Vec<_>>().join(";")
+        rows.iter()
+            .map(|r| format!("{}|{}|{}", r.0, r.1, r.2))
+            .collect::<Vec<_>>()
+            .join(";")
     }
 
     /// Metamorphic H ≅ H+dup(e): identity dedup makes duplicate ingestion invisible —
@@ -707,7 +1052,10 @@ mod w7_metamorphic_tests {
         let h2 = WorldLog::replay(&s2);
         assert_eq!(render(&h1), render(&h2));
         for kn in [base(16), base(22), base(32)] {
-            assert_eq!(h1.state_at("delta", "status", &q(kn)), h2.state_at("delta", "status", &q(kn)));
+            assert_eq!(
+                h1.state_at("delta", "status", &q(kn)),
+                h2.state_at("delta", "status", &q(kn))
+            );
         }
     }
 
@@ -734,7 +1082,10 @@ mod w7_metamorphic_tests {
         // and the two logs ANSWER identically everywhere that matters
         for kn in [base(18), base(26), base(32)] {
             for ent in ["alpha", "beta", "gamma", "delta", "epsilon"] {
-                assert_eq!(resumed.state_at(ent, "status", &q(kn)), whole.state_at(ent, "status", &q(kn)));
+                assert_eq!(
+                    resumed.state_at(ent, "status", &q(kn)),
+                    whole.state_at(ent, "status", &q(kn))
+                );
             }
         }
     }
@@ -745,14 +1096,35 @@ mod w7_metamorphic_tests {
     fn terminations_kill_present_preserve_past_and_rows() {
         // freshness pinned OFF: this test isolates termination semantics, not staleness policy
         let log = WorldLog::replay(&stream()).with_freshness_ms(i64::MAX);
-        matches!(log.state_at("beta", "status", &q(base(32))), StateAt::Unknown);
-        matches!(log.state_at("gamma", "status", &q(base(32))), StateAt::Expired);
-        assert_eq!(log.state_at("alpha", "status", &q(base(32))), StateAt::Known("final-alpha".into()));
+        matches!(
+            log.state_at("beta", "status", &q(base(32))),
+            StateAt::Unknown
+        );
+        matches!(
+            log.state_at("gamma", "status", &q(base(32))),
+            StateAt::Expired
+        );
+        assert_eq!(
+            log.state_at("alpha", "status", &q(base(32))),
+            StateAt::Known("final-alpha".into())
+        );
         // before the terminations were observed, the newest plain asserts answered
-        assert_eq!(log.state_at("beta", "status", &q(base(29))), StateAt::Known("v14".into()));
-        assert_eq!(log.state_at("gamma", "status", &q(base(29))), StateAt::Known("v14".into()));
-        assert!(log.transitions().iter().any(|t| t.entity == "beta" && t.kind == Kind::Retract));
-        assert!(log.transitions().iter().any(|t| t.entity == "gamma" && t.kind == Kind::Expire));
+        assert_eq!(
+            log.state_at("beta", "status", &q(base(29))),
+            StateAt::Known("v14".into())
+        );
+        assert_eq!(
+            log.state_at("gamma", "status", &q(base(29))),
+            StateAt::Known("v14".into())
+        );
+        assert!(log
+            .transitions()
+            .iter()
+            .any(|t| t.entity == "beta" && t.kind == Kind::Retract));
+        assert!(log
+            .transitions()
+            .iter()
+            .any(|t| t.entity == "gamma" && t.kind == Kind::Expire));
     }
 }
 
@@ -766,60 +1138,167 @@ mod compound_chain_tests {
     #[test]
     fn two_hop_derivation_loses_warrant_transitively() {
         let rule_visa = DerivationRule {
-            id: "visa-clear", version: 1, entity: "visa_status".into(), attr: "status".into(),
-            consumes: vec![("visa".into(), "status".into()), ("passport".into(), "status".into())],
+            id: "visa-clear",
+            version: 1,
+            entity: "visa_status".into(),
+            attr: "status".into(),
+            consumes: vec![
+                ("visa".into(), "status".into()),
+                ("passport".into(), "status".into()),
+            ],
             produce: Box::new(|i: &[Option<&StateAt>]| match (i[0], i[1]) {
-                (Some(StateAt::Known(a)), Some(StateAt::Known(b))) if a == "submitted" && b == "valid" => Some("clear".into()),
+                (Some(StateAt::Known(a)), Some(StateAt::Known(b)))
+                    if a == "submitted" && b == "valid" =>
+                {
+                    Some("clear".into())
+                }
                 _ => None,
             }),
         };
         let mk_trip = || DerivationRule {
-            id: "trip-ready", version: 1, entity: "trip_ready".into(), attr: "status".into(),
-            consumes: vec![("visa_status".into(), "status".into()), ("itinerary".into(), "status".into())],
+            id: "trip-ready",
+            version: 1,
+            entity: "trip_ready".into(),
+            attr: "status".into(),
+            consumes: vec![
+                ("visa_status".into(), "status".into()),
+                ("itinerary".into(), "status".into()),
+            ],
             produce: Box::new(|i: &[Option<&StateAt>]| match (i[0], i[1]) {
-                (Some(StateAt::Known(a)), Some(StateAt::Known(b))) if a == "clear" && b == "held" => Some("go".into()),
+                (Some(StateAt::Known(a)), Some(StateAt::Known(b)))
+                    if a == "clear" && b == "held" =>
+                {
+                    Some("go".into())
+                }
                 _ => None,
             }),
         };
         let log = WorldLog::replay(&[
-            wev("portal:v1", Kind::Assert, base(20), base(20), "visa", "submitted"),
-            wev("rec:p1", Kind::Assert, base(20), base(20), "passport", "valid"),
-            wev("air:b1", Kind::Assert, base(21), base(21), "itinerary", "held"),
+            wev(
+                "portal:v1",
+                Kind::Assert,
+                base(20),
+                base(20),
+                "visa",
+                "submitted",
+            ),
+            wev(
+                "rec:p1",
+                Kind::Assert,
+                base(20),
+                base(20),
+                "passport",
+                "valid",
+            ),
+            wev(
+                "air:b1",
+                Kind::Assert,
+                base(21),
+                base(21),
+                "itinerary",
+                "held",
+            ),
         ])
         .with_freshness_ms(i64::MAX)
         .with_derivation(rule_visa)
         .with_derivation(mk_trip());
-        let q = |kn: i64| WorldQuery { valid_at: kn, known_at: kn, access: mind_types::AccessContext::operator_audit() };
+        let q = |kn: i64| WorldQuery {
+            valid_at: kn,
+            known_at: kn,
+            access: mind_types::AccessContext::operator_audit(),
+        };
 
         // both hops warranted while inputs hold
-        assert_eq!(log.derived_state("trip_ready", &q(base(22))), StateAt::Known("go".into()));
-        assert_eq!(log.derived_state("visa_status", &q(base(22))), StateAt::Known("clear".into()));
+        assert_eq!(
+            log.derived_state("trip_ready", &q(base(22))),
+            StateAt::Known("go".into())
+        );
+        assert_eq!(
+            log.derived_state("visa_status", &q(base(22))),
+            StateAt::Known("clear".into())
+        );
 
         // B superseded -> C unwarranted -> E unwarranted THROUGH C
         let log2 = WorldLog::replay(&[
-            wev("portal:v1", Kind::Assert, base(20), base(20), "visa", "submitted"),
-            wev("rec:p1", Kind::Assert, base(20), base(20), "passport", "valid"),
-            wev("rec:p2", Kind::Supersede, base(25), base(25), "passport", "expired"),
-            wev("air:b1", Kind::Assert, base(21), base(21), "itinerary", "held"),
+            wev(
+                "portal:v1",
+                Kind::Assert,
+                base(20),
+                base(20),
+                "visa",
+                "submitted",
+            ),
+            wev(
+                "rec:p1",
+                Kind::Assert,
+                base(20),
+                base(20),
+                "passport",
+                "valid",
+            ),
+            wev(
+                "rec:p2",
+                Kind::Supersede,
+                base(25),
+                base(25),
+                "passport",
+                "expired",
+            ),
+            wev(
+                "air:b1",
+                Kind::Assert,
+                base(21),
+                base(21),
+                "itinerary",
+                "held",
+            ),
         ])
         .with_freshness_ms(i64::MAX)
         .with_derivation(DerivationRule {
-            id: "visa-clear", version: 1, entity: "visa_status".into(), attr: "status".into(),
-            consumes: vec![("visa".into(), "status".into()), ("passport".into(), "status".into())],
+            id: "visa-clear",
+            version: 1,
+            entity: "visa_status".into(),
+            attr: "status".into(),
+            consumes: vec![
+                ("visa".into(), "status".into()),
+                ("passport".into(), "status".into()),
+            ],
             produce: Box::new(|i: &[Option<&StateAt>]| match (i[0], i[1]) {
-                (Some(StateAt::Known(a)), Some(StateAt::Known(b))) if a == "submitted" && b == "valid" => Some("clear".into()),
+                (Some(StateAt::Known(a)), Some(StateAt::Known(b)))
+                    if a == "submitted" && b == "valid" =>
+                {
+                    Some("clear".into())
+                }
                 _ => None,
             }),
         })
         .with_derivation(mk_trip());
-        assert_eq!(log2.derived_state("visa_status", &q(base(26))), StateAt::Unknown);
-        assert_eq!(log2.derived_state("trip_ready", &q(base(26))), StateAt::Unknown);
+        assert_eq!(
+            log2.derived_state("visa_status", &q(base(26))),
+            StateAt::Unknown
+        );
+        assert_eq!(
+            log2.derived_state("trip_ready", &q(base(26))),
+            StateAt::Unknown
+        );
         // history at its own cut still answers through the chain
-        assert_eq!(log2.derived_state("trip_ready", &q(base(22))), StateAt::Known("go".into()));
-        assert_eq!(log2.lineage_of("trip_ready"), Some(("trip-ready", 1, &[(("visa_status".into()), ("status".into())), (("itinerary".into()), ("status".into()))][..])));
+        assert_eq!(
+            log2.derived_state("trip_ready", &q(base(22))),
+            StateAt::Known("go".into())
+        );
+        assert_eq!(
+            log2.lineage_of("trip_ready"),
+            Some((
+                "trip-ready",
+                1,
+                &[
+                    (("visa_status".into()), ("status".into())),
+                    (("itinerary".into()), ("status".into()))
+                ][..]
+            ))
+        );
     }
 }
-
 
 #[cfg(test)]
 mod retraction_targeting_tests {
@@ -828,18 +1307,30 @@ mod retraction_targeting_tests {
     /// PHASE 3A.1 RED SPEC - RETRACT is evidence-targeted: it withdraws ITS OWN SOURCE's
     /// contribution to a proposition; it must never silence independent witnesses.
     fn q(kn: i64) -> WorldQuery {
-        WorldQuery { valid_at: kn, known_at: kn, access: mind_types::AccessContext::operator_audit() }
+        WorldQuery {
+            valid_at: kn,
+            known_at: kn,
+            access: mind_types::AccessContext::operator_audit(),
+        }
     }
 
     #[test]
     fn one_witness_withdrawal_leaves_others_in_conflict() {
         let log = WorldLog::replay(&[
             wev("a:X", Kind::Assert, base(10), base(10), "m", "X"),
-            wev("b:X", Kind::Assert, base(10) + 100, base(10) + 200, "m", "X"),
+            wev(
+                "b:X",
+                Kind::Assert,
+                base(10) + 100,
+                base(10) + 200,
+                "m",
+                "X",
+            ),
             wev("c:Y", Kind::Assert, base(11), base(12), "m", "Y"),
             wev("d:Y", Kind::Assert, base(11) + 100, base(13), "m", "Y"),
             wev("b:ret", Kind::Retract, base(14), base(15), "m", "withdrawn"),
-        ]).with_freshness_ms(i64::MAX);
+        ])
+        .with_freshness_ms(i64::MAX);
         matches!(log.state_at("m", "status", &q(base(16))), StateAt::Conflicted(ref c) if c.len() == 2);
     }
 
@@ -849,8 +1340,12 @@ mod retraction_targeting_tests {
             wev("a:X", Kind::Assert, base(10), base(10), "p", "X"),
             wev("b:X", Kind::Assert, base(10) + 100, base(11), "p", "X"),
             wev("b:ret", Kind::Retract, base(13), base(14), "p", "withdrawn"),
-        ]).with_freshness_ms(i64::MAX);
-        assert_eq!(log.state_at("p", "status", &q(base(15))), StateAt::Known("X".into()));
+        ])
+        .with_freshness_ms(i64::MAX);
+        assert_eq!(
+            log.state_at("p", "status", &q(base(15))),
+            StateAt::Known("X".into())
+        );
     }
 
     #[test]
@@ -858,7 +1353,8 @@ mod retraction_targeting_tests {
         let log = WorldLog::replay(&[
             wev("a:X", Kind::Assert, base(10), base(10), "s", "X"),
             wev("a:ret", Kind::Retract, base(12), base(13), "s", "withdrawn"),
-        ]).with_freshness_ms(i64::MAX);
+        ])
+        .with_freshness_ms(i64::MAX);
         matches!(log.state_at("s", "status", &q(base(14))), StateAt::Unknown);
     }
 
@@ -867,12 +1363,23 @@ mod retraction_targeting_tests {
         let log = WorldLog::replay(&[
             wev("a:X", Kind::Assert, base(10), base(10), "h", "X"),
             wev("b:X", Kind::Assert, base(11), base(12), "h", "X"),
-            wev("b:ret", Kind::Retract, base(12) + 500, base(20), "h", "withdrawn"),
-        ]).with_freshness_ms(i64::MAX);
+            wev(
+                "b:ret",
+                Kind::Retract,
+                base(12) + 500,
+                base(20),
+                "h",
+                "withdrawn",
+            ),
+        ])
+        .with_freshness_ms(i64::MAX);
         // before B's retraction is KNOWN: B participates
         matches!(log.state_at("h", "status", &q(base(15))), StateAt::Known(_));
         // after it is known: B silent, A alone still warrants X
-        assert_eq!(log.state_at("h", "status", &q(base(25))), StateAt::Known("X".into()));
+        assert_eq!(
+            log.state_at("h", "status", &q(base(25))),
+            StateAt::Known("X".into())
+        );
     }
 
     #[test]
@@ -881,12 +1388,14 @@ mod retraction_targeting_tests {
             wev("a:X", Kind::Assert, base(10), base(10), "r", "X"),
             wev("a:ret", Kind::Retract, base(12), base(13), "r", "withdrawn"),
             wev("a:Y", Kind::Assert, base(15), base(16), "r", "Y"),
-        ]).with_freshness_ms(i64::MAX);
-        assert_eq!(log.state_at("r", "status", &q(base(17))), StateAt::Known("Y".into()));
+        ])
+        .with_freshness_ms(i64::MAX);
+        assert_eq!(
+            log.state_at("r", "status", &q(base(17))),
+            StateAt::Known("Y".into())
+        );
     }
 }
-
-
 
 #[cfg(test)]
 mod conflict_breadth_tests {
@@ -899,7 +1408,8 @@ mod conflict_breadth_tests {
             wev("a:X", Kind::Assert, base(10), base(10), "k", "status"),
             wev("c:Y", Kind::Assert, base(11), base(12), "k", "status"),
             wev("d:Y", Kind::Assert, base(12), base(13), "k", "status"),
-        ]).with_freshness_ms(i64::MAX);
+        ])
+        .with_freshness_ms(i64::MAX);
         matches!(log.state_at("k", "status", &WorldQuery { valid_at: base(14), known_at: base(14), access: mind_types::AccessContext::operator_audit() }),
             StateAt::Conflicted(ref c) if c.len() == 2);
     }

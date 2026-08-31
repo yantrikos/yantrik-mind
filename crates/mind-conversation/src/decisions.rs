@@ -2,6 +2,27 @@
 
 use super::*;
 
+const PACKET_DECISION_EVALUATOR_ID: &str = "owner-packet-decision-v1";
+const PACKET_EXPIRY_EVALUATOR_ID: &str = "packet-expiry-clock-v1";
+static PACKET_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_packet_id(now_ms: i64) -> String {
+    let sequence = PACKET_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("pkt:{now_ms:x}-{:x}-{sequence:x}", std::process::id())
+}
+
+/// Packet confidence is persisted in both the mutable packet store and the immutable recorder.
+/// Keep the two representations inside the probability contract even when a future producer
+/// supplies an invalid float. Non-finite values become the conservative floor rather than JSON
+/// `null`; finite out-of-range values are bounded without changing the packet API.
+fn normalize_packet_confidence(confidence: f64) -> f64 {
+    if confidence.is_finite() {
+        confidence.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 impl super::ConversationEngine {
     pub(crate) async fn load_packets(&self) -> Vec<serde_json::Value> {
         self.memory
@@ -16,7 +37,10 @@ impl super::ConversationEngine {
     pub(crate) async fn save_packets(&self, v: &[serde_json::Value]) {
         let _ = self
             .memory
-            .profile_set("action_packets", &serde_json::Value::Array(v.to_vec()).to_string())
+            .profile_set(
+                "action_packets",
+                &serde_json::Value::Array(v.to_vec()).to_string(),
+            )
             .await;
     }
 
@@ -41,18 +65,20 @@ impl super::ConversationEngine {
         confirmation_required: bool,
         expiry_ms: i64,
     ) -> String {
-        let id = self
-            .packet_add(node_id, satisfies, kind, title, body, reason, evidence, confidence, confirmation_required, expiry_ms)
-            .await;
-        let mut store = self.load_packets().await;
-        if let Some(p) = store.iter_mut().find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
-            p["trigger_provenance"] = serde_json::json!("told");
-        }
-        let _ = self
-            .memory
-            .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
-            .await;
-        id
+        self.packet_add_with_provenance(
+            node_id,
+            satisfies,
+            kind,
+            title,
+            body,
+            reason,
+            evidence,
+            confidence,
+            confirmation_required,
+            expiry_ms,
+            "told",
+        )
+        .await
     }
 
     /// The door that stamps `observed` authority — for packets whose TRIGGER is a deterministic
@@ -80,18 +106,20 @@ impl super::ConversationEngine {
         confirmation_required: bool,
         expiry_ms: i64,
     ) -> String {
-        let id = self
-            .packet_add(node_id, satisfies, kind, title, body, reason, evidence, confidence, confirmation_required, expiry_ms)
-            .await;
-        let mut store = self.load_packets().await;
-        if let Some(p) = store.iter_mut().find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
-            p["trigger_provenance"] = serde_json::json!("observed");
-        }
-        let _ = self
-            .memory
-            .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
-            .await;
-        id
+        self.packet_add_with_provenance(
+            node_id,
+            satisfies,
+            kind,
+            title,
+            body,
+            reason,
+            evidence,
+            confidence,
+            confirmation_required,
+            expiry_ms,
+            "observed",
+        )
+        .await
     }
 
     /// Drop terminal packets (expired/rejected, or past expiry) older than 30 days — the store had
@@ -103,8 +131,14 @@ impl super::ConversationEngine {
         let mut store = self.load_packets().await;
         let before = store.len();
         store.retain(|p| {
-            let status = p.get("status").and_then(|x| x.as_str()).unwrap_or("proposed");
-            let expiry = p.get("expiry_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+            let status = p
+                .get("status")
+                .and_then(|x| x.as_str())
+                .unwrap_or("proposed");
+            let expiry = p
+                .get("expiry_ms")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(i64::MAX);
             let terminal = status == "expired" || status == "rejected" || expiry < now;
             !(terminal && expiry < cutoff)
         });
@@ -112,7 +146,10 @@ impl super::ConversationEngine {
         if removed > 0 {
             let _ = self
                 .memory
-                .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
+                .profile_set(
+                    "action_packets",
+                    &serde_json::to_string(&store).unwrap_or_default(),
+                )
                 .await;
         }
         removed
@@ -123,20 +160,30 @@ impl super::ConversationEngine {
     /// makes that claim structurally true instead of a hopeful phrase.
     pub(crate) async fn packet_mark_prepared(&self, id: &str, prepared: bool) {
         let mut store = self.load_packets().await;
-        if let Some(p) = store.iter_mut().find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id)) {
+        if let Some(p) = store
+            .iter_mut()
+            .find(|p| p.get("id").and_then(|x| x.as_str()) == Some(id))
+        {
             p["prepared"] = serde_json::json!(prepared);
         }
         let _ = self
             .memory
-            .profile_set("action_packets", &serde_json::to_string(&store).unwrap_or_default())
+            .profile_set(
+                "action_packets",
+                &serde_json::to_string(&store).unwrap_or_default(),
+            )
             .await;
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "packet creation exposes the proof-carrying action contract explicitly rather than hiding fields in defaults"
+    )]
     pub async fn packet_add(
         &self,
         node_id: &str,
         satisfies: Option<&str>,
-        kind: &str,          // checklist | plan | draft | cart | info
+        kind: &str, // checklist | plan | draft | cart | info
         title: &str,
         body: &str,
         reason: &str,
@@ -145,17 +192,73 @@ impl super::ConversationEngine {
         confirmation_required: bool,
         expiry_ms: i64,
     ) -> String {
+        self.packet_add_with_provenance(
+            node_id,
+            satisfies,
+            kind,
+            title,
+            body,
+            reason,
+            evidence,
+            confidence,
+            confirmation_required,
+            expiry_ms,
+            "inferred",
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the internal packet writer atomically persists the explicit trigger authority with the proof-carrying action contract"
+    )]
+    async fn packet_add_with_provenance(
+        &self,
+        node_id: &str,
+        satisfies: Option<&str>,
+        kind: &str,
+        title: &str,
+        body: &str,
+        reason: &str,
+        evidence: Vec<String>,
+        confidence: f64,
+        confirmation_required: bool,
+        expiry_ms: i64,
+        trigger_provenance: &str,
+    ) -> String {
         let now = chrono::Utc::now().timestamp_millis();
-        let id = format!("pkt:{:x}", now);
+        let id = next_packet_id(now);
+        let confidence = normalize_packet_confidence(confidence);
         // Hygiene rides the write path: without it, terminal packets only left the store past the
         // 200 cap — 62 corpses sat being re-scanned 2,000+ times a day for five weeks.
         let _ = self.packets_prune().await;
         let mut store = self.load_packets().await;
+        // Mint the causal root before persisting the packet so every later terminal event can
+        // point back to the exact proposal it resolves, rather than relying on trace co-location.
+        let mut created_event =
+            mind_observability::DecisionEvent::span(&id, None, "packet_created");
+        created_event.object_id = Some(id.clone());
+        created_event.goal_id = Some(node_id.to_string());
+        created_event.actor = Some("proactive".into());
+        created_event.lane = Some("primary".into());
+        created_event.goal = Some(title.to_string());
+        created_event.trigger = Some(format!(
+            "{node_id}{}",
+            satisfies.map(|s| format!(" ({s})")).unwrap_or_default()
+        ));
+        created_event.evidence_ids = evidence.clone();
+        created_event.chosen = Some(kind.to_string());
+        created_event.confidence = Some(confidence);
+        created_event.policy = vec![format!(
+            "confirmation_required={confirmation_required} provenance={trigger_provenance} expiry_ms={expiry_ms}"
+        )];
+        let created_event_id = created_event.event_id.clone();
         store.push(serde_json::json!({
             "id": id, "node_id": node_id, "satisfies": satisfies, "kind": kind,
             "title": title, "body": body, "reason": reason, "evidence": evidence,
             "confidence": confidence, "confirmation_required": confirmation_required,
             "expiry_ms": expiry_ms, "status": "proposed", "created_ms": now,
+            "created_event_id": created_event_id,
             "alternatives_rejected": [],
             // EXPLICIT AUTHORITY STAMP. A packet may only justify INTERRUPTING the user when its
             // trigger was observed or told (see `knock`). Everything built by an emissary or the
@@ -163,34 +266,26 @@ impl super::ConversationEngine {
             // and stays ineligible; `packet_add_told` is the one door that stamps `told`. This was
             // previously left implicit and fell back to reading `reason` (a system-written string),
             // which made eligibility an accident rather than a decision.
-            "trigger_provenance": "inferred",
+            "trigger_provenance": trigger_provenance,
         }));
         // keep the store bounded; drop the oldest terminal packets first
         if store.len() > 200 {
             store.retain(|p| {
-                matches!(p.get("status").and_then(|x| x.as_str()), Some("proposed") | Some("confirmed"))
+                matches!(
+                    p.get("status").and_then(|x| x.as_str()),
+                    Some("proposed") | Some("confirmed")
+                )
             });
         }
         self.save_packets(&store).await;
         if let Some(criterion) = satisfies {
             self.node_tick(node_id, criterion, true).await;
         }
-        self.ledger_sent("packet", &format!("prepared: {title}")).await;
+        self.ledger_sent("packet", &format!("prepared: {title}"))
+            .await;
         // FLIGHT RECORDER: the packet's own id IS its trace — creation and resolution share it,
         // so `ym why pkt:<hex>` reconstructs proposed→decided from persisted evidence.
-        self.recorder.record({
-            let mut e = mind_observability::DecisionEvent::new(&id, "packet_created");
-            e.actor = Some("proactive".into());
-            e.goal = Some(title.to_string());
-            e.trigger = Some(format!("{node_id}{}", satisfies.map(|s| format!(" ({s})")).unwrap_or_default()));
-            e.evidence_ids = evidence.clone();
-            e.chosen = Some(kind.to_string());
-            e.confidence = Some(confidence);
-            e.policy = vec![format!(
-                "confirmation_required={confirmation_required} provenance=inferred expiry_ms={expiry_ms}"
-            )];
-            e
-        });
+        self.recorder.record(created_event);
         id
     }
 
@@ -207,7 +302,8 @@ impl super::ConversationEngine {
         for n in nodes.iter_mut() {
             if n.get("id").and_then(|x| x.as_str()) == Some(node_id) {
                 if let Some(obj) = n.as_object_mut() {
-                    obj.entry("readiness").or_insert_with(|| serde_json::json!({}));
+                    obj.entry("readiness")
+                        .or_insert_with(|| serde_json::json!({}));
                     if let Some(r) = obj.get_mut("readiness").and_then(|x| x.as_object_mut()) {
                         r.insert(criterion.to_string(), serde_json::json!(done));
                     }
@@ -227,27 +323,40 @@ impl super::ConversationEngine {
         let mut changed = false;
         for p in store.iter_mut() {
             let live = matches!(p.get("status").and_then(|x| x.as_str()), Some("proposed"));
-            let exp = p.get("expiry_ms").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+            let exp = p
+                .get("expiry_ms")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(i64::MAX);
             if live && exp < now {
                 p["status"] = serde_json::json!("expired");
                 changed = true;
                 // FLIGHT RECORDER: expiry is an outcome too — the charter counts it in the
                 // acceptance denominator, and silence about it would flatter the numbers.
                 self.recorder.record({
-                    let mut e = mind_observability::DecisionEvent::new(
-                        p.get("id").and_then(|x| x.as_str()).unwrap_or("pkt:?"),
+                    let packet_id = p.get("id").and_then(|x| x.as_str()).unwrap_or("pkt:?");
+                    let mut e = mind_observability::DecisionEvent::span(
+                        packet_id,
+                        p.get("created_event_id").and_then(|x| x.as_str()),
                         "packet_expired",
                     );
+                    e.object_id = Some(packet_id.to_string());
+                    e.goal_id = p.get("node_id").and_then(|x| x.as_str()).map(String::from);
                     e.actor = Some("proactive".into());
+                    e.lane = Some("primary".into());
                     e.goal = p.get("title").and_then(|x| x.as_str()).map(String::from);
                     e.trigger = Some("expiry passed with no owner word".into());
+                    e.policy.push(format!("expiry_ms={exp}"));
                     e.verdict = Some("expired".into());
+                    e.semantic_success = Some(false);
+                    e.evaluator_id = Some(PACKET_EXPIRY_EVALUATOR_ID.into());
                     e
                 });
                 // an expired packet no longer vouches for readiness
                 if let (Some(nid), Some(c)) = (
                     p.get("node_id").and_then(|x| x.as_str()).map(String::from),
-                    p.get("satisfies").and_then(|x| x.as_str()).map(String::from),
+                    p.get("satisfies")
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
                 ) {
                     self.node_tick(&nid, &c, false).await;
                 }
@@ -259,7 +368,10 @@ impl super::ConversationEngine {
         store
             .into_iter()
             .filter(|p| {
-                matches!(p.get("status").and_then(|x| x.as_str()), Some("proposed") | Some("confirmed"))
+                matches!(
+                    p.get("status").and_then(|x| x.as_str()),
+                    Some("proposed") | Some("confirmed")
+                )
             })
             .collect()
     }
@@ -275,11 +387,18 @@ impl super::ConversationEngine {
             let title = p.get("title").and_then(|x| x.as_str()).unwrap_or("?");
             let kind = p.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
             let st = p.get("status").and_then(|x| x.as_str()).unwrap_or("?");
-            let conf = p.get("confirmation_required").and_then(|x| x.as_bool()).unwrap_or(false);
+            let conf = p
+                .get("confirmation_required")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             out.push_str(&format!(
                 "{}. [{kind}] {title} — {st}{}\n",
                 i + 1,
-                if conf && st == "proposed" { " · NEEDS YOUR WORD (`approve N` / `reject N`)" } else { "" }
+                if conf && st == "proposed" {
+                    " · NEEDS YOUR WORD (`approve N` / `reject N`)"
+                } else {
+                    ""
+                }
             ));
         }
         out.push_str("`packet N` shows the full proof (reason, evidence, expiry).");
@@ -289,7 +408,11 @@ impl super::ConversationEngine {
     /// `ym packet N` — the full proof-carrying view.
     pub async fn packet_show(&self, sel: &str) -> String {
         let live = self.live_packets().await;
-        let idx = sel.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+        let idx = sel
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1));
         let Some(p) = idx.and_then(|i| live.get(i)) else {
             return "Which packet? `packets` lists them; `packet 2` shows one.".to_string();
         };
@@ -297,13 +420,22 @@ impl super::ConversationEngine {
         let ev: Vec<String> = p
             .get("evidence")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| format!("  · {x}")).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|x| format!("  · {x}"))
+                    .collect()
+            })
             .unwrap_or_default();
         let exp = p
             .get("expiry_ms")
             .and_then(|x| x.as_i64())
             .and_then(chrono::DateTime::from_timestamp_millis)
-            .map(|t| t.with_timezone(local_now().offset()).format("%a %b %-d %H:%M").to_string())
+            .map(|t| {
+                t.with_timezone(local_now().offset())
+                    .format("%a %b %-d %H:%M")
+                    .to_string()
+            })
             .unwrap_or_else(|| "never".into());
         format!(
             "📦 {}\nkind: {} · status: {} · confidence: {:.2} · expires: {exp}\nnode: {} (satisfies: {})\n\nWHY: {}\n\nEVIDENCE:\n{}\n\n{}",
@@ -323,12 +455,43 @@ impl super::ConversationEngine {
     /// the why as a correction the replay lab learns from.
     pub async fn packet_decide(&self, sel: &str, approve: bool, why: &str) -> String {
         let live = self.live_packets().await;
-        let idx = sel.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+        let idx = sel
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1));
         let Some(target) = idx.and_then(|i| live.get(i)) else {
             return "Which packet? `packets` lists them by number.".to_string();
         };
-        let id = target.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let title = target.get("title").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+        let id = target
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = target
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let status = target
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        if status != "proposed" {
+            return format!("Already {status}: {title}. No new decision was recorded.");
+        }
+        let created_event_id = target
+            .get("created_event_id")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let goal_id = target
+            .get("node_id")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        let expiry_ms = target
+            .get("expiry_ms")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(i64::MAX);
         let mut store = self.load_packets().await;
         for p in store.iter_mut() {
             if p.get("id").and_then(|x| x.as_str()) == Some(id.as_str()) {
@@ -342,12 +505,33 @@ impl super::ConversationEngine {
         // FLIGHT RECORDER: same trace as packet_created — the pair answers "what was predicted,
         // what actually happened" for every human word on prepared work.
         self.recorder.record({
-            let mut e = mind_observability::DecisionEvent::new(&id, "packet_resolved");
+            let mut e = mind_observability::DecisionEvent::span(
+                &id,
+                created_event_id.as_deref(),
+                "packet_resolved",
+            );
+            e.object_id = Some(id.clone());
+            e.goal_id = goal_id;
             e.actor = Some("proactive".into());
+            e.lane = Some("primary".into());
             e.goal = Some(title.clone());
-            e.trigger = Some(if approve { "owner approved" } else { "owner rejected" }.into());
-            e.outcome = if why.trim().is_empty() { None } else { Some(why.trim().to_string()) };
+            e.trigger = Some(
+                if approve {
+                    "owner approved"
+                } else {
+                    "owner rejected"
+                }
+                .into(),
+            );
+            e.policy.push(format!("expiry_ms={expiry_ms}"));
+            e.outcome = if why.trim().is_empty() {
+                None
+            } else {
+                Some(why.trim().to_string())
+            };
             e.verdict = Some(if approve { "confirmed" } else { "rejected" }.into());
+            e.semantic_success = Some(approve);
+            e.evaluator_id = Some(PACKET_DECISION_EVALUATOR_ID.into());
             e.lesson = if approve {
                 Some("packet acceptance — emissary class earns standing".into())
             } else {
@@ -357,7 +541,9 @@ impl super::ConversationEngine {
         });
         if approve {
             self.ledger_resolve(true).await;
-            format!("✅ Confirmed: {title}. I'll act within the packet's bounds — nothing beyond it.")
+            format!(
+                "✅ Confirmed: {title}. I'll act within the packet's bounds — nothing beyond it."
+            )
         } else {
             if let (Some(nid), Some(c)) = (
                 target.get("node_id").and_then(|x| x.as_str()),
@@ -365,8 +551,24 @@ impl super::ConversationEngine {
             ) {
                 self.node_tick(nid, c, false).await;
             }
-            self.ledger_correction("packet", &title, if why.trim().is_empty() { "rejected" } else { why.trim() }).await;
-            format!("🗑 Rejected: {title}{} — noted for the replay lab.", if why.trim().is_empty() { String::new() } else { format!(" ({})", why.trim()) })
+            self.ledger_correction(
+                "packet",
+                &title,
+                if why.trim().is_empty() {
+                    "rejected"
+                } else {
+                    why.trim()
+                },
+            )
+            .await;
+            format!(
+                "🗑 Rejected: {title}{} — noted for the replay lab.",
+                if why.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", why.trim())
+                }
+            )
         }
     }
 
@@ -414,48 +616,73 @@ impl super::ConversationEngine {
             }
         };
         let mut nodes: Vec<serde_json::Value> = Vec::new();
-        let mut push = |title: String, kind: &str, when_ms: i64, end_ms: i64, participants: Vec<String>| {
-            let id = format!("{kind}:{}", slug(&title));
-            let mut node = old.get(&id).cloned().unwrap_or_else(|| {
-                serde_json::json!({
-                    "id": id, "readiness": {}, "packets": [], "status": "open",
-                })
-            });
-            node["title"] = serde_json::json!(title);
-            node["kind"] = serde_json::json!(kind);
-            node["when_ms"] = serde_json::json!(when_ms);
-            node["end_ms"] = serde_json::json!(end_ms.max(when_ms));
-            node["participants"] = serde_json::json!(participants);
-            node["criteria"] = serde_json::json!(criteria(kind));
-            nodes.push(node);
-        };
+        let mut push =
+            |title: String, kind: &str, when_ms: i64, end_ms: i64, participants: Vec<String>| {
+                let id = format!("{kind}:{}", slug(&title));
+                let mut node = old.get(&id).cloned().unwrap_or_else(|| {
+                    serde_json::json!({
+                        "id": id, "readiness": {}, "packets": [], "status": "open",
+                    })
+                });
+                node["title"] = serde_json::json!(title);
+                node["kind"] = serde_json::json!(kind);
+                node["when_ms"] = serde_json::json!(when_ms);
+                node["end_ms"] = serde_json::json!(end_ms.max(when_ms));
+                node["participants"] = serde_json::json!(participants);
+                node["criteria"] = serde_json::json!(criteria(kind));
+                nodes.push(node);
+            };
         // 1. Calendar entries (festivals carry the fest: prefix; multi-day events keep their window).
         for e in self.load_calendar().await {
             let ms = e.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0);
             if ms < now - 86_400_000 || ms > horizon {
                 continue;
             }
-            let title = e.get("title").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+            let title = e
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?")
+                .to_string();
             let end = e.get("end_ms").and_then(|x| x.as_i64()).unwrap_or(ms);
             let tl = title.to_lowercase();
             // Trip beats festival when both signals appear ("Olathe trip — Puja at cousin's"):
             // the drive is the operational load; the observance rides along.
-            let kind = if tl.contains("trip") || tl.contains("travel") || tl.contains("resort") || tl.contains("hotel") || tl.contains("flight") {
+            let kind = if tl.contains("trip")
+                || tl.contains("travel")
+                || tl.contains("resort")
+                || tl.contains("hotel")
+                || tl.contains("flight")
+            {
                 "trip"
-            } else if title.starts_with("fest:") || tl.contains("puja") || tl.contains("yatra") || tl.contains("ashtami") {
+            } else if title.starts_with("fest:")
+                || tl.contains("puja")
+                || tl.contains("yatra")
+                || tl.contains("ashtami")
+            {
                 "festival"
             } else {
                 "event"
             };
-            push(title.trim_start_matches("fest:").trim().to_string(), kind, ms, end, vec![]);
+            push(
+                title.trim_start_matches("fest:").trim().to_string(),
+                kind,
+                ms,
+                end,
+                vec![],
+            );
         }
         // 1b. The FESTIVALS registry — the authoritative festival dates (they are NOT calendar
         // entries; the twin must read the registry directly or it misses every festival).
         for e in self.load_festival_dates().await {
-            let (Some(name), Some(date)) = (e.get("name").and_then(|x| x.as_str()), e.get("date").and_then(|x| x.as_str())) else {
+            let (Some(name), Some(date)) = (
+                e.get("name").and_then(|x| x.as_str()),
+                e.get("date").and_then(|x| x.as_str()),
+            ) else {
                 continue;
             };
-            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else { continue };
+            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+                continue;
+            };
             let when_ms = d
                 .and_hms_opt(9, 0, 0)
                 .and_then(|dt| dt.and_local_timezone(*today.offset()).single())
@@ -468,22 +695,45 @@ impl super::ConversationEngine {
         }
         // 2. People dates (birthdays/anniversaries) inside the horizon.
         for (name, label, d, _mmdd) in self.upcoming_people_dates(days).await {
-            let kind = if label.to_lowercase().contains("birthday") { "birthday" } else { "event" };
-            push(format!("{name}'s {label}"), kind, now + d * 86_400_000, now + d * 86_400_000, vec![name]);
+            let kind = if label.to_lowercase().contains("birthday") {
+                "birthday"
+            } else {
+                "event"
+            };
+            push(
+                format!("{name}'s {label}"),
+                kind,
+                now + d * 86_400_000,
+                now + d * 86_400_000,
+                vec![name],
+            );
         }
         // 3. Deadlined reminders.
         let (reminders, _) = self.split_tasks().await;
         for t in &reminders {
-            if let Some(ms) = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)) {
+            if let Some(ms) = t
+                .due_ms
+                .map(|m| m as i64)
+                .or_else(|| parse_text_date_ms(&t.description, &today))
+            {
                 if ms >= now && ms <= horizon {
-                    push(t.description.chars().take(80).collect(), "deadline", ms, ms, vec![]);
+                    push(
+                        t.description.chars().take(80).collect(),
+                        "deadline",
+                        ms,
+                        ms,
+                        vec![],
+                    );
                 }
             }
         }
         nodes.sort_by_key(|n| n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(0));
         let _ = self
             .memory
-            .profile_set("future_nodes", &serde_json::Value::Array(nodes.clone()).to_string())
+            .profile_set(
+                "future_nodes",
+                &serde_json::Value::Array(nodes.clone()).to_string(),
+            )
             .await;
         nodes
     }
@@ -500,7 +750,12 @@ impl super::ConversationEngine {
             .map(|n| {
                 let when = n.get("when_ms").and_then(|x| x.as_i64()).unwrap_or(now);
                 let days_left = ((when - now).max(0) as f64 / 86_400_000.0).max(0.25);
-                let total = n.get("criteria").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(1).max(1);
+                let total = n
+                    .get("criteria")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(1)
+                    .max(1);
                 let done = n
                     .get("readiness")
                     .and_then(|x| x.as_object())
@@ -522,7 +777,9 @@ impl super::ConversationEngine {
             return "🔭 Nothing on the 21-day horizon. (`ym calendar add …` seeds it.)".to_string();
         }
         let today = local_now();
-        let mut out = String::from("🔭 FUTURE NODES (21d, fragility-ranked — most imminent × least ready first)\n");
+        let mut out = String::from(
+            "🔭 FUTURE NODES (21d, fragility-ranked — most imminent × least ready first)\n",
+        );
         for (score, n) in ranked.iter().take(12) {
             let title = n.get("title").and_then(|x| x.as_str()).unwrap_or("?");
             let kind = n.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
@@ -530,9 +787,17 @@ impl super::ConversationEngine {
                 .get("when_ms")
                 .and_then(|x| x.as_i64())
                 .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|t| t.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                .map(|t| {
+                    t.with_timezone(today.offset())
+                        .format("%a %b %-d")
+                        .to_string()
+                })
                 .unwrap_or_default();
-            let total = n.get("criteria").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            let total = n
+                .get("criteria")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             let done = n
                 .get("readiness")
                 .and_then(|x| x.as_object())
@@ -545,7 +810,10 @@ impl super::ConversationEngine {
                     a.iter()
                         .filter_map(|c| c.as_str())
                         .filter(|c| {
-                            n.get("readiness").and_then(|r| r.get(*c)).and_then(|v| v.as_bool()) != Some(true)
+                            n.get("readiness")
+                                .and_then(|r| r.get(*c))
+                                .and_then(|v| v.as_bool())
+                                != Some(true)
                         })
                         .map(String::from)
                         .collect()
@@ -553,7 +821,11 @@ impl super::ConversationEngine {
                 .unwrap_or_default();
             out.push_str(&format!(
                 "• [{kind}] {title} — {when} · readiness {done}/{total} · fragility {score:.1}{}\n",
-                if unmet.is_empty() { String::new() } else { format!(" · needs: {}", unmet.join(", ")) }
+                if unmet.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · needs: {}", unmet.join(", "))
+                }
             ));
         }
         out
@@ -566,8 +838,10 @@ impl super::ConversationEngine {
         if t.len() < 12 || is_cli_verb(t) || t.starts_with('/') {
             return;
         }
-        let stop = ["what", "when", "where", "there", "about", "have", "this", "that", "with",
-                    "will", "would", "could", "should", "going", "know", "need", "want", "does"];
+        let stop = [
+            "what", "when", "where", "there", "about", "have", "this", "that", "with", "will",
+            "would", "could", "should", "going", "know", "need", "want", "does",
+        ];
         let words: Vec<String> = t
             .to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
@@ -586,11 +860,18 @@ impl super::ConversationEngine {
                 .filter(|w| w.len() >= 4 && !stop.contains(w))
                 .map(String::from)
                 .collect();
-            words.iter().any(|w| ltoks.contains(w)).then(|| label.clone())
+            words
+                .iter()
+                .any(|w| ltoks.contains(w))
+                .then(|| label.clone())
         });
         let now = chrono::Utc::now();
         let today = local_now();
-        let week = format!("{}-W{:02}", today.format("%G"), chrono::Datelike::iso_week(&today).week());
+        let week = format!(
+            "{}-W{:02}",
+            today.format("%G"),
+            chrono::Datelike::iso_week(&today).week()
+        );
         let mut stats: serde_json::Value = self
             .memory
             .profile_get("regret_stats")
@@ -601,10 +882,15 @@ impl super::ConversationEngine {
             .unwrap_or_else(|| serde_json::json!({}));
         let wk = stats
             .as_object_mut()
-            .map(|m| m.entry(week.clone()).or_insert_with(|| serde_json::json!({"asks":0,"linked":0,"anticipated":0,"missed":0})))
+            .map(|m| {
+                m.entry(week.clone()).or_insert_with(
+                    || serde_json::json!({"asks":0,"linked":0,"anticipated":0,"missed":0}),
+                )
+            })
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"asks":0,"linked":0,"anticipated":0,"missed":0}));
-        let bump = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0) + 1;
+        let bump =
+            |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0) + 1;
         let mut wk2 = wk.clone();
         wk2["asks"] = serde_json::json!(bump(&wk, "asks"));
         let class = match &hit {
@@ -629,7 +915,11 @@ impl super::ConversationEngine {
                     .to_lowercase();
                     subj.iter().any(|w| hay.contains(w.as_str()))
                 });
-                let recent = self.memory.recent_messages(80, &mind_types::AccessContext::operator_audit()).await.unwrap_or_default();
+                let recent = self
+                    .memory
+                    .recent_messages(80, &mind_types::AccessContext::operator_audit())
+                    .await
+                    .unwrap_or_default();
                 let spoken = packed
                     || recent
                         .iter()
@@ -658,7 +948,10 @@ impl super::ConversationEngine {
                 }
             }
         }
-        let _ = self.memory.profile_set("regret_stats", &stats.to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("regret_stats", &stats.to_string())
+            .await;
         // A miss is a RegretRecord — the raw material for regression tests + self-build goals.
         if class == "missed_foreseeable" {
             let mut log: Vec<serde_json::Value> = self
@@ -680,7 +973,10 @@ impl super::ConversationEngine {
                 let cut = log.len() - 300;
                 log.drain(..cut);
             }
-            let _ = self.memory.profile_set("regret_log", &serde_json::Value::Array(log).to_string()).await;
+            let _ = self
+                .memory
+                .profile_set("regret_log", &serde_json::Value::Array(log).to_string())
+                .await;
         }
     }
 
@@ -695,7 +991,9 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|x| serde_json::from_str(&x).ok())
             .unwrap_or_else(|| serde_json::json!({}));
-        let mut out = String::from("📉 PREVENTABLE-ASK CURVE (charter metric — must decline once the Night Shift ships)\n");
+        let mut out = String::from(
+            "📉 PREVENTABLE-ASK CURVE (charter metric — must decline once the Night Shift ships)\n",
+        );
         let mut weeks: Vec<(String, serde_json::Value)> = stats
             .as_object()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -707,7 +1005,11 @@ impl super::ConversationEngine {
         for (wk, v) in &weeks {
             let g = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
             let (linked, missed) = (g("linked"), g("missed"));
-            let rate = if linked > 0 { format!("{:.0}%", missed as f64 * 100.0 / linked as f64) } else { "—".to_string() };
+            let rate = if linked > 0 {
+                format!("{:.0}%", missed as f64 * 100.0 / linked as f64)
+            } else {
+                "—".to_string()
+            };
             out.push_str(&format!(
                 "{wk}: {} asks · {} foreseeable · {} anticipated · {} MISSED → preventable-ask rate {rate}\n",
                 g("asks"), linked, g("anticipated"), missed
@@ -731,12 +1033,19 @@ impl super::ConversationEngine {
         }
         out
     }
-
 }
- 
+
 #[cfg(test)]
 mod flight_recorder_tests {
     use super::*;
+
+    #[test]
+    fn packet_ids_do_not_collide_within_one_millisecond() {
+        let ids: std::collections::HashSet<String> =
+            (0..1_024).map(|_| next_packet_id(42)).collect();
+        assert_eq!(ids.len(), 1_024);
+        assert!(ids.iter().all(|id| id.starts_with("pkt:2a-")));
+    }
     use std::sync::Arc;
 
     fn engine_with_recorder(tag: &str) -> (Arc<ConversationEngine>, mind_types::scratch::Scratch) {
@@ -746,12 +1055,14 @@ mod flight_recorder_tests {
             Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
             1,
         );
-        let eng = Arc::new(ConversationEngine::new(
-            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
-            pool,
-            mind_types::default_persona("the user"),
-        )
-        .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))));
+        let eng = Arc::new(
+            ConversationEngine::new(
+                Arc::new(mem) as Arc<dyn MemoryFacade>,
+                pool,
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
+        );
         (eng, p)
     }
 
@@ -780,7 +1091,17 @@ mod flight_recorder_tests {
         let events = eng.recorder().read_trace(&id);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "packet_created");
-        assert_eq!(events[0].evidence_ids, vec!["E1".to_string(), "E2".to_string()]);
+        assert!(
+            events[0].event_id.is_some(),
+            "creation must mint a causal root"
+        );
+        assert_eq!(events[0].object_id.as_deref(), Some(id.as_str()));
+        assert_eq!(events[0].goal_id.as_deref(), Some("node:birthday"));
+        assert_eq!(events[0].lane.as_deref(), Some("primary"));
+        assert_eq!(
+            events[0].evidence_ids,
+            vec!["E1".to_string(), "E2".to_string()]
+        );
 
         // The owner rejects it: same trace gains the resolution with its why.
         eng.packet_decide("1", false, "wrong occasion").await;
@@ -789,14 +1110,223 @@ mod flight_recorder_tests {
         assert_eq!(events[1].kind, "packet_resolved");
         assert_eq!(events[1].verdict.as_deref(), Some("rejected"));
         assert_eq!(events[1].outcome.as_deref(), Some("wrong occasion"));
+        assert_eq!(events[1].parent_event_id, events[0].event_id);
+        assert_eq!(events[1].object_id, events[0].object_id);
+        assert_eq!(events[1].goal_id, events[0].goal_id);
+        assert_eq!(events[1].lane, events[0].lane);
+        assert_eq!(events[1].policy, vec!["expiry_ms=9223372036854775807"]);
+        assert_eq!(events[1].semantic_success, Some(false));
+        assert_eq!(
+            events[1].evaluator_id.as_deref(),
+            Some(PACKET_DECISION_EVALUATOR_ID)
+        );
 
         // And `ym why <prefix>` renders it human-readably from persisted evidence only.
         let rendered = eng.why(&id);
-        for needle in ["packet_created", "packet_resolved", "verdict: rejected", "outcome: wrong occasion", "confidence 0.70"] {
-            assert!(rendered.contains(needle), "rendered trace must contain '{needle}':\n{rendered}");
+        for needle in [
+            "packet_created",
+            "packet_resolved",
+            "verdict: rejected",
+            "outcome: wrong occasion",
+            "confidence 0.70",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "rendered trace must contain '{needle}':\n{rendered}"
+            );
         }
         // Chain integrity survives real writes through the wiring.
         assert_eq!(mind_observability::verify_log(&path), Ok(2));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn packet_expiry_is_graded_and_parented_to_its_proposal() {
+        let (eng, path) = engine_with_recorder("pkt_expiry");
+        let id = eng
+            .packet_add(
+                "node:window",
+                None,
+                "info",
+                "Time-bounded packet",
+                "prepared body",
+                "window was open",
+                vec![],
+                0.6,
+                false,
+                0,
+            )
+            .await;
+
+        assert!(eng.live_packets().await.is_empty());
+        let events = eng.recorder().read_trace(&id);
+        assert_eq!(events.len(), 2, "create + expiry share one trace");
+        assert_eq!(events[1].kind, "packet_expired");
+        assert_eq!(events[1].parent_event_id, events[0].event_id);
+        assert_eq!(events[1].object_id, events[0].object_id);
+        assert_eq!(events[1].goal_id, events[0].goal_id);
+        assert_eq!(events[1].lane, events[0].lane);
+        assert_eq!(events[1].policy, vec!["expiry_ms=0"]);
+        assert_eq!(events[1].verdict.as_deref(), Some("expired"));
+        assert_eq!(events[1].semantic_success, Some(false));
+        assert_eq!(
+            events[1].evaluator_id.as_deref(),
+            Some(PACKET_EXPIRY_EVALUATOR_ID)
+        );
+        let gate = eng
+            .cli_dispatch(
+                "why packet-chains",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await;
+        assert!(
+            gate.contains("PACKET CHAIN COMPLETENESS — 1/1 latest packet lifecycle(s) complete"),
+            "the public command must read the verified lifecycle end to end:\n{gate}"
+        );
+        assert_eq!(mind_observability::verify_log(&path), Ok(2));
+
+        // Aggregate gates must fail closed when a parseable event is appended outside the chain.
+        // Raw trace reconstruction remains permissive for forensics; promotion metrics do not.
+        {
+            use std::io::Write as _;
+            let forged = serde_json::json!({
+                "chain": "forged",
+                "event": mind_observability::DecisionEvent::new("forged", "packet_resolved")
+            });
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("scratch decision log should remain appendable");
+            writeln!(file, "{forged}").expect("forged test tail should be written");
+        }
+        let refused = eng
+            .cli_dispatch(
+                "why packet-chains",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await;
+        assert!(
+            refused.starts_with("DECISION ANALYTICS UNAVAILABLE"),
+            "packet analytics must not compute through a forged tail:\n{refused}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn packet_trigger_authority_is_atomic_across_store_and_recorder() {
+        let (eng, path) = engine_with_recorder("pkt_authority");
+        let id = eng
+            .packet_add_told(
+                "node:promise",
+                None,
+                "plan",
+                "Promised follow-up",
+                "prepared body",
+                "the owner explicitly asked",
+                vec!["promise-evidence".into()],
+                0.9,
+                false,
+                i64::MAX,
+            )
+            .await;
+
+        let stored = eng.load_packets().await;
+        let packet = stored
+            .iter()
+            .find(|packet| packet.get("id").and_then(|value| value.as_str()) == Some(&id))
+            .expect("the told packet must be persisted");
+        assert_eq!(
+            packet
+                .get("trigger_provenance")
+                .and_then(|value| value.as_str()),
+            Some("told")
+        );
+        let events = eng.recorder().read_trace(&id);
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0]
+                .policy
+                .iter()
+                .any(|policy| policy.contains("provenance=told")),
+            "recorder and packet store must agree on trigger authority: {:?}",
+            events[0].policy
+        );
+        assert_eq!(mind_observability::verify_log(&path), Ok(1));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn confirmed_packet_decision_is_idempotent() {
+        let (eng, path) = engine_with_recorder("pkt_idempotent");
+        let id = eng
+            .packet_add(
+                "node:idempotent",
+                None,
+                "plan",
+                "One owner decision",
+                "prepared body",
+                "ready for review",
+                vec![],
+                0.8,
+                true,
+                i64::MAX,
+            )
+            .await;
+
+        assert!(eng
+            .packet_decide("1", true, "looks right")
+            .await
+            .contains("Confirmed"));
+        let repeated = eng.packet_decide("1", true, "again").await;
+        assert!(repeated.contains("Already confirmed"), "{repeated}");
+        let reversed = eng.packet_decide("1", false, "changed my mind").await;
+        assert!(reversed.contains("Already confirmed"), "{reversed}");
+
+        let events = eng.recorder().read_trace(&id);
+        assert_eq!(
+            events.len(),
+            2,
+            "one creation and exactly one terminal decision"
+        );
+        assert_eq!(events[1].kind, "packet_resolved");
+        assert_eq!(events[1].verdict.as_deref(), Some("confirmed"));
+        assert_eq!(mind_observability::verify_log(&path), Ok(2));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn packet_confidence_is_normalized_in_store_and_recorder() {
+        let (eng, path) = engine_with_recorder("pkt_confidence");
+        let id = eng
+            .packet_add(
+                "node:confidence",
+                None,
+                "plan",
+                "Conservative confidence",
+                "prepared body",
+                "invalid producer input",
+                vec![],
+                f64::NAN,
+                false,
+                i64::MAX,
+            )
+            .await;
+
+        let packets = eng.load_packets().await;
+        let stored = packets
+            .iter()
+            .find(|packet| packet.get("id").and_then(|value| value.as_str()) == Some(&id))
+            .expect("packet must be stored");
+        assert_eq!(
+            stored.get("confidence").and_then(|value| value.as_f64()),
+            Some(0.0)
+        );
+
+        let events = eng.recorder().read_trace(&id);
+        assert_eq!(events[0].confidence, Some(0.0));
+        assert_eq!(normalize_packet_confidence(-0.1), 0.0);
+        assert_eq!(normalize_packet_confidence(1.1), 1.0);
+        assert_eq!(mind_observability::verify_log(&path), Ok(1));
         let _ = std::fs::remove_file(&path);
     }
 }

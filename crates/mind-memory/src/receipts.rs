@@ -64,10 +64,15 @@ impl ReadReceiptLedger {
     pub fn for_db(db_path: &str) -> Self {
         let path = match std::env::var("YM_READ_RECEIPTS") {
             Ok(p) if !p.trim().is_empty() => Some(PathBuf::from(p)),
-            _ if db_path != ":memory:" => Some(PathBuf::from(format!("{db_path}.read_receipts.jsonl"))),
+            _ if db_path != ":memory:" => {
+                Some(PathBuf::from(format!("{db_path}.read_receipts.jsonl")))
+            }
             _ => None,
         };
-        Self { path, head: Mutex::new(None) }
+        Self {
+            path,
+            head: Mutex::new(None),
+        }
     }
 
     /// Append one receipt. Best-effort: a ledger failure must never fail the
@@ -91,7 +96,10 @@ impl ReadReceiptLedger {
         hasher.update(record_json.as_bytes());
         let chain = format!("{:x}", hasher.finalize());
         let line = format!("{{\"chain\":\"{chain}\",\"record\":{record_json}}}\n");
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         f.write_all(line.as_bytes())?;
         f.sync_all()?;
         *head = Some(chain);
@@ -131,7 +139,9 @@ pub fn verify_ledger(path: &Path) -> std::result::Result<usize, usize> {
 
 /// Deserialize all receipts (chain not verified — pair with `verify_ledger`).
 pub fn read_ledger(path: &Path) -> Vec<ReadReceipt> {
-    let Ok(content) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -171,7 +181,10 @@ mod tests {
     #[test]
     fn appends_chain_and_verifies() {
         let path = scratch("ok");
-        let ledger = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
+        let ledger = ReadReceiptLedger {
+            path: Some(path.to_path_buf()),
+            head: Mutex::new(None),
+        };
         ledger.append(receipt("recall_typed", "safe combination"));
         ledger.append(receipt("beliefs_matching", "gift"));
         ledger.append(receipt("conflicts", ""));
@@ -185,14 +198,20 @@ mod tests {
     #[test]
     fn tamper_breaks_the_chain() {
         let path = scratch("tamper");
-        let ledger = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
+        let ledger = ReadReceiptLedger {
+            path: Some(path.to_path_buf()),
+            head: Mutex::new(None),
+        };
         ledger.append(receipt("recall_typed", "one"));
         ledger.append(receipt("recall_typed", "two"));
         // Rewrite record #1's detail without recomputing the chain: verify must flag line 0.
         let content = std::fs::read_to_string(&path).unwrap();
         let tampered = content.replacen("one", "own", 1);
         std::fs::write(&path, tampered).unwrap();
-        assert!(verify_ledger(&path).is_err(), "tampered ledger must not verify");
+        assert!(
+            verify_ledger(&path).is_err(),
+            "tampered ledger must not verify"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -200,11 +219,17 @@ mod tests {
     fn head_survives_reopen() {
         let path = scratch("reopen");
         {
-            let ledger = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
+            let ledger = ReadReceiptLedger {
+                path: Some(path.to_path_buf()),
+                head: Mutex::new(None),
+            };
             ledger.append(receipt("recall_typed", "first"));
         }
         // A NEW ledger handle (fresh process) must chain off the persisted head, not genesis.
-        let ledger2 = ReadReceiptLedger { path: Some(path.to_path_buf()), head: Mutex::new(None) };
+        let ledger2 = ReadReceiptLedger {
+            path: Some(path.to_path_buf()),
+            head: Mutex::new(None),
+        };
         ledger2.append(receipt("recall_typed", "second"));
         assert_eq!(verify_ledger(&path), Ok(2));
         let _ = std::fs::remove_file(&path);

@@ -69,9 +69,21 @@ impl NudgeGate {
 /// vocabulary sol flagged. Enforced by [`render`] and asserted in tests so a
 /// future edit cannot quietly reintroduce guilt framing.
 pub const BANNED_PHRASES: &[&str] = &[
-    "should", "haven't", "hasn't", "weeks since", "days since", "long time",
-    "lonely", "loneliness", "neglect", "reach out more", "you never",
-    "reconnect", "drifted", "out of touch", "been a while",
+    "should",
+    "haven't",
+    "hasn't",
+    "weeks since",
+    "days since",
+    "long time",
+    "lonely",
+    "loneliness",
+    "neglect",
+    "reach out more",
+    "you never",
+    "reconnect",
+    "drifted",
+    "out of touch",
+    "been a while",
 ];
 
 /// Opportunity-first render. The only framing allowed: a concrete, near event
@@ -79,7 +91,10 @@ pub const BANNED_PHRASES: &[&str] = &[
 pub fn render(person: &str, date_phrase: &str, gift_hint: Option<&str>) -> String {
     let offer = match gift_hint {
         Some(h) if !h.trim().is_empty() => {
-            format!("I remember {} — want me to draft a note, or pull a couple of gift ideas?", h.trim())
+            format!(
+                "I remember {} — want me to draft a note, or pull a couple of gift ideas?",
+                h.trim()
+            )
         }
         _ => "want me to draft a note?".to_string(),
     };
@@ -98,7 +113,11 @@ pub fn is_clean(rendered: &str) -> bool {
 /// One-shot dedup key: person + the event's calendar day. Two runs on the
 /// same birthday produce the same key, so the nudge fires at most once.
 pub fn event_key(person: &str, when_ms: i64) -> String {
-    format!("snr:birthday:{}:{}", person.trim().to_lowercase(), when_ms / 86_400_000)
+    format!(
+        "snr:birthday:{}:{}",
+        person.trim().to_lowercase(),
+        when_ms / 86_400_000
+    )
 }
 
 /// The audit record. Captures eligibility, provenance, and that controls were
@@ -121,12 +140,18 @@ pub struct NudgeAudit {
 
 /// Feedback that COUNTS as a success for the Wilson bound.
 pub fn feedback_is_positive(f: &str) -> bool {
-    matches!(f.trim().to_lowercase().as_str(), "helpful" | "neutral" | "good" | "yes")
+    matches!(
+        f.trim().to_lowercase().as_str(),
+        "helpful" | "neutral" | "good" | "yes"
+    )
 }
 
 /// Feedback that trips the per-person / class kill switch.
 pub fn feedback_is_harm(f: &str) -> bool {
-    matches!(f.trim().to_lowercase().as_str(), "pressured" | "monitored" | "creepy" | "guilt" | "stop")
+    matches!(
+        f.trim().to_lowercase().as_str(),
+        "pressured" | "monitored" | "creepy" | "guilt" | "stop"
+    )
 }
 
 /// Wilson 95% one-sided lower bound (z = 1.645) — the honest small-n rate the
@@ -160,7 +185,7 @@ pub fn class_health(audits: &[NudgeAudit]) -> ClassHealth {
         .iter()
         .rev()
         .take(10)
-        .filter(|a| a.feedback.as_deref().map(feedback_is_harm).unwrap_or(false))
+        .filter(|a| a.feedback.as_deref().is_some_and(feedback_is_harm))
         .count();
     if recent_harm >= 2 {
         return ClassHealth::KillDisabled;
@@ -168,7 +193,7 @@ pub fn class_health(audits: &[NudgeAudit]) -> ClassHealth {
     let graded: Vec<&NudgeAudit> = audits.iter().filter(|a| a.feedback.is_some()).collect();
     let positives = graded
         .iter()
-        .filter(|a| a.feedback.as_deref().map(feedback_is_positive).unwrap_or(false))
+        .filter(|a| a.feedback.as_deref().is_some_and(feedback_is_positive))
         .count();
     if graded.len() >= 20 && wilson_lower_bound(positives, graded.len()) >= 0.80 {
         ClassHealth::Trusted
@@ -238,7 +263,7 @@ mod tests {
     #[test]
     fn event_key_is_one_shot_per_day() {
         let a = event_key("Asha", 1_700_000_000_000);
-        let b = event_key(" asha ", 1_700_000_000_000 + 3600_000); // same day, spacing/case differ
+        let b = event_key(" asha ", 1_700_000_000_000 + 3_600_000); // same day, spacing/case differ
         assert_eq!(a, b, "same person + day → one nudge");
         let c = event_key("Asha", 1_700_000_000_000 + 86_400_000);
         assert_ne!(a, c, "next year's birthday is a distinct event");
@@ -247,8 +272,12 @@ mod tests {
     #[test]
     fn class_health_kills_on_two_harm_reports_and_trusts_on_calibration() {
         let mk = |fb: Option<&str>| NudgeAudit {
-            event_key: "k".into(), person: "p".into(), provenance: "told".into(),
-            controls_shown: true, ts_ms: 0, feedback: fb.map(String::from),
+            event_key: "k".into(),
+            person: "p".into(),
+            provenance: "told".into(),
+            controls_shown: true,
+            ts_ms: 0,
+            feedback: fb.map(String::from),
         };
         // Two harm reports in the last 10 → disabled.
         let mut kill = vec![mk(Some("helpful")); 8];

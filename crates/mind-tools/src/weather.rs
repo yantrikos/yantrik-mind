@@ -41,7 +41,7 @@ fn wmo(code: i64) -> &'static str {
         66 | 67 => "freezing rain",
         71 | 73 | 75 => "snow",
         77 => "snow grains",
-        80 | 81 | 82 => "rain showers",
+        80..=82 => "rain showers",
         85 | 86 => "snow showers",
         95 => "thunderstorm",
         96 | 99 => "thunderstorm with hail",
@@ -206,11 +206,12 @@ impl WeatherClient for OpenMeteo {
 /// Keyless; requires a User-Agent with contact info per NWS policy.
 fn nws_daily(lat: f64, lon: f64) -> anyhow::Result<Vec<DayForecast>> {
     const UA: &str = "yantrik-mind (contact: developer@pranab.co.in)";
-    let pts: serde_json::Value = ureq::get(&format!("https://api.weather.gov/points/{lat:.4},{lon:.4}"))
-        .set("User-Agent", UA)
-        .timeout(std::time::Duration::from_secs(15))
-        .call()?
-        .into_json()?;
+    let pts: serde_json::Value =
+        ureq::get(&format!("https://api.weather.gov/points/{lat:.4},{lon:.4}"))
+            .set("User-Agent", UA)
+            .timeout(std::time::Duration::from_secs(15))
+            .call()?
+            .into_json()?;
     let url = pts["properties"]["forecast"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("NWS: no forecast URL (non-US location?)"))?
@@ -220,7 +221,10 @@ fn nws_daily(lat: f64, lon: f64) -> anyhow::Result<Vec<DayForecast>> {
         .timeout(std::time::Duration::from_secs(15))
         .call()?
         .into_json()?;
-    let periods = fc["properties"]["periods"].as_array().cloned().unwrap_or_default();
+    let periods = fc["properties"]["periods"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     // Night temps become the day's low.
     let mut lows: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     for p in &periods {
@@ -235,7 +239,9 @@ fn nws_daily(lat: f64, lon: f64) -> anyhow::Result<Vec<DayForecast>> {
         if !p["isDaytime"].as_bool().unwrap_or(false) {
             continue;
         }
-        let Some(date) = p["startTime"].as_str().map(|t| t[..10].to_string()) else { continue };
+        let Some(date) = p["startTime"].as_str().map(|t| t[..10].to_string()) else {
+            continue;
+        };
         let weekday = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d")
             .map(|nd| nd.format("%a").to_string())
             .unwrap_or_default();
@@ -250,7 +256,9 @@ fn nws_daily(lat: f64, lon: f64) -> anyhow::Result<Vec<DayForecast>> {
             desc: p["shortForecast"].as_str().unwrap_or("—").to_string(),
             hi_f: p["temperature"].as_f64().unwrap_or(0.0),
             lo_f: lows.get(&date).copied().unwrap_or(0.0),
-            precip_prob: p["probabilityOfPrecipitation"]["value"].as_f64().unwrap_or(0.0),
+            precip_prob: p["probabilityOfPrecipitation"]["value"]
+                .as_f64()
+                .unwrap_or(0.0),
             wind_mph,
             sunset: String::new(),
             date,

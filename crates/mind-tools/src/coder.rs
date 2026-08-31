@@ -17,6 +17,7 @@
 //! `--dangerously-skip-permissions` is what makes it non-interactive; `claude` itself refuses that
 //! flag as root, so the service MUST run as a non-root user (it runs as `yantrikmind`).
 
+use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
@@ -81,10 +82,13 @@ fn parse_cli_json(raw: &str) -> (String, Option<RoundSpend>) {
     let prose = v
         .get("result")
         .and_then(|r| r.as_str())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| raw.trim().to_string());
+        .map_or_else(|| raw.trim().to_string(), |s| s.trim().to_string());
     let u = v.get("usage");
-    let n = |k: &str| u.and_then(|u| u.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
+    let n = |k: &str| {
+        u.and_then(|u| u.get(k))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0)
+    };
     // No usage block means the run reported no spend it can vouch for — say unmeasured, not zero.
     let spend = u.map(|_| RoundSpend {
         model: v
@@ -96,7 +100,10 @@ fn parse_cli_json(raw: &str) -> (String, Option<RoundSpend>) {
         cache_write: n("cache_creation_input_tokens"),
         cache_read: n("cache_read_input_tokens"),
         output: n("output_tokens"),
-        usd: v.get("total_cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0),
+        usd: v
+            .get("total_cost_usd")
+            .and_then(|c| c.as_f64())
+            .unwrap_or(0.0),
     });
     (prose, spend)
 }
@@ -117,6 +124,9 @@ pub struct CoderResult {
     /// redesign that was thrown away as "failed", so callers must treat this as a partial result
     /// to salvage, never as an absence of work.
     pub timed_out: bool,
+    /// Snapshot of the artifact tree immediately before this refinement round. `None` on the
+    /// first round because there was no prior artifact to preserve.
+    pub checkpoint: Option<String>,
 }
 
 impl Coder {
@@ -171,6 +181,92 @@ impl Coder {
         let wd = format!("{}/run-{nanos}", self.scratch_root.trim_end_matches('/'));
         std::fs::create_dir_all(&wd)?;
         Ok(wd)
+    }
+
+    /// Resolve an existing run directory and prove it is a child of this coder's scratch root.
+    /// Ledger paths are data, not authority: no rollback operation may escape into an arbitrary
+    /// directory even if a row is malformed or tampered with.
+    fn checked_workdir(&self, wd: &str) -> anyhow::Result<(std::path::PathBuf, String)> {
+        let root = std::path::Path::new(&self.scratch_root).canonicalize()?;
+        let workdir = std::path::Path::new(wd).canonicalize()?;
+        if workdir == root || !workdir.starts_with(&root) {
+            anyhow::bail!("workdir is outside the coder scratch root");
+        }
+        let run = workdir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("workdir has no safe run name"))?
+            .to_string();
+        Ok((workdir, run))
+    }
+
+    /// Stable SHA-256 of the visible artifact tree. Hidden state is outside the deliverable and is
+    /// deliberately excluded, matching checkpoint copy/restore semantics.
+    pub fn artifact_sha256(&self, wd: &str) -> anyhow::Result<String> {
+        let (workdir, _) = self.checked_workdir(wd)?;
+        Ok(digest_visible_tree(&workdir)?)
+    }
+
+    pub fn create_checkpoint(&self, wd: &str) -> anyhow::Result<String> {
+        let (workdir, run) = self.checked_workdir(wd)?;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let id = format!("cp-{nanos}");
+        let target = std::path::Path::new(&self.scratch_root)
+            .join(".checkpoints")
+            .join(run)
+            .join(&id);
+        std::fs::create_dir_all(&target)?;
+        if let Err(error) = copy_visible_tree(&workdir, &target) {
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(error.into());
+        }
+        Ok(id)
+    }
+
+    /// Restore one pre-round snapshot. This is intentionally synchronous and operator-invoked;
+    /// callers must refuse while a job is running so no builder can race the restore.
+    pub fn restore_checkpoint(&self, wd: &str, id: &str) -> anyhow::Result<Vec<String>> {
+        if !id
+            .strip_prefix("cp-")
+            .is_some_and(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()))
+        {
+            anyhow::bail!("invalid checkpoint id");
+        }
+        let (workdir, run) = self.checked_workdir(wd)?;
+        let checkpoint_root = std::path::Path::new(&self.scratch_root)
+            .join(".checkpoints")
+            .join(run);
+        let source = checkpoint_root.join(id).canonicalize()?;
+        let checkpoint_root = checkpoint_root.canonicalize()?;
+        if !source.starts_with(&checkpoint_root) || !source.is_dir() {
+            anyhow::bail!("checkpoint is outside the run checkpoint root");
+        }
+        let expected_sha256 = digest_visible_tree(&source)?;
+        for entry in std::fs::read_dir(&workdir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                std::fs::remove_dir_all(entry.path())?;
+            } else {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        copy_visible_tree(&source, &workdir)?;
+        let restored_sha256 = digest_visible_tree(&workdir)?;
+        if restored_sha256 != expected_sha256 {
+            anyhow::bail!(
+                "checkpoint restore digest mismatch: expected {expected_sha256}, observed {restored_sha256}"
+            );
+        }
+        Ok(list_files(wd))
     }
 
     fn command(&self, wd: &str, task: &str, use_oauth: bool, resume: bool) -> Command {
@@ -234,24 +330,32 @@ impl Coder {
     /// Run an agentic coding task. The agent works in a fresh isolated scratch dir and reports back.
     pub async fn run(&self, task: &str) -> anyhow::Result<CoderResult> {
         let wd = self.fresh_workdir()?;
-        self.run_round(task, wd, false).await
+        self.run_round(task, wd, false, None).await
     }
 
     /// Run in an EXISTING workdir — the iterate-until-good loop's primitive. Round N+1 continues
     /// where round N left its files, so a critique can say "fix the contrast on index.html" and the
     /// builder actually has an index.html to fix.
     pub async fn run_in(&self, task: &str, wd: String) -> anyhow::Result<CoderResult> {
-        self.run_round(task, wd, false).await
+        let checkpoint = self.create_checkpoint(&wd)?;
+        self.run_round(task, wd, false, Some(checkpoint)).await
     }
 
     /// Like `run_in`, but RESUMES the previous round's session in this workdir instead of starting
     /// a cold one. The files alone carry WHAT was done; only the transcript carries WHY, and a
     /// critic's "fix X" lands very differently on a builder that remembers choosing X.
     pub async fn continue_in(&self, task: &str, wd: String) -> anyhow::Result<CoderResult> {
-        self.run_round(task, wd, true).await
+        let checkpoint = self.create_checkpoint(&wd)?;
+        self.run_round(task, wd, true, Some(checkpoint)).await
     }
 
-    async fn run_round(&self, task: &str, wd: String, resume: bool) -> anyhow::Result<CoderResult> {
+    async fn run_round(
+        &self,
+        task: &str,
+        wd: String,
+        resume: bool,
+        checkpoint: Option<String>,
+    ) -> anyhow::Result<CoderResult> {
         let use_oauth = self.oauth_token.is_some();
         let child = self.command(&wd, task, use_oauth, resume).spawn()?;
         let timeout = std::time::Duration::from_secs(self.timeout_secs);
@@ -261,7 +365,7 @@ impl Coder {
         // decides whether it is worth critiquing.
         let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(r) => r?,
-            Err(_) => return Ok(self.salvage(wd, "", resume)),
+            Err(_) => return Ok(self.salvage(wd, "", resume, checkpoint)),
         };
 
         let auth_error = format!(
@@ -273,7 +377,14 @@ impl Coder {
             let fallback = self.command(&wd, task, false, resume).spawn()?;
             match tokio::time::timeout(timeout, fallback.wait_with_output()).await {
                 Ok(r) => r?,
-                Err(_) => return Ok(self.salvage(wd, " (during the provider fallback)", resume)),
+                Err(_) => {
+                    return Ok(self.salvage(
+                        wd,
+                        " (during the provider fallback)",
+                        resume,
+                        checkpoint,
+                    ))
+                }
             }
         } else {
             out
@@ -294,12 +405,19 @@ impl Coder {
             files: list_files(&wd),
             workdir: wd,
             timed_out: false,
+            checkpoint,
         })
     }
 
     /// What a timed-out round yields: the on-disk state, honestly labelled. `ok` stays false —
     /// the agent never got to confirm its own work — but the files are there to judge.
-    fn salvage(&self, wd: String, ctx: &str, resumed: bool) -> CoderResult {
+    fn salvage(
+        &self,
+        wd: String,
+        ctx: &str,
+        resumed: bool,
+        checkpoint: Option<String>,
+    ) -> CoderResult {
         CoderResult {
             ok: false,
             summary: format!(
@@ -314,8 +432,100 @@ impl Coder {
             files: list_files(&wd),
             workdir: wd,
             timed_out: true,
+            checkpoint,
         }
     }
+}
+
+/// Copy artifact files without following symlinks or importing hidden state such as `.env`, `.git`,
+/// or an agent transcript. A checkpoint is the deliverable tree, not a second secret store.
+fn copy_visible_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_visible_tree(&entry.path(), &target)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn digest_visible_tree(root: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        hasher: &mut Sha256,
+    ) -> std::io::Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "artifact path is not valid UTF-8",
+                )
+            })?;
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "artifact path escaped its root",
+                )
+            })?;
+            let relative = relative
+                .components()
+                .map(|part| part.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "artifact path is not valid UTF-8",
+                    )
+                })?
+                .join("/");
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                hasher.update(b"\0directory\0");
+                hasher.update((relative.len() as u64).to_le_bytes());
+                hasher.update(relative.as_bytes());
+                walk(root, &path, hasher)?;
+            } else if ty.is_file() {
+                let metadata = entry.metadata()?;
+                hasher.update(b"\0file\0");
+                hasher.update((relative.len() as u64).to_le_bytes());
+                hasher.update(relative.as_bytes());
+                hasher.update(metadata.len().to_le_bytes());
+                let mut file = std::fs::File::open(&path)?;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..read]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"yantrik-visible-artifact-v1");
+    walk(root, root, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Non-hidden files currently in a workdir.
@@ -374,9 +584,16 @@ mod tests {
                       "cache_read_input_tokens": 61965, "output_tokens": 667}
         }"#;
         let (prose, spend) = parse_cli_json(raw);
-        assert_eq!(prose, "Added tests/mail-form.test.ts (67 lines).", "the prose is .result, trimmed — not the whole envelope");
+        assert_eq!(
+            prose, "Added tests/mail-form.test.ts (67 lines).",
+            "the prose is .result, trimmed — not the whole envelope"
+        );
         let s = spend.expect("a usage block means the round is measured");
-        assert_eq!(s.total_tokens(), 70_535, "total must include cache reads — they are the whole story of this loop's cost");
+        assert_eq!(
+            s.total_tokens(),
+            70_535,
+            "total must include cache reads — they are the whole story of this loop's cost"
+        );
         assert_eq!(s.model, "claude-haiku-4-5-20251001");
         assert!((s.usd - 0.0769).abs() < 1e-9);
     }
@@ -405,11 +622,17 @@ mod tests {
     #[test]
     fn a_round_without_usage_is_unmeasured_not_zero() {
         let (prose, spend) = parse_cli_json("API Error: Request rejected (429) · quota exhausted");
-        assert!(prose.contains("429"), "a bare CLI error is worth more than a clean parse failure — keep the text");
+        assert!(
+            prose.contains("429"),
+            "a bare CLI error is worth more than a clean parse failure — keep the text"
+        );
         assert!(spend.is_none(), "no envelope means no measurement");
 
         let (_, spend) = parse_cli_json(r#"{"result": "done", "total_cost_usd": 0.0}"#);
-        assert!(spend.is_none(), "an envelope with no usage block is unmeasured, not a free round");
+        assert!(
+            spend.is_none(),
+            "an envelope with no usage block is unmeasured, not a free round"
+        );
     }
 
     #[test]
@@ -435,5 +658,90 @@ mod tests {
         assert!(!is_revoked_oauth_error(
             "API Error: 429 usage limit exceeded"
         ));
+    }
+
+    #[test]
+    fn checkpoint_restore_reproduces_pre_resume_hash_without_hidden_state() {
+        let root = mind_types::scratch::dir("coder-checkpoint");
+        let _ = std::fs::remove_dir_all(&root);
+        let run = root.join("run-test");
+        std::fs::create_dir_all(run.join("src")).unwrap();
+        std::fs::write(run.join("src/app.rs"), "before").unwrap();
+        std::fs::write(run.join("README.md"), "before-readme").unwrap();
+        std::fs::write(run.join(".env"), "must-not-enter-checkpoint").unwrap();
+        let coder = Coder::new(
+            "token",
+            "model",
+            "https://example.com",
+            root.to_string_lossy(),
+        );
+
+        let pre_resume_sha256 = coder.artifact_sha256(&run.to_string_lossy()).unwrap();
+        let id = coder.create_checkpoint(&run.to_string_lossy()).unwrap();
+        std::fs::write(run.join("src/app.rs"), "after").unwrap();
+        std::fs::remove_file(run.join("README.md")).unwrap();
+        std::fs::write(run.join("NEW.txt"), "new").unwrap();
+        std::fs::write(run.join(".env"), "new-hidden-value").unwrap();
+        assert_ne!(
+            coder.artifact_sha256(&run.to_string_lossy()).unwrap(),
+            pre_resume_sha256,
+            "the resumed artifact must differ before rollback"
+        );
+
+        let files = coder
+            .restore_checkpoint(&run.to_string_lossy(), &id)
+            .unwrap();
+        assert_eq!(
+            coder.artifact_sha256(&run.to_string_lossy()).unwrap(),
+            pre_resume_sha256,
+            "verified rollback must reproduce the recorded pre-resume artifact hash"
+        );
+        assert_eq!(
+            std::fs::read_to_string(run.join("src/app.rs")).unwrap(),
+            "before"
+        );
+        assert_eq!(
+            std::fs::read_to_string(run.join("README.md")).unwrap(),
+            "before-readme"
+        );
+        assert!(!run.join("NEW.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(run.join(".env")).unwrap(),
+            "new-hidden-value",
+            "hidden state is neither snapshotted nor overwritten"
+        );
+        std::fs::write(run.join(".env"), "another-hidden-value").unwrap();
+        assert_eq!(
+            coder.artifact_sha256(&run.to_string_lossy()).unwrap(),
+            pre_resume_sha256,
+            "hidden state must not perturb the deliverable receipt"
+        );
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(files.contains(&"src".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_path_and_id_escape_attempts() {
+        let root = mind_types::scratch::dir("coder-checkpoint-escape");
+        let outside = mind_types::scratch::dir("coder-checkpoint-outside");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(root.join("run-test")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let coder = Coder::new(
+            "token",
+            "model",
+            "https://example.com",
+            root.to_string_lossy(),
+        );
+        assert!(coder
+            .restore_checkpoint(&outside.to_string_lossy(), "cp-123")
+            .is_err());
+        assert!(coder
+            .restore_checkpoint(&root.join("run-test").to_string_lossy(), "../escape")
+            .is_err());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

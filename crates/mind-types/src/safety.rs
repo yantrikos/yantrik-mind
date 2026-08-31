@@ -5,13 +5,21 @@
 /// Substrings that mark a secret/credential. Matched case-insensitively against any text that would
 /// cross a trust boundary (an outward payload OR a write into the cognitive moat).
 pub const SECRET_MARKERS: &[&str] = &[
-    "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", // GitHub tokens
-    "glpat-",                                       // GitLab
-    "akia", "asia",                                 // AWS access keys
-    "-----begin", "private key",                    // PEM private keys
-    "app password", "app-password",                 // mail app passwords
-    "xoxb-", "xoxp-",                               // Slack
-    "sk-",                                          // OpenAI-style
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_", // GitHub tokens
+    "glpat-",      // GitLab
+    "akia",
+    "asia", // AWS access keys
+    "-----begin",
+    "private key", // PEM private keys
+    "app password",
+    "app-password", // mail app passwords
+    "xoxb-",
+    "xoxp-", // Slack
+    "sk-",   // OpenAI-style
 ];
 
 // ── SENSITIVITY DETECTION (E.SEC1) ──────────────────────────────────────────────────────────────
@@ -82,7 +90,13 @@ pub struct SensitiveFinding {
 impl std::fmt::Display for SensitiveFinding {
     /// Kind and span only. There is no formatting path that can print the matched text.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} at {}..{}", self.kind.label(), self.start, self.start + self.len)
+        write!(
+            f,
+            "{} at {}..{}",
+            self.kind.label(),
+            self.start,
+            self.start + self.len
+        )
     }
 }
 
@@ -102,17 +116,61 @@ struct TokenShape {
 }
 
 const TOKEN_SHAPES: &[TokenShape] = &[
-    TokenShape { prefix: "ghp_", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "gho_", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "ghu_", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "ghs_", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "github_pat_", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "glpat-", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "xoxb-", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "xoxp-", min_tail: 8, upper_only: false },
-    TokenShape { prefix: "sk-", min_tail: 6, upper_only: false },
-    TokenShape { prefix: "akia", min_tail: 16, upper_only: true },
-    TokenShape { prefix: "asia", min_tail: 16, upper_only: true },
+    TokenShape {
+        prefix: "ghp_",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "gho_",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "ghu_",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "ghs_",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "github_pat_",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "glpat-",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "xoxb-",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "xoxp-",
+        min_tail: 8,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "sk-",
+        min_tail: 6,
+        upper_only: false,
+    },
+    TokenShape {
+        prefix: "akia",
+        min_tail: 16,
+        upper_only: true,
+    },
+    TokenShape {
+        prefix: "asia",
+        min_tail: 16,
+        upper_only: true,
+    },
 ];
 
 /// Words that make a nearby number an identity number rather than a quantity.
@@ -121,8 +179,19 @@ const SSN_CONTEXT: &[&str] = &["ssn", "social"];
 
 /// Credential words. On their own they are conversation; with a value beside them they are not.
 const CREDENTIAL_PHRASES: &[&str] = &[
-    "password", "passcode", "passphrase", "api key", "apikey", "api-key", "secret key",
-    "access token", "auth token", "refresh token", "client secret", "bearer", "private key",
+    "password",
+    "passcode",
+    "passphrase",
+    "api key",
+    "apikey",
+    "api-key",
+    "secret key",
+    "access token",
+    "auth token",
+    "refresh token",
+    "client secret",
+    "bearer",
+    "private key",
 ];
 
 /// Is this byte offset the start of a token (rather than the middle of a word)?
@@ -136,7 +205,9 @@ fn at_token_start(text: &str, at: usize) -> bool {
 /// The maximal token beginning at `at`.
 fn token_at(text: &str, at: usize) -> &str {
     let rest = &text[at..];
-    let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -222,7 +293,11 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
     // user text on every memory write. `to_ascii_lowercase` touches only A-Z, so lengths and char
     // boundaries are identical by construction, and every marker here is ASCII anyway (E.SEC1b).
     let lower = text.to_ascii_lowercase();
-    debug_assert_eq!(lower.len(), text.len(), "offsets are shared between the two");
+    debug_assert_eq!(
+        lower.len(),
+        text.len(),
+        "offsets are shared between the two"
+    );
     let find = |kind, start: usize, len: usize| Some(SensitiveFinding { kind, start, len });
 
     // 1. PEM private keys — a shape, not a phrase.
@@ -241,7 +316,10 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
                 let tok = token_at(text, at);
                 let tail = tok.len().saturating_sub(shape.prefix.len());
                 let shape_ok = tail >= shape.min_tail
-                    && (!shape.upper_only || tok.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+                    && (!shape.upper_only
+                        || tok
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
                 if shape_ok {
                     return find(SensitiveKind::TokenPrefix, at, tok.len());
                 }
@@ -260,7 +338,10 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
     //    token, optionally grouped with spaces or hyphens — it is never buried in hex.
     for (start, len, digits) in digit_runs(text) {
         let n = digits.len();
-        if !(13..=19).contains(&n) || !matches!(digits.as_bytes()[0], b'3'..=b'6') || !luhn_ok(&digits) {
+        if !(13..=19).contains(&n)
+            || !matches!(digits.as_bytes()[0], b'3'..=b'6')
+            || !luhn_ok(&digits)
+        {
             continue;
         }
         if is_embedded(text, start, len) {
@@ -366,8 +447,14 @@ pub fn sensitive_findings(text: &str) -> Vec<SensitiveFinding> {
     let mut out = Vec::new();
     let mut base = 0usize;
     while base < text.len() && out.len() < MAX {
-        let Some(f) = first_sensitive(&text[base..]) else { break };
-        out.push(SensitiveFinding { kind: f.kind, start: base + f.start, len: f.len });
+        let Some(f) = first_sensitive(&text[base..]) else {
+            break;
+        };
+        out.push(SensitiveFinding {
+            kind: f.kind,
+            start: base + f.start,
+            len: f.len,
+        });
         // Always advance, even on a zero-length match, and always onto a char boundary.
         let mut next = base + f.start + f.len.max(1);
         while next < text.len() && !text.is_char_boundary(next) {
@@ -390,7 +477,13 @@ pub fn sensitive_pair(key: &str, value: &str) -> Option<SensitiveFinding> {
     // `api_key` and `api-key` and `apiKey` are the same key wearing three coats.
     let flat: String = key
         .chars()
-        .map(|c| if c == '_' || c == '-' { ' ' } else { c.to_ascii_lowercase() })
+        .map(|c| {
+            if c == '_' || c == '-' {
+                ' '
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
         .collect();
     let named = CREDENTIAL_PHRASES.iter().any(|p| {
         let mut from = 0usize;
@@ -411,7 +504,11 @@ pub fn sensitive_pair(key: &str, value: &str) -> Option<SensitiveFinding> {
     let v = value.trim();
     let single_token = !v.chars().any(|c| c.is_whitespace());
     if single_token && v.len() >= 6 {
-        return Some(SensitiveFinding { kind: SensitiveKind::CredentialPhrase, start: 0, len: v.len() });
+        return Some(SensitiveFinding {
+            kind: SensitiveKind::CredentialPhrase,
+            start: 0,
+            len: v.len(),
+        });
     }
     None
 }
@@ -456,7 +553,6 @@ impl ProvenanceCategory {
     pub fn is_human_independent(&self) -> bool {
         !matches!(self, Self::Human)
     }
-
 }
 
 impl std::str::FromStr for ProvenanceCategory {
@@ -494,10 +590,14 @@ mod tests {
         assert!(ProvenanceCategory::SubAgent.is_human_independent());
         assert!(!ProvenanceCategory::Human.is_human_independent());
         assert_eq!(
-            ProvenanceCategory::WebContent.as_str().parse::<ProvenanceCategory>(),
+            ProvenanceCategory::WebContent
+                .as_str()
+                .parse::<ProvenanceCategory>(),
             Ok(ProvenanceCategory::WebContent)
         );
-        assert!("typoed_machine_source".parse::<ProvenanceCategory>().is_err());
+        assert!("typoed_machine_source"
+            .parse::<ProvenanceCategory>()
+            .is_err());
     }
 }
 
@@ -512,15 +612,30 @@ mod sensitivity_tests {
         let cases: &[(&str, SensitiveKind)] = &[
             ("my password is hunter2", SensitiveKind::CredentialPhrase),
             ("the api key is abc123xyz", SensitiveKind::CredentialPhrase),
-            ("bearer eyJhbGciOiJIUzI1NiJ9.abcdefghij", SensitiveKind::CredentialPhrase),
-            ("client secret: s3cr3t-value-here", SensitiveKind::CredentialPhrase),
-            ("access token = abcd1234efgh", SensitiveKind::CredentialPhrase),
+            (
+                "bearer eyJhbGciOiJIUzI1NiJ9.abcdefghij",
+                SensitiveKind::CredentialPhrase,
+            ),
+            (
+                "client secret: s3cr3t-value-here",
+                SensitiveKind::CredentialPhrase,
+            ),
+            (
+                "access token = abcd1234efgh",
+                SensitiveKind::CredentialPhrase,
+            ),
             ("passcode: 9f3a2b1c8d7e", SensitiveKind::CredentialPhrase),
             // The one that opened the whole finding. Luhn FAILS on it; the card/PIN context is why
             // it is caught anyway.
-            ("my card pin is 4471-9302-1122-8890", SensitiveKind::CardContextNumber),
+            (
+                "my card pin is 4471-9302-1122-8890",
+                SensitiveKind::CardContextNumber,
+            ),
             // A real payment card shape: Luhn passes and it starts with a card industry digit.
-            ("charge 4111 1111 1111 1111 today", SensitiveKind::PaymentPan),
+            (
+                "charge 4111 1111 1111 1111 today",
+                SensitiveKind::PaymentPan,
+            ),
             ("ssn 123-45-6789 on file", SensitiveKind::NationalId),
         ];
         for (text, want) in cases {
@@ -565,7 +680,12 @@ mod sensitivity_tests {
             "pin 3 items to the board",
         ];
         for text in clean {
-            assert_eq!(first_sensitive(text), None, "FALSE POSITIVE on {text:?}: {:?}", first_sensitive(text));
+            assert_eq!(
+                first_sensitive(text),
+                None,
+                "FALSE POSITIVE on {text:?}: {:?}",
+                first_sensitive(text)
+            );
             assert!(!contains_secret(text), "the wrapper must agree: {text:?}");
         }
     }
@@ -587,7 +707,14 @@ mod sensitivity_tests {
             assert_eq!(got.kind, SensitiveKind::TokenPrefix, "{text:?}");
         }
         // The same prefixes as ordinary words are not.
-        for text in ["ghp_ is a prefix", "sk- alone", "AKIA", "ASIA", "asia", "Asia Pacific review"] {
+        for text in [
+            "ghp_ is a prefix",
+            "sk- alone",
+            "AKIA",
+            "ASIA",
+            "asia",
+            "Asia Pacific review",
+        ] {
             assert_eq!(first_sensitive(text), None, "FALSE POSITIVE: {text:?}");
         }
         // PEM is a shape too.
@@ -609,7 +736,10 @@ mod sensitivity_tests {
         let debug = format!("{f:?}");
         let display = format!("{f}");
         for rendered in [&debug, &display] {
-            assert!(!rendered.contains("hunter2swordfish"), "the value leaked: {rendered}");
+            assert!(
+                !rendered.contains("hunter2swordfish"),
+                "the value leaked: {rendered}"
+            );
             assert!(!rendered.contains("hunter"), "even partly: {rendered}");
         }
         assert!(display.contains("credential-phrase"), "{display}");
@@ -638,10 +768,16 @@ mod sec1b {
         // Reachable from `gate_write`, which scans arbitrary user text on every memory write.
         // It must not PANIC. The correct answer is None — no value is assigned after the word —
         // and the assertion says so rather than assuming a finding, which is what I assumed first.
-        assert!(first_sensitive("İpassword日本").is_none(), "no value follows it, so it is not a credential");
+        assert!(
+            first_sensitive("İpassword日本").is_none(),
+            "no value follows it, so it is not a credential"
+        );
         // The same multibyte prefix with a real value is still caught, so the fix did not buy
         // boundary-safety by going blind.
-        assert!(first_sensitive("İpassword: hunter2").is_some(), "a shifted offset must not hide a secret");
+        assert!(
+            first_sensitive("İpassword: hunter2").is_some(),
+            "a shifted offset must not hide a secret"
+        );
         assert!(first_sensitive("日本語 ghp_SECRET12345").is_some());
 
         // Every nasty character woven through a body at EVERY byte boundary, against every rule.
@@ -668,13 +804,26 @@ mod sec1b {
                     //    a span that cannot be sliced is a span that was computed against
                     //    something else.
                     if let Some(f) = found {
-                        assert!(f.start <= text.len() && f.start + f.len <= text.len(), "span inside the text: {f} of {text:?}");
-                        assert!(text.is_char_boundary(f.start), "start on a boundary: {f} of {text:?}");
-                        assert!(text.is_char_boundary(f.start + f.len), "end on a boundary: {f} of {text:?}");
+                        assert!(
+                            f.start <= text.len() && f.start + f.len <= text.len(),
+                            "span inside the text: {f} of {text:?}"
+                        );
+                        assert!(
+                            text.is_char_boundary(f.start),
+                            "start on a boundary: {f} of {text:?}"
+                        );
+                        assert!(
+                            text.is_char_boundary(f.start + f.len),
+                            "end on a boundary: {f} of {text:?}"
+                        );
                     }
                     // 3. And the all-findings scan must terminate and agree about the first one.
                     let all = sensitive_findings(&text);
-                    assert_eq!(all.first().copied(), found, "the two entry points agree: {text:?}");
+                    assert_eq!(
+                        all.first().copied(),
+                        found,
+                        "the two entry points agree: {text:?}"
+                    );
                 }
             }
         }
@@ -700,25 +849,52 @@ mod sec1b {
         // POINT 2. JSON splits the context from the content. Neither half of
         // `{"api_key": "9f2b1c4d8e"}` is sensitive alone — the key is a word, the value is a
         // hex-ish token — so a walk that scans only values reports the file clean.
-        assert!(sensitive_pair("api_key", "9f2b1c4d8e").is_some(), "the case a value-only walk misses");
+        assert!(
+            sensitive_pair("api_key", "9f2b1c4d8e").is_some(),
+            "the case a value-only walk misses"
+        );
         assert!(sensitive_pair("password", "hunter2").is_some());
-        assert!(sensitive_pair("apiKey", "9f2b1c4d8e").is_some(), "camelCase is the same key");
+        assert!(
+            sensitive_pair("apiKey", "9f2b1c4d8e").is_some(),
+            "camelCase is the same key"
+        );
         assert!(sensitive_pair("API-KEY", "9f2b1c4d8e").is_some());
         assert!(sensitive_pair("client_secret", "abcdef123456").is_some());
         assert!(sensitive_pair("auth_token", "eyJhbGciOiJIUzI1NiJ9").is_some());
 
         // And the documentation that must stay writable.
-        assert!(sensitive_pair("password_policy", "requires 12 characters").is_none(), "a sentence is not a secret");
-        assert!(sensitive_pair("note", "9f2b1c4d8e").is_none(), "an unnamed key is not context");
-        assert!(sensitive_pair("password", "").is_none(), "an empty value is not a secret");
-        assert!(sensitive_pair("password", "unset").is_none(), "too short to be one");
+        assert!(
+            sensitive_pair("password_policy", "requires 12 characters").is_none(),
+            "a sentence is not a secret"
+        );
+        assert!(
+            sensitive_pair("note", "9f2b1c4d8e").is_none(),
+            "an unnamed key is not context"
+        );
+        assert!(
+            sensitive_pair("password", "").is_none(),
+            "an empty value is not a secret"
+        );
+        assert!(
+            sensitive_pair("password", "unset").is_none(),
+            "too short to be one"
+        );
         assert!(sensitive_pair("passwords_are_hard", "why is that").is_none());
 
         // The whole-text detector already catches the phrase form across JSON punctuation; the pair
         // rule is the ADDITION, not a replacement.
-        assert!(first_sensitive(r#"{"password":"hunter2"}"#).is_some(), "already caught before E.SEC1b");
-        assert!(first_sensitive(r#"{"api_key":"sk-abc123"}"#).is_some(), "caught by token shape");
-        assert!(first_sensitive(r#"{"api_key":"9f2b1c4d8e"}"#).is_none(), "and THIS is the gap the pair rule closes");
+        assert!(
+            first_sensitive(r#"{"password":"hunter2"}"#).is_some(),
+            "already caught before E.SEC1b"
+        );
+        assert!(
+            first_sensitive(r#"{"api_key":"sk-abc123"}"#).is_some(),
+            "caught by token shape"
+        );
+        assert!(
+            first_sensitive(r#"{"api_key":"9f2b1c4d8e"}"#).is_none(),
+            "and THIS is the gap the pair rule closes"
+        );
     }
 
     #[test]
@@ -729,9 +905,20 @@ mod sec1b {
         let secret = "hunter2";
         let text = format!("my password is {secret}");
         let f = first_sensitive(&text).expect("caught");
-        for rendered in [format!("{f}"), format!("{f:?}"), format!("{:?}", f.kind), f.kind.label().to_string()] {
-            assert!(!rendered.contains(secret), "a finding must not carry its value: {rendered}");
-            assert!(!rendered.contains("my password is"), "nor the text around it: {rendered}");
+        for rendered in [
+            format!("{f}"),
+            format!("{f:?}"),
+            format!("{:?}", f.kind),
+            f.kind.label().to_string(),
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "a finding must not carry its value: {rendered}"
+            );
+            assert!(
+                !rendered.contains("my password is"),
+                "nor the text around it: {rendered}"
+            );
         }
         // The same for every kind, against a battery of real-shaped secrets.
         for probe in [
@@ -755,11 +942,17 @@ mod sec1b {
         // being reported as payment cards. A confidence float's fractional part is a long digit run
         // that can start with 3-6 and satisfy Luhn by chance, and nothing about the shape rules
         // says otherwise. `gate_write` scans every memory write, so this refused precise numbers.
-        assert!(first_sensitive("0.5500005555555559").is_none(), "a fraction is not a card");
+        assert!(
+            first_sensitive("0.5500005555555559").is_none(),
+            "a fraction is not a card"
+        );
         assert!(first_sensitive("confidence 0.5500005555555559 recorded").is_none());
         assert!(first_sensitive("ratio 12.5500005555555559").is_none());
         // The far side of the point must be a DIGIT for it to be part of a number.
-        assert!(first_sensitive("I paid with 5500005555555559.").is_some(), "a sentence-ending period is not a decimal");
+        assert!(
+            first_sensitive("I paid with 5500005555555559.").is_some(),
+            "a sentence-ending period is not a decimal"
+        );
         assert!(first_sensitive("I paid with 5500005555555559").is_some());
         assert!(first_sensitive("5500005555555559 is the number").is_some());
         // And the control from the audit's own evidence: the same digits buried in hex stay out.
@@ -773,7 +966,10 @@ mod sec1b {
         let all = sensitive_findings(text);
         assert!(all.len() >= 2, "both tokens: {all:?}");
         for f in &all {
-            assert!(text.is_char_boundary(f.start) && text.is_char_boundary(f.start + f.len), "{f}");
+            assert!(
+                text.is_char_boundary(f.start) && text.is_char_boundary(f.start + f.len),
+                "{f}"
+            );
         }
         assert!(sensitive_findings("nothing here").is_empty());
         assert!(sensitive_findings("").is_empty());

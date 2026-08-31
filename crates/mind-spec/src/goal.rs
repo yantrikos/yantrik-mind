@@ -141,13 +141,33 @@ impl Default for CompletionCriteria {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Shortfall {
-    NotEnoughFindings { have: usize, need: usize },
-    TooManyFindings { have: usize, max: usize },
-    UnderEvidenced { finding: String, have: usize, need: usize },
-    OpenCriticalUncertainty { question: String, importance: f64 },
-    LowConfidence { have: f64, need: f64 },
-    MissingCheck { check: String },
-    UncoveredRequirement { requirement: String },
+    NotEnoughFindings {
+        have: usize,
+        need: usize,
+    },
+    TooManyFindings {
+        have: usize,
+        max: usize,
+    },
+    UnderEvidenced {
+        finding: String,
+        have: usize,
+        need: usize,
+    },
+    OpenCriticalUncertainty {
+        question: String,
+        importance: f64,
+    },
+    LowConfidence {
+        have: f64,
+        need: f64,
+    },
+    MissingCheck {
+        check: String,
+    },
+    UncoveredRequirement {
+        requirement: String,
+    },
 }
 
 impl Shortfall {
@@ -161,14 +181,25 @@ impl Shortfall {
             Self::TooManyFindings { have, max } => {
                 format!("{have} findings, but the goal asked for at most {max}")
             }
-            Self::UnderEvidenced { finding, have, need } => {
+            Self::UnderEvidenced {
+                finding,
+                have,
+                need,
+            } => {
                 format!("\u{201c}{finding}\u{201d} rests on {have} source(s); {need} required")
             }
-            Self::OpenCriticalUncertainty { question, importance } => {
+            Self::OpenCriticalUncertainty {
+                question,
+                importance,
+            } => {
                 format!("still unresolved and it matters ({importance:.0}%): {question}")
             }
             Self::LowConfidence { have, need } => {
-                format!("confidence {:.0}%, below the {:.0}% this goal needs", have * 100.0, need * 100.0)
+                format!(
+                    "confidence {:.0}%, below the {:.0}% this goal needs",
+                    have * 100.0,
+                    need * 100.0
+                )
             }
             Self::MissingCheck { check } => format!("the {check} check has not run"),
             Self::UncoveredRequirement { requirement } => {
@@ -188,7 +219,10 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn met() -> Self {
-        Self { met: true, shortfalls: Vec::new() }
+        Self {
+            met: true,
+            shortfalls: Vec::new(),
+        }
     }
     /// A one-line summary for a status row.
     pub fn summarize(&self) -> String {
@@ -198,7 +232,11 @@ impl Verdict {
         match self.shortfalls.len() {
             0 => "not met".to_string(),
             1 => self.shortfalls[0].describe(),
-            n => format!("{} \u{2014} and {} more", self.shortfalls[0].describe(), n - 1),
+            n => format!(
+                "{} \u{2014} and {} more",
+                self.shortfalls[0].describe(),
+                n - 1
+            ),
         }
     }
 }
@@ -217,14 +255,19 @@ impl CompletionCriteria {
         if self.require_full_coverage {
             for req in requirements {
                 if !capsule.covers(req) {
-                    out.push(Shortfall::UncoveredRequirement { requirement: req.clone() });
+                    out.push(Shortfall::UncoveredRequirement {
+                        requirement: req.clone(),
+                    });
                 }
             }
         }
 
         let n = capsule.findings.len();
         if n < self.min_findings {
-            out.push(Shortfall::NotEnoughFindings { have: n, need: self.min_findings });
+            out.push(Shortfall::NotEnoughFindings {
+                have: n,
+                need: self.min_findings,
+            });
         }
         if let Some(max) = self.max_findings {
             if n > max {
@@ -255,7 +298,10 @@ impl CompletionCriteria {
         }
 
         if capsule.confidence < self.min_confidence {
-            out.push(Shortfall::LowConfidence { have: capsule.confidence, need: self.min_confidence });
+            out.push(Shortfall::LowConfidence {
+                have: capsule.confidence,
+                need: self.min_confidence,
+            });
         }
         for c in &self.required_checks {
             if !capsule.checks_passed.iter().any(|p| p == c) {
@@ -263,7 +309,10 @@ impl CompletionCriteria {
             }
         }
 
-        Verdict { met: out.is_empty(), shortfalls: out }
+        Verdict {
+            met: out.is_empty(),
+            shortfalls: out,
+        }
     }
 }
 
@@ -334,11 +383,21 @@ impl Budget {
     /// reports `Timeout` and `StepBudget` as distinct reasons precisely so "it ran out of time" is
     /// never mistaken for "it ran out of ideas".
     pub fn interactive() -> Self {
-        Self { max_steps: 100, max_model_calls: 100, max_wall_ms: 180_000, max_usd: None }
+        Self {
+            max_steps: 100,
+            max_model_calls: 100,
+            max_wall_ms: 180_000,
+            max_usd: None,
+        }
     }
     /// A delegated or scheduled run: nobody is watching the clock, so depth is worth more.
     pub fn background() -> Self {
-        Self { max_steps: 150, max_model_calls: 150, max_wall_ms: 45 * 60_000, max_usd: None }
+        Self {
+            max_steps: 150,
+            max_model_calls: 150,
+            max_wall_ms: 45 * 60_000,
+            max_usd: None,
+        }
     }
 
     /// Apply operator overrides, clamped.
@@ -410,7 +469,10 @@ impl GoalSpec {
             missing_capabilities: Vec::new(),
             contract: Contract {
                 requirements: Vec::new(),
-                completion: CompletionCriteria { require_full_coverage: false, ..Default::default() },
+                completion: CompletionCriteria {
+                    require_full_coverage: false,
+                    ..Default::default()
+                },
                 output: OutputContract::default(),
             },
             budget: Budget::interactive(),
@@ -445,7 +507,11 @@ mod tests {
     #[test]
     fn a_met_contract_reports_no_shortfalls() {
         let c = capsule_with(vec![finding("A is up", &["E1", "E2"])]);
-        let crit = CompletionCriteria { min_evidence_per_finding: 2, require_full_coverage: false, ..Default::default() };
+        let crit = CompletionCriteria {
+            min_evidence_per_finding: 2,
+            require_full_coverage: false,
+            ..Default::default()
+        };
         let v = crit.evaluate(&c, &[]);
         assert!(v.met, "{:?}", v.shortfalls);
         assert!(v.shortfalls.is_empty());
@@ -458,10 +524,17 @@ mod tests {
     fn confidence_cannot_buy_its_way_past_a_count() {
         let mut c = capsule_with(vec![finding("only one", &["E1"])]);
         c.confidence = 1.0;
-        let crit = CompletionCriteria { min_findings: 3, require_full_coverage: false, ..Default::default() };
+        let crit = CompletionCriteria {
+            min_findings: 3,
+            require_full_coverage: false,
+            ..Default::default()
+        };
         let v = crit.evaluate(&c, &[]);
         assert!(!v.met);
-        assert_eq!(v.shortfalls, vec![Shortfall::NotEnoughFindings { have: 1, need: 3 }]);
+        assert_eq!(
+            v.shortfalls,
+            vec![Shortfall::NotEnoughFindings { have: 1, need: 3 }]
+        );
         assert_eq!(v.summarize(), "1 of 3 findings so far");
     }
 
@@ -470,7 +543,10 @@ mod tests {
     #[test]
     fn an_unevidenced_finding_fails_the_contract() {
         let c = capsule_with(vec![finding("grounded", &["E1"]), finding("invented", &[])]);
-        let crit = CompletionCriteria { require_full_coverage: false, ..Default::default() };
+        let crit = CompletionCriteria {
+            require_full_coverage: false,
+            ..Default::default()
+        };
         let v = crit.evaluate(&c, &[]);
         assert!(!v.met);
         assert!(v.shortfalls.iter().any(
@@ -485,10 +561,23 @@ mod tests {
     fn an_open_important_uncertainty_blocks_completion_but_a_trivial_one_does_not() {
         let mut c = capsule_with(vec![finding("A", &["E1"])]);
         c.uncertainties = vec![
-            Uncertainty { question: "is the move news-driven?".into(), importance: 0.9, confidence: 0.3, resolved: false },
-            Uncertainty { question: "what colour is the logo?".into(), importance: 0.1, confidence: 0.2, resolved: false },
+            Uncertainty {
+                question: "is the move news-driven?".into(),
+                importance: 0.9,
+                confidence: 0.3,
+                resolved: false,
+            },
+            Uncertainty {
+                question: "what colour is the logo?".into(),
+                importance: 0.1,
+                confidence: 0.2,
+                resolved: false,
+            },
         ];
-        let crit = CompletionCriteria { require_full_coverage: false, ..Default::default() };
+        let crit = CompletionCriteria {
+            require_full_coverage: false,
+            ..Default::default()
+        };
         let v = crit.evaluate(&c, &[]);
         assert!(!v.met);
         let qs: Vec<&str> = v
@@ -499,7 +588,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(qs, vec!["is the move news-driven?"], "only the important one blocks");
+        assert_eq!(
+            qs,
+            vec!["is the move news-driven?"],
+            "only the important one blocks"
+        );
 
         // Resolving it clears the block.
         c.uncertainties[0].resolved = true;
@@ -513,34 +606,59 @@ mod tests {
         let mut c = capsule_with(vec![finding("liquidity is fine", &["E1"])]);
         c.findings[0].addresses = vec!["sufficient liquidity".to_string()];
         let crit = CompletionCriteria::default();
-        let reqs = vec!["sufficient liquidity".to_string(), "identify downside/risk".to_string()];
+        let reqs = vec![
+            "sufficient liquidity".to_string(),
+            "identify downside/risk".to_string(),
+        ];
         let v = crit.evaluate(&c, &reqs);
         assert!(!v.met);
         assert_eq!(
             v.shortfalls[0],
-            Shortfall::UncoveredRequirement { requirement: "identify downside/risk".into() }
+            Shortfall::UncoveredRequirement {
+                requirement: "identify downside/risk".into()
+            }
         );
-        assert!(v.shortfalls[0].describe().contains("identify downside/risk"));
+        assert!(v.shortfalls[0]
+            .describe()
+            .contains("identify downside/risk"));
     }
 
     #[test]
     fn a_cap_on_findings_is_enforced_too() {
-        let c = capsule_with(vec![finding("a", &["E1"]), finding("b", &["E1"]), finding("c", &["E1"])]);
-        let crit = CompletionCriteria { max_findings: Some(2), require_full_coverage: false, ..Default::default() };
+        let c = capsule_with(vec![
+            finding("a", &["E1"]),
+            finding("b", &["E1"]),
+            finding("c", &["E1"]),
+        ]);
+        let crit = CompletionCriteria {
+            max_findings: Some(2),
+            require_full_coverage: false,
+            ..Default::default()
+        };
         let v = crit.evaluate(&c, &[]);
-        assert!(v.shortfalls.contains(&Shortfall::TooManyFindings { have: 3, max: 2 }));
+        assert!(v
+            .shortfalls
+            .contains(&Shortfall::TooManyFindings { have: 3, max: 2 }));
     }
 
     #[test]
     fn a_simple_goal_does_not_invent_criteria_it_has_no_basis_for() {
         let g = GoalSpec::simple("what's the weather in pune?");
         assert!(g.is_runnable());
-        assert!(!g.contract.completion.require_full_coverage, "no requirements were stated, so none are enforced");
+        assert!(
+            !g.contract.completion.require_full_coverage,
+            "no requirements were stated, so none are enforced"
+        );
         assert_eq!(g.contract.completion.min_findings, 1);
         assert_eq!(g.horizon, 3, "rolling horizon, not a 20-step plan");
         // One evidenced finding satisfies it.
         let c = capsule_with(vec![finding("28C and clear", &["E1"])]);
-        assert!(g.contract.completion.evaluate(&c, &g.contract.requirements).met);
+        assert!(
+            g.contract
+                .completion
+                .evaluate(&c, &g.contract.requirements)
+                .met
+        );
     }
 
     #[test]
@@ -548,29 +666,43 @@ mod tests {
         let mut g = GoalSpec::simple("check my github");
         g.required_capabilities = vec!["github".into()];
         g.missing_capabilities = vec!["github".into()];
-        assert!(!g.is_runnable(), "refuse before running, not after a tool error");
+        assert!(
+            !g.is_runnable(),
+            "refuse before running, not after a tool error"
+        );
     }
 
     #[test]
     fn budgets_differ_by_who_is_waiting() {
         assert!(Budget::interactive().max_steps < Budget::background().max_steps);
         assert!(Budget::interactive().max_wall_ms < Budget::background().max_wall_ms);
-        assert!(Budget::interactive().max_usd.is_none(), "an absent ceiling is None, not a fake number");
+        assert!(
+            Budget::interactive().max_usd.is_none(),
+            "an absent ceiling is None, not a fake number"
+        );
     }
 
     #[test]
     fn an_operator_can_raise_the_step_limit() {
         let b = Budget::interactive().with_overrides(Some(20), None, None, None);
         assert_eq!(b.max_steps, 20);
-        assert!(b.clamp_note(Some(20)).is_none(), "an honoured setting needs no note");
+        assert!(
+            b.clamp_note(Some(20)).is_none(),
+            "an honoured setting needs no note"
+        );
     }
 
     /// A nonsense setting must not stop the mind answering, and must not be silently ignored either.
     #[test]
     fn an_absurd_step_limit_is_clamped_and_reported() {
         let b = Budget::interactive().with_overrides(Some(100_000), None, None, None);
-        assert_eq!(b.max_steps, MAX_STEPS_CEILING, "an unbounded loop is not a valid configuration");
-        let note = b.clamp_note(Some(100_000)).expect("a clamped setting must be reported");
+        assert_eq!(
+            b.max_steps, MAX_STEPS_CEILING,
+            "an unbounded loop is not a valid configuration"
+        );
+        let note = b
+            .clamp_note(Some(100_000))
+            .expect("a clamped setting must be reported");
         assert!(note.contains("100000") && note.contains("500"), "{note}");
 
         // And the floor: one step cannot complete any goal needing a tool, so it would look like the
@@ -587,15 +719,25 @@ mod tests {
     /// stuck at its old value satisfies perfectly — so it passed while the setting was broken.
     #[test]
     fn raising_the_iteration_limit_actually_raises_what_binds() {
-        let b = Budget { max_steps: 5, max_model_calls: 5, ..Budget::interactive() }
-            .with_overrides(Some(30), None, None, None);
+        let b = Budget {
+            max_steps: 5,
+            max_model_calls: 5,
+            ..Budget::interactive()
+        }
+        .with_overrides(Some(30), None, None, None);
         assert_eq!(b.max_steps, 30);
-        assert_eq!(b.max_model_calls, 30, "an unraised call ceiling would silently cap the run at 5");
+        assert_eq!(
+            b.max_model_calls, 30,
+            "an unraised call ceiling would silently cap the run at 5"
+        );
 
         // An explicit call budget is respected, and is what binds when it is the lower of the two.
         let explicit = Budget::interactive().with_overrides(Some(30), Some(4), None, None);
         assert_eq!(explicit.max_steps, 30);
-        assert_eq!(explicit.max_model_calls, 4, "an explicit call budget is the operator's choice");
+        assert_eq!(
+            explicit.max_model_calls, 4,
+            "an explicit call budget is the operator's choice"
+        );
 
         // Lowering steps pulls the ceiling down with it: a call ceiling above the step ceiling can
         // never bind, so it is not a bigger budget, just a misleading number.
@@ -606,7 +748,10 @@ mod tests {
     #[test]
     fn a_zero_spend_ceiling_means_ungoverned_not_zero_dollars() {
         let b = Budget::interactive().with_overrides(None, None, None, Some(0.0));
-        assert!(b.max_usd.is_none(), "0 is how an operator clears a limit, not a $0 budget");
+        assert!(
+            b.max_usd.is_none(),
+            "0 is how an operator clears a limit, not a $0 budget"
+        );
         let set = Budget::interactive().with_overrides(None, None, None, Some(2.5));
         assert_eq!(set.max_usd, Some(2.5));
     }

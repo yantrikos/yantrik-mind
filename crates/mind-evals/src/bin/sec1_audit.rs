@@ -44,12 +44,18 @@ const CLEAN: &[&str] = &[
 fn control_passes() -> Result<(), String> {
     for c in CANARIES {
         if mind_types::first_sensitive(c).is_none() {
-            return Err(format!("a canary was NOT flagged ({} chars) — the detector cannot fire", c.len()));
+            return Err(format!(
+                "a canary was NOT flagged ({} chars) — the detector cannot fire",
+                c.len()
+            ));
         }
     }
     for c in CLEAN {
         if let Some(f) = mind_types::first_sensitive(c) {
-            return Err(format!("a clean control WAS flagged as {} — the detector cannot pass", f.kind.label()));
+            return Err(format!(
+                "a clean control WAS flagged as {} — the detector cannot pass",
+                f.kind.label()
+            ));
         }
     }
     // The pair rule, which the value-only walk depends on.
@@ -77,7 +83,11 @@ struct Hit {
 fn hits_of(path: &str, text: &str) -> Vec<Hit> {
     mind_types::sensitive_findings(text)
         .iter()
-        .map(|f| Hit { path: path.to_string(), kind: f.kind.label(), len: f.len })
+        .map(|f| Hit {
+            path: path.to_string(),
+            kind: f.kind.label(),
+            len: f.len,
+        })
         .collect()
 }
 
@@ -98,14 +108,22 @@ fn walk(node: &serde_json::Value, path: &str, out: &mut Vec<Hit>) {
         }
         serde_json::Value::Object(map) => {
             for (k, v) in map {
-                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
                 if let Some(scalar) = match v {
                     serde_json::Value::String(s) => Some(s.clone()),
                     serde_json::Value::Number(n) => Some(n.to_string()),
                     _ => None,
                 } {
                     if let Some(f) = mind_types::sensitive_pair(k, &scalar) {
-                        out.push(Hit { path: format!("{child} (key+value)"), kind: f.kind.label(), len: f.len });
+                        out.push(Hit {
+                            path: format!("{child} (key+value)"),
+                            kind: f.kind.label(),
+                            len: f.len,
+                        });
                     }
                 }
                 walk(v, &child, out);
@@ -134,7 +152,11 @@ struct Report {
 
 impl Report {
     fn new() -> Self {
-        Report { scanned: 0, per_kind: BTreeMap::new(), flagged: Vec::new() }
+        Report {
+            scanned: 0,
+            per_kind: BTreeMap::new(),
+            flagged: Vec::new(),
+        }
     }
     fn record(&mut self, id: String, hits: Vec<Hit>) {
         self.scanned += 1;
@@ -170,7 +192,10 @@ impl Report {
             }
         }
         if self.flagged.len() > 20 {
-            println!("    … {} more flagged records not listed", self.flagged.len() - 20);
+            println!(
+                "    … {} more flagged records not listed",
+                self.flagged.len() - 20
+            );
         }
         println!();
     }
@@ -185,7 +210,14 @@ fn audit_jsonl(path: &str) -> std::io::Result<Report> {
             Ok(l) => l,
             // Invalid UTF-8 is itself worth seeing rather than skipping silently.
             Err(_) => {
-                rep.record(format!("line:{}", i + 1), vec![Hit { path: "<invalid utf-8>".into(), kind: "unreadable-line", len: 0 }]);
+                rep.record(
+                    format!("line:{}", i + 1),
+                    vec![Hit {
+                        path: "<invalid utf-8>".into(),
+                        kind: "unreadable-line",
+                        len: 0,
+                    }],
+                );
                 continue;
             }
         };
@@ -226,7 +258,11 @@ fn audit_db(path: &str) -> Result<Report, String> {
         let (rid, text, status) = row.map_err(|e| e.to_string())?;
         // The rid carries its lifecycle so every printed finding says whether it is reachable.
         let live = status != "tombstoned";
-        let label = if live { format!("{rid} [LIVE:{status}]") } else { format!("{rid} [tombstoned]") };
+        let label = if live {
+            format!("{rid} [LIVE:{status}]")
+        } else {
+            format!("{rid} [tombstoned]")
+        };
         rep.record(label, hits_of("memories.text", &text));
     }
     Ok(rep)
@@ -239,11 +275,17 @@ fn main() {
     let explain = args.iter().any(|a| a == "--explain");
     let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
-    println!("E.SEC1b READ-ONLY AUDIT — production's detector; counts, kinds and record ids only\n");
+    println!(
+        "E.SEC1b READ-ONLY AUDIT — production's detector; counts, kinds and record ids only\n"
+    );
 
     // The instrument proves itself BEFORE it is trusted to report anything.
     match control_passes() {
-        Ok(()) => println!("sensitivity control: PASS ({} canaries flagged, {} clean controls passed)\n", CANARIES.len(), CLEAN.len()),
+        Ok(()) => println!(
+            "sensitivity control: PASS ({} canaries flagged, {} clean controls passed)\n",
+            CANARIES.len(),
+            CLEAN.len()
+        ),
         Err(why) => {
             println!("sensitivity control: FAIL — {why}");
             println!("\nINCONCLUSIVE. This run proves nothing about the files it was pointed at.");

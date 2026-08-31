@@ -49,7 +49,14 @@ pub trait Bus: Send + Sync {
     /// is where the semantic preprocessing belongs (a GitHub response becoming language/stars/
     /// activity/interesting-files rather than 2,000 lines of metadata).
     fn normalize(&self, tool: &str, args: &Value, raw: &str, ok: bool) -> Observation {
-        let summary: String = raw.trim().lines().next().unwrap_or("").chars().take(160).collect();
+        let summary: String = raw
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect();
         Observation {
             action: signature(tool, args),
             ok,
@@ -104,6 +111,13 @@ pub trait Bus: Send + Sync {
         None
     }
 
+    /// Whether `ground` is backed by a model call for this bus. The cognition loop uses this before
+    /// invoking the seam so an unavailable default does not consume the model-call budget, while an
+    /// attempted production grounding call does.
+    fn has_grounder(&self) -> bool {
+        false
+    }
+
     /// Is this tool's successful output THE answer, to be delivered to the user verbatim?
     ///
     /// A published page's URL, an async delegation's ack, a self-contained cited brief: synthesis
@@ -124,6 +138,10 @@ pub trait Bus: Send + Sync {
     /// simply has nothing to declare.
     fn declare_trace(&self, _trace_id: &str) {}
 
+    /// Declare the compiled goal's stable identity before any tool call. Kept separate from trace:
+    /// retries and later turns may mint new traces while continuing one durable goal.
+    fn declare_goal_id(&self, _goal_id: &str) {}
+
     /// Grade GOAL CONTRIBUTION at run completion: for every tool whose evidence entered the
     /// capsule, did a finding actually CITE it?
     ///
@@ -131,7 +149,14 @@ pub trait Bus: Send + Sync {
     /// contract verdict says it MATTERED. Contributors are `(tool_name, contributed)` pairs;
     /// `met` is the contract's own verdict. Called once per completed (non-delivered) run.
     /// Default no-op.
-    async fn grade_goal(&self, _trace_id: &str, _goal: &str, _met: bool, _contributors: &[(String, bool)]) {}
+    async fn grade_goal(
+        &self,
+        _trace_id: &str,
+        _goal: &str,
+        _met: bool,
+        _contributors: &[(String, bool)],
+    ) {
+    }
 }
 
 /// A stable signature for one tool call.
@@ -195,7 +220,10 @@ pub(crate) mod tests_support {
             self
         }
         pub fn returning(self, tool: &str, reply: &str) -> Self {
-            self.replies.lock().unwrap().insert(tool.to_string(), reply.to_string());
+            self.replies
+                .lock()
+                .unwrap()
+                .insert(tool.to_string(), reply.to_string());
             self
         }
         pub fn outward(mut self, tools: &[&str]) -> Self {
@@ -224,7 +252,11 @@ pub(crate) mod tests_support {
     #[async_trait]
     impl Bus for FakeBus {
         fn catalog(&self, _goal: &str) -> String {
-            self.ready.iter().map(|c| format!("- {c} {{query}}: the {c} tool")).collect::<Vec<_>>().join("\n")
+            self.ready
+                .iter()
+                .map(|c| format!("- {c} {{query}}: the {c} tool"))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
         fn ready_capabilities(&self) -> Vec<String> {
             self.ready.clone()
@@ -241,6 +273,9 @@ pub(crate) mod tests_support {
         }
         async fn ground(&self, _q: &str, _e: &str) -> Option<String> {
             self.grounded.clone()
+        }
+        fn has_grounder(&self) -> bool {
+            self.grounded.is_some()
         }
         async fn procedures(&self, _goal: &str, _limit: usize) -> Vec<crate::procedure::Procedure> {
             self.known.clone()
@@ -267,7 +302,10 @@ mod tests {
     fn a_signature_is_canonical_across_key_order() {
         let a = signature("search", &json!({"query": "x", "limit": 3}));
         let b = signature("search", &json!({"limit": 3, "query": "x"}));
-        assert_eq!(a, b, "key order must not create a new identity, or dedup fails silently");
+        assert_eq!(
+            a, b,
+            "key order must not create a new identity, or dedup fails silently"
+        );
     }
 
     #[test]
@@ -277,14 +315,21 @@ mod tests {
             signature("search", &json!({"query": "b"})),
             "different searches are different actions"
         );
-        assert_eq!(signature("now", &json!({})), "now", "an argument-free tool is just its name");
+        assert_eq!(
+            signature("now", &json!({})),
+            "now",
+            "an argument-free tool is just its name"
+        );
         assert_eq!(signature("now", &Value::Null), "now");
     }
 
     #[test]
     fn a_signature_is_bounded() {
         let big = json!({ "html": "x".repeat(50_000) });
-        assert!(signature("publish_page", &big).len() < 260, "a signature must not carry a payload");
+        assert!(
+            signature("publish_page", &big).len() < 260,
+            "a signature must not carry a payload"
+        );
     }
 
     struct Bare;
@@ -312,9 +357,18 @@ mod tests {
         let o = Bare.normalize("fetch", &json!({"url": "http://x"}), &raw, true);
         assert!(o.ok);
         assert_eq!(o.evidence.len(), 1);
-        assert_eq!(o.evidence[0].summary, "Company raised FY guidance", "the summary is the first line");
-        assert!(o.evidence[0].id.is_empty(), "a bus must not guess evidence ids");
-        assert!(o.evidence[0].body.len() <= 20_000, "bodies are capped even in the store");
+        assert_eq!(
+            o.evidence[0].summary, "Company raised FY guidance",
+            "the summary is the first line"
+        );
+        assert!(
+            o.evidence[0].id.is_empty(),
+            "a bus must not guess evidence ids"
+        );
+        assert!(
+            o.evidence[0].body.len() <= 20_000,
+            "bodies are capped even in the store"
+        );
         assert!(o.did.is_some());
     }
 

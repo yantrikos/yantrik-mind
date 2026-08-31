@@ -43,7 +43,11 @@ pub trait MailClient: Send + Sync {
         anyhow::bail!("this mail backend cannot leave drafts")
     }
 
-    async fn peek_bodies(&self, ids: &[String], max_chars: usize) -> anyhow::Result<Vec<(String, String)>> {
+    async fn peek_bodies(
+        &self,
+        ids: &[String],
+        max_chars: usize,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let _ = (ids, max_chars);
         Ok(Vec::new())
     }
@@ -57,7 +61,11 @@ fn qp_decode(s: &str) -> String {
     while i < raw.len() {
         if raw[i] == b'=' && i + 1 < raw.len() {
             if raw[i + 1] == b'\r' || raw[i + 1] == b'\n' {
-                i += if raw[i + 1] == b'\r' && i + 2 < raw.len() && raw[i + 2] == b'\n' { 3 } else { 2 };
+                i += if raw[i + 1] == b'\r' && i + 2 < raw.len() && raw[i + 2] == b'\n' {
+                    3
+                } else {
+                    2
+                };
                 continue;
             }
             if i + 2 < raw.len() {
@@ -115,7 +123,12 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
     let lossy = String::from_utf8_lossy(raw);
     // A base64-encoded MIME part arrives as a run of base64 lines; DECODE it (many receipts
     // encode their HTML this way) rather than dropping it as noise.
-    let is_b64 = |s: &str| s.len() >= 40 && !s.contains(' ') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+    let is_b64 = |s: &str| {
+        s.len() >= 40
+            && !s.contains(' ')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    };
     let mut kept: Vec<String> = Vec::new();
     let mut b64buf = String::new();
     let flush = |buf: &mut String, out: &mut Vec<String>| {
@@ -123,7 +136,11 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(buf.as_bytes()) {
                 let txt = String::from_utf8_lossy(&bytes).into_owned();
                 // keep only if it decoded to mostly-printable text (an HTML/text part)
-                let printable = txt.chars().take(400).filter(|c| c.is_ascii_graphic() || c.is_whitespace()).count();
+                let printable = txt
+                    .chars()
+                    .take(400)
+                    .filter(|c| c.is_ascii_graphic() || c.is_whitespace())
+                    .count();
                 if printable * 100 >= txt.chars().take(400).count() * 80 {
                     out.push(txt);
                 }
@@ -140,8 +157,19 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
         }
         flush(&mut b64buf, &mut kept);
         // MIME boundary lines ("--=_Part_…", "------=_…") + part headers → drop.
-        let is_boundary = tt.starts_with("--") && tt.len() > 6 && !tt.contains(' ') && (tt.contains("=_") || tt.contains("_Part") || tt.chars().all(|c| c == '-' || c.is_ascii_alphanumeric() || c == '=' || c == '_' || c == '.'));
-        if is_boundary || tt.starts_with("Content-") || tt.starts_with("MIME-") || tt.starts_with("charset=") {
+        let is_boundary = tt.starts_with("--")
+            && tt.len() > 6
+            && !tt.contains(' ')
+            && (tt.contains("=_")
+                || tt.contains("_Part")
+                || tt.chars().all(|c| {
+                    c == '-' || c.is_ascii_alphanumeric() || c == '=' || c == '_' || c == '.'
+                }));
+        if is_boundary
+            || tt.starts_with("Content-")
+            || tt.starts_with("MIME-")
+            || tt.starts_with("charset=")
+        {
             continue;
         }
         kept.push(t.to_string());
@@ -155,7 +183,9 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
     // Block tags → breaks so words don't run together; other tags → dropped. Iterate by CHARS
     // (char_indices) and slice only at recorded char boundaries — the body may hold multibyte /
     // replacement chars, so byte-indexing a lowercased copy would panic.
-    let breakers = ["</p>", "<br", "</tr>", "</div>", "</td>", "</li>", "</h1>", "</h2>", "</h3>"];
+    let breakers = [
+        "</p>", "<br", "</tr>", "</div>", "</td>", "</li>", "</h1>", "</h2>", "</h3>",
+    ];
     let chars: Vec<(usize, char)> = body.char_indices().collect();
     let mut spaced = String::with_capacity(body.len());
     let mut k = 0;
@@ -166,7 +196,11 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
             while end < chars.len() && chars[end].1 != '>' {
                 end += 1;
             }
-            let tag_end = if end < chars.len() { chars[end].0 + 1 } else { body.len() };
+            let tag_end = if end < chars.len() {
+                chars[end].0 + 1
+            } else {
+                body.len()
+            };
             let tag_low = body[bi..tag_end].to_lowercase();
             let is_break = breakers.iter().any(|br| tag_low.starts_with(br));
             spaced.push(if is_break { '\n' } else { ' ' });
@@ -203,7 +237,12 @@ fn clean_body(raw: &[u8], max_chars: usize) -> String {
             _ => text.replace_range(p..p + 2, "  "),
         }
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max_chars).collect()
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 /// Render an inbox as a compact, untrusted digest block for grounding a reply.
@@ -213,7 +252,11 @@ pub fn render_inbox_digest(msgs: &[EmailMsg]) -> String {
     }
     let mut s = format!("{} recent message(s):\n", msgs.len());
     for m in msgs {
-        let subj = if m.subject.trim().is_empty() { "(no subject)" } else { m.subject.trim() };
+        let subj = if m.subject.trim().is_empty() {
+            "(no subject)"
+        } else {
+            m.subject.trim()
+        };
         s.push_str(&format!("- from {} — {} [{}]\n", m.from, subj, m.date));
     }
     s
@@ -247,8 +290,18 @@ pub struct ImapClient {
 }
 
 impl ImapClient {
-    pub fn new(host: impl Into<String>, port: u16, user: impl Into<String>, password: impl Into<String>) -> Self {
-        Self { host: host.into(), port, user: user.into(), password: password.into() }
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        user: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            user: user.into(),
+            password: password.into(),
+        }
     }
 
     /// Convenience for common providers by the account address.
@@ -257,7 +310,10 @@ impl ImapClient {
             "imap.gmail.com"
         } else {
             // Best-effort: mail.<domain>. Override with ImapClient::new for non-standard hosts.
-            return addr.split('@').nth(1).map(|d| Self::new(format!("mail.{d}"), 993, addr, password));
+            return addr
+                .split('@')
+                .nth(1)
+                .map(|d| Self::new(format!("mail.{d}"), 993, addr, password));
         };
         Some(Self::new(host, 993, addr, password))
     }
@@ -270,8 +326,12 @@ impl MailClient for ImapClient {
     }
 
     async fn inbox(&self, limit: usize) -> anyhow::Result<Vec<EmailMsg>> {
-        let (host, port, user, password) =
-            (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+        let (host, port, user, password) = (
+            self.host.clone(),
+            self.port,
+            self.user.clone(),
+            self.password.clone(),
+        );
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<EmailMsg>> {
             let tls = native_tls::TlsConnector::builder().build()?;
             let client = imap::connect((host.as_str(), port), host.as_str(), &tls)?;
@@ -287,9 +347,8 @@ impl MailClient for ImapClient {
             let fetches = session.fetch(set, "(ENVELOPE INTERNALDATE)")?;
             let mut out = Vec::new();
             for f in fetches.iter() {
-                let env = match f.envelope() {
-                    Some(e) => e,
-                    None => continue,
+                let Some(env) = f.envelope() else {
+                    continue;
                 };
                 let decode = |b: &[u8]| String::from_utf8_lossy(b).to_string();
                 let subject = env.subject.as_ref().map(|s| decode(s)).unwrap_or_default();
@@ -297,18 +356,25 @@ impl MailClient for ImapClient {
                     .from
                     .as_ref()
                     .and_then(|addrs| addrs.first())
-                    .map(|a| {
-                        let mbox = a.mailbox.as_ref().map(|b| decode(b)).unwrap_or_default();
-                        let host = a.host.as_ref().map(|b| decode(b)).unwrap_or_default();
-                        if a.name.is_some() {
-                            decode(a.name.as_ref().unwrap())
-                        } else {
-                            format!("{mbox}@{host}")
-                        }
-                    })
-                    .unwrap_or_else(|| "(unknown)".into());
+                    .map_or_else(
+                        || "(unknown)".into(),
+                        |a| {
+                            let mbox = a.mailbox.as_ref().map(|b| decode(b)).unwrap_or_default();
+                            let host = a.host.as_ref().map(|b| decode(b)).unwrap_or_default();
+                            if a.name.is_some() {
+                                decode(a.name.as_ref().unwrap())
+                            } else {
+                                format!("{mbox}@{host}")
+                            }
+                        },
+                    );
                 let date = env.date.as_ref().map(|b| decode(b)).unwrap_or_default();
-                out.push(EmailMsg { id: f.message.to_string(), from, subject, date });
+                out.push(EmailMsg {
+                    id: f.message.to_string(),
+                    from,
+                    subject,
+                    date,
+                });
             }
             let _ = session.logout();
             out.reverse(); // newest first
@@ -318,8 +384,12 @@ impl MailClient for ImapClient {
     }
 
     async fn search(&self, needle: &str, limit: usize) -> anyhow::Result<Vec<(EmailMsg, String)>> {
-        let (host, port, user, password) =
-            (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+        let (host, port, user, password) = (
+            self.host.clone(),
+            self.port,
+            self.user.clone(),
+            self.password.clone(),
+        );
         let needle: String = needle.chars().filter(|c| *c != '"' && *c != '\\').collect();
         let limit = limit.clamp(1, 10);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(EmailMsg, String)>> {
@@ -337,32 +407,48 @@ impl MailClient for ImapClient {
                 if session.select(mb).is_err() {
                     continue;
                 }
-                let Ok(ids) = session.search(format!("TEXT \"{needle}\"")) else { continue };
+                let Ok(ids) = session.search(format!("TEXT \"{needle}\"")) else {
+                    continue;
+                };
                 let mut idv: Vec<u32> = ids.into_iter().collect();
                 idv.sort_unstable();
                 let take: Vec<u32> = idv.into_iter().rev().take(limit).collect();
                 if take.is_empty() {
                     continue;
                 }
-                let set = take.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                let set = take
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let fetches = session.fetch(&set, "(ENVELOPE INTERNALDATE BODY.PEEK[TEXT])")?;
                 for fmsg in fetches.iter() {
                     let Some(env) = fmsg.envelope() else { continue };
                     let decode = |b: &[u8]| String::from_utf8_lossy(b).to_string();
                     let subject = env.subject.as_ref().map(|s| decode(s)).unwrap_or_default();
-                    let from = env
-                        .from
-                        .as_ref()
-                        .and_then(|a| a.first())
-                        .map(|a| {
+                    let from = env.from.as_ref().and_then(|a| a.first()).map_or_else(
+                        || "(unknown)".into(),
+                        |a| {
                             let mbox = a.mailbox.as_ref().map(|b| decode(b)).unwrap_or_default();
                             let h = a.host.as_ref().map(|b| decode(b)).unwrap_or_default();
-                            if a.name.is_some() { decode(a.name.as_ref().unwrap()) } else { format!("{mbox}@{h}") }
-                        })
-                        .unwrap_or_else(|| "(unknown)".into());
+                            if a.name.is_some() {
+                                decode(a.name.as_ref().unwrap())
+                            } else {
+                                format!("{mbox}@{h}")
+                            }
+                        },
+                    );
                     let date = env.date.as_ref().map(|b| decode(b)).unwrap_or_default();
                     let body = fmsg.text().map(|t| clean_body(t, 4000)).unwrap_or_default();
-                    out.push((EmailMsg { id: fmsg.message.to_string(), from, subject, date }, body));
+                    out.push((
+                        EmailMsg {
+                            id: fmsg.message.to_string(),
+                            from,
+                            subject,
+                            date,
+                        },
+                        body,
+                    ));
                 }
                 if !out.is_empty() {
                     break; // first mailbox with hits wins (All Mail already spans the account)
@@ -375,12 +461,20 @@ impl MailClient for ImapClient {
         .await?
     }
 
-    async fn peek_bodies(&self, ids: &[String], max_chars: usize) -> anyhow::Result<Vec<(String, String)>> {
+    async fn peek_bodies(
+        &self,
+        ids: &[String],
+        max_chars: usize,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let (host, port, user, password) =
-            (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+        let (host, port, user, password) = (
+            self.host.clone(),
+            self.port,
+            self.user.clone(),
+            self.password.clone(),
+        );
         let set = ids.join(",");
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String)>> {
             let tls = native_tls::TlsConnector::builder().build()?;
@@ -420,15 +514,27 @@ pub struct SmtpMailSender {
 }
 
 impl SmtpMailSender {
-    pub fn new(host: impl Into<String>, user: impl Into<String>, password: impl Into<String>, from: impl Into<String>) -> Self {
-        Self { host: host.into(), user: user.into(), password: password.into(), from: from.into() }
+    pub fn new(
+        host: impl Into<String>,
+        user: impl Into<String>,
+        password: impl Into<String>,
+        from: impl Into<String>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            user: user.into(),
+            password: password.into(),
+            from: from.into(),
+        }
     }
 
     pub fn for_address(addr: &str, password: impl Into<String>) -> Self {
         let host = if addr.ends_with("@gmail.com") {
             "smtp.gmail.com".to_string()
         } else {
-            addr.split('@').nth(1).map(|d| format!("mail.{d}")).unwrap_or_else(|| "localhost".into())
+            addr.split('@')
+                .nth(1)
+                .map_or_else(|| "localhost".into(), |d| format!("mail.{d}"))
         };
         Self::new(host, addr, password, addr)
     }
@@ -439,8 +545,12 @@ impl MailSender for SmtpMailSender {
     async fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()> {
         use lettre::transport::smtp::authentication::Credentials;
         use lettre::{Message, SmtpTransport, Transport};
-        let (host, user, password, from) =
-            (self.host.clone(), self.user.clone(), self.password.clone(), self.from.clone());
+        let (host, user, password, from) = (
+            self.host.clone(),
+            self.user.clone(),
+            self.password.clone(),
+            self.from.clone(),
+        );
         let (to, subject, body) = (to.to_string(), subject.to_string(), body.to_string());
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let email = Message::builder()
@@ -460,11 +570,21 @@ impl MailSender for SmtpMailSender {
 /// Compose an RFC-5322 message. Split out from the draft path so the wire format is testable
 /// without a mail server — a malformed header is the difference between a draft that opens and
 /// one the client silently refuses to show.
-pub fn compose_rfc822(from: &str, to: &str, subject: &str, body: &str, date_rfc2822: &str, msg_id: &str) -> String {
+pub fn compose_rfc822(
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    date_rfc2822: &str,
+    msg_id: &str,
+) -> String {
     // Header injection guard: a newline in any header field would let composed content forge
     // headers (a Bcc, a different recipient). Fields are single-line by construction.
     let clean = |s: &str| {
-        let flattened: String = s.chars().map(|c| if c == '\r' || c == '\n' { ' ' } else { c }).collect();
+        let flattened: String = s
+            .chars()
+            .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+            .collect();
         // Collapse the run so a CRLF becomes one space, not two.
         let mut out = String::with_capacity(flattened.len());
         let mut prev_space = false;
@@ -513,18 +633,33 @@ impl ImapClient {
     /// stays human. Nothing here can send: IMAP APPEND writes to a folder, it has no transport to
     /// anywhere, so this path is incapable of the outward effect by construction rather than by
     /// policy. That is why it is safe to let it run unattended when `send` is not.
-    pub async fn append_draft(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
-        let (host, port, user, password) = (self.host.clone(), self.port, self.user.clone(), self.password.clone());
+    pub async fn append_draft(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+    ) -> anyhow::Result<String> {
+        let (host, port, user, password) = (
+            self.host.clone(),
+            self.port,
+            self.user.clone(),
+            self.password.clone(),
+        );
         let (to, subject, body) = (to.to_string(), subject.to_string(), body.to_string());
         let date = chrono::Utc::now().to_rfc2822();
-        let msg_id = format!("<{}.{}@yantrik-mind>", chrono::Utc::now().timestamp_millis(), std::process::id());
+        let msg_id = format!(
+            "<{}.{}@yantrik-mind>",
+            chrono::Utc::now().timestamp_millis(),
+            std::process::id()
+        );
         tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             let folder = drafts_folder_for(&host);
             let message = compose_rfc822(&user, &to, &subject, &body, &date, &msg_id);
             let tls = native_tls::TlsConnector::builder().build()?;
             let client = imap::connect((host.as_str(), port), host.as_str(), &tls)?;
             let mut session = client.login(&user, &password).map_err(|(e, _)| e)?;
-            let res = session.append_with_flags(folder, message.as_bytes(), &[imap::types::Flag::Draft]);
+            let res =
+                session.append_with_flags(folder, message.as_bytes(), &[imap::types::Flag::Draft]);
             let _ = session.logout();
             res?;
             Ok(format!("{folder} ({msg_id})"))
@@ -548,7 +683,10 @@ impl ScriptedMailSender {
 #[async_trait]
 impl MailSender for ScriptedMailSender {
     async fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()> {
-        self.sent.lock().unwrap().push((to.into(), subject.into(), body.into()));
+        self.sent
+            .lock()
+            .unwrap()
+            .push((to.into(), subject.into(), body.into()));
         Ok(())
     }
 }
@@ -558,12 +696,21 @@ mod tests {
     use super::*;
 
     fn msg(from: &str, subj: &str) -> EmailMsg {
-        EmailMsg { id: "1".into(), from: from.into(), subject: subj.into(), date: "today".into() }
+        EmailMsg {
+            id: "1".into(),
+            from: from.into(),
+            subject: subj.into(),
+            date: "today".into(),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scripted_inbox_respects_limit() {
-        let c = ScriptedMailClient::new(vec![msg("a@x", "one"), msg("b@x", "two"), msg("c@x", "three")]);
+        let c = ScriptedMailClient::new(vec![
+            msg("a@x", "one"),
+            msg("b@x", "two"),
+            msg("c@x", "three"),
+        ]);
         assert_eq!(c.inbox(2).await.unwrap().len(), 2);
     }
 
@@ -596,11 +743,16 @@ mod tests {
             "<1@yantrik-mind>",
         );
         // Headers, then ONE blank line, then the body — the separator RFC 5322 requires.
-        let (head, body) = m.split_once("\r\n\r\n").expect("headers must be separated from the body");
+        let (head, body) = m
+            .split_once("\r\n\r\n")
+            .expect("headers must be separated from the body");
         assert!(head.contains("From: me@example.com"), "{head}");
         assert!(head.contains("To: them@example.com"), "{head}");
         assert!(head.contains("Subject: Re: the renewal"), "{head}");
-        assert!(head.contains("Content-Type: text/plain; charset=utf-8"), "{head}");
+        assert!(
+            head.contains("Content-Type: text/plain; charset=utf-8"),
+            "{head}"
+        );
         // Tagged as ours, so a human (or a later sweep) can tell what wrote it.
         assert!(head.contains("X-Yantrik-Mind: prepared-draft"), "{head}");
         // Body lines are CRLF-terminated on the wire, and not doubled.
@@ -625,10 +777,15 @@ mod tests {
         // is inert — but whether any header LINE begins with it, which is what would make it a
         // header the server acts on.
         assert!(
-            !head.lines().any(|l| l.trim_start().to_lowercase().starts_with("bcc:")),
+            !head
+                .lines()
+                .any(|l| l.trim_start().to_lowercase().starts_with("bcc:")),
             "a forged header line survived: {head}"
         );
-        assert!(head.contains("Subject: Hello Bcc: attacker@evil.com"), "flattened onto one line: {head}");
+        assert!(
+            head.contains("Subject: Hello Bcc: attacker@evil.com"),
+            "flattened onto one line: {head}"
+        );
     }
 
     #[test]

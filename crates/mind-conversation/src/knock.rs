@@ -73,13 +73,18 @@ pub(crate) fn band_for(p: f64) -> Option<u8> {
 /// evidence trail). A packet with no evidence is an opinion; a packet with no body is a notification.
 pub(crate) fn packet_is_knockworthy(p: &Value, now_ms: i64) -> bool {
     let status = p.get("status").and_then(|x| x.as_str()).unwrap_or("");
-    let unexpired = p.get("expiry_ms").and_then(|x| x.as_i64()).map(|e| e > now_ms).unwrap_or(false);
-    let has_body = p.get("body").and_then(|x| x.as_str()).map(|b| b.trim().len() > 20).unwrap_or(false);
+    let unexpired = p
+        .get("expiry_ms")
+        .and_then(|x| x.as_i64())
+        .is_some_and(|e| e > now_ms);
+    let has_body = p
+        .get("body")
+        .and_then(|x| x.as_str())
+        .is_some_and(|b| b.trim().len() > 20);
     let has_evidence = p
         .get("evidence")
         .and_then(|x| x.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
+        .is_some_and(|a| !a.is_empty());
     // A packet that merely RESTATES the request is a reminder, and the knock's "I've prepared X"
     // would be an overclaim. Only genuinely-prepared work earns an interruption. Absent flag ⇒ not
     // prepared (emissary/night-shift packets never set it), so this fails closed by construction.
@@ -93,7 +98,10 @@ pub(crate) fn packet_is_knockworthy(p: &Value, now_ms: i64) -> bool {
 /// it may only knock about what it was actually told or actually saw. A pattern it merely inferred
 /// about the household — however confident — is not grounds for interrupting a person's day.
 pub(crate) fn trigger_may_interrupt(provenance: &str) -> bool {
-    matches!(super::ConversationEngine::epistemic_class(provenance), "observed" | "told")
+    matches!(
+        super::ConversationEngine::epistemic_class(provenance),
+        "observed" | "told"
+    )
 }
 
 /// Render the knock. One sentence of justification, the band, and the single affordance line.
@@ -128,28 +136,63 @@ mod tests {
         // The whole anti-surveillance point: a confident INFERENCE about the household may not knock.
         assert!(!trigger_may_interrupt("inferred"));
         assert!(!trigger_may_interrupt("reflected"));
-        assert!(!trigger_may_interrupt("studied"), "reading the web is not grounds to interrupt");
-        assert!(!trigger_may_interrupt(""), "unknown provenance collapses to inferred");
+        assert!(
+            !trigger_may_interrupt("studied"),
+            "reading the web is not grounds to interrupt"
+        );
+        assert!(
+            !trigger_may_interrupt(""),
+            "unknown provenance collapses to inferred"
+        );
     }
 
     #[test]
     fn a_knock_requires_prepared_work_and_provenance() {
-        let good = packet(vec!["she said Friday (0.91)"], "Accept / counter / decline, with numbers.", "proposed", NOW + 1000);
+        let good = packet(
+            vec!["she said Friday (0.91)"],
+            "Accept / counter / decline, with numbers.",
+            "proposed",
+            NOW + 1000,
+        );
         assert!(packet_is_knockworthy(&good, NOW));
 
         // No evidence trail -> an opinion, not proof-carrying work.
-        let no_ev = packet(vec![], "Accept / counter / decline, with numbers.", "proposed", NOW + 1000);
-        assert!(!packet_is_knockworthy(&no_ev, NOW), "no evidence => no knock");
+        let no_ev = packet(
+            vec![],
+            "Accept / counter / decline, with numbers.",
+            "proposed",
+            NOW + 1000,
+        );
+        assert!(
+            !packet_is_knockworthy(&no_ev, NOW),
+            "no evidence => no knock"
+        );
 
         // No real body -> a notification, which is exactly what this is not.
         let thin = packet(vec!["x (0.9)"], "fyi", "proposed", NOW + 1000);
-        assert!(!packet_is_knockworthy(&thin, NOW), "no prepared work => no knock");
+        assert!(
+            !packet_is_knockworthy(&thin, NOW),
+            "no prepared work => no knock"
+        );
 
         // Expired or already decided work must not resurface as an interruption.
-        let stale = packet(vec!["x (0.9)"], "Accept / counter / decline, with numbers.", "proposed", NOW - 1);
+        let stale = packet(
+            vec!["x (0.9)"],
+            "Accept / counter / decline, with numbers.",
+            "proposed",
+            NOW - 1,
+        );
         assert!(!packet_is_knockworthy(&stale, NOW), "expired => no knock");
-        let decided = packet(vec!["x (0.9)"], "Accept / counter / decline, with numbers.", "approved", NOW + 1000);
-        assert!(!packet_is_knockworthy(&decided, NOW), "already decided => no knock");
+        let decided = packet(
+            vec!["x (0.9)"],
+            "Accept / counter / decline, with numbers.",
+            "approved",
+            NOW + 1000,
+        );
+        assert!(
+            !packet_is_knockworthy(&decided, NOW),
+            "already decided => no knock"
+        );
     }
 
     /// THE ANTI-OVERCLAIM RULE. The knock literally says "I've prepared X". A packet that only
@@ -157,27 +200,45 @@ mod tests {
     /// would be a lie in the product's own voice.
     #[test]
     fn a_reminder_is_not_prepared_work() {
-        let mut reminder = packet(vec!["he said compare (0.9)"], "You asked me to compare the renewal when it arrived.", "proposed", NOW + 1000);
+        let mut reminder = packet(
+            vec!["he said compare (0.9)"],
+            "You asked me to compare the renewal when it arrived.",
+            "proposed",
+            NOW + 1000,
+        );
         reminder["prepared"] = json!(false);
-        assert!(!packet_is_knockworthy(&reminder, NOW), "a restated request may not claim to be prepared work");
+        assert!(
+            !packet_is_knockworthy(&reminder, NOW),
+            "a restated request may not claim to be prepared work"
+        );
         // An unstamped packet (every emissary/night-shift one) fails closed the same way.
         let unstamped = json!({
             "status": "proposed", "expiry_ms": NOW + 1000,
             "body": "A full festival checklist with concrete items.", "evidence": ["puja Sunday (0.9)"],
         });
-        assert!(!packet_is_knockworthy(&unstamped, NOW), "absent flag => not prepared");
+        assert!(
+            !packet_is_knockworthy(&unstamped, NOW),
+            "absent flag => not prepared"
+        );
     }
 
     #[test]
     fn bands_are_coarse_and_low_confidence_stays_silent() {
         assert_eq!(band_for(0.95), Some(90));
-        assert_eq!(band_for(0.78), Some(75), "a 0.78 model output SPEAKS as 75, never as 78");
+        assert_eq!(
+            band_for(0.78),
+            Some(75),
+            "a 0.78 model output SPEAKS as 75, never as 78"
+        );
         assert_eq!(band_for(0.60), Some(60));
         // Below the bar the answer is silence, not a quieter knock.
         assert_eq!(band_for(0.50), None);
         assert_eq!(band_for(0.0), None);
         for b in BANDS {
-            assert!(matches!(b, 60 | 75 | 90), "only the three coarse bands are speakable");
+            assert!(
+                matches!(b, 60 | 75 | 90),
+                "only the three coarse bands are speakable"
+            );
         }
     }
 
@@ -187,7 +248,10 @@ mod tests {
         assert_eq!(KnockReply::parse("  Later. "), Some(KnockReply::Later));
         assert_eq!(KnockReply::parse("mute these"), Some(KnockReply::Mute));
         // Ordinary conversation must NOT be captured as a knock reply.
-        assert_eq!(KnockReply::parse("can we talk about it later this week?"), None);
+        assert_eq!(
+            KnockReply::parse("can we talk about it later this week?"),
+            None
+        );
         assert_eq!(KnockReply::parse("show me the photos from Puri"), None);
     }
 

@@ -15,12 +15,291 @@
 
 use super::*;
 
+const PAPER_DESK_PROFILE: &str = "paper_desk_config";
+const PAPER_DESK_RETRY_MS: i64 = 60 * 60_000;
+const PAPER_DESK_FOLLOW_MS: i64 = 15 * 60_000;
+
+/// The autonomous desk has exactly two modes. Neither can address a live brokerage account:
+/// `Shadow` records gradeable views without orders; `Paper` delegates to `PaperBroker`, whose host
+/// is a compile-time paper-only constant in mind-tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PaperDeskMode {
+    #[default]
+    Shadow,
+    Paper,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub(crate) struct PaperDeskConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) mode: PaperDeskMode,
+    #[serde(default)]
+    pub(crate) last_scan_date: String,
+    #[serde(default)]
+    pub(crate) last_attempt_ms: i64,
+    #[serde(default)]
+    pub(crate) last_follow_ms: i64,
+    #[serde(default)]
+    pub(crate) last_summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaperDeskAction {
+    Scan,
+    Follow,
+}
+
+/// Decide whether the desk should work now. The mover universe and paper broker are US-equity
+/// instruments, so the recurring loop follows New York market hours rather than the owner's sleep
+/// schedule. `chrono-tz` keeps daylight-saving changes out of handwritten offset arithmetic.
+pub(crate) fn paper_desk_action_at(
+    cfg: &PaperDeskConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<PaperDeskAction> {
+    use chrono::{Datelike, Timelike};
+
+    if !cfg.enabled {
+        return None;
+    }
+    let ny = now.with_timezone(&chrono_tz::America::New_York);
+    if matches!(ny.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+        return None;
+    }
+    let minute = ny.hour() * 60 + ny.minute();
+    if !(9 * 60 + 30..16 * 60).contains(&minute) {
+        return None;
+    }
+    let now_ms = now.timestamp_millis();
+    let session = ny.format("%Y-%m-%d").to_string();
+    // A paper account is reconciled before a fresh hunt can add exposure. At a new session this
+    // means stale exits get their turn first; the once-per-session scan follows on the next tick.
+    if cfg.mode == PaperDeskMode::Paper
+        && now_ms.saturating_sub(cfg.last_follow_ms) >= PAPER_DESK_FOLLOW_MS
+    {
+        return Some(PaperDeskAction::Follow);
+    }
+    if cfg.last_scan_date != session
+        && now_ms.saturating_sub(cfg.last_attempt_ms) >= PAPER_DESK_RETRY_MS
+    {
+        return Some(PaperDeskAction::Scan);
+    }
+    None
+}
+
+fn paper_desk_summary(label: &str, output: &str) -> String {
+    let useful = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no report");
+    format!("{label}: {useful}").chars().take(280).collect()
+}
+
+pub(crate) fn hunt_trade_refusal(
+    symbol: &str,
+    side: &str,
+    conviction: f64,
+    thesis: &str,
+    eligible_symbols: &[String],
+) -> Option<&'static str> {
+    if symbol.is_empty() {
+        return Some("missing symbol");
+    }
+    if !eligible_symbols
+        .iter()
+        .any(|eligible| eligible.eq_ignore_ascii_case(symbol))
+    {
+        return Some("symbol was not in the arithmetic shortlist");
+    }
+    if !matches!(side, "long" | "short") {
+        return Some("missing or unsupported direction");
+    }
+    if !conviction.is_finite() || !(0.0..=1.0).contains(&conviction) {
+        return Some("conviction was outside 0.0..=1.0");
+    }
+    if thesis.trim().is_empty() {
+        return Some("missing a specific thesis");
+    }
+    None
+}
+
 /// How many frames one look costs (each is a vision call).
 fn frame_budget() -> usize {
-    std::env::var("YM_MEDIA_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(4)
+    std::env::var("YM_MEDIA_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4)
 }
 
 impl super::ConversationEngine {
+    async fn load_paper_desk(&self) -> std::result::Result<PaperDeskConfig, String> {
+        let raw = self
+            .memory
+            .profile_get(PAPER_DESK_PROFILE)
+            .await
+            .map_err(|_| {
+                "Paper desk state is unavailable; refusing to change or run the desk.".to_string()
+            })?;
+        match raw {
+            None => Ok(PaperDeskConfig::default()),
+            Some(raw) => serde_json::from_str(&raw).map_err(|_| {
+                "Paper desk state is corrupt; refusing to overwrite or run it.".to_string()
+            }),
+        }
+    }
+
+    async fn save_paper_desk(&self, cfg: &PaperDeskConfig) -> std::result::Result<(), String> {
+        let raw = serde_json::to_string(cfg).map_err(|_| {
+            "Paper desk state could not be encoded; the requested change was not confirmed."
+                .to_string()
+        })?;
+        self.memory
+            .profile_set(PAPER_DESK_PROFILE, &raw)
+            .await
+            .map_err(|_| {
+                "Paper desk state could not be persisted; the requested change was not confirmed."
+                    .to_string()
+            })
+    }
+
+    fn render_paper_desk(cfg: &PaperDeskConfig) -> String {
+        if !cfg.enabled {
+            return "🤖 Paper desk: OFF\n  `ym trading-agent shadow` records one gradeable view-set per US market session.\n  `ym trading-agent paper` may also place and manage small SANDBOX orders. Live trading is not supported."
+                .to_string();
+        }
+        let mode = match cfg.mode {
+            PaperDeskMode::Shadow => "SHADOW — gradeable views, no orders",
+            PaperDeskMode::Paper => "PAPER — small sandbox orders + automatic exit checks",
+        };
+        let mut out = format!(
+            "🤖 Paper desk: ON ({mode})\n  cadence: one evidence-backed hunt per US market session; position checks every 15 minutes while the market is open\n  boundary: Alpaca PAPER host only; no live-broker path"
+        );
+        let configured = |key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty());
+        if cfg.mode == PaperDeskMode::Paper
+            && !(configured("ALPACA_KEY_ID") && configured("ALPACA_SECRET_KEY"))
+        {
+            out.push_str(
+                "\n  setup: waiting for ALPACA_KEY_ID + ALPACA_SECRET_KEY before sandbox orders can fill",
+            );
+        }
+        if !cfg.last_summary.is_empty() {
+            out.push_str(&format!("\n  last: {}", cfg.last_summary));
+        }
+        out
+    }
+
+    /// Persistent orchestration for the common "AI trading system while I sleep" use case.
+    ///
+    /// Shadow is the default because an unmeasured strategy should learn before it allocates even
+    /// simulated capital. Paper mode is explicit, remains confined to the compile-time paper host,
+    /// and reuses the existing conviction, order-size, exit, provenance, and grading controls.
+    pub async fn paper_desk_cmd(&self, spec: &str) -> String {
+        let cmd = spec.trim().to_lowercase();
+        let mut cfg = match self.load_paper_desk().await {
+            Ok(cfg) => cfg,
+            Err(message) => return message,
+        };
+        match cmd.as_str() {
+            "" | "status" | "show" => Self::render_paper_desk(&cfg),
+            "off" | "stop" | "disable" => {
+                cfg.enabled = false;
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return message;
+                }
+                Self::render_paper_desk(&cfg)
+            }
+            "on" | "shadow" | "enable" => {
+                if let Err(message) = self.stop_crypto_trader_for_other_desk().await {
+                    return format!("Could not isolate the session desk from crypto: {message}");
+                }
+                if let Err(message) = self.stop_day_trader_for_other_desk().await {
+                    return format!("Could not isolate the session desk from the day trader: {message}");
+                }
+                if !cfg.enabled || cfg.mode != PaperDeskMode::Shadow {
+                    cfg.last_scan_date.clear();
+                    cfg.last_attempt_ms = 0;
+                }
+                cfg.enabled = true;
+                cfg.mode = PaperDeskMode::Shadow;
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return message;
+                }
+                Self::render_paper_desk(&cfg)
+            }
+            "paper" | "paper on" | "enable paper" => {
+                if let Err(message) = self.stop_crypto_trader_for_other_desk().await {
+                    return format!("Could not isolate the session desk from crypto: {message}");
+                }
+                if let Err(message) = self.stop_day_trader_for_other_desk().await {
+                    return format!("Could not isolate the session desk from the day trader: {message}");
+                }
+                if !cfg.enabled || cfg.mode != PaperDeskMode::Paper {
+                    cfg.last_scan_date.clear();
+                    cfg.last_attempt_ms = 0;
+                }
+                cfg.enabled = true;
+                cfg.mode = PaperDeskMode::Paper;
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return message;
+                }
+                Self::render_paper_desk(&cfg)
+            }
+            "run" | "run shadow" => self.hunt(false).await,
+            "run paper" | "paper run" => self.hunt(true).await,
+            "live" | "real" | "live on" => "Live trading is not supported. Use `ym trading-agent paper` for the bounded sandbox desk, or `shadow` to record gradeable views without orders.".to_string(),
+            _ => "Usage: `ym trading-agent status|shadow|paper|off|run|run paper`. Shadow records gradeable views; paper can place sandbox orders; live trading is unavailable.".to_string(),
+        }
+    }
+
+    /// One cheap idle-tick slice of the persistent desk. It is invoked only on the DMN's non-LLM
+    /// phase, preserving the global one-inference-call-per-idle-tick bound when a hunt is due.
+    pub async fn paper_desk_tick(&self) -> Option<String> {
+        let now = chrono::Utc::now();
+        // Corrupt or unavailable state is a hard stop: never silently replace persistent safety
+        // configuration with permissive defaults during autonomous work.
+        let mut cfg = self.load_paper_desk().await.ok()?;
+        match paper_desk_action_at(&cfg, now)? {
+            PaperDeskAction::Scan => {
+                // Claim the attempt before network work. A failure may retry next hour, but an idle
+                // loop cannot stampede the market/LLM endpoints every few minutes.
+                cfg.last_attempt_ms = now.timestamp_millis();
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return Some(format!("scan skipped: {message}"));
+                }
+                let out = self.hunt(cfg.mode == PaperDeskMode::Paper).await;
+                let succeeded = out.contains("HUNT")
+                    && !out.contains("Hunt aborted")
+                    && !out.contains("could not form a view");
+                if succeeded {
+                    cfg.last_scan_date = now
+                        .with_timezone(&chrono_tz::America::New_York)
+                        .format("%Y-%m-%d")
+                        .to_string();
+                }
+                cfg.last_summary = paper_desk_summary("scan", &out);
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return Some(format!("{}; {message}", cfg.last_summary));
+                }
+                Some(cfg.last_summary)
+            }
+            PaperDeskAction::Follow => {
+                cfg.last_follow_ms = now.timestamp_millis();
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return Some(format!("position check skipped: {message}"));
+                }
+                let out = self.follow_positions(true).await;
+                cfg.last_summary = paper_desk_summary("manage", &out);
+                if let Err(message) = self.save_paper_desk(&cfg).await {
+                    return Some(format!("{}; {message}", cfg.last_summary));
+                }
+                Some(cfg.last_summary)
+            }
+        }
+    }
+
     /// `watch <url> [question]` — the whole pipeline, with every refusal stated in the terms that
     /// caused it. Returns what it actually perceived, never a summary of what it assumes is there.
     pub async fn watch_media(&self, url: &str, question: &str) -> String {
@@ -44,7 +323,11 @@ impl super::ConversationEngine {
         if probe.is_live {
             out.push_str(" (LIVE)");
         } else if probe.duration_secs > 0 {
-            out.push_str(&format!(" ({}m{:02}s)", probe.duration_secs / 60, probe.duration_secs % 60));
+            out.push_str(&format!(
+                " ({}m{:02}s)",
+                probe.duration_secs / 60,
+                probe.duration_secs % 60
+            ));
         }
         out.push('\n');
 
@@ -80,12 +363,16 @@ impl super::ConversationEngine {
                                 Some(win)
                             }
                         } else {
-                            out.push_str("📝 Read the published captions (the speaker's own words).\n");
+                            out.push_str(
+                                "📝 Read the published captions (the speaker's own words).\n",
+                            );
                             Some(t)
                         }
                     }
                     Ok(Err(e)) => {
-                        out.push_str(&format!("📝 Captions were advertised but unreadable ({e}).\n"));
+                        out.push_str(&format!(
+                            "📝 Captions were advertised but unreadable ({e}).\n"
+                        ));
                         None
                     }
                     Err(_) => None,
@@ -105,7 +392,11 @@ impl super::ConversationEngine {
                     }
                     _ => 0,
                 };
-                match tokio::task::spawn_blocking(move || mind_tools::media::transcribe_segments_at(&u, s, offset)).await {
+                match tokio::task::spawn_blocking(move || {
+                    mind_tools::media::transcribe_segments_at(&u, s, offset)
+                })
+                .await
+                {
                     Ok(Ok(segs)) => {
                         spoken = segs;
                         let t = mind_tools::media::utterances_to_text(&spoken);
@@ -138,17 +429,23 @@ impl super::ConversationEngine {
         // Always sample frames: for screen-content media this IS the information, and it is the
         // only modality available when the audio is refused or silent.
         let window = match &plan {
-            mind_tools::media::MediaPlan::LiveWindow { secs } => *secs,
-            mind_tools::media::MediaPlan::PartialListen { secs, .. } => *secs,
-            mind_tools::media::MediaPlan::Transcribe { secs } => *secs,
+            mind_tools::media::MediaPlan::LiveWindow { secs }
+            | mind_tools::media::MediaPlan::PartialListen { secs, .. }
+            | mind_tools::media::MediaPlan::Transcribe { secs } => *secs,
             mind_tools::media::MediaPlan::Captions => probe.duration_secs.min(cap).max(60),
         };
         let (u, want) = (url.to_string(), frame_budget());
         let frame_offset = match &plan {
-            mind_tools::media::MediaPlan::PartialListen { secs, of_secs } => mind_tools::media::sensible_offset(*of_secs, *secs),
+            mind_tools::media::MediaPlan::PartialListen { secs, of_secs } => {
+                mind_tools::media::sensible_offset(*of_secs, *secs)
+            }
             _ => 0,
         };
-        let frames = match tokio::task::spawn_blocking(move || mind_tools::media::keyframes_at(&u, want, window, frame_offset)).await {
+        let frames = match tokio::task::spawn_blocking(move || {
+            mind_tools::media::keyframes_at(&u, want, window, frame_offset)
+        })
+        .await
+        {
             Ok(Ok(f)) => f,
             Ok(Err(e)) => {
                 out.push_str(&format!("👁 Could not sample frames: {e}.\n"));
@@ -169,11 +466,16 @@ impl super::ConversationEngine {
                 seen.push(format!("[{}:{:02}] {}", at / 60, at % 60, caption.trim()));
                 seen_at.push((at, caption.trim().to_string()));
             }
-            out.push_str(&format!("👁 Looked at {} frame(s) with the local vision model.\n", seen.len()));
+            out.push_str(&format!(
+                "👁 Looked at {} frame(s) with the local vision model.\n",
+                seen.len()
+            ));
         }
 
         if heard.is_none() && seen.is_empty() {
-            out.push_str("\nI perceived nothing from this one — so I have nothing to tell you about it.");
+            out.push_str(
+                "\nI perceived nothing from this one — so I have nothing to tell you about it.",
+            );
             return out;
         }
 
@@ -185,7 +487,10 @@ impl super::ConversationEngine {
         if !spoken.is_empty() && !seen_at.is_empty() {
             let mut rows: Vec<(u64, String)> = Vec::new();
             for (at, caption) in &seen_at {
-                rows.push((*at, format!("👁 {}", caption.chars().take(400).collect::<String>())));
+                rows.push((
+                    *at,
+                    format!("👁 {}", caption.chars().take(400).collect::<String>()),
+                ));
             }
             for u in &spoken {
                 rows.push((u.at_secs, format!("🗣 {}", u.text)));
@@ -213,11 +518,23 @@ impl super::ConversationEngine {
         let note = format!(
             "MEDIA: \"{}\" by {} — {}{}",
             probe.title,
-            if probe.uploader.is_empty() { "unknown" } else { &probe.uploader },
-            seen.first().map(|s| s.chars().take(300).collect::<String>()).unwrap_or_default(),
-            heard.as_ref().map(|t| format!(" | said: {}", t.chars().take(300).collect::<String>())).unwrap_or_default()
+            if probe.uploader.is_empty() {
+                "unknown"
+            } else {
+                &probe.uploader
+            },
+            seen.first()
+                .map(|s| s.chars().take(300).collect::<String>())
+                .unwrap_or_default(),
+            heard
+                .as_ref()
+                .map(|t| format!(" | said: {}", t.chars().take(300).collect::<String>()))
+                .unwrap_or_default()
         );
-        let _ = self.memory.remember_observation(&note, mind_types::ProvenanceCategory::ToolResult).await;
+        let _ = self
+            .memory
+            .remember_observation(&note, mind_types::ProvenanceCategory::ToolResult)
+            .await;
         out
     }
 
@@ -249,14 +566,22 @@ impl super::ConversationEngine {
         let seen: String = perception.chars().take(6000).collect();
         let priors = self
             .memory
-            .beliefs_matching_n("trading market stream broadcast", 12, &mind_types::AccessContext::operator_audit())
+            .beliefs_matching_n(
+                "trading market stream broadcast",
+                12,
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap_or_default()
             .iter()
             .map(|b| format!("- {} ({:.2})", b.statement, b.confidence))
             .collect::<Vec<_>>()
             .join("\n");
-        let prior_list = if priors.is_empty() { "(none yet)".to_string() } else { priors };
+        let prior_list = if priors.is_empty() {
+            "(none yet)".to_string()
+        } else {
+            priors
+        };
 
         let prompt = format!(
             "You WATCHED a segment of a live broadcast. Below is what was seen on screen and heard, with timestamps.\n\n\
@@ -277,7 +602,11 @@ impl super::ConversationEngine {
             ChatMessage::user(&prompt),
         ];
         // PRIVATE-GROUNDED: the perception may carry household content, so it takes the private lane.
-        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+        let text = match self
+            .inference
+            .chat_grounded(messages, GenerationConfig::default())
+            .await
+        {
             Ok(r) => r.text,
             Err(e) => return format!("{perception}\n\n(could not reconcile what I saw: {e})"),
         };
@@ -293,14 +622,28 @@ impl super::ConversationEngine {
         let mut learned: Vec<String> = Vec::new();
         let mut logged: Vec<String> = Vec::new();
 
-        for f in v.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-            let stmt = f.get("statement").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        for f in v
+            .get("facts")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let stmt = f
+                .get("statement")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if stmt.len() < 8 {
                 continue;
             }
             // Capped: one viewing of a broadcast is weaker than being told something. Repeat
             // viewings accumulate their own evidence, which is the point.
-            let cert = f.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.1, 0.6);
+            let cert = f
+                .get("certainty")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.5)
+                .clamp(0.1, 0.6);
             if self
                 .memory
                 .remember_as_belief(BeliefAssertion {
@@ -316,28 +659,91 @@ impl super::ConversationEngine {
                 learned.push(stmt);
             }
         }
-        for r in v.get("revisions").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-            let old = r.get("old").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            let new = r.get("new").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        for r in v
+            .get("revisions")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let old = r
+                .get("old")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let new = r
+                .get("new")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if old.len() < 8 || new.len() < 8 {
                 continue;
             }
-            let w = 0.4 + r.get("certainty").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.1, 0.6);
-            let _ = self.memory.remember_as_belief(BeliefAssertion { statement: new.clone(), polarity: 1.0, weight: w, source_event: Some("watched".into()), provenance: "watched".into() }).await;
-            let _ = self.memory.remember_as_belief(BeliefAssertion { statement: old.clone(), polarity: -1.0, weight: w, source_event: Some("watched".into()), provenance: "watched".into() }).await;
+            let w = 0.4
+                + r.get("certainty")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.5)
+                    .clamp(0.1, 0.6);
+            let _ = self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: new.clone(),
+                    polarity: 1.0,
+                    weight: w,
+                    source_event: Some("watched".into()),
+                    provenance: "watched".into(),
+                })
+                .await;
+            let _ = self
+                .memory
+                .remember_as_belief(BeliefAssertion {
+                    statement: old.clone(),
+                    polarity: -1.0,
+                    weight: w,
+                    source_event: Some("watched".into()),
+                    provenance: "watched".into(),
+                })
+                .await;
             let _ = self.memory.relate(&new, &old, "contradicts", 0.9).await;
             learned.push(format!("revised: \"{old}\" → \"{new}\""));
         }
         // The claims do NOT become beliefs. They become gradeable predictions.
         let now = chrono::Utc::now().timestamp_millis();
-        for c in v.get("claims").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-            let claim = c.get("claim").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        for c in v
+            .get("claims")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let claim = c
+                .get("claim")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if claim.len() < 8 {
                 continue;
             }
-            let p = c.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.5).clamp(0.05, 0.95);
-            let days = c.get("resolve_in_days").and_then(|x| x.as_i64()).unwrap_or(7).clamp(1, 30);
-            self.judgment_log("watched", "trading", &claim, p, now + days * 86_400_000, url).await;
+            let p = c
+                .get("confidence")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.5)
+                .clamp(0.05, 0.95);
+            let days = c
+                .get("resolve_in_days")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(7)
+                .clamp(1, 30);
+            self.judgment_log(
+                "watched",
+                "trading",
+                &claim,
+                p,
+                now + days * 86_400_000,
+                url,
+            )
+            .await;
             logged.push(format!("{claim} (p={p:.2}, grades in {days}d)"));
         }
 
@@ -362,26 +768,6 @@ impl super::ConversationEngine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The refusals must be reachable without any media tooling installed — a host with no yt-dlp
-    /// must say so, not fail obscurely. (The perception paths need real binaries and are exercised
-    /// on the box, not in unit tests.)
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_non_url_is_refused_before_any_work() {
-        let mem: Arc<dyn MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
-        let pool = mind_inference::InferencePool::new(
-            Arc::new(mind_inference::ScriptedLLM::new("x")) as Arc<dyn yantrik_ml::LLMBackend>,
-            1,
-        );
-        let conv = ConversationEngine::new(mem, pool, "JARVIS");
-        let out = conv.watch_media("not a url", "").await;
-        assert!(out.contains("full URL"), "{out}");
-    }
-}
-
 impl super::ConversationEngine {
     /// Sample the position bar once and append it to the tape.
     ///
@@ -397,11 +783,14 @@ impl super::ConversationEngine {
             .filter(|s| !s.is_empty())
             .collect();
         let (u, window) = (url.to_string(), 30u64);
-        let frames = match tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, 1, window)).await {
-            Ok(Ok(f)) => f,
-            Ok(Err(e)) => return format!("tape: could not sample a frame ({e})"),
-            Err(_) => return "tape: frame task failed".to_string(),
-        };
+        let frames =
+            match tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, 1, window))
+                .await
+            {
+                Ok(Ok(f)) => f,
+                Ok(Err(e)) => return format!("tape: could not sample a frame ({e})"),
+                Err(_) => return "tape: frame task failed".to_string(),
+            };
         let Some((_, bytes)) = frames.into_iter().next() else {
             return "tape: no frame returned".to_string();
         };
@@ -416,7 +805,10 @@ impl super::ConversationEngine {
         // configured list would silently stop recording the day it does.
         let states = mind_tools::tape::parse_bar_auto(&caption, &traders);
         if states.is_empty() {
-            return format!("tape: no trader state could be read (kept nothing rather than guessing)\n{}", caption.chars().take(200).collect::<String>());
+            return format!(
+                "tape: no trader state could be read (kept nothing rather than guessing)\n{}",
+                caption.chars().take(200).collect::<String>()
+            );
         }
         let sample = mind_tools::tape::TapeSample {
             at_ms: chrono::Utc::now().timestamp_millis(),
@@ -424,7 +816,8 @@ impl super::ConversationEngine {
             states: states.clone(),
         };
         let path = std::path::PathBuf::from(
-            std::env::var("YM_TAPE_PATH").unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
+            std::env::var("YM_TAPE_PATH")
+                .unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
         );
         let stored = mind_tools::tape::append_sample(&path, &sample).is_ok();
         let mut out = String::from("📼 tape: ");
@@ -448,7 +841,8 @@ impl super::ConversationEngine {
     /// `ym shadow` — the counterfactual over everything recorded so far.
     pub async fn shadow_report(&self) -> String {
         let path = std::path::PathBuf::from(
-            std::env::var("YM_TAPE_PATH").unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
+            std::env::var("YM_TAPE_PATH")
+                .unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
         );
         let tape = mind_tools::tape::read_tape(&path);
         if tape.is_empty() {
@@ -468,8 +862,12 @@ impl super::ConversationEngine {
             tape.iter().map(|s| s.at_ms).min().unwrap_or(0),
             tape.iter().map(|s| s.at_ms).max().unwrap_or(0),
         );
-        let start = chrono::DateTime::from_timestamp_millis(lo - 3_600_000).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default();
-        let end = chrono::DateTime::from_timestamp_millis(hi + 3_600_000).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default();
+        let start = chrono::DateTime::from_timestamp_millis(lo - 3_600_000)
+            .map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_default();
+        let end = chrono::DateTime::from_timestamp_millis(hi + 3_600_000)
+            .map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_default();
         let bars = match tokio::task::spawn_blocking(move || {
             // Route per symbol: Alpaca for US equities, Yahoo for Indian listings (and as the
             // fallback whenever Alpaca has nothing). An NSE symbol handed to Alpaca returns an
@@ -484,7 +882,10 @@ impl super::ConversationEngine {
                     }
                     continue;
                 }
-                let via_alpaca = client.as_ref().and_then(|c| c.bars(&s, "1Min", &start, &end).ok()).filter(|b| !b.is_empty());
+                let via_alpaca = client
+                    .as_ref()
+                    .and_then(|c| c.bars(&s, "1Min", &start, &end).ok())
+                    .filter(|b| !b.is_empty());
                 match via_alpaca {
                     Some(b) => {
                         m.insert(s, b);
@@ -501,7 +902,13 @@ impl super::ConversationEngine {
         .await
         {
             Ok(Ok(m)) => m,
-            Ok(Err(e)) => return format!("Recorded {} sample(s) and {} transition(s), but I can't price them: {e}", tape.len(), trans.len()),
+            Ok(Err(e)) => {
+                return format!(
+                    "Recorded {} sample(s) and {} transition(s), but I can't price them: {e}",
+                    tape.len(),
+                    trans.len()
+                )
+            }
             Err(_) => return "The pricing task failed.".to_string(),
         };
         let curve = mind_tools::lag_curve(&trans, &bars, &[0, 60, 120, 180, 300, 600], 15.0);
@@ -525,19 +932,27 @@ impl super::ConversationEngine {
     /// on those timings being right.
     pub async fn bar_drain(&self, max_frames: usize) -> String {
         let spool = std::path::PathBuf::from(
-            std::env::var("YM_BAR_SPOOL").unwrap_or_else(|_| "/var/lib/yantrik-mind/barspool".into()),
+            std::env::var("YM_BAR_SPOOL")
+                .unwrap_or_else(|_| "/var/lib/yantrik-mind/barspool".into()),
         );
-        let mut frames: Vec<(std::time::SystemTime, std::path::PathBuf)> = match std::fs::read_dir(&spool) {
-            Ok(rd) => rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x == "jpg").unwrap_or(false))
-                .filter_map(|p| p.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, p)))
-                .collect(),
-            Err(_) => return "bar-drain: no spool yet (the watcher has not run).".to_string(),
-        };
+        let mut frames: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+            match std::fs::read_dir(&spool) {
+                Ok(rd) => rd
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().map(|x| x == "jpg").unwrap_or(false))
+                    .filter_map(|p| {
+                        p.metadata()
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .map(|t| (t, p))
+                    })
+                    .collect(),
+                Err(_) => return "bar-drain: no spool yet (the watcher has not run).".to_string(),
+            };
         if frames.is_empty() {
-            return "bar-drain: spool empty — no bar changes detected since the last drain.".to_string();
+            return "bar-drain: spool empty — no bar changes detected since the last drain."
+                .to_string();
         }
         frames.sort_by_key(|(t, _)| *t);
         let total = frames.len();
@@ -549,13 +964,16 @@ impl super::ConversationEngine {
             .filter(|s| !s.is_empty())
             .collect();
         let tape_path = std::path::PathBuf::from(
-            std::env::var("YM_TAPE_PATH").unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
+            std::env::var("YM_TAPE_PATH")
+                .unwrap_or_else(|_| "/var/lib/yantrik-mind/tape.jsonl".into()),
         );
         let mut recorded = 0usize;
         let mut unreadable = 0usize;
         let mut last = String::new();
         for (mtime, path) in &frames {
-            let Ok(bytes) = std::fs::read(path) else { continue };
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
             let caption = self
                 .analyze_image_bytes(
                     bytes,
@@ -573,7 +991,11 @@ impl super::ConversationEngine {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
-            let sample = mind_tools::tape::TapeSample { at_ms, source: "bar-watch".into(), states: states.clone() };
+            let sample = mind_tools::tape::TapeSample {
+                at_ms,
+                source: "bar-watch".into(),
+                states: states.clone(),
+            };
             if mind_tools::tape::append_sample(&tape_path, &sample).is_ok() {
                 recorded += 1;
                 last = states
@@ -589,8 +1011,16 @@ impl super::ConversationEngine {
         }
         format!(
             "📼 bar-drain: {recorded} change event(s) recorded{}{} — {} still spooled\n{last}",
-            if unreadable > 0 { format!(", {unreadable} unreadable (dropped, not guessed)") } else { String::new() },
-            if total > frames.len() { format!(", {} deferred to the next drain", total - frames.len()) } else { String::new() },
+            if unreadable > 0 {
+                format!(", {unreadable} unreadable (dropped, not guessed)")
+            } else {
+                String::new()
+            },
+            if total > frames.len() {
+                format!(", {} deferred to the next drain", total - frames.len())
+            } else {
+                String::new()
+            },
             total.saturating_sub(frames.len())
         )
     }
@@ -615,9 +1045,11 @@ impl super::ConversationEngine {
     /// Every position is filed as a prediction on the same ledger as any other claim, so a run of
     /// these is a measurable strategy rather than a sequence of anecdotes.
     pub async fn hunt(&self, act: bool) -> String {
-        let pull = tokio::task::spawn_blocking(|| mind_tools::hunt::fetch_movers(20).map_err(|e| e.to_string()))
-            .await
-            .unwrap_or_else(|e| Err(format!("join failed: {e}")));
+        let pull = tokio::task::spawn_blocking(|| {
+            mind_tools::hunt::fetch_movers(20).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join failed: {e}")));
 
         let movers = match pull {
             Ok(x) => x,
@@ -628,16 +1060,26 @@ impl super::ConversationEngine {
 
         // News is asked for THESE symbols, after the shortlist — never the general firehose, which
         // is dominated by large caps and answers "no catalyst" for every small-cap mover.
-        let syms: Vec<String> = keep.iter().take(6).map(|m| m.symbol.clone()).collect();
-        let news = tokio::task::spawn_blocking(move || mind_tools::hunt::fetch_news_for(&syms, 50))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
+        let eligible_symbols: Vec<String> = keep.iter().take(6).map(|m| m.symbol.clone()).collect();
+        let news_symbols = eligible_symbols.clone();
+        let news = tokio::task::spawn_blocking(move || {
+            mind_tools::hunt::fetch_news_for(&news_symbols, 50)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
 
-        let mut out = format!("🎯 HUNT — {} movers scanned, {} tradeable\n", movers.len(), keep.len());
+        let mut out = format!(
+            "🎯 HUNT — {} movers scanned, {} tradeable\n",
+            movers.len(),
+            keep.len()
+        );
         if !dropped.is_empty() {
-            out.push_str(&format!("  filtered out {} (the filter IS the strategy here):\n", dropped.len()));
+            out.push_str(&format!(
+                "  filtered out {} (the filter IS the strategy here):\n",
+                dropped.len()
+            ));
             for (s, r) in dropped.iter().take(6) {
                 out.push_str(&format!("    · {s}: {r}\n"));
             }
@@ -666,12 +1108,24 @@ impl super::ConversationEngine {
                     if mind_tools::hunt::is_fresh(&h.at, read_at) {
                         format!("[{age}] {}", h.headline)
                     } else {
-                        format!("[{age} — STALE, may not explain today's move] {}", h.headline)
+                        format!(
+                            "[{age} — STALE, may not explain today's move] {}",
+                            h.headline
+                        )
                     }
                 })
                 .unwrap_or_else(|| "(no company-specific news — an unexplained move)".into());
-            out.push_str(&format!("    {} {:>8.2} {:+6.2}%  {}\n", m.symbol, m.price, m.percent_change, head.chars().take(70).collect::<String>()));
-            brief.push_str(&format!("- {} at {:.2}, {:+.2}% today. News: {}\n", m.symbol, m.price, m.percent_change, head));
+            out.push_str(&format!(
+                "    {} {:>8.2} {:+6.2}%  {}\n",
+                m.symbol,
+                m.price,
+                m.percent_change,
+                head.chars().take(70).collect::<String>()
+            ));
+            brief.push_str(&format!(
+                "- {} at {:.2}, {:+.2}% today. News: {}\n",
+                m.symbol, m.price, m.percent_change, head
+            ));
         }
 
         let prompt = format!(
@@ -723,7 +1177,10 @@ impl super::ConversationEngine {
         // graded, because the ledger would be scoring a coin toss and reporting it as skill. And it
         // removes a temptation that is hard to see from the inside — with a variable decision,
         // re-running the hunt until it agrees with you looks exactly like more analysis.
-        let decide = GenerationConfig { temperature: 0.0, ..GenerationConfig::default() };
+        let decide = GenerationConfig {
+            temperature: 0.0,
+            ..GenerationConfig::default()
+        };
         let text = match self.inference.chat_grounded(messages, decide).await {
             Ok(r) => r.text,
             Err(e) => return format!("{out}\n(could not form a view: {e})"),
@@ -736,32 +1193,69 @@ impl super::ConversationEngine {
             _ => "{}",
         };
         let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
-        let trades = v.get("trades").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let trades = v
+            .get("trades")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
         if trades.is_empty() {
             out.push_str("\n📉 No thesis worth a position today. Declining is the discipline this is supposed to have.\n");
             return out;
         }
 
-        let floor: f64 = std::env::var("YM_TRADE_MIN_CONVICTION").ok().and_then(|s| s.parse().ok()).unwrap_or(0.6);
-        let stake: f64 = std::env::var("YM_PAPER_STAKE_USD").ok().and_then(|s| s.parse().ok()).unwrap_or(250.0);
+        let floor: f64 = std::env::var("YM_TRADE_MIN_CONVICTION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.6);
+        let stake: f64 = std::env::var("YM_PAPER_STAKE_USD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(250.0);
         let now = chrono::Utc::now().timestamp_millis();
         out.push_str("\n📈 VIEW:\n");
         // EVERY candidate, not the top three. A view costs no capital, so a cap only buys a
         // slower answer to whether any of this works.
         let mut views = 0usize;
         for t in trades.into_iter() {
-            let sym = t.get("symbol").and_then(|x| x.as_str()).unwrap_or("").trim().to_uppercase();
-            let side = t.get("side").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+            let sym = t
+                .get("symbol")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_uppercase();
+            let side = t
+                .get("side")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
             let conv = t.get("conviction").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let thesis = t.get("thesis").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            if sym.is_empty() || !matches!(side.as_str(), "long" | "short") {
+            let thesis = t
+                .get("thesis")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if let Some(reason) = hunt_trade_refusal(&sym, &side, conv, &thesis, &eligible_symbols)
+            {
+                out.push_str(&format!("  refused model row for {sym:?}: {reason}\n"));
                 continue;
             }
-            out.push_str(&format!("  {sym} {side} (conviction {conv:.2}) — {thesis}\n"));
+            out.push_str(&format!(
+                "  {sym} {side} (conviction {conv:.2}) — {thesis}\n"
+            ));
             // The view is recorded whether or not it is acted on. A thesis that is only logged when
             // it becomes a trade produces a track record of exactly the trades that were taken,
             // which is how a strategy grades itself generously.
-            self.judgment_log("hunt", "trading", &format!("{sym} {side}: {thesis}"), conv.clamp(0.05, 0.95), now + 86_400_000, &sym).await;
+            self.judgment_log(
+                "hunt",
+                "trading",
+                &format!("{sym} {side}: {thesis}"),
+                conv.clamp(0.05, 0.95),
+                now + 86_400_000,
+                &sym,
+            )
+            .await;
             // RECORD THE VIEW so it can actually be resolved. Logging a claim states what was
             // believed; without a reference price and a clock nothing can ever grade it, which is
             // how six hunt predictions sat unresolved days past their deadline.
@@ -770,7 +1264,9 @@ impl super::ConversationEngine {
             // the tape from THIS moment, and a view with no entry mark is ungradeable later.
             let ref_sym = sym.clone();
             let ref_px = tokio::task::spawn_blocking(move || {
-                mind_tools::MarketClient::from_env().ok().and_then(|c| c.last_price(&ref_sym).ok())
+                mind_tools::MarketClient::from_env()
+                    .ok()
+                    .and_then(|c| c.last_price(&ref_sym).ok())
             })
             .await
             .ok()
@@ -790,27 +1286,41 @@ impl super::ConversationEngine {
                 views += 1;
             }
             if !act {
-                out.push_str("      (view recorded and gradeable; not traded — pass `act` to take it)\n");
+                out.push_str(
+                    "      (view recorded and gradeable; not traded — pass `act` to take it)\n",
+                );
                 continue;
             }
             if conv < floor {
-                out.push_str(&format!("      not taken: conviction {conv:.2} below the {floor:.2} floor\n"));
+                out.push_str(&format!(
+                    "      not taken: conviction {conv:.2} below the {floor:.2} floor\n"
+                ));
                 continue;
             }
             let (s2, side2) = (sym.clone(), side.clone());
-            let placed = tokio::task::spawn_blocking(move || -> std::result::Result<(f64, f64, String), String> {
-                let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
-                let acct = broker.account().map_err(|e| e.to_string())?;
-                let px = mind_tools::MarketClient::from_env()
-                    .ok()
-                    .and_then(|c| c.last_price(&s2).ok())
-                    .ok_or_else(|| "no live price — refusing to size blind".to_string())?;
-                let qty = (stake / px).floor();
-                mind_tools::broker::check_order(qty, px, acct.equity).map_err(|r| r.to_string())?;
-                let sd = if side2 == "long" { mind_tools::broker::Side::Buy } else { mind_tools::broker::Side::Sell };
-                let ack = broker.submit_market(&s2, qty, sd).map_err(|e| e.to_string())?;
-                Ok((qty, px, format!("{} {}", ack.status, ack.id)))
-            })
+            let placed = tokio::task::spawn_blocking(
+                move || -> std::result::Result<(f64, f64, String), String> {
+                    let broker =
+                        mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
+                    let acct = broker.account().map_err(|e| e.to_string())?;
+                    let px = mind_tools::MarketClient::from_env()
+                        .ok()
+                        .and_then(|c| c.last_price(&s2).ok())
+                        .ok_or_else(|| "no live price — refusing to size blind".to_string())?;
+                    let qty = (stake / px).floor();
+                    mind_tools::broker::check_order(qty, px, acct.equity)
+                        .map_err(|r| r.to_string())?;
+                    let sd = if side2 == "long" {
+                        mind_tools::broker::Side::Buy
+                    } else {
+                        mind_tools::broker::Side::Sell
+                    };
+                    let ack = broker
+                        .submit_market(&s2, qty, sd)
+                        .map_err(|e| e.to_string())?;
+                    Ok((qty, px, format!("{} {}", ack.status, ack.id)))
+                },
+            )
             .await
             .unwrap_or_else(|e| Err(format!("join failed: {e}")));
             match placed {
@@ -831,8 +1341,10 @@ impl super::ConversationEngine {
                         staked: true,
                     })
                     .await;
-                    out.push_str(&format!("      ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}
-"));
+                    out.push_str(&format!(
+                        "      ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}
+"
+                    ));
                 }
                 Err(e) => out.push_str(&format!("      ✗ not filled: {e}\n")),
             }
@@ -852,15 +1364,179 @@ impl super::ConversationEngine {
 
     /// Persist a trade record beside the broker position.
     pub(crate) async fn record_open_trade(&self, t: mind_tools::trades::OpenTrade) {
-        let raw = self.memory.profile_get("open_trades").await.ok().flatten().unwrap_or_default();
+        let raw = self
+            .memory
+            .profile_get("open_trades")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mut book = mind_tools::trades::parse_book(&raw);
         mind_tools::trades::upsert(&mut book, t);
-        let _ = self.memory.profile_set("open_trades", &mind_tools::trades::render_book(&book)).await;
+        let _ = self
+            .memory
+            .profile_set("open_trades", &mind_tools::trades::render_book(&book))
+            .await;
     }
 
     pub(crate) async fn open_trade_book(&self) -> Vec<mind_tools::trades::OpenTrade> {
-        let raw = self.memory.profile_get("open_trades").await.ok().flatten().unwrap_or_default();
+        let raw = self
+            .memory
+            .profile_get("open_trades")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         mind_tools::trades::parse_book(&raw)
+    }
+
+    pub(crate) async fn remove_open_trade(&self, symbol: &str) {
+        let mut book = self.open_trade_book().await;
+        if mind_tools::trades::take(&mut book, symbol).is_some() {
+            let _ = self
+                .memory
+                .profile_set("open_trades", &mind_tools::trades::render_book(&book))
+                .await;
+        }
+    }
+
+    /// Persist a broker-confirmed close. Polling a completed order more than once is harmless:
+    /// the broker order id is the ledger key, so retries update rather than duplicate the result.
+    pub async fn record_closed_trade(
+        &self,
+        trade: mind_tools::trades::ClosedTrade,
+    ) -> std::result::Result<(), String> {
+        let raw = self
+            .memory
+            .profile_get("closed_trades")
+            .await
+            .map_err(|e| format!("closed-trade ledger read failed: {e}"))?
+            .unwrap_or_else(|| "[]".to_string());
+        let mut book: Vec<mind_tools::trades::ClosedTrade> = serde_json::from_str(&raw)
+            .map_err(|_| "closed-trade ledger is corrupt; refusing to overwrite it".to_string())?;
+        mind_tools::trades::upsert_closed(&mut book, trade);
+        let next = serde_json::to_string(&book)
+            .map_err(|e| format!("closed-trade ledger serialization failed: {e}"))?;
+        self.memory
+            .profile_set("closed_trades", &next)
+            .await
+            .map_err(|e| format!("closed-trade ledger write failed: {e}"))
+    }
+
+    /// Operator-facing realized performance. This intentionally reports only broker-reconciled
+    /// closes; quotes, open P&L and model confidence are not substitutes for executed results.
+    pub async fn trading_performance(&self, requested_desk: &str) -> String {
+        let raw = match self.memory.profile_get("closed_trades").await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => "[]".to_string(),
+            Err(e) => return format!("Trading performance unavailable: ledger read failed: {e}"),
+        };
+        let book: Vec<mind_tools::trades::ClosedTrade> = match serde_json::from_str(&raw) {
+            Ok(book) => book,
+            Err(_) => {
+                return "Trading performance unavailable: closed-trade ledger is corrupt."
+                    .to_string()
+            }
+        };
+        let desk = requested_desk.trim();
+        let selected: Vec<_> = book
+            .into_iter()
+            .filter(|trade| {
+                desk.is_empty()
+                    || desk.eq_ignore_ascii_case("all")
+                    || trade.desk.eq_ignore_ascii_case(desk)
+            })
+            .collect();
+        let summary = mind_tools::trades::summarize_closed(&selected);
+        if summary.trades == 0 {
+            return format!(
+                "📈 TRADING PERFORMANCE ({}) — no broker-reconciled closed trades yet.",
+                if desk.is_empty() { "all desks" } else { desk }
+            );
+        }
+        let profit_factor = summary
+            .profit_factor
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "not defined (no realized losses)".to_string());
+        let (win_rate_low, win_rate_high) =
+            mind_tools::trades::win_rate_interval_95(summary.wins, summary.trades)
+                .expect("a non-empty performance summary has a valid win count");
+        let observed_win_rate = summary.wins as f64 / summary.trades as f64;
+        let win_rate_evidence = if win_rate_low > 0.5 {
+            "interval is above a 50% hit rate"
+        } else if win_rate_high < 0.5 {
+            "interval is below a 50% hit rate"
+        } else {
+            "inconclusive around a 50% hit rate"
+        };
+        let invalid = selected.len().saturating_sub(summary.trades);
+        let invalid_note = if invalid > 0 {
+            format!("\n  {invalid} invalid ledger row(s) excluded")
+        } else {
+            String::new()
+        };
+        format!(
+            "📈 TRADING PERFORMANCE ({})\n  {}/{} wins · net ${:.2} · expectancy ${:.2}/trade\n  win rate {:.1}% · 95% interval {:.1}–{:.1}% ({})\n  profit factor {} · max realized drawdown ${:.2}{}",
+            if desk.is_empty() { "all desks" } else { desk },
+            summary.wins,
+            summary.trades,
+            summary.net_pnl,
+            summary.expectancy,
+            observed_win_rate * 100.0,
+            win_rate_low * 100.0,
+            win_rate_high * 100.0,
+            win_rate_evidence,
+            profit_factor,
+            summary.max_realized_drawdown,
+            invalid_note,
+        )
+    }
+
+    /// One read-only operator surface for the entire trading system. Status calls load persisted
+    /// desk state but never enable a desk, fetch a quote, submit an order, or touch a signer.
+    pub async fn trading_cockpit(&self) -> String {
+        let (session, day, crypto, performance) = tokio::join!(
+            self.paper_desk_cmd("status"),
+            self.day_trader_cmd("status"),
+            self.crypto_trader_cmd("status"),
+            self.trading_performance("all"),
+        );
+        let configured = |key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty());
+        let paper_ready = configured("ALPACA_KEY_ID") && configured("ALPACA_SECRET_KEY");
+        let next = if paper_ready {
+            "Run a shadow scan and keep accumulating broker-gradeable evidence; paper execution remains explicit."
+        } else {
+            "Configure both Alpaca paper-data credentials locally, then run crypto shadow; never paste credentials into chat."
+        };
+        format!(
+            "🧭 TRADING COCKPIT
+
+EXECUTION BOUNDARIES
+  live-money broker: unavailable by construction
+  Alpaca paper/data credentials: {}
+  wallet: intent validation only; no signer or broadcaster connected
+
+SESSION DESK
+{}
+
+DAY DESK
+{}
+
+CRYPTO DESK
+{}
+
+EVIDENCE
+{}
+
+NEXT SAFE ACTION
+  {}",
+            if paper_ready { "READY" } else { "MISSING" },
+            session,
+            day,
+            crypto,
+            performance,
+            next,
+        )
     }
 
     /// GRADE what has come due — the other half of logging a prediction.
@@ -887,7 +1563,9 @@ impl super::ConversationEngine {
             }
             let sym = t.symbol.clone();
             let price = tokio::task::spawn_blocking(move || {
-                mind_tools::MarketClient::from_env().ok().and_then(|c| c.last_price(&sym).ok())
+                mind_tools::MarketClient::from_env()
+                    .ok()
+                    .and_then(|c| c.last_price(&sym).ok())
             })
             .await
             .ok()
@@ -911,9 +1589,14 @@ impl super::ConversationEngine {
                 if right { "RIGHT" } else { "WRONG" }
             ));
         }
-        format!("⚖️  GRADED WHAT CAME DUE
-{}", lines.join("
-"))
+        format!(
+            "⚖️  GRADED WHAT CAME DUE
+{}",
+            lines.join(
+                "
+"
+            )
+        )
     }
 
     /// SOURCES — who has earned attention, from the record rather than the impression.
@@ -942,7 +1625,11 @@ impl super::ConversationEngine {
         let graded: Vec<(String, bool)> = led
             .iter()
             .filter_map(|r| {
-                let src = r.get("source").and_then(|x| x.as_str()).unwrap_or("(unknown)").to_string();
+                let src = r
+                    .get("source")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("(unknown)")
+                    .to_string();
                 // The ledger writes an outcome as 1/0, not true/false. Reading it with as_bool()
                 // returned None for every graded row, so this reported "803 claims, 0 graded" — the
                 // mind looked as though it had never learned from a single outcome in its life. The
@@ -972,7 +1659,11 @@ impl super::ConversationEngine {
         }
         for (src, rec) in &tallied {
             let st = mind_tools::scout::standing(rec);
-            let hit = if rec.graded > 0 { rec.correct as f64 / rec.graded as f64 * 100.0 } else { 0.0 };
+            let hit = if rec.graded > 0 {
+                f64::from(rec.correct) / f64::from(rec.graded) * 100.0
+            } else {
+                0.0
+            };
             out.push_str(&format!(
                 "  {:<28} {}/{} correct ({hit:.0}%) — {}\n",
                 src,
@@ -981,9 +1672,11 @@ impl super::ConversationEngine {
                 match st {
                     mind_tools::scout::Standing::Trusted => "TRUSTED (act on it)",
                     mind_tools::scout::Standing::Dropped => "DROPPED (stop spending attention)",
-                    mind_tools::scout::Standing::Provisional if rec.graded < mind_tools::scout::MIN_GRADED =>
+                    mind_tools::scout::Standing::Provisional
+                        if rec.graded < mind_tools::scout::MIN_GRADED =>
                         "provisional (too few calls to judge)",
-                    mind_tools::scout::Standing::Provisional => "provisional (no edge over a coin flip)",
+                    mind_tools::scout::Standing::Provisional =>
+                        "provisional (no edge over a coin flip)",
                 }
             ));
         }
@@ -1013,7 +1706,8 @@ impl super::ConversationEngine {
         } else {
             mind_tools::surf::parse_feeds(spec)
         };
-        let mut out = String::from("📡 SURFING the rotation (each feed diffed against its own last look)\n");
+        let mut out =
+            String::from("📡 SURFING the rotation (each feed diffed against its own last look)\n");
         let mut changes: Vec<String> = Vec::new();
 
         // WHICH feeds are live is asked of all of them AT ONCE. Sequentially this cost one probe's
@@ -1023,12 +1717,16 @@ impl super::ConversationEngine {
         let mut probes = Vec::new();
         for f in feeds.iter().take(6) {
             let u = mind_tools::surf::live_url(&f.handle);
-            probes.push(tokio::task::spawn_blocking(move || mind_tools::media::probe(&u)));
+            probes.push(tokio::task::spawn_blocking(move || {
+                mind_tools::media::probe(&u)
+            }));
         }
         let mut live: Vec<(&mind_tools::surf::Feed, String, String, String)> = Vec::new();
         for (f, h) in feeds.iter().take(6).zip(probes) {
             match h.await.ok().and_then(|r| r.ok()) {
-                Some(p) if p.is_live => live.push((f, mind_tools::surf::live_url(&f.handle), p.title, p.id)),
+                Some(p) if p.is_live => {
+                    live.push((f, mind_tools::surf::live_url(&f.handle), p.title, p.id))
+                }
                 _ => out.push_str(&format!("  · {} — not live now\n", f.handle)),
             }
         }
@@ -1055,11 +1753,12 @@ impl super::ConversationEngine {
             // Whole frame, no crop: what makes this work on a channel nobody tuned is that the model
             // is asked what it SEES rather than told where to look.
             let u = url.clone();
-            let frame = tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, 1, 20))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .and_then(|f| f.into_iter().next());
+            let frame =
+                tokio::task::spawn_blocking(move || mind_tools::media::keyframes(&u, 1, 20))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .and_then(|f| f.into_iter().next());
             // A CONSTRAINED reading, not a description.
             //
             // The first version asked the model to say what it saw and diffed the prose. Three
@@ -1078,7 +1777,10 @@ impl super::ConversationEngine {
             // headlines are up — so the roster names the lens and this loop stays domain-free.
             let lens = mind_tools::surf::lens_named(&f.lens);
             let digest = match frame {
-                Some((_, bytes)) => self.analyze_image_bytes(bytes, "image/jpeg", lens.prompt).await,
+                Some((_, bytes)) => {
+                    self.analyze_image_bytes(bytes, "image/jpeg", lens.prompt)
+                        .await
+                }
                 None => String::new(),
             };
             let digest: String = digest.chars().take(600).collect();
@@ -1087,11 +1789,20 @@ impl super::ConversationEngine {
             // shift with different traders — and diffing across that seam compares two unrelated
             // screens. That is a transition the mind would report and act on, and it never happened.
             let key = format!("surf_last_{}", f.handle.trim_start_matches('@'));
-            let stored = self.memory.profile_get(&key).await.ok().flatten().unwrap_or_default();
+            let stored = self
+                .memory
+                .profile_get(&key)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             let (prev_id, before) = stored.split_once('\n').unwrap_or(("", ""));
             let same_broadcast = !prev_id.is_empty() && prev_id == p_id;
             let moved = same_broadcast && mind_tools::surf::changed_by(&lens, before, &digest);
-            let _ = self.memory.profile_set(&key, &format!("{p_title}\n{digest}")).await;
+            let _ = self
+                .memory
+                .profile_set(&key, &format!("{p_title}\n{digest}"))
+                .await;
             out.push_str(&format!(
                 "  {} {} — {}\n",
                 if moved { "🔔" } else { "·" },
@@ -1112,16 +1823,30 @@ impl super::ConversationEngine {
                 // live stream to re-run against. A detector that announces a change and cannot say
                 // WHAT changed is unfalsifiable, and an unfalsifiable signal is the one thing this
                 // must never be — it would send the mind to trade on a rephrasing.
-                let b4 = (lens.reduce)(&before).unwrap_or_default();
+                let b4 = (lens.reduce)(before).unwrap_or_default();
                 let now = (lens.reduce)(&digest).unwrap_or_default();
                 let opened: Vec<&String> = now.difference(&b4).collect();
                 let closed: Vec<&String> = b4.difference(&now).collect();
                 out.push_str("      CHANGED since the last look:\n");
                 if !opened.is_empty() {
-                    out.push_str(&format!("        + {}\n", opened.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                    out.push_str(&format!(
+                        "        + {}\n",
+                        opened
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if !closed.is_empty() {
-                    out.push_str(&format!("        - {}\n", closed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                    out.push_str(&format!(
+                        "        - {}\n",
+                        closed
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 if opened.is_empty() && closed.is_empty() {
                     out.push_str("        (nothing added or removed — the reducer is unstable, NOT a real transition)\n");
@@ -1133,7 +1858,10 @@ impl super::ConversationEngine {
                           most looks at most feeds should be quiet, and a surfer that always finds something \
                           is finding noise.\n");
         } else {
-            out.push_str(&format!("\nChanged: {}. Run `ym copy-trade <url>` on those.\n", changes.join(", ")));
+            out.push_str(&format!(
+                "\nChanged: {}. Run `ym copy-trade <url>` on those.\n",
+                changes.join(", ")
+            ));
         }
         out
     }
@@ -1171,9 +1899,15 @@ impl super::ConversationEngine {
             ChatMessage::system("You extract typed trading signals. Output ONLY the JSON object. An empty array is a valid answer."),
             ChatMessage::user(&prompt),
         ];
-        let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+        let text = match self
+            .inference
+            .chat_grounded(messages, GenerationConfig::default())
+            .await
+        {
             Ok(r) => r.text,
-            Err(e) => return format!("{perception}\n\n(could not read signals from what I saw: {e})"),
+            Err(e) => {
+                return format!("{perception}\n\n(could not read signals from what I saw: {e})")
+            }
         };
         let body_owned = crate::strip_reasoning(&text);
         let body = body_owned.as_str();
@@ -1183,28 +1917,59 @@ impl super::ConversationEngine {
             _ => "{}",
         };
         let v: serde_json::Value = serde_json::from_str(obj).unwrap_or(serde_json::json!({}));
-        let signals = v.get("signals").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let signals = v
+            .get("signals")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
         if signals.is_empty() {
             return format!("{perception}\n\n📈 No actionable directional signal in this window — nothing traded. (A watchlist is not a call.)");
         }
 
         // Conviction floor. Acting on everything heard would measure the broadcast's chattiness
         // rather than its skill.
-        let floor: f64 = std::env::var("YM_TRADE_MIN_CONVICTION").ok().and_then(|s| s.parse().ok()).unwrap_or(0.6);
-        let stake: f64 = std::env::var("YM_PAPER_STAKE_USD").ok().and_then(|s| s.parse().ok()).unwrap_or(250.0);
+        let floor: f64 = std::env::var("YM_TRADE_MIN_CONVICTION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.6);
+        let stake: f64 = std::env::var("YM_PAPER_STAKE_USD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(250.0);
 
         let mut acted: Vec<(String, String, f64, f64, String, String)> = Vec::new(); // sym, side, qty, px, why, ack
         let mut refused: Vec<String> = Vec::new();
         let now = chrono::Utc::now().timestamp_millis();
 
         for s in signals.into_iter().take(4) {
-            let sym = s.get("symbol").and_then(|x| x.as_str()).unwrap_or("").trim().trim_start_matches('$').to_uppercase();
-            let side_s = s.get("side").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
+            let sym = s
+                .get("symbol")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('$')
+                .to_uppercase();
+            let side_s = s
+                .get("side")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
             let conv = s.get("conviction").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let why = s.get("why").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            let level = s.get("level").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let why = s
+                .get("why")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let level = s
+                .get("level")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if sym.is_empty() || sym.len() > 8 {
-                refused.push(format!("(unnamed symbol) — no usable ticker"));
+                refused.push("(unnamed symbol) — no usable ticker".to_string());
                 continue;
             }
             if !matches!(side_s.as_str(), "long" | "short") {
@@ -1212,30 +1977,40 @@ impl super::ConversationEngine {
                 continue;
             }
             if conv < floor {
-                refused.push(format!("{sym} {side_s} — conviction {conv:.2} below the {floor:.2} floor"));
+                refused.push(format!(
+                    "{sym} {side_s} — conviction {conv:.2} below the {floor:.2} floor"
+                ));
                 continue;
             }
             let sym2 = sym.clone();
             let side2 = side_s.clone();
             // Price, sizing, bound-check and submission all happen off the async runtime.
-            let placed = tokio::task::spawn_blocking(move || -> std::result::Result<(f64, f64, String), String> {
-                let broker = mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
-                let acct = broker.account().map_err(|e| e.to_string())?;
-                let px = mind_tools::MarketClient::from_env()
-                    .ok()
-                    .and_then(|c| c.last_price(&sym2).ok())
-                    .ok_or_else(|| "no live price — refusing to size a position blind".to_string())?;
-                let qty = (stake / px).floor();
-                // The bound is checked BEFORE the order exists, so a refusal names which limit hit.
-                mind_tools::broker::check_order(qty, px, acct.equity).map_err(|r| r.to_string())?;
-                let side = if side2 == "long" {
-                    mind_tools::broker::Side::Buy
-                } else {
-                    mind_tools::broker::Side::Sell
-                };
-                let ack = broker.submit_market(&sym2, qty, side).map_err(|e| e.to_string())?;
-                Ok((qty, px, format!("{} {}", ack.status, ack.id)))
-            })
+            let placed = tokio::task::spawn_blocking(
+                move || -> std::result::Result<(f64, f64, String), String> {
+                    let broker =
+                        mind_tools::broker::PaperBroker::from_env().map_err(|e| e.to_string())?;
+                    let acct = broker.account().map_err(|e| e.to_string())?;
+                    let px = mind_tools::MarketClient::from_env()
+                        .ok()
+                        .and_then(|c| c.last_price(&sym2).ok())
+                        .ok_or_else(|| {
+                            "no live price — refusing to size a position blind".to_string()
+                        })?;
+                    let qty = (stake / px).floor();
+                    // The bound is checked BEFORE the order exists, so a refusal names which limit hit.
+                    mind_tools::broker::check_order(qty, px, acct.equity)
+                        .map_err(|r| r.to_string())?;
+                    let side = if side2 == "long" {
+                        mind_tools::broker::Side::Buy
+                    } else {
+                        mind_tools::broker::Side::Sell
+                    };
+                    let ack = broker
+                        .submit_market(&sym2, qty, side)
+                        .map_err(|e| e.to_string())?;
+                    Ok((qty, px, format!("{} {}", ack.status, ack.id)))
+                },
+            )
             .await
             .unwrap_or_else(|e| Err(format!("join failed: {e}")));
 
@@ -1252,7 +2027,15 @@ impl super::ConversationEngine {
                     // under "copy_trade" would pool a good desk and a bad one into one meaningless
                     // record, and the whole point of a record is to tell them apart.
                     let src = mind_tools::scout::source_label(url);
-                    self.judgment_log(&src, "trading", &claim, conv.clamp(0.05, 0.95), now + 86_400_000, url).await;
+                    self.judgment_log(
+                        &src,
+                        "trading",
+                        &claim,
+                        conv.clamp(0.05, 0.95),
+                        now + 86_400_000,
+                        url,
+                    )
+                    .await;
                     acted.push((sym, side_s, qty, px, why, ack));
                 }
                 Err(e) => refused.push(format!("{sym} {side_s} — {e}")),
@@ -1265,7 +2048,14 @@ impl super::ConversationEngine {
             out.push_str("  nothing was traded.\n");
         }
         for (sym, side, qty, px, why, ack) in &acted {
-            out.push_str(&format!("  ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}{}\n", if why.is_empty() { String::new() } else { format!(" · {why}") }));
+            out.push_str(&format!(
+                "  ✓ {side} {qty} {sym} @ ~{px:.2} — {ack}{}\n",
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {why}")
+                }
+            ));
         }
         if !refused.is_empty() {
             out.push_str("  not acted on (the refusals are where the selection lives):\n");
@@ -1298,7 +2088,9 @@ impl super::ConversationEngine {
         {
             let known: Vec<String> = book.iter().map(|t| t.symbol.to_uppercase()).collect();
             let live = tokio::task::spawn_blocking(|| {
-                mind_tools::broker::PaperBroker::from_env().ok().and_then(|b| b.positions().ok())
+                mind_tools::broker::PaperBroker::from_env()
+                    .ok()
+                    .and_then(|b| b.positions().ok())
             })
             .await
             .ok()
@@ -1318,7 +2110,9 @@ impl super::ConversationEngine {
                         entry: p.avg_entry_price,
                         opened_at_ms: stamp,
                         judgment_ref: p.symbol.clone(),
-                        thesis: "adopted — opened before trades were recorded; ageing from first sight".into(),
+                        thesis:
+                            "adopted — opened before trades were recorded; ageing from first sight"
+                                .into(),
                         staked: true,
                     },
                 );
@@ -1409,9 +2203,19 @@ impl super::ConversationEngine {
         .await
         .unwrap_or_else(|e| Err(format!("join failed: {e}")));
         match res {
-            Ok(lines) => format!("👣 FOLLOW{}
-{}", if act { " (closing what is due)" } else { " (dry run — pass `act` to close)" }, lines.join("
-")),
+            Ok(lines) => format!(
+                "👣 FOLLOW{}
+{}",
+                if act {
+                    " (closing what is due)"
+                } else {
+                    " (dry run — pass `act` to close)"
+                },
+                lines.join(
+                    "
+"
+                )
+            ),
             Err(e) => format!("👣 Follow failed: {e}"),
         }
     }
@@ -1478,13 +2282,24 @@ impl super::ConversationEngine {
                     Ok(ser) => match ser.bars.last() {
                         Some(b) => {
                             let first = ser.bars.first().map(|f| f.close).unwrap_or(b.close);
-                            let chg = if first > 0.0 { (b.close - first) / first * 100.0 } else { 0.0 };
+                            let chg = if first > 0.0 {
+                                (b.close - first) / first * 100.0
+                            } else {
+                                0.0
+                            };
                             out.push(format!(
                                 "  {}: {:.2} {} ({:+.2}% on the session, {} bars, {})",
-                                ser.symbol, b.close, ser.currency, chg, ser.bars.len(), ser.exchange_tz
+                                ser.symbol,
+                                b.close,
+                                ser.currency,
+                                chg,
+                                ser.bars.len(),
+                                ser.exchange_tz
                             ));
                         }
-                        None => out.push(format!("  {s}: no bars returned (market may be closed with no session data)")),
+                        None => out.push(format!(
+                            "  {s}: no bars returned (market may be closed with no session data)"
+                        )),
                     },
                     Err(e) => out.push(format!("  {s}: unavailable — {e}")),
                 }
@@ -1497,5 +2312,87 @@ impl super::ConversationEngine {
             return "No quotes came back — reporting nothing rather than guessing.".to_string();
         }
         format!("💹 Quotes (measured, not recalled):\n{}", lines.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusals must be reachable without any media tooling installed — a host with no yt-dlp
+    /// must say so, not fail obscurely. (The perception paths need real binaries and are exercised
+    /// on the box, not in unit tests.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_non_url_is_refused_before_any_work() {
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("x")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(mem, pool, "JARVIS");
+        let out = conv.watch_media("not a url", "").await;
+        assert!(out.contains("full URL"), "{out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn realized_performance_is_persisted_and_idempotent() {
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("unused")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(mem, pool, "JARVIS");
+        let trade = mind_tools::trades::ClosedTrade {
+            desk: "crypto".into(),
+            symbol: "BTCUSD".into(),
+            qty: 0.1,
+            entry: 100_000.0,
+            exit: 101_000.0,
+            fees: 10.0,
+            opened_at_ms: 1,
+            closed_at_ms: 2,
+            exit_order_id: "close-1".into(),
+        };
+
+        conv.record_closed_trade(trade.clone()).await.unwrap();
+        conv.record_closed_trade(trade).await.unwrap();
+        let report = conv.trading_performance("crypto").await;
+
+        assert!(report.contains("1/1 wins"), "{report}");
+        assert!(report.contains("net $90.00"), "{report}");
+        assert!(report.contains("20.7–100.0%"), "{report}");
+        assert!(report.contains("inconclusive"), "{report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cockpit_is_a_read_only_truthful_system_view() {
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("unused")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let conv = ConversationEngine::new(mem, pool, "JARVIS");
+
+        let report = conv.trading_cockpit().await;
+
+        assert!(report.contains("TRADING COCKPIT"), "{report}");
+        assert!(
+            report.contains("live-money broker: unavailable"),
+            "{report}"
+        );
+        assert!(report.contains("Paper desk: OFF"), "{report}");
+        assert!(report.contains("Pro day trader: OFF"), "{report}");
+        assert!(report.contains("Crypto trader: OFF"), "{report}");
+        assert!(
+            report.contains("no broker-reconciled closed trades"),
+            "{report}"
+        );
+        assert!(
+            report.contains("no signer or broadcaster connected"),
+            "{report}"
+        );
     }
 }

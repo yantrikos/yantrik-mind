@@ -66,7 +66,11 @@ pub struct SkillOutcome {
 impl SkillOutcome {
     /// A sandboxed code run. `exit_code == 0` is the one cheap, deterministic proxy available.
     pub fn from_exit(exit_ok: bool) -> Self {
-        Self { executor_ok: true, task_success: Some(exit_ok), basis: TaskBasis::ExitCode }
+        Self {
+            executor_ok: true,
+            task_success: Some(exit_ok),
+            basis: TaskBasis::ExitCode,
+        }
     }
 
     /// The runner failed — an API outage, a crash, a missing executor.
@@ -75,22 +79,38 @@ impl SkillOutcome {
     /// skill is any good, and letting it count as a task failure would discredit a fine skill for
     /// the provider having a bad afternoon.
     pub fn executor_failed() -> Self {
-        Self { executor_ok: false, task_success: None, basis: TaskBasis::Unknown }
+        Self {
+            executor_ok: false,
+            task_success: None,
+            basis: TaskBasis::Unknown,
+        }
     }
 
     /// The runner finished and nobody has judged the result. The honest state for a document.
     pub fn ungraded() -> Self {
-        Self { executor_ok: true, task_success: None, basis: TaskBasis::Unknown }
+        Self {
+            executor_ok: true,
+            task_success: None,
+            basis: TaskBasis::Unknown,
+        }
     }
 
     /// A judge read the deliverable.
     pub fn judged(ok: bool) -> Self {
-        Self { executor_ok: true, task_success: Some(ok), basis: TaskBasis::StructuredJudge }
+        Self {
+            executor_ok: true,
+            task_success: Some(ok),
+            basis: TaskBasis::StructuredJudge,
+        }
     }
 
     /// A deterministic signal in the deliverable said the task was not done.
     pub fn refused() -> Self {
-        Self { executor_ok: true, task_success: Some(false), basis: TaskBasis::ExplicitRefusal }
+        Self {
+            executor_ok: true,
+            task_success: Some(false),
+            basis: TaskBasis::ExplicitRefusal,
+        }
     }
 
     /// Does this run belong in the denominator of the skill's success rate?
@@ -118,8 +138,14 @@ mod tests {
         // reached the job board as a finished deliverable under a green tick.
         let o = SkillOutcome::executor_failed();
         assert!(!o.executor_ok);
-        assert_eq!(o.task_success, None, "an outage is not a verdict on the skill");
-        assert!(!o.is_graded(), "and it must not enter the denominator either");
+        assert_eq!(
+            o.task_success, None,
+            "an outage is not a verdict on the skill"
+        );
+        assert!(
+            !o.is_graded(),
+            "and it must not enter the denominator either"
+        );
         assert!(!o.is_task_success());
     }
 
@@ -144,8 +170,17 @@ mod tests {
 
         assert_eq!(SkillOutcome::from_exit(false).task_success, Some(false));
         // The generic paths cannot produce an ExitCode basis at all.
-        for o in [SkillOutcome::ungraded(), SkillOutcome::executor_failed(), SkillOutcome::judged(true), SkillOutcome::refused()] {
-            assert_ne!(o.basis, TaskBasis::ExitCode, "only the code adapter may claim exit_code");
+        for o in [
+            SkillOutcome::ungraded(),
+            SkillOutcome::executor_failed(),
+            SkillOutcome::judged(true),
+            SkillOutcome::refused(),
+        ] {
+            assert_ne!(
+                o.basis,
+                TaskBasis::ExitCode,
+                "only the code adapter may claim exit_code"
+            );
         }
     }
 
@@ -161,7 +196,16 @@ mod tests {
             TaskBasis::Unknown,
         ];
         let labels: Vec<&str> = all.iter().map(|b| b.label()).collect();
-        assert_eq!(labels, ["exit_code", "structured_judge", "explicit_refusal", "operator", "unknown"]);
+        assert_eq!(
+            labels,
+            [
+                "exit_code",
+                "structured_judge",
+                "explicit_refusal",
+                "operator",
+                "unknown"
+            ]
+        );
         // And it round-trips, so a stored basis cannot decay into a string nobody parses.
         for b in all {
             let json = serde_json::to_string(&b).unwrap();

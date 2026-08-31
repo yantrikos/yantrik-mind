@@ -9,7 +9,7 @@
 //!   1. Validate the pasted Telegram token on the spot with getMe — confirm it
 //!      works and auto-derive the bot's @username (never ask for it).
 //!   2. The Tailscale trick, but the product IS the auth channel: print
-//!      t.me/<bot>?start=<one-time-code>, long-poll getUpdates, and the moment
+//!      `t.me/<bot>?start=<one-time-code>`, long-poll getUpdates, and the moment
 //!      the owner taps Start we capture their chat_id and greet them live.
 //!   3. Write /etc/yantrik-mind.env (mode 600) with only what's needed to
 //!      breathe — Telegram + the brain key. Email/GitHub are optional and
@@ -37,13 +37,23 @@ fn color() -> bool {
 fn atty_stdout() -> bool {
     // Minimal TTY check without a dep: isatty(1) via libc is unavailable here,
     // so approximate — TERM set and not "dumb". Good enough for cosmetics.
-    std::env::var("TERM").map(|t| t != "dumb" && !t.is_empty()).unwrap_or(false)
+    std::env::var("TERM")
+        .map(|t| t != "dumb" && !t.is_empty())
+        .unwrap_or(false)
 }
 fn paint(c: &str, s: &str) -> String {
-    if color() { format!("{c}{s}{C_RESET}") } else { s.to_string() }
+    if color() {
+        format!("{c}{s}{C_RESET}")
+    } else {
+        s.to_string()
+    }
 }
 fn step(n: u8, total: u8, msg: &str) {
-    println!("\n{} {}", paint(C_SIG, &format!("[{n}/{total}]")), paint(C_BOLD, msg));
+    println!(
+        "\n{} {}",
+        paint(C_SIG, &format!("[{n}/{total}]")),
+        paint(C_BOLD, msg)
+    );
 }
 fn ok(msg: &str) {
     println!("  {} {msg}", paint(C_OK, "✓"));
@@ -149,7 +159,10 @@ fn await_first_contact(token: &str, code: &str, secs: u64) -> Result<(i64, Strin
             let msg = &upd["message"];
             let text = msg["text"].as_str().unwrap_or("");
             let chat_id = msg["chat"]["id"].as_i64();
-            let first = msg["from"]["first_name"].as_str().unwrap_or("there").to_string();
+            let first = msg["from"]["first_name"]
+                .as_str()
+                .unwrap_or("there")
+                .to_string();
             let matches = if code.is_empty() {
                 !text.is_empty()
             } else {
@@ -181,7 +194,8 @@ fn send_greeting(token: &str, chat_id: i64) {
 /// so the moment the poller starts it already knows the active chat and picks
 /// up cleanly after the /start message.
 fn persist_handoff(chat_id: i64, next_offset: i64) {
-    let offset_path = std::env::var("YM_TG_OFFSET").unwrap_or_else(|_| "/var/lib/yantrik-mind/tg_offset".into());
+    let offset_path =
+        std::env::var("YM_TG_OFFSET").unwrap_or_else(|_| "/var/lib/yantrik-mind/tg_offset".into());
     let _ = std::fs::write(&offset_path, next_offset.to_string());
     let _ = std::fs::write(format!("{offset_path}.active_chat"), chat_id.to_string());
 }
@@ -221,14 +235,23 @@ pub fn run() -> anyhow::Result<()> {
     println!(
         "\n{}\n{}",
         paint(C_BOLD, "  yantrik-mind · first-run setup"),
-        paint(C_DIM, "  a companion that remembers, helps you show up, and proves what it knows")
+        paint(
+            C_DIM,
+            "  a companion that remembers, helps you show up, and proves what it knows"
+        )
     );
 
     let env_path = std::env::var("YM_ENV_PATH").unwrap_or_else(|_| "/etc/yantrik-mind.env".into());
 
     // ---- Step 1: the brain key -------------------------------------------
     step(1, total, "The brain — an inference key");
-    println!("  {}", paint(C_DIM, "yantrik-mind thinks via a hosted model (no GPU needed). Paste your NanoGPT key."));
+    println!(
+        "  {}",
+        paint(
+            C_DIM,
+            "yantrik-mind thinks via a hosted model (no GPU needed). Paste your NanoGPT key."
+        )
+    );
     let mut nano = std::env::var("NANOGPT_KEY").unwrap_or_default();
     let mut empties = 0;
     loop {
@@ -257,8 +280,17 @@ pub fn run() -> anyhow::Result<()> {
 
     // ---- Step 2: the Telegram bot ----------------------------------------
     step(2, total, "The phone line — a Telegram bot");
-    println!("  {}", paint(C_DIM, "In Telegram, message @BotFather → /newbot → pick a name. It replies with a token."));
-    println!("  {}", paint(C_DIM, "Tap to open BotFather:  https://t.me/BotFather"));
+    println!(
+        "  {}",
+        paint(
+            C_DIM,
+            "In Telegram, message @BotFather → /newbot → pick a name. It replies with a token."
+        )
+    );
+    println!(
+        "  {}",
+        paint(C_DIM, "Tap to open BotFather:  https://t.me/BotFather")
+    );
     let mut token = std::env::var("YM_TELEGRAM_TOKEN").unwrap_or_default();
     let mut tok_empties = 0;
     let bot_username = loop {
@@ -279,7 +311,9 @@ pub fn run() -> anyhow::Result<()> {
                 break u;
             }
             Err(e) => {
-                err(&format!("{e}. Expected a token like 123456789:ABCdef...  — try again."));
+                err(&format!(
+                    "{e}. Expected a token like 123456789:ABCdef...  — try again."
+                ));
                 token.clear();
             }
         }
@@ -288,7 +322,11 @@ pub fn run() -> anyhow::Result<()> {
 
     // ---- Step 3: write the environment -----------------------------------
     step(3, total, "Writing configuration");
-    println!("  {} {}", paint(C_DIM, "will write:"), paint(C_BOLD, &env_path));
+    println!(
+        "  {} {}",
+        paint(C_DIM, "will write:"),
+        paint(C_BOLD, &env_path)
+    );
     let existing = std::fs::read_to_string(&env_path).unwrap_or_default();
     let env_body = render_env(&existing, &token, &nano);
     write_env_600(&env_path, &env_body)?;
@@ -298,10 +336,19 @@ pub fn run() -> anyhow::Result<()> {
     step(4, total, "Meet your companion");
     let code = one_time_code();
     let link = format!("https://t.me/{bot_username}?start={code}");
-    println!("\n  {}", paint(C_BOLD, "Open this on your phone — it opens the chat with your bot:"));
+    println!(
+        "\n  {}",
+        paint(
+            C_BOLD,
+            "Open this on your phone — it opens the chat with your bot:"
+        )
+    );
     println!("      {}", paint(C_SIG, &link));
     print_qr(&link);
-    println!("\n  {}", paint(C_DIM, "Waiting for you to tap Start… (2 min)"));
+    println!(
+        "\n  {}",
+        paint(C_DIM, "Waiting for you to tap Start… (2 min)")
+    );
 
     match await_first_contact(&token, &code, 120) {
         Ok((chat_id, name, offset)) => {
@@ -313,15 +360,27 @@ pub fn run() -> anyhow::Result<()> {
             persist_handoff(chat_id, offset + 1);
             send_greeting(&token, chat_id);
             println!();
-            ok(&format!("Linked to {} — your companion just said hello.", paint(C_BOLD, &name)));
+            ok(&format!(
+                "Linked to {} — your companion just said hello.",
+                paint(C_BOLD, &name)
+            ));
             if start_service() {
                 ok("always-on service started.");
             } else {
-                println!("  {}", paint(C_DIM, "Start the always-on service:  sudo systemctl enable --now yantrik-mind"));
+                println!(
+                    "  {}",
+                    paint(
+                        C_DIM,
+                        "Start the always-on service:  sudo systemctl enable --now yantrik-mind"
+                    )
+                );
             }
             println!(
                 "\n  {}\n      {}",
-                paint(C_BOLD, "👉 Open Telegram — the conversation is already waiting:"),
+                paint(
+                    C_BOLD,
+                    "👉 Open Telegram — the conversation is already waiting:"
+                ),
                 paint(C_SIG, &format!("https://t.me/{bot_username}"))
             );
         }

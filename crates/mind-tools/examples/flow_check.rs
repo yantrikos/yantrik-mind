@@ -6,7 +6,20 @@ fn main() {
         let faults = mind_tools::flow::faults(text, 1);
         let chunks = mind_tools::speech::speakable_chunks(text, 60, 160);
         println!("{label}: {:.0}s to say, {} chunks", secs, chunks.len());
-        println!("   first thing heard: {:?}", chunks.first().map(|c| c.chars().take(72).collect::<String>()).unwrap_or_default());
-        println!("   faults: {}", if faults.is_empty() { "none".into() } else { faults.join("; ") });
+        println!(
+            "   first thing heard: {:?}",
+            chunks
+                .first()
+                .map(|c| c.chars().take(72).collect::<String>())
+                .unwrap_or_default()
+        );
+        println!(
+            "   faults: {}",
+            if faults.is_empty() {
+                "none".into()
+            } else {
+                faults.join("; ")
+            }
+        );
     }
 }

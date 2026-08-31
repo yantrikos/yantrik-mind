@@ -55,8 +55,30 @@ pub struct TapeSample {
 
 /// Names that are not tickers, however much they look like one in caps.
 const NOT_TICKERS: &[&str] = &[
-    "LONG", "SHORT", "FLAT", "NO", "POSITIONS", "POSITION", "TRADER", "LIVE", "THE", "AND", "USD",
-    "PNL", "P", "L", "BUY", "SELL", "OPEN", "CLOSE", "HIGH", "LOW", "VOL", "AVG", "QTY", "TV",
+    "LONG",
+    "SHORT",
+    "FLAT",
+    "NO",
+    "POSITIONS",
+    "POSITION",
+    "TRADER",
+    "LIVE",
+    "THE",
+    "AND",
+    "USD",
+    "PNL",
+    "P",
+    "L",
+    "BUY",
+    "SELL",
+    "OPEN",
+    "CLOSE",
+    "HIGH",
+    "LOW",
+    "VOL",
+    "AVG",
+    "QTY",
+    "TV",
 ];
 
 /// A plausible ticker: 1–5 capitals, not a word the bar uses for something else.
@@ -77,7 +99,12 @@ pub fn parse_trader_segment(trader: &str, segment: &str) -> TraderState {
     let lower = segment.to_lowercase();
     let evidence = segment.trim().chars().take(160).collect::<String>();
     if lower.contains("no position") || lower.contains("flat") {
-        return TraderState { trader: trader.to_string(), side: Side::Flat, symbol: None, evidence };
+        return TraderState {
+            trader: trader.to_string(),
+            side: Side::Flat,
+            symbol: None,
+            evidence,
+        };
     }
     // The trader's OWN NAME is a short uppercase token and parses as a ticker unless excluded —
     // "CHEIF LONG OSHR" otherwise reads as a position in CHEIF. The segment begins with the name
@@ -86,11 +113,16 @@ pub fn parse_trader_segment(trader: &str, segment: &str) -> TraderState {
     let symbol = segment
         .split_whitespace()
         .filter(|t| {
-            let c = t.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_uppercase();
+            let c = t
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_uppercase();
             c != own && !own.starts_with(&c) && !c.starts_with(&own)
         })
         .find(|t| looks_like_ticker(t))
-        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_uppercase());
+        .map(|t| {
+            t.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_uppercase()
+        });
     // A side word only counts as state once a symbol establishes that a position exists.
     let side = match symbol {
         None => Side::Unknown,
@@ -105,7 +137,12 @@ pub fn parse_trader_segment(trader: &str, segment: &str) -> TraderState {
             }
         }
     };
-    TraderState { trader: trader.to_string(), side, symbol, evidence }
+    TraderState {
+        trader: trader.to_string(),
+        side,
+        symbol,
+        evidence,
+    }
 }
 
 /// Split a vision caption of the position bar into per-trader segments and parse each.
@@ -137,8 +174,7 @@ pub fn parse_bar(caption: &str, traders: &[String]) -> Vec<TraderState> {
         let end = marks[n + 1..]
             .iter()
             .find(|(_, t)| t != trader)
-            .map(|(i, _)| *i)
-            .unwrap_or(caption.len());
+            .map_or(caption.len(), |(i, _)| *i);
         let seg = caption.get(*start..end).unwrap_or("");
         out.push(parse_trader_segment(trader, seg));
     }
@@ -172,9 +208,12 @@ pub fn discover_traders(caption: &str) -> Vec<String> {
         // Names are 2–12 letters and written in caps or Titlecase on this bar.
         let plausible = (2..=12).contains(&word.len())
             && (word.chars().all(|c| c.is_ascii_uppercase())
-                || (word.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+                || (word.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                     && word.chars().skip(1).all(|c| c.is_ascii_lowercase())));
-        if !plausible || NOT_TICKERS.contains(&word.to_uppercase().as_str()) || NOT_NAMES.contains(&word.to_uppercase().as_str()) {
+        if !plausible
+            || NOT_TICKERS.contains(&word.to_uppercase().as_str())
+            || NOT_NAMES.contains(&word.to_uppercase().as_str())
+        {
             continue;
         }
         // A trader name has position language close behind it.
@@ -192,9 +231,39 @@ pub fn discover_traders(caption: &str) -> Vec<String> {
 
 /// Words that appear beside position language but never name a trader.
 const NOT_NAMES: &[&str] = &[
-    "LONG", "SHORT", "FLAT", "NO", "POSITIONS", "POSITION", "TRADER", "TRADERS", "BAR", "BOTTOM",
-    "SCREEN", "HERE", "THE", "AND", "FOR", "EACH", "BASED", "INFORMATION", "LIVE", "SHOW", "IS",
-    "ON", "AT", "OF", "IN", "TV", "BUY", "SELL", "NONE", "BOTH", "WITH", "HAS", "ARE",
+    "LONG",
+    "SHORT",
+    "FLAT",
+    "NO",
+    "POSITIONS",
+    "POSITION",
+    "TRADER",
+    "TRADERS",
+    "BAR",
+    "BOTTOM",
+    "SCREEN",
+    "HERE",
+    "THE",
+    "AND",
+    "FOR",
+    "EACH",
+    "BASED",
+    "INFORMATION",
+    "LIVE",
+    "SHOW",
+    "IS",
+    "ON",
+    "AT",
+    "OF",
+    "IN",
+    "TV",
+    "BUY",
+    "SELL",
+    "NONE",
+    "BOTH",
+    "WITH",
+    "HAS",
+    "ARE",
 ];
 
 /// Parse the bar, discovering the roster when one is not supplied.
@@ -213,15 +282,23 @@ pub fn parse_bar_auto(caption: &str, hint: &[String]) -> Vec<TraderState> {
 pub fn append_sample(path: &std::path::Path, sample: &TapeSample) -> std::io::Result<()> {
     use std::io::Write as _;
     let line = serde_json::to_string(sample).map_err(std::io::Error::other)?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(f, "{line}")?;
     Ok(())
 }
 
 /// Read the tape back for analysis.
 pub fn read_tape(path: &std::path::Path) -> Vec<TapeSample> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
-    text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok()).collect()
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 /// The transitions that matter: flat → position (an entry) and position → flat (an exit). These
@@ -249,11 +326,25 @@ pub fn transitions(tape: &[TapeSample]) -> Vec<Transition> {
             let prev = last.get(&st.trader).cloned();
             let now = (st.side, st.symbol.clone());
             match (&prev, &now) {
-                (Some((Side::Flat, _)), (Side::Long, _)) | (Some((Side::Flat, _)), (Side::Short, _)) => {
-                    out.push(Transition { at_ms: s.at_ms, trader: st.trader.clone(), kind: "entry".into(), symbol: st.symbol.clone(), side: st.side });
+                (Some((Side::Flat, _)), (Side::Long, _))
+                | (Some((Side::Flat, _)), (Side::Short, _)) => {
+                    out.push(Transition {
+                        at_ms: s.at_ms,
+                        trader: st.trader.clone(),
+                        kind: "entry".into(),
+                        symbol: st.symbol.clone(),
+                        side: st.side,
+                    });
                 }
-                (Some((Side::Long, _)), (Side::Flat, _)) | (Some((Side::Short, _)), (Side::Flat, _)) => {
-                    out.push(Transition { at_ms: s.at_ms, trader: st.trader.clone(), kind: "exit".into(), symbol: prev.as_ref().and_then(|p| p.1.clone()), side: Side::Flat });
+                (Some((Side::Long, _)), (Side::Flat, _))
+                | (Some((Side::Short, _)), (Side::Flat, _)) => {
+                    out.push(Transition {
+                        at_ms: s.at_ms,
+                        trader: st.trader.clone(),
+                        kind: "exit".into(),
+                        symbol: prev.as_ref().and_then(|p| p.1.clone()),
+                        side: Side::Flat,
+                    });
                 }
                 _ => {}
             }
@@ -275,10 +366,14 @@ mod tests {
     /// each of them as button labels; reading those as state would invent two positions.
     #[test]
     fn the_real_flat_bar_parses_as_flat_not_as_long() {
-        let caption = "CHERIF LONG SHORT no positions no positions OBI LONG SHORT no positions no positions";
+        let caption =
+            "CHERIF LONG SHORT no positions no positions OBI LONG SHORT no positions no positions";
         let states = parse_bar(caption, &roster());
         assert_eq!(states.len(), 2, "{states:?}");
-        assert!(states.iter().all(|s| s.side == Side::Flat), "button labels are not positions: {states:?}");
+        assert!(
+            states.iter().all(|s| s.side == Side::Flat),
+            "button labels are not positions: {states:?}"
+        );
         assert!(states.iter().all(|s| s.symbol.is_none()));
     }
 
@@ -302,7 +397,11 @@ mod tests {
         assert_eq!(s.symbol, None);
         // Both direction words with a symbol is the button row — still refuses to pick.
         let both = parse_trader_segment("OBI", "OBI LONG SHORT AAPL");
-        assert_eq!(both.side, Side::Unknown, "cannot tell direction from a button row");
+        assert_eq!(
+            both.side,
+            Side::Unknown,
+            "cannot tell direction from a button row"
+        );
     }
 
     #[test]
@@ -319,7 +418,12 @@ mod tests {
         let mk = |at: i64, side: Side, sym: Option<&str>| TapeSample {
             at_ms: at,
             source: "t".into(),
-            states: vec![TraderState { trader: "CHERIF".into(), side, symbol: sym.map(|s| s.into()), evidence: String::new() }],
+            states: vec![TraderState {
+                trader: "CHERIF".into(),
+                side,
+                symbol: sym.map(|s| s.into()),
+                evidence: String::new(),
+            }],
         };
         let tape = vec![
             mk(1000, Side::Flat, None),
@@ -335,7 +439,11 @@ mod tests {
         assert_eq!(t[0].symbol.as_deref(), Some("OSHR"));
         assert_eq!(t[1].kind, "exit");
         assert_eq!(t[1].at_ms, 5000);
-        assert_eq!(t[1].symbol.as_deref(), Some("OSHR"), "an exit remembers what was held");
+        assert_eq!(
+            t[1].symbol.as_deref(),
+            Some("OSHR"),
+            "an exit remembers what was held"
+        );
     }
 
     /// The REAL caption from the first live run — today's shift was NEAL and JOE while the
@@ -351,7 +459,10 @@ mod tests {
         assert!(found.contains(&"JOE".to_string()), "{found:?}");
         // Bar furniture and prose must never be mistaken for a person.
         for junk in ["LONG", "SHORT", "POSITIONS", "TRADERS", "BOTTOM", "BASED"] {
-            assert!(!found.contains(&junk.to_string()), "{junk} is not a trader: {found:?}");
+            assert!(
+                !found.contains(&junk.to_string()),
+                "{junk} is not a trader: {found:?}"
+            );
         }
         // And with an empty hint the bar still parses to two flat traders.
         let states = parse_bar_auto(caption, &[]);
@@ -375,7 +486,12 @@ mod tests {
         let s = TapeSample {
             at_ms: 1,
             source: "stream".into(),
-            states: vec![TraderState { trader: "CHERIF".into(), side: Side::Long, symbol: Some("OSHR".into()), evidence: "raw".into() }],
+            states: vec![TraderState {
+                trader: "CHERIF".into(),
+                side: Side::Long,
+                symbol: Some("OSHR".into()),
+                evidence: "raw".into(),
+            }],
         };
         append_sample(&p, &s).unwrap();
         append_sample(&p, &s).unwrap();

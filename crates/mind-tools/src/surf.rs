@@ -77,11 +77,31 @@ pub struct Sighting {
 /// the mind is expected to add and drop handles as it learns which ones repay the attention.
 pub fn default_feeds() -> Vec<Feed> {
     vec![
-        Feed { handle: "@TraderTVLive".into(), why: "live trading desk; on-screen position badges".into(), lens: "desk".into() },
-        Feed { handle: "@BearBullTraders".into(), why: "live trading desk; on-screen watchlist".into(), lens: "desk".into() },
-        Feed { handle: "@business".into(), why: "Bloomberg; macro headlines".into(), lens: "headlines".into() },
-        Feed { handle: "@CNBCtelevision".into(), why: "US market news".into(), lens: "headlines".into() },
-        Feed { handle: "@NDTVProfitIndia".into(), why: "Indian market session".into(), lens: "desk".into() },
+        Feed {
+            handle: "@TraderTVLive".into(),
+            why: "live trading desk; on-screen position badges".into(),
+            lens: "desk".into(),
+        },
+        Feed {
+            handle: "@BearBullTraders".into(),
+            why: "live trading desk; on-screen watchlist".into(),
+            lens: "desk".into(),
+        },
+        Feed {
+            handle: "@business".into(),
+            why: "Bloomberg; macro headlines".into(),
+            lens: "headlines".into(),
+        },
+        Feed {
+            handle: "@CNBCtelevision".into(),
+            why: "US market news".into(),
+            lens: "headlines".into(),
+        },
+        Feed {
+            handle: "@NDTVProfitIndia".into(),
+            why: "Indian market session".into(),
+            lens: "desk".into(),
+        },
     ]
 }
 
@@ -92,7 +112,11 @@ pub fn parse_feeds(spec: &str) -> Vec<Feed> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            let h = if s.starts_with('@') { s.to_string() } else { format!("@{s}") };
+            let h = if s.starts_with('@') {
+                s.to_string()
+            } else {
+                format!("@{s}")
+            };
             // Inherit the lens the ROSTER gives this handle. Naming a feed on the command line used
             // to force the generic headline lens onto it, so `surf @TraderTVLive` diffed scrolling
             // news copy on a trading desk and reported a change every single pass. Four fixes to the
@@ -100,9 +124,12 @@ pub fn parse_feeds(spec: &str) -> Vec<Feed> {
             let lens = default_feeds()
                 .into_iter()
                 .find(|f| f.handle.eq_ignore_ascii_case(&h))
-                .map(|f| f.lens)
-                .unwrap_or_else(|| "headlines".into());
-            Feed { handle: h, why: "named by the operator".into(), lens }
+                .map_or_else(|| "headlines".into(), |f| f.lens);
+            Feed {
+                handle: h,
+                why: "named by the operator".into(),
+                lens,
+            }
         })
         .collect()
 }
@@ -116,7 +143,10 @@ pub fn parse_feeds(spec: &str) -> Vec<Feed> {
 /// start another when the shift changes. Anything holding the id was left watching a finished
 /// recording while the desk carried on trading.
 pub fn live_url(handle: &str) -> String {
-    format!("https://www.youtube.com/{}/live", handle.trim_start_matches('@').trim())
+    format!(
+        "https://www.youtube.com/{}/live",
+        handle.trim_start_matches('@').trim()
+    )
 }
 
 /// A YouTube search URL for live broadcasts matching a query.
@@ -199,8 +229,14 @@ mod tests {
     fn a_handle_is_a_source_and_resolves_to_whatever_is_live_now() {
         // The roster holds handles, never video ids: a video id is one broadcast that ends, a
         // handle is a source the mind can keep following tomorrow.
-        assert_eq!(live_url("@TraderTVLive"), "https://www.youtube.com/TraderTVLive/live");
-        assert_eq!(live_url("TraderTVLive"), "https://www.youtube.com/TraderTVLive/live");
+        assert_eq!(
+            live_url("@TraderTVLive"),
+            "https://www.youtube.com/TraderTVLive/live"
+        );
+        assert_eq!(
+            live_url("TraderTVLive"),
+            "https://www.youtube.com/TraderTVLive/live"
+        );
     }
 
     #[test]
@@ -212,11 +248,17 @@ mod tests {
 SPY 769.61";
         let b = "US SET TO HALVE TARIFFS ON CANADIAN STEEL
 SPY 771.02";
-        assert!(!changed_by(&HEADLINE_LENS, a, b), "the same headline at a new price is not news");
+        assert!(
+            !changed_by(&HEADLINE_LENS, a, b),
+            "the same headline at a new price is not news"
+        );
 
         let c = "SQM RISES AS Q2 ROUTS EXPECTATIONS
 SPY 771.02";
-        assert!(changed_by(&HEADLINE_LENS, b, c), "a new headline is the signal for this lens");
+        assert!(
+            changed_by(&HEADLINE_LENS, b, c),
+            "a new headline is the signal for this lens"
+        );
     }
 
     #[test]
@@ -224,7 +266,11 @@ SPY 771.02";
         // A reducer returning None means "I could not read this", which must never compare unequal
         // to a previous look and manufacture a signal out of a failed glance.
         assert_eq!((HEADLINE_LENS.reduce)("NONE"), None);
-        assert!(!changed_by(&HEADLINE_LENS, "TARIFFS HALVED ON STEEL", "NONE"));
+        assert!(!changed_by(
+            &HEADLINE_LENS,
+            "TARIFFS HALVED ON STEEL",
+            "NONE"
+        ));
     }
 
     #[test]
@@ -251,7 +297,10 @@ SPY 771.02";
         let f = parse_feeds("@TraderTVLive, BearBullTraders  @business");
         assert_eq!(f.len(), 3);
         assert_eq!(f[0].handle, "@TraderTVLive");
-        assert_eq!(f[1].handle, "@BearBullTraders", "a missing @ is a typo, not a different channel");
+        assert_eq!(
+            f[1].handle, "@BearBullTraders",
+            "a missing @ is a typo, not a different channel"
+        );
         assert_eq!(f[2].handle, "@business");
     }
 
@@ -260,6 +309,9 @@ SPY 771.02";
         let f = default_feeds();
         assert!(f.len() >= 4);
         assert!(f.iter().any(|x| x.why.contains("trading desk")));
-        assert!(f.iter().any(|x| x.handle.contains("NDTV")), "an Indian session is a different clock, not a duplicate");
+        assert!(
+            f.iter().any(|x| x.handle.contains("NDTV")),
+            "an Indian session is a different clock, not a duplicate"
+        );
     }
 }

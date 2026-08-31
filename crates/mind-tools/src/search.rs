@@ -79,7 +79,10 @@ pub struct SearxngSearch {
 
 impl SearxngSearch {
     pub fn new(base: impl Into<String>) -> Self {
-        Self { base: base.into().trim_end_matches('/').to_string(), fallback: None }
+        Self {
+            base: base.into().trim_end_matches('/').to_string(),
+            fallback: None,
+        }
     }
     pub fn with_fallback(mut self, fb: Arc<dyn WebSearch>) -> Self {
         self.fallback = Some(fb);
@@ -89,7 +92,12 @@ impl SearxngSearch {
 
 impl SearxngSearch {
     /// One SearXNG JSON query; `categories` biases the engine set (e.g. "news" for recent articles).
-    async fn query(&self, query: &str, limit: usize, categories: Option<&'static str>) -> anyhow::Result<Vec<SearchHit>> {
+    async fn query(
+        &self,
+        query: &str,
+        limit: usize,
+        categories: Option<&'static str>,
+    ) -> anyhow::Result<Vec<SearchHit>> {
         let url = format!("{}/search", self.base);
         let (q, want) = (query.to_string(), limit.max(1));
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchHit>> {
@@ -131,19 +139,43 @@ impl WebSearch for SearxngSearch {
 }
 
 /// Map a SearXNG JSON response (`{results:[{title,url,content}]}`) to hits.
+fn is_http_url(url: &str) -> bool {
+    let Some((scheme, authority)) = url.split_once("://") else {
+        return false;
+    };
+    !authority.is_empty()
+        && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+}
+
 fn parse_searxng(v: &serde_json::Value, limit: usize) -> Vec<SearchHit> {
     v.get("results")
         .and_then(|r| r.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|r| {
-                    let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    if !url.starts_with("http") || title.is_empty() {
+                    let url = r
+                        .get("url")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let title = r
+                        .get("title")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !is_http_url(&url) || title.is_empty() {
                         return None;
                     }
-                    let snippet = r.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    Some(SearchHit { title, url, snippet })
+                    let snippet = r
+                        .get("content")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(SearchHit {
+                        title,
+                        url,
+                        snippet,
+                    })
                 })
                 .take(limit)
                 .collect()
@@ -218,7 +250,11 @@ fn parse_ddg(html: &str, limit: usize) -> Vec<SearchHit> {
         if hits.len() >= limit {
             break;
         }
-        let href = chunk.split("href=\"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("");
+        let href = chunk
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
         let mut url = href.to_string();
         // Some DDG variants wrap the target in a redirect: //duckduckgo.com/l/?uddg=<encoded>
         if let Some(idx) = url.find("uddg=") {
@@ -230,17 +266,26 @@ fn parse_ddg(html: &str, limit: usize) -> Vec<SearchHit> {
             url = format!("https:{url}");
         }
         let title = strip_tags(
-            chunk.splitn(2, '>').nth(1).unwrap_or("").split("</a>").next().unwrap_or(""),
+            chunk
+                .split_once('>')
+                .map_or("", |x| x.1)
+                .split("</a>")
+                .next()
+                .unwrap_or(""),
         );
         let snippet = chunk
             .split("result__snippet")
             .nth(1)
-            .and_then(|s| s.splitn(2, '>').nth(1))
+            .and_then(|s| s.split_once('>').map(|x| x.1))
             .and_then(|s| s.split("</a>").next())
             .map(strip_tags)
             .unwrap_or_default();
-        if url.starts_with("http") && !title.is_empty() {
-            hits.push(SearchHit { title, url, snippet });
+        if is_http_url(&url) && !title.is_empty() {
+            hits.push(SearchHit {
+                title,
+                url,
+                snippet,
+            });
         }
     }
     hits
@@ -268,7 +313,29 @@ mod tests {
         assert_eq!(hits[0].url, "https://rust-lang.org/async");
         assert_eq!(hits[0].title, "Rust Async & You");
         assert!(hits[0].snippet.contains("async in Rust"));
-        assert_eq!(hits[1].url, "https://tokio.rs/", "uddg redirect must be decoded");
+        assert_eq!(
+            hits[1].url, "https://tokio.rs/",
+            "uddg redirect must be decoded"
+        );
+    }
+
+    #[test]
+    fn parsers_accept_only_http_and_https_schemes() {
+        let html = r#"
+          <a class="result__a" href="httpx://attacker.invalid/">Looks web-like</a>
+          <a class="result__a" href="HTTPS://example.com/">Uppercase HTTPS</a>
+        "#;
+        let hits = parse_ddg(html, 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "HTTPS://example.com/");
+
+        let json = serde_json::json!({"results": [
+            {"title": "Reject", "url": "httpx://attacker.invalid/"},
+            {"title": "Accept", "url": "HTTP://example.com/"}
+        ]});
+        let hits = parse_searxng(&json, 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Accept");
     }
 
     #[test]
@@ -293,7 +360,11 @@ mod tests {
 
     #[test]
     fn render_is_numbered() {
-        let h = vec![SearchHit { title: "T".into(), url: "https://x".into(), snippet: "s".into() }];
+        let h = vec![SearchHit {
+            title: "T".into(),
+            url: "https://x".into(),
+            snippet: "s".into(),
+        }];
         assert!(render_search(&h).starts_with("1. T — https://x"));
         assert_eq!(render_search(&[]), "(no results)");
     }
@@ -301,8 +372,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scripted_respects_limit() {
         let s = ScriptedSearch::new(vec![
-            SearchHit { title: "a".into(), url: "https://a".into(), snippet: String::new() },
-            SearchHit { title: "b".into(), url: "https://b".into(), snippet: String::new() },
+            SearchHit {
+                title: "a".into(),
+                url: "https://a".into(),
+                snippet: String::new(),
+            },
+            SearchHit {
+                title: "b".into(),
+                url: "https://b".into(),
+                snippet: String::new(),
+            },
         ]);
         assert_eq!(s.search("q", 1).await.unwrap().len(), 1);
     }

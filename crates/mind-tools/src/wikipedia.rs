@@ -50,8 +50,13 @@ impl WikiClient for Wikipedia {
                 .query("gsrlimit", "1")
                 .call()?
                 .into_json()?;
-            let pages = v["query"]["pages"].as_object().ok_or_else(|| anyhow::anyhow!("nothing on Wikipedia for \"{q}\""))?;
-            let page = pages.values().next().ok_or_else(|| anyhow::anyhow!("nothing on Wikipedia for \"{q}\""))?;
+            let pages = v["query"]["pages"]
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("nothing on Wikipedia for \"{q}\""))?;
+            let page = pages
+                .values()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("nothing on Wikipedia for \"{q}\""))?;
             let title = page["title"].as_str().unwrap_or(&q);
             let mut extract = page["extract"].as_str().unwrap_or("").trim().to_string();
             if extract.is_empty() {

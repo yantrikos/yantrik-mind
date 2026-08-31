@@ -8,13 +8,28 @@ impl super::ConversationEngine {
     /// MiniMax expose nothing programmatic (web dashboards only) — for those we report OUR observed
     /// served/failed counts from the chain layer, which is also how a dry first-hop shows itself.
     pub async fn providers_report(&self) -> String {
-        let mut out = String::from("🔌 PROVIDERS — real quota where queryable, observed truth elsewhere\n");
+        let mut out =
+            String::from("🔌 PROVIDERS — real quota where queryable, observed truth elsewhere\n");
         // Live balance (blocking probe off the async thread).
-        let q = tokio::task::spawn_blocking(mind_tools::nanogpt_quota).await.ok().flatten();
-        let bal = tokio::task::spawn_blocking(mind_tools::nanogpt_balance).await.ok().flatten();
-        let sub_active = q.as_ref().and_then(|v| v.get("active")).and_then(|x| x.as_bool()).unwrap_or(false);
+        let q = tokio::task::spawn_blocking(mind_tools::nanogpt_quota)
+            .await
+            .ok()
+            .flatten();
+        let bal = tokio::task::spawn_blocking(mind_tools::nanogpt_balance)
+            .await
+            .ok()
+            .flatten();
+        let sub_active = q
+            .as_ref()
+            .and_then(|v| v.get("active"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         if sub_active {
-            let w = q.as_ref().and_then(|v| v.get("weeklyInputTokens")).cloned().unwrap_or_default();
+            let w = q
+                .as_ref()
+                .and_then(|v| v.get("weeklyInputTokens"))
+                .cloned()
+                .unwrap_or_default();
             let used = w.get("used").and_then(|x| x.as_i64()).unwrap_or(0);
             let rem = w.get("remaining").and_then(|x| x.as_i64()).unwrap_or(0);
             let pct = w.get("percentUsed").and_then(|x| x.as_f64()).unwrap_or(0.0) * 100.0;
@@ -22,7 +37,11 @@ impl super::ConversationEngine {
                 .get("resetAt")
                 .and_then(|x| x.as_i64())
                 .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|t| t.with_timezone(local_now().offset()).format("%a %b %-d").to_string())
+                .map(|t| {
+                    t.with_timezone(local_now().offset())
+                        .format("%a %b %-d")
+                        .to_string()
+                })
                 .unwrap_or_default();
             out.push_str(&format!(
                 "• nanogpt: SUBSCRIPTION active — weekly input tokens {:.1}M/{:.0}M used ({pct:.1}%), {:.1}M remaining, resets {reset}",
@@ -38,14 +57,25 @@ impl super::ConversationEngine {
             match bal {
                 Some((usd, _)) => out.push_str(&format!(
                     "• nanogpt: ${usd:.2} PAYG remaining{}\n",
-                    if usd < 0.50 { " ⚠️ DRY — calls fail over to the next provider" } else { "" }
+                    if usd < 0.50 {
+                        " ⚠️ DRY — calls fail over to the next provider"
+                    } else {
+                        ""
+                    }
                 )),
-                None => out.push_str("• nanogpt: quota probe failed (key missing or endpoint down)\n"),
+                None => {
+                    out.push_str("• nanogpt: quota probe failed (key missing or endpoint down)\n")
+                }
             }
         }
         out.push_str("• ollama-cloud: no usage API (dashboard: ollama.com/settings) — observed counts below\n");
-        out.push_str("• minimax: no usage API (dashboard: platform.minimax.io) — observed counts below\n");
-        let a = tokio::task::spawn_blocking(mind_tools::anthropic_subscription_usage).await.ok().flatten();
+        out.push_str(
+            "• minimax: no usage API (dashboard: platform.minimax.io) — observed counts below\n",
+        );
+        let a = tokio::task::spawn_blocking(mind_tools::anthropic_subscription_usage)
+            .await
+            .ok()
+            .flatten();
         match a {
             Some(v) if v.get("five_hour").is_some() => {
                 let pct = |k: &str| v.get(k).and_then(|x| x.get("utilization")).and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -79,7 +109,10 @@ impl super::ConversationEngine {
         }
         // LOCAL METER — our own persisted token counts (the workaround for no-API providers;
         // for nanogpt it cross-checks their real weekly meter).
-        let roll = tokio::task::spawn_blocking(mind_inference::provider_usage_rollup).await.ok().unwrap_or_default();
+        let roll = tokio::task::spawn_blocking(mind_inference::provider_usage_rollup)
+            .await
+            .ok()
+            .unwrap_or_default();
         if !roll.is_empty() {
             out.push_str("\nLocal meter (our records — survives restarts):\n");
             for (p, tin, tout, win, wout, wcalls) in roll {
@@ -115,7 +148,10 @@ impl super::ConversationEngine {
             .and_then(|x| serde_json::from_str::<serde_json::Value>(&x).ok())
             .map(|mut v| {
                 // envelope keys the owner hasn't set fall back to defaults (new subsystems appear)
-                if let (Some(env), Some(defs)) = (v.get_mut("envelope").and_then(|x| x.as_object_mut()), default["envelope"].as_object()) {
+                if let (Some(env), Some(defs)) = (
+                    v.get_mut("envelope").and_then(|x| x.as_object_mut()),
+                    default["envelope"].as_object(),
+                ) {
                     for (k, d) in defs {
                         env.entry(k.clone()).or_insert(d.clone());
                     }
@@ -143,11 +179,21 @@ impl super::ConversationEngine {
             b["spent"] = serde_json::json!({});
             b["skipped"] = serde_json::json!({});
         }
-        let cap = b["envelope"].get(subsystem).and_then(|x| x.as_i64()).unwrap_or(2);
-        let used = b["spent"].get(subsystem).and_then(|x| x.as_i64()).unwrap_or(0);
+        let cap = b["envelope"]
+            .get(subsystem)
+            .and_then(|x| x.as_i64())
+            .unwrap_or(2);
+        let used = b["spent"]
+            .get(subsystem)
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
         let ok = used < cap;
         let bucket = if ok { "spent" } else { "skipped" };
-        let n = b[bucket].get(subsystem).and_then(|x| x.as_i64()).unwrap_or(0) + 1;
+        let n = b[bucket]
+            .get(subsystem)
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0)
+            + 1;
         b[bucket][subsystem] = serde_json::json!(n);
         Self::budget_save(&b);
         if !ok {
@@ -170,7 +216,11 @@ impl super::ConversationEngine {
                 let skip = b["skipped"].get(k).and_then(|x| x.as_i64()).unwrap_or(0);
                 out.push_str(&format!(
                     "  {k}: {used}/{cap}{}\n",
-                    if skip > 0 { format!(" · {skip} pass(es) SKIPPED dry") } else { String::new() }
+                    if skip > 0 {
+                        format!(" · {skip} pass(es) SKIPPED dry")
+                    } else {
+                        String::new()
+                    }
                 ));
             }
         }
@@ -203,20 +253,38 @@ impl super::ConversationEngine {
             // A memoryful agent will book hope as income unless the ledger structurally forbids it.
             //   treasury earn <usd> <source> [pot] [status]
             let toks: Vec<&str> = rest.split_whitespace().collect();
-            let amt = toks.first().and_then(|x| x.parse::<f64>().ok()).unwrap_or(f64::NAN);
+            let amt = toks
+                .first()
+                .and_then(|x| x.parse::<f64>().ok())
+                .unwrap_or(f64::NAN);
             if amt.is_nan() || amt <= 0.0 {
                 return "Usage: treasury earn <usd> <source> [survival|family|endowment] [promised|invoiced|collected|withdrawn]".into();
             }
             const POTS: [&str; 3] = ["survival", "family", "endowment"];
             const STATUSES: [&str; 4] = ["promised", "invoiced", "collected", "withdrawn"];
-            let pot = toks.iter().find(|t| POTS.contains(&t.to_lowercase().as_str()))
-                .map(|t| t.to_lowercase()).unwrap_or_else(|| "survival".into());
-            let status = toks.iter().find(|t| STATUSES.contains(&t.to_lowercase().as_str()))
-                .map(|t| t.to_lowercase()).unwrap_or_else(|| "collected".into());
-            let src = toks.iter().skip(1)
-                .filter(|t| !POTS.contains(&t.to_lowercase().as_str()) && !STATUSES.contains(&t.to_lowercase().as_str()))
-                .cloned().collect::<Vec<_>>().join(" ");
-            let src = if src.is_empty() { "unspecified".to_string() } else { src };
+            let pot = toks
+                .iter()
+                .find(|t| POTS.contains(&t.to_lowercase().as_str()))
+                .map_or_else(|| "survival".into(), |t| t.to_lowercase());
+            let status = toks
+                .iter()
+                .find(|t| STATUSES.contains(&t.to_lowercase().as_str()))
+                .map_or_else(|| "collected".into(), |t| t.to_lowercase());
+            let src = toks
+                .iter()
+                .skip(1)
+                .filter(|t| {
+                    !POTS.contains(&t.to_lowercase().as_str())
+                        && !STATUSES.contains(&t.to_lowercase().as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let src = if src.is_empty() {
+                "unspecified".to_string()
+            } else {
+                src
+            };
             let cleared = status == "collected" || status == "withdrawn";
             if cleared {
                 let bal = b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0) + amt;
@@ -225,15 +293,31 @@ impl super::ConversationEngine {
             let entry = serde_json::json!({"day": Self::ledger_today(), "usd": amt, "source": src, "pot": pot, "status": status});
             if let Some(arr) = b["ledger"]["income"].as_array_mut() {
                 arr.push(entry);
-                if arr.len() > 500 { arr.remove(0); }
+                if arr.len() > 500 {
+                    arr.remove(0);
+                }
             }
             Self::budget_save(&b);
-            let first_cleared = cleared && b["ledger"]["income"].as_array()
-                .map(|a| a.iter().filter(|e| { let s = e.get("status").and_then(|x| x.as_str()).unwrap_or(""); s == "collected" || s == "withdrawn" }).count() == 1)
-                .unwrap_or(false);
-            let milestone = if first_cleared { "\n\n🎉 FIRST CLEARED DOLLAR — real money, in hand, from a real source. The milestone that matters: an entity that earns, not only spends." } else { "" };
+            let first_cleared = cleared
+                && b["ledger"]["income"].as_array().is_some_and(|a| {
+                    a.iter()
+                        .filter(|e| {
+                            let s = e.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                            s == "collected" || s == "withdrawn"
+                        })
+                        .count()
+                        == 1
+                });
+            let milestone = if first_cleared {
+                "\n\n🎉 FIRST CLEARED DOLLAR — real money, in hand, from a real source. The milestone that matters: an entity that earns, not only spends."
+            } else {
+                ""
+            };
             let note = if cleared {
-                format!("Balance now ${:.2}.", b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0))
+                format!(
+                    "Balance now ${:.2}.",
+                    b["ledger"]["balance_usd"].as_f64().unwrap_or(0.0)
+                )
             } else {
                 format!("Tracked as {status} in the {pot} pot — NOT counted as cash until collected (honesty invariant).")
             };
@@ -260,47 +344,95 @@ impl super::ConversationEngine {
         let monthly_burn: f64 = burn_obj.values().filter_map(|v| v.as_f64()).sum();
         let daily_burn = monthly_burn / 30.0;
         let today = Self::ledger_today();
-        let income = b["ledger"]["income"].as_array().cloned().unwrap_or_default();
+        let income = b["ledger"]["income"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         // four never-summed columns — the anti-self-deception view
-        let col = |status: &str| -> f64 { income.iter()
-            .filter(|e| e.get("status").and_then(|x| x.as_str()).unwrap_or("collected") == status)
-            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum() };
-        let (promised, invoiced, collected, withdrawn) = (col("promised"), col("invoiced"), col("collected"), col("withdrawn"));
+        let col = |status: &str| -> f64 {
+            income
+                .iter()
+                .filter(|e| {
+                    e.get("status")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("collected")
+                        == status
+                })
+                .filter_map(|e| e.get("usd").and_then(|x| x.as_f64()))
+                .sum()
+        };
+        let (promised, invoiced, collected, withdrawn) = (
+            col("promised"),
+            col("invoiced"),
+            col("collected"),
+            col("withdrawn"),
+        );
         // trailing-30d CLEARED income only (collected+withdrawn) — never promises
-        let cleared30: f64 = income.iter()
+        let cleared30: f64 = income
+            .iter()
             .filter(|e| today - e.get("day").and_then(|x| x.as_i64()).unwrap_or(0) <= 30)
-            .filter(|e| { let s = e.get("status").and_then(|x| x.as_str()).unwrap_or("collected"); s == "collected" || s == "withdrawn" })
-            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum();
+            .filter(|e| {
+                let s = e
+                    .get("status")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("collected");
+                s == "collected" || s == "withdrawn"
+            })
+            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64()))
+            .sum();
         // per-pot cleared totals
-        let pot_cleared = |pot: &str| -> f64 { income.iter()
-            .filter(|e| e.get("pot").and_then(|x| x.as_str()).unwrap_or("survival") == pot)
-            .filter(|e| { let s = e.get("status").and_then(|x| x.as_str()).unwrap_or("collected"); s == "collected" || s == "withdrawn" })
-            .filter_map(|e| e.get("usd").and_then(|x| x.as_f64())).sum() };
+        let pot_cleared = |pot: &str| -> f64 {
+            income
+                .iter()
+                .filter(|e| e.get("pot").and_then(|x| x.as_str()).unwrap_or("survival") == pot)
+                .filter(|e| {
+                    let s = e
+                        .get("status")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("collected");
+                    s == "collected" || s == "withdrawn"
+                })
+                .filter_map(|e| e.get("usd").and_then(|x| x.as_f64()))
+                .sum()
+        };
 
-        let mut out = format!("💰 MISSION LEDGER — can I pay my own rent?\n\nBalance (cleared cash): ${bal:.2}\n");
+        let mut out = format!(
+            "💰 MISSION LEDGER — can I pay my own rent?\n\nBalance (cleared cash): ${bal:.2}\n"
+        );
         if burn_obj.is_empty() {
             out.push_str("Burn: none declared — `treasury burn <item> <usd/mo>`\n");
         } else {
             out.push_str(&format!("Burn: ${monthly_burn:.2}/mo\n"));
             let mut items: Vec<(&String, &serde_json::Value)> = burn_obj.iter().collect();
             items.sort_by(|a, c| a.0.cmp(c.0));
-            for (k, v) in items { out.push_str(&format!("  · {k}: ${:.2}/mo\n", v.as_f64().unwrap_or(0.0))); }
+            for (k, v) in items {
+                out.push_str(&format!("  · {k}: ${:.2}/mo\n", v.as_f64().unwrap_or(0.0)));
+            }
         }
         // the honesty columns — shown separately, NEVER summed into one 'income' number
         out.push_str(&format!(
             "\nIncome pipeline (never summed):\n  promised ${promised:.2} → invoiced ${invoiced:.2} → collected ${collected:.2} → withdrawn ${withdrawn:.2}\n  (only collected+withdrawn are real money; promised/invoiced are hope)\n"
         ));
-        out.push_str(&format!("\nBy mission (cleared only): survival ${:.2} · family ${:.2} · endowment ${:.2}\n",
-            pot_cleared("survival"), pot_cleared("family"), pot_cleared("endowment")));
+        out.push_str(&format!(
+            "\nBy mission (cleared only): survival ${:.2} · family ${:.2} · endowment ${:.2}\n",
+            pot_cleared("survival"),
+            pot_cleared("family"),
+            pot_cleared("endowment")
+        ));
         out.push_str(&format!("Cleared income (trailing 30d): ${cleared30:.2}\n"));
         if daily_burn > 0.0 {
             let runway = (bal / daily_burn).floor() as i64;
             out.push_str(&format!("\n⏳ Runway: {runway} days on cleared cash"));
             if cleared30 >= monthly_burn && monthly_burn > 0.0 {
-                out.push_str("\n✅ BREAK-EVEN: cleared income covers the burn — I am paying my own rent.");
+                out.push_str(
+                    "\n✅ BREAK-EVEN: cleared income covers the burn — I am paying my own rent.",
+                );
             } else if monthly_burn > 0.0 {
                 let gap = monthly_burn - cleared30;
-                out.push_str(&format!("\n📈 To break even: earn ${gap:.2} more CLEARED per month ({:.0}% there).", (cleared30 / monthly_burn * 100.0).min(100.0)));
+                out.push_str(&format!(
+                    "\n📈 To break even: earn ${gap:.2} more CLEARED per month ({:.0}% there).",
+                    (cleared30 / monthly_burn * 100.0).min(100.0)
+                ));
             }
         } else {
             out.push_str("\n(declare burn lines to see runway)");
@@ -308,7 +440,9 @@ impl super::ConversationEngine {
         out
     }
 
-    pub(crate) fn ledger_today() -> i64 { (chrono::Utc::now().timestamp() / 86_400) as i64 }
+    pub(crate) fn ledger_today() -> i64 {
+        chrono::Utc::now().timestamp() / 86_400
+    }
 
     /// `ym budget set <subsystem> <n>` — the owner's declaration.
     pub fn treasury_set(subsystem: &str, n: i64) -> String {
@@ -317,5 +451,4 @@ impl super::ConversationEngine {
         Self::budget_save(&b);
         format!("💰 {subsystem}: {} passes/day.", n.max(0))
     }
-
 }

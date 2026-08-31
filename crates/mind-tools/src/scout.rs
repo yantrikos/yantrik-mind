@@ -68,15 +68,30 @@ impl Appraisal {
         let up = reading.to_uppercase();
         let has = |needles: &[&str]| needles.iter().any(|n| up.contains(n));
         Appraisal {
-            shows_positions: has(&["LONG=", "SHORT=", "NO POSITIONS", "POSITION", "ENTRY", "AVG PRICE"]),
+            shows_positions: has(&[
+                "LONG=",
+                "SHORT=",
+                "NO POSITIONS",
+                "POSITION",
+                "ENTRY",
+                "AVG PRICE",
+            ]),
             // Ticker detection reads the ORIGINAL text, never the uppercased copy. Checking the
             // uppercased one destroys the only signal that separates AMD from "and": every word is
             // caps by then, so a plain English sentence scores as a screen full of tickers and any
             // talking head is admitted as a checkable source.
-            names_tickers: has(&["TICKER", "$"]) || reading.split_whitespace().any(is_ticker_shaped),
+            names_tickers: has(&["TICKER", "$"])
+                || reading.split_whitespace().any(is_ticker_shaped),
             shows_levels: has(&["SUPPORT", "RESISTANCE", "TARGET", "STOP", "LEVEL"]),
             selling_something: has(&[
-                "DISCORD", "PROMO CODE", "SIGN UP", "COURSE", "MENTORSHIP", "SUBSCRIBE FOR", "JOIN NOW", "DM ME",
+                "DISCORD",
+                "PROMO CODE",
+                "SIGN UP",
+                "COURSE",
+                "MENTORSHIP",
+                "SUBSCRIBE FOR",
+                "JOIN NOW",
+                "DM ME",
             ]),
         }
     }
@@ -122,7 +137,7 @@ pub fn standing(r: &Record) -> Standing {
     if r.graded < MIN_GRADED {
         return Standing::Provisional;
     }
-    let hit = r.correct as f64 / r.graded as f64;
+    let hit = f64::from(r.correct) / f64::from(r.graded);
     // A coin flip is not an edge, and a source needs to beat it by enough that noise is an unlikely
     // explanation before the mind hands it real weight.
     if hit >= 0.60 {
@@ -153,8 +168,10 @@ pub fn source_label(url: &str) -> String {
     u.split("://")
         .nth(1)
         .and_then(|r| r.split('/').next())
-        .map(|h| h.trim_start_matches("www.").to_string())
-        .unwrap_or_else(|| "(unknown source)".into())
+        .map_or_else(
+            || "(unknown source)".into(),
+            |h| h.trim_start_matches("www.").to_string(),
+        )
 }
 
 /// Roll graded claims up into a record per source.
@@ -167,7 +184,9 @@ pub fn source_label(url: &str) -> String {
 /// UNGRADED claims are excluded rather than counted as failures. A prediction whose deadline has not
 /// arrived is not a wrong prediction, and treating pending as wrong would punish exactly the sources
 /// that make long-horizon calls.
-pub fn tally<'a>(graded: impl Iterator<Item = (&'a str, bool)>) -> std::collections::BTreeMap<String, Record> {
+pub fn tally<'a>(
+    graded: impl Iterator<Item = (&'a str, bool)>,
+) -> std::collections::BTreeMap<String, Record> {
     let mut out: std::collections::BTreeMap<String, Record> = Default::default();
     for (source, correct) in graded {
         let e = out.entry(source.trim().to_string()).or_default();
@@ -184,11 +203,12 @@ pub fn tally<'a>(graded: impl Iterator<Item = (&'a str, bool)>) -> std::collecti
 /// Viewers are used ONLY to break ties. A large audience is evidence about production values and
 /// nothing else — the most-watched desk and the most-profitable desk are different questions, and
 /// conflating them would have the mind learning from whoever is best at being watched.
-pub fn rank<'a>(cands: &'a [(Candidate, Appraisal)]) -> Vec<&'a Candidate> {
-    let mut worth: Vec<&(Candidate, Appraisal)> = cands.iter().filter(|(_, a)| a.is_checkable()).collect();
+pub fn rank(cands: &[(Candidate, Appraisal)]) -> Vec<&Candidate> {
+    let mut worth: Vec<&(Candidate, Appraisal)> =
+        cands.iter().filter(|(_, a)| a.is_checkable()).collect();
     worth.sort_by(|x, y| {
         let score = |a: &Appraisal| {
-            (a.shows_positions as u8) * 2 + (a.names_tickers as u8) + (a.shows_levels as u8)
+            u8::from(a.shows_positions) * 2 + u8::from(a.names_tickers) + u8::from(a.shows_levels)
         };
         score(&y.1)
             .cmp(&score(&x.1))
@@ -202,7 +222,12 @@ mod tests {
     use super::*;
 
     fn cand(id: &str, viewers: u64) -> Candidate {
-        Candidate { video_id: id.into(), title: "t".into(), channel: "c".into(), viewers: Some(viewers) }
+        Candidate {
+            video_id: id.into(),
+            title: "t".into(),
+            channel: "c".into(),
+            viewers: Some(viewers),
+        }
     }
 
     #[test]
@@ -210,7 +235,8 @@ mod tests {
         // A commentator with no tickers, no positions and no levels may be the most insightful
         // person on the platform, and the mind still cannot learn anything from them: nothing they
         // say can be scored. Gradeability is not a proxy for quality, it is a precondition for it.
-        let talker = Appraisal::from_reading("Let me explain my macro view on the economy this quarter");
+        let talker =
+            Appraisal::from_reading("Let me explain my macro view on the economy this quarter");
         assert!(!talker.is_checkable());
 
         let desk = Appraisal::from_reading("CHERIF | LONG=NONE | SHORT=NVAX");
@@ -222,7 +248,9 @@ mod tests {
     fn a_sales_pitch_is_rejected_even_when_it_names_tickers() {
         // Naming tickers next to a promo code is marketing wearing the costume of analysis, and it
         // is the single most common shape of bad trading content.
-        let pitch = Appraisal::from_reading("AMD TSLA to the moon! JOIN NOW - use PROMO CODE for my course");
+        let pitch = Appraisal::from_reading(
+            "AMD TSLA to the moon! JOIN NOW - use PROMO CODE for my course",
+        );
         assert!(pitch.names_tickers, "it does name tickers");
         assert!(pitch.selling_something);
         assert!(!pitch.is_checkable(), "but it must not be watched");
@@ -232,16 +260,47 @@ mod tests {
     fn a_new_source_is_neither_trusted_nor_ignored() {
         // Both obvious answers are wrong: trusting strangers copies anyone, ignoring them freezes
         // the roster at whatever was typed first.
-        assert_eq!(standing(&Record { graded: 0, correct: 0 }), Standing::Provisional);
-        assert_eq!(standing(&Record { graded: 9, correct: 9 }), Standing::Provisional,
-                   "nine out of nine is still not a record");
+        assert_eq!(
+            standing(&Record {
+                graded: 0,
+                correct: 0
+            }),
+            Standing::Provisional
+        );
+        assert_eq!(
+            standing(&Record {
+                graded: 9,
+                correct: 9
+            }),
+            Standing::Provisional,
+            "nine out of nine is still not a record"
+        );
     }
 
     #[test]
     fn trust_is_earned_from_being_right_and_lost_from_being_wrong() {
-        assert_eq!(standing(&Record { graded: 20, correct: 14 }), Standing::Trusted);
-        assert_eq!(standing(&Record { graded: 20, correct: 10 }), Standing::Provisional, "a coin flip is not an edge");
-        assert_eq!(standing(&Record { graded: 20, correct: 6 }), Standing::Dropped);
+        assert_eq!(
+            standing(&Record {
+                graded: 20,
+                correct: 14
+            }),
+            Standing::Trusted
+        );
+        assert_eq!(
+            standing(&Record {
+                graded: 20,
+                correct: 10
+            }),
+            Standing::Provisional,
+            "a coin flip is not an edge"
+        );
+        assert_eq!(
+            standing(&Record {
+                graded: 20,
+                correct: 6
+            }),
+            Standing::Dropped
+        );
     }
 
     #[test]
@@ -249,10 +308,19 @@ mod tests {
         // A desk restarts its stream several times a day. Filing claims under the video URL would
         // give every shift a fresh, empty record — so no source would ever accumulate enough graded
         // calls to be trusted OR dropped, and the whole ledger would stay permanently provisional.
-        assert_eq!(source_label("https://www.youtube.com/@TraderTVLive/live"), "@TraderTVLive");
-        assert_eq!(source_label("https://youtube.com/@BearBullTraders/live?x=1"), "@BearBullTraders");
+        assert_eq!(
+            source_label("https://www.youtube.com/@TraderTVLive/live"),
+            "@TraderTVLive"
+        );
+        assert_eq!(
+            source_label("https://youtube.com/@BearBullTraders/live?x=1"),
+            "@BearBullTraders"
+        );
         // A bare video URL has no channel in it; grouping by host is the honest fallback.
-        assert_eq!(source_label("https://www.youtube.com/watch?v=NpZf5vWGVw8"), "youtube.com");
+        assert_eq!(
+            source_label("https://www.youtube.com/watch?v=NpZf5vWGVw8"),
+            "youtube.com"
+        );
     }
 
     #[test]
@@ -267,8 +335,20 @@ mod tests {
             ("@SomeGuru", false),
         ];
         let t = tally(rows.into_iter());
-        assert_eq!(t["@TraderTVLive"], Record { graded: 3, correct: 2 });
-        assert_eq!(t["@SomeGuru"], Record { graded: 2, correct: 0 });
+        assert_eq!(
+            t["@TraderTVLive"],
+            Record {
+                graded: 3,
+                correct: 2
+            }
+        );
+        assert_eq!(
+            t["@SomeGuru"],
+            Record {
+                graded: 2,
+                correct: 0
+            }
+        );
         // Neither has enough calls to be rated yet, and saying so is the correct answer.
         assert_eq!(standing(&t["@SomeGuru"]), Standing::Provisional);
     }
@@ -279,15 +359,24 @@ mod tests {
         // sources that make longer-horizon calls, which is precisely backwards.
         let graded_only = vec![("@A", true)];
         let t = tally(graded_only.into_iter());
-        assert_eq!(t["@A"].graded, 1, "a source with one graded call and nine pending has ONE record");
+        assert_eq!(
+            t["@A"].graded, 1,
+            "a source with one graded call and nine pending has ONE record"
+        );
     }
 
     #[test]
     fn audience_size_only_breaks_ties() {
         // The most-watched desk and the most-profitable desk are different questions. If viewers
         // outranked form, the mind would learn from whoever is best at being watched.
-        let big_talker = (cand("a", 50_000), Appraisal::from_reading("my macro view on the economy"));
-        let small_desk = (cand("b", 12), Appraisal::from_reading("JOE | LONG=TQQQ | SHORT=NONE"));
+        let big_talker = (
+            cand("a", 50_000),
+            Appraisal::from_reading("my macro view on the economy"),
+        );
+        let small_desk = (
+            cand("b", 12),
+            Appraisal::from_reading("JOE | LONG=TQQQ | SHORT=NONE"),
+        );
         let pool = [big_talker, small_desk];
         let ranked = rank(&pool);
         assert_eq!(ranked.len(), 1, "the talker is not rankable at all");
@@ -296,10 +385,19 @@ mod tests {
 
     #[test]
     fn among_checkable_sources_the_one_showing_positions_wins() {
-        let names_only = (cand("a", 9_000), Appraisal::from_reading("watching $AMD and $NVDA today"));
-        let with_book = (cand("b", 30), Appraisal::from_reading("CHERIF | LONG=AMD | SHORT=NONE"));
+        let names_only = (
+            cand("a", 9_000),
+            Appraisal::from_reading("watching $AMD and $NVDA today"),
+        );
+        let with_book = (
+            cand("b", 30),
+            Appraisal::from_reading("CHERIF | LONG=AMD | SHORT=NONE"),
+        );
         let pool = [names_only, with_book];
         let ranked = rank(&pool);
-        assert_eq!(ranked[0].video_id, "b", "a printed position beats a mentioned ticker");
+        assert_eq!(
+            ranked[0].video_id, "b",
+            "a printed position beats a mentioned ticker"
+        );
     }
 }

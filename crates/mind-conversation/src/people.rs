@@ -11,8 +11,8 @@ pub(crate) const PEOPLE_DETAILED: usize = 3;
 fn is_core_relation(rel: &str) -> bool {
     let r = rel.trim().to_lowercase();
     [
-        "wife", "husband", "spouse", "partner", "son", "daughter", "child", "kid",
-        "mother", "father", "mom", "dad", "mum",
+        "wife", "husband", "spouse", "partner", "son", "daughter", "child", "kid", "mother",
+        "father", "mom", "dad", "mum",
     ]
     .iter()
     .any(|c| r == *c || r.starts_with(&format!("{c} ")) || r.ends_with(&format!(" {c}")))
@@ -114,8 +114,14 @@ fn gate_people_inner(
     for (i, p) in people.iter().enumerate() {
         let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
         let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-        let rels = if rel.is_empty() { String::new() } else { format!(" (your {rel})") };
-        let nd = next_date_line(p, today).map(|s| format!("; {s}")).unwrap_or_default();
+        let rels = if rel.is_empty() {
+            String::new()
+        } else {
+            format!(" (your {rel})")
+        };
+        let nd = next_date_line(p, today)
+            .map(|s| format!("; {s}"))
+            .unwrap_or_default();
         if !all_detailed && !detailed.contains(&i) {
             gated += 1;
             out.push_str(&format!("\n- {name}{rels}{nd}"));
@@ -126,7 +132,11 @@ fn gate_people_inner(
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str()).take(4).collect())
             .unwrap_or_default();
-        let fs = if facts.is_empty() { String::new() } else { format!(" — {}", facts.join("; ")) };
+        let fs = if facts.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", facts.join("; "))
+        };
         out.push_str(&format!("\n- {name}{rels}{nd}{fs}"));
     }
     if gated > 0 {
@@ -140,22 +150,41 @@ fn gate_people_inner(
 
 impl super::ConversationEngine {
     pub(crate) async fn load_people(&self) -> Vec<serde_json::Value> {
-        self.memory.profile_get("people").await.ok().flatten()
+        self.memory
+            .profile_get("people")
+            .await
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.as_array().cloned()).unwrap_or_default()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
     }
 
     pub(crate) async fn save_people(&self, p: &[serde_json::Value]) {
-        let _ = self.memory.profile_set("people", &serde_json::Value::Array(p.to_vec()).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("people", &serde_json::Value::Array(p.to_vec()).to_string())
+            .await;
     }
 
     /// The owner slug for a Telegram user id (registered member, or the primary if it's the primary's
     /// id), else None (an unknown guest — isolated to shared-only).
     pub(crate) async fn owner_for_tg(&self, tg_id: i64) -> Option<String> {
-        if self.memory.profile_get("primary_tg").await.ok().flatten().and_then(|s| s.trim().parse::<i64>().ok()) == Some(tg_id) {
+        if self
+            .memory
+            .profile_get("primary_tg")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            == Some(tg_id)
+        {
             return Some(mind_types::PRIMARY.to_string());
         }
-        self.load_people().await.iter().find(|p| p.get("tg_id").and_then(|x| x.as_i64()) == Some(tg_id))
+        self.load_people()
+            .await
+            .iter()
+            .find(|p| p.get("tg_id").and_then(|x| x.as_i64()) == Some(tg_id))
             .and_then(|p| p.get("slug").and_then(|x| x.as_str()).map(String::from))
     }
 
@@ -177,8 +206,19 @@ impl super::ConversationEngine {
         if let Some(o) = self.owner_for_tg(tg_id).await {
             return o;
         }
-        if !shared_channel && self.memory.profile_get("primary_tg").await.ok().flatten().is_none() {
-            let _ = self.memory.profile_set("primary_tg", &tg_id.to_string()).await;
+        if !shared_channel
+            && self
+                .memory
+                .profile_get("primary_tg")
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            let _ = self
+                .memory
+                .profile_set("primary_tg", &tg_id.to_string())
+                .await;
             return mind_types::PRIMARY.to_string();
         }
         format!("guest:{tg_id}")
@@ -188,13 +228,20 @@ impl super::ConversationEngine {
     /// transport). The card's user_id becomes their recognized identity with a private scope.
     pub async fn register_contact(&self, first_name: &str, last_name: &str, tg_id: i64) -> String {
         let name = format!("{first_name} {last_name}").trim().to_string();
-        let slug: String = first_name.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+        let slug: String = first_name
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect();
         if slug.is_empty() || slug == mind_types::PRIMARY || slug == "shared" {
             return "That contact name can't be used as a member id — add them with `person add <slug> <name> <tg-id>`.".to_string();
         }
         let mut people = self.load_people().await;
         people.retain(|p| p.get("slug").and_then(|x| x.as_str()) != Some(slug.as_str()));
-        people.push(serde_json::json!({ "slug": slug, "name": name, "tg_id": tg_id, "relationship": "" }));
+        people.push(
+            serde_json::json!({ "slug": slug, "name": name, "tg_id": tg_id, "relationship": "" }),
+        );
         self.save_people(&people).await;
         format!(
             "✅ Registered {name} from the contact card — they get their own private space with me (their chats stay theirs, yours stay yours). I'll recognize them the moment they message. Add how they're related anytime: `person add {slug} {name} wife`."
@@ -214,7 +261,12 @@ impl super::ConversationEngine {
         for t in &toks[1..] {
             if let Ok(n) = t.parse::<i64>() {
                 tg_id = Some(n);
-            } else if ["wife", "husband", "spouse", "partner", "son", "daughter", "child", "friend", "roommate"].contains(&t.to_lowercase().as_str()) {
+            } else if [
+                "wife", "husband", "spouse", "partner", "son", "daughter", "child", "friend",
+                "roommate",
+            ]
+            .contains(&t.to_lowercase().as_str())
+            {
                 rel = t.to_lowercase();
             } else {
                 name_toks.push(*t);
@@ -223,7 +275,9 @@ impl super::ConversationEngine {
         let name = name_toks.join(" ");
         let mut people = self.load_people().await;
         people.retain(|p| p.get("slug").and_then(|x| x.as_str()) != Some(slug.as_str()));
-        people.push(serde_json::json!({ "slug": slug, "name": name, "tg_id": tg_id, "relationship": rel }));
+        people.push(
+            serde_json::json!({ "slug": slug, "name": name, "tg_id": tg_id, "relationship": rel }),
+        );
         self.save_people(&people).await;
         format!(
             "Added '{slug}'{}. They get their own private memory; shared (group) facts are visible to everyone, and your private DMs stay yours.{}",
@@ -246,26 +300,56 @@ impl super::ConversationEngine {
 
     pub(crate) async fn people_list(&self) -> String {
         let people = self.load_people().await;
-        let mut lines = vec!["👥 Household (each has private memory + shared household memory):".to_string(), "  • primary (you) — owner".to_string()];
+        let mut lines = vec![
+            "👥 Household (each has private memory + shared household memory):".to_string(),
+            "  • primary (you) — owner".to_string(),
+        ];
         for p in &people {
             let slug = p.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
             let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
             let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-            let tg = if p.get("tg_id").and_then(|x| x.as_i64()).is_some() { "" } else { "  (no telegram id yet)" };
-            lines.push(format!("  • {slug}{}{}{tg}", if name.is_empty() { String::new() } else { format!(" — {name}") }, if rel.is_empty() { String::new() } else { format!(" ({rel})") }));
+            let tg = if p.get("tg_id").and_then(|x| x.as_i64()).is_some() {
+                ""
+            } else {
+                "  (no telegram id yet)"
+            };
+            lines.push(format!(
+                "  • {slug}{}{}{tg}",
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {name}")
+                },
+                if rel.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({rel})")
+                }
+            ));
         }
         lines.push("\nAdd one: `ym person add wife Priya <telegram-id> wife`. Speak as them: `ym as wife <message>`.".to_string());
         lines.join("\n")
     }
 
     pub(crate) async fn load_people_profiles(&self) -> Vec<serde_json::Value> {
-        self.memory.profile_get("people_profiles").await.ok().flatten()
+        self.memory
+            .profile_get("people_profiles")
+            .await
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.as_array().cloned()).unwrap_or_default()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
     }
 
     pub(crate) async fn save_people_profiles(&self, p: &[serde_json::Value]) {
-        let _ = self.memory.profile_set("people_profiles", &serde_json::Value::Array(p.to_vec()).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "people_profiles",
+                &serde_json::Value::Array(p.to_vec()).to_string(),
+            )
+            .await;
     }
 
     /// Deterministic profile editor — the human-authoritative path for key dates and relationship.
@@ -274,7 +358,8 @@ impl super::ConversationEngine {
         let field = field.to_lowercase();
         // `clear` removes a date entry — for when the stored value is WRONG and the truth unknown
         // (never guess a family date to fill a slot).
-        let clearing = value.trim().eq_ignore_ascii_case("clear") || value.trim().eq_ignore_ascii_case("none");
+        let clearing =
+            value.trim().eq_ignore_ascii_case("clear") || value.trim().eq_ignore_ascii_case("none");
         // Accept MM-DD or "July 23"-style month-name dates for the date fields.
         let mmdd: Option<String> = if (field == "birthday" || field == "anniversary") && !clearing {
             let v = value.trim();
@@ -291,7 +376,9 @@ impl super::ConversationEngine {
             None
         };
         if (field == "birthday" || field == "anniversary") && !clearing && mmdd.is_none() {
-            return format!("Couldn't parse \"{value}\" as a date — use MM-DD, \"July 23\", or `clear`.");
+            return format!(
+                "Couldn't parse \"{value}\" as a date — use MM-DD, \"July 23\", or `clear`."
+            );
         }
         let mut store = self.load_people_profiles().await;
         let mut touched = false;
@@ -316,7 +403,11 @@ impl super::ConversationEngine {
                     touched = true;
                 }
                 "birthday" | "anniversary" => {
-                    let label = if field == "birthday" { "birthday" } else { "wedding anniversary" };
+                    let label = if field == "birthday" {
+                        "birthday"
+                    } else {
+                        "wedding anniversary"
+                    };
                     let dates = p
                         .as_object_mut()
                         .and_then(|m| {
@@ -326,15 +417,24 @@ impl super::ConversationEngine {
                         .and_then(|d| d.as_array_mut());
                     if let Some(arr) = dates {
                         arr.retain(|d| {
-                            d.get("label").and_then(|x| x.as_str()).map(|l| !l.eq_ignore_ascii_case(label)).unwrap_or(true)
+                            d.get("label")
+                                .and_then(|x| x.as_str())
+                                .map(|l| !l.eq_ignore_ascii_case(label))
+                                .unwrap_or(true)
                         });
                         if !clearing {
-                            arr.push(serde_json::json!({"label": label, "mmdd": mmdd.clone().unwrap()}));
+                            arr.push(
+                                serde_json::json!({"label": label, "mmdd": mmdd.clone().unwrap()}),
+                            );
                         }
                         touched = true;
                     }
                 }
-                _ => return format!("Unknown field \"{field}\" — birthday | anniversary | relationship."),
+                _ => {
+                    return format!(
+                        "Unknown field \"{field}\" — birthday | anniversary | relationship."
+                    )
+                }
             }
         }
         if !touched {
@@ -355,7 +455,10 @@ impl super::ConversationEngine {
                 provenance: "told".into(),
             })
             .await;
-        format!("✅ {name}: {field} set to {} (profile + belief).", mmdd.as_deref().unwrap_or(value))
+        format!(
+            "✅ {name}: {field} set to {} (profile + belief).",
+            mmdd.as_deref().unwrap_or(value)
+        )
     }
 
     /// Merge freshly-extracted people into the living profiles: upsert by name, dedupe facts, refresh the
@@ -374,7 +477,11 @@ impl super::ConversationEngine {
         store.retain(|p| {
             let n = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
             if n.to_lowercase() == want {
-                let facts = p.get("facts").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                let facts = p
+                    .get("facts")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
                 dropped.push(format!("{n} ({facts} facts)"));
                 false
             } else {
@@ -394,55 +501,120 @@ impl super::ConversationEngine {
         if fm_dropped > 0 {
             self.save_face_names(&fm).await;
         }
-        format!("🧹 Forgot profile: {} — {} people remain{}.", dropped.join(", "), store.len(), if fm_dropped > 0 { format!(" (+{fm_dropped} face-map entry)") } else { String::new() })
+        format!(
+            "🧹 Forgot profile: {} — {} people remain{}.",
+            dropped.join(", "),
+            store.len(),
+            if fm_dropped > 0 {
+                format!(" (+{fm_dropped} face-map entry)")
+            } else {
+                String::new()
+            }
+        )
     }
 
-    pub(crate) async fn merge_people(&self, people: Vec<serde_json::Value>, user_said: &str) -> usize {
+    pub(crate) async fn merge_people(
+        &self,
+        people: Vec<serde_json::Value>,
+        user_said: &str,
+    ) -> Result<usize> {
         if people.is_empty() {
-            return 0;
+            return Ok(0);
         }
-        let norm = |s: &str| -> String { s.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ") };
-        let mut store = self.load_people_profiles().await;
+        let norm = |s: &str| -> String {
+            s.to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ')
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut store: Vec<serde_json::Value> =
+            match self.memory.profile_get("people_profiles").await? {
+                Some(raw) => serde_json::from_str(&raw).map_err(|_| {
+                    MindError::Memory("people profile store is not valid JSON".into())
+                })?,
+                None => Vec::new(),
+            };
+        let blocked: Vec<String> = match self.memory.profile_get("people_blocklist").await? {
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|_| MindError::Memory("people blocklist is not valid JSON".into()))?,
+            None => Vec::new(),
+        };
         let now = chrono::Utc::now().timestamp_millis();
         let mut touched = 0usize;
         for pv in people {
-            let name = pv.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            if name.len() < 2 {
+            let name = pv
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.len() < 2 || Self::is_placeholder_name(&name) {
                 continue;
             }
             // BLOCKLIST: names the user declared non-existent stay dead — consolidation keeps
             // re-extracting them from old transcript text (Aarav rose three times).
-            {
-                let blocked: Vec<String> = self
-                    .memory
-                    .profile_get("people_blocklist")
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-                if blocked.iter().any(|b| b.eq_ignore_ascii_case(&name)) {
-                    continue;
-                }
+            let blocked_incoming_identity = std::iter::once(name.as_str())
+                .chain(
+                    pv.get("aliases")
+                        .and_then(|value| value.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|value| value.as_str()),
+                )
+                .any(|candidate| {
+                    blocked
+                        .iter()
+                        .any(|blocked_name| blocked_name.eq_ignore_ascii_case(candidate.trim()))
+                });
+            if blocked_incoming_identity {
+                continue;
             }
             // Perspective words are not people. Bare relationship nouns ("wife", "mother"), the
             // primary's own name, and "<primary>'s wife/husband" when the spouse is registered
             // all create phantom profiles — facts belong on the real person instead.
             {
                 const GENERIC: [&str; 18] = [
-                    "wife", "husband", "mother", "father", "mom", "dad", "son", "daughter",
-                    "brother", "sister", "mother-in-law", "father-in-law", "cousin", "nephew",
-                    "niece", "uncle", "aunt", "friend",
+                    "wife",
+                    "husband",
+                    "mother",
+                    "father",
+                    "mom",
+                    "dad",
+                    "son",
+                    "daughter",
+                    "brother",
+                    "sister",
+                    "mother-in-law",
+                    "father-in-law",
+                    "cousin",
+                    "nephew",
+                    "niece",
+                    "uncle",
+                    "aunt",
+                    "friend",
                 ];
                 let low = name.to_lowercase();
-                let primary = self.memory.profile_get("name").await.ok().flatten().unwrap_or_default().to_lowercase();
-                let spouse_registered = self
-                    .load_people()
-                    .await
-                    .iter()
-                    .any(|p| matches!(p.get("relationship").and_then(|x| x.as_str()), Some("wife") | Some("husband")));
-                let possessive_spouse = (low.ends_with("'s wife") || low.ends_with("'s husband")) && spouse_registered;
-                if GENERIC.contains(&low.as_str()) || (!primary.is_empty() && low == primary) || possessive_spouse {
+                let primary = self
+                    .memory
+                    .profile_get("name")
+                    .await?
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let spouse_registered = self.load_people().await.iter().any(|p| {
+                    matches!(
+                        p.get("relationship").and_then(|x| x.as_str()),
+                        Some("wife") | Some("husband")
+                    )
+                });
+                let possessive_spouse =
+                    (low.ends_with("'s wife") || low.ends_with("'s husband")) && spouse_registered;
+                if GENERIC.contains(&low.as_str())
+                    || (!primary.is_empty() && low == primary)
+                    || possessive_spouse
+                {
                     continue;
                 }
             }
@@ -450,7 +622,12 @@ impl super::ConversationEngine {
             // person under a nickname (e.g. "Arya" vs "Aadrisha") would fork into a duplicate record.
             let mut cands: std::collections::HashSet<String> = std::collections::HashSet::new();
             cands.insert(norm(&name));
-            for a in pv.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            for a in pv
+                .get("aliases")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
                 if let Some(s) = a.as_str() {
                     let n = norm(s);
                     if !n.is_empty() {
@@ -459,9 +636,20 @@ impl super::ConversationEngine {
                 }
             }
             let idx = store.iter().position(|p| {
-                let nm = p.get("name").and_then(|x| x.as_str()).map(norm).unwrap_or_default();
+                let nm = p
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .map(norm)
+                    .unwrap_or_default();
                 cands.contains(&nm)
-                    || p.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).any(|al| cands.contains(&norm(al)))).unwrap_or(false)
+                    || p.get("aliases")
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str())
+                                .any(|al| cands.contains(&norm(al)))
+                        })
+                        .unwrap_or(false)
             });
             let mut rec = match idx {
                 Some(i) => store.remove(i),
@@ -469,14 +657,29 @@ impl super::ConversationEngine {
                     // PROVENANCE GATE: a NEW person can only be born from the user's OWN words.
                     // The extraction window mixes assistant text (mail digests, cleanup chatter,
                     // transcript ghosts) — that text may ENRICH existing people, never create.
-                    if !user_said.contains(&name.to_lowercase()) {
+                    let mentioned_by_user = std::iter::once(name.as_str())
+                        .chain(
+                            pv.get("aliases")
+                                .and_then(|value| value.as_array())
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|value| value.as_str()),
+                        )
+                        .any(|candidate| {
+                            word_boundary_contains(user_said, &candidate.trim().to_lowercase())
+                        });
+                    if !mentioned_by_user {
                         continue;
                     }
                     serde_json::json!({ "name": name.clone(), "relationship": "", "facts": [], "dates": [] })
                 }
             };
             // The canonical stored name wins; anything else this person is called becomes a nickname.
-            let key = rec.get("name").and_then(|x| x.as_str()).map(norm).unwrap_or_else(|| norm(&name));
+            let key = rec
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(norm)
+                .unwrap_or_else(|| norm(&name));
             if let Some(r) = pv.get("relationship").and_then(|x| x.as_str()) {
                 if !r.trim().is_empty() {
                     rec["relationship"] = serde_json::json!(r.trim().to_lowercase());
@@ -484,9 +687,26 @@ impl super::ConversationEngine {
             }
             // aliases (nicknames) — dedupe, so `ym about <nickname>` resolves to the person. The incoming
             // name is itself folded in as a nickname when it differs from the canonical stored name.
-            let mut aliases: Vec<serde_json::Value> = rec.get("aliases").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-            let mut akeys: std::collections::HashSet<String> = aliases.iter().filter_map(|a| a.as_str()).map(norm).collect();
-            let mut incoming_aliases: Vec<String> = pv.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(String::from).collect()).unwrap_or_default();
+            let mut aliases: Vec<serde_json::Value> = rec
+                .get("aliases")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut akeys: std::collections::HashSet<String> = aliases
+                .iter()
+                .filter_map(|a| a.as_str())
+                .map(norm)
+                .collect();
+            let mut incoming_aliases: Vec<String> = pv
+                .get("aliases")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
             incoming_aliases.push(name.clone());
             for s in incoming_aliases {
                 let s = s.trim();
@@ -496,9 +716,19 @@ impl super::ConversationEngine {
             }
             rec["aliases"] = serde_json::json!(aliases);
             // facts — dedupe by normalized text, keep the most recent ~24
-            let mut facts: Vec<serde_json::Value> = rec.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-            let mut fkeys: std::collections::HashSet<String> = facts.iter().filter_map(|f| f.as_str()).map(norm).collect();
-            for f in pv.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let mut facts: Vec<serde_json::Value> = rec
+                .get("facts")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut fkeys: std::collections::HashSet<String> =
+                facts.iter().filter_map(|f| f.as_str()).map(norm).collect();
+            for f in pv
+                .get("facts")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
                 if let Some(s) = f.as_str() {
                     let s = s.trim();
                     if s.len() >= 4 && fkeys.insert(norm(s)) {
@@ -511,11 +741,31 @@ impl super::ConversationEngine {
             }
             rec["facts"] = serde_json::json!(facts);
             // dates — upsert by label (normalized to MM-DD)
-            let mut dates: Vec<serde_json::Value> = rec.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-            for d in pv.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date").trim().to_lowercase();
-                if let Some(mmdd) = d.get("date").and_then(|x| x.as_str()).and_then(parse_monthday) {
-                    dates.retain(|e| e.get("label").and_then(|x| x.as_str()) != Some(label.as_str()));
+            let mut dates: Vec<serde_json::Value> = rec
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
+            for d in pv
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let label = d
+                    .get("label")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("date")
+                    .trim()
+                    .to_lowercase();
+                if let Some(mmdd) = d
+                    .get("date")
+                    .and_then(|x| x.as_str())
+                    .and_then(parse_monthday)
+                {
+                    dates.retain(|e| {
+                        e.get("label").and_then(|x| x.as_str()) != Some(label.as_str())
+                    });
                     dates.push(serde_json::json!({ "label": label, "mmdd": mmdd }));
                 }
             }
@@ -524,8 +774,13 @@ impl super::ConversationEngine {
             store.push(rec);
             touched += 1;
         }
-        self.save_people_profiles(&store).await;
-        touched
+        self.memory
+            .profile_set(
+                "people_profiles",
+                &serde_json::Value::Array(store).to_string(),
+            )
+            .await?;
+        Ok(touched)
     }
 
     /// `ym family` — everyone I know about, with each one's next key date (rolled to its next occurrence).
@@ -539,10 +794,21 @@ impl super::ConversationEngine {
         for p in &store {
             let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
             let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-            let nfacts = p.get("facts").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            let nfacts = p
+                .get("facts")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             let next = next_date_line(p, &today);
-            let rel_tag = if rel.is_empty() { String::new() } else { format!(" ({rel})") };
-            lines.push(format!("• {name}{rel_tag} — {nfacts} thing(s) I know{}", next.map(|n| format!("; {n}")).unwrap_or_default()));
+            let rel_tag = if rel.is_empty() {
+                String::new()
+            } else {
+                format!(" ({rel})")
+            };
+            lines.push(format!(
+                "• {name}{rel_tag} — {nfacts} thing(s) I know{}",
+                next.map(|n| format!("; {n}")).unwrap_or_default()
+            ));
         }
         lines.push("\n`ym about <name>` for the full picture on someone.".to_string());
         lines.join("\n")
@@ -555,30 +821,63 @@ impl super::ConversationEngine {
         let q = name.trim().to_lowercase();
         // Exact name first — "Brishti" must never resolve to "Brishti's Mom" by substring accident.
         let exact = store.iter().find(|p| {
-            p.get("name").and_then(|x| x.as_str()).map(|n| n.trim().to_lowercase() == q).unwrap_or(false)
+            p.get("name")
+                .and_then(|x| x.as_str())
+                .map(|n| n.trim().to_lowercase() == q)
+                .unwrap_or(false)
         });
-        let p = match exact.or_else(|| store.iter().find(|p| person_matches(p, &q))) {
-            Some(p) => p,
-            None => return format!("I don't know anyone called \"{}\" yet.", name.trim()),
+        let Some(p) = exact.or_else(|| store.iter().find(|p| person_matches(p, &q))) else {
+            return format!("I don't know anyone called \"{}\" yet.", name.trim());
         };
         let pname = p.get("name").and_then(|x| x.as_str()).unwrap_or("?");
         let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
-        let aliases: Vec<&str> = p.get("aliases").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
-        let nick = if aliases.is_empty() { String::new() } else { format!(" (aka {})", aliases.join(", ")) };
-        let mut out = vec![format!("👤 {pname}{nick}{}", if rel.is_empty() { String::new() } else { format!(" — your {rel}") })];
+        let aliases: Vec<&str> = p
+            .get("aliases")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        let nick = if aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (aka {})", aliases.join(", "))
+        };
+        let mut out = vec![format!(
+            "👤 {pname}{nick}{}",
+            if rel.is_empty() {
+                String::new()
+            } else {
+                format!(" — your {rel}")
+            }
+        )];
         let today = local_now();
-        let dates: Vec<&serde_json::Value> = p.get("dates").and_then(|x| x.as_array()).map(|a| a.iter().collect()).unwrap_or_default();
+        let dates: Vec<&serde_json::Value> = p
+            .get("dates")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().collect())
+            .unwrap_or_default();
         if !dates.is_empty() {
             out.push("\nKey dates:".to_string());
             for d in dates {
                 let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date");
                 let mmdd = d.get("mmdd").and_then(|x| x.as_str()).unwrap_or("");
                 let days = days_until_mmdd(mmdd, &today);
-                let when = days.map(|n| if n == 0 { " (today! 🎉)".to_string() } else { format!(" (in {n} day(s))") }).unwrap_or_default();
+                let when = days
+                    .map(|n| {
+                        if n == 0 {
+                            " (today! 🎉)".to_string()
+                        } else {
+                            format!(" (in {n} day(s))")
+                        }
+                    })
+                    .unwrap_or_default();
                 out.push(format!("  • {label}: {mmdd}{when}"));
             }
         }
-        let facts: Vec<&str> = p.get("facts").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+        let facts: Vec<&str> = p
+            .get("facts")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
+            .unwrap_or_default();
         if facts.is_empty() {
             out.push("\n(I don't have specifics yet — tell me about them.)".to_string());
         } else {
@@ -601,10 +900,17 @@ impl super::ConversationEngine {
         let before = store.len();
         // Word-boundary matching: a short name can't delete an unrelated person via a substring of
         // their name/alias (e.g. "Ana" removing "Susana" or "Anastasia").
-        let removed: Vec<String> = store.iter().filter(|p| person_matches_mode(p, &q, MatchMode::WordBoundary)).filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from)).collect();
+        let removed: Vec<String> = store
+            .iter()
+            .filter(|p| person_matches_mode(p, &q, MatchMode::WordBoundary))
+            .filter_map(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+            .collect();
         store.retain(|p| !person_matches_mode(p, &q, MatchMode::WordBoundary));
         if store.len() == before {
-            return format!("I don't have anyone matching \"{}\" in your family layer.", name.trim());
+            return format!(
+                "I don't have anyone matching \"{}\" in your family layer.",
+                name.trim()
+            );
         }
         self.save_people_profiles(&store).await;
         // Forgetting a person must forget their FACE too — a stale face-name map entry keeps
@@ -617,9 +923,15 @@ impl super::ConversationEngine {
         if faces_dropped > 0 {
             self.save_face_names(&fm).await;
         }
-        let face_note =
-            if faces_dropped > 0 { format!(" Unlinked {faces_dropped} face cluster(s) as well.") } else { String::new() };
-        format!("Forgotten: {}. (Removed from the people I track.){face_note}", removed.join(", "))
+        let face_note = if faces_dropped > 0 {
+            format!(" Unlinked {faces_dropped} face cluster(s) as well.")
+        } else {
+            String::new()
+        };
+        format!(
+            "Forgotten: {}. (Removed from the people I track.){face_note}",
+            removed.join(", ")
+        )
     }
 
     /// `ym rename <old> to <new>` — correct a person's canonical name. The new name becomes canonical
@@ -639,7 +951,10 @@ impl super::ConversationEngine {
         }
         self.save_people_profiles(&store).await;
         let stale = self.beliefs_referencing(&old_q).await;
-        let mut out = format!("Renamed {} → {new}. (\"{old}\" is kept as a nickname so lookups still resolve.)", renamed.join(", "));
+        let mut out = format!(
+            "Renamed {} → {new}. (\"{old}\" is kept as a nickname so lookups still resolve.)",
+            renamed.join(", ")
+        );
         if stale.is_empty() {
             out.push_str("\nNo beliefs still reference the old name — nothing to clean up.");
         } else {
@@ -647,22 +962,44 @@ impl super::ConversationEngine {
             for s in &stale {
                 out.push_str(&format!("\n  • {s}"));
             }
-            out.push_str(&format!("\n\nRun `ym forget-belief {old}` to purge them, or leave them if they still hold."));
+            out.push_str(&format!(
+                "\n\nRun `ym forget-belief {old}` to purge them, or leave them if they still hold."
+            ));
         }
         out
     }
 
     /// Upcoming key dates across everyone, within `within_days`. Returns (name, label, days, mmdd) for
     /// the proactive tick to surface. Rolls each date to its next occurrence from today.
-    pub async fn upcoming_people_dates(&self, within_days: i64) -> Vec<(String, String, i64, String)> {
+    pub async fn upcoming_people_dates(
+        &self,
+        within_days: i64,
+    ) -> Vec<(String, String, i64, String)> {
         let store = self.load_people_profiles().await;
         let today = local_now();
         let mut out = Vec::new();
         for p in &store {
-            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                let label = d.get("label").and_then(|x| x.as_str()).unwrap_or("date").to_string();
-                let mmdd = d.get("mmdd").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let name = p
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            for d in p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let label = d
+                    .get("label")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("date")
+                    .to_string();
+                let mmdd = d
+                    .get("mmdd")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(days) = days_until_mmdd(&mmdd, &today) {
                     if days <= within_days {
                         out.push((name.clone(), label, days, mmdd));
@@ -698,11 +1035,24 @@ impl super::ConversationEngine {
             if !reminded.insert(key) {
                 continue;
             }
-            let when = if days == 0 { "today".to_string() } else { format!("in {days} day(s) ({mmdd})") };
-            out.push(format!("🎂 {name}'s {label} is {when}. Want me to help you plan something?"));
+            let when = if days == 0 {
+                "today".to_string()
+            } else {
+                format!("in {days} day(s) ({mmdd})")
+            };
+            out.push(format!(
+                "🎂 {name}'s {label} is {when}. Want me to help you plan something?"
+            ));
         }
         if !out.is_empty() {
-            let _ = self.memory.profile_set("people_reminded", &serde_json::to_string(&reminded.iter().collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())).await;
+            let _ = self
+                .memory
+                .profile_set(
+                    "people_reminded",
+                    &serde_json::to_string(&reminded.iter().collect::<Vec<_>>())
+                        .unwrap_or_else(|_| "[]".into()),
+                )
+                .await;
         }
         out
     }
@@ -714,7 +1064,8 @@ impl super::ConversationEngine {
         let nq = name.trim().to_lowercase();
         let lq = label.trim().to_lowercase();
         if nq.len() < 2 || lq.len() < 2 {
-            return "Whose date, and which one? e.g. `ym forget-date Aadrisha open house`".to_string();
+            return "Whose date, and which one? e.g. `ym forget-date Aadrisha open house`"
+                .to_string();
         }
         let mut store = self.load_people_profiles().await;
         let mut removed: Option<(String, usize)> = None;
@@ -722,33 +1073,59 @@ impl super::ConversationEngine {
             if !person_matches(p, &nq) {
                 continue;
             }
-            let dates: Vec<serde_json::Value> = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let dates: Vec<serde_json::Value> = p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
             let before = dates.len();
             let kept: Vec<serde_json::Value> = dates
                 .into_iter()
-                .filter(|d| d.get("label").and_then(|x| x.as_str()).map(|l| !l.to_lowercase().contains(&lq)).unwrap_or(true))
+                .filter(|d| {
+                    d.get("label")
+                        .and_then(|x| x.as_str())
+                        .map(|l| !l.to_lowercase().contains(&lq))
+                        .unwrap_or(true)
+                })
                 .collect();
             if kept.len() < before {
-                removed = Some((p.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(), before - kept.len()));
+                removed = Some((
+                    p.get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                    before - kept.len(),
+                ));
                 p["dates"] = serde_json::json!(kept);
             }
         }
         let Some((who, n)) = removed else {
-            return format!("I don't have a \"{}\" date on {}.", label.trim(), name.trim());
+            return format!(
+                "I don't have a \"{}\" date on {}.",
+                label.trim(),
+                name.trim()
+            );
         };
         self.save_people_profiles(&store).await;
         if let Ok(Some(r)) = self.memory.profile_get("people_reminded").await {
             if let Ok(mut v) = serde_json::from_str::<Vec<String>>(&r) {
-                v.retain(|k| !(k.starts_with(&format!("{who}|")) && k.to_lowercase().contains(&lq)));
+                v.retain(|k| {
+                    !(k.starts_with(&format!("{who}|")) && k.to_lowercase().contains(&lq))
+                });
                 let _ = self
                     .memory
-                    .profile_set("people_reminded", &serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()))
+                    .profile_set(
+                        "people_reminded",
+                        &serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()),
+                    )
                     .await;
             }
         }
-        format!("🗑 Removed {n} \"{}\" date(s) from {who}'s profile.", label.trim())
+        format!(
+            "🗑 Removed {n} \"{}\" date(s) from {who}'s profile.",
+            label.trim()
+        )
     }
-
 }
 
 #[cfg(test)]
@@ -775,41 +1152,78 @@ mod gate_tests {
     /// a relevance gate that can drop a name would reintroduce exactly that bug.
     #[test]
     fn every_person_keeps_name_and_relationship_whatever_the_topic() {
-        let out = gate_people(&store(), "the proxmox node1 root disk is full again", &today());
+        let out = gate_people(
+            &store(),
+            "the proxmox node1 root disk is full again",
+            &today(),
+        );
         for who in ["Priya", "Arjun", "Rakesh", "Meera", "Sanjay", "Tara"] {
-            assert!(out.contains(who), "{who} disappeared from an off-topic turn:\n{out}");
+            assert!(
+                out.contains(who),
+                "{who} disappeared from an off-topic turn:\n{out}"
+            );
         }
         assert!(out.contains("your wife") && out.contains("your dentist"));
     }
 
     #[test]
     fn household_keeps_facts_on_an_unrelated_turn() {
-        let out = gate_people(&store(), "the proxmox node1 root disk is full again", &today());
-        assert!(out.contains("allergic to peanuts"), "wife's facts were gated:\n{out}");
-        assert!(out.contains("plays chess"), "son's facts were gated:\n{out}");
+        let out = gate_people(
+            &store(),
+            "the proxmox node1 root disk is full again",
+            &today(),
+        );
+        assert!(
+            out.contains("allergic to peanuts"),
+            "wife's facts were gated:\n{out}"
+        );
+        assert!(
+            out.contains("plays chess"),
+            "son's facts were gated:\n{out}"
+        );
         // ...while the unrelated acquaintances arrive name-only.
-        assert!(!out.contains("golden retrievers"), "off-topic facts survived:\n{out}");
+        assert!(
+            !out.contains("golden retrievers"),
+            "off-topic facts survived:\n{out}"
+        );
         assert!(!out.contains("shuts on wednesdays"));
     }
 
     #[test]
     fn naming_someone_pulls_their_facts_in() {
         let out = gate_people(&store(), "what did Rakesh say about the rollout?", &today());
-        assert!(out.contains("kubernetes migration"), "named person stayed gated:\n{out}");
+        assert!(
+            out.contains("kubernetes migration"),
+            "named person stayed gated:\n{out}"
+        );
     }
 
     #[test]
     fn a_fact_word_in_the_turn_pulls_that_person_in() {
-        let out = gate_people(&store(), "anyone I know living in Berlin these days?", &today());
-        assert!(out.contains("moved to Berlin"), "fact-word match missed:\n{out}");
+        let out = gate_people(
+            &store(),
+            "anyone I know living in Berlin these days?",
+            &today(),
+        );
+        assert!(
+            out.contains("moved to Berlin"),
+            "fact-word match missed:\n{out}"
+        );
     }
 
     /// A gate that silently omits invites the model to fill the hole from imagination. It has to say
     /// it withheld, and say how to get it back.
     #[test]
     fn gating_is_announced_with_the_way_to_undo_it() {
-        let out = gate_people(&store(), "the proxmox node1 root disk is full again", &today());
-        assert!(out.contains("name only") && out.contains("recall"), "silent gate:\n{out}");
+        let out = gate_people(
+            &store(),
+            "the proxmox node1 root disk is full again",
+            &today(),
+        );
+        assert!(
+            out.contains("name only") && out.contains("recall"),
+            "silent gate:\n{out}"
+        );
         assert!(out.contains("never to guess"));
     }
 
@@ -820,14 +1234,26 @@ mod gate_tests {
         s[4]["dates"] = json!([{"label": "birthday", "mmdd": "08-06"}]);
         let out = gate_people(&s, "the proxmox node1 root disk is full again", &today());
         let line = out.lines().find(|l| l.contains("Sanjay")).unwrap();
-        assert!(line.contains("birthday"), "time-critical date got gated away: {line}");
+        assert!(
+            line.contains("birthday"),
+            "time-critical date got gated away: {line}"
+        );
     }
 
     #[test]
     fn the_gate_actually_shrinks_the_block() {
-        let full = gate_people(&store(), "Rakesh Meera Sanjay Tara kubernetes retrievers", &today());
+        let full = gate_people(
+            &store(),
+            "Rakesh Meera Sanjay Tara kubernetes retrievers",
+            &today(),
+        );
         let gated = gate_people(&store(), "disk is full", &today());
-        assert!(gated.len() < full.len(), "no saving: {} vs {}", gated.len(), full.len());
+        assert!(
+            gated.len() < full.len(),
+            "no saving: {} vs {}",
+            gated.len(),
+            full.len()
+        );
     }
 
     #[test]
@@ -839,8 +1265,15 @@ mod gate_tests {
     /// would be decorative.
     #[test]
     fn common_short_words_do_not_make_everyone_relevant() {
-        let out = gate_people(&store(), "can you tell me the one for her and the dog?", &today());
-        assert!(!out.contains("golden retrievers"), "stopword-grade match leaked:\n{out}");
+        let out = gate_people(
+            &store(),
+            "can you tell me the one for her and the dog?",
+            &today(),
+        );
+        assert!(
+            !out.contains("golden retrievers"),
+            "stopword-grade match leaked:\n{out}"
+        );
     }
 
     fn mk(name: &str, rel: &str, fact: &str) -> serde_json::Value {
@@ -862,7 +1295,10 @@ mod gate_tests {
         store.push(mk("Later", "friend", "irrelevant"));
 
         let out = gate_people(&store, "when is Brishti's anniversary?", &day());
-        assert!(out.contains("Brishti"), "the named person must appear at all:\n{out}");
+        assert!(
+            out.contains("Brishti"),
+            "the named person must appear at all:\n{out}"
+        );
         assert!(
             out.contains("wedding anniversary in March"),
             "and NAMING someone must earn their details, wherever they sit in the store:\n{out}"
@@ -874,18 +1310,38 @@ mod gate_tests {
     #[test]
     fn everyone_appears_but_only_a_few_are_detailed() {
         let store: Vec<serde_json::Value> = (0..20)
-            .map(|i| mk(&format!("Person{i}"), "friend", &format!("a distinctive fact about number {i}")))
+            .map(|i| {
+                mk(
+                    &format!("Person{i}"),
+                    "friend",
+                    &format!("a distinctive fact about number {i}"),
+                )
+            })
             .collect();
         let out = gate_people(&store, "tell me about Person17", &day());
 
         for i in 0..20 {
-            assert!(out.contains(&format!("Person{i}")), "Person{i} vanished from the prompt:\n{out}");
+            assert!(
+                out.contains(&format!("Person{i}")),
+                "Person{i} vanished from the prompt:\n{out}"
+            );
         }
-        assert!(out.contains("a distinctive fact about number 17"), "the named one is detailed:\n{out}");
+        assert!(
+            out.contains("a distinctive fact about number 17"),
+            "the named one is detailed:\n{out}"
+        );
         // Most fact tails are withheld, and the prompt says so rather than implying ignorance.
-        let detailed = (0..20).filter(|i| out.contains(&format!("a distinctive fact about number {i}"))).count();
-        assert!(detailed <= PEOPLE_DETAILED + 2, "{detailed} people detailed — the budget is gone");
-        assert!(out.contains("listed by name only"), "the withholding must be stated:\n{out}");
+        let detailed = (0..20)
+            .filter(|i| out.contains(&format!("a distinctive fact about number {i}")))
+            .count();
+        assert!(
+            detailed <= PEOPLE_DETAILED + 2,
+            "{detailed} people detailed — the budget is gone"
+        );
+        assert!(
+            out.contains("listed by name only"),
+            "the withholding must be stated:\n{out}"
+        );
     }
 
     /// A core relation keeps its details unprompted — you should not have to name your own spouse.
@@ -896,6 +1352,9 @@ mod gate_tests {
             .collect();
         store.push(mk("Priya", "wife", "allergic to shellfish"));
         let out = gate_people(&store, "what should we cook tonight?", &day());
-        assert!(out.contains("allergic to shellfish"), "a spouse's facts should not need summoning:\n{out}");
+        assert!(
+            out.contains("allergic to shellfish"),
+            "a spouse's facts should not need summoning:\n{out}"
+        );
     }
 }

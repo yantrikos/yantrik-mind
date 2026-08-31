@@ -30,7 +30,12 @@ pub(crate) struct Setting {
 /// A malformed value is treated as absent rather than as zero. `YM_MAX_STEPS=five` should leave the
 /// default in place, not silently configure a mind that cannot take a single step.
 fn env_u32(key: &str) -> Option<u32> {
-    std::env::var(key).ok()?.trim().parse::<u32>().ok().filter(|n| *n > 0)
+    std::env::var(key)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 fn env_f64(key: &str) -> Option<f64> {
@@ -45,7 +50,7 @@ pub fn agent_budget() -> mind_spec::Budget {
     mind_spec::Budget::interactive().with_overrides(
         env_u32("YM_MAX_STEPS"),
         env_u32("YM_MAX_MODEL_CALLS"),
-        env_u32("YM_MAX_WALL_SECS").map(|s| s as u64 * 1000),
+        env_u32("YM_MAX_WALL_SECS").map(|s| u64::from(s) * 1000),
         env_f64("YM_MAX_USD"),
     )
 }
@@ -124,7 +129,11 @@ pub(crate) const SCHEMA: &[Setting] = &[
 /// Mask a secret to shape-only: presence and length class, never content. (Two credential leaks
 /// this month came from printing "just enough" of a value — the only safe rendering is none.)
 fn mask(v: &str) -> String {
-    if v.is_empty() { "(unset)".into() } else { format!("••• set ({} chars)", v.chars().count()) }
+    if v.is_empty() {
+        "(unset)".into()
+    } else {
+        format!("••• set ({} chars)", v.chars().count())
+    }
 }
 
 impl super::ConversationEngine {
@@ -168,14 +177,28 @@ impl super::ConversationEngine {
             // knob somebody turned outside the panel's sight, and it is shown, not hidden.
             let known: std::collections::HashSet<&str> = SCHEMA.iter().map(|s| s.key).collect();
             let mut unregistered: Vec<(String, String)> = std::env::vars()
-                .filter(|(k, _)| (k.starts_with("YM_") || k.starts_with("YANTRIK") || k.starts_with("NANOGPT") || k.starts_with("OLLAMA")) && !known.contains(k.as_str()))
+                .filter(|(k, _)| {
+                    (k.starts_with("YM_")
+                        || k.starts_with("YANTRIK")
+                        || k.starts_with("NANOGPT")
+                        || k.starts_with("OLLAMA"))
+                        && !known.contains(k.as_str())
+                })
                 .collect();
             unregistered.sort();
             if !unregistered.is_empty() {
-                out.push_str("\nUNREGISTERED OVERRIDES (env the code may read; no schema row lists them):\n");
+                out.push_str(
+                    "\nUNREGISTERED OVERRIDES (env the code may read; no schema row lists them):\n",
+                );
                 for (k, v) in unregistered {
-                    let secretish = ["KEY", "TOKEN", "SECRET", "PASSWORD"].iter().any(|m| k.contains(m));
-                    out.push_str(&format!("  {:<26} {}\n", k, if secretish { mask(&v) } else { v }));
+                    let secretish = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                        .iter()
+                        .any(|m| k.contains(m));
+                    out.push_str(&format!(
+                        "  {:<26} {}\n",
+                        k,
+                        if secretish { mask(&v) } else { v }
+                    ));
                 }
             }
             let b = agent_budget();
@@ -223,10 +246,15 @@ mod tests {
     async fn config_dump_surfaces_unregistered_overrides_and_masks_secrets() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let pool = mind_inference::InferencePool::new(
-            std::sync::Arc::new(mind_inference::ScriptedLLM::new("ok")) as std::sync::Arc<dyn yantrik_ml::LLMBackend>,
+            std::sync::Arc::new(mind_inference::ScriptedLLM::new("ok"))
+                as std::sync::Arc<dyn yantrik_ml::LLMBackend>,
             1,
         );
-        let eng = ConversationEngine::new(std::sync::Arc::new(mem) as std::sync::Arc<dyn mind_types::MemoryFacade>, pool, "JARVIS");
+        let eng = ConversationEngine::new(
+            std::sync::Arc::new(mem) as std::sync::Arc<dyn mind_types::MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
         std::env::set_var("YM_TEST_UNREGISTERED_KNOB", "on");
         std::env::set_var("YM_TEST_UNREGISTERED_KEY", "hunter2hunter2");
         let out = eng.config_panel("dump").await;
@@ -234,11 +262,20 @@ mod tests {
         std::env::remove_var("YM_TEST_UNREGISTERED_KEY");
 
         assert!(out.contains("UNREGISTERED OVERRIDES"), "{out}");
-        assert!(out.contains("YM_TEST_UNREGISTERED_KNOB"), "an off-schema knob must be shown:\n{out}");
+        assert!(
+            out.contains("YM_TEST_UNREGISTERED_KNOB"),
+            "an off-schema knob must be shown:\n{out}"
+        );
         assert!(out.contains("YM_TEST_UNREGISTERED_KEY"), "{out}");
-        assert!(!out.contains("hunter2"), "a secret-shaped value must be masked, never printed:\n{out}");
+        assert!(
+            !out.contains("hunter2"),
+            "a secret-shaped value must be masked, never printed:\n{out}"
+        );
         assert!(out.contains("EFFECTIVE BUDGETS"), "{out}");
-        assert!(out.contains("[default]") || out.contains("[env]"), "every row carries its source:\n{out}");
+        assert!(
+            out.contains("[default]") || out.contains("[env]"),
+            "every row carries its source:\n{out}"
+        );
     }
 
     /// The whole point of the schema is that it can't lie: every key must be one the workspace
@@ -246,26 +283,40 @@ mod tests {
     /// the schema loudly instead of leaving a dead form field.
     #[test]
     fn every_schema_key_is_actually_read_somewhere() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
         let mut haystack = String::new();
         for dir in ["crates", "deploy"] {
             let mut stack = vec![root.join(dir)];
             while let Some(d) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                let Ok(rd) = std::fs::read_dir(&d) else {
+                    continue;
+                };
                 for e in rd.flatten() {
                     let p = e.path();
                     if p.is_dir() {
                         if !p.ends_with("target") {
                             stack.push(p);
                         }
-                    } else if p.extension().map(|x| x == "rs" || x == "sh").unwrap_or(false) {
+                    } else if p
+                        .extension()
+                        .map(|x| x == "rs" || x == "sh")
+                        .unwrap_or(false)
+                    {
                         haystack.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
                     }
                 }
             }
         }
         for s in SCHEMA {
-            assert!(haystack.contains(s.key), "schema key {} is read nowhere in crates/ or deploy/ — dead form field", s.key);
+            assert!(
+                haystack.contains(s.key),
+                "schema key {} is read nowhere in crates/ or deploy/ — dead form field",
+                s.key
+            );
         }
     }
 
@@ -278,19 +329,36 @@ mod tests {
         let prev = std::env::var("YM_MAX_STEPS").ok();
         std::env::remove_var("YM_MAX_STEPS");
         let default = agent_budget();
-        assert_eq!(default.max_steps, 100, "the default must allow real work, not a token gesture");
-        assert_eq!(default.max_model_calls, 100, "the reasoning ceiling must not shadow it");
+        assert_eq!(
+            default.max_steps, 100,
+            "the default must allow real work, not a token gesture"
+        );
+        assert_eq!(
+            default.max_model_calls, 100,
+            "the reasoning ceiling must not shadow it"
+        );
 
         std::env::set_var("YM_MAX_STEPS", "18");
         let raised = agent_budget();
         assert_eq!(raised.max_steps, 18);
-        assert_eq!(raised.max_model_calls, 18, "the reasoning ceiling must rise too or nothing changes");
+        assert_eq!(
+            raised.max_model_calls, 18,
+            "the reasoning ceiling must rise too or nothing changes"
+        );
 
         // Garbage leaves the default in place rather than configuring a mind that cannot move.
         std::env::set_var("YM_MAX_STEPS", "five");
-        assert_eq!(agent_budget().max_steps, 100, "an unparseable value is absent, not zero");
+        assert_eq!(
+            agent_budget().max_steps,
+            100,
+            "an unparseable value is absent, not zero"
+        );
         std::env::set_var("YM_MAX_STEPS", "0");
-        assert_eq!(agent_budget().max_steps, 100, "zero is absent too \u{2014} a 0-step mind is not a configuration");
+        assert_eq!(
+            agent_budget().max_steps,
+            100,
+            "zero is absent too \u{2014} a 0-step mind is not a configuration"
+        );
 
         // Absurd is clamped, and reported rather than silently ignored.
         std::env::set_var("YM_MAX_STEPS", "99999");
@@ -312,28 +380,40 @@ mod tests {
     #[test]
     fn the_clock_and_the_step_count_bind_independently_and_distinguishably() {
         let b = agent_budget();
-        assert!(b.max_wall_ms >= 120_000, "an interactive turn needs at least a couple of minutes");
-        assert!(b.max_wall_ms <= 600_000, "and it is still a promise to whoever is waiting");
+        assert!(
+            b.max_wall_ms >= 120_000,
+            "an interactive turn needs at least a couple of minutes"
+        );
+        assert!(
+            b.max_wall_ms <= 600_000,
+            "and it is still a promise to whoever is waiting"
+        );
 
         // Each limit reports its own reason, so neither is mistaken for the other.
         use mind_spec::{Capsule, Controller, ReasonCode, StepOutcome};
         let ctl = Controller::default();
         let contract = mind_spec::Contract {
             requirements: vec![],
-            completion: mind_spec::CompletionCriteria { min_findings: 99, require_full_coverage: false, ..Default::default() },
+            completion: mind_spec::CompletionCriteria {
+                min_findings: 99,
+                require_full_coverage: false,
+                ..Default::default()
+            },
             output: Default::default(),
         };
 
         let mut out_of_steps = Capsule::new("g", "goal");
         out_of_steps.progress.steps = b.max_steps;
         assert_eq!(
-            ctl.decide(&out_of_steps, &contract, &b, 0, StepOutcome::default()).reason(),
+            ctl.decide(&out_of_steps, &contract, &b, 0, StepOutcome::default())
+                .reason(),
             Some(ReasonCode::StepBudget)
         );
 
         let fresh = Capsule::new("g", "goal");
         assert_eq!(
-            ctl.decide(&fresh, &contract, &b, b.max_wall_ms, StepOutcome::default()).reason(),
+            ctl.decide(&fresh, &contract, &b, b.max_wall_ms, StepOutcome::default())
+                .reason(),
             Some(ReasonCode::Timeout)
         );
     }
@@ -349,7 +429,10 @@ mod tests {
     fn delegated_work_has_a_separate_larger_cap() {
         let interactive = mind_spec::Budget::interactive();
         let delegated = mind_spec::Budget::background();
-        assert!(delegated.max_steps > interactive.max_steps, "delegated runs are not held to an interactive cap");
+        assert!(
+            delegated.max_steps > interactive.max_steps,
+            "delegated runs are not held to an interactive cap"
+        );
         assert!(delegated.max_wall_ms > interactive.max_wall_ms);
     }
 

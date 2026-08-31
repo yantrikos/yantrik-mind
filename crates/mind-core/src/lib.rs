@@ -10,8 +10,9 @@ use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 
-pub mod telegram;
 pub mod setup;
+pub mod telegram;
+pub mod wallet_setup;
 
 /// Parse the two conflicting belief statements from a Contradiction tension's `about` field.
 /// Handles both formats emitted by the memory layer:
@@ -22,7 +23,9 @@ fn parse_contradiction_beliefs(about: &str) -> Option<(String, String)> {
     let (a, b) = s.split_once(" vs ")?;
     let a = a.trim().trim_matches('"').to_string();
     let b = b.trim().trim_matches('"').to_string();
-    if a.is_empty() || b.is_empty() { return None; }
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
     Some((a, b))
 }
 
@@ -65,7 +68,11 @@ const HELP_TEXT: &str = "\
 ///   `:explain <statement>`                                  show a belief + its evidence count
 ///   `:help` / `:commands`                                   print every command with a one-line description
 ///   `:quit`
-pub async fn handle_line(line: &str, mem: &MemoryHandle, conv: &Arc<ConversationEngine>) -> Outcome {
+pub async fn handle_line(
+    line: &str,
+    mem: &MemoryHandle,
+    conv: &Arc<ConversationEngine>,
+) -> Outcome {
     // The local `ym` REPL is the trusted owner console — the ONE place the explicit
     // operator capability is minted for interactive commands (ARCH-1).
     handle_line_as(
@@ -98,7 +105,11 @@ pub async fn handle_line_as(
     let t: &str = if let Some(body) = raw.strip_prefix('/') {
         let (cmd, rest) = body.split_once(' ').unwrap_or((body, ""));
         let cmd = cmd.split('@').next().unwrap_or(cmd);
-        owned = if rest.is_empty() { format!(":{cmd}") } else { format!(":{cmd} {rest}") };
+        owned = if rest.is_empty() {
+            format!(":{cmd}")
+        } else {
+            format!(":{cmd} {rest}")
+        };
         &owned
     } else {
         raw
@@ -111,7 +122,9 @@ pub async fn handle_line_as(
     }
     if t == ":consolidate" {
         let n = conv.consolidate().await;
-        return Outcome::Said(format!("consolidated {n} durable belief(s) from recent turns"));
+        return Outcome::Said(format!(
+            "consolidated {n} durable belief(s) from recent turns"
+        ));
     }
     if t == ":workers" {
         return Outcome::Said(conv.workers_status().await);
@@ -126,11 +139,31 @@ pub async fn handle_line_as(
     }
     if let Some(query) = t.strip_prefix(":beliefs") {
         let query = query.trim();
-        return match mem.recall_typed(RecallQuery { text: query.to_string(), top_k: 10, kind: None }, ctx).await {
+        return match mem
+            .recall_typed(
+                RecallQuery {
+                    text: query.to_string(),
+                    top_k: 10,
+                    kind: None,
+                },
+                ctx,
+            )
+            .await
+        {
             Ok(rs) if rs.is_empty() => Outcome::Said("(no beliefs stored)".into()),
             Ok(mut rs) => {
-                rs.sort_by(|a, b| b.item.confidence.partial_cmp(&a.item.confidence).unwrap_or(std::cmp::Ordering::Equal));
-                Outcome::Said(rs.iter().map(|r| format!("• {} ({:.2})", r.item.text, r.item.confidence)).collect::<Vec<_>>().join("\n"))
+                rs.sort_by(|a, b| {
+                    b.item
+                        .confidence
+                        .partial_cmp(&a.item.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                Outcome::Said(
+                    rs.iter()
+                        .map(|r| format!("• {} ({:.2})", r.item.text, r.item.confidence))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
             }
             Err(e) => Outcome::Said(format!("(error: {e})")),
         };
@@ -195,7 +228,12 @@ pub async fn handle_line_as(
             Ok(cs) if cs.is_empty() => Outcome::Said("(no open contradictions)".into()),
             Ok(cs) => Outcome::Said(
                 cs.iter()
-                    .map(|c| format!("• \"{}\" ⟂ \"{}\" (severity {:.2})", c.belief_a, c.belief_b, c.severity))
+                    .map(|c| {
+                        format!(
+                            "• \"{}\" ⟂ \"{}\" (severity {:.2})",
+                            c.belief_a, c.belief_b, c.severity
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
@@ -224,8 +262,20 @@ pub async fn handle_line_as(
             return Outcome::Said(format!("(could not parse beliefs from tension: {about})"));
         };
         // Weaken the less-confident side so the contradiction resolves.
-        let conf_a = mem.explain_belief(&belief_a, ctx).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
-        let conf_b = mem.explain_belief(&belief_b, ctx).await.ok().flatten().map(|(b, _)| b.confidence).unwrap_or(0.5);
+        let conf_a = mem
+            .explain_belief(&belief_a, ctx)
+            .await
+            .ok()
+            .flatten()
+            .map(|(b, _)| b.confidence)
+            .unwrap_or(0.5);
+        let conf_b = mem
+            .explain_belief(&belief_b, ctx)
+            .await
+            .ok()
+            .flatten()
+            .map(|(b, _)| b.confidence)
+            .unwrap_or(0.5);
         let weaker = if conf_a <= conf_b { belief_a } else { belief_b };
         let result = mem
             .remember_as_belief(BeliefAssertion {
@@ -242,14 +292,19 @@ pub async fn handle_line_as(
                 "resolved: weakened \"{}\" (confidence now {:.2}), tension discharged",
                 b.statement, b.confidence
             )),
-            Err(e) => Outcome::Said(format!("(could not weaken belief: {e}; tension discharged)")),
+            Err(e) => Outcome::Said(format!(
+                "(could not weaken belief: {e}; tension discharged)"
+            )),
         };
     }
     if let Some(stmt) = t.strip_prefix(":explain ") {
         return match mem.explain_belief(stmt.trim(), ctx).await {
             Ok(Some((b, ev))) => Outcome::Said(format!(
                 "{} — confidence {:.2}, {} evidence item(s), provenance {}",
-                b.statement, b.confidence, ev.len().max(b.evidence_count as usize), b.provenance
+                b.statement,
+                b.confidence,
+                ev.len().max(b.evidence_count as usize),
+                b.provenance
             )),
             Ok(None) => Outcome::Said("(no such belief)".into()),
             Err(e) => Outcome::Said(format!("(error: {e})")),
@@ -316,7 +371,10 @@ pub async fn handle_line_as(
             })
             .await
         {
-            Ok(b) => Outcome::Said(format!("remembered: {} (confidence now {:.2})", b.statement, b.confidence)),
+            Ok(b) => Outcome::Said(format!(
+                "remembered: {} (confidence now {:.2})",
+                b.statement, b.confidence
+            )),
             Err(e) => Outcome::Said(format!("(error: {e})")),
         };
     }
@@ -337,21 +395,28 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
 
     // Shared read capabilities (used by both chat grounding and recipes).
     // Gmail needs a 16-char App Password; a non-standard IMAP host can be set with YM_IMAP_HOST.
-    let mail_read: Option<Arc<dyn mind_tools::MailClient>> =
-        match (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
-            (Ok(addr), Ok(pw)) if !addr.is_empty() && !pw.is_empty() => match std::env::var("YM_IMAP_HOST") {
+    let mail_read: Option<Arc<dyn mind_tools::MailClient>> = match (
+        std::env::var("YM_EMAIL"),
+        std::env::var("YM_EMAIL_PASSWORD"),
+    ) {
+        (Ok(addr), Ok(pw)) if !addr.is_empty() && !pw.is_empty() => {
+            match std::env::var("YM_IMAP_HOST") {
                 Ok(host) if !host.is_empty() => {
-                    Some(Arc::new(mind_tools::ImapClient::new(host, 993, addr, pw)) as Arc<dyn mind_tools::MailClient>)
+                    Some(Arc::new(mind_tools::ImapClient::new(host, 993, addr, pw))
+                        as Arc<dyn mind_tools::MailClient>)
                 }
                 _ => mind_tools::ImapClient::for_address(&addr, pw)
                     .map(|c| Arc::new(c) as Arc<dyn mind_tools::MailClient>),
-            },
-            _ => None,
-        };
-    let gh_token = std::env::var("YM_GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
-    let github_read: Option<Arc<dyn mind_tools::GithubClient>> = gh_token
-        .as_ref()
-        .map(|t| Arc::new(mind_tools::ApiGithubClient::new(t.clone())) as Arc<dyn mind_tools::GithubClient>);
+            }
+        }
+        _ => None,
+    };
+    let gh_token = std::env::var("YM_GITHUB_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    let github_read: Option<Arc<dyn mind_tools::GithubClient>> = gh_token.as_ref().map(|t| {
+        Arc::new(mind_tools::ApiGithubClient::new(t.clone())) as Arc<dyn mind_tools::GithubClient>
+    });
 
     // Per-function model routing: pin a role (chat/research/util/…) to a provider:model via
     // YM_ROLE_<ROLE> (e.g. YM_ROLE_RESEARCH=ollama-cloud:kimi-k2.7); unset roles use the default
@@ -364,10 +429,16 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // Web search backend: a self-hosted SearXNG instance (YM_SEARXNG_URL) when available — aggregates
     // many engines, no bot-challenge/rate-limit, indexes sites our direct fetch can't reach — with
     // keyless DuckDuckGo as the fallback. Falls back to plain DDG when no instance is configured.
-    let searcher: Arc<dyn mind_tools::WebSearch> = match std::env::var("YM_SEARXNG_URL").ok().filter(|u| !u.trim().is_empty()) {
+    let searcher: Arc<dyn mind_tools::WebSearch> = match std::env::var("YM_SEARXNG_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+    {
         Some(url) => {
             eprintln!("[search] using SearXNG at {url} (DDG fallback)");
-            Arc::new(mind_tools::SearxngSearch::new(url).with_fallback(Arc::new(mind_tools::DdgSearch::new())))
+            Arc::new(
+                mind_tools::SearxngSearch::new(url)
+                    .with_fallback(Arc::new(mind_tools::DdgSearch::new())),
+            )
         }
         None => Arc::new(mind_tools::DdgSearch::new()),
     };
@@ -376,7 +447,9 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.
-        .with_recorder(Arc::new(mind_observability::DecisionLog::for_db(mem.db_path())))
+        .with_recorder(Arc::new(mind_observability::DecisionLog::for_db(
+            mem.db_path(),
+        )))
         .with_web(Arc::new(mind_tools::HttpFetcher::new()))
         .with_searcher(searcher.clone()) // SearXNG (or DDG) — the discovery half of research
         .with_news(Arc::new(mind_tools::GoogleNews::new())) // keyless news, always on
@@ -385,10 +458,16 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_markets(Arc::new(mind_tools::LiveMarkets::new())) // keyless crypto + stock quotes
         .with_translator(Arc::new(mind_tools::GoogleTranslate::new())) // keyless translation
         // Declarative plugin manifest: enable/disable + security level, no code edits. Toggles persist.
-        .with_plugins_manifest(std::env::var("YM_PLUGINS_CONFIG").unwrap_or_else(|_| "/var/lib/yantrik-mind/plugins.json".to_string()))
+        .with_plugins_manifest(
+            std::env::var("YM_PLUGINS_CONFIG")
+                .unwrap_or_else(|_| "/var/lib/yantrik-mind/plugins.json".to_string()),
+        )
         // Installed capability packs survive restarts (certified ones come back enabled), and
         // certification verdicts land on the trust ledger when YM_WEFT_URL/KEY are set.
-        .with_packs_path(std::env::var("YM_PACKS_CONFIG").unwrap_or_else(|_| "/var/lib/yantrik-mind/packs.json".to_string()))
+        .with_packs_path(
+            std::env::var("YM_PACKS_CONFIG")
+                .unwrap_or_else(|_| "/var/lib/yantrik-mind/packs.json".to_string()),
+        )
         .with_weft_from_env();
     if let Some(m) = &mail_read {
         eng = eng.with_mail(m.clone());
@@ -398,19 +477,33 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // custom-domain IMAP hosts via YM_SCAN_HOST[_n]. Gmail/Yahoo need app passwords.
     for n in 1..=6u8 {
         let (ke, kp, kh) = if n == 1 {
-            ("YM_SCAN_EMAIL".to_string(), "YM_SCAN_PASSWORD".to_string(), "YM_SCAN_HOST".to_string())
+            (
+                "YM_SCAN_EMAIL".to_string(),
+                "YM_SCAN_PASSWORD".to_string(),
+                "YM_SCAN_HOST".to_string(),
+            )
         } else {
-            (format!("YM_SCAN_EMAIL_{n}"), format!("YM_SCAN_PASSWORD_{n}"), format!("YM_SCAN_HOST_{n}"))
+            (
+                format!("YM_SCAN_EMAIL_{n}"),
+                format!("YM_SCAN_PASSWORD_{n}"),
+                format!("YM_SCAN_HOST_{n}"),
+            )
         };
-        let (Ok(addr), Ok(pw)) = (std::env::var(&ke), std::env::var(&kp)) else { continue };
+        let (Ok(addr), Ok(pw)) = (std::env::var(&ke), std::env::var(&kp)) else {
+            continue;
+        };
         if addr.is_empty() || pw.is_empty() {
             continue;
         }
         let client: Option<Arc<dyn mind_tools::MailClient>> = match std::env::var(&kh) {
             Ok(host) if !host.is_empty() => {
-                Some(Arc::new(mind_tools::ImapClient::new(host, 993, addr.clone(), pw)) as Arc<dyn mind_tools::MailClient>)
+                Some(
+                    Arc::new(mind_tools::ImapClient::new(host, 993, addr.clone(), pw))
+                        as Arc<dyn mind_tools::MailClient>,
+                )
             }
-            _ => mind_tools::ImapClient::for_address(&addr, pw).map(|c| Arc::new(c) as Arc<dyn mind_tools::MailClient>),
+            _ => mind_tools::ImapClient::for_address(&addr, pw)
+                .map(|c| Arc::new(c) as Arc<dyn mind_tools::MailClient>),
         };
         if let Some(c) = client {
             eprintln!("[mail] scan inbox connected: {addr}");
@@ -423,8 +516,12 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // Smart-home awareness (Home Assistant): read-only entity states, when YM_HA_URL + YM_HA_TOKEN
     // are set. The first domain of the full-life world-model; control comes later, harm-gated.
     if let (Some(url), Some(tok)) = (
-        std::env::var("YM_HA_URL").ok().filter(|u| !u.trim().is_empty()),
-        std::env::var("YM_HA_TOKEN").ok().filter(|t| !t.trim().is_empty()),
+        std::env::var("YM_HA_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty()),
+        std::env::var("YM_HA_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty()),
     ) {
         eng = eng.with_home(Arc::new(mind_tools::ApiHomeAssistantClient::new(url, tok)));
     }
@@ -436,7 +533,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // tools then run freely in the agent loop; mutating tools are gated (no un-gated write path).
     let mut mcp_hub: Option<Arc<mind_tools::McpHub>> = None;
     {
-        let path = std::env::var("YM_MCP_CONFIG").unwrap_or_else(|_| "/etc/yantrik-mind/mcp.json".to_string());
+        let path = std::env::var("YM_MCP_CONFIG")
+            .unwrap_or_else(|_| "/etc/yantrik-mind/mcp.json".to_string());
         if let Ok(raw) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(v) => {
@@ -460,14 +558,19 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // transport (email send and/or github comment) is configured. Every action rides the harm-gate.
     let mut executor = mind_tools::ToolActionExecutor::new();
     let mut granted: Vec<mind_types::Capability> = Vec::new();
-    if let (Ok(addr), Ok(pw)) = (std::env::var("YM_EMAIL"), std::env::var("YM_EMAIL_PASSWORD")) {
+    if let (Ok(addr), Ok(pw)) = (
+        std::env::var("YM_EMAIL"),
+        std::env::var("YM_EMAIL_PASSWORD"),
+    ) {
         if !addr.is_empty() && !pw.is_empty() {
-            executor = executor.with_mail_sender(Arc::new(mind_tools::SmtpMailSender::for_address(&addr, pw)));
+            executor = executor
+                .with_mail_sender(Arc::new(mind_tools::SmtpMailSender::for_address(&addr, pw)));
             granted.push(mind_types::Capability::SendMessage);
         }
     }
     if let Some(token) = &gh_token {
-        executor = executor.with_github_writer(Arc::new(mind_tools::ApiGithubClient::new(token.clone())));
+        executor =
+            executor.with_github_writer(Arc::new(mind_tools::ApiGithubClient::new(token.clone())));
         if !granted.contains(&mind_types::Capability::SendMessage) {
             granted.push(mind_types::Capability::SendMessage);
         }
@@ -482,11 +585,14 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // The HOME HAND — granted only when BOTH the HA connection and an explicit entity allowlist
     // exist. No allowlist, no hand: the writer isn't even constructed, and the executor would
     // fail-closed anyway. Two layers, same policy.
-    if let (Ok(url), Ok(tok), Ok(allow)) =
-        (std::env::var("YM_HA_URL"), std::env::var("YM_HA_TOKEN"), std::env::var("YM_HA_ACTIONS_ALLOW"))
-    {
+    if let (Ok(url), Ok(tok), Ok(allow)) = (
+        std::env::var("YM_HA_URL"),
+        std::env::var("YM_HA_TOKEN"),
+        std::env::var("YM_HA_ACTIONS_ALLOW"),
+    ) {
         if !url.is_empty() && !tok.is_empty() && !allow.trim().is_empty() {
-            executor = executor.with_home_writer(Arc::new(mind_tools::ApiHomeAssistantClient::new(url, tok)));
+            executor = executor
+                .with_home_writer(Arc::new(mind_tools::ApiHomeAssistantClient::new(url, tok)));
             if !granted.contains(&mind_types::Capability::Network) {
                 granted.push(mind_types::Capability::Network);
             }
@@ -511,9 +617,15 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // gets an in-memory broker. Shared by the agent loop AND the recipe/sub-agent host.
     let egress_dir = std::env::var("YM_DB")
         .ok()
-        .and_then(|p| std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string()))
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+        })
         .filter(|d| !d.is_empty());
-    let egress_persist = std::env::var("YM_DB").map(|d| !d.is_empty() && d != ":memory:").unwrap_or(false);
+    let egress_persist = std::env::var("YM_DB")
+        .map(|d| !d.is_empty() && d != ":memory:")
+        .unwrap_or(false);
     let egress = Arc::new(mind_governance::egress::EgressBroker::open(
         egress_dir.clone().unwrap_or_else(|| ".".to_string()),
         egress_persist,
@@ -523,9 +635,13 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // Shared tool host: recipe Tool steps + sub-agent tool calls both go through it. Includes web
     // research tools (keyless DuckDuckGo search + SSRF-guarded fetch) and the egress broker.
     let host: Arc<dyn mind_recipes::RecipeHost> = Arc::new(
-        mind_conversation::MindRecipeHost::new(mail_read.clone(), github_read.clone(), memory.clone())
-            .with_web(Arc::new(mind_tools::HttpFetcher::new()), searcher.clone())
-            .with_egress(egress.clone()),
+        mind_conversation::MindRecipeHost::new(
+            mail_read.clone(),
+            github_read.clone(),
+            memory.clone(),
+        )
+        .with_web(Arc::new(mind_tools::HttpFetcher::new()), searcher.clone())
+        .with_egress(egress.clone()),
     );
 
     // A research sub-agent: web search + fetch + the mind's own read tools. Bounded ReAct, read-only.
@@ -546,7 +662,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
 
     // Recipe engine: citation-validated, adaptive workflows over the read capabilities. Gets the same
     // harm-gated runtime (for Act steps) and a durable store (persistence + crash recovery).
-    let mut recipe_engine = mind_recipes::RecipeEngine::new(util_pool, host.clone(), persona.clone());
+    let mut recipe_engine =
+        mind_recipes::RecipeEngine::new(util_pool, host.clone(), persona.clone());
     if let Some(rt) = &runtime {
         recipe_engine = recipe_engine.with_runtime(rt.clone());
     }
@@ -563,7 +680,11 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // Masks the mind's own state dir so sandboxed code can't read/corrupt the DB.
     let state_dir = std::env::var("YM_DB")
         .ok()
-        .and_then(|p| std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string()))
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+        })
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| "/var/lib/yantrik-mind".to_string());
     eng = eng.with_sandbox(Arc::new(mind_tools::Sandbox::new().hiding(state_dir)));
@@ -578,13 +699,23 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // the same fleet idea as the nightly builder's YM_BUILDER. Needs the `claude` CLI present.
     // Isolated scratch under the service user's home; secret-stripped child env.
     if mind_tools::Coder::available() {
-        let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|t| !t.trim().is_empty());
-        let minimax = std::env::var("MINIMAX_API_KEY").ok().filter(|k| !k.trim().is_empty());
-        let qwen = std::env::var("QWEN_API_KEY").ok().filter(|k| !k.trim().is_empty());
-        let scratch = std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
+        let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty());
+        let minimax = std::env::var("MINIMAX_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty());
+        let qwen = std::env::var("QWEN_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty());
+        let scratch =
+            std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
         // Unset keeps the historical behaviour EXACTLY: Max-plan OAuth when present, else MiniMax.
         // Naming a provider is what makes the choice explicit and reproducible.
-        let provider = std::env::var("YM_CODER_PROVIDER").unwrap_or_default().trim().to_lowercase();
+        let provider = std::env::var("YM_CODER_PROVIDER")
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase();
         let coder = match provider.as_str() {
             // QwenCloud token-plan, on the SAME endpoint the nightly qwen builder already uses, so
             // both wings run the identical model. The host matters: the documented dashscope-intl
@@ -592,7 +723,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
             // HOUSEHOLD LANE ONLY, like every cloud provider here: it must never serve a
             // private-grounded turn. Delegated building is household work, so this is in bounds.
             "qwen" => qwen.map(|key| {
-                let model = std::env::var("YM_QWEN_MODEL").unwrap_or_else(|_| "qwen3.8-max".to_string());
+                let model =
+                    std::env::var("YM_QWEN_MODEL").unwrap_or_else(|_| "qwen3.8-max".to_string());
                 mind_tools::Coder::new(
                     key,
                     model,
@@ -601,13 +733,15 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
                 )
             }),
             "minimax" => minimax.clone().map(|key| {
-                let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
+                let model =
+                    std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
                 mind_tools::Coder::new(key, model, "https://api.minimax.io/anthropic", scratch)
             }),
             // "claude", or unset. MiniMax stays configured underneath as the fallback the coder
             // itself drops to when a revoked OAuth token is rejected mid-run.
             _ => (oauth.is_some() || minimax.is_some()).then(|| {
-                let model = std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
+                let model =
+                    std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
                 let c = mind_tools::Coder::new(
                     minimax.clone().unwrap_or_default(),
                     model,
@@ -653,9 +787,18 @@ mod tests {
         let conv = Arc::new(engine(&mem, pool).with_agent_primary(false));
 
         // assert two contradicting beliefs + a link via the REPL
-        assert!(matches!(handle_line(":remember + Pranab likes coffee", &mem, &conv).await, Outcome::Said(s) if s.contains("confidence")));
+        assert!(
+            matches!(handle_line(":remember + Pranab likes coffee", &mem, &conv).await, Outcome::Said(s) if s.contains("confidence"))
+        );
         handle_line(":remember + Pranab hates coffee", &mem, &conv).await;
-        mem.relate("Pranab likes coffee", "Pranab hates coffee", "contradicts", 0.9).await.unwrap();
+        mem.relate(
+            "Pranab likes coffee",
+            "Pranab hates coffee",
+            "contradicts",
+            0.9,
+        )
+        .await
+        .unwrap();
 
         // :conflicts surfaces it
         match handle_line(":conflicts", &mem, &conv).await {
@@ -668,10 +811,16 @@ mod tests {
             Outcome::Said(s) => assert_eq!(s, "ok"),
             _ => panic!("expected reply"),
         }
-        assert!(scripted.last_system_prompt().contains("coffee"), "chat should be grounded in memory");
+        assert!(
+            scripted.last_system_prompt().contains("coffee"),
+            "chat should be grounded in memory"
+        );
 
         // :quit
-        assert!(matches!(handle_line(":quit", &mem, &conv).await, Outcome::Quit));
+        assert!(matches!(
+            handle_line(":quit", &mem, &conv).await,
+            Outcome::Quit
+        ));
     }
 
     /// ARCH-1 slice 2 acceptance — the REPL commands were the loudest bypass sol found:
@@ -689,54 +838,145 @@ mod tests {
 
         let secret = "The safe combination is 47-12-33";
         mem.remember_as_belief_scoped(
-            mind_types::BeliefAssertion { statement: secret.into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            mind_types::BeliefAssertion {
+                statement: secret.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            },
             Scope::primary(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         mem.remember_as_belief_scoped(
-            mind_types::BeliefAssertion { statement: "Dinner on Friday is at seven".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            mind_types::BeliefAssertion {
+                statement: "Dinner on Friday is at seven".into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            },
             Scope::Shared,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let member_id = mind_conversation::TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
-        let member_ctx = AccessContext::principal(member_id.viewer(), mind_types::Purpose::conversation(&member_id.owner));
+        let member_id = mind_conversation::TurnIdentity::new(
+            "asha",
+            false,
+            mind_types::OutputScope::HouseholdMember,
+        );
+        let member_ctx = AccessContext::principal(
+            member_id.viewer(),
+            mind_types::Purpose::conversation(&member_id.owner),
+        );
 
         // :beliefs — filtered list; shared visible, secret absent
-        match handle_line_as(":beliefs safe combination", &mem, &conv, member_id.clone(), &member_ctx).await {
-            Outcome::Said(s) => assert!(!s.contains("47-12-33"), "MEMBER :beliefs leaked the secret: {s}"),
+        match handle_line_as(
+            ":beliefs safe combination",
+            &mem,
+            &conv,
+            member_id.clone(),
+            &member_ctx,
+        )
+        .await
+        {
+            Outcome::Said(s) => assert!(
+                !s.contains("47-12-33"),
+                "MEMBER :beliefs leaked the secret: {s}"
+            ),
             _ => panic!("expected output"),
         }
-        match handle_line_as(":beliefs dinner", &mem, &conv, member_id.clone(), &member_ctx).await {
-            Outcome::Said(s) => assert!(s.contains("Dinner on Friday"), "member :beliefs must keep shared facts: {s}"),
+        match handle_line_as(
+            ":beliefs dinner",
+            &mem,
+            &conv,
+            member_id.clone(),
+            &member_ctx,
+        )
+        .await
+        {
+            Outcome::Said(s) => assert!(
+                s.contains("Dinner on Friday"),
+                "member :beliefs must keep shared facts: {s}"
+            ),
             _ => panic!("expected output"),
         }
         // :reflect — filtered reflection
-        match handle_line_as(":reflect safe combination", &mem, &conv, member_id.clone(), &member_ctx).await {
-            Outcome::Said(s) => assert!(!s.contains("47-12-33"), "MEMBER :reflect leaked the secret: {s}"),
+        match handle_line_as(
+            ":reflect safe combination",
+            &mem,
+            &conv,
+            member_id.clone(),
+            &member_ctx,
+        )
+        .await
+        {
+            Outcome::Said(s) => assert!(
+                !s.contains("47-12-33"),
+                "MEMBER :reflect leaked the secret: {s}"
+            ),
             _ => panic!("expected output"),
         }
         // :explain — out-of-scope belief indistinguishable from absent
-        match handle_line_as(&format!(":explain {secret}"), &mem, &conv, member_id.clone(), &member_ctx).await {
-            Outcome::Said(s) => assert!(s.contains("no such belief"), "MEMBER :explain leaked the secret: {s}"),
+        match handle_line_as(
+            &format!(":explain {secret}"),
+            &mem,
+            &conv,
+            member_id.clone(),
+            &member_ctx,
+        )
+        .await
+        {
+            Outcome::Said(s) => assert!(
+                s.contains("no such belief"),
+                "MEMBER :explain leaked the secret: {s}"
+            ),
             _ => panic!("expected output"),
         }
         // :conflicts — a secret-referencing contradiction stays invisible
         mem.remember_as_belief_scoped(
-            mind_types::BeliefAssertion { statement: "The safe combination is 51-09-27".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            mind_types::BeliefAssertion {
+                statement: "The safe combination is 51-09-27".into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            },
             Scope::primary(),
-        ).await.unwrap();
-        mem.relate(secret, "The safe combination is 51-09-27", "contradicts", 0.9).await.unwrap();
+        )
+        .await
+        .unwrap();
+        mem.relate(
+            secret,
+            "The safe combination is 51-09-27",
+            "contradicts",
+            0.9,
+        )
+        .await
+        .unwrap();
         match handle_line_as(":conflicts", &mem, &conv, member_id.clone(), &member_ctx).await {
-            Outcome::Said(s) => assert!(!s.contains("safe combination"), "MEMBER :conflicts leaked the secret: {s}"),
+            Outcome::Said(s) => assert!(
+                !s.contains("safe combination"),
+                "MEMBER :conflicts leaked the secret: {s}"
+            ),
             _ => panic!("expected output"),
         }
         // :patterns — bulk mining refused for principals
         match handle_line_as(":patterns", &mem, &conv, member_id.clone(), &member_ctx).await {
-            Outcome::Said(s) => assert!(s.contains("owner-console"), ":patterns must be operator-only: {s}"),
+            Outcome::Said(s) => assert!(
+                s.contains("owner-console"),
+                ":patterns must be operator-only: {s}"
+            ),
             _ => panic!("expected output"),
         }
         // The owner console (operator ctx) retains everything.
         match handle_line(":explain The safe combination is 47-12-33", &mem, &conv).await {
-            Outcome::Said(s) => assert!(s.contains("confidence"), "operator :explain must still work: {s}"),
+            Outcome::Said(s) => assert!(
+                s.contains("confidence"),
+                "operator :explain must still work: {s}"
+            ),
             _ => panic!("expected output"),
         }
     }
@@ -749,7 +989,9 @@ mod tests {
         let conv = Arc::new(engine(&mem, pool));
 
         // no beliefs yet
-        assert!(matches!(handle_line(":beliefs", &mem, &conv).await, Outcome::Said(s) if s.contains("no beliefs")));
+        assert!(
+            matches!(handle_line(":beliefs", &mem, &conv).await, Outcome::Said(s) if s.contains("no beliefs"))
+        );
 
         // assert a belief and check it appears in :beliefs
         handle_line(":remember + sky is blue", &mem, &conv).await;
@@ -760,7 +1002,10 @@ mod tests {
 
         // query filter
         match handle_line(":beliefs sky", &mem, &conv).await {
-            Outcome::Said(s) => assert!(s.contains("sky is blue"), ":beliefs <query> should filter: {s}"),
+            Outcome::Said(s) => assert!(
+                s.contains("sky is blue"),
+                ":beliefs <query> should filter: {s}"
+            ),
             _ => panic!("expected output"),
         }
     }
@@ -775,10 +1020,19 @@ mod tests {
         // empty memory → four sections, nothing in beliefs
         match handle_line(":reflect", &mem, &conv).await {
             Outcome::Said(s) => {
-                assert!(s.contains("## what I believe"), "missing belief section: {s}");
-                assert!(s.contains("## uncertain / contradicted"), "missing uncertain section: {s}");
+                assert!(
+                    s.contains("## what I believe"),
+                    "missing belief section: {s}"
+                );
+                assert!(
+                    s.contains("## uncertain / contradicted"),
+                    "missing uncertain section: {s}"
+                );
                 assert!(s.contains("## goals"), "missing goals section: {s}");
-                assert!(s.contains("## preferences"), "missing preferences section: {s}");
+                assert!(
+                    s.contains("## preferences"),
+                    "missing preferences section: {s}"
+                );
                 assert!(s.contains("(none)"), "should report no beliefs yet: {s}");
             }
             _ => panic!("expected Outcome::Said"),
@@ -788,7 +1042,10 @@ mod tests {
         handle_line(":remember + I prefer concise answers", &mem, &conv).await;
         match handle_line(":reflect", &mem, &conv).await {
             Outcome::Said(s) => {
-                assert!(s.contains("concise answers"), "belief should appear in reflection: {s}");
+                assert!(
+                    s.contains("concise answers"),
+                    "belief should appear in reflection: {s}"
+                );
             }
             _ => panic!("expected Outcome::Said"),
         }
@@ -796,18 +1053,31 @@ mod tests {
         // optional topic argument is forwarded (belief still surfaces when topic overlaps)
         match handle_line(":reflect concise", &mem, &conv).await {
             Outcome::Said(s) => {
-                assert!(s.contains("concise"), ":reflect <topic> should surface related belief: {s}");
+                assert!(
+                    s.contains("concise"),
+                    ":reflect <topic> should surface related belief: {s}"
+                );
             }
             _ => panic!("expected Outcome::Said"),
         }
 
         // store a goal and a preference, then verify they appear in :reflect
-        assert!(matches!(handle_line(":goal be helpful and honest", &mem, &conv).await, Outcome::Said(s) if s.contains("stored")));
-        assert!(matches!(handle_line(":prefer concise responses", &mem, &conv).await, Outcome::Said(s) if s.contains("stored")));
+        assert!(
+            matches!(handle_line(":goal be helpful and honest", &mem, &conv).await, Outcome::Said(s) if s.contains("stored"))
+        );
+        assert!(
+            matches!(handle_line(":prefer concise responses", &mem, &conv).await, Outcome::Said(s) if s.contains("stored"))
+        );
         match handle_line(":reflect", &mem, &conv).await {
             Outcome::Said(s) => {
-                assert!(s.contains("be helpful and honest"), "goal should appear in reflection: {s}");
-                assert!(s.contains("concise responses"), "preference should appear in reflection: {s}");
+                assert!(
+                    s.contains("be helpful and honest"),
+                    "goal should appear in reflection: {s}"
+                );
+                assert!(
+                    s.contains("concise responses"),
+                    "preference should appear in reflection: {s}"
+                );
             }
             _ => panic!("expected Outcome::Said"),
         }
@@ -824,7 +1094,10 @@ mod tests {
             Outcome::Said(s) => assert!(s.contains("buy milk"), "slash command should work: {s}"),
             _ => panic!("expected output"),
         }
-        assert!(matches!(handle_line("/quit", &mem, &conv).await, Outcome::Quit));
+        assert!(matches!(
+            handle_line("/quit", &mem, &conv).await,
+            Outcome::Quit
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -839,17 +1112,27 @@ mod tests {
         handle_line(":remember + sky is green", &mem, &conv).await;
 
         // Record the contradiction tension directly (as the memory layer does automatically).
-        mem.record_tension(TensionKind::Contradiction, 0.8, "conflict: sky is blue vs sky is green")
-            .await
-            .unwrap();
+        mem.record_tension(
+            TensionKind::Contradiction,
+            0.8,
+            "conflict: sky is blue vs sky is green",
+        )
+        .await
+        .unwrap();
 
         let tensions = mem.open_tensions(10).await.unwrap();
-        let t = tensions.iter().find(|t| t.about.contains("sky")).expect("tension should exist");
+        let t = tensions
+            .iter()
+            .find(|t| t.about.contains("sky"))
+            .expect("tension should exist");
         let tid = t.id.clone();
 
         // Unknown id → helpful error, no crash.
         match handle_line(":resolve 99999", &mem, &conv).await {
-            Outcome::Said(s) => assert!(s.contains("no open tension"), "expected missing-id message: {s}"),
+            Outcome::Said(s) => assert!(
+                s.contains("no open tension"),
+                "expected missing-id message: {s}"
+            ),
             _ => panic!("expected Said"),
         }
 
@@ -857,14 +1140,20 @@ mod tests {
         match handle_line(&format!(":resolve {tid}"), &mem, &conv).await {
             Outcome::Said(s) => {
                 assert!(s.contains("weakened"), "should report weakened belief: {s}");
-                assert!(s.contains("discharged"), "should report tension discharged: {s}");
+                assert!(
+                    s.contains("discharged"),
+                    "should report tension discharged: {s}"
+                );
             }
             _ => panic!("expected Said"),
         }
 
         // Tension must now be gone from the open list.
         let open = mem.open_tensions(10).await.unwrap();
-        assert!(!open.iter().any(|t| t.id == tid), "resolved tension should no longer be open");
+        assert!(
+            !open.iter().any(|t| t.id == tid),
+            "resolved tension should no longer be open"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -877,10 +1166,24 @@ mod tests {
         for cmd in [":help", ":commands"] {
             match handle_line(cmd, &mem, &conv).await {
                 Outcome::Said(s) => {
-                    for expected in &[":remember", ":beliefs", ":reflect", ":conflicts",
-                                      ":resolve", ":explain", ":tasks", ":task", ":done",
-                                      ":consolidate", ":workers", ":quit"] {
-                        assert!(s.contains(expected), "{cmd}: missing {expected} in help:\n{s}");
+                    for expected in &[
+                        ":remember",
+                        ":beliefs",
+                        ":reflect",
+                        ":conflicts",
+                        ":resolve",
+                        ":explain",
+                        ":tasks",
+                        ":task",
+                        ":done",
+                        ":consolidate",
+                        ":workers",
+                        ":quit",
+                    ] {
+                        assert!(
+                            s.contains(expected),
+                            "{cmd}: missing {expected} in help:\n{s}"
+                        );
                     }
                 }
                 Outcome::Quit => panic!("{cmd} should return Said, not Quit"),

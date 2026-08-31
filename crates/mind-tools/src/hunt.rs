@@ -65,10 +65,20 @@ pub enum Reject {
 impl std::fmt::Display for Reject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooThin { dollars } => write!(f, "only ${:.0}m traded — too thin to leave a position in", dollars / 1e6),
-            Self::TooCheap { price } => write!(f, "${price:.2} — under the price floor; the spread would be the trade"),
+            Self::TooThin { dollars } => write!(
+                f,
+                "only ${:.0}m traded — too thin to leave a position in",
+                dollars / 1e6
+            ),
+            Self::TooCheap { price } => write!(
+                f,
+                "${price:.2} — under the price floor; the spread would be the trade"
+            ),
             Self::NotCommonStock => write!(f, "warrant/right/unit, not common stock"),
-            Self::MoveExhausted { pct } => write!(f, "{pct:+.0}% — the news already happened; what is left is a coin flip on the fade"),
+            Self::MoveExhausted { pct } => write!(
+                f,
+                "{pct:+.0}% — the news already happened; what is left is a coin flip on the fade"
+            ),
             Self::TooQuiet { pct } => write!(f, "{pct:+.1}% — nothing actually moved"),
         }
     }
@@ -87,7 +97,11 @@ impl Default for Bounds {
         // $5 floor clears the penny tier where the spread dominates any edge; 3% is the smallest
         // move worth explaining; 60% is where a move stops being a trend and becomes an event that
         // has already resolved.
-        Self { min_price: 5.0, min_move_pct: 3.0, max_move_pct: 60.0 }
+        Self {
+            min_price: 5.0,
+            min_move_pct: 3.0,
+            max_move_pct: 60.0,
+        }
     }
 }
 
@@ -110,14 +124,20 @@ pub fn tradeable(m: &Mover, b: &Bounds) -> Result<(), Reject> {
     }
     // Zero means the caller had no volume figure, not that nothing traded — only judge when known.
     if m.dollar_volume > 0.0 && m.dollar_volume < MIN_DOLLAR_VOLUME {
-        return Err(Reject::TooThin { dollars: m.dollar_volume });
+        return Err(Reject::TooThin {
+            dollars: m.dollar_volume,
+        });
     }
     let mag = m.percent_change.abs();
     if mag < b.min_move_pct {
-        return Err(Reject::TooQuiet { pct: m.percent_change });
+        return Err(Reject::TooQuiet {
+            pct: m.percent_change,
+        });
     }
     if mag > b.max_move_pct {
-        return Err(Reject::MoveExhausted { pct: m.percent_change });
+        return Err(Reject::MoveExhausted {
+            pct: m.percent_change,
+        });
     }
     Ok(())
 }
@@ -133,7 +153,12 @@ pub fn shortlist(movers: &[Mover], b: &Bounds) -> (Vec<Mover>, Vec<(String, Reje
         }
     }
     // Biggest surviving move first — among things that are actually tradeable.
-    keep.sort_by(|a, c| c.percent_change.abs().partial_cmp(&a.percent_change.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    keep.sort_by(|a, c| {
+        c.percent_change
+            .abs()
+            .partial_cmp(&a.percent_change.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     (keep, drop)
 }
 
@@ -142,15 +167,27 @@ pub fn shortlist(movers: &[Mover], b: &Bounds) -> (Vec<Mover>, Vec<(String, Reje
 pub fn parse_movers(v: &serde_json::Value) -> Vec<Mover> {
     let mut out = Vec::new();
     for key in ["gainers", "losers"] {
-        for q in v.get(key).and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-            let symbol = q.get("symbol").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        for q in v
+            .get(key)
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let symbol = q
+                .get("symbol")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if symbol.is_empty() {
                 continue;
             }
             out.push(Mover {
                 symbol,
                 price: q.get("price").and_then(|x| x.as_f64()).unwrap_or(0.0),
-                percent_change: q.get("percent_change").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                percent_change: q
+                    .get("percent_change")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0),
                 dollar_volume: 0.0,
             });
         }
@@ -169,11 +206,27 @@ pub fn parse_news(v: &serde_json::Value) -> Vec<Headline> {
             symbols: n
                 .get("symbols")
                 .and_then(|x| x.as_array())
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default(),
-            headline: n.get("headline").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            source: n.get("source").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            at: n.get("created_at").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            headline: n
+                .get("headline")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            source: n
+                .get("source")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            at: n
+                .get("created_at")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
         .filter(|h| !h.headline.is_empty())
         .collect()
@@ -201,8 +254,10 @@ pub fn is_specific(h: &Headline) -> bool {
 /// a known cause, and the difference belongs in the thesis rather than hidden in a filter.
 pub fn news_for<'a>(sym: &str, news: &'a [Headline]) -> Vec<&'a Headline> {
     let s = sym.trim().to_uppercase();
-    let mut hits: Vec<&Headline> =
-        news.iter().filter(|h| h.symbols.iter().any(|x| x.trim().to_uppercase() == s)).collect();
+    let mut hits: Vec<&Headline> = news
+        .iter()
+        .filter(|h| h.symbols.iter().any(|x| x.trim().to_uppercase() == s))
+        .collect();
     // Specific first, so a caller taking `.first()` gets the real catalyst when one exists rather
     // than whichever roundup happened to be most recent.
     hits.sort_by_key(|h| h.symbols.len());
@@ -244,8 +299,7 @@ pub const FRESH_CATALYST_MINS: i64 = 240;
 
 pub fn is_fresh(at: &str, now_ms: i64) -> bool {
     crate::shadow::parse_rfc3339_ms(at)
-        .map(|t| (now_ms - t) / 60_000 <= FRESH_CATALYST_MINS && t <= now_ms)
-        .unwrap_or(false)
+        .is_some_and(|t| (now_ms - t) / 60_000 <= FRESH_CATALYST_MINS && t <= now_ms)
 }
 
 /// Headlines about this symbol published SINCE a given moment, newest first.
@@ -261,7 +315,7 @@ pub fn news_since<'a>(sym: &str, since_ms: i64, news: &'a [Headline]) -> Vec<&'a
     let mut out: Vec<&Headline> = news_for(sym, news)
         .into_iter()
         .filter(|h| is_specific(h))
-        .filter(|h| crate::shadow::parse_rfc3339_ms(&h.at).map(|t| t > since_ms).unwrap_or(false))
+        .filter(|h| crate::shadow::parse_rfc3339_ms(&h.at).is_some_and(|t| t > since_ms))
         .collect();
     out.sort_by_key(|h| std::cmp::Reverse(crate::shadow::parse_rfc3339_ms(&h.at).unwrap_or(0)));
     out
@@ -292,18 +346,30 @@ pub fn actives_url(top: usize) -> String {
 
 /// Snapshots carry the last price and the previous close, so today's move needs no extra call.
 pub fn snapshots_url(symbols: &[String]) -> String {
-    format!("https://data.alpaca.markets/v2/stocks/snapshots?symbols={}", symbols.join(","))
+    format!(
+        "https://data.alpaca.markets/v2/stocks/snapshots?symbols={}",
+        symbols.join(",")
+    )
 }
 
 /// Turn a snapshot batch into movers, given the share volumes from the actives call.
-pub fn parse_snapshots(v: &serde_json::Value, volumes: &std::collections::BTreeMap<String, f64>) -> Vec<Mover> {
+pub fn parse_snapshots(
+    v: &serde_json::Value,
+    volumes: &std::collections::BTreeMap<String, f64>,
+) -> Vec<Mover> {
     let mut out = Vec::new();
     let Some(obj) = v.as_object() else { return out };
     for (sym, d) in obj {
         let day = d.get("dailyBar");
         let prev = d.get("prevDailyBar");
-        let price = day.and_then(|x| x.get("c")).and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let prev_close = prev.and_then(|x| x.get("c")).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let price = day
+            .and_then(|x| x.get("c"))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
+        let prev_close = prev
+            .and_then(|x| x.get("c"))
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
         if price <= 0.0 || prev_close <= 0.0 {
             continue;
         }
@@ -316,7 +382,11 @@ pub fn parse_snapshots(v: &serde_json::Value, volumes: &std::collections::BTreeM
         });
     }
     // Most traded first — the deepest book is the easiest to leave.
-    out.sort_by(|a, b| b.dollar_volume.partial_cmp(&a.dollar_volume).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.dollar_volume
+            .partial_cmp(&a.dollar_volume)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -325,7 +395,10 @@ pub const MIN_DOLLAR_VOLUME: f64 = 50_000_000.0;
 
 /// The movers URL on the DATA host. Split out so the shape is testable without a network call.
 pub fn movers_url(top: usize) -> String {
-    format!("https://data.alpaca.markets/v1beta1/screener/stocks/movers?top={}", top.clamp(1, 50))
+    format!(
+        "https://data.alpaca.markets/v1beta1/screener/stocks/movers?top={}",
+        top.clamp(1, 50)
+    )
 }
 
 /// The news URL for a set of symbols (empty = the whole firehose).
@@ -334,13 +407,19 @@ pub fn news_url(symbols: &[String], limit: usize) -> String {
     if symbols.is_empty() {
         format!("{base}?limit={}", limit.clamp(1, 50))
     } else {
-        format!("{base}?symbols={}&limit={}", symbols.join(","), limit.clamp(1, 50))
+        format!(
+            "{base}?symbols={}&limit={}",
+            symbols.join(","),
+            limit.clamp(1, 50)
+        )
     }
 }
 
 fn alpaca_get(url: String) -> anyhow::Result<serde_json::Value> {
-    let key = std::env::var("ALPACA_KEY_ID").map_err(|_| anyhow::anyhow!("ALPACA_KEY_ID is not set"))?;
-    let sec = std::env::var("ALPACA_SECRET_KEY").map_err(|_| anyhow::anyhow!("ALPACA_SECRET_KEY is not set"))?;
+    let key =
+        std::env::var("ALPACA_KEY_ID").map_err(|_| anyhow::anyhow!("ALPACA_KEY_ID is not set"))?;
+    let sec = std::env::var("ALPACA_SECRET_KEY")
+        .map_err(|_| anyhow::anyhow!("ALPACA_SECRET_KEY is not set"))?;
     Ok(ureq::get(&url)
         .set("APCA-API-KEY-ID", &key)
         .set("APCA-API-SECRET-KEY", &sec)
@@ -374,16 +453,29 @@ pub fn fetch_actives(top: usize) -> anyhow::Result<Vec<Mover>> {
     let list = alpaca_get(actives_url(top))?;
     let mut volumes = std::collections::BTreeMap::new();
     let mut syms: Vec<String> = Vec::new();
-    for a in list.get("most_actives").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-        let Some(sym) = a.get("symbol").and_then(|x| x.as_str()) else { continue };
-        volumes.insert(sym.to_string(), a.get("volume").and_then(|x| x.as_f64()).unwrap_or(0.0));
+    for a in list
+        .get("most_actives")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let Some(sym) = a.get("symbol").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        volumes.insert(
+            sym.to_string(),
+            a.get("volume").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        );
         syms.push(sym.to_string());
     }
     if syms.is_empty() {
         return Ok(Vec::new());
     }
     syms.truncate(60);
-    Ok(parse_snapshots(&alpaca_get(snapshots_url(&syms))?, &volumes))
+    Ok(parse_snapshots(
+        &alpaca_get(snapshots_url(&syms))?,
+        &volumes,
+    ))
 }
 
 /// News for SPECIFIC symbols — never the general firehose.
@@ -408,28 +500,59 @@ mod tests {
 
     fn m(sym: &str, price: f64, pct: f64) -> Mover {
         // Zero volume = "not known", which the filter deliberately does not judge.
-        Mover { symbol: sym.into(), price, percent_change: pct, dollar_volume: 0.0 }
+        Mover {
+            symbol: sym.into(),
+            price,
+            percent_change: pct,
+            dollar_volume: 0.0,
+        }
     }
 
     #[test]
     fn share_volume_is_not_liquidity_but_dollar_volume_is() {
         // Both were in the live most-actives list at the same minute. HUIZ traded 65 MILLION shares
         // and MMA 76 million — more than Walmart — and neither is a position anyone could leave.
-        let huiz = Mover { symbol: "HUIZ".into(), price: 2.24, percent_change: 30.0, dollar_volume: 2.24 * 65_036_594.0 };
-        let mma = Mover { symbol: "MMA".into(), price: 0.64, percent_change: 25.0, dollar_volume: 0.64 * 76_228_431.0 };
-        let wmt = Mover { symbol: "WMT".into(), price: 104.16, percent_change: -8.96, dollar_volume: 2.4e9 };
+        let huiz = Mover {
+            symbol: "HUIZ".into(),
+            price: 2.24,
+            percent_change: 30.0,
+            dollar_volume: 2.24 * 65_036_594.0,
+        };
+        let mma = Mover {
+            symbol: "MMA".into(),
+            price: 0.64,
+            percent_change: 25.0,
+            dollar_volume: 0.64 * 76_228_431.0,
+        };
+        let wmt = Mover {
+            symbol: "WMT".into(),
+            price: 104.16,
+            percent_change: -8.96,
+            dollar_volume: 2.4e9,
+        };
         let b = Bounds::default();
         assert!(matches!(tradeable(&huiz, &b), Err(Reject::TooCheap { .. })));
         assert!(matches!(tradeable(&mma, &b), Err(Reject::TooCheap { .. })));
-        assert!(tradeable(&wmt, &b).is_ok(), "Walmart down 9 percent on 2.4 billion dollars is the trade");
+        assert!(
+            tradeable(&wmt, &b).is_ok(),
+            "Walmart down 9 percent on 2.4 billion dollars is the trade"
+        );
     }
 
     #[test]
     fn a_liquid_name_on_a_thin_day_is_still_refused() {
         // Price alone does not make a position exitable — a $40 stock with $8m of flow will move on
         // the way out.
-        let thin = Mover { symbol: "QUIET".into(), price: 40.0, percent_change: 6.0, dollar_volume: 8_000_000.0 };
-        assert!(matches!(tradeable(&thin, &Bounds::default()), Err(Reject::TooThin { .. })));
+        let thin = Mover {
+            symbol: "QUIET".into(),
+            price: 40.0,
+            percent_change: 6.0,
+            dollar_volume: 8_000_000.0,
+        };
+        assert!(matches!(
+            tradeable(&thin, &Bounds::default()),
+            Err(Reject::TooThin { .. })
+        ));
     }
 
     #[test]
@@ -458,7 +581,10 @@ mod tests {
         // And each rejection must explain ITSELF — a silent filter is indistinguishable from a
         // broken one.
         let why: Vec<String> = drop.iter().map(|(s, r)| format!("{s}: {r}")).collect();
-        assert!(why.iter().any(|w| w.contains("warrant/right/unit")), "{why:?}");
+        assert!(
+            why.iter().any(|w| w.contains("warrant/right/unit")),
+            "{why:?}"
+        );
         assert!(why.iter().any(|w| w.contains("price floor")), "{why:?}");
         assert!(why.iter().any(|w| w.contains("coin flip")), "{why:?}");
     }
@@ -466,7 +592,11 @@ mod tests {
     #[test]
     fn a_normal_days_move_survives() {
         // The point of the filters is to leave real candidates standing, not to reject everything.
-        let day = vec![m("MRVL", 233.40, 8.05), m("NBIS", 228.64, -7.97), m("AVGO", 362.82, -4.48)];
+        let day = vec![
+            m("MRVL", 233.40, 8.05),
+            m("NBIS", 228.64, -7.97),
+            m("AVGO", 362.82, -4.48),
+        ];
         let (keep, drop) = shortlist(&day, &Bounds::default());
         assert_eq!(keep.len(), 3, "dropped: {drop:?}");
         assert_eq!(keep[0].symbol, "MRVL", "biggest tradeable move ranks first");
@@ -497,8 +627,18 @@ mod tests {
     #[test]
     fn a_headline_is_matched_to_its_symbol_not_to_a_substring() {
         let news = vec![
-            Headline { symbols: vec!["SNOW".into()], headline: "BofA raises Snowflake target".into(), source: "b".into(), at: "".into() },
-            Headline { symbols: vec!["WDC".into()], headline: "Western Digital lab".into(), source: "b".into(), at: "".into() },
+            Headline {
+                symbols: vec!["SNOW".into()],
+                headline: "BofA raises Snowflake target".into(),
+                source: "b".into(),
+                at: "".into(),
+            },
+            Headline {
+                symbols: vec!["WDC".into()],
+                headline: "Western Digital lab".into(),
+                source: "b".into(),
+                at: "".into(),
+            },
         ];
         assert_eq!(news_for("SNOW", &news).len(), 1);
         assert_eq!(news_for("NOW", &news).len(), 0, "SNOW must not match NOW");
@@ -516,9 +656,18 @@ mod tests {
         assert_eq!(age_phrase("2026-08-21T19:30:00Z", now), "4d ago");
         assert_eq!(age_phrase("not a date", now), "undated");
 
-        assert!(is_fresh("2026-08-25T19:00:00Z", now), "half an hour old explains a move now");
-        assert!(!is_fresh("2026-08-25T13:00:00Z", now), "six hours old has already been traded");
-        assert!(!is_fresh("2026-08-21T19:30:00Z", now), "Friday's story is not Tuesday's catalyst");
+        assert!(
+            is_fresh("2026-08-25T19:00:00Z", now),
+            "half an hour old explains a move now"
+        );
+        assert!(
+            !is_fresh("2026-08-25T13:00:00Z", now),
+            "six hours old has already been traded"
+        );
+        assert!(
+            !is_fresh("2026-08-21T19:30:00Z", now),
+            "Friday's story is not Tuesday's catalyst"
+        );
         // A future timestamp is a feed problem, not a fresh story.
         assert!(!is_fresh("2026-08-26T19:30:00Z", now));
     }
@@ -528,13 +677,32 @@ mod tests {
         // A position is entered on a catalyst and then watched only by price. The reason for
         // holding can be refuted long before the price reflects it, and watching price alone means
         // finding out last.
-        let old = Headline { symbols: vec!["BMNR".into()], headline: "Bitmine buys $81M of Ethereum".into(), source: "b".into(), at: "2026-08-25T18:00:00Z".into() };
-        let fresh = Headline { symbols: vec!["BMNR".into()], headline: "Bitmine says the purchase was misreported".into(), source: "b".into(), at: "2026-08-25T19:40:00Z".into() };
-        let roundup = Headline { symbols: "A B C D E F".split(' ').map(String::from).collect(), headline: "12 crypto stocks moving today".into(), source: "b".into(), at: "2026-08-25T19:50:00Z".into() };
+        let old = Headline {
+            symbols: vec!["BMNR".into()],
+            headline: "Bitmine buys $81M of Ethereum".into(),
+            source: "b".into(),
+            at: "2026-08-25T18:00:00Z".into(),
+        };
+        let fresh = Headline {
+            symbols: vec!["BMNR".into()],
+            headline: "Bitmine says the purchase was misreported".into(),
+            source: "b".into(),
+            at: "2026-08-25T19:40:00Z".into(),
+        };
+        let roundup = Headline {
+            symbols: "A B C D E F".split(' ').map(String::from).collect(),
+            headline: "12 crypto stocks moving today".into(),
+            source: "b".into(),
+            at: "2026-08-25T19:50:00Z".into(),
+        };
         let news = vec![old, fresh, roundup];
         let entry = crate::shadow::parse_rfc3339_ms("2026-08-25T19:00:00Z").unwrap();
         let since = news_since("BMNR", entry, &news);
-        assert_eq!(since.len(), 1, "only the post-entry, company-specific one: {since:?}");
+        assert_eq!(
+            since.len(),
+            1,
+            "only the post-entry, company-specific one: {since:?}"
+        );
         assert!(since[0].headline.contains("misreported"));
     }
 
@@ -544,7 +712,10 @@ mod tests {
         // list of tickers and explain none of them; presenting either as the reason a stock fell
         // 51% would hand the model a false premise that reads exactly like evidence.
         let roundup = Headline {
-            symbols: "AAPL MSFT PFSA TGT DOW AMZN NVDA F GM BA".split(' ').map(String::from).collect(),
+            symbols: "AAPL MSFT PFSA TGT DOW AMZN NVDA F GM BA"
+                .split(' ')
+                .map(String::from)
+                .collect(),
             headline: "Dow Gains Over 100 Points; Target Posts Upbeat Q2 Earnings".into(),
             source: "benzinga".into(),
             at: "".into(),
@@ -560,8 +731,15 @@ mod tests {
         // Both mention PFSA, but only one explains it — and the specific one must win even though
         // the roundup was listed first.
         let news = vec![roundup, real];
-        assert_eq!(catalyst_for("PFSA", &news).map(|h| h.headline.as_str()), Some("PFSA halts trial after safety signal"));
-        assert_eq!(catalyst_for("TGT", &news), None, "a stock that only appears in a roundup has no catalyst");
+        assert_eq!(
+            catalyst_for("PFSA", &news).map(|h| h.headline.as_str()),
+            Some("PFSA halts trial after safety signal")
+        );
+        assert_eq!(
+            catalyst_for("TGT", &news),
+            None,
+            "a stock that only appears in a roundup has no catalyst"
+        );
     }
 
     #[test]
@@ -581,6 +759,6 @@ mod tests {
         assert!(movers_url(10).starts_with("https://data.alpaca.markets/"));
         assert!(news_url(&[], 5).starts_with("https://data.alpaca.markets/"));
         assert!(!movers_url(10).contains("paper-api"));
-        assert_eq!(news_url(&["AAPL".into(), "MSFT".into()], 5).contains("symbols=AAPL,MSFT"), true);
+        assert!(news_url(&["AAPL".into(), "MSFT".into()], 5).contains("symbols=AAPL,MSFT"));
     }
 }

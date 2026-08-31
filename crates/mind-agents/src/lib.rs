@@ -14,11 +14,13 @@
 pub mod bus;
 pub mod cognition;
 pub mod compile;
+pub mod handoff;
 pub mod nba;
 pub mod procedure;
+pub mod synthesis;
 
 pub use bus::{signature, Bus};
-pub use cognition::{Cognition, Outcome, Step};
+pub use cognition::{Cognition, Outcome, Step, GOAL_CONTRIBUTION_EVALUATOR_ID};
 pub use compile::{compile, Compilation, Origin};
 pub use nba::{Action, Verb, Why};
 pub use procedure::{Procedure, ProcedureKind};
@@ -93,7 +95,8 @@ fn extract_urls(text: &str) -> Vec<String> {
         let mut rest = text;
         while let Some(i) = rest.find(marker) {
             let tail = &rest[i..];
-            let end = tail.find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | ')' | ']'))
+            let end = tail
+                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | ')' | ']'))
                 .unwrap_or(tail.len());
             let url = tail[..end].trim_end_matches(['.', ',', ';']).to_string();
             if url.len() > marker.len() {
@@ -178,7 +181,11 @@ fn salvage_answer(s: &str) -> Option<String> {
     // that closes the object — anything earlier is an unescaped quote inside the prose.
     let bytes = t.as_bytes();
     let mut end = None;
-    for (i, _) in t[open..].char_indices().map(|(i, c)| (i + open, c)).filter(|(_, c)| *c == '"') {
+    for (i, _) in t[open..]
+        .char_indices()
+        .map(|(i, c)| (i + open, c))
+        .filter(|(_, c)| *c == '"')
+    {
         if i > 0 && bytes[i - 1] == b'\\' {
             continue;
         }
@@ -215,14 +222,13 @@ fn unescape(s: &str) -> String {
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
             Some('"') => out.push('"'),
-            Some('\\') => out.push('\\'),
+            Some('\\') | None => out.push('\\'),
             Some('/') => out.push('/'),
             // An unknown escape keeps both characters rather than silently eating one.
             Some(other) => {
                 out.push('\\');
                 out.push(other);
             }
-            None => out.push('\\'),
         }
     }
     out
@@ -332,7 +338,11 @@ impl SubAgent {
             ];
             // PRIVATE-GROUNDED: a sub-agent's task + accumulated trace carry whatever the parent
             // turn was about — on a companion that is the household's own context. Fail closed.
-            let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            let text = match self
+                .inference
+                .chat_grounded(messages, GenerationConfig::default())
+                .await
+            {
                 Ok(r) => r.text,
                 Err(e) => {
                     return AgentResult {
@@ -348,29 +358,73 @@ impl SubAgent {
             };
             let decision = parse_decision(&text);
 
-            if decision.action == "finish" || (decision.action.is_empty() && !decision.answer.is_empty()) {
+            if decision.action == "finish"
+                || (decision.action.is_empty() && !decision.answer.is_empty())
+            {
                 let answer = plain_prose(&decision.answer);
-                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone(), error: None };
+                return AgentResult {
+                    task: task.into(),
+                    answer,
+                    steps: step + 1,
+                    trace,
+                    pending_actions,
+                    sources: sources.clone(),
+                    error: None,
+                };
             }
             // call_tool
             let tool = decision.tool.trim().to_string();
             if tool.is_empty() {
                 let answer = plain_prose(&decision.answer);
-                return AgentResult { task: task.into(), answer, steps: step + 1, trace, pending_actions, sources: sources.clone(), error: None };
+                return AgentResult {
+                    task: task.into(),
+                    answer,
+                    steps: step + 1,
+                    trace,
+                    pending_actions,
+                    sources: sources.clone(),
+                    error: None,
+                };
             }
             // OUTWARD action tool → through the harm-gate. The agent can never self-confirm.
             if self.act_tools.iter().any(|t| t == &tool) {
                 if let Some(rt) = &self.runtime {
                     let intent = ActionIntent {
                         kind: tool.clone(),
-                        target: decision.args.get("target").or_else(|| decision.args.get("to")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        summary: decision.args.get("summary").or_else(|| decision.args.get("subject")).and_then(|v| v.as_str()).unwrap_or("(sub-agent action)").to_string(),
-                        payload: Some(decision.args.get("payload").or_else(|| decision.args.get("body")).and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                        target: decision
+                            .args
+                            .get("target")
+                            .or_else(|| decision.args.get("to"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        summary: decision
+                            .args
+                            .get("summary")
+                            .or_else(|| decision.args.get("subject"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(sub-agent action)")
+                            .to_string(),
+                        payload: Some(
+                            decision
+                                .args
+                                .get("payload")
+                                .or_else(|| decision.args.get("body"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        ),
                         capabilities: vec![Capability::SendMessage],
                         risk: RiskLevel::Medium,
                         reversible: false,
                     };
-                    let req = ActionRequest { id: format!("sa-{}", now_ms()), actor: "sub-agent".into(), intent, justification: format!("sub-agent task: {task}"), created_ms: now_ms() };
+                    let req = ActionRequest {
+                        id: format!("sa-{}", now_ms()),
+                        actor: "sub-agent".into(),
+                        intent,
+                        justification: format!("sub-agent task: {task}"),
+                        created_ms: now_ms(),
+                    };
                     let obs = match rt.decide(&req, &dummy_ctx(&req)).await {
                         ActionDecision::Execute => match rt.execute(req).await {
                             Ok(r) if r.ok => format!("done: {}", r.output),
@@ -381,7 +435,9 @@ impl SubAgent {
                             pending_actions.push(req);
                             "PROPOSED — needs the user's confirmation; NOT executed".to_string()
                         }
-                        ActionDecision::Deny { reason } => format!("BLOCKED by harm-gate: {reason}"),
+                        ActionDecision::Deny { reason } => {
+                            format!("BLOCKED by harm-gate: {reason}")
+                        }
                     };
                     trace.push(format!("{tool}: {obs}"));
                     observations.push_str(&format!("[{tool}] => {obs}\n"));
@@ -433,7 +489,7 @@ impl SubAgent {
                  genuinely do not answer the task, say exactly WHAT IS MISSING and what you would \
                  need to get it — that is a finding, not a question.",
             ),
-            ChatMessage::user(&format!(
+            ChatMessage::user(format!(
                 "Task: {task}\nObservations:\n{observations}\n\nWrite the deliverable. Ground every \
                  claim in the observations above; never invent."
             )),
@@ -448,11 +504,26 @@ impl SubAgent {
         // so the escalation did not appear on the dashboard either. The privacy guard did not catch
         // it because the call was WRAPPED across lines and the scan matched one line at a time
         // (E.SEC2).
-        let (answer, error) = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+        let (answer, error) = match self
+            .inference
+            .chat_grounded(messages, GenerationConfig::default())
+            .await
+        {
             Ok(r) => (plain_prose(&r.text), None),
-            Err(e) => (format!("(sub-agent synthesis error: {e})"), Some(e.to_string())),
+            Err(e) => (
+                format!("(sub-agent synthesis error: {e})"),
+                Some(e.to_string()),
+            ),
         };
-        AgentResult { task: task.into(), answer, steps: self.max_steps, trace, pending_actions, sources: sources.clone(), error }
+        AgentResult {
+            task: task.into(),
+            answer,
+            steps: self.max_steps,
+            trace,
+            pending_actions,
+            sources: sources.clone(),
+            error,
+        }
     }
 
     /// Run several tasks concurrently (parallelism via the InferencePool's blocking pool).
@@ -480,21 +551,42 @@ fn parse_decision(raw: &str) -> Decision {
             // Partly-malformed object (truncated / stray field): pull what we can out of a lenient
             // Value so we NEVER dump raw JSON. An extractable answer or tool wins over the raw fallback.
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(span) {
-                let answer = v.get("answer").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-                let tool = v.get("tool").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                let answer = v
+                    .get("answer")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let tool = v
+                    .get("tool")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 if !answer.is_empty() || !tool.is_empty() {
                     let action = v
                         .get("action")
                         .and_then(|x| x.as_str())
-                        .unwrap_or(if tool.is_empty() { "finish" } else { "call_tool" })
+                        .unwrap_or(if tool.is_empty() {
+                            "finish"
+                        } else {
+                            "call_tool"
+                        })
                         .to_string();
-                    return Decision { action, tool, args: v.get("args").cloned().unwrap_or_default(), answer };
+                    return Decision {
+                        action,
+                        tool,
+                        args: v.get("args").cloned().unwrap_or_default(),
+                        answer,
+                    };
                 }
             }
         }
     }
     // No usable JSON → treat the whole (think-stripped) text as a finished answer (graceful).
-    Decision { action: "finish".into(), answer: raw.trim().to_string(), ..Default::default() }
+    Decision {
+        action: "finish".into(),
+        answer: raw.trim().to_string(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -524,7 +616,9 @@ mod tests {
     }
     impl SeqLLM {
         fn new(seq: Vec<&str>) -> Self {
-            Self { responses: Mutex::new(seq.into_iter().map(|s| s.to_string()).collect()) }
+            Self {
+                responses: Mutex::new(seq.into_iter().map(|s| s.to_string()).collect()),
+            }
         }
     }
     impl LLMBackend for SeqLLM {
@@ -583,7 +677,13 @@ mod tests {
 
     fn agent(seq: Vec<&str>, tools: Vec<&str>, max: usize) -> SubAgent {
         let pool = InferencePool::new(Arc::new(SeqLLM::new(seq)) as Arc<dyn LLMBackend>, 1);
-        SubAgent::new(pool, Arc::new(FakeHost), "JARVIS", tools.into_iter().map(|s| s.into()).collect(), max)
+        SubAgent::new(
+            pool,
+            Arc::new(FakeHost),
+            "JARVIS",
+            tools.into_iter().map(|s| s.into()).collect(),
+            max,
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -592,7 +692,9 @@ mod tests {
             r#"{"action":"call_tool","tool":"recall","args":{"query":"prefs"}}"#,
             r#"{"action":"finish","answer":"You prefer terse replies."}"#,
         ];
-        let r = agent(seq, vec!["recall", "inbox"], 5).run("what do I prefer?").await;
+        let r = agent(seq, vec!["recall", "inbox"], 5)
+            .run("what do I prefer?")
+            .await;
         assert_eq!(r.answer, "You prefer terse replies.");
         assert_eq!(r.steps, 2);
         assert_eq!(r.trace.len(), 1, "one tool call");
@@ -606,7 +708,11 @@ mod tests {
             r#"{"action":"finish","answer":"can't use that"}"#,
         ];
         let r = agent(seq, vec!["recall"], 5).run("do something").await;
-        assert!(r.trace.iter().any(|t| t.contains("refused")), "exec must be refused: {:?}", r.trace);
+        assert!(
+            r.trace.iter().any(|t| t.contains("refused")),
+            "exec must be refused: {:?}",
+            r.trace
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -623,11 +729,21 @@ mod tests {
     #[async_trait::async_trait]
     impl ActionRuntime for ConfirmRuntime {
         async fn decide(&self, _req: &ActionRequest, _ctx: &TurnContext) -> ActionDecision {
-            ActionDecision::RequireConfirmation { reason: "outward".into() }
+            ActionDecision::RequireConfirmation {
+                reason: "outward".into(),
+            }
         }
-        async fn execute(&self, req: ActionRequest) -> mind_types::Result<mind_types::ActionReceipt> {
+        async fn execute(
+            &self,
+            req: ActionRequest,
+        ) -> mind_types::Result<mind_types::ActionReceipt> {
             *self.executed.lock().unwrap() += 1;
-            Ok(mind_types::ActionReceipt { request_id: req.id, ok: true, output: "sent".into(), idempotency_key: "k".into() })
+            Ok(mind_types::ActionReceipt {
+                request_id: req.id,
+                ok: true,
+                output: "sent".into(),
+                idempotency_key: "k".into(),
+            })
         }
     }
 
@@ -639,13 +755,23 @@ mod tests {
         ];
         let pool = InferencePool::new(Arc::new(SeqLLM::new(seq)) as Arc<dyn LLMBackend>, 1);
         let executed = Arc::new(Mutex::new(0));
-        let rt: Arc<dyn ActionRuntime> = Arc::new(ConfirmRuntime { executed: executed.clone() });
+        let rt: Arc<dyn ActionRuntime> = Arc::new(ConfirmRuntime {
+            executed: executed.clone(),
+        });
         let agent = SubAgent::new(pool, Arc::new(FakeHost), "JARVIS", vec![], 5)
             .with_actions(rt, vec!["send_email".into()]);
         let r = agent.run("email a@b.com that the deploy is live").await;
-        assert_eq!(r.pending_actions.len(), 1, "the action must be PROPOSED, not executed");
+        assert_eq!(
+            r.pending_actions.len(),
+            1,
+            "the action must be PROPOSED, not executed"
+        );
         assert_eq!(r.pending_actions[0].intent.target, "a@b.com");
-        assert_eq!(*executed.lock().unwrap(), 0, "a sub-agent can NEVER self-confirm an outward action");
+        assert_eq!(
+            *executed.lock().unwrap(),
+            0,
+            "a sub-agent can NEVER self-confirm an outward action"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -678,7 +804,11 @@ mod tests {
         let d: Decision = serde_json::from_str(LIVE_LEAK).expect("null must deserialize as absent");
         assert_eq!(d.action, "finish");
         assert_eq!(d.tool, "");
-        assert!(d.answer.starts_with("I cannot provide"), "answer was not extracted: {:?}", d.answer);
+        assert!(
+            d.answer.starts_with("I cannot provide"),
+            "answer was not extracted: {:?}",
+            d.answer
+        );
         // And the whole-decision path still agrees.
         assert_eq!(parse_decision(LIVE_LEAK).action, "finish");
     }
@@ -686,15 +816,27 @@ mod tests {
     #[test]
     fn the_control_envelope_never_reaches_the_reader() {
         let out = plain_prose(LIVE_LEAK);
-        assert!(!out.contains("\"action\""), "the envelope is still there: {out}");
-        assert!(!out.contains("finish"), "the envelope is still there: {out}");
+        assert!(
+            !out.contains("\"action\""),
+            "the envelope is still there: {out}"
+        );
+        assert!(
+            !out.contains("finish"),
+            "the envelope is still there: {out}"
+        );
         // And the escapes must have become REAL newlines — that is what proves it parsed. The needle
         // is a backslash followed by 'n', built from chars so no amount of escaping confusion can turn
         // it into an actual newline (which is what an earlier version of this line accidentally
         // asserted, making the test fail against correct output).
         let escaped_nl: String = ['\\', 'n'].iter().collect();
-        assert!(!out.contains(&escaped_nl), "escaped newlines survived, so nothing parsed: {out:?}");
-        assert!(out.contains('\n'), "the paragraph breaks were lost: {out:?}");
+        assert!(
+            !out.contains(&escaped_nl),
+            "escaped newlines survived, so nothing parsed: {out:?}"
+        );
+        assert!(
+            out.contains('\n'),
+            "the paragraph breaks were lost: {out:?}"
+        );
         assert!(out.starts_with("I cannot provide"));
     }
 
@@ -729,11 +871,26 @@ mod tests {
                  exercising the salvage path at all"
             );
             let out = plain_prose(raw);
-            assert!(!out.contains("\"action\""), "sample {name} still carries the envelope: {out}");
-            assert!(!out.starts_with('{'), "sample {name} still starts with a brace: {out}");
-            assert!(!out.contains(&escaped_nl), "sample {name} kept escaped newlines: {out:?}");
-            assert!(out.contains('\n'), "sample {name} lost its paragraph breaks: {out:?}");
-            assert!(out.contains('"'), "sample {name} lost the quoted text inside the prose: {out:?}");
+            assert!(
+                !out.contains("\"action\""),
+                "sample {name} still carries the envelope: {out}"
+            );
+            assert!(
+                !out.starts_with('{'),
+                "sample {name} still starts with a brace: {out}"
+            );
+            assert!(
+                !out.contains(&escaped_nl),
+                "sample {name} kept escaped newlines: {out:?}"
+            );
+            assert!(
+                out.contains('\n'),
+                "sample {name} lost its paragraph breaks: {out:?}"
+            );
+            assert!(
+                out.contains('"'),
+                "sample {name} lost the quoted text inside the prose: {out:?}"
+            );
         }
         assert!(plain_prose(MALFORMED_A).starts_with("I cannot provide"));
         assert!(plain_prose(MALFORMED_B).starts_with("The search results provide"));
@@ -743,9 +900,21 @@ mod tests {
     #[test]
     fn the_salvage_refuses_anything_that_is_not_an_envelope() {
         // It rewrites text by hand, so it must be certain before touching a character.
-        assert_eq!(salvage_answer("The \"answer\" is 42."), None, "no leading brace");
-        assert_eq!(salvage_answer("{\"tool\":\"now\",\"args\":{}}"), None, "no answer key");
-        assert_eq!(salvage_answer("{\"answer\":\"\"}"), None, "an empty answer is not a salvage");
+        assert_eq!(
+            salvage_answer("The \"answer\" is 42."),
+            None,
+            "no leading brace"
+        );
+        assert_eq!(
+            salvage_answer("{\"tool\":\"now\",\"args\":{}}"),
+            None,
+            "no answer key"
+        );
+        assert_eq!(
+            salvage_answer("{\"answer\":\"\"}"),
+            None,
+            "an empty answer is not a salvage"
+        );
         assert_eq!(salvage_answer(""), None);
     }
 
@@ -770,7 +939,9 @@ mod tests {
 
     #[test]
     fn a_think_preamble_is_stripped_before_peeling() {
-        let out = plain_prose("<think>weighing it up {maybe}</think>\n{\"answer\":\"Six sources agree.\"}");
+        let out = plain_prose(
+            "<think>weighing it up {maybe}</think>\n{\"answer\":\"Six sources agree.\"}",
+        );
         assert_eq!(out, "Six sources agree.");
     }
 
@@ -794,8 +965,16 @@ mod tests {
         );
         let a = SubAgent::new(pool, Arc::new(FakeHost), "JARVIS", vec!["recall".into()], 2);
         let r = a.run("find the best stocks to trade today").await;
-        assert!(!r.answer.contains("\"action\""), "the envelope reached the caller: {}", r.answer);
-        assert!(r.answer.starts_with("I cannot provide"), "got: {}", r.answer);
+        assert!(
+            !r.answer.contains("\"action\""),
+            "the envelope reached the caller: {}",
+            r.answer
+        );
+        assert!(
+            r.answer.starts_with("I cannot provide"),
+            "got: {}",
+            r.answer
+        );
     }
 }
 
@@ -822,15 +1001,24 @@ mod sk5 {
         // returned `(sub-agent synthesis error: OpenAI-compatible API request failed)`. Callers
         // decided success with `!answer.trim().is_empty()` — and that string is not empty — so an
         // API error went on the job board under a green tick and was credited to the skill.
-        let failed = result("(sub-agent synthesis error: OpenAI-compatible API request failed)", Some("OpenAI-compatible API request failed"));
+        let failed = result(
+            "(sub-agent synthesis error: OpenAI-compatible API request failed)",
+            Some("OpenAI-compatible API request failed"),
+        );
         assert!(!failed.ok(), "an error message is not an answer");
-        assert!(!failed.answer.trim().is_empty(), "and it is NOT empty — which is why the old guess failed");
+        assert!(
+            !failed.answer.trim().is_empty(),
+            "and it is NOT empty — which is why the old guess failed"
+        );
 
         let inference_failed = result("(sub-agent inference error: timeout)", Some("timeout"));
         assert!(!inference_failed.ok(), "the loop's own failure path too");
 
         // The control, so `ok()` is not simply false.
-        assert!(result("WMT closed at $105.38, down 1.04%.", None).ok(), "a real deliverable is ok");
+        assert!(
+            result("WMT closed at $105.38, down 1.04%.", None).ok(),
+            "a real deliverable is ok"
+        );
         // And an empty answer with no error is still not a deliverable.
         assert!(!result("   ", None).ok(), "blank is not an answer");
     }

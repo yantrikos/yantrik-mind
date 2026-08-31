@@ -41,7 +41,7 @@ This is the move flat-RAG companions structurally cannot make: there is no revis
 - **Evidence trails**: every belief records its provenance (`told`, `inferred`, `extracted`, `consolidated`) and every piece of evidence that shaped its confidence.
 - **Consolidation** (`consolidate` / `:consolidate`): distils recent conversation turns into durable typed beliefs and future commitments in a single LLM pass. Runs on a cursor so it never re-chews the same turns. The memory grows and compounds; it doesn't summarise and shrink.
 - **Belief inspection** (`:beliefs [query]`): lists stored beliefs ranked by confidence, with optional semantic filtering — see what the mind actually knows and how sure it is.
-- **Semantic recall** (YantrikDB 0.9.0, bundled model2vec, dim 64): paraphrases retrieve the right belief with no shared keywords — no external server, no download.
+- **Semantic recall** (YantrikDB 0.18.0, bundled model2vec, dim 64): paraphrases retrieve the right belief with no shared keywords — no external server, no download.
 
 ### Research that revises its own beliefs
 - `research and update X` / `update your knowledge on X`: recalls prior beliefs near the topic, researches live with citations (keyless DuckDuckGo + SSRF-guarded fetch), reconciles findings against priors, asserts new facts, applies negative Bayesian evidence to stale beliefs, draws contradiction edges.
@@ -58,10 +58,30 @@ Providers: NanoGPT, Ollama Cloud, MiniMax, OpenRouter, Grok — all OpenAI-compa
 ### Parallel sub-agents
 A bounded ReAct loop (think → call tool → observe → … → finish) over a granted read-tool subset. The step budget prevents runaway loops. `fan_out` runs many tasks concurrently via the inference pool. Act-capable agents can only *propose* outward actions — they cannot self-confirm anything that requires confirmation.
 
+Multi-round delegated code work snapshots its visible artifact tree before every refinement. `ym jobs checkpoints <job-id>` lists recovery points, and `ym jobs rollback <job-id> [checkpoint-id]` restores one only after the job stops. Recovery refuses paths outside the coder scratch root, excludes hidden state and symlinks, checkpoints the current tree first so rollback itself remains reversible, and caps history rather than permitting unbounded scratch growth.
+
+Restart-interrupted code jobs can continue with `ym jobs resume <job-id> [checkpoint-id]`. Resume is limited to jobs explicitly reconciled as interrupted, restores a ledger-owned checkpoint inside the isolated coder root, preserves the interrupted tree as an undo point, reuses the original task, and runs one to five bounded build-and-critique recovery rounds. Artifact location is persisted after every completed round, so a later restart retains the recovery seam.
+
+### Competitive evidence
+`cargo run -p mind-evals -- competitive manifest|template|mind-preflight|report` provides a frozen, vendor-neutral comparison protocol for Mind, Grok, OpenClaw, and Hermes. Missing or invalid runs cannot score; safety is a hard eligibility gate; every observation needs immutable evidence; and a superiority claim requires complete paired coverage plus a conservative confidence bound. The Mind preflight runs nearby deterministic checks but never promotes partial coverage into a competitive grade. See [the competitive benchmark protocol](docs/COMPETITIVE_BENCHMARK.md).
+
 ### Commitments and persistent delegation
 - Spoken commitments (`"I'll do X by tomorrow"`, `"remind me to X"`) are extracted by consolidation and become tracked tasks with due dates.
 - **Monitors** set up long-running WaitForCondition recipes: `watch my inbox for X`, `watch my github for X`, `watch <url> for X`. They poll in the background and notify you when the condition is met.
 - Recipes survive restarts (SQLite-backed, idempotent — a non-idempotent step is failed-visibly on recovery, never double-executed).
+
+### Always-on paper trading desk
+- `ym trading-agent shadow` runs one evidence-backed mover/news hunt per US market session, records every directional view, and grades it later without placing an order.
+- `ym trading-agent paper` uses the same loop for small sandbox positions and checks exit rules every 15 minutes while the market is open. Orders are size-bounded and the broker client is compiled to Alpaca's paper host; there is no live-trading mode.
+- `ym trading-agent status|off` makes the persistent state visible and reversible. The media watcher and `copy_trade` tool can separately extract gradeable signals from linked trading broadcasts.
+- `ym day-trader shadow` enables a deterministic professional-style intraday playbook: fresh catalyst plus a volume-confirmed break of the first 15-minute range. `ym day-trader paper` adds stop-distance sizing, a 0.25% equity risk budget per trade, three-entry and 1% daily-loss limits, one-minute management, and a 15:50 New York flatten—still exclusively through the compiled-in paper broker.
+- `ym day-trader status|off|run|run paper|flatten` exposes and controls the same persistent agent through the CLI and the Mind's `day_trader` conversational tool. The two autonomous desks disable one another so they cannot compete for the same paper account, and shutdown or mode changes refuse while an owned paper position still needs broker reconciliation.
+- `ym crypto-trader shadow|paper|status|off|run|run paper|flatten` provides the separate 24/7 spot-crypto loop through the CLI and Mind's `crypto_trader` tool. It watches only BTC/USD and ETH/USD, stays long/flat, scans completed 15-minute bars hourly, manages owned paper positions every five minutes, resets its loss budget at UTC midnight, and caps every holding at 24 hours. It uses fractional GTC orders against the same compiled-in paper host and is mutually exclusive with both equities desks.
+- `ym trading-performance [day|crypto]` reports only broker-reconciled realized closes: win count with a 95% uncertainty interval, net P&L after recorded fees, expectancy, profit factor, and maximum realized drawdown. Exit-order ids make ledger writes idempotent, so a reconciliation retry cannot manufacture a second win or loss.
+- Wallet execution begins with a signer-free intent boundary: `mind_tools::wallet` defaults to deny-all and checks exact account, chain, asset, and router allowlists plus notional, slippage, network-fee, and expiry caps. Passing validation permits only an approval request; no seed phrase, private key, calldata, signing, or broadcasting capability is represented.
+- `ym wallet create|status|backup|receive` provisions one real Base-mainnet receive wallet in the local Windows Credential Manager. Creation withholds the public address until the operator completes an interactive offline recovery-backup check; the command refuses redirected backup output and never places key material in Mind memory, files, arguments, or agent tools. Funding does not enable trading: signing and broadcasting remain structurally absent.
+- `ym trading-cockpit` is the read-only operator view: all three desk states, credential readiness without credential values, hard execution boundaries, realized evidence, and the next safe action in one report.
+- `cargo run -p mind-core --example trader_cockpit` exercises both desks against isolated in-memory Mind state with scripted inference, including cross-desk isolation, market-hours gates, missing-credential refusal, and the structural live-trading refusal.
 
 ### NL planner
 `plan: X` / `automate X` / `set up a task to X` → the mind authors and runs a recipe from a natural-language goal. Recipes support Think (LLM drafting), Act (gated outward action), AskUser (pause and resume), WaitUntil (time-based), and WaitForCondition (poll until true).
@@ -87,6 +107,17 @@ The mind can open bounded self-build pull requests against its own codebase: it 
 
 ### Always-on, Telegram-native
 Runs as a systemd service on any Linux host (no GPU or local model required for API-backed providers). The Telegram bot interface maps `/command` slash syntax to the same REPL commands available locally. Quiet hours are configurable.
+
+### Embeddable in existing AI clients
+The authenticated localhost control plane also exposes a deliberately small OpenAI-compatible API:
+
+- `GET /v1/models` discovers the single `yantrik-mind` model.
+- `POST /v1/chat/completions` accepts non-streaming text chat-completions payloads.
+- `POST /v1/responses` accepts non-streaming text input in the modern Responses shape.
+- The bearer token is an existing Mind device credential; no parallel API-key or identity system is created.
+- Requests enter the same principal-scoped `ConversationEngine`, durable memory, tools, and governance as native chat. Mind consumes the newest user message and owns conversation continuity; replayed client `system` and `assistant` messages are not promoted into trusted instructions.
+
+Point an OpenAI-compatible client at `http://127.0.0.1:8077/v1`, select model `yantrik-mind`, and use its paired Mind device token as the API key. The endpoint stays loopback-only and can be disabled with `YM_CTL=off`.
 
 ---
 

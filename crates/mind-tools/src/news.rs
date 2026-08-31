@@ -27,7 +27,11 @@ pub fn render_news(items: &[NewsItem]) -> String {
         .iter()
         .enumerate()
         .map(|(i, n)| {
-            let src = if n.source.is_empty() { String::new() } else { format!(" — {}", n.source) };
+            let src = if n.source.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", n.source)
+            };
             let when = short_date(&n.published);
             format!("{}. {}{}{}\n   {}", i + 1, n.title, src, when, n.url)
         })
@@ -44,7 +48,10 @@ pub struct GoogleNews {
 
 impl Default for GoogleNews {
     fn default() -> Self {
-        Self { hl: "en-US".into(), gl: "US".into() }
+        Self {
+            hl: "en-US".into(),
+            gl: "US".into(),
+        }
     }
 }
 
@@ -54,7 +61,10 @@ impl GoogleNews {
     }
     /// Locale-tuned (e.g. GoogleNews::with_locale("en-IN", "IN")).
     pub fn with_locale(hl: impl Into<String>, gl: impl Into<String>) -> Self {
-        Self { hl: hl.into(), gl: gl.into() }
+        Self {
+            hl: hl.into(),
+            gl: gl.into(),
+        }
     }
 }
 
@@ -134,7 +144,10 @@ fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
 }
 
 fn strip_cdata(s: &str) -> &str {
-    s.trim().trim_start_matches("<![CDATA[").trim_end_matches("]]>").trim()
+    s.trim()
+        .trim_start_matches("<![CDATA[")
+        .trim_end_matches("]]>")
+        .trim()
 }
 
 /// Pull NewsItems out of a Google News RSS feed.
@@ -144,14 +157,27 @@ fn parse_rss(xml: &str, limit: usize) -> Vec<NewsItem> {
         if out.len() >= limit {
             break;
         }
-        let mut title = between(item, "<title>", "</title>").map(strip_cdata).map(unescape).unwrap_or_default();
-        let url = between(item, "<link>", "</link>").map(strip_cdata).map(unescape).unwrap_or_default();
-        let published = between(item, "<pubDate>", "</pubDate>").map(strip_cdata).map(unescape).unwrap_or_default();
+        let mut title = between(item, "<title>", "</title>")
+            .map(strip_cdata)
+            .map(unescape)
+            .unwrap_or_default();
+        let url = between(item, "<link>", "</link>")
+            .map(strip_cdata)
+            .map(unescape)
+            .unwrap_or_default();
+        let published = between(item, "<pubDate>", "</pubDate>")
+            .map(strip_cdata)
+            .map(unescape)
+            .unwrap_or_default();
         // <source url="...">Name</source>
         let source = item
             .find("<source")
             .and_then(|i| item[i..].find('>').map(|j| i + j + 1))
-            .and_then(|start| item[start..].find("</source>").map(|e| &item[start..start + e]))
+            .and_then(|start| {
+                item[start..]
+                    .find("</source>")
+                    .map(|e| &item[start..start + e])
+            })
             .map(strip_cdata)
             .map(unescape)
             .unwrap_or_default();
@@ -162,7 +188,12 @@ fn parse_rss(xml: &str, limit: usize) -> Vec<NewsItem> {
             }
         }
         if !title.is_empty() && url.starts_with("http") {
-            out.push(NewsItem { title, url, source, published });
+            out.push(NewsItem {
+                title,
+                url,
+                source,
+                published,
+            });
         }
     }
     out
@@ -200,9 +231,15 @@ mod tests {
         </channel></rss>"#;
         let items = parse_rss(xml, 10);
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].title, "Talks stall in Geneva", "source suffix stripped");
+        assert_eq!(
+            items[0].title, "Talks stall in Geneva",
+            "source suffix stripped"
+        );
         assert_eq!(items[0].source, "Reuters");
-        assert_eq!(items[1].title, "Sanctions widen & markets dip", "entities unescaped");
+        assert_eq!(
+            items[1].title, "Sanctions widen & markets dip",
+            "entities unescaped"
+        );
         let r = render_news(&items);
         assert!(r.contains("1. Talks stall in Geneva — Reuters (29 Jun)"));
     }

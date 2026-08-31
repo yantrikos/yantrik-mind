@@ -62,7 +62,11 @@ impl OpenTrade {
             return 0.0;
         }
         let raw = (price / self.entry - 1.0) * 100.0;
-        if self.is_short() { -raw } else { raw }
+        if self.is_short() {
+            -raw
+        } else {
+            raw
+        }
     }
 
     /// Did the prediction come true? A trade is graded on DIRECTION, not on whether it was closed
@@ -71,6 +75,118 @@ impl OpenTrade {
     pub fn was_right(&self, price: f64) -> bool {
         self.favour_pct(price) > 0.0
     }
+}
+
+/// One broker-reconciled close. Quotes never enter this record: entry and exit are execution
+/// prices, quantity is signed (negative for shorts), and costs reduce the result explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClosedTrade {
+    pub desk: String,
+    pub symbol: String,
+    pub qty: f64,
+    pub entry: f64,
+    pub exit: f64,
+    #[serde(default)]
+    pub fees: f64,
+    pub opened_at_ms: i64,
+    pub closed_at_ms: i64,
+    pub exit_order_id: String,
+}
+
+impl ClosedTrade {
+    pub fn net_pnl(&self) -> Option<f64> {
+        let valid = self.qty.is_finite()
+            && self.qty != 0.0
+            && self.entry.is_finite()
+            && self.entry > 0.0
+            && self.exit.is_finite()
+            && self.exit > 0.0
+            && self.fees.is_finite()
+            && self.fees >= 0.0
+            && self.closed_at_ms >= self.opened_at_ms
+            && !self.exit_order_id.trim().is_empty();
+        valid.then_some((self.exit - self.entry) * self.qty - self.fees)
+    }
+
+    pub fn return_pct(&self) -> Option<f64> {
+        let capital = self.entry * self.qty.abs();
+        self.net_pnl().map(|pnl| pnl / capital * 100.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PerformanceSummary {
+    pub trades: usize,
+    pub wins: usize,
+    pub net_pnl: f64,
+    pub gross_profit: f64,
+    /// Positive magnitude of losing P&L.
+    pub gross_loss: f64,
+    pub expectancy: f64,
+    pub profit_factor: Option<f64>,
+    pub max_realized_drawdown: f64,
+}
+
+/// Summarize only complete, broker-attributed executions, ordered by their actual close time.
+pub fn summarize_closed(book: &[ClosedTrade]) -> PerformanceSummary {
+    let mut outcomes: Vec<(i64, f64)> = book
+        .iter()
+        .filter_map(|trade| trade.net_pnl().map(|pnl| (trade.closed_at_ms, pnl)))
+        .collect();
+    outcomes.sort_by_key(|(closed_at_ms, _)| *closed_at_ms);
+    if outcomes.is_empty() {
+        return PerformanceSummary::default();
+    }
+
+    let mut summary = PerformanceSummary {
+        trades: outcomes.len(),
+        ..Default::default()
+    };
+    let mut equity_curve = 0.0_f64;
+    let mut equity_peak = 0.0_f64;
+    for (_, pnl) in outcomes {
+        summary.net_pnl += pnl;
+        if pnl > 0.0 {
+            summary.wins += 1;
+            summary.gross_profit += pnl;
+        } else if pnl < 0.0 {
+            summary.gross_loss += -pnl;
+        }
+        equity_curve += pnl;
+        equity_peak = equity_peak.max(equity_curve);
+        summary.max_realized_drawdown = summary
+            .max_realized_drawdown
+            .max(equity_peak - equity_curve);
+    }
+    summary.expectancy = summary.net_pnl / summary.trades as f64;
+    summary.profit_factor =
+        (summary.gross_loss > 0.0).then_some(summary.gross_profit / summary.gross_loss);
+    summary
+}
+
+/// A 95% Wilson score interval for the observed win rate. Unlike the naive `wins / trades`
+/// number, this stays appropriately wide for small samples and never escapes 0–100%.
+pub fn win_rate_interval_95(wins: usize, trades: usize) -> Option<(f64, f64)> {
+    if trades == 0 || wins > trades {
+        return None;
+    }
+    let n = trades as f64;
+    let observed = wins as f64 / n;
+    let z = 1.959_963_984_540_054_f64;
+    let z_squared = z * z;
+    let denominator = 1.0 + z_squared / n;
+    let center = (observed + z_squared / (2.0 * n)) / denominator;
+    let spread =
+        z * ((observed * (1.0 - observed) + z_squared / (4.0 * n)) / n).sqrt() / denominator;
+    Some(((center - spread).max(0.0), (center + spread).min(1.0)))
+}
+
+/// Store one broker close exactly once. Broker status polling is deliberately retryable, so the
+/// execution id—not the symbol—is the identity of a closed trade. Replacing an existing row also
+/// lets a later broker response fill in final fees without counting the same close twice.
+pub fn upsert_closed(book: &mut Vec<ClosedTrade>, trade: ClosedTrade) {
+    book.retain(|row| row.exit_order_id != trade.exit_order_id);
+    book.push(trade);
 }
 
 /// Parse the stored ledger. A corrupt or absent record yields an empty book rather than an error:
@@ -94,7 +210,9 @@ pub fn upsert(book: &mut Vec<OpenTrade>, t: OpenTrade) {
 }
 
 pub fn take(book: &mut Vec<OpenTrade>, symbol: &str) -> Option<OpenTrade> {
-    let i = book.iter().position(|x| x.symbol.eq_ignore_ascii_case(symbol))?;
+    let i = book
+        .iter()
+        .position(|x| x.symbol.eq_ignore_ascii_case(symbol))?;
     Some(book.remove(i))
 }
 
@@ -114,12 +232,53 @@ mod tests {
         }
     }
 
+    fn retried_close(exit: f64, fees: f64) -> ClosedTrade {
+        ClosedTrade {
+            desk: "day".into(),
+            symbol: "WMT".into(),
+            qty: 2.0,
+            entry: 100.0,
+            exit,
+            fees,
+            opened_at_ms: 1,
+            closed_at_ms: 2,
+            exit_order_id: "close-1".into(),
+        }
+    }
+
+    #[test]
+    fn retrying_a_broker_close_does_not_double_count_it() {
+        let mut book = vec![];
+        upsert_closed(&mut book, retried_close(104.0, 0.0));
+        upsert_closed(&mut book, retried_close(104.0, 1.0));
+
+        assert_eq!(book.len(), 1);
+        assert_eq!(book[0].fees, 1.0);
+        assert_eq!(summarize_closed(&book).net_pnl, 7.0);
+    }
+
+    #[test]
+    fn win_rate_uncertainty_does_not_call_one_win_an_edge() {
+        let (one_win_low, one_win_high) = win_rate_interval_95(1, 1).unwrap();
+        assert!((one_win_low - 0.2065).abs() < 0.0001);
+        assert_eq!(one_win_high, 1.0);
+
+        let (balanced_low, balanced_high) = win_rate_interval_95(50, 100).unwrap();
+        assert!((balanced_low - 0.4038).abs() < 0.0001);
+        assert!((balanced_high - 0.5962).abs() < 0.0001);
+        assert_eq!(win_rate_interval_95(2, 1), None);
+        assert_eq!(win_rate_interval_95(0, 0), None);
+    }
+
     #[test]
     fn the_real_trade_is_graded_on_direction() {
         // Entered at 103.75 short; the tape went to 105.44. The thesis said further downside, so
         // this is simply wrong, and the ledger should say so rather than leave it pending forever.
         let t = wmt(0);
-        assert!(!t.was_right(105.44), "price rose against a short — the view was wrong");
+        assert!(
+            !t.was_right(105.44),
+            "price rose against a short — the view was wrong"
+        );
         assert!(t.favour_pct(105.44) < 0.0);
         assert!(t.was_right(99.0), "price fell — the view was right");
     }
@@ -155,10 +314,17 @@ mod tests {
     fn a_view_grades_exactly_like_a_trade_but_risks_nothing() {
         // The whole point of views: six a day instead of one, at zero capital, graded by the same
         // code. Direction still lives in the sign of qty, so nothing about scoring changes.
-        let view = OpenTrade { qty: -1.0, staked: false, ..wmt(0) };
+        let view = OpenTrade {
+            qty: -1.0,
+            staked: false,
+            ..wmt(0)
+        };
         assert!(!view.staked);
         assert!(view.is_short());
-        assert!(!view.was_right(105.44), "graded on the tape exactly as a real short would be");
+        assert!(
+            !view.was_right(105.44),
+            "graded on the tape exactly as a real short would be"
+        );
         assert!(view.was_right(99.0));
     }
 
@@ -169,7 +335,10 @@ mod tests {
         let old = r#"[{"symbol":"WMT","qty":-2.0,"entry":103.75,"opened_at_ms":1,"judgment_ref":"WMT","thesis":"t"}]"#;
         let book = parse_book(old);
         assert_eq!(book.len(), 1);
-        assert!(book[0].staked, "a pre-views record is a real position, not a view");
+        assert!(
+            book[0].staked,
+            "a pre-views record is a real position, not a view"
+        );
     }
 
     #[test]
@@ -178,5 +347,51 @@ mod tests {
         let closed = take(&mut book, "wmt").expect("case-insensitive");
         assert_eq!(closed.judgment_ref, "WMT");
         assert!(book.is_empty());
+    }
+
+    fn closed(qty: f64, entry: f64, exit: f64, fees: f64, at: i64) -> ClosedTrade {
+        ClosedTrade {
+            desk: "test".into(),
+            symbol: "XYZ".into(),
+            qty,
+            entry,
+            exit,
+            fees,
+            opened_at_ms: 0,
+            closed_at_ms: at,
+            exit_order_id: format!("order-{at}"),
+        }
+    }
+
+    #[test]
+    fn realized_pnl_handles_longs_shorts_and_costs() {
+        assert_eq!(closed(10.0, 100.0, 105.0, 2.0, 1).net_pnl(), Some(48.0));
+        assert_eq!(closed(-5.0, 200.0, 190.0, 1.0, 1).net_pnl(), Some(49.0));
+        assert_eq!(closed(2.0, 100.0, 90.0, 0.0, 1).net_pnl(), Some(-20.0));
+    }
+
+    #[test]
+    fn performance_uses_execution_order_and_reports_drawdown() {
+        let report = summarize_closed(&[
+            closed(2.0, 100.0, 90.0, 0.0, 3),
+            closed(-5.0, 200.0, 190.0, 0.0, 2),
+            closed(10.0, 100.0, 105.0, 0.0, 1),
+        ]);
+        assert_eq!(report.trades, 3);
+        assert_eq!(report.wins, 2);
+        assert_eq!(report.net_pnl, 80.0);
+        assert_eq!(report.gross_profit, 100.0);
+        assert_eq!(report.gross_loss, 20.0);
+        assert_eq!(report.profit_factor, Some(5.0));
+        assert_eq!(report.max_realized_drawdown, 20.0);
+        assert!((report.expectancy - 80.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn incomplete_or_impossible_execution_rows_are_not_scored() {
+        let mut invalid = closed(1.0, 100.0, 110.0, 0.0, 1);
+        invalid.exit_order_id.clear();
+        assert_eq!(invalid.net_pnl(), None);
+        assert_eq!(summarize_closed(&[invalid]), PerformanceSummary::default());
     }
 }

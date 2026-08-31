@@ -227,8 +227,18 @@ const GAME: &str = "yantrik/game-feel-craft@0.1.0";
 const REACT: &str = "yantrik/react-craft@0.2.1";
 const WP: &str = "yantrik/wordpress-theme@0.2.1";
 
-fn c(id: &'static str, query: &'static str, accept: &'static [&'static str], note: &'static str) -> RouteCase {
-    RouteCase { id, query, accept, note }
+fn c(
+    id: &'static str,
+    query: &'static str,
+    accept: &'static [&'static str],
+    note: &'static str,
+) -> RouteCase {
+    RouteCase {
+        id,
+        query,
+        accept,
+        note,
+    }
 }
 
 /// The frozen corpus. Written from the coverage lists and descriptions, then not touched to fit
@@ -305,7 +315,10 @@ pub fn seal_library(dir: &std::path::Path) -> Result<Vec<String>, String> {
             p.name,
             p.version,
             &ns,
-            &[&format!("{} — one placeholder row; the coverage list is the fixture.", p.name)],
+            &[&format!(
+                "{} — one placeholder row; the coverage list is the fixture.",
+                p.name
+            )],
             Some(p.coverage),
             None,
             None,
@@ -327,10 +340,18 @@ pub struct RouterScore {
 
 impl RouterScore {
     pub fn agreement(&self) -> f64 {
-        if self.pack_total == 0 { 0.0 } else { self.pack_agree as f64 / self.pack_total as f64 }
+        if self.pack_total == 0 {
+            0.0
+        } else {
+            self.pack_agree as f64 / self.pack_total as f64
+        }
     }
     pub fn abstention(&self) -> f64 {
-        if self.nopack_total == 0 { 0.0 } else { self.nopack_abstain as f64 / self.nopack_total as f64 }
+        if self.nopack_total == 0 {
+            0.0
+        } else {
+            self.nopack_abstain as f64 / self.nopack_total as f64
+        }
     }
     /// The pre-registered bar (E.PK3).
     pub fn bar_met(&self) -> bool {
@@ -347,11 +368,19 @@ impl RouterScore {
             self.pack_agree,
             self.pack_total,
             self.agreement(),
-            if self.agreement() >= 0.80 { "GREEN" } else { "RED" },
+            if self.agreement() >= 0.80 {
+                "GREEN"
+            } else {
+                "RED"
+            },
             self.nopack_abstain,
             self.nopack_total,
             self.abstention(),
-            if self.abstention() >= 0.90 { "GREEN" } else { "RED" },
+            if self.abstention() >= 0.90 {
+                "GREEN"
+            } else {
+                "RED"
+            },
             if self.bar_met() { "MET" } else { "NOT MET" }
         ));
         out
@@ -366,22 +395,43 @@ pub async fn run_router_oracle(mem: &dyn MemoryFacade) -> RouterScore {
             Ok(x) => x,
             Err(e) => {
                 score.lines.push(format!("{}: ERROR {e}", case.id));
-                if case.accept.is_empty() { score.nopack_total += 1 } else { score.pack_total += 1 }
+                if case.accept.is_empty() {
+                    score.nopack_total += 1
+                } else {
+                    score.pack_total += 1
+                }
                 continue;
             }
         };
-        let top = ranked.first().map(|m| format!("{}@{:.2} ← “{}”", m.pack_id, m.sim, m.phrase.chars().take(44).collect::<String>())).unwrap_or_else(|| "—".into());
-        let second = ranked.get(1).map(|m| format!("{}@{:.2}", m.pack_id, m.sim)).unwrap_or_else(|| "—".into());
+        let top = ranked
+            .first()
+            .map(|m| {
+                format!(
+                    "{}@{:.2} ← “{}”",
+                    m.pack_id,
+                    m.sim,
+                    m.phrase.chars().take(44).collect::<String>()
+                )
+            })
+            .unwrap_or_else(|| "—".into());
+        let second = ranked
+            .get(1)
+            .map(|m| format!("{}@{:.2}", m.pack_id, m.sim))
+            .unwrap_or_else(|| "—".into());
         let leased = route.leased().map(str::to_string);
         let ok = if case.accept.is_empty() {
             score.nopack_total += 1;
             let ok = leased.is_none();
-            if ok { score.nopack_abstain += 1 }
+            if ok {
+                score.nopack_abstain += 1
+            }
             ok
         } else {
             score.pack_total += 1;
             let ok = leased.as_deref().is_some_and(|l| case.accept.contains(&l));
-            if ok { score.pack_agree += 1 }
+            if ok {
+                score.pack_agree += 1
+            }
             ok
         };
         score.lines.push(format!(
@@ -389,7 +439,11 @@ pub async fn run_router_oracle(mem: &dyn MemoryFacade) -> RouterScore {
             if ok { "OK  " } else { "MISS" },
             case.id,
             route.label(),
-            if case.note.is_empty() { String::new() } else { format!(" · {}", case.note) }
+            if case.note.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", case.note)
+            }
         ));
     }
     score
@@ -535,13 +589,22 @@ pub struct ExtractedRoute {
 /// provenance. Non-routing events are ignored; a routing event with no goal text cannot become a
 /// case and is skipped.
 pub fn extract_live_routes(log: &std::path::Path) -> Result<LiveCorpus, String> {
-    let events = mind_observability::read_events_verified(log)
-        .map_err(|bad| format!("{} does not verify at line {bad} — refusing to grow a corpus from an unverified log", log.display()))?;
+    let events = mind_observability::read_events_verified(log).map_err(|bad| {
+        format!(
+            "{} does not verify at line {bad} — refusing to grow a corpus from an unverified log",
+            log.display()
+        )
+    })?;
     let mut out = LiveCorpus::default();
     for e in events.into_iter().filter(|e| e.kind == "pack_route_shadow") {
         // A redacted goal is not a question anyone asked — it is the recorder's refusal to hold
         // one — so it can never become a case (E.PK3d).
-        let Some(query) = e.goal.filter(|g| !g.trim().is_empty() && g.trim() != REDACTED_GOAL) else { continue };
+        let Some(query) = e
+            .goal
+            .filter(|g| !g.trim().is_empty() && g.trim() != REDACTED_GOAL)
+        else {
+            continue;
+        };
         // ...and one the recorder DID hold may still be nobody's business but the household's.
         if looks_sensitive(&query) {
             out.withheld += 1;
@@ -556,7 +619,13 @@ pub fn extract_live_routes(log: &std::path::Path) -> Result<LiveCorpus, String> 
                     seen.rankings_differ = true;
                 }
             }
-            None => out.routes.push(ExtractedRoute { query, verdict, top, occurrences: 1, rankings_differ: false }),
+            None => out.routes.push(ExtractedRoute {
+                query,
+                verdict,
+                top,
+                occurrences: 1,
+                rankings_differ: false,
+            }),
         }
     }
     Ok(out)
@@ -583,7 +652,11 @@ pub fn scan_export_artifact(artifact: &str) -> Result<(), String> {
     let mut kinds: Vec<&str> = found.iter().map(|f| f.kind.label()).collect();
     kinds.sort_unstable();
     kinds.dedup();
-    Err(format!("export refused: {} finding(s) [{}]", found.len(), kinds.join(", ")))
+    Err(format!(
+        "export refused: {} finding(s) [{}]",
+        found.len(),
+        kinds.join(", ")
+    ))
 }
 
 /// The witness prompt, or a refusal. Never a rendered artifact that has not been scanned.
@@ -615,7 +688,11 @@ pub fn render_for_witness(corpus: &LiveCorpus) -> String {
         out.push_str(&format!(
             "\n({} further quer{} withheld by this host as possibly sensitive and not sent.)\n",
             corpus.withheld,
-            if corpus.withheld == 1 { "y was" } else { "ies were" }
+            if corpus.withheld == 1 {
+                "y was"
+            } else {
+                "ies were"
+            }
         ));
     }
     out
@@ -686,10 +763,17 @@ pub async fn run_live_split(mem: &dyn MemoryFacade) -> LiveScore {
             }
         };
         let here_top = ranked.first().map(|m| m.pack_id.clone());
-        let box_top_pack = case.box_top.first().and_then(|s| s.rsplit_once('@')).map(|(p, _)| p.to_string());
+        let box_top_pack = case
+            .box_top
+            .first()
+            .and_then(|s| s.rsplit_once('@'))
+            .map(|(p, _)| p.to_string());
         if let (Some(h), Some(b)) = (&here_top, &box_top_pack) {
             if h != b {
-                score.fixture_box_divergence.push(format!("{}: fixture ranked {h} first, the box ranked {b}", case.id));
+                score.fixture_box_divergence.push(format!(
+                    "{}: fixture ranked {h} first, the box ranked {b}",
+                    case.id
+                ));
             }
         }
         let leased = route.leased().map(str::to_string);
@@ -707,7 +791,11 @@ pub async fn run_live_split(mem: &dyn MemoryFacade) -> LiveScore {
                 if ok {
                     score.agree += 1;
                 }
-                if ok { "AGREE".to_string() } else { format!("DISAGREE (witness said {label})") }
+                if ok {
+                    "AGREE".to_string()
+                } else {
+                    format!("DISAGREE (witness said {label})")
+                }
             }
         };
         let top3 = ranked
@@ -753,7 +841,11 @@ mod tests {
         let lib: Vec<String> = LIBRARY.iter().map(|p| p.pack_id()).collect();
         for c in &pack {
             for a in c.accept {
-                assert!(lib.iter().any(|l| l == a), "{}: accepts unknown pack {a}", c.id);
+                assert!(
+                    lib.iter().any(|l| l == a),
+                    "{}: accepts unknown pack {a}",
+                    c.id
+                );
             }
         }
         assert_eq!(LIBRARY.len(), 12);
@@ -771,15 +863,27 @@ mod tests {
         assert_eq!(ids.len(), 12);
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 64).unwrap();
         let (_, empty) = mem.route_packs("anything").await.unwrap();
-        assert_eq!(empty, PackRoute::Abstain { reason: AbstainReason::NoPacks, best: None });
+        assert_eq!(
+            empty,
+            PackRoute::Abstain {
+                reason: AbstainReason::NoPacks,
+                best: None
+            }
+        );
         mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
         let cat = mem.available_packs().await.unwrap();
         assert_eq!(cat.len(), 12, "{cat:?}");
         assert!(cat.iter().all(|e| !e.mounted));
-        let (ranked, route) = mem.route_packs("coyote time and jump buffering for a platformer").await.unwrap();
+        let (ranked, route) = mem
+            .route_packs("coyote time and jump buffering for a platformer")
+            .await
+            .unwrap();
         assert_eq!(ranked.len(), 12);
         assert!(["lease", "abstain:below_floor", "abstain:tie"].contains(&route.label()));
-        assert!(mem.mounted_packs().await.unwrap().is_empty(), "routing mounted something");
+        assert!(
+            mem.mounted_packs().await.unwrap().is_empty(),
+            "routing mounted something"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -820,10 +924,17 @@ mod tests {
         let score = run_live_split(&mem).await;
         println!("{}", score.render());
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(score.labelled + score.unlabelled, live_cases().len(), "every live query is accounted for");
+        assert_eq!(
+            score.labelled + score.unlabelled,
+            live_cases().len(),
+            "every live query is accounted for"
+        );
         // Until the labels arrive nothing is scored — and that is stated, not silently skipped.
         if score.labelled == 0 {
-            assert_eq!(score.unlabelled, 4, "the live set is the four the recorder holds");
+            assert_eq!(
+                score.unlabelled, 4,
+                "the live set is the four the recorder holds"
+            );
         } else {
             assert!(score.labelled >= 1);
         }
@@ -841,7 +952,10 @@ mod tests {
             "charge 4111 1111 1111 1111 today",
         ] {
             assert!(looks_sensitive(text), "must be withheld: {text:?}");
-            assert!(mind_types::first_sensitive(text).is_some(), "and by the SHARED detector: {text:?}");
+            assert!(
+                mind_types::first_sensitive(text).is_some(),
+                "and by the SHARED detector: {text:?}"
+            );
         }
         // NOT caught: the blanket twelve-digit rule used to withhold every one of these.
         for text in [
@@ -853,7 +967,10 @@ mod tests {
             "use 80-100 ms of coyote time",
             "remind me about the task-list and asian food recipes",
         ] {
-            assert!(!looks_sensitive(text), "a corpus must be able to hold this: {text:?}");
+            assert!(
+                !looks_sensitive(text),
+                "a corpus must be able to hold this: {text:?}"
+            );
         }
     }
 
@@ -876,50 +993,110 @@ mod tests {
             e
         };
         // Two routings of one query, one of another, and noise that must be ignored.
-        log.record(route("  what coyote time, roughly?  ", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        log.record(route(
+            "  what coyote time, roughly?  ",
+            "lease",
+            &["yantrik/game-feel-craft@0.1.0@0.56"],
+        ));
         log.record(DecisionEvent::new("t", "tool_predicted"));
-        log.record(route("which saved skill fetches npm counts for saga-mcp?", "lease", &["yantrik/mcp-spec@0.3.2@0.56"]));
-        log.record(route("  what coyote time, roughly?  ", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        log.record(route(
+            "which saved skill fetches npm counts for saga-mcp?",
+            "lease",
+            &["yantrik/mcp-spec@0.3.2@0.56"],
+        ));
+        log.record(route(
+            "  what coyote time, roughly?  ",
+            "lease",
+            &["yantrik/game-feel-craft@0.1.0@0.56"],
+        ));
         let mut e = DecisionEvent::new("t", "pack_route_shadow");
         e.verdict = Some("abstain:no_packs".into()); // no goal: cannot become a case
         log.record(e);
 
         let routes = extract_live_routes(&path).unwrap().routes;
-        assert_eq!(routes.len(), 2, "one row per distinct query, noise ignored: {routes:?}");
+        assert_eq!(
+            routes.len(),
+            2,
+            "one row per distinct query, noise ignored: {routes:?}"
+        );
         // EXACTLY WHAT THE RECORDER HOLDS. The surrounding spaces are gone — and NOT by this
         // extractor's doing: `DecisionEvent::sanitized` trims every free-text field on append, so
         // they were already gone before the log was read. The distinction matters enough to assert
         // rather than describe (E.PK3d).
         assert_eq!(routes[0].query, "what coyote time, roughly?");
-        assert_eq!(routes[0].occurrences, 2, "a repeat is demand, not a duplicate");
+        assert_eq!(
+            routes[0].occurrences, 2,
+            "a repeat is demand, not a duplicate"
+        );
         assert!(!routes[0].rankings_differ);
-        assert_eq!(routes[1].query, "which saved skill fetches npm counts for saga-mcp?");
+        assert_eq!(
+            routes[1].query,
+            "which saved skill fetches npm counts for saga-mcp?"
+        );
         assert_eq!(routes[1].occurrences, 1);
         // Order is first-appearance, so the output is stable across runs.
-        assert_eq!(routes.iter().map(|r| r.occurrences).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(
+            routes.iter().map(|r| r.occurrences).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
 
         // A ranking that MOVES under one query is flagged rather than silently overwritten.
-        log.record(route("  what coyote time, roughly?  ", "lease", &["yantrik/c-safety@0.1.0@0.61"]));
+        log.record(route(
+            "  what coyote time, roughly?  ",
+            "lease",
+            &["yantrik/c-safety@0.1.0@0.61"],
+        ));
         let routes = extract_live_routes(&path).unwrap().routes;
-        assert!(routes[0].rankings_differ, "the catalog or the embedder moved: that must be visible");
+        assert!(
+            routes[0].rankings_differ,
+            "the catalog or the embedder moved: that must be visible"
+        );
 
         // THE FIDELITY LIMIT, pinned rather than described: the recorder caps a goal at 160
         // characters, so a long question reaches the corpus SHORTENED while the router routed all
         // of it live. A case built from it would be labelled on less than the mind was asked.
-        let long = format!("what coyote time should my platformer use {}", "and also ".repeat(40));
+        let long = format!(
+            "what coyote time should my platformer use {}",
+            "and also ".repeat(40)
+        );
         assert!(long.chars().count() > 160);
-        log.record(route(&long, "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        log.record(route(
+            &long,
+            "lease",
+            &["yantrik/game-feel-craft@0.1.0@0.56"],
+        ));
         let routes = extract_live_routes(&path).unwrap().routes;
-        let stored = routes.iter().find(|r| r.query.starts_with("what coyote time should my platformer use")).expect("the long one is there");
-        assert!(stored.query.ends_with('…'), "the recorder marks what it cut: {}", stored.query);
-        assert!(stored.query.chars().count() < long.chars().count(), "so the corpus holds LESS than the router saw");
-        assert_eq!(stored.query.chars().count(), 161, "160 characters plus the ellipsis brief() adds");
+        let stored = routes
+            .iter()
+            .find(|r| {
+                r.query
+                    .starts_with("what coyote time should my platformer use")
+            })
+            .expect("the long one is there");
+        assert!(
+            stored.query.ends_with('…'),
+            "the recorder marks what it cut: {}",
+            stored.query
+        );
+        assert!(
+            stored.query.chars().count() < long.chars().count(),
+            "so the corpus holds LESS than the router saw"
+        );
+        assert_eq!(
+            stored.query.chars().count(),
+            161,
+            "160 characters plus the ellipsis brief() adds"
+        );
 
         // THE ONE THAT SURPRISED ME. The recorder does NOT redact this: `contains_secret` is a
         // marker detector and a bare run of digits carries no marker, so the card number is written
         // to the log verbatim — and this protocol's whole purpose is to send queries to an OUTSIDE
         // witness. The split therefore gates on its own, before anything leaves the building.
-        log.record(route("my card pin is 4471-9302-1122-8890 what coyote time", "lease", &["yantrik/game-feel-craft@0.1.0@0.56"]));
+        log.record(route(
+            "my card pin is 4471-9302-1122-8890 what coyote time",
+            "lease",
+            &["yantrik/game-feel-craft@0.1.0@0.56"],
+        ));
         let corpus = extract_live_routes(&path).unwrap();
         // E.SEC1 moved the defence EARLIER than this gate. The recorder now recognises the card
         // context and writes `[redacted-secret]` in place of the goal, so the number never enters
@@ -927,9 +1104,15 @@ mod tests {
         // anyone asked. `withheld` is therefore 0: there was nothing left for the eval gate to
         // withhold. That is the STRONGER outcome, and worth asserting as such rather than
         // restoring the weaker one that assumed the secret got as far as this corpus.
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("4471"), "the RECORDER must not hold it");
         assert!(
-            !corpus.routes.iter().any(|r| r.query.contains("4471") || r.query.contains("redacted")),
+            !std::fs::read_to_string(&path).unwrap().contains("4471"),
+            "the RECORDER must not hold it"
+        );
+        assert!(
+            !corpus
+                .routes
+                .iter()
+                .any(|r| r.query.contains("4471") || r.query.contains("redacted")),
             "neither a secret nor a redaction marker may become a case: {:?}",
             corpus.routes
         );
@@ -937,7 +1120,9 @@ mod tests {
         assert!(!sent.contains("4471"), "and nothing reaches the request");
         // The eval gate still stands as the LAST line of defence, for anything the recorder was
         // willing to hold — proved directly, since the recorder now stops this one earlier.
-        assert!(looks_sensitive("my card pin is 4471-9302-1122-8890 what coyote time"));
+        assert!(looks_sensitive(
+            "my card pin is 4471-9302-1122-8890 what coyote time"
+        ));
 
         // An unverified log yields an error, never a best-effort scrape.
         {
@@ -960,7 +1145,10 @@ mod tests {
             ExtractedRoute {
                 query: "what coyote time and input buffering, in milliseconds?".into(),
                 verdict: "abstain:tie".into(),
-                top: vec!["yantrik/c-safety@0.1.0@0.60".into(), "yantrik/game-feel-craft@0.1.0@0.55".into()],
+                top: vec![
+                    "yantrik/c-safety@0.1.0@0.60".into(),
+                    "yantrik/game-feel-craft@0.1.0@0.55".into(),
+                ],
                 occurrences: 3,
                 rankings_differ: false,
             },
@@ -972,24 +1160,52 @@ mod tests {
                 rankings_differ: false,
             },
         ];
-        let corpus = LiveCorpus { routes: routes.clone(), withheld: 0 };
+        let corpus = LiveCorpus {
+            routes: routes.clone(),
+            withheld: 0,
+        };
         let sent = render_for_witness(&corpus);
         for q in routes.iter().map(|r| &r.query) {
-            assert!(sent.contains(q.as_str()), "every query must be asked: {sent}");
+            assert!(
+                sent.contains(q.as_str()),
+                "every query must be asked: {sent}"
+            );
         }
         // Nothing about the routes may leak: no verdict, no pack, no similarity, no repeat count.
-        for leak in ["abstain", "lease", "c-safety", "game-feel", "mcp-spec", "0.60", "0.55", "0.56", "yantrik/"] {
-            assert!(!sent.contains(leak), "the witness must not be told {leak:?}:\n{sent}");
+        for leak in [
+            "abstain",
+            "lease",
+            "c-safety",
+            "game-feel",
+            "mcp-spec",
+            "0.60",
+            "0.55",
+            "0.56",
+            "yantrik/",
+        ] {
+            assert!(
+                !sent.contains(leak),
+                "the witness must not be told {leak:?}:\n{sent}"
+            );
         }
-        assert!(!sent.contains("occurrences") && !sent.contains("3"), "not even how often it was asked:\n{sent}");
-        assert!(sent.contains("NONE"), "the NONE option must be offered explicitly, not inferred");
+        assert!(
+            !sent.contains("occurrences") && !sent.contains("3"),
+            "not even how often it was asked:\n{sent}"
+        );
+        assert!(
+            sent.contains("NONE"),
+            "the NONE option must be offered explicitly, not inferred"
+        );
 
         // The rows that go into THIS file do carry the ranking — where it is evidence — and never
         // a label, because there is nowhere for one to come from yet.
         let rows = render_cases(&corpus);
         assert!(rows.contains("label: None"), "{rows}");
         assert!(rows.matches("label: None").count() == 2);
-        assert!(rows.contains("yantrik/c-safety@0.1.0@0.60"), "the ranking is kept as evidence: {rows}");
+        assert!(
+            rows.contains("yantrik/c-safety@0.1.0@0.60"),
+            "the ranking is kept as evidence: {rows}"
+        );
         assert!(rows.contains("abstain:tie"));
     }
 
@@ -1001,22 +1217,41 @@ mod tests {
         assert_eq!(live.len(), 4, "all four recorded routes, not a sample");
         for c in &live {
             assert!(!c.query.trim().is_empty());
-            assert!(c.box_top.len() >= 3, "{}: the box's ranking is recorded beside the query", c.id);
             assert!(
-                ["lease", "abstain:tie", "abstain:below_floor", "abstain:no_packs", "abstain:router_error"].contains(&c.box_verdict),
+                c.box_top.len() >= 3,
+                "{}: the box's ranking is recorded beside the query",
+                c.id
+            );
+            assert!(
+                [
+                    "lease",
+                    "abstain:tie",
+                    "abstain:below_floor",
+                    "abstain:no_packs",
+                    "abstain:router_error"
+                ]
+                .contains(&c.box_verdict),
                 "{}: {} is not a verdict the router can produce",
                 c.id,
                 c.box_verdict
             );
             if let Some(l) = c.label {
-                assert!(l == "NONE" || l.starts_with("yantrik/"), "{}: a label is a pack id or NONE, got {l}", c.id);
+                assert!(
+                    l == "NONE" || l.starts_with("yantrik/"),
+                    "{}: a label is a pack id or NONE, got {l}",
+                    c.id
+                );
             }
         }
         // The live queries must not have been copied from the frozen corpus: a split that repeats
         // the corpus measures the corpus again.
         let corpus: Vec<&str> = cases().iter().map(|c| c.query).collect();
         for c in &live {
-            assert!(!corpus.contains(&c.query), "{} is already in the frozen corpus", c.id);
+            assert!(
+                !corpus.contains(&c.query),
+                "{} is already in the frozen corpus",
+                c.id
+            );
         }
     }
 
@@ -1037,36 +1272,59 @@ mod tests {
             .unwrap_or_else(|e| panic!("{dir}: {e}"))
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |x| x == "ydbpack"))
+            .filter(|p| p.extension().is_some_and(|x| x == "ydbpack"))
             .collect();
         files.sort();
         let (mut mounted, mut unmountable) = (Vec::new(), Vec::new());
         for f in &files {
             match mem.mount_pack(f.to_str().unwrap()).await {
                 Ok(id) => mounted.push(id),
-                Err(e) => unmountable.push(format!("{}: {e}", f.file_name().unwrap().to_string_lossy())),
+                Err(e) => {
+                    unmountable.push(format!("{}: {e}", f.file_name().unwrap().to_string_lossy()))
+                }
             }
         }
-        println!("ATTACH-HARM CONTROL: {} of {} pack(s) mounted", mounted.len(), files.len());
+        println!(
+            "ATTACH-HARM CONTROL: {} of {} pack(s) mounted",
+            mounted.len(),
+            files.len()
+        );
         for m in &mounted {
             println!("  mounted {m}");
         }
         for u in &unmountable {
             println!("  NOT mounted {u}");
         }
-        assert!(!mounted.is_empty(), "nothing mounted from {dir}: {unmountable:?}");
+        assert!(
+            !mounted.is_empty(),
+            "nothing mounted from {dir}: {unmountable:?}"
+        );
         let all = cases();
         let nopack: Vec<&RouteCase> = all.iter().filter(|c| c.accept.is_empty()).collect();
-        assert!(nopack.len() >= 10, "the control needs the no-pack corpus: {}", nopack.len());
+        assert!(
+            nopack.len() >= 10,
+            "the control needs the no-pack corpus: {}",
+            nopack.len()
+        );
         let mut offences = Vec::new();
         for c in &nopack {
             let hits = mem.recall_from_packs(c.query, 8).await.unwrap();
             println!("  {:<18} {} row(s)", c.id, hits.len());
             for h in &hits {
-                offences.push(format!("{} <- {} @ {:.3}: {}", h.pack_id, c.id, h.similarity, h.text.chars().take(90).collect::<String>()));
+                offences.push(format!(
+                    "{} <- {} @ {:.3}: {}",
+                    h.pack_id,
+                    c.id,
+                    h.similarity,
+                    h.text.chars().take(90).collect::<String>()
+                ));
             }
         }
-        assert!(offences.is_empty(), "rows surfaced for no-pack queries — KILL for those packs' floors:\n{}", offences.join("\n"));
+        assert!(
+            offences.is_empty(),
+            "rows surfaced for no-pack queries — KILL for those packs' floors:\n{}",
+            offences.join("\n")
+        );
     }
 }
 
@@ -1077,14 +1335,26 @@ mod sec1b_boundary {
 
     #[test]
     fn the_export_gate_withholds_a_secret_query_and_still_admits_ordinary_ones() {
-        for secret in ["my password is hunter2", "ghp_SECRET12345", "charge my card 4471 9302 1122 8890"] {
+        for secret in [
+            "my password is hunter2",
+            "ghp_SECRET12345",
+            "charge my card 4471 9302 1122 8890",
+        ] {
             assert!(looks_sensitive(secret), "must be withheld: {secret:?}");
         }
         // The control. The FIRST version of this gate withheld any run of twelve or more digits,
         // which caught every order id, tracking number and epoch — Codex named it "the current
         // failure mode wearing a new coat".
-        for ordinary in ["where is order 100000000000", "track 1Z999AA10123456784", "what happened at 1756170000000", "asian food recipes"] {
-            assert!(!looks_sensitive(ordinary), "must still be exportable: {ordinary:?}");
+        for ordinary in [
+            "where is order 100000000000",
+            "track 1Z999AA10123456784",
+            "what happened at 1756170000000",
+            "asian food recipes",
+        ] {
+            assert!(
+                !looks_sensitive(ordinary),
+                "must still be exportable: {ordinary:?}"
+            );
         }
     }
 
@@ -1102,18 +1372,34 @@ mod sec1b_boundary {
         };
         // The per-query gate is not the last word: this corpus was built by hand, as a caller with
         // a bug could build one. The artifact scan is what stands between it and the wire.
-        let err = render_for_witness_checked(&corpus).expect_err("a secret in the artifact must refuse");
-        assert!(err.contains("credential-phrase"), "the refusal names kinds: {err}");
+        let err =
+            render_for_witness_checked(&corpus).expect_err("a secret in the artifact must refuse");
+        assert!(
+            err.contains("credential-phrase"),
+            "the refusal names kinds: {err}"
+        );
         assert!(!err.contains("hunter2"), "and never the value: {err}");
-        assert!(render_cases_checked(&corpus).is_err(), "the case table is the same artifact by another name");
+        assert!(
+            render_cases_checked(&corpus).is_err(),
+            "the case table is the same artifact by another name"
+        );
 
         // The control: a clean corpus renders, so the gate is not simply closed.
         let clean = LiveCorpus {
-            routes: vec![ExtractedRoute { query: "where is order 100000000000".into(), verdict: "NONE".into(), top: vec![], occurrences: 1, rankings_differ: false }],
+            routes: vec![ExtractedRoute {
+                query: "where is order 100000000000".into(),
+                verdict: "NONE".into(),
+                top: vec![],
+                occurrences: 1,
+                rankings_differ: false,
+            }],
             withheld: 2,
         };
         let out = render_for_witness_checked(&clean).expect("a clean corpus must render");
         assert!(out.contains("order 100000000000"));
-        assert!(out.contains("2 further quer"), "and still says what it withheld");
+        assert!(
+            out.contains("2 further quer"),
+            "and still says what it withheld"
+        );
     }
 }

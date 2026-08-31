@@ -11,29 +11,47 @@ impl super::ConversationEngine {
             "name" => {
                 let name = Self::clean_name(text);
                 let _ = self.memory.profile_set("name", &name).await;
-                let _ = self.memory.remember_as_belief(BeliefAssertion {
-                    statement: format!("The user's name is {name}"),
-                    polarity: 1.0, weight: 1.0, source_event: Some("onboard".into()), provenance: "told".into(),
-                }).await;
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!("The user's name is {name}"),
+                        polarity: 1.0,
+                        weight: 1.0,
+                        source_event: Some("onboard".into()),
+                        provenance: "told".into(),
+                    })
+                    .await;
                 self.set_pending_slot(Some("purpose")).await;
                 format!("Good to meet you, {name}. What would you most like me to help you with — the main thing you'd want from me? Knowing that lets me actually be useful rather than generic.")
             }
             "purpose" => {
                 let purpose: String = text.trim().chars().take(240).collect();
                 let _ = self.memory.profile_set("purpose", &purpose).await;
-                let _ = self.memory.remember_as_belief(BeliefAssertion {
-                    statement: format!("The user wants me to help with: {purpose}"),
-                    polarity: 1.0, weight: 1.0, source_event: Some("onboard".into()), provenance: "told".into(),
-                }).await;
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!("The user wants me to help with: {purpose}"),
+                        polarity: 1.0,
+                        weight: 1.0,
+                        source_event: Some("onboard".into()),
+                        provenance: "told".into(),
+                    })
+                    .await;
                 match self.purpose_followup(&purpose).await {
                     Some(q) => format!("Got it — I'll keep that as my north star. {q}"),
-                    None => "Got it — I'll keep that as my north star. Tell me more whenever you like.".to_string(),
+                    None => {
+                        "Got it — I'll keep that as my north star. Tell me more whenever you like."
+                            .to_string()
+                    }
                 }
             }
             s if s.starts_with("interest:") => {
                 let key = s.trim_start_matches("interest:").to_string();
                 let ans: String = text.trim().chars().take(400).collect();
-                let _ = self.memory.profile_set(&format!("interest_{key}"), &ans).await;
+                let _ = self
+                    .memory
+                    .profile_set(&format!("interest_{key}"), &ans)
+                    .await;
                 let _ = self
                     .memory
                     .remember_as_belief(BeliefAssertion {
@@ -54,10 +72,20 @@ impl super::ConversationEngine {
                         if let Some(mmdd) = mmdd {
                             let mut store = self.load_people_profiles().await;
                             if let Some(i) = store.iter().position(|p| {
-                                p.get("relationship").and_then(|x| x.as_str()).map(|r| r.contains("wife")).unwrap_or(false)
+                                p.get("relationship")
+                                    .and_then(|x| x.as_str())
+                                    .map(|r| r.contains("wife"))
+                                    .unwrap_or(false)
                             }) {
-                                let mut dates = store[i].get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-                                dates.retain(|d| d.get("label").and_then(|x| x.as_str()) != Some("wedding anniversary"));
+                                let mut dates = store[i]
+                                    .get("dates")
+                                    .and_then(|x| x.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                dates.retain(|d| {
+                                    d.get("label").and_then(|x| x.as_str())
+                                        != Some("wedding anniversary")
+                                });
                                 dates.push(serde_json::json!({ "label": "wedding anniversary", "mmdd": mmdd }));
                                 store[i]["dates"] = serde_json::json!(dates);
                                 self.save_people_profiles(&store).await;
@@ -77,8 +105,14 @@ impl super::ConversationEngine {
                     .copied()
                     .collect();
                 if !remaining.is_empty() && ans.chars().count() > 60 {
-                    let dims_list = remaining.iter().map(|(k, q)| format!("- {k}: {q}")).collect::<Vec<_>>().join("
-");
+                    let dims_list = remaining
+                        .iter()
+                        .map(|(k, q)| format!("- {k}: {q}"))
+                        .collect::<Vec<_>>()
+                        .join(
+                            "
+",
+                        );
                     let prompt = format!(
                         "The user wrote:
 \"\"\"
@@ -89,16 +123,42 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
 
 {dims_list}"
                     );
-                    let cfg = GenerationConfig { max_tokens: 400, ..GenerationConfig::default() };
-                    if let Ok(r) = self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+                    let cfg = GenerationConfig {
+                        max_tokens: 400,
+                        ..GenerationConfig::default()
+                    };
+                    if let Ok(r) = self
+                        .inference
+                        .chat_grounded(
+                            vec![
+                                ChatMessage::system(&self.persona),
+                                ChatMessage::user(&prompt),
+                            ],
+                            cfg,
+                        )
+                        .await
+                    {
                         let v = parse_json_obj(&r.text);
-                        for a in v.get("answered").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                            let (Some(k2), Some(ans2)) = (a.get("key").and_then(|x| x.as_str()), a.get("answer").and_then(|x| x.as_str())) else { continue };
+                        for a in v
+                            .get("answered")
+                            .and_then(|x| x.as_array())
+                            .cloned()
+                            .unwrap_or_default()
+                        {
+                            let (Some(k2), Some(ans2)) = (
+                                a.get("key").and_then(|x| x.as_str()),
+                                a.get("answer").and_then(|x| x.as_str()),
+                            ) else {
+                                continue;
+                            };
                             if !remaining.iter().any(|(rk, _)| *rk == k2) || ans2.trim().len() < 4 {
                                 continue;
                             }
                             let ans2: String = ans2.trim().chars().take(400).collect();
-                            let _ = self.memory.profile_set(&format!("interest_{k2}"), &ans2).await;
+                            let _ = self
+                                .memory
+                                .profile_set(&format!("interest_{k2}"), &ans2)
+                                .await;
                             let _ = self
                                 .memory
                                 .remember_as_belief(BeliefAssertion {
@@ -115,23 +175,37 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 }
                 // Chain only a question that is STILL genuinely unanswered.
                 let covered = self.ask_covered().await;
-                match INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
+                match INTEREST_DIMS
+                    .iter()
+                    .find(|(k, _)| !covered.iter().any(|c| c == k))
+                {
                     Some((nk, nq)) => {
                         self.set_pending_slot(Some(&format!("interest:{nk}"))).await;
                         format!("Love that — noted. {nq}")
                     }
-                    None => "Got it — that gives me a real feel for you, and I'll put it to use.".to_string(),
+                    None => "Got it — that gives me a real feel for you, and I'll put it to use."
+                        .to_string(),
                 }
             }
             s if s.starts_with("mergeface:") => {
                 // mergeface:<display>:<target_pid>:<cand_pid> — confirm to unify a person's timeline.
-                let parts: Vec<String> = s.trim_start_matches("mergeface:").splitn(3, ':').map(String::from).collect();
+                let parts: Vec<String> = s
+                    .trim_start_matches("mergeface:")
+                    .splitn(3, ':')
+                    .map(String::from)
+                    .collect();
                 let t = text.trim().to_lowercase();
                 if parts.len() != 3 {
                     return "That merge slot looks malformed — ignoring it.".to_string();
                 }
-                let (display, target_pid, cand_pid) = (parts[0].clone(), parts[1].clone(), parts[2].clone());
-                if ["yes", "y", "yeah", "yep", "correct", "merge", "confirm", "do it"].iter().any(|w| t == *w || t.starts_with(w)) {
+                let (display, target_pid, cand_pid) =
+                    (parts[0].clone(), parts[1].clone(), parts[2].clone());
+                if [
+                    "yes", "y", "yeah", "yep", "correct", "merge", "confirm", "do it",
+                ]
+                .iter()
+                .any(|w| t == *w || t.starts_with(w))
+                {
                     let sources = mind_tools::PhotoSource::all_from_env();
                     let Some(src) = sources.iter().find(|s| s.knows_people()) else {
                         return "Photo library unreachable right now — merge not done.".to_string();
@@ -147,12 +221,20 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                                 provenance: "told".into(),
                             })
                             .await;
-                        self.ledger_correction("photos", &format!("younger-self of {display}"), "confirmed + merged").await;
+                        self.ledger_correction(
+                            "photos",
+                            &format!("younger-self of {display}"),
+                            "confirmed + merged",
+                        )
+                        .await;
                         format!("🕵️ Merged — {display}'s timeline now includes those years. Give the library a minute, then `thennow {display}` for the real then-and-now.")
                     } else {
                         "The merge call failed on the library side — nothing changed. I'll leave the evidence as is.".to_string()
                     }
-                } else if ["no", "n", "nope", "not", "wrong", "skip"].iter().any(|w| t == *w || t.starts_with(w)) {
+                } else if ["no", "n", "nope", "not", "wrong", "skip"]
+                    .iter()
+                    .any(|w| t == *w || t.starts_with(w))
+                {
                     self.ledger_resolve(true).await;
                     // Remember the rejection forever; offer the next-best candidate if one waits.
                     let mut rej: Vec<String> = self
@@ -166,7 +248,13 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     if !rej.contains(&cand_pid) {
                         rej.push(cand_pid.clone());
                     }
-                    let _ = self.memory.profile_set("youngerself_no", &serde_json::to_string(&rej).unwrap_or_default()).await;
+                    let _ = self
+                        .memory
+                        .profile_set(
+                            "youngerself_no",
+                            &serde_json::to_string(&rej).unwrap_or_default(),
+                        )
+                        .await;
                     let key = format!("youngerself_cands_{}", display.to_lowercase());
                     let mut cands: Vec<serde_json::Value> = self
                         .memory
@@ -176,8 +264,15 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         .flatten()
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default();
-                    if let Some(next) = if cands.is_empty() { None } else { Some(cands.remove(0)) } {
-                        let _ = self.memory.profile_set(&key, &serde_json::Value::Array(cands).to_string()).await;
+                    if let Some(next) = if cands.is_empty() {
+                        None
+                    } else {
+                        Some(cands.remove(0))
+                    } {
+                        let _ = self
+                            .memory
+                            .profile_set(&key, &serde_json::Value::Array(cands).to_string())
+                            .await;
                         let sources = mind_tools::PhotoSource::all_from_env();
                         if let Some(src) = sources.iter().find(|s| s.knows_people()) {
                             if let (Some(nid), Some(thumb)) = (
@@ -193,26 +288,45 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                                     next["co"].as_f64().unwrap_or(0.0) * 100.0
                                 );
                                 self.photo_queue.lock().unwrap().push((thumb, cap, None));
-                                self.set_pending_slot(Some(&format!("mergeface:{display}:{target_pid}:{nid}"))).await;
-                                return "🕵️ Noted as not them — sending the next candidate now.".to_string();
+                                self.set_pending_slot(Some(&format!(
+                                    "mergeface:{display}:{target_pid}:{nid}"
+                                )))
+                                .await;
+                                return "🕵️ Noted as not them — sending the next candidate now."
+                                    .to_string();
                             }
                         }
                     }
-                    "Understood — left unmerged, and I'll remember that cluster isn't them.".to_string()
+                    "Understood — left unmerged, and I'll remember that cluster isn't them."
+                        .to_string()
                 } else {
-                    "Just yes or no on this one — is that photo the same person, younger?".to_string()
+                    "Just yes or no on this one — is that photo the same person, younger?"
+                        .to_string()
                 }
             }
             s if s.starts_with("book:") => {
                 // book:<year>|book:origin — an answer for the family book. Store as lore, then
                 // REWRITE that chapter immediately so the answer visibly lands in the book.
                 let key = s.trim_start_matches("book:").to_string();
-                let year: i64 = if key == "origin" { 0 } else { key.parse().unwrap_or(0) };
+                let year: i64 = if key == "origin" {
+                    0
+                } else {
+                    key.parse().unwrap_or(0)
+                };
                 let t = text.trim();
                 let low = t.to_lowercase();
-                if ["skip", "pass", "idk", "no idea", "not sure", "later", "dont know", "don't know"]
-                    .iter()
-                    .any(|w| low == *w || low.starts_with(w))
+                if [
+                    "skip",
+                    "pass",
+                    "idk",
+                    "no idea",
+                    "not sure",
+                    "later",
+                    "dont know",
+                    "don't know",
+                ]
+                .iter()
+                .any(|w| low == *w || low.starts_with(w))
                 {
                     return "No problem — the book keeps that page open.".to_string();
                 }
@@ -229,7 +343,14 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     self.set_pending_slot(None).await;
                     return "That looked like a command, not a book memory — I've set that book question aside. Send it again and I'll run it.".to_string();
                 }
-                let teller = self.memory.profile_get("name").await.ok().flatten().filter(|n| !n.is_empty()).unwrap_or_else(|| "the family".to_string());
+                let teller = self
+                    .memory
+                    .profile_get("name")
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "the family".to_string());
                 let mut lore = self.load_book_lore().await;
                 lore.push(serde_json::json!({
                     "year": year, "q": format!("about {}", if year == 0 { "the beginning".to_string() } else { year.to_string() }),
@@ -237,13 +358,23 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     "by": teller,
                     "ts": chrono::Utc::now().timestamp_millis(),
                 }));
-                let _ = self.memory.profile_set("book_lore", &serde_json::Value::Array(lore.clone()).to_string()).await;
+                let _ = self
+                    .memory
+                    .profile_set(
+                        "book_lore",
+                        &serde_json::Value::Array(lore.clone()).to_string(),
+                    )
+                    .await;
                 let _ = self
                     .memory
                     .remember_as_belief(BeliefAssertion {
                         statement: format!(
                             "Family lore ({}): {}",
-                            if year == 0 { "origins".to_string() } else { year.to_string() },
+                            if year == 0 {
+                                "origins".to_string()
+                            } else {
+                                year.to_string()
+                            },
                             t.chars().take(300).collect::<String>()
                         ),
                         polarity: 1.0,
@@ -252,9 +383,18 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         provenance: "told".into(),
                     })
                     .await;
-                self.ledger_correction("book", &format!("chapter gap {year}"), &format!("told: {}", t.chars().take(120).collect::<String>())).await;
+                self.ledger_correction(
+                    "book",
+                    &format!("chapter gap {year}"),
+                    &format!("told: {}", t.chars().take(120).collect::<String>()),
+                )
+                .await;
                 let _ = self.book_redraft(year).await;
-                let ylabel = if year == 0 { "the prologue".to_string() } else { format!("chapter {year}") };
+                let ylabel = if year == 0 {
+                    "the prologue".to_string()
+                } else {
+                    format!("chapter {year}")
+                };
                 format!("📖 That's in the book — I've rewritten {ylabel} with it. `book {}` to read it.", if year == 0 { "origin".to_string() } else { year.to_string() })
             }
             s if s.starts_with("plans:") => {
@@ -264,9 +404,20 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let year = it.next().unwrap_or("").to_string();
                 let t = text.trim();
                 let low = t.to_lowercase();
-                if ["skip", "pass", "idk", "no idea", "not sure", "no plans", "nothing yet", "later", "dont know", "don't know"]
-                    .iter()
-                    .any(|w| low == *w || low.starts_with(w))
+                if [
+                    "skip",
+                    "pass",
+                    "idk",
+                    "no idea",
+                    "not sure",
+                    "no plans",
+                    "nothing yet",
+                    "later",
+                    "dont know",
+                    "don't know",
+                ]
+                .iter()
+                .any(|w| low == *w || low.starts_with(w))
                 {
                     self.ledger_resolve(true).await;
                     return format!("No plans yet — noted. I'll check back as {fest} gets closer.");
@@ -274,37 +425,77 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 let _ = self
                     .memory
                     .remember_as_belief(BeliefAssertion {
-                        statement: format!("Plan for {fest} {year}: {}", t.chars().take(300).collect::<String>()),
+                        statement: format!(
+                            "Plan for {fest} {year}: {}",
+                            t.chars().take(300).collect::<String>()
+                        ),
                         polarity: 1.0,
                         weight: 0.85,
                         source_event: Some("festival-plans".into()),
                         provenance: "told".into(),
                     })
                     .await;
-                self.ledger_correction("anticipate", &format!("plans for {fest} {year}"), &format!("captured: {}", t.chars().take(120).collect::<String>())).await;
-                format!("🪔 Noted for {fest} — \"{}\". I'll keep it in mind as it approaches.", t.chars().take(140).collect::<String>())
+                self.ledger_correction(
+                    "anticipate",
+                    &format!("plans for {fest} {year}"),
+                    &format!("captured: {}", t.chars().take(120).collect::<String>()),
+                )
+                .await;
+                format!(
+                    "🪔 Noted for {fest} — \"{}\". I'll keep it in mind as it approaches.",
+                    t.chars().take(140).collect::<String>()
+                )
             }
             s if s.starts_with("event:") => {
                 // event:<date> — the user is telling us what a heavily-photographed day WAS.
                 let date = s.trim_start_matches("event:").to_string();
                 let t = text.trim();
                 let low = t.to_lowercase();
-                if ["skip", "pass", "idk", "no idea", "not sure", "dont know", "don't know", "later"].iter().any(|w| low == *w || low.starts_with(w)) {
+                if [
+                    "skip",
+                    "pass",
+                    "idk",
+                    "no idea",
+                    "not sure",
+                    "dont know",
+                    "don't know",
+                    "later",
+                ]
+                .iter()
+                .any(|w| low == *w || low.starts_with(w))
+                {
                     return "No problem — that day stays a mystery for now.".to_string();
                 }
                 // Distill a short label from a natural reply.
                 let prompt = format!(
                     "The user was shown photos from one day and asked what the occasion was. They replied: \"{t}\". Output ONLY a short event label (3-8 words, properly capitalized), e.g. 'Aadrisha's Annaprashan ceremony' or 'Housewarming party'."
                 );
-                let cfg = GenerationConfig { max_tokens: 60, think: mind_inference::think_for("onboarding_ask", Some(false)), ..GenerationConfig::default() };
+                let cfg = GenerationConfig {
+                    max_tokens: 60,
+                    think: mind_inference::think_for("onboarding_ask", Some(false)),
+                    ..GenerationConfig::default()
+                };
                 let label = self
                     .inference
                     // Private: the user's own words about a family occasion (E.SEC9).
                     // Refusal degrades to the deterministic path below rather than propagating.
-                    .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+                    .chat_grounded(
+                        vec![
+                            ChatMessage::system(&self.persona),
+                            ChatMessage::user(&prompt),
+                        ],
+                        cfg,
+                    )
                     .await
                     .ok()
-                    .map(|r| r.text.trim().trim_matches('"').chars().take(60).collect::<String>())
+                    .map(|r| {
+                        r.text
+                            .trim()
+                            .trim_matches('"')
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                    })
                     .filter(|l| l.len() > 3)
                     .unwrap_or_else(|| t.chars().take(60).collect());
                 let mut events = self.load_events().await;
@@ -314,43 +505,82 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     if e["date"].as_str() == Some(date.as_str()) {
                         e["label"] = serde_json::json!(label);
                         e["src"] = serde_json::json!("told");
-                        who = e["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                        who = e["people"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
                         photos = e["photos"].as_u64().unwrap_or(0);
                     }
                 }
                 self.save_events(&events).await;
-                let _ = self.memory.remember_as_belief(BeliefAssertion {
-                    statement: format!(
-                        "Life event (told): {label} on {date} ({photos} photos{})",
-                        if who.is_empty() { String::new() } else { format!(", with {who}") }
-                    ),
-                    polarity: 1.0, weight: 0.9, source_event: Some("event-learn".into()), provenance: "told".into(),
-                }).await;
-                self.ledger_correction("events", &format!("unknown day {date}"), &format!("learned: {label}")).await;
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!(
+                            "Life event (told): {label} on {date} ({photos} photos{})",
+                            if who.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", with {who}")
+                            }
+                        ),
+                        polarity: 1.0,
+                        weight: 0.9,
+                        source_event: Some("event-learn".into()),
+                        provenance: "told".into(),
+                    })
+                    .await;
+                self.ledger_correction(
+                    "events",
+                    &format!("unknown day {date}"),
+                    &format!("learned: {label}"),
+                )
+                .await;
                 format!("🎪 Learned — {date} was **{label}**. It's part of the family story now; `event {date}` anytime.")
             }
             s if s.starts_with("whois:") => {
                 // whois:<source>:<person_id>:<count> — the user is answering a who-is-this question.
                 let mut it = s.splitn(4, ':');
-                let (_, source, pid, count) = (it.next(), it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or("?"));
+                let (_, source, pid, count) = (
+                    it.next(),
+                    it.next().unwrap_or(""),
+                    it.next().unwrap_or(""),
+                    it.next().unwrap_or("?"),
+                );
                 let t = text.trim();
                 let low = t.to_lowercase();
                 if Self::is_non_answer(t) {
                     // NOTHING is written: no face-name, no profile, no belief, no library write.
                     // A decline is not an answer, and acting on one is how "N/A" got named in the
                     // user's photo library.
-                    return "No problem — I'll leave that face unnamed and won't ask again.".to_string();
+                    return "No problem — I'll leave that face unnamed and won't ask again."
+                        .to_string();
                 }
                 // Natural replies carry more than a name ("that's my cousin Ritu") — extract both.
                 let prompt = format!(
                     "The user was shown a face photo and asked who it is. They replied: \"{t}\". Output ONLY JSON {{\"name\":\"<the person's name, properly capitalized>\",\"relationship\":\"<their relation to the user (wife/son/cousin/friend/colleague/...), or empty if not stated>\"}}."
                 );
-                let cfg = GenerationConfig { max_tokens: 120, think: mind_inference::think_for("onboarding_reply", Some(false)), ..GenerationConfig::default() };
+                let cfg = GenerationConfig {
+                    max_tokens: 120,
+                    think: mind_inference::think_for("onboarding_reply", Some(false)),
+                    ..GenerationConfig::default()
+                };
                 let v = self
                     .inference
                     // Private: a face, a name, and their relation to the user -- the most sensitive prompt here (E.SEC9).
                     // Refusal degrades to the deterministic path below rather than propagating.
-                    .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+                    .chat_grounded(
+                        vec![
+                            ChatMessage::system(&self.persona),
+                            ChatMessage::user(&prompt),
+                        ],
+                        cfg,
+                    )
                     .await
                     .map(|r| parse_json_obj(&r.text))
                     .unwrap_or_default();
@@ -360,7 +590,12 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     .map(|s| s.trim().to_string())
                     .filter(|s| s.len() > 1)
                     .unwrap_or_else(|| Self::clean_name(t));
-                let rel = v.get("relationship").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let rel = v
+                    .get("relationship")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 // JUNK GATE + RELATIONAL RESOLUTION: "my wife" / "that's my wife's mom" carry a
                 // RELATION, not a name — resolve through the family, or re-ask. A phrase must
                 // never become a person's name (it polluted Immich once: "That's my wife's").
@@ -374,7 +609,11 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         || nl.contains(" my ")
                         || nl.ends_with("'s")
                         || nl.ends_with("\u{2019}s");
-                    if !junk && !Self::is_placeholder_name(&name) && Self::looks_like_person_name(&name) && name.len() > 1 {
+                    if !junk
+                        && !Self::is_placeholder_name(&name)
+                        && Self::looks_like_person_name(&name)
+                        && name.len() > 1
+                    {
                         name
                     } else {
                         // resolve pure relations via the household registry + profiles
@@ -383,21 +622,40 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         let member_name = |want: &str| -> Option<String> {
                             members
                                 .iter()
-                                .find(|p| p.get("relationship").and_then(|x| x.as_str()) == Some(want))
-                                .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+                                .find(|p| {
+                                    p.get("relationship").and_then(|x| x.as_str()) == Some(want)
+                                })
+                                .and_then(|p| {
+                                    p.get("name").and_then(|x| x.as_str()).map(String::from)
+                                })
                         };
                         let profiles = self.load_people_profiles().await;
                         let profile_named = |n: &str| -> Option<String> {
                             profiles
                                 .iter()
-                                .find(|p| p.get("name").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(n)).unwrap_or(false))
-                                .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
+                                .find(|p| {
+                                    p.get("name")
+                                        .and_then(|x| x.as_str())
+                                        .map(|x| x.eq_ignore_ascii_case(n))
+                                        .unwrap_or(false)
+                                })
+                                .and_then(|p| {
+                                    p.get("name").and_then(|x| x.as_str()).map(String::from)
+                                })
                         };
                         let spouse = member_name("wife").or_else(|| member_name("husband"));
-                        let resolved = if phrase.contains("wife") && (phrase.contains("mom") || phrase.contains("mother")) {
-                            spouse.as_deref().and_then(|w| profile_named(&format!("{w}'s Mom")))
-                        } else if phrase.contains("wife") && (phrase.contains("dad") || phrase.contains("father")) {
-                            spouse.as_deref().and_then(|w| profile_named(&format!("{w}'s Dad")))
+                        let resolved = if phrase.contains("wife")
+                            && (phrase.contains("mom") || phrase.contains("mother"))
+                        {
+                            spouse
+                                .as_deref()
+                                .and_then(|w| profile_named(&format!("{w}'s Mom")))
+                        } else if phrase.contains("wife")
+                            && (phrase.contains("dad") || phrase.contains("father"))
+                        {
+                            spouse
+                                .as_deref()
+                                .and_then(|w| profile_named(&format!("{w}'s Dad")))
                         } else if phrase.contains("wife") {
                             member_name("wife")
                         } else if phrase.contains("husband") {
@@ -433,37 +691,64 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 // People layer: enrich an existing profile or start one.
                 let ql = name.to_lowercase();
                 let mut store = self.load_people_profiles().await;
-                let fact = format!("Appears in ~{count} photos in the library ({source} face match)");
+                let fact =
+                    format!("Appears in ~{count} photos in the library ({source} face match)");
                 if let Some(p) = store.iter_mut().find(|p| person_matches(p, &ql)) {
-                    let mut facts = p.get("facts").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-                    if !facts.iter().any(|f| f.as_str().map(|s| s.contains("face match")).unwrap_or(false)) {
+                    let mut facts = p
+                        .get("facts")
+                        .and_then(|x| x.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if !facts.iter().any(|f| {
+                        f.as_str()
+                            .map(|s| s.contains("face match"))
+                            .unwrap_or(false)
+                    }) {
                         facts.push(serde_json::json!(fact));
                         p["facts"] = serde_json::json!(facts);
                     }
-                    if !rel.is_empty() && p.get("relationship").and_then(|x| x.as_str()).unwrap_or("").is_empty() {
+                    if !rel.is_empty()
+                        && p.get("relationship")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .is_empty()
+                    {
                         p["relationship"] = serde_json::json!(rel);
                     }
                 } else {
                     store.push(serde_json::json!({ "name": name, "relationship": rel, "facts": [fact], "dates": [] }));
                 }
                 self.save_people_profiles(&store).await;
-                let _ = self.memory.remember_as_belief(BeliefAssertion {
-                    statement: format!(
-                        "The face appearing in ~{count} library photos is {name}{}",
-                        if rel.is_empty() { String::new() } else { format!(" (the user's {rel})") }
-                    ),
-                    polarity: 1.0, weight: 0.9, source_event: Some("whois".into()), provenance: "told".into(),
-                }).await;
+                let _ = self
+                    .memory
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!(
+                            "The face appearing in ~{count} library photos is {name}{}",
+                            if rel.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (the user's {rel})")
+                            }
+                        ),
+                        polarity: 1.0,
+                        weight: 0.9,
+                        source_event: Some("whois".into()),
+                        provenance: "told".into(),
+                    })
+                    .await;
                 // WRITE-BACK (opted in): if the source already has a person with this name, MERGE
                 // the unnamed cluster into them (recognition anchor gets stronger); otherwise name
                 // the cluster itself. Honest suffix only when the write actually landed.
                 let mut wrote = String::new();
-                if let Some(src_obj) = mind_tools::PhotoSource::all_from_env().into_iter().find(|s| s.name() == source) {
-                    let existing = src_obj
-                        .list_people()
-                        .await
-                        .into_iter()
-                        .find(|p| !p.name.is_empty() && p.name.to_lowercase() == name.to_lowercase() && p.id != pid);
+                if let Some(src_obj) = mind_tools::PhotoSource::all_from_env()
+                    .into_iter()
+                    .find(|s| s.name() == source)
+                {
+                    let existing = src_obj.list_people().await.into_iter().find(|p| {
+                        !p.name.is_empty()
+                            && p.name.to_lowercase() == name.to_lowercase()
+                            && p.id != pid
+                    });
                     let ok = match &existing {
                         Some(t) => src_obj.merge_people(&t.id, &[pid.to_string()]).await,
                         None => src_obj.name_person(pid, &name).await,
@@ -493,12 +778,29 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
         );
         let messages = vec![
             ChatMessage::system(&self.persona),
-            ChatMessage::system("Ask exactly one concise, specific question. No preamble, no markdown."),
+            ChatMessage::system(
+                "Ask exactly one concise, specific question. No preamble, no markdown.",
+            ),
             ChatMessage::user(&prompt),
         ];
-        let r = self.inference.chat_grounded(messages, GenerationConfig::default()).await.ok()?;
-        let q = r.text.trim().lines().last().unwrap_or("").trim().to_string();
-        if q.ends_with('?') && q.len() > 8 { Some(q) } else { None }
+        let r = self
+            .inference
+            .chat_grounded(messages, GenerationConfig::default())
+            .await
+            .ok()?;
+        let q = r
+            .text
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if q.ends_with('?') && q.len() > 8 {
+            Some(q)
+        } else {
+            None
+        }
     }
 
     /// Strip a few common lead-ins ("my name is", "i'm", "call me") so we store the bare name.
@@ -516,18 +818,52 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
     /// inference as something the user actually told us.
     pub(crate) fn is_non_answer(s: &str) -> bool {
         // Normalise the quote variants phones produce BEFORE any comparison.
-        let low = s.trim().to_lowercase().replace(['\u{2019}', '\u{02BC}', '\u{FF07}'], "'");
+        let low = s
+            .trim()
+            .to_lowercase()
+            .replace(['\u{2019}', '\u{02BC}', '\u{FF07}'], "'");
         const DECLINE: &[&str] = &[
-            "skip", "pass", "later", "leave it", "no idea", "not sure", "unsure", "dont know",
-            "don't know", "do not know", "dunno", "idk", "no clue", "cant tell", "can't tell",
-            "cannot tell", "cant see", "can't see", "not clear", "unclear", "hazy", "blurry",
-            "blurred", "unrecognizable", "unrecognisable", "cant recognize", "can't recognize",
+            "skip",
+            "pass",
+            "later",
+            "leave it",
+            "no idea",
+            "not sure",
+            "unsure",
+            "dont know",
+            "don't know",
+            "do not know",
+            "dunno",
+            "idk",
+            "no clue",
+            "cant tell",
+            "can't tell",
+            "cannot tell",
+            "cant see",
+            "can't see",
+            "not clear",
+            "unclear",
+            "hazy",
+            "blurry",
+            "blurred",
+            "unrecognizable",
+            "unrecognisable",
+            "cant recognize",
+            "can't recognize",
             "not recognizable",
             // Live 2026-08-14: "I don't remember" was captured as the NAME and written into the
             // photo library for a face appearing in ~431 photos. Not-knowing and not-remembering
             // are the same answer; only one of them was listed.
-            "dont remember", "don't remember", "do not remember", "not remember",
-            "cant remember", "can't remember", "cannot remember", "forgot", "forget", "no memory",
+            "dont remember",
+            "don't remember",
+            "do not remember",
+            "not remember",
+            "cant remember",
+            "can't remember",
+            "cannot remember",
+            "forgot",
+            "forget",
+            "no memory",
         ];
         // `contains`, not `starts_with`: uncertainty usually arrives mid-sentence.
         DECLINE.iter().any(|w| low == *w || low.contains(w))
@@ -552,7 +888,10 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
         }
         // Letters, spaces, and the punctuation real names actually carry (O'Brien, Jean-Luc, Dr.).
         // This alone rejects "N/A", handles/URLs, and anything with digits.
-        if !t.chars().all(|c| c.is_alphabetic() || c.is_whitespace() || "'-.\u{2019}".contains(c)) {
+        if !t
+            .chars()
+            .all(|c| c.is_alphabetic() || c.is_whitespace() || "'-.\u{2019}".contains(c))
+        {
             return false;
         }
         let words: Vec<String> = t
@@ -582,7 +921,12 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
     /// it. Belt-and-braces behind `is_non_answer`: this is the last gate before a WRITE to the
     /// user's real photo library, and "N/A" got through once.
     pub(crate) fn is_placeholder_name(s: &str) -> bool {
-        let n: String = s.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+        let n: String = s
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == ' ')
+            .collect();
         let n = n.trim().to_string();
         n.is_empty()
             || matches!(
@@ -601,13 +945,29 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
     pub(crate) fn clean_name(s: &str) -> String {
         let t = s.trim();
         let low = t.to_ascii_lowercase();
-        for p in ["my name is ", "i am ", "i'm ", "call me ", "it's ", "this is ", "name's "] {
+        for p in [
+            "my name is ",
+            "i am ",
+            "i'm ",
+            "call me ",
+            "it's ",
+            "this is ",
+            "name's ",
+        ] {
             if let Some(rest) = low.strip_prefix(p) {
                 let start = t.len() - rest.len();
-                return t[start..].trim().trim_end_matches(['.', '!', ',']).chars().take(40).collect();
+                return t[start..]
+                    .trim()
+                    .trim_end_matches(['.', '!', ','])
+                    .chars()
+                    .take(40)
+                    .collect();
             }
         }
-        t.trim_end_matches(['.', '!', ',']).chars().take(40).collect()
+        t.trim_end_matches(['.', '!', ','])
+            .chars()
+            .take(40)
+            .collect()
     }
 
     /// Seed the built-in CAPABILITY skills into YantrikDB (idempotent). Capabilities are DATA, not code:
@@ -634,27 +994,38 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
              r#"{"tool":"inbox","var":"inbox","args":{"limit":10},"label":"inbox","needs_url":false}"#),
         ];
         for (name, summary, tags, code) in caps {
-            let _ = self.memory.save_skill(Skill {
-                name: name.into(),
-                lang: "capability".into(),
-                code: code.into(),
-                summary: summary.into(),
-                tags: tags.split(',').map(|s| s.trim().to_string()).collect(),
-                status: "active".into(),
-                runs: 0,
-                successes: 0,
-                graded: 0,
-                judged_ok: 0,
-                created_ms: 0,
-            }).await;
+            let _ = self
+                .memory
+                .save_skill(Skill {
+                    name: name.into(),
+                    lang: "capability".into(),
+                    code: code.into(),
+                    summary: summary.into(),
+                    tags: tags.split(',').map(|s| s.trim().to_string()).collect(),
+                    status: "active".into(),
+                    runs: 0,
+                    successes: 0,
+                    graded: 0,
+                    judged_ok: 0,
+                    created_ms: 0,
+                })
+                .await;
         }
     }
 
     /// The LLM routing decision (testable, no I/O): given the request + the capability catalog, pick ONE
     /// capability (or none) and extract its target/url. This is the dynamic replacement for the hardcoded
     /// `parse_*` verb lists — new capabilities appear here automatically because they're read from the store.
-    pub(crate) async fn decide_capability(&self, user_text: &str, caps: &[Skill]) -> Option<(String, String, String)> {
-        let catalog = caps.iter().map(|c| format!("- {}: {}", c.name, c.summary)).collect::<Vec<_>>().join("\n");
+    pub(crate) async fn decide_capability(
+        &self,
+        user_text: &str,
+        caps: &[Skill],
+    ) -> Option<(String, String, String)> {
+        let catalog = caps
+            .iter()
+            .map(|c| format!("- {}: {}", c.name, c.summary))
+            .collect::<Vec<_>>()
+            .join("\n");
         let prompt = format!(
             "User request: \"{user_text}\"\n\nCapabilities I can set up:\n{catalog}\n\nIf the request is asking me to set ONE of these up, reply ONLY JSON: {{\"capability\":\"<exact name>\",\"target\":\"<short phrase to watch for>\",\"url\":\"<url if any else empty>\"}}. If none clearly fit, reply {{\"capability\":null}}."
         );
@@ -663,7 +1034,12 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             ChatMessage::system("You route a request to exactly one capability or none. Reply ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
-        let text = self.inference.chat_grounded(messages, GenerationConfig::default()).await.ok()?.text;
+        let text = self
+            .inference
+            .chat_grounded(messages, GenerationConfig::default())
+            .await
+            .ok()?
+            .text;
         let body_owned = crate::strip_reasoning(&text);
         let body = body_owned.as_str();
         let body = body.split("```").find(|s| s.contains('{')).unwrap_or(body);
@@ -676,8 +1052,18 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
         if name.is_empty() || name == "null" {
             return None;
         }
-        let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let target = v
+            .get("target")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let url = v
+            .get("url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         Some((name.to_string(), target, url))
     }
 
@@ -701,7 +1087,10 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
         // Pre-filter from the skills' OWN tags — skip the LLM on plain chat, but any new skill's tags
         // automatically widen what gets routed (zero code to add a capability).
         let low = user_text.to_lowercase();
-        let hinted = caps.iter().flat_map(|c| c.tags.iter()).any(|t| t.len() > 2 && low.contains(t.as_str()));
+        let hinted = caps
+            .iter()
+            .flat_map(|c| c.tags.iter())
+            .any(|t| t.len() > 2 && low.contains(t.as_str()));
         if !hinted {
             return None;
         }
@@ -713,9 +1102,19 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
         let spec: serde_json::Value = serde_json::from_str(&cap.code).ok()?;
         let tool = spec.get("tool")?.as_str()?.to_string();
         let var = spec.get("var")?.as_str()?.to_string();
-        let label = spec.get("label").and_then(|x| x.as_str()).unwrap_or(&cap.name).to_string();
-        let needs_url = spec.get("needs_url").and_then(|x| x.as_bool()).unwrap_or(false);
-        let mut args = spec.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let label = spec
+            .get("label")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&cap.name)
+            .to_string();
+        let needs_url = spec
+            .get("needs_url")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let mut args = spec
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         if needs_url {
             if url.is_empty() {
                 return None;
@@ -734,60 +1133,114 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     tool_name: tool,
                     args,
                     store_as: var.clone(),
-                    condition: Condition::VarContains { var, substring: target.clone() },
+                    condition: Condition::VarContains {
+                        var,
+                        substring: target.clone(),
+                    },
                     poll_secs: 120,
                     expire_ms: now + 24 * 3600 * 1000,
                 },
-                RecipeStep::Notify { message: format!("📡 Heads up — the {label} now matches \"{target}\".") },
+                RecipeStep::Notify {
+                    message: format!("📡 Heads up — the {label} now matches \"{target}\"."),
+                },
             ],
         };
-        let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+        let out = recipes
+            .run_with(&rec, std::collections::HashMap::new())
+            .await;
         Some(if out.sleeping_until.is_some() {
             format!("Watching the {label} for \"{target}\" — I'll ping you when it matches (every ~2 min, up to 24h).")
         } else if !out.notifications.is_empty() {
             out.notifications.join("\n")
         } else {
-            format!("Couldn't start watching ({}).", out.error.unwrap_or_else(|| "tool unavailable".into()))
+            format!(
+                "Couldn't start watching ({}).",
+                out.error.unwrap_or_else(|| "tool unavailable".into())
+            )
         })
     }
 
     /// PERSISTENT-DELEGATION TICK: wake any due WaitUntil/WaitForCondition runs and return whatever
     /// they surfaced (the caller delivers these to the home channel). Called on the heartbeat.
     pub async fn tick_delegations(&self) -> Vec<String> {
-        let recipes = match &self.recipes {
-            Some(r) => r,
-            None => return Vec::new(),
+        let Some(recipes) = &self.recipes else {
+            return Vec::new();
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        recipes
+        let mut notifications: Vec<String> = recipes
             .resume_due(now)
             .await
             .into_iter()
             .flat_map(|o| o.notifications)
-            .collect()
+            .collect();
+        for outcome in recipes.resume_due_horizons(now).await {
+            match outcome.state {
+                mind_recipes::HorizonTickState::Advanced => {}
+                mind_recipes::HorizonTickState::AwaitingReplan => notifications.push(format!(
+                    "↻ Long-horizon goal {} paused safely: a declared assumption changed and the plan needs review.",
+                    outcome.goal_id
+                )),
+                mind_recipes::HorizonTickState::Completed => {
+                    let receipt = outcome
+                        .receipt
+                        .as_ref()
+                        .map(|receipt| &receipt.receipt_sha256[..12])
+                        .unwrap_or("unavailable");
+                    notifications.push(format!(
+                        "✅ Long-horizon goal {} completed · receipt {}",
+                        outcome.goal_id, receipt
+                    ));
+                }
+                mind_recipes::HorizonTickState::Failed => notifications.push(format!(
+                    "⚠️ Long-horizon goal {} stopped safely; its scheduled segment needs local review.",
+                    outcome.goal_id
+                )),
+            }
+        }
+        notifications
     }
 
     /// Cadence gate for the poll loop: a people-knowing source exists, no interview question is
     /// already pending, and YM_WHOIS_SECS (default daily) has elapsed.
     pub async fn whois_due(&self) -> bool {
-        if !mind_tools::PhotoSource::all_from_env().iter().any(|s| s.knows_people()) {
+        if !mind_tools::PhotoSource::all_from_env()
+            .iter()
+            .any(|s| s.knows_people())
+        {
             return false;
         }
         if self.pending_slot().await.is_some() {
             return false; // never stack interview questions
         }
-        let period_ms: i64 = std::env::var("YM_WHOIS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms: i64 = std::env::var("YM_WHOIS_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
         let period_ms = (period_ms as f64 * self.domain_pace("whois").await) as i64;
-        let last: i64 = self.memory.profile_get("whois_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let last: i64 = self
+            .memory
+            .profile_get("whois_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
     /// `ym whois` sets a force flag (the CLI can't carry a photo) — the next poll tick fires it.
     pub async fn whois_forced(&self) -> bool {
-        let f = self.memory.profile_get("whois_force").await.ok().flatten().unwrap_or_default();
+        let f = self
+            .memory
+            .profile_get("whois_force")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         if f == "1" {
             let _ = self.memory.profile_set("whois_force", "").await;
             true
@@ -807,7 +1260,9 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 .list_people()
                 .await
                 .into_iter()
-                .filter(|p| p.name.is_empty() && !asked.contains(&format!("{}:{}", src.name(), p.id)))
+                .filter(|p| {
+                    p.name.is_empty() && !asked.contains(&format!("{}:{}", src.name(), p.id))
+                })
                 .collect();
             if unnamed.is_empty() {
                 continue;
@@ -848,18 +1303,27 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             // largest face.
             let (context_photo, mut hint) = {
                 let assets = src
-                    .taken_between("1970-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z", &[pid.clone()], 4)
+                    .taken_between(
+                        "1970-01-01T00:00:00.000Z",
+                        "2100-01-01T00:00:00.000Z",
+                        std::slice::from_ref(&pid),
+                        4,
+                    )
                     .await;
                 let mut chosen: (Option<Vec<u8>>, String) = (None, String::new());
                 let mut best_area = 0.0f32;
                 for a in assets.iter() {
-                    let Some((x1, _y1, x2, _y2, _pxw)) = src.face_box(&a.id, &pid).await else { continue };
-                    let cx = (x1 + x2) / 2.0;
+                    let Some((x1, _y1, x2, _y2, _pxw)) = src.face_box(&a.id, &pid).await else {
+                        continue;
+                    };
+                    let cx = f32::midpoint(x1, x2);
                     let area = x2 - x1;
                     if area <= best_area {
                         continue;
                     }
-                    let Some(bytes) = src.image_bytes(a).await else { continue };
+                    let Some(bytes) = src.image_bytes(a).await else {
+                        continue;
+                    };
                     let where_ = if cx < 0.34 {
                         "on the LEFT of this photo"
                     } else if cx > 0.66 {
@@ -881,7 +1345,6 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                 }
                 chosen
             };
-            let context_photo = context_photo;
             let used_context = context_photo.is_some();
             if !used_context {
                 hint.clear();
@@ -920,9 +1383,16 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             self.save_whois_asked(&asked).await;
         }
         self.set_pending_slot(Some(slot)).await;
-        let _ = self.memory.profile_set("whois_last", &chrono::Utc::now().timestamp_millis().to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "whois_last",
+                &chrono::Utc::now().timestamp_millis().to_string(),
+            )
+            .await;
         self.note_proactive_sent().await;
-        self.ledger_sent("whois", "asked who an unnamed face is").await;
+        self.ledger_sent("whois", "asked who an unnamed face is")
+            .await;
     }
 
     pub(crate) async fn whois_asked(&self) -> Vec<String> {
@@ -936,7 +1406,9 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
     }
 
     pub(crate) async fn save_whois_asked(&self, v: &[String]) {
-        let _ = self.memory.profile_set("whois_asked", &serde_json::to_string(v).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set("whois_asked", &serde_json::to_string(v).unwrap_or_default())
+            .await;
     }
-
 }

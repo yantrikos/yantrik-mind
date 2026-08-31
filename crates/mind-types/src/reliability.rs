@@ -64,7 +64,10 @@ impl Reliability {
     /// `successes` is clamped to `runs`: more successes than attempts is not a state that should be
     /// representable, and clamping here means no caller has to check.
     pub fn new(runs: u32, successes: u32) -> Self {
-        Self { runs, successes: successes.min(runs) }
+        Self {
+            runs,
+            successes: successes.min(runs),
+        }
     }
 
     pub fn runs(&self) -> u32 {
@@ -81,7 +84,7 @@ impl Reliability {
     /// what "no evidence" looks like, and cannot accidentally print an optimism prior as a
     /// measurement.
     pub fn rate(&self) -> Option<f64> {
-        (self.runs > 0).then(|| self.successes as f64 / self.runs as f64)
+        (self.runs > 0).then(|| f64::from(self.successes) / f64::from(self.runs))
     }
 
     /// The optimism prior for RANKING — 1.0 when untested, on purpose.
@@ -118,9 +121,16 @@ mod tests {
         let r = Reliability::new(0, 0);
         assert_eq!(r.rate(), None, "there is no rate to compute");
         assert_eq!(r.verdict(), Verdict::Untested);
-        assert!(!r.is_discredited(), "never tried is not the same as failing");
+        assert!(
+            !r.is_discredited(),
+            "never tried is not the same as failing"
+        );
         // The ranking half, kept deliberately: without it a new skill never earns a first run.
-        assert_eq!(r.rank_score(), 1.0, "the optimism prior survives, under a name that says so");
+        assert_eq!(
+            r.rank_score(),
+            1.0,
+            "the optimism prior survives, under a name that says so"
+        );
     }
 
     #[test]
@@ -136,7 +146,11 @@ mod tests {
         // At the threshold it does.
         assert_eq!(Reliability::new(4, 1).verdict(), Verdict::Discredited);
         assert_eq!(Reliability::new(4, 0).verdict(), Verdict::Discredited);
-        assert_eq!(Reliability::new(4, 2).verdict(), Verdict::Active, "exactly half is not failing MORE often than not");
+        assert_eq!(
+            Reliability::new(4, 2).verdict(),
+            Verdict::Active,
+            "exactly half is not failing MORE often than not"
+        );
         assert_eq!(Reliability::new(4, 4).verdict(), Verdict::Active);
         assert_eq!(Reliability::new(100, 49).verdict(), Verdict::Discredited);
     }
@@ -150,15 +164,27 @@ mod tests {
 
                 // 1. The SQL predicate: `runs>=4 AND (successes*2) < runs`.
                 let sql = runs >= 4 && successes * 2 < runs;
-                assert_eq!(r.is_discredited(), sql, "SQL disagrees at {runs}/{successes}");
+                assert_eq!(
+                    r.is_discredited(),
+                    sql,
+                    "SQL disagrees at {runs}/{successes}"
+                );
 
                 // 2. The surface report's Rust bool — the same expression, written again.
                 let surface = runs >= 4 && successes * 2 < runs;
-                assert_eq!(r.is_discredited(), surface, "surface disagrees at {runs}/{successes}");
+                assert_eq!(
+                    r.is_discredited(),
+                    surface,
+                    "surface disagrees at {runs}/{successes}"
+                );
 
                 // 3. The procedure ranker, which holds a RATE rather than counts.
                 if let Some(rate) = r.rate() {
-                    assert_eq!(r.is_discredited(), is_discredited(runs, rate), "the rate form disagrees at {runs}/{successes}");
+                    assert_eq!(
+                        r.is_discredited(),
+                        is_discredited(runs, rate),
+                        "the rate form disagrees at {runs}/{successes}"
+                    );
                 }
             }
         }

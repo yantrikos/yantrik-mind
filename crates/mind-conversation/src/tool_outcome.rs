@@ -4,7 +4,7 @@
 //!
 //! The agent loop used to decide this with one boolean built from a substring list:
 //!
-//! ```ignore
+//! ```text
 //! let failure_marker = ["error", "couldn't", "not configured", "nothing", "no results", …]
 //!     .iter().any(|m| obs_lc.contains(m));
 //! let tool_ok = obs.chars().count() > 10 && !(obs.trim_start().starts_with('(') && failure_marker);
@@ -77,6 +77,9 @@
 //! events accumulate in the flight recorder for context-conditioned rates. Do not fold them
 //! back into the success rate to "use more data" — that re-teaches exactly the lie this module
 //! replaced.
+
+/// Versioned identity stamped onto every flight-recorder grade produced by this classifier.
+pub const EVALUATOR_ID: &str = "tool-outcome-v1";
 
 /// What a tool call actually did. Deliberately not a boolean: the four non-Ok cases call for
 /// different responses and must not be averaged together.
@@ -151,7 +154,11 @@ impl Outcome {
         // run_skill's own not-found line is tool-SPECIFIC: with an empty name it is a malformed call
         // that slipped the boundary; with a real name it is the tool honestly finding nothing.
         if tool == "run_skill" && low.contains("no saved skill named") {
-            return if low.contains("named ''") { Outcome::Malformed } else { Outcome::Empty };
+            return if low.contains("named ''") {
+                Outcome::Malformed
+            } else {
+                Outcome::Empty
+            };
         }
 
         // PRIORITY ORDER, most specific first. A refusal often also contains the word "cannot", and a
@@ -162,25 +169,66 @@ impl Outcome {
         // be doing gate work to match. These are the strings the mind actually emits — "BLOCKED by
         // harm-gate: …", "PROPOSED — needs the user's confirmation; NOT executed", and the egress
         // broker's "(I couldn't compose a safe outbound request …)".
-        if has(&["harm-gate", "blocked by", "refused by", "not permitted", "needs your confirmation",
-                 "needs the user's confirmation", "requires confirmation", "denied by",
-                 "safe outbound request", "not executed"]) {
+        if has(&[
+            "harm-gate",
+            "blocked by",
+            "refused by",
+            "not permitted",
+            "needs your confirmation",
+            "needs the user's confirmation",
+            "requires confirmation",
+            "denied by",
+            "safe outbound request",
+            "not executed",
+        ]) {
             return Outcome::Denied;
         }
-        if has(&["not configured", "isn't configured", "is not configured", "no mailbox", "not set up",
-                 "no credential", "missing credential", "no api key", "not available on this box",
-                 "no such tool", "unknown tool", "not enabled"]) {
+        if has(&[
+            "not configured",
+            "isn't configured",
+            "is not configured",
+            "no mailbox",
+            "not set up",
+            "no credential",
+            "missing credential",
+            "no api key",
+            "not available on this box",
+            "no such tool",
+            "unknown tool",
+            "not enabled",
+        ]) {
             return Outcome::Unavailable;
         }
-        if has(&["error", "failed", "panic", "timed out", "timeout", "couldn't reach", "could not reach",
-                 "unreachable", "connection refused", "exception", "traceback", "crashed"]) {
+        if has(&[
+            "error",
+            "failed",
+            "panic",
+            "timed out",
+            "timeout",
+            "couldn't reach",
+            "could not reach",
+            "unreachable",
+            "connection refused",
+            "exception",
+            "traceback",
+            "crashed",
+        ]) {
             return Outcome::Failed;
         }
         // `no tool or saved skill matches` is `discover_tools` working correctly on an empty library —
         // caught only by testing against observations captured from the running box. Every fixture I
         // invented passed; this one did not.
-        if has(&["no results", "nothing found", "no matches", "found nothing", "0 results",
-                 "no entries", "empty", "none found", "no tool or saved skill"]) {
+        if has(&[
+            "no results",
+            "nothing found",
+            "no matches",
+            "found nothing",
+            "0 results",
+            "no entries",
+            "empty",
+            "none found",
+            "no tool or saved skill",
+        ]) {
             return Outcome::Empty;
         }
         Outcome::Ok
@@ -206,12 +254,10 @@ impl Outcome {
     pub fn recovery(self) -> Recovery {
         match self {
             Outcome::Ok => Recovery::Proceed,
-            Outcome::Empty => Recovery::Vary,
+            Outcome::Empty | Outcome::Malformed => Recovery::Vary,
             Outcome::Unavailable => Recovery::Reroute,
             Outcome::Denied => Recovery::Tell,
             Outcome::Failed => Recovery::Retry,
-            // The call was wrong, not the tool: ask again, properly.
-            Outcome::Malformed => Recovery::Vary,
         }
     }
 
@@ -270,7 +316,10 @@ pub(crate) fn malformed_call(
         return None;
     }
     let refusal = |problems: Vec<String>| {
-        format!("(malformed call: {tool} — {} — call it again with the fields as documented)", problems.join("; "))
+        format!(
+            "(malformed call: {tool} — {} — call it again with the fields as documented)",
+            problems.join("; ")
+        )
     };
     let obj = match args {
         serde_json::Value::Object(o) => o,
@@ -279,7 +328,12 @@ pub(crate) fn malformed_call(
                 .filter(|c| !c.required.is_empty())
                 .map(|c| refusal(vec![format!("missing required {}", c.required.join(", "))]));
         }
-        other => return Some(refusal(vec![format!("a bare {} instead of an object of arguments", json_type(other))])),
+        other => {
+            return Some(refusal(vec![format!(
+                "a bare {} instead of an object of arguments",
+                json_type(other)
+            )]))
+        }
     };
     let mut problems: Vec<String> = Vec::new();
     let none = crate::tool_catalog::ArgContract::default();
@@ -288,7 +342,12 @@ pub(crate) fn malformed_call(
     // always taken (`ArgContract::aliases`, from the catalog's ARG_ALIASES). `{}` and
     // `{"name": null}` cannot be made; neither can `run_skill {"target": …}` without a name or
     // `add_reminder {"text": …}` without a `when` (Codex's review of P.2d).
-    let missing: Vec<&str> = c.required.iter().filter(|r| !c.present(obj, r)).map(|r| r.as_str()).collect();
+    let missing: Vec<&str> = c
+        .required
+        .iter()
+        .filter(|r| !c.present(obj, r))
+        .map(|r| r.as_str())
+        .collect();
     if !missing.is_empty() {
         problems.push(format!("missing required {}", missing.join(", ")));
     }
@@ -312,7 +371,10 @@ pub(crate) fn malformed_call(
                     problems.push(format!("`{k}` is empty"));
                 }
             }
-            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::Value::Number(_)
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Array(_)
+            | serde_json::Value::Object(_) => {
                 if free_text {
                     problems.push(format!("`{k}`:{} where text was expected", json_type(v)));
                 }
@@ -324,7 +386,10 @@ pub(crate) fn malformed_call(
     if problems.is_empty() && !supplied_any && !obj.is_empty() {
         // A call whose EVERY argument is null asked for nothing (`discover_tools {"query":null}`,
         // seen live on 2026-08-26 right after P.2b shipped).
-        problems.push(format!("only null arguments ({})", obj.keys().cloned().collect::<Vec<_>>().join(", ")));
+        problems.push(format!(
+            "only null arguments ({})",
+            obj.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
     }
     if problems.is_empty() {
         None
@@ -352,15 +417,27 @@ mod tests {
     fn an_empty_search_is_the_tool_working() {
         // THE HEADLINE BUG. "no results" was a failure, so a search that ran perfectly and found
         // nothing taught the bandit that search is unreliable.
-        for s in ["(no results for 'xyzzy')", "No results found.", "found nothing", "0 results"] {
+        for s in [
+            "(no results for 'xyzzy')",
+            "No results found.",
+            "found nothing",
+            "0 results",
+        ] {
             assert_eq!(Outcome::classify("web_search", s), Outcome::Empty, "{s}");
         }
-        assert_eq!(Outcome::classify("web_search", "(no results)").counts_toward_reliability(), Some(true));
+        assert_eq!(
+            Outcome::classify("web_search", "(no results)").counts_toward_reliability(),
+            Some(true)
+        );
     }
 
     #[test]
     fn a_missing_credential_teaches_nothing_about_reliability() {
-        for s in ["(github not configured)", "(no mailbox configured)", "(no API key set)"] {
+        for s in [
+            "(github not configured)",
+            "(no mailbox configured)",
+            "(no API key set)",
+        ] {
             assert_eq!(Outcome::classify("github", s), Outcome::Unavailable, "{s}");
         }
         assert_eq!(
@@ -381,17 +458,32 @@ mod tests {
         ];
         for s in real {
             assert_eq!(Outcome::classify("send_email", s), Outcome::Denied, "{s}");
-            assert_eq!(Outcome::classify("send_email", s).counts_toward_reliability(), None, "{s}");
-            assert_eq!(Outcome::classify("send_email", s).recovery(), Recovery::Tell, "{s}");
+            assert_eq!(
+                Outcome::classify("send_email", s).counts_toward_reliability(),
+                None,
+                "{s}"
+            );
+            assert_eq!(
+                Outcome::classify("send_email", s).recovery(),
+                Recovery::Tell,
+                "{s}"
+            );
         }
     }
 
     #[test]
     fn a_real_break_is_a_failure() {
-        for s in ["(error: connection refused)", "(couldn't reach the host)", "(timed out after 30s)"] {
+        for s in [
+            "(error: connection refused)",
+            "(couldn't reach the host)",
+            "(timed out after 30s)",
+        ] {
             assert_eq!(Outcome::classify("fetch", s), Outcome::Failed, "{s}");
         }
-        assert_eq!(Outcome::classify("fetch", "(error: boom)").counts_toward_reliability(), Some(false));
+        assert_eq!(
+            Outcome::classify("fetch", "(error: boom)").counts_toward_reliability(),
+            Some(false)
+        );
     }
 
     #[test]
@@ -411,7 +503,10 @@ mod tests {
     fn a_parenthetical_stays_status_shaped_at_any_length() {
         // The mind's own convention: a leading `(` means the runtime is talking, not the data. That
         // must not be overridden by length.
-        let long_status = format!("(error: {})", "the upstream returned a malformed payload; ".repeat(12));
+        let long_status = format!(
+            "(error: {})",
+            "the upstream returned a malformed payload; ".repeat(12)
+        );
         assert!(long_status.len() > 240);
         assert_eq!(Outcome::classify("fetch", &long_status), Outcome::Failed);
     }
@@ -421,14 +516,20 @@ mod tests {
         // The old check called anything under 10 characters a failure.
         assert_eq!(Outcome::classify("calc", "42"), Outcome::Ok);
         assert_eq!(Outcome::classify("now", "09:15"), Outcome::Ok);
-        assert_eq!(Outcome::classify("calc", "42").counts_toward_reliability(), Some(true));
+        assert_eq!(
+            Outcome::classify("calc", "42").counts_toward_reliability(),
+            Some(true)
+        );
     }
 
     #[test]
     fn an_unparenthesised_error_is_still_an_error() {
         // The old check only consulted markers when the text began with `(`, so this was recorded as
         // a SUCCESS.
-        assert_eq!(Outcome::classify("fetch", "Error: DNS lookup failed"), Outcome::Failed);
+        assert_eq!(
+            Outcome::classify("fetch", "Error: DNS lookup failed"),
+            Outcome::Failed
+        );
         assert_eq!(
             Outcome::classify("fetch", "Error: DNS lookup failed").counts_toward_reliability(),
             Some(false)
@@ -440,24 +541,52 @@ mod tests {
         // "refused" appears in both a gate refusal and a connection error, and the first version of
         // the Denied arm matched the bare word — so "(connection refused)" was classified as the
         // safety gate working rather than as a dead host. This test caught it.
-        assert_eq!(Outcome::classify("fetch", "(connection refused)"), Outcome::Failed);
-        assert_eq!(Outcome::classify("fetch", "(connection refused)").recovery(), Recovery::Retry);
+        assert_eq!(
+            Outcome::classify("fetch", "(connection refused)"),
+            Outcome::Failed
+        );
+        assert_eq!(
+            Outcome::classify("fetch", "(connection refused)").recovery(),
+            Recovery::Retry
+        );
         // …but an explicit gate refusal still wins over the generic words it also contains.
-        assert_eq!(Outcome::classify("send_email", "(refused by harm-gate)"), Outcome::Denied);
+        assert_eq!(
+            Outcome::classify("send_email", "(refused by harm-gate)"),
+            Outcome::Denied
+        );
         // And an unavailable tool is not a break, even though both are "it didn't work".
-        assert_eq!(Outcome::classify("github", "(github not configured)").recovery(), Recovery::Reroute);
+        assert_eq!(
+            Outcome::classify("github", "(github not configured)").recovery(),
+            Recovery::Reroute
+        );
     }
 
     #[test]
     fn every_outcome_has_a_recovery_and_only_failures_hurt_the_score() {
-        for o in [Outcome::Ok, Outcome::Empty, Outcome::Unavailable, Outcome::Denied, Outcome::Failed] {
+        for o in [
+            Outcome::Ok,
+            Outcome::Empty,
+            Outcome::Unavailable,
+            Outcome::Denied,
+            Outcome::Failed,
+        ] {
             let _ = o.recovery();
         }
-        let hurts: Vec<_> = [Outcome::Ok, Outcome::Empty, Outcome::Unavailable, Outcome::Denied, Outcome::Failed]
-            .into_iter()
-            .filter(|o| o.counts_toward_reliability() == Some(false))
-            .collect();
-        assert_eq!(hurts, vec![Outcome::Failed], "only a genuine break may lower a tool's score");
+        let hurts: Vec<_> = [
+            Outcome::Ok,
+            Outcome::Empty,
+            Outcome::Unavailable,
+            Outcome::Denied,
+            Outcome::Failed,
+        ]
+        .into_iter()
+        .filter(|o| o.counts_toward_reliability() == Some(false))
+        .collect();
+        assert_eq!(
+            hurts,
+            vec![Outcome::Failed],
+            "only a genuine break may lower a tool's score"
+        );
     }
 }
 
@@ -486,7 +615,11 @@ mod live_fixtures {
              Outcome::Ok),
         ];
         for (tool, obs, want) in cases {
-            assert_eq!(Outcome::classify(tool, obs), *want, "misclassified live observation: {obs}");
+            assert_eq!(
+                Outcome::classify(tool, obs),
+                *want,
+                "misclassified live observation: {obs}"
+            );
         }
     }
 
@@ -499,7 +632,10 @@ mod live_fixtures {
         // Neither of these is evidence about reliability, and the old boolean recorded both as
         // failures — teaching the mind that a tool it never ran is unreliable.
         assert_eq!(record("(unknown tool: answer)"), None);
-        assert_eq!(record("(no tool or saved skill matches — use build_capability)"), Some(true));
+        assert_eq!(
+            record("(no tool or saved skill matches — use build_capability)"),
+            Some(true)
+        );
     }
 }
 
@@ -519,10 +655,22 @@ mod malformed_tests {
     fn a_malformed_call_is_its_own_outcome_and_teaches_nothing_about_the_tool() {
         let c = contracts();
         let rs = c.get("run_skill");
-        assert!(rs.is_some(), "run_skill is a core/meta tool with a contract");
+        assert!(
+            rs.is_some(),
+            "run_skill is a core/meta tool with a contract"
+        );
         // The two live shapes, plus the compound / missing / empty shapes Codex named.
-        let refused = malformed_call("run_skill", &serde_json::json!({"name": 328, "target": 328}), rs).expect("refused");
-        assert!(refused.starts_with("(malformed call: run_skill — `name`:number where text was expected"), "{refused}");
+        let refused = malformed_call(
+            "run_skill",
+            &serde_json::json!({"name": 328, "target": 328}),
+            rs,
+        )
+        .expect("refused");
+        assert!(
+            refused
+                .starts_with("(malformed call: run_skill — `name`:number where text was expected"),
+            "{refused}"
+        );
         assert!(refused.contains("`target`:number"), "{refused}");
         for bad in [
             serde_json::json!({}),
@@ -533,44 +681,131 @@ mod malformed_tests {
             serde_json::Value::Null,
             serde_json::json!("just a string"),
         ] {
-            assert!(malformed_call("run_skill", &bad, rs).is_some(), "must refuse {bad}");
+            assert!(
+                malformed_call("run_skill", &bad, rs).is_some(),
+                "must refuse {bad}"
+            );
         }
-        assert!(malformed_call("run_skill", &serde_json::json!({"name": "csv-clean", "target": null}), rs).is_none(), "a real name with a null optional is fine");
+        assert!(
+            malformed_call(
+                "run_skill",
+                &serde_json::json!({"name": "csv-clean", "target": null}),
+                rs
+            )
+            .is_none(),
+            "a real name with a null optional is fine"
+        );
         let o = Outcome::classify("run_skill", &refused);
         assert_eq!(o, Outcome::Malformed);
-        assert_eq!(o.counts_toward_reliability(), None, "never evidence about the tool, either way");
+        assert_eq!(
+            o.counts_toward_reliability(),
+            None,
+            "never evidence about the tool, either way"
+        );
         assert_eq!(o.recovery(), Recovery::Vary);
         assert_eq!(o.badge(), "malformed");
         assert!(o.note().contains("call it again"));
 
         // PRIVACY: never a value. A sentinel PIN in an undeclared numeric field must not appear.
-        let leak = malformed_call("recall", &serde_json::json!({"query": "card", "pin": 447193}), c.get("recall")).expect("refused");
-        assert!(!leak.contains("447193"), "value leaked into the refusal: {leak}");
+        let leak = malformed_call(
+            "recall",
+            &serde_json::json!({"query": "card", "pin": 447193}),
+            c.get("recall"),
+        )
+        .expect("refused");
+        assert!(
+            !leak.contains("447193"),
+            "value leaked into the refusal: {leak}"
+        );
         assert!(leak.contains("`pin`:number"), "{leak}");
 
         // discover_tools: boolean, and nothing but null.
-        assert!(malformed_call("discover_tools", &serde_json::json!({"query": true}), c.get("discover_tools")).unwrap().contains("`query`:boolean"));
-        assert!(malformed_call("discover_tools", &serde_json::json!({"query": null}), c.get("discover_tools")).unwrap().contains("missing required query"));
-        assert!(malformed_call("recall", &serde_json::json!({"query": "dinner", "limit": null}), c.get("recall")).is_none());
+        assert!(malformed_call(
+            "discover_tools",
+            &serde_json::json!({"query": true}),
+            c.get("discover_tools")
+        )
+        .unwrap()
+        .contains("`query`:boolean"));
+        assert!(malformed_call(
+            "discover_tools",
+            &serde_json::json!({"query": null}),
+            c.get("discover_tools")
+        )
+        .unwrap()
+        .contains("missing required query"));
+        assert!(malformed_call(
+            "recall",
+            &serde_json::json!({"query": "dinner", "limit": null}),
+            c.get("recall")
+        )
+        .is_none());
 
         // Contracts from the catalog: declared scalars pass, free text does not, per FIELD.
-        assert!(malformed_call("add_holding", &serde_json::json!({"ticker": "AAPL", "shares": 3}), c.get("add_holding")).is_none(), "shares is a declared scalar");
-        assert!(malformed_call("add_holding", &serde_json::json!({"ticker": 5, "shares": 3}), c.get("add_holding")).unwrap().contains("`ticker`:number"));
-        assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "budget": 300}), c.get("deals")).is_none());
-        assert!(malformed_call("deals", &serde_json::json!({"query": true}), c.get("deals")).unwrap().contains("`query`:boolean"));
+        assert!(
+            malformed_call(
+                "add_holding",
+                &serde_json::json!({"ticker": "AAPL", "shares": 3}),
+                c.get("add_holding")
+            )
+            .is_none(),
+            "shares is a declared scalar"
+        );
+        assert!(malformed_call(
+            "add_holding",
+            &serde_json::json!({"ticker": 5, "shares": 3}),
+            c.get("add_holding")
+        )
+        .unwrap()
+        .contains("`ticker`:number"));
+        assert!(malformed_call(
+            "deals",
+            &serde_json::json!({"query": "headphones", "budget": 300}),
+            c.get("deals")
+        )
+        .is_none());
+        assert!(
+            malformed_call("deals", &serde_json::json!({"query": true}), c.get("deals"))
+                .unwrap()
+                .contains("`query`:boolean")
+        );
         assert!(malformed_call("hunt", &serde_json::json!({"act": true}), c.get("hunt")).is_none());
         // No contract: only the scalar-name rule.
-        assert!(malformed_call("some_uncatalogued", &serde_json::json!({"year": 2019}), None).is_none());
-        assert!(malformed_call("some_uncatalogued", &serde_json::json!({"who": 2019}), None).unwrap().contains("`who`:number"));
+        assert!(malformed_call(
+            "some_uncatalogued",
+            &serde_json::json!({"year": 2019}),
+            None
+        )
+        .is_none());
+        assert!(
+            malformed_call("some_uncatalogued", &serde_json::json!({"who": 2019}), None)
+                .unwrap()
+                .contains("`who`:number")
+        );
         // MCP: judged by the server's own verdict, not here.
         assert!(malformed_call("mcp.fs.read", &serde_json::json!({"limit": 10}), None).is_none());
-        assert_eq!(Outcome::classify("mcp.fs.read", "error: Invalid params (-32602): path must be a string"), Outcome::Malformed);
+        assert_eq!(
+            Outcome::classify(
+                "mcp.fs.read",
+                "error: Invalid params (-32602): path must be a string"
+            ),
+            Outcome::Malformed
+        );
 
         // run_skill's not-found line is tool-specific: empty name = malformed that slipped through;
         // a real name = Empty; the same words from another tool are content.
-        assert_eq!(Outcome::classify("run_skill", "(no saved skill named '')"), Outcome::Malformed);
-        assert_eq!(Outcome::classify("run_skill", "(no saved skill named 'foo')"), Outcome::Empty);
-        assert_eq!(Outcome::classify("recall", "the note said: no saved skill named that"), Outcome::Ok);
+        assert_eq!(
+            Outcome::classify("run_skill", "(no saved skill named '')"),
+            Outcome::Malformed
+        );
+        assert_eq!(
+            Outcome::classify("run_skill", "(no saved skill named 'foo')"),
+            Outcome::Empty
+        );
+        assert_eq!(
+            Outcome::classify("recall", "the note said: no saved skill named that"),
+            Outcome::Ok
+        );
     }
 
     /// P.2e (Codex's review of P.2d): required fields are enforced per FIELD, and a handler's
@@ -580,13 +815,19 @@ mod malformed_tests {
     fn required_fields_are_held_per_field_and_aliases_are_explicit() {
         let c = contracts();
         // The contract carries the handler's aliases, read from one table.
-        assert_eq!(c["calc"].aliases, vec![("expression".to_string(), vec!["expr".to_string()])]);
+        assert_eq!(
+            c["calc"].aliases,
+            vec![("expression".to_string(), vec!["expr".to_string()])]
+        );
         // A tool may declare several fields' aliases; each row is (canonical, aliases in order).
         assert_eq!(
             c["deals"].aliases,
             vec![
                 ("budget".to_string(), vec!["max".to_string()]),
-                ("query".to_string(), vec!["item".to_string(), "text".to_string()]),
+                (
+                    "query".to_string(),
+                    vec!["item".to_string(), "text".to_string()]
+                ),
             ]
         );
         assert_eq!(
@@ -596,27 +837,85 @@ mod malformed_tests {
                 ("query".to_string(), vec!["item".to_string()]),
             ]
         );
-        assert!(c["run_skill"].aliases.is_empty(), "run_skill's handler takes no synonym: {:?}", c["run_skill"].aliases);
+        assert!(
+            c["run_skill"].aliases.is_empty(),
+            "run_skill's handler takes no synonym: {:?}",
+            c["run_skill"].aliases
+        );
         // calc {"expr"} is calc {expression}: the two bounded-loop tests that caught P.2d's first cut.
-        assert!(malformed_call("calc", &serde_json::json!({"expr": "6*7"}), c.get("calc")).is_none());
-        assert!(malformed_call("calc", &serde_json::json!({"expression": "6*7"}), c.get("calc")).is_none());
-        let r = malformed_call("calc", &serde_json::json!({"expr": 42}), c.get("calc")).expect("typed as its field");
+        assert!(
+            malformed_call("calc", &serde_json::json!({"expr": "6*7"}), c.get("calc")).is_none()
+        );
+        assert!(malformed_call(
+            "calc",
+            &serde_json::json!({"expression": "6*7"}),
+            c.get("calc")
+        )
+        .is_none());
+        let r = malformed_call("calc", &serde_json::json!({"expr": 42}), c.get("calc"))
+            .expect("typed as its field");
         assert!(r.contains("`expr`:number where text was expected"), "{r}");
-        assert!(malformed_call("calc", &serde_json::json!({}), c.get("calc")).unwrap().contains("missing required expression"));
-        assert!(malformed_call("calc", &serde_json::json!({"expr": null}), c.get("calc")).unwrap().contains("missing required expression"));
+        assert!(
+            malformed_call("calc", &serde_json::json!({}), c.get("calc"))
+                .unwrap()
+                .contains("missing required expression")
+        );
+        assert!(
+            malformed_call("calc", &serde_json::json!({"expr": null}), c.get("calc"))
+                .unwrap()
+                .contains("missing required expression")
+        );
         // A supplied value elsewhere no longer excuses a missing required field.
-        let r = malformed_call("run_skill", &serde_json::json!({"target": "https://example.org/x.csv"}), c.get("run_skill")).expect("no name");
+        let r = malformed_call(
+            "run_skill",
+            &serde_json::json!({"target": "https://example.org/x.csv"}),
+            c.get("run_skill"),
+        )
+        .expect("no name");
         assert!(r.contains("missing required name"), "{r}");
         assert!(!r.contains("example.org"), "never a value: {r}");
-        let r = malformed_call("add_reminder", &serde_json::json!({"text": "call mum"}), c.get("add_reminder")).expect("no when");
+        let r = malformed_call(
+            "add_reminder",
+            &serde_json::json!({"text": "call mum"}),
+            c.get("add_reminder"),
+        )
+        .expect("no when");
         assert!(r.contains("missing required when"), "{r}");
-        assert!(malformed_call("add_reminder", &serde_json::json!({"text": "call mum", "when": "tomorrow 9am"}), c.get("add_reminder")).is_none());
-        let r = malformed_call("watch_price", &serde_json::json!({"query": "rtx 4070"}), c.get("watch_price")).expect("no target");
+        assert!(malformed_call(
+            "add_reminder",
+            &serde_json::json!({"text": "call mum", "when": "tomorrow 9am"}),
+            c.get("add_reminder")
+        )
+        .is_none());
+        let r = malformed_call(
+            "watch_price",
+            &serde_json::json!({"query": "rtx 4070"}),
+            c.get("watch_price"),
+        )
+        .expect("no target");
         assert!(r.contains("missing required target"), "{r}");
         // The alias satisfies the requirement AND inherits the field's typing: a number is a budget.
-        assert!(malformed_call("watch_price", &serde_json::json!({"query": "rtx 4070", "budget": 450}), c.get("watch_price")).is_none());
-        assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "max": 300}), c.get("deals")).is_none(), "max is deals' budget");
-        assert!(malformed_call("deals", &serde_json::json!({"query": "headphones", "max": "300"}), c.get("deals")).is_none());
+        assert!(malformed_call(
+            "watch_price",
+            &serde_json::json!({"query": "rtx 4070", "budget": 450}),
+            c.get("watch_price")
+        )
+        .is_none());
+        assert!(
+            malformed_call(
+                "deals",
+                &serde_json::json!({"query": "headphones", "max": 300}),
+                c.get("deals")
+            )
+            .is_none(),
+            "max is deals' budget"
+        );
+        assert!(malformed_call(
+            "deals",
+            &serde_json::json!({"query": "headphones", "max": "300"}),
+            c.get("deals")
+        )
+        .is_none());
     }
 
     /// P.2f (Codex's review of P.2e): the normalizer unwraps a list only when every element is
@@ -626,14 +925,40 @@ mod malformed_tests {
     fn only_a_list_of_text_is_unwrapped_by_the_normalizer() {
         let n = crate::normalize_tool_args;
         // The documented shapes still work.
-        assert_eq!(n(serde_json::json!({"name": [{"type": "text", "content": "csv-clean"}]})), serde_json::json!({"name": "csv-clean"}));
-        assert_eq!(n(serde_json::json!({"name": ["csv", "-clean"]})), serde_json::json!({"name": "csv-clean"}), "a split string is one string");
-        assert_eq!(n(serde_json::json!({"name": [{"text": "a"}, "b"]})), serde_json::json!({"name": "ab"}));
+        assert_eq!(
+            n(serde_json::json!({"name": [{"type": "text", "content": "csv-clean"}]})),
+            serde_json::json!({"name": "csv-clean"})
+        );
+        assert_eq!(
+            n(serde_json::json!({"name": ["csv", "-clean"]})),
+            serde_json::json!({"name": "csv-clean"}),
+            "a split string is one string"
+        );
+        assert_eq!(
+            n(serde_json::json!({"name": [{"text": "a"}, "b"]})),
+            serde_json::json!({"name": "ab"})
+        );
         // A PIN-shaped number in a list is not a name.
-        assert_eq!(n(serde_json::json!({"name": [447193]})), serde_json::json!({"name": [447193]}), "a number must stay an array");
-        assert_eq!(n(serde_json::json!({"name": [{"x": 1}]})), serde_json::json!({"name": [{"x": 1}]}), "an arbitrary object must stay an array");
-        assert_eq!(n(serde_json::json!({"name": ["ok", 447193]})), serde_json::json!({"name": ["ok", 447193]}), "one bad element preserves the list");
-        assert_eq!(n(serde_json::json!({"name": [{"type": "text", "content": 447193}]})), serde_json::json!({"name": [{"type": "text", "content": 447193}]}), "a block wrapping a number is not text");
+        assert_eq!(
+            n(serde_json::json!({"name": [447193]})),
+            serde_json::json!({"name": [447193]}),
+            "a number must stay an array"
+        );
+        assert_eq!(
+            n(serde_json::json!({"name": [{"x": 1}]})),
+            serde_json::json!({"name": [{"x": 1}]}),
+            "an arbitrary object must stay an array"
+        );
+        assert_eq!(
+            n(serde_json::json!({"name": ["ok", 447193]})),
+            serde_json::json!({"name": ["ok", 447193]}),
+            "one bad element preserves the list"
+        );
+        assert_eq!(
+            n(serde_json::json!({"name": [{"type": "text", "content": 447193}]})),
+            serde_json::json!({"name": [{"type": "text", "content": 447193}]}),
+            "a block wrapping a number is not text"
+        );
         // ...and the boundary refuses every preserved one, naming the type and never the value.
         let c = contracts();
         for bad in [
@@ -642,10 +967,19 @@ mod malformed_tests {
             serde_json::json!({"name": ["ok", 447193]}),
             serde_json::json!({"name": [{"type": "text", "content": 447193}]}),
         ] {
-            let refusal = malformed_call("run_skill", &n(bad.clone()), c.get("run_skill")).unwrap_or_else(|| panic!("must refuse {bad}"));
+            let refusal = malformed_call("run_skill", &n(bad.clone()), c.get("run_skill"))
+                .unwrap_or_else(|| panic!("must refuse {bad}"));
             assert!(refusal.contains("`name`:array"), "{refusal}");
-            assert!(!refusal.contains("447193"), "the value reached the refusal: {refusal}");
+            assert!(
+                !refusal.contains("447193"),
+                "the value reached the refusal: {refusal}"
+            );
         }
-        assert!(malformed_call("run_skill", &n(serde_json::json!({"name": [{"type": "text", "content": "csv-clean"}]})), c.get("run_skill")).is_none());
+        assert!(malformed_call(
+            "run_skill",
+            &n(serde_json::json!({"name": [{"type": "text", "content": "csv-clean"}]})),
+            c.get("run_skill")
+        )
+        .is_none());
     }
 }

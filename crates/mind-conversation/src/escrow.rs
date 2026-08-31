@@ -63,13 +63,17 @@ pub(crate) fn material_hash(p: &Value) -> u64 {
     let mut h: u64 = 1469598103934665603; // FNV-1a
     let mut eat = |s: &str| {
         for b in s.as_bytes() {
-            h ^= *b as u64;
+            h ^= u64::from(*b);
             h = h.wrapping_mul(1099511628211);
         }
     };
     eat(p.get("title").and_then(|x| x.as_str()).unwrap_or(""));
     eat(p.get("body").and_then(|x| x.as_str()).unwrap_or(""));
-    eat(&p.get("expiry_ms").and_then(|x| x.as_i64()).unwrap_or(0).to_string());
+    eat(&p
+        .get("expiry_ms")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0)
+        .to_string());
     h
 }
 
@@ -87,11 +91,19 @@ pub(crate) fn may_resurface(prev_hash: u64, now_hash: u64, prev_reason: Silence)
 
 /// Drop held records that are no longer worth carrying: past their expiry, or low-value and stale.
 /// Returns the retained set. Bounded by construction so the ledger cannot grow without limit.
-pub(crate) fn prune(mut held: Vec<Value>, now_ms: i64, stale_days: i64, low_value: f64) -> Vec<Value> {
+pub(crate) fn prune(
+    mut held: Vec<Value>,
+    now_ms: i64,
+    stale_days: i64,
+    low_value: f64,
+) -> Vec<Value> {
     let cutoff = now_ms - stale_days * 86_400_000;
     held.retain(|h| {
         let at = h.get("at_ms").and_then(|x| x.as_i64()).unwrap_or(0);
-        let benefit = h.get("predicted_benefit").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let benefit = h
+            .get("predicted_benefit")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
         // A high-value hold is kept longer; a low-value one ages out fast rather than accumulating.
         if benefit < low_value {
             at > cutoff
@@ -116,10 +128,18 @@ pub(crate) fn render(held: &[Value]) -> String {
         held.len()
     );
     for h in held.iter().take(8) {
-        let title = h.get("title").and_then(|x| x.as_str()).unwrap_or("(untitled)");
+        let title = h
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("(untitled)");
         let why = h.get("reason").and_then(|x| x.as_str()).unwrap_or("?");
-        let benefit = h.get("predicted_benefit").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        s.push_str(&format!("   · \"{title}\" — held because {why} (I put its value at {benefit:.0}%)\n"));
+        let benefit = h
+            .get("predicted_benefit")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0);
+        s.push_str(&format!(
+            "   · \"{title}\" — held because {why} (I put its value at {benefit:.0}%)\n"
+        ));
     }
     s.push_str(
         "   These surface only if something actually CHANGES about them — never just because time passed.",
@@ -142,11 +162,24 @@ impl super::ConversationEngine {
     /// worth, why it stayed quiet, and a fingerprint of the candidate so a later MATERIAL change can
     /// release it. Re-holding the same unchanged candidate updates the existing row rather than
     /// stacking duplicates (the mistake that buried the tension ledger).
-    pub(crate) async fn escrow_hold(&self, pkt: &Value, reason: Silence, benefit: f64, now_ms: i64) {
-        let id = pkt.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    pub(crate) async fn escrow_hold(
+        &self,
+        pkt: &Value,
+        reason: Silence,
+        benefit: f64,
+        now_ms: i64,
+    ) {
+        let id = pkt
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let hash = material_hash(pkt);
         let mut held = self.load_escrow().await;
-        if let Some(row) = held.iter_mut().find(|h| h.get("candidate").and_then(|x| x.as_str()) == Some(id.as_str())) {
+        if let Some(row) = held
+            .iter_mut()
+            .find(|h| h.get("candidate").and_then(|x| x.as_str()) == Some(id.as_str()))
+        {
             row["reason"] = serde_json::json!(reason.as_str());
             row["material_hash"] = serde_json::json!(hash.to_string());
             row["times_held"] =
@@ -163,12 +196,17 @@ impl super::ConversationEngine {
                 "times_held": 1,
             }));
         }
-        let stale_days: i64 =
-            std::env::var("YM_ESCROW_STALE_DAYS").ok().and_then(|s| s.parse().ok()).unwrap_or(14);
+        let stale_days: i64 = std::env::var("YM_ESCROW_STALE_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(14);
         let kept = prune(held, now_ms, stale_days, 0.55);
         let _ = self
             .memory
-            .profile_set("interruption_escrow", &serde_json::to_string(&kept).unwrap_or_default())
+            .profile_set(
+                "interruption_escrow",
+                &serde_json::to_string(&kept).unwrap_or_default(),
+            )
             .await;
     }
 
@@ -178,7 +216,9 @@ impl super::ConversationEngine {
     pub(crate) async fn escrow_still_held(&self, pkt: &Value) -> bool {
         let id = pkt.get("id").and_then(|x| x.as_str()).unwrap_or("");
         let held = self.load_escrow().await;
-        let Some(row) = held.iter().find(|h| h.get("candidate").and_then(|x| x.as_str()) == Some(id))
+        let Some(row) = held
+            .iter()
+            .find(|h| h.get("candidate").and_then(|x| x.as_str()) == Some(id))
         else {
             return false;
         };
@@ -232,13 +272,33 @@ mod tests {
 
     #[test]
     fn a_material_change_does_resurface_it() {
-        let before = pkt("Vendor quote", "accept at 4,200 / counter at 3,900", NOW + DAY);
+        let before = pkt(
+            "Vendor quote",
+            "accept at 4,200 / counter at 3,900",
+            NOW + DAY,
+        );
         // The number changed — that is real new information about the same thing.
-        let after = pkt("Vendor quote", "accept at 4,600 / counter at 4,100", NOW + DAY);
-        assert!(may_resurface(material_hash(&before), material_hash(&after), Silence::BelowBand));
+        let after = pkt(
+            "Vendor quote",
+            "accept at 4,600 / counter at 4,100",
+            NOW + DAY,
+        );
+        assert!(may_resurface(
+            material_hash(&before),
+            material_hash(&after),
+            Silence::BelowBand
+        ));
         // So does the deadline moving.
-        let sooner = pkt("Vendor quote", "accept at 4,200 / counter at 3,900", NOW + 3600_000);
-        assert!(may_resurface(material_hash(&before), material_hash(&sooner), Silence::Unreceptive));
+        let sooner = pkt(
+            "Vendor quote",
+            "accept at 4,200 / counter at 3,900",
+            NOW + 3_600_000,
+        );
+        assert!(may_resurface(
+            material_hash(&before),
+            material_hash(&sooner),
+            Silence::Unreceptive
+        ));
     }
 
     #[test]
@@ -246,7 +306,11 @@ mod tests {
         let before = pkt("Vendor quote", "a", NOW + DAY);
         let after = pkt("Vendor quote", "b", NOW + DAY);
         assert!(
-            !may_resurface(material_hash(&before), material_hash(&after), Silence::Muted),
+            !may_resurface(
+                material_hash(&before),
+                material_hash(&after),
+                Silence::Muted
+            ),
             "the user's standing instruction outranks new evidence"
         );
     }
@@ -257,17 +321,27 @@ mod tests {
         let old_low = held(0.2, NOW - 20 * DAY);
         let old_high = held(0.9, NOW - 20 * DAY);
         let kept = prune(vec![recent_low, old_low, old_high], NOW, 14, 0.5);
-        assert_eq!(kept.len(), 2, "the stale low-value hold is dropped, the valuable one is kept");
-        assert!(kept.iter().any(|h| h["predicted_benefit"].as_f64() == Some(0.9)));
+        assert_eq!(
+            kept.len(),
+            2,
+            "the stale low-value hold is dropped, the valuable one is kept"
+        );
+        assert!(kept
+            .iter()
+            .any(|h| h["predicted_benefit"].as_f64() == Some(0.9)));
         assert!(!kept
             .iter()
-            .any(|h| h["predicted_benefit"].as_f64() == Some(0.2) && h["at_ms"].as_i64() == Some(NOW - 20 * DAY)));
+            .any(|h| h["predicted_benefit"].as_f64() == Some(0.2)
+                && h["at_ms"].as_i64() == Some(NOW - 20 * DAY)));
     }
 
     #[test]
     fn the_ledger_is_bounded() {
         let many: Vec<Value> = (0..250).map(|i| held(0.9, NOW - i)).collect();
-        assert!(prune(many, NOW, 14, 0.5).len() <= 100, "escrow can never grow without limit");
+        assert!(
+            prune(many, NOW, 14, 0.5).len() <= 100,
+            "escrow can never grow without limit"
+        );
     }
 
     #[test]
@@ -275,7 +349,10 @@ mod tests {
         let s = render(&[held(0.62, NOW)]);
         assert!(s.contains("chose NOT to interrupt"));
         assert!(s.contains("below-band"));
-        assert!(s.contains("never just because time passed"), "the rule is stated to the user");
+        assert!(
+            s.contains("never just because time passed"),
+            "the rule is stated to the user"
+        );
         // And the empty case reads as health, not absence.
         assert!(render(&[]).contains("nothing held back"));
     }

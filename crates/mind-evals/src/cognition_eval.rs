@@ -86,11 +86,11 @@ pub async fn run_cognition_scenario(s: &CognitionScenario) -> ScenarioResult {
             "WEBDOC: Teal is a cyan-family blue-green color.",
         ))),
     );
-    let bus = Arc::new(
-        EngineBus::new(engine, TurnIdentity::primary()).for_turn(&s.goal),
-    );
+    let bus = Arc::new(EngineBus::new(engine, TurnIdentity::primary()).for_turn(&s.goal));
     let cognition = Cognition::new(pool.clone(), pool, bus, "JARVIS");
-    let out = cognition.run(&goal_spec(s), &mind_types::clock::SystemClock).await;
+    let out = cognition
+        .run(&goal_spec(s), &mind_types::clock::SystemClock)
+        .await;
 
     let mut checks = Vec::new();
     for g in &s.grades {
@@ -105,26 +105,39 @@ pub async fn run_cognition_scenario(s: &CognitionScenario) -> ScenarioResult {
                 out.capsule.progress.failures == *n,
             ),
             CogGrade::MinBarren(n) => (
-                format!("barren_steps >= {n} (was {})", out.capsule.progress.barren_steps),
+                format!(
+                    "barren_steps >= {n} (was {})",
+                    out.capsule.progress.barren_steps
+                ),
                 out.capsule.progress.barren_steps >= *n,
             ),
             CogGrade::FailureNoteContains(x) => (
                 format!("a failure note contains '{x}'"),
                 out.capsule.failures.iter().any(|f| f.contains(x.as_str())),
             ),
-            CogGrade::AnswerContains(x) => {
-                (format!("answer contains '{x}'"), out.answer.contains(x.as_str()))
-            }
+            CogGrade::AnswerContains(x) => (
+                format!("answer contains '{x}'"),
+                out.answer.contains(x.as_str()),
+            ),
             CogGrade::EvidenceIds(ids) => {
                 let got: Vec<String> = out.capsule.evidence.iter().map(|e| e.id.clone()).collect();
-                (format!("evidence ids == {ids:?} (was {got:?})"), &got == ids)
+                (
+                    format!("evidence ids == {ids:?} (was {got:?})"),
+                    &got == ids,
+                )
             }
         };
         checks.push(CheckResult { desc, pass });
     }
     let passed = checks.iter().filter(|c| c.pass).count();
     let total = checks.len();
-    ScenarioResult { name: s.name.clone(), passed, total, checks, calls: seq.call_count() }
+    ScenarioResult {
+        name: s.name.clone(),
+        passed,
+        total,
+        checks,
+        calls: seq.call_count(),
+    }
 }
 
 pub async fn run_cognition_suite(scenarios: &[CognitionScenario]) -> Scorecard {
@@ -139,14 +152,20 @@ pub async fn run_cognition_suite(scenarios: &[CognitionScenario]) -> Scorecard {
     Scorecard {
         passed,
         total,
-        score: if total == 0 { 0.0 } else { passed as f64 / total as f64 },
+        score: if total == 0 {
+            0.0
+        } else {
+            passed as f64 / total as f64
+        },
         scenarios: results,
     }
 }
 
 /// An NBA tool-call decision.
 fn call(tool: &str, query: &str) -> String {
-    format!(r#"{{"verb":"CALL_TOOL","target":"{tool}","args":{{"query":"{query}"}},"why":"NEED_EVIDENCE"}}"#)
+    format!(
+        r#"{{"verb":"CALL_TOOL","target":"{tool}","args":{{"query":"{query}"}},"why":"NEED_EVIDENCE"}}"#
+    )
 }
 /// An NBA decision that reports what the last step established AND finishes.
 fn learned_then_finish(claim: &str, ev: &str) -> String {
@@ -156,7 +175,12 @@ fn learned_then_finish(claim: &str, ev: &str) -> String {
 }
 
 fn budget(max_steps: u32, max_model_calls: u32) -> Budget {
-    Budget { max_steps, max_model_calls, max_wall_ms: 60_000, max_usd: None }
+    Budget {
+        max_steps,
+        max_model_calls,
+        max_wall_ms: 60_000,
+        max_usd: None,
+    }
 }
 
 /// The standard cognitive-loop behavioral suite.
@@ -235,6 +259,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cognitive_loop_behavioral_suite_passes() {
         let card = run_cognition_suite(&cognition_suite()).await;
-        assert_eq!(card.passed, card.total, "cognitive-loop eval regressions:\n{}", card.render());
+        assert_eq!(
+            card.passed,
+            card.total,
+            "cognitive-loop eval regressions:\n{}",
+            card.render()
+        );
     }
 }

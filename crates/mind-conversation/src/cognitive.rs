@@ -19,6 +19,8 @@ use serde_json::Value;
 
 use super::*;
 
+const TOOL_RUNTIME_VERSION: &str = concat!("mind-conversation/", env!("CARGO_PKG_VERSION"));
+
 /// The capability bus over a live engine.
 pub struct EngineBus {
     engine: Arc<ConversationEngine>,
@@ -33,15 +35,47 @@ pub struct EngineBus {
     /// The run's flight-recorder trace, declared by the loop before its first call. Tool
     /// prediction/observation events become spans UNDER this trace instead of orphans.
     trace_root: std::sync::Mutex<Option<String>>,
+    /// The event that caused this bounded run. In production this is `goal_compiled`, making tool
+    /// predictions, contribution grades, and the terminal run event children of one durable
+    /// bounded-execution root (grounding events may precede it on the same turn trace).
+    trace_parent: std::sync::Mutex<Option<String>>,
+    /// Stable compiled-goal identity for the current bounded run. Separate from trace because one
+    /// durable goal may be retried across several run traces.
+    goal_root: std::sync::Mutex<Option<String>>,
+    /// Configured util/chat/research route for this run. This is immutable after bus construction
+    /// and deliberately does not claim which fallback link served an individual model call.
+    model_route: Option<String>,
 }
 
 impl EngineBus {
     pub fn new(engine: Arc<ConversationEngine>, identity: TurnIdentity) -> Self {
-        Self { engine, identity, user_text: String::new(), guard_state: std::sync::Mutex::new(Default::default()), trace_root: std::sync::Mutex::new(None) }
+        Self {
+            engine,
+            identity,
+            user_text: String::new(),
+            guard_state: std::sync::Mutex::new(Default::default()),
+            trace_root: std::sync::Mutex::new(None),
+            trace_parent: std::sync::Mutex::new(None),
+            goal_root: std::sync::Mutex::new(None),
+            model_route: None,
+        }
     }
 
     fn current_trace(&self) -> Option<String> {
         self.trace_root.lock().unwrap().clone()
+    }
+
+    fn current_trace_parent(&self) -> Option<String> {
+        self.trace_parent.lock().unwrap().clone()
+    }
+
+    fn declare_trace_parent(&self, trace_id: &str, parent_event_id: Option<&str>) {
+        *self.trace_root.lock().unwrap() = Some(trace_id.to_string());
+        *self.trace_parent.lock().unwrap() = parent_event_id.map(String::from);
+    }
+
+    fn current_goal_id(&self) -> Option<String> {
+        self.goal_root.lock().unwrap().clone()
     }
 
     fn tool_surface_allowed(&self, fallback_goal: &str) -> bool {
@@ -59,6 +93,11 @@ impl EngineBus {
     /// value" from "the model injected it".
     pub fn for_turn(mut self, user_text: &str) -> Self {
         self.user_text = user_text.to_string();
+        self
+    }
+
+    pub fn for_model_route(mut self, route: &str) -> Self {
+        self.model_route = Some(route.to_string());
         self
     }
 
@@ -94,7 +133,15 @@ impl Bus for EngineBus {
     /// paths cannot disagree about what tools exist.
     fn catalog(&self, goal: &str) -> String {
         if !self.tool_surface_allowed(goal) {
-            return String::new();
+            // The restricted catalog is already the complete, tiny allowlist. Relevance-gating it
+            // would demote the sole declaration to a name-only tail for numeric requests (which
+            // have no lexical overlap with prose like "do arithmetic locally").
+            return self
+                .engine
+                .plugins
+                .lock()
+                .unwrap()
+                .restricted_turn_catalog();
         }
         let src = self.engine.catalog_source();
         let (detailed, tail) = tool_catalog::gate_catalog(goal, &src);
@@ -125,13 +172,12 @@ impl Bus for EngineBus {
     /// outward if the registry cannot vouch for it being read-only.
     fn is_outward(&self, tool: &str) -> bool {
         let reg = self.engine.plugins.lock().unwrap();
-        match reg.security_for_tool(tool) {
-            Some(crate::plugins::SecurityLevel::GatedWrite) => true,
-            Some(_) => false,
-            // A tool no capability claims is a core tool (recall/remember/now) — those are read-only
-            // or self-directed, and the dispatch refuses anything it does not know.
-            None => false,
-        }
+        // A tool no capability claims is a core tool (recall/remember/now) — those are read-only
+        // or self-directed, and the dispatch refuses anything it does not know.
+        matches!(
+            reg.security_for_tool(tool),
+            Some(crate::plugins::SecurityLevel::GatedWrite)
+        )
     }
 
     async fn call(&self, tool: &str, args: &Value) -> anyhow::Result<String> {
@@ -143,9 +189,20 @@ impl Bus for EngineBus {
                 "tool execution requires a bound user request; construct the bus with for_turn"
             );
         }
-        if !self.tool_surface_allowed("") {
+        // The empty fallback cannot relax policy here: the unbound-bus guard immediately above
+        // already refuses an empty `user_text`. Every reachable call therefore computes policy
+        // from the literal request carried by `for_turn`, never from this fallback.
+        let restricted_turn = !self.tool_surface_allowed("");
+        if restricted_turn
+            && !self
+                .engine
+                .plugins
+                .lock()
+                .unwrap()
+                .restricted_turn_allows_tool(tool)
+        {
             anyhow::bail!(
-                "tools and private memory are withheld for this privacy-restricted turn"
+                "non-local tools and private memory are withheld for this privacy-restricted turn"
             );
         }
         // ── THE CLOSED LEARNING CHAIN, one tool call wide (Phase-2 §2). ────────────────────────
@@ -153,7 +210,17 @@ impl Bus for EngineBus {
         // (the bandit's Beta(1,1)-smoothed posterior). The model's confidence is NOT consulted
         // and not invented. Events are spans UNDER the run's declared trace (declare_trace), so
         // `ym why run-…` reconstructs which calls served which goal.
-        let trace = self.current_trace().unwrap_or_else(|| format!("toolcall-{}", mind_observability::now_ms()));
+        let trace = self
+            .current_trace()
+            .unwrap_or_else(|| format!("toolcall-{}", mind_observability::now_ms()));
+        let context_fingerprint = mind_observability::opaque_id("context", self.user_text.as_str());
+        let lane = if self.identity.owner == mind_types::PRIMARY {
+            "primary"
+        } else {
+            "member"
+        };
+        let goal_id = self.current_goal_id();
+        let trace_parent = self.current_trace_parent();
         // THE ARGUMENT BOUNDARY, before prediction, before egress, and before anything derived from
         // the arguments is written: `signature` embeds the arguments, and the refusal exists
         // precisely to keep those out of the record — so a refused call carries a constant id. What
@@ -164,33 +231,83 @@ impl Bus for EngineBus {
             Ok(admitted) => admitted,
             Err(msg) => {
                 self.engine.recorder().record({
-                    let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_observed");
+                    let mut e = mind_observability::DecisionEvent::span(
+                        &trace,
+                        trace_parent.as_deref(),
+                        "tool_observed",
+                    );
+                    e.actor = Some("conversation".into());
+                    e.lane = Some(lane.into());
+                    e.context_fingerprint = Some(context_fingerprint.clone());
+                    e.goal_id = goal_id.clone();
+                    e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
+                    e.model_route = self.model_route.clone();
                     e.object_id = Some(format!("{tool}:malformed"));
                     e.outcome = Some(msg.chars().take(160).collect());
                     e.verdict = Some("malformed".into());
+                    e.evaluator_id = Some(crate::tool_outcome::EVALUATOR_ID.into());
                     e.lesson = Some("malformed: excluded from reliability — the model's arguments did not fit the tool; the planner's failure, not the tool's".into());
                     e
                 });
                 anyhow::bail!("{msg}");
             }
         };
+        if restricted_turn
+            && !crate::plugins::restricted_turn_args_derive_from_request(
+                tool,
+                &args,
+                &self.user_text,
+            )
+        {
+            anyhow::bail!(
+                "pure-local tool arguments must be literal values from the current request"
+            );
+        }
         let args = &args;
         let prior = self.empirical_prior(tool).await;
-        let object_id = format!("{}:{}", tool, signature(tool, args));
+        let object_id = mind_observability::opaque_id(tool, &signature(tool, args));
         let predicted = {
-            let mut e = mind_observability::DecisionEvent::span(&trace, None, "tool_predicted");
+            let mut e = mind_observability::DecisionEvent::span(
+                &trace,
+                trace_parent.as_deref(),
+                "tool_predicted",
+            );
+            e.actor = Some("conversation".into());
+            e.lane = Some(lane.into());
+            e.context_fingerprint = Some(context_fingerprint.clone());
+            e.goal_id = goal_id.clone();
+            e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
+            e.model_route = self.model_route.clone();
             e.object_id = Some(object_id.clone());
             e.goal = Some(self.user_text.chars().take(120).collect());
             e.chosen = Some(tool.to_string());
             e.predicted = Some(format!("tool {tool} returns usable output"));
             e.confidence = Some(prior.rate);
-            e.policy = vec![format!("empirical prior n={}{}", prior.n, if prior.n < 5 { " (low-N shrinkage)" } else { "" })];
+            e.policy = vec![format!(
+                "empirical prior n={}{}",
+                prior.n,
+                if prior.n < 5 {
+                    " (low-N shrinkage)"
+                } else {
+                    ""
+                }
+            )];
             let id = e.event_id.clone();
             self.engine.recorder().record(e);
             id
         };
 
-        let clean = match crate::guards::pre(&self.engine, &self.guard_state, &self.identity, &self.user_text, tool, args.clone(), "bus").await {
+        let clean = match crate::guards::pre(
+            &self.engine,
+            &self.guard_state,
+            &self.identity,
+            &self.user_text,
+            tool,
+            args.clone(),
+            "bus",
+        )
+        .await
+        {
             crate::guards::PreVerdict::Proceed(a) => a,
             crate::guards::PreVerdict::Refuse { msg, .. } => {
                 // A refusal is the SAFETY machinery observed, not the tool observed: no
@@ -198,16 +315,28 @@ impl Bus for EngineBus {
                 // but the chain still records what happened.
                 self.engine.recorder().record({
                     let mut e = mind_observability::DecisionEvent::span(&trace, predicted.as_deref(), "tool_observed");
+                    e.actor = Some("conversation".into());
+                    e.lane = Some(lane.into());
+                    e.context_fingerprint = Some(context_fingerprint.clone());
+                    e.goal_id = goal_id.clone();
+                    e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
+                    e.model_route = self.model_route.clone();
                     e.object_id = Some(object_id);
                     e.outcome = Some(msg.chars().take(160).collect());
                     e.verdict = Some("denied".into());
+                    e.evaluator_id = Some(crate::tool_outcome::EVALUATOR_ID.into());
                     e.lesson = Some("refusal recorded; excluded from reliability by design — feeds P(permitted | context), not P(success)".into());
                     e
                 });
                 anyhow::bail!("{msg}");
             }
         };
-        let out = self.engine.run_agent_tool_as(tool, &clean, &self.identity).await;
+        let tool_started = std::time::Instant::now();
+        let out = self
+            .engine
+            .run_agent_tool_as(tool, &clean, &self.identity)
+            .await;
+        let latency_ms = tool_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         // ONE definition of "worked": the five-way outcome, recorded and classified in `post`.
         // An empty result is the tool WORKING; the capsule sees it as a barren step, not a break.
         let verdict = crate::guards::post(&self.engine, &self.guard_state, tool, &out).await;
@@ -228,20 +357,35 @@ impl Bus for EngineBus {
                 crate::tool_outcome::Outcome::Empty => Some(false),
                 _ => None,
             };
-            let mut e = mind_observability::DecisionEvent::span(&trace, predicted.as_deref(), "tool_observed");
+            let mut e = mind_observability::DecisionEvent::span(
+                &trace,
+                predicted.as_deref(),
+                "tool_observed",
+            );
+            e.actor = Some("conversation".into());
+            e.lane = Some(lane.into());
+            e.context_fingerprint = Some(context_fingerprint);
+            e.goal_id = goal_id;
+            e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
+            e.model_route = self.model_route.clone();
             e.object_id = Some(object_id);
             e.outcome = Some(out.chars().take(160).collect());
             e.verdict = Some(verdict.badge().into());
             e.semantic_success = semantic;
+            e.latency_ms = Some(latency_ms);
+            e.evaluator_id = Some(crate::tool_outcome::EVALUATOR_ID.into());
             match success {
                 Some(s) => {
                     e.brier = Some((prior.rate - s).powi(2));
                     e.prediction_error = Some(s - prior.rate);
                     e.lesson = Some(match verdict {
-                        crate::tool_outcome::Outcome::Failed =>
-                            format!("prior said {:.2}, it broke — future estimate for {tool} drops", prior.rate),
-                        crate::tool_outcome::Outcome::Empty =>
-                            "ran fine, found nothing — execution held, semantics did not".into(),
+                        crate::tool_outcome::Outcome::Failed => format!(
+                            "prior said {:.2}, it broke — future estimate for {tool} drops",
+                            prior.rate
+                        ),
+                        crate::tool_outcome::Outcome::Empty => {
+                            "ran fine, found nothing — execution held, semantics did not".into()
+                        }
                         _ => format!("estimate held within band (prior {:.2})", prior.rate),
                     });
                 }
@@ -275,7 +419,10 @@ impl Bus for EngineBus {
             return Observation {
                 action: signature(tool, args),
                 ok: false,
-                error: Some(format!("{}{note}", raw.chars().take(300).collect::<String>())),
+                error: Some(format!(
+                    "{}{note}",
+                    raw.chars().take(300).collect::<String>()
+                )),
                 ..Default::default()
             };
         }
@@ -283,11 +430,14 @@ impl Bus for EngineBus {
         // reset the capsule's stall counter, making a run of fruitless searches read as progress and
         // hiding the very signal the controller replans on. It becomes a NOTE (context, not
         // conclusions) and the step stays barren.
-        if crate::tool_outcome::Outcome::classify(tool, raw) == crate::tool_outcome::Outcome::Empty {
+        if crate::tool_outcome::Outcome::classify(tool, raw) == crate::tool_outcome::Outcome::Empty
+        {
             return Observation {
                 action: signature(tool, args),
                 ok: true,
-                notes: vec![format!("{tool} ran fine and found nothing — a different query or source may help")],
+                notes: vec![format!(
+                    "{tool} ran fine and found nothing — a different query or source may help"
+                )],
                 did: Some(format!("used {tool} (found nothing)")),
                 ..Default::default()
             };
@@ -304,10 +454,20 @@ impl Bus for EngineBus {
         let summary: String = if trimmed.chars().count() <= 400 {
             trimmed.replace('\n', " ")
         } else {
-            let head: String = trimmed.lines().next().unwrap_or("").chars().take(360).collect();
+            let head: String = trimmed
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(360)
+                .collect();
             if head.chars().count() < 80 {
                 // A short first line is a heading, not a summary — take a prefix of the whole thing.
-                trimmed.chars().take(360).collect::<String>().replace('\n', " ")
+                trimmed
+                    .chars()
+                    .take(360)
+                    .collect::<String>()
+                    .replace('\n', " ")
             } else {
                 head
             }
@@ -315,17 +475,17 @@ impl Bus for EngineBus {
         Observation {
             action: signature(tool, args),
             ok: true,
-            evidence: (!trimmed.is_empty())
-                .then(|| {
-                    vec![Evidence {
-                        id: String::new(), // the run assigns ids
-                        summary,
-                        source: tool.to_string(),
-                        body: trimmed.chars().take(20_000).collect(),
-                        captured_ms: 0,
-                    }]
-                })
-                .unwrap_or_default(),
+            evidence: if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![Evidence {
+                    id: String::new(), // the run assigns ids
+                    summary,
+                    source: tool.to_string(),
+                    body: trimmed.chars().take(20_000).collect(),
+                    captured_ms: 0,
+                }]
+            },
             did: Some(format!("used {tool}")),
             ..Default::default()
         }
@@ -334,7 +494,15 @@ impl Bus for EngineBus {
     /// The real verifier: the recipe engine's ThinkCited→Validate, which strips uncited claims
     /// deterministically rather than asking a model whether it was truthful.
     async fn ground(&self, question: &str, evidence: &str) -> Option<String> {
-        self.engine.recipes.as_ref()?.cited_answer(question, evidence).await
+        self.engine
+            .recipes
+            .as_ref()?
+            .cited_answer(question, evidence)
+            .await
+    }
+
+    fn has_grounder(&self) -> bool {
+        self.engine.recipes.is_some()
     }
 
     /// The engine's ONE terminal-delivery definition — the same list the legacy loop consults, so
@@ -348,16 +516,50 @@ impl Bus for EngineBus {
         *self.trace_root.lock().unwrap() = Some(trace_id.to_string());
     }
 
+    fn declare_goal_id(&self, goal_id: &str) {
+        *self.goal_root.lock().unwrap() = Some(goal_id.to_string());
+    }
+
     /// Run-completion grading of the THIRD success kind: did this tool's evidence advance the
     /// goal? Recorded per tool under the run's trace; aggregated by `ym why contribution`.
-    async fn grade_goal(&self, trace_id: &str, goal: &str, met: bool, contributors: &[(String, bool)]) {
+    async fn grade_goal(
+        &self,
+        trace_id: &str,
+        goal: &str,
+        met: bool,
+        contributors: &[(String, bool)],
+    ) {
         for (tool, contributed) in contributors {
-            let mut g = mind_observability::DecisionEvent::span(trace_id, None, "tool_goal_graded");
+            let parent = self.current_trace_parent();
+            let mut g = mind_observability::DecisionEvent::span(
+                trace_id,
+                parent.as_deref(),
+                "tool_goal_graded",
+            );
+            g.actor = Some("conversation".into());
+            g.lane = Some(if self.identity.owner == mind_types::PRIMARY {
+                "primary".into()
+            } else {
+                "member".into()
+            });
+            g.context_fingerprint = Some(mind_observability::opaque_id(
+                "context",
+                self.user_text.as_str(),
+            ));
             g.object_id = Some(format!("tool:{tool}"));
+            g.goal_id = self.current_goal_id();
             g.goal = Some(goal.to_string());
             g.trigger = Some("run completion — contract evaluated".into());
-            g.verdict = Some(if *contributed { "evidence_used" } else { "ran_unused" }.into());
+            g.verdict = Some(
+                if *contributed {
+                    "evidence_used"
+                } else {
+                    "ran_unused"
+                }
+                .into(),
+            );
             g.semantic_success = Some(*contributed);
+            g.evaluator_id = Some(mind_agents::GOAL_CONTRIBUTION_EVALUATOR_ID.into());
             g.policy = vec![format!("goal_met={met}")];
             self.engine.recorder().record(g);
         }
@@ -374,7 +576,13 @@ impl Bus for EngineBus {
         let mut out = Vec::new();
 
         // Executable: the sandboxed skill bank. `recall_skills` already excludes quarantined ones.
-        for s in self.engine.memory.recall_skills(goal, limit).await.unwrap_or_default() {
+        for s in self
+            .engine
+            .memory
+            .recall_skills(goal, limit)
+            .await
+            .unwrap_or_default()
+        {
             // A banked-but-never-run skill is UNPROVEN. The guard that used to stand here is gone
             // because the type no longer hands out a rate it does not have: `rate()` is `None` at
             // zero runs, so the untested case cannot be forgotten (E.P5a).
@@ -407,7 +615,11 @@ impl Bus for EngineBus {
                 if steps.len() >= 2 {
                     out.push(Procedure {
                         name: routine_name(&text),
-                        when: if when.is_empty() { format!("from pack {}", hit.pack_id) } else { format!("{when} [from pack {}]", hit.pack_id) },
+                        when: if when.is_empty() {
+                            format!("from pack {}", hit.pack_id)
+                        } else {
+                            format!("{when} [from pack {}]", hit.pack_id)
+                        },
                         steps,
                         kind: ProcedureKind::Instructions,
                         reliability: Prior::declared(0.5),
@@ -430,13 +642,22 @@ impl Bus for EngineBus {
             .map(String::from)
             .collect();
         let mut ranked: Vec<(usize, Procedure)> = Vec::new();
-        for t in self.engine.memory.list_approaches(200).await.unwrap_or_default() {
+        for t in self
+            .engine
+            .memory
+            .list_approaches(200)
+            .await
+            .unwrap_or_default()
+        {
             let (when, steps) = split_routine(&t);
             if steps.is_empty() {
                 continue;
             }
             let tl = t.to_lowercase();
-            let overlap = goal_words.iter().filter(|w| tl.contains(w.as_str())).count();
+            let overlap = goal_words
+                .iter()
+                .filter(|w| tl.contains(w.as_str()))
+                .count();
             ranked.push((
                 overlap,
                 Procedure {
@@ -483,7 +704,12 @@ impl Bus for EngineBus {
         }
         let text = format!(
             "APPROACH: {name}\nWHEN: {when}\n{}",
-            steps.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect::<Vec<_>>().join("\n")
+            steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {s}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         self.engine
             .memory
@@ -528,13 +754,21 @@ fn routine_name(text: &str) -> String {
             }
         }
     }
-    text.lines().next().unwrap_or("remembered approach").trim().chars().take(60).collect()
+    text.lines()
+        .next()
+        .unwrap_or("remembered approach")
+        .trim()
+        .chars()
+        .take(60)
+        .collect()
 }
 
 impl ConversationEngine {
     /// Is the bounded cognitive loop enabled? (env; per-engine override via `with_cognition`)
     pub fn cognition_enabled() -> bool {
-        std::env::var("YM_COGNITION").map(|v| v.trim() == "on").unwrap_or(false)
+        std::env::var("YM_COGNITION")
+            .map(|v| v.trim() == "on")
+            .unwrap_or(false)
     }
 
     /// The flag as THIS engine sees it — the test seam wins over the process env.
@@ -574,6 +808,10 @@ impl ConversationEngine {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recorder boundary keeps every auditable prediction field explicit at call sites"
+    )]
     pub(crate) fn record_tool_prediction(
         &self,
         trace: &str,
@@ -582,8 +820,14 @@ impl ConversationEngine {
         prior_rate: f64,
         prior_n: u64,
         object_id: &str,
+        lane: &str,
     ) -> Option<String> {
         let mut e = mind_observability::DecisionEvent::span(trace, None, "tool_predicted");
+        e.actor = Some("conversation".into());
+        e.lane = Some(lane.to_string());
+        e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
+        e.model_route = Some(self.inference.provider().to_string());
+        e.context_fingerprint = Some(mind_observability::opaque_id("context", goal));
         e.object_id = Some(object_id.to_string());
         e.goal = Some(goal.chars().take(120).collect());
         e.chosen = Some(tool.to_string());
@@ -591,7 +835,11 @@ impl ConversationEngine {
         e.confidence = Some(prior_rate);
         e.policy = vec![format!(
             "empirical prior n={prior_n}{}",
-            if prior_n < 5 { " (low-N shrinkage)" } else { "" }
+            if prior_n < 5 {
+                " (low-N shrinkage)"
+            } else {
+                ""
+            }
         )];
         let id = e.event_id.clone();
         self.recorder().record(e);
@@ -599,6 +847,10 @@ impl ConversationEngine {
     }
 
     /// The observed half: five-way verdict, Brier loss and the lesson, parented to the prediction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recorder boundary keeps every auditable observation field explicit at call sites"
+    )]
     pub(crate) fn record_tool_observation(
         &self,
         trace: &str,
@@ -608,6 +860,9 @@ impl ConversationEngine {
         verdict: crate::tool_outcome::Outcome,
         out: &str,
         prior_rate: f64,
+        latency_ms: Option<u64>,
+        context_fingerprint: &str,
+        lane: &str,
     ) {
         use crate::tool_outcome::Outcome;
         // Unavailable/Denied say nothing about whether the tool WOULD have worked: they feed
@@ -625,17 +880,28 @@ impl ConversationEngine {
             _ => None,
         };
         let mut e = mind_observability::DecisionEvent::span(trace, parent, "tool_observed");
+        e.actor = Some("conversation".into());
+        e.lane = Some(lane.to_string());
+        e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
+        e.model_route = Some(self.inference.provider().to_string());
+        e.context_fingerprint = Some(context_fingerprint.to_string());
         e.object_id = Some(object_id.to_string());
         e.outcome = Some(out.chars().take(160).collect());
         e.verdict = Some(verdict.badge().into());
         e.semantic_success = semantic;
+        e.latency_ms = latency_ms;
+        e.evaluator_id = Some(crate::tool_outcome::EVALUATOR_ID.into());
         match success {
             Some(s) => {
                 e.brier = Some((prior_rate - s).powi(2));
                 e.prediction_error = Some(s - prior_rate);
                 e.lesson = Some(match verdict {
-                    Outcome::Failed => format!("prior said {prior_rate:.2}, it broke - future estimate for {tool} drops"),
-                    Outcome::Empty => "ran fine, found nothing - execution held, semantics did not".into(),
+                    Outcome::Failed => format!(
+                        "prior said {prior_rate:.2}, it broke - future estimate for {tool} drops"
+                    ),
+                    Outcome::Empty => {
+                        "ran fine, found nothing - execution held, semantics did not".into()
+                    }
                     _ => format!("estimate held within band (prior {prior_rate:.2})"),
                 });
             }
@@ -648,7 +914,6 @@ impl ConversationEngine {
         }
         self.recorder().record(e);
     }
-
 
     /// THE turn entry point. Every channel calls this rather than `handle_turn_as` directly.
     ///
@@ -697,33 +962,94 @@ impl ConversationEngine {
     ///
     /// Returns `None` when the loop cannot be built (no recipe engine for grounding, say), so the
     /// caller falls back to the legacy path rather than degrading silently.
-    pub async fn cognitive_turn(self: &Arc<Self>, user_text: &str, id: &TurnIdentity) -> Option<String> {
-        // The run's trace id is minted inside Cognition::run (and declared to the bus, so tool
-        // spans parent under it); the compile-time refusal below still mints its own.
+    pub async fn cognitive_turn(
+        self: &Arc<Self>,
+        user_text: &str,
+        id: &TurnIdentity,
+    ) -> Option<String> {
+        // Mint one trace before grounding and compilation. `goal_compiled` becomes the identified
+        // root of bounded execution; completion/refusal and every bounded-loop tool chain parent
+        // beneath it, while earlier grounding evidence stays on the same turn trace.
         let trace_id = format!("run-{}", mind_observability::now_ms());
-        let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(self.clone(), id.clone()).for_turn(user_text));
         let router = mind_inference::Router::from_env(self.inference.clone(), 4);
+        let util_pool = router.pool("util");
+        let chat_pool = router.pool("chat");
+        let research_pool = router.pool("research");
+        // Configured route identity, not a claim about which fallback link ultimately served. The
+        // inference layer does not expose per-response link identity yet, so recording more would
+        // turn an instrumentation gap into false precision.
+        let model_route = format!(
+            "util={};chat={};research={}",
+            util_pool.provider(),
+            chat_pool.provider(),
+            research_pool.provider()
+        );
+        let lane = if id.owner == mind_types::PRIMARY {
+            "primary".to_string()
+        } else {
+            "member".to_string()
+        };
+        let context_fingerprint = mind_observability::opaque_id("context", user_text);
+        let bus = Arc::new(
+            EngineBus::new(self.clone(), id.clone())
+                .for_turn(user_text)
+                .for_model_route(&model_route),
+        );
 
         // The SAME grounding assembly the classic loop uses — one function, two loops, zero drift.
         emit_progress("grounding from memory…");
         let grounding = self.turn_grounding(user_text, id, &trace_id).await;
 
         emit_progress("understanding the goal…");
+        let compile_started = std::time::Instant::now();
         let compiled = mind_agents::compile(
-            &router.pool("util"),
+            &util_pool,
             bus.as_ref(),
             user_text,
             crate::config_panel::agent_budget(),
         )
         .await;
+        let compile_latency_ms = compile_started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let compile_event_id = {
+            let mut e = mind_observability::DecisionEvent::span(&trace_id, None, "goal_compiled");
+            e.actor = Some("cognition".into());
+            e.lane = Some(lane.clone());
+            e.context_fingerprint = Some(context_fingerprint.clone());
+            e.model_route = Some(format!("util={}", util_pool.provider()));
+            e.model_calls = Some(1); // one logical InferencePool request, regardless of outcome
+            e.latency_ms = Some(compile_latency_ms);
+            e.subject = Some(id.owner.clone());
+            e.goal_id = Some(compiled.spec.id.clone());
+            e.goal = Some(compiled.spec.goal.clone());
+            e.trigger = Some("interactive request compilation".into());
+            e.verdict = Some(match compiled.origin {
+                mind_agents::compile::Origin::Compiled => "compiled".into(),
+                mind_agents::compile::Origin::Fallback => "fallback".into(),
+            });
+            let event_id = e.event_id.clone();
+            self.recorder.record(e);
+            event_id
+        };
+        bus.declare_trace_parent(&trace_id, compile_event_id.as_deref());
 
         // A goal needing something this mind does not have is said plainly, before any work. The old
         // loop would have improvised around the gap and reported something that sounded like progress.
         if !compiled.spec.is_runnable() {
             self.recorder.record({
-                let mut e = mind_observability::DecisionEvent::new(&trace_id, "cognitive_run_refused");
+                let mut e = mind_observability::DecisionEvent::span(
+                    &trace_id,
+                    compile_event_id.as_deref(),
+                    "cognitive_run_refused",
+                );
                 e.actor = Some("cognition".into());
+                e.lane = Some(lane.clone());
+                e.context_fingerprint = Some(context_fingerprint.clone());
+                e.model_route = Some(model_route.clone());
                 e.subject = Some(id.owner.clone());
+                e.goal_id = Some(compiled.spec.id.clone());
                 e.goal = Some(user_text.to_string());
                 e.trigger = Some("capability missing at compile time".into());
                 e.rejected = compiled.spec.missing_capabilities.clone();
@@ -737,28 +1063,47 @@ impl ConversationEngine {
             ));
         }
 
-        let cognition = mind_agents::Cognition::new(
-            router.pool("chat"),
-            router.pool("research"),
-            bus,
-            self.persona.clone(),
-        )
-        .with_grounding(grounding);
+        let cognition =
+            mind_agents::Cognition::new(chat_pool, research_pool, bus, self.persona.clone())
+                .with_grounding(grounding);
         emit_progress("working…");
-        let outcome = cognition.run(&compiled.spec, &mind_types::clock::SystemClock).await;
+        let run_started = std::time::Instant::now();
+        let outcome = cognition
+            .run_with_trace(&compiled.spec, &mind_types::clock::SystemClock, &trace_id)
+            .await;
+        let run_latency_ms = run_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         // ── FLIGHT RECORDER: the run's causal path from persisted state — what was known
         // (evidence ids), why it stopped (chosen), where it hit walls (failures), the budget
-        // story (policy line), and derived confidence. Same trace the loop declared, so every
-        // tool span this run caused sits beneath this completion event.
+        // story (policy line), and derived confidence. This completion and every tool chain are
+        // siblings beneath `goal_compiled`, because a completion cannot parent work that preceded it.
         {
-            let mut e = mind_observability::DecisionEvent::new(&outcome.trace_id, "cognitive_run");
+            let mut e = mind_observability::DecisionEvent::span(
+                &outcome.trace_id,
+                compile_event_id.as_deref(),
+                "cognitive_run",
+            );
             e.actor = Some("cognition".into());
+            e.lane = Some(lane);
+            e.context_fingerprint = Some(context_fingerprint);
+            e.model_route = Some(model_route);
+            e.model_calls = Some(outcome.capsule.progress.model_calls);
+            e.latency_ms = Some(run_latency_ms);
             e.subject = Some(id.owner.clone());
+            e.goal_id = Some(compiled.spec.id.clone());
             e.goal = Some(compiled.spec.goal.clone());
             e.trigger = Some("interactive user request".into());
-            e.evidence_ids = outcome.capsule.evidence.iter().map(|ev| ev.id.clone()).collect();
-            e.chosen = Some(outcome.stopped_because.map(|r| r.describe().to_string()).unwrap_or_else(|| "completed".into()));
+            e.evidence_ids = outcome
+                .capsule
+                .evidence
+                .iter()
+                .map(|ev| ev.id.clone())
+                .collect();
+            e.chosen = Some(
+                outcome
+                    .stopped_because
+                    .map_or_else(|| "completed".into(), |r| r.describe().to_string()),
+            );
             e.rejected = outcome.capsule.failures.iter().take(4).cloned().collect();
             e.policy = vec![format!(
                 "steps={} model_calls={} barren={} failures={}",
@@ -774,7 +1119,11 @@ impl ConversationEngine {
                 (_, Some(false)) => "partial+unverified".into(),
                 (false, _) => "partial".into(),
             });
-            e.lesson = outcome.capsule.contradictions.first().map(|c| format!("contradiction surfaced: {c}"));
+            e.lesson = outcome
+                .capsule
+                .contradictions
+                .first()
+                .map(|c| format!("contradiction surfaced: {c}"));
             self.recorder.record(e);
             // GOAL CONTRIBUTION is graded by the run itself (Bus::grade_goal) — the run owns
             // its capsule and its contract verdict; the turn wrapper must not duplicate it.
@@ -783,7 +1132,11 @@ impl ConversationEngine {
         // The trace is real execution, so it is safe to narrate — every line corresponds to a tool
         // call that happened.
         for step in &outcome.trace {
-            emit_progress(&format!("{} {}", if step.ok { "\u{2713}" } else { "\u{2717}" }, step.action));
+            emit_progress(&format!(
+                "{} {}",
+                if step.ok { "\u{2713}" } else { "\u{2717}" },
+                step.action
+            ));
         }
 
         let mut answer = outcome.answer;
@@ -795,8 +1148,14 @@ impl ConversationEngine {
             answer.push_str(&format!("\n\n({note})"));
         }
 
-        let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
-        let _ = self.memory.append_message_scoped("assistant", &answer, id.write_scope()).await;
+        let _ = self
+            .memory
+            .append_message_scoped("user", user_text, id.write_scope())
+            .await;
+        let _ = self
+            .memory
+            .append_message_scoped("assistant", &answer, id.write_scope())
+            .await;
         Some(answer)
     }
 }
@@ -825,9 +1184,18 @@ mod tests {
         let ready = bus.ready_capabilities();
         // A bare engine has no clients, so anything requiring one must be absent — the same
         // false-green guard as the capability report itself.
-        assert!(!ready.contains(&"github".to_string()), "github has no token here");
-        assert!(!ready.contains(&"web_search".to_string()), "no searcher is wired");
-        assert!(ready.contains(&"calculator".to_string()), "pure compute is always ready: {ready:?}");
+        assert!(
+            !ready.contains(&"github".to_string()),
+            "github has no token here"
+        );
+        assert!(
+            !ready.contains(&"web_search".to_string()),
+            "no searcher is wired"
+        );
+        assert!(
+            ready.contains(&"calculator".to_string()),
+            "pure compute is always ready: {ready:?}"
+        );
     }
 
     /// A gated-write capability must read as outward, from the registry's declaration rather than a
@@ -837,7 +1205,10 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
         // `code` belongs to the coder capability, declared GatedWrite.
-        assert!(bus.is_outward("code"), "a gated-write tool is outward by declaration");
+        assert!(
+            bus.is_outward("code"),
+            "a gated-write tool is outward by declaration"
+        );
         assert!(!bus.is_outward("calc"), "arithmetic is not");
         assert!(!bus.is_outward("recall"), "a core read tool is not");
     }
@@ -848,11 +1219,17 @@ mod tests {
     async fn the_bus_catalog_matches_the_engines_own() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = engine(&mem);
-        let bus = EngineBus::new(eng.clone(), TurnIdentity::primary());
+        let bus = EngineBus::new(eng, TurnIdentity::primary());
         let cat = bus.catalog("what's the weather in pune?");
-        assert!(cat.contains("weather"), "the relevant tool is detailed:\n{cat}");
+        assert!(
+            cat.contains("weather"),
+            "the relevant tool is detailed:\n{cat}"
+        );
         // Everything else stays reachable by name — the same never-remove rule as the legacy gate.
-        assert!(cat.contains("OTHER TOOLS"), "the name-only tail must survive:\n{cat}");
+        assert!(
+            cat.contains("OTHER TOOLS"),
+            "the name-only tail must survive:\n{cat}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -862,9 +1239,21 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary()).for_turn(QUERY);
 
+        let catalog = bus.catalog(QUERY);
         assert!(
-            bus.catalog(QUERY).is_empty(),
-            "a prohibited cognitive turn must expose no tool surface"
+            catalog.contains("calc"),
+            "pure-local arithmetic remains named: {catalog}"
+        );
+        for denied in ["recall", "remember", "now", "myself", "weather", "search"] {
+            assert!(
+                !catalog.contains(denied),
+                "restricted catalog exposed {denied}: {catalog}"
+            );
+        }
+        let arithmetic_catalog = bus.catalog("what is 17*23?");
+        assert!(
+            arithmetic_catalog.contains("calc {expression}"),
+            "an explicit arithmetic goal gets the detailed pure-local declaration: {arithmetic_catalog}"
         );
         let result = bus
             .call("remember", &serde_json::json!({ "text": SENTINEL }))
@@ -888,6 +1277,24 @@ mod tests {
             recalled.iter().all(|b| !b.item.text.contains(SENTINEL)),
             "the cognitive execution gate still changed memory: {recalled:?}"
         );
+
+        let hidden_number = bus
+            .call("calc", &serde_json::json!({ "expr": "771983*1" }))
+            .await;
+        assert!(
+            matches!(&hidden_number, Err(e) if e.to_string().contains("current request")),
+            "a model-derived private number reached pure compute: {hidden_number:?}"
+        );
+
+        let arithmetic_bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
+            .for_turn("Calculate 17*23, but do not reveal private facts.");
+        let arithmetic = arithmetic_bus
+            .call("calc", &serde_json::json!({ "expr": "17*23" }))
+            .await;
+        assert!(
+            matches!(arithmetic.as_deref(), Ok("= 391")),
+            "pure local arithmetic remains usable: {arithmetic:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -895,7 +1302,9 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
 
-        let result = bus.call("calc", &serde_json::json!({ "expr": "6*7" })).await;
+        let result = bus
+            .call("calc", &serde_json::json!({ "expr": "6*7" }))
+            .await;
         assert!(
             matches!(&result, Err(e) if e.to_string().contains("bound user request")),
             "a future caller must not inherit tool authority from an empty fallback request: {result:?}"
@@ -911,14 +1320,32 @@ mod tests {
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
             .for_turn("exercise tool outcome classification");
         // discover_tools over a query nothing matches: the tool WORKED, the world was empty.
-        let r = bus.call("discover_tools", &serde_json::json!({ "query": "zzqx warp drive" })).await;
-        assert!(r.is_ok(), "an honest empty answer must not be classified as a break: {r:?}");
+        let r = bus
+            .call(
+                "discover_tools",
+                &serde_json::json!({ "query": "zzqx warp drive" }),
+            )
+            .await;
+        assert!(
+            r.is_ok(),
+            "an honest empty answer must not be classified as a break: {r:?}"
+        );
         // An unconfigured capability is still a dead end the run must not walk into.
-        let r = bus.call("github_repo_items", &serde_json::json!({ "repo": "acme/x" })).await;
+        let r = bus
+            .call(
+                "github_repo_items",
+                &serde_json::json!({ "repo": "acme/x" }),
+            )
+            .await;
         assert!(r.is_err(), "an unavailable tool must surface as one");
         // A short correct answer is a result. The old boolean called anything ≤10 chars a failure.
-        let r = bus.call("calc", &serde_json::json!({ "expr": "6*7" })).await;
-        assert!(matches!(r.as_deref(), Ok(s) if s.contains("42")), "42 is an answer, not a failure: {r:?}");
+        let r = bus
+            .call("calc", &serde_json::json!({ "expr": "6*7" }))
+            .await;
+        assert!(
+            matches!(r.as_deref(), Ok(s) if s.contains("42")),
+            "42 is an answer, not a failure: {r:?}"
+        );
     }
 
     /// An empty result folds into the capsule as a NOTE, never as evidence — evidence resets the
@@ -927,13 +1354,21 @@ mod tests {
     async fn an_empty_result_stays_a_barren_step_in_the_capsule() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
-        let obs = bus.normalize("web_search", &serde_json::json!({"query":"x"}), "(no results for 'x')", true);
+        let obs = bus.normalize(
+            "web_search",
+            &serde_json::json!({"query":"x"}),
+            "(no results for 'x')",
+            true,
+        );
         assert!(obs.ok, "the tool worked");
         assert!(obs.evidence.is_empty(), "absence is not evidence");
         assert!(obs.notes[0].contains("found nothing"));
         let c = mind_spec::capsule::Capsule::new("g", "goal").reduce(obs);
         assert_eq!(c.progress.failures, 0, "no failure was invented");
-        assert_eq!(c.progress.barren_steps, 1, "and the stall signal still sees the step");
+        assert_eq!(
+            c.progress.barren_steps, 1,
+            "and the stall signal still sees the step"
+        );
     }
 
     /// A real failure keeps its recovery hint, so the FAILED list tells the next decision what kind
@@ -942,10 +1377,18 @@ mod tests {
     async fn a_failure_observation_carries_the_recovery_hint() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
-        let obs = bus.normalize("github_repo_items", &serde_json::json!({}), "(github not configured)", false);
+        let obs = bus.normalize(
+            "github_repo_items",
+            &serde_json::json!({}),
+            "(github not configured)",
+            false,
+        );
         assert!(!obs.ok);
         let err = obs.error.unwrap();
-        assert!(err.contains("not available on this box"), "the reroute hint travels with the failure: {err}");
+        assert!(
+            err.contains("not available on this box"),
+            "the reroute hint travels with the failure: {err}"
+        );
     }
 
     /// A long result keeps a useful summary; a heading-first result does not get reduced to its
@@ -955,13 +1398,31 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
 
-        let short = bus.normalize("now", &serde_json::json!({}), "Monday 11 August, 10:42", true);
-        assert_eq!(short.evidence[0].summary, "Monday 11 August, 10:42", "a short answer IS its summary");
+        let short = bus.normalize(
+            "now",
+            &serde_json::json!({}),
+            "Monday 11 August, 10:42",
+            true,
+        );
+        assert_eq!(
+            short.evidence[0].summary, "Monday 11 August, 10:42",
+            "a short answer IS its summary"
+        );
 
-        let heading = format!("NEWS\nThe substantive first story is about {}", "x".repeat(400));
+        let heading = format!(
+            "NEWS\nThe substantive first story is about {}",
+            "x".repeat(400)
+        );
         let n = bus.normalize("news", &serde_json::json!({}), &heading, true);
-        assert!(n.evidence[0].summary.contains("substantive"), "a 4-char heading must not become the summary: {}", n.evidence[0].summary);
-        assert!(n.evidence[0].body.len() > 200, "the body keeps the whole thing for paging");
+        assert!(
+            n.evidence[0].summary.contains("substantive"),
+            "a 4-char heading must not become the summary: {}",
+            n.evidence[0].summary
+        );
+        assert!(
+            n.evidence[0].body.len() > 200,
+            "the body keeps the whole thing for paging"
+        );
     }
 
     /// The bus re-runs the EXACT-VALUE EXFIL GUARD the legacy loop runs: a distinctive stored
@@ -980,15 +1441,32 @@ mod tests {
             })
             .await;
         // The user asked about laptops; the model smuggled the stored email into the query.
-        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary()).for_turn("find me a good laptop");
-        let r = bus.call("web_search", &serde_json::json!({ "query": "laptops for secret.owner@example.com" })).await;
-        assert!(r.is_err(), "a stored private value the user never typed must not leave: {r:?}");
+        let bus =
+            EngineBus::new(engine(&mem), TurnIdentity::primary()).for_turn("find me a good laptop");
+        let r = bus
+            .call(
+                "web_search",
+                &serde_json::json!({ "query": "laptops for secret.owner@example.com" }),
+            )
+            .await;
+        assert!(
+            r.is_err(),
+            "a stored private value the user never typed must not leave: {r:?}"
+        );
 
         // The user typing the value themselves is their call, not a model exfil.
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
             .for_turn("search the web for secret.owner@example.com");
-        let r = bus.call("web_search", &serde_json::json!({ "query": "secret.owner@example.com" })).await;
-        assert!(r.is_ok() || !format!("{r:?}").contains("private detail"), "user-typed values pass the guard: {r:?}");
+        let r = bus
+            .call(
+                "web_search",
+                &serde_json::json!({ "query": "secret.owner@example.com" }),
+            )
+            .await;
+        assert!(
+            r.is_ok() || !format!("{r:?}").contains("private detail"),
+            "user-typed values pass the guard: {r:?}"
+        );
     }
 
     /// The bus serves the ENGINE's terminal-delivery list — a published URL, a delegation ack, a
@@ -998,12 +1476,30 @@ mod tests {
     async fn terminal_delivery_is_one_definition_across_both_loops() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
-        assert!(bus.is_terminal("publish_page", "Done — published (works on your home network):\nhttp://192.168.4.90:8088/x.html"));
-        assert!(bus.is_terminal("code", "On it — building \"a page\" in the background (isolated sandbox)"));
-        assert!(bus.is_terminal("news", &format!("MORNING BRIEF\n{}", "story with sources. ".repeat(20))));
-        assert!(!bus.is_terminal("publish_page", "(couldn't publish the page)"), "a failed publish is not an answer");
-        assert!(!bus.is_terminal("news", "quiet day"), "a stub brief goes through synthesis like anything else");
-        assert!(!bus.is_terminal("web_fetch", "http://example.com returned a page"), "an ordinary fetch is material, not an answer");
+        assert!(bus.is_terminal(
+            "publish_page",
+            "Done — published (works on your home network):\nhttp://192.168.4.90:8088/x.html"
+        ));
+        assert!(bus.is_terminal(
+            "code",
+            "On it — building \"a page\" in the background (isolated sandbox)"
+        ));
+        assert!(bus.is_terminal(
+            "news",
+            &format!("MORNING BRIEF\n{}", "story with sources. ".repeat(20))
+        ));
+        assert!(
+            !bus.is_terminal("publish_page", "(couldn't publish the page)"),
+            "a failed publish is not an answer"
+        );
+        assert!(
+            !bus.is_terminal("news", "quiet day"),
+            "a stub brief goes through synthesis like anything else"
+        );
+        assert!(
+            !bus.is_terminal("web_fetch", "http://example.com returned a page"),
+            "an ordinary fetch is material, not an answer"
+        );
     }
 
     /// A stored routine round-trips: what it is for, and its steps in order.
@@ -1014,7 +1510,14 @@ mod tests {
         assert_eq!(routine_name(text), "repo review");
         let (when, steps) = split_routine(text);
         assert_eq!(when, "evaluating a repository");
-        assert_eq!(steps, vec!["read the README", "read the commit history", "check open issues"]);
+        assert_eq!(
+            steps,
+            vec![
+                "read the README",
+                "read the commit history",
+                "check open issues"
+            ]
+        );
     }
 
     /// Bulleted steps are as valid as numbered ones — a procedure written by hand should not be lost
@@ -1040,8 +1543,14 @@ mod tests {
     async fn a_one_step_approach_is_not_worth_banking() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
-        assert!(!bus.bank_procedure("trivial", "when x", &["did one thing".into()]).await);
-        assert!(bus.bank_procedure("real", "when x", &["step one".into(), "step two".into()]).await);
+        assert!(
+            !bus.bank_procedure("trivial", "when x", &["did one thing".into()])
+                .await
+        );
+        assert!(
+            bus.bank_procedure("real", "when x", &["step one".into(), "step two".into()])
+                .await
+        );
     }
 
     /// A banked approach is recallable as a procedure — the round trip through real memory, which is
@@ -1058,7 +1567,9 @@ mod tests {
             )
             .await
         );
-        let found = bus.procedures("how should I evaluate this repository?", 5).await;
+        let found = bus
+            .procedures("how should I evaluate this repository?", 5)
+            .await;
         // UNCONDITIONAL, deliberately. This assertion used to sit behind an `if let` excusing a
         // semantic-recall miss — which is exactly how the library being WRITE-ONLY went unnoticed:
         // banking wrote episodic memories, recall read only beliefs, the test shrugged at the
@@ -1071,7 +1582,10 @@ mod tests {
         assert_eq!(p.when, "evaluating a repository");
         assert_eq!(p.steps.len(), 2, "both steps survive the round trip");
         assert!(matches!(p.kind, mind_agents::ProcedureKind::Instructions));
-        assert!(!p.reliability.is_trustworthy(), "a freshly banked approach is unproven");
+        assert!(
+            !p.reliability.is_trustworthy(),
+            "a freshly banked approach is unproven"
+        );
     }
 
     /// FOLLOW-THROUGH: a result that finished while no chat was reachable is delivered appended to
@@ -1083,12 +1597,18 @@ mod tests {
         let eng = engine(&mem);
         eng.hold_for_next_turn("🛠️ Code — your page is ready: http://192.168.4.90:8088/x.html");
 
-        let a = eng.turn("thanks, and what else?", TurnIdentity::primary()).await.unwrap();
+        let a = eng
+            .turn("thanks, and what else?", TurnIdentity::primary())
+            .await
+            .unwrap();
         assert!(a.contains("finished while you were away"), "{a}");
         assert!(a.contains("your page is ready"), "{a}");
 
         let b = eng.turn("ok", TurnIdentity::primary()).await.unwrap();
-        assert!(!b.contains("your page is ready"), "a held note must deliver exactly once: {b}");
+        assert!(
+            !b.contains("your page is ready"),
+            "a held note must deliver exactly once: {b}"
+        );
     }
 
     /// A held result is the PRIMARY lane's. Another household member's next turn must not
@@ -1101,10 +1621,16 @@ mod tests {
 
         let member = TurnIdentity::new("guest", false, mind_types::OutputScope::HouseholdMember);
         let a = eng.turn("hello", member).await.unwrap();
-        assert!(!a.contains("surprise-gift"), "another member must not see the owner's result: {a}");
+        assert!(
+            !a.contains("surprise-gift"),
+            "another member must not see the owner's result: {a}"
+        );
 
         let b = eng.turn("hi", TurnIdentity::primary()).await.unwrap();
-        assert!(b.contains("surprise-gift"), "…and the owner still gets it on their next turn: {b}");
+        assert!(
+            b.contains("surprise-gift"),
+            "…and the owner still gets it on their next turn: {b}"
+        );
     }
 
     /// THE RE-SLOT, end to end: with the flag forced on, a real `turn()` reaches the bounded loop
@@ -1113,6 +1639,7 @@ mod tests {
     /// block. This is the shape the first live night said was missing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_bounded_loop_runs_in_the_classic_loops_slot_with_its_grounding() {
+        let log = mind_types::scratch::file("bounded_run_resources", "jsonl");
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let seq = Arc::new(mind_inference::SequencedLLM::new(vec![
             // compile → a minimal usable draft
@@ -1124,21 +1651,145 @@ mod tests {
             // synthesize
             "Teal is a blue-green color, per E1.",
         ]));
-        let pool = mind_inference::InferencePool::new(seq.clone() as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let pool =
+            mind_inference::InferencePool::new(seq.clone() as Arc<dyn yantrik_ml::LLMBackend>, 1);
         let eng = Arc::new(
-            ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, mind_types::default_persona("the user"))
-                .with_web(Arc::new(mind_tools::ScriptedFetcher::new("WEBDOC: Teal is a cyan-family blue-green color.")))
-                .with_cognition(true),
+            ConversationEngine::new(
+                Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+                pool,
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log)))
+            .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
+                "WEBDOC: Teal is a cyan-family blue-green color.",
+            )))
+            .with_cognition(true),
         );
 
-        let a = eng.turn("what color is teal?", TurnIdentity::primary()).await.unwrap();
-        assert!(a.contains("blue-green"), "the bounded loop must have served the slot: {a}");
+        let a = eng
+            .turn("what color is teal?", TurnIdentity::primary())
+            .await
+            .unwrap();
+        assert!(
+            a.contains("blue-green"),
+            "the bounded loop must have served the slot: {a}"
+        );
 
         // The synthesis call (4th model call) carried the grounding reference block — the thing the
         // preempting wiring could never provide.
         let synth = seq.prompt_at(3);
-        assert!(synth.contains("what you know"), "grounding must reach synthesis:\n{synth}");
-        assert!(synth.contains("NOT instructions"), "…as reference data, marked as such:\n{synth}");
+        assert!(
+            synth.contains("what you know"),
+            "grounding must reach synthesis:\n{synth}"
+        );
+        assert!(
+            synth.contains("NOT instructions"),
+            "…as reference data, marked as such:\n{synth}"
+        );
+
+        let events = mind_observability::read_events_verified(&log).unwrap();
+        let grounding = events
+            .iter()
+            .find(|event| event.kind == "grounding_assembled")
+            .expect("the shared grounding phase is timed");
+        assert!(grounding.latency_ms.is_some());
+        assert_eq!(grounding.lane.as_deref(), Some("primary"));
+        let run = events
+            .iter()
+            .find(|event| event.kind == "cognitive_run")
+            .expect("the completed bounded run is recorded");
+        assert_eq!(run.model_calls, Some(3), "two decisions plus synthesis");
+        assert!(
+            run.latency_ms.is_some(),
+            "bounded-run wall time is recorded"
+        );
+        let compile = events
+            .iter()
+            .find(|event| event.kind == "goal_compiled")
+            .expect("the compile phase is recorded separately");
+        assert_eq!(compile.model_calls, Some(1));
+        assert!(compile.latency_ms.is_some());
+        assert_eq!(compile.verdict.as_deref(), Some("compiled"));
+        assert_eq!(compile.lane.as_deref(), Some("primary"));
+        assert_eq!(compile.trace_id, run.trace_id);
+        assert_eq!(grounding.trace_id, run.trace_id);
+        assert_eq!(grounding.context_fingerprint, run.context_fingerprint);
+        assert_eq!(compile.context_fingerprint, run.context_fingerprint);
+        assert!(
+            compile.event_id.is_some(),
+            "the causal root has an event id"
+        );
+        assert_eq!(run.parent_event_id, compile.event_id);
+        let predicted = events
+            .iter()
+            .find(|event| event.kind == "tool_predicted")
+            .expect("the tool prediction is recorded");
+        assert_eq!(predicted.parent_event_id, compile.event_id);
+        let grade = events
+            .iter()
+            .find(|event| event.kind == "tool_goal_graded")
+            .expect("the tool contribution grade is recorded");
+        assert_eq!(grade.parent_event_id, compile.event_id);
+        let completeness = mind_observability::render_tool_chain_completeness(&events);
+        assert!(
+            completeness.contains("1/1 latest call(s) complete"),
+            "the production bounded trace passes the causal-provenance gate: {completeness}"
+        );
+        let _ = std::fs::remove_file(&log);
+    }
+
+    /// A capability refusal ends before Cognition::run, but it is still a consequential decision.
+    /// Compile and refusal must retain the same opaque turn identity and lane without claiming any
+    /// bounded-run model calls.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_compile_time_refusal_keeps_complete_turn_provenance() {
+        let log = mind_types::scratch::file("bounded_refusal_provenance", "jsonl");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new(
+                r#"{"objective":"inspect a repository","capabilities":["github"]}"#,
+            )) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let eng = Arc::new(
+            ConversationEngine::new(
+                Arc::new(mem) as Arc<dyn MemoryFacade>,
+                pool,
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log))),
+        );
+
+        let answer = eng
+            .cognitive_turn("inspect the repository", &TurnIdentity::primary())
+            .await
+            .expect("the refusal is a bounded-loop response");
+        assert!(answer.contains("not set up"), "{answer}");
+
+        let events = mind_observability::read_events_verified(&log).unwrap();
+        let compile = events
+            .iter()
+            .find(|event| event.kind == "goal_compiled")
+            .expect("compile event");
+        let refused = events
+            .iter()
+            .find(|event| event.kind == "cognitive_run_refused")
+            .expect("refusal event");
+        assert_eq!(compile.goal_id, refused.goal_id);
+        assert_eq!(compile.trace_id, refused.trace_id);
+        assert!(
+            compile.event_id.is_some(),
+            "the causal root has an event id"
+        );
+        assert_eq!(refused.parent_event_id, compile.event_id);
+        assert_eq!(compile.lane.as_deref(), Some("primary"));
+        assert_eq!(refused.lane.as_deref(), Some("primary"));
+        assert_eq!(compile.context_fingerprint, refused.context_fingerprint);
+        assert!(
+            refused.model_calls.is_none(),
+            "the bounded run never started"
+        );
+        let _ = std::fs::remove_file(&log);
     }
 
     /// THE TURN-LEVEL REWARD CHANNEL: a correction-shaped next message grades the previous answer
@@ -1148,30 +1799,63 @@ mod tests {
     async fn a_correction_grades_the_previous_answer() {
         use crate::pace_ledger::reads_as_correction;
         // Precision first: these must NOT read as corrections.
-        for ok in ["yes, do that", "no problem, thanks", "tell me about teal", "actually that's great", "nothing else"] {
-            assert!(!reads_as_correction(ok), "false positive poisons the counter: {ok:?}");
+        for ok in [
+            "yes, do that",
+            "no problem, thanks",
+            "tell me about teal",
+            "actually that's great",
+            "nothing else",
+        ] {
+            assert!(
+                !reads_as_correction(ok),
+                "false positive poisons the counter: {ok:?}"
+            );
         }
-        for bad in ["no, I meant the OTHER page", "that's wrong — it was Tuesday", "you misunderstood me", "not what I asked"] {
-            assert!(reads_as_correction(bad), "must read as a correction: {bad:?}");
+        for bad in [
+            "no, I meant the OTHER page",
+            "that's wrong — it was Tuesday",
+            "you misunderstood me",
+            "not what I asked",
+        ] {
+            assert!(
+                reads_as_correction(bad),
+                "must read as a correction: {bad:?}"
+            );
         }
 
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = engine(&mem);
         // Exchange 1: the mind answers something.
-        let _ = eng.turn("what day is it?", TurnIdentity::primary()).await.unwrap();
+        let _ = eng
+            .turn("what day is it?", TurnIdentity::primary())
+            .await
+            .unwrap();
         // Exchange 2: the user corrects it — the PREVIOUS answer takes the grade.
-        let _ = eng.turn("no, I meant the OTHER calendar", TurnIdentity::primary()).await.unwrap();
+        let _ = eng
+            .turn("no, I meant the OTHER calendar", TurnIdentity::primary())
+            .await
+            .unwrap();
         // Exchange 3: an ordinary message — tacit acceptance of exchange 2's answer.
         let _ = eng.turn("thanks", TurnIdentity::primary()).await.unwrap();
 
         let g: serde_json::Value =
             serde_json::from_str(&mem.profile_get("turn_grades").await.unwrap().unwrap()).unwrap();
         assert_eq!(g["corrected"].as_u64(), Some(1), "{g}");
-        assert_eq!(g["accepted"].as_u64(), Some(1), "exchange 3 tacitly accepted exchange 2: {g}");
+        assert_eq!(
+            g["accepted"].as_u64(),
+            Some(1),
+            "exchange 3 tacitly accepted exchange 2: {g}"
+        );
         let recent = g["recent"].as_array().unwrap();
         assert_eq!(recent.len(), 1);
-        assert!(recent[0]["correction"].as_str().unwrap().contains("OTHER calendar"));
-        assert!(!recent[0]["answer"].as_str().unwrap().is_empty(), "what was corrected is kept beside how");
+        assert!(recent[0]["correction"]
+            .as_str()
+            .unwrap()
+            .contains("OTHER calendar"));
+        assert!(
+            !recent[0]["answer"].as_str().unwrap().is_empty(),
+            "what was corrected is kept beside how"
+        );
     }
 
     /// The flag is off unless explicitly turned on: the legacy loop stays primary until evals say
@@ -1191,11 +1875,90 @@ mod tests {
         }
     }
 }
- 
+
 #[cfg(test)]
 mod learning_chain_tests {
     use super::*;
     use mind_memory::MemoryHandle;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejected_restricted_argument_leaves_no_prediction_or_telemetry_oracle() {
+        const HIDDEN_NUMBER: &str = "771983";
+        let p = mind_types::scratch::file("restricted_arg_oracle", "jsonl");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let engine = Arc::new(
+            ConversationEngine::new(
+                Arc::new(mem) as Arc<dyn MemoryFacade>,
+                pool,
+                mind_types::default_persona("the user"),
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
+        );
+
+        let restricted = EngineBus::new(engine.clone(), TurnIdentity::primary())
+            .for_turn("Help with the general shape, but do not reveal private facts.");
+        let refused = Bus::call(
+            &restricted,
+            "calc",
+            &serde_json::json!({ "expression": format!("{HIDDEN_NUMBER}*1") }),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(e) if e.to_string().contains("current request")),
+            "the hidden number was not refused at provenance: {refused:?}"
+        );
+        assert!(
+            mind_observability::read_events(&p).is_empty(),
+            "a refusal before authority must not create an existence oracle in telemetry"
+        );
+
+        let extra_field = EngineBus::new(engine.clone(), TurnIdentity::primary())
+            .for_turn("Calculate 17*23, but do not reveal private facts.");
+        let refused = Bus::call(
+            &extra_field,
+            "calc",
+            &serde_json::json!({
+                "expression": "17*23",
+                "private_note": HIDDEN_NUMBER,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(e) if e.to_string().contains("current request")),
+            "an ignored extra field was not refused at provenance: {refused:?}"
+        );
+        assert!(
+            mind_observability::read_events(&p).is_empty(),
+            "an ignored extra field must not reach a signature or telemetry"
+        );
+
+        let explicit = EngineBus::new(engine, TurnIdentity::primary())
+            .for_turn("Calculate 17*23, but do not reveal private facts.");
+        let allowed = Bus::call(
+            &explicit,
+            "calc",
+            &serde_json::json!({ "expression": "17*23" }),
+        )
+        .await;
+        assert!(matches!(allowed.as_deref(), Ok("= 391")), "{allowed:?}");
+        let events = mind_observability::read_events(&p);
+        assert_eq!(
+            events.len(),
+            2,
+            "only the admitted call gets predict/observe: {events:?}"
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains(HIDDEN_NUMBER),
+            "the refused private value reached telemetry: {events:?}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
 
     /// THE FIRST CLOSED LEARNING CHAIN, one tool call wide, proven end to end:
     /// predict (empirical prior only) → act → observe (five-way) → prediction error → lesson.
@@ -1217,9 +1980,11 @@ mod learning_chain_tests {
             .with_recorder(Arc::new(mind_observability::DecisionLog::open(&p))),
         );
         let bus = EngineBus::new(engine.clone(), TurnIdentity::primary())
-            .for_turn("calculate 6 times 7");
+            .for_turn("calculate 6 times 7")
+            .for_model_route("scripted");
         // The loop declares its run trace; every tool span must land UNDER it as children.
         Bus::declare_trace(&bus, "run-test");
+        Bus::declare_goal_id(&bus, "goal-test");
 
         // CALL 1: pure compute succeeds. No history exists yet → the prior is the honest
         // uninformed 0.5, labeled low-N in the event.
@@ -1228,10 +1993,20 @@ mod learning_chain_tests {
         let events = mind_observability::read_events(&p);
         assert_eq!(events.len(), 2, "predict + observe per call: {events:?}");
         assert_eq!(events[0].kind, "tool_predicted");
-        assert_eq!(events[0].trace_id, "run-test", "spans root under the declared run trace");
+        assert_eq!(
+            events[0].trace_id, "run-test",
+            "spans root under the declared run trace"
+        );
         assert!(events[0].event_id.is_some());
-        assert_eq!(events[0].confidence, Some(0.5), "uninformed prior before any data");
-        assert!(events[0].policy[0].contains("n=0"), "sample size is stated, not hidden");
+        assert_eq!(
+            events[0].confidence,
+            Some(0.5),
+            "uninformed prior before any data"
+        );
+        assert!(
+            events[0].policy[0].contains("n=0"),
+            "sample size is stated, not hidden"
+        );
         assert_eq!(events[1].kind, "tool_observed");
         assert_eq!(events[1].trace_id, "run-test");
         assert_eq!(
@@ -1241,20 +2016,63 @@ mod learning_chain_tests {
         );
         assert_eq!(events[1].verdict.as_deref(), Some("ok"));
         assert_eq!(events[1].semantic_success, Some(true));
-        assert_eq!(events[1].brier, Some(0.25), "(0.5 − 1)² — the calibration metric, not just signed error");
-        assert_eq!(events[1].prediction_error, Some(0.5), "success minus 0.5 prior");
+        for event in &events {
+            assert_eq!(event.actor.as_deref(), Some("conversation"));
+            assert_eq!(event.lane.as_deref(), Some("primary"));
+            assert_eq!(event.goal_id.as_deref(), Some("goal-test"));
+            assert_eq!(event.tool_version.as_deref(), Some(TOOL_RUNTIME_VERSION));
+            assert_eq!(event.model_route.as_deref(), Some("scripted"));
+        }
+        assert_eq!(
+            events[1].context_fingerprint, events[0].context_fingerprint,
+            "prediction and observation retain one opaque turn-context identity"
+        );
+        assert!(
+            events[0]
+                .context_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| fingerprint.starts_with("context:")
+                    && !fingerprint.contains("calculate")),
+            "the request is joined by digest, never copied into the identity field"
+        );
+        assert_eq!(
+            events[1].evaluator_id.as_deref(),
+            Some(crate::tool_outcome::EVALUATOR_ID),
+            "the outcome grade names the versioned classifier that assigned it"
+        );
+        assert_eq!(
+            events[1].brier,
+            Some(0.25),
+            "(0.5 − 1)² — the calibration metric, not just signed error"
+        );
+        assert_eq!(
+            events[1].prediction_error,
+            Some(0.5),
+            "success minus 0.5 prior"
+        );
 
         // CALL 2: same tool again — the bandit now holds ONE success, so the empirical prior
         // must have MOVED (shrunken): (1*1+1)/(1+2) = 2/3.
         let _ = Bus::call(&bus, "calc", &serde_json::json!({ "expr": "6*8" })).await;
         let events = mind_observability::read_events(&p);
-        let pred2 = events.iter().rev().find(|e| e.kind == "tool_predicted").unwrap();
+        let pred2 = events
+            .iter()
+            .rev()
+            .find(|e| e.kind == "tool_predicted")
+            .unwrap();
         assert!(
             (pred2.confidence.unwrap() - 2.0 / 3.0).abs() < 1e-9,
-            "the prior must learn from observed history: got {}", pred2.confidence.unwrap()
+            "the prior must learn from observed history: got {}",
+            pred2.confidence.unwrap()
         );
-        assert!(pred2.policy[0].contains("n=1"), "sample size travels with the number");
-        assert!(pred2.policy[0].contains("low-N"), "one observation is still declared small");
+        assert!(
+            pred2.policy[0].contains("n=1"),
+            "sample size travels with the number"
+        );
+        assert!(
+            pred2.policy[0].contains("low-N"),
+            "one observation is still declared small"
+        );
 
         // CHAIN INTEGRITY on disk through real traffic.
         assert_eq!(mind_observability::verify_log(&p), Ok(events.len()));
@@ -1284,18 +2102,33 @@ mod learning_chain_tests {
         let bus = EngineBus::new(engine, TurnIdentity::primary())
             .for_turn("show repository items for acme/x");
 
-        let r = Bus::call(&bus, "github_repo_items", &serde_json::json!({ "repo": "acme/x" })).await;
-        assert!(r.is_err(), "unconfigured capability must surface as a dead end");
+        let r = Bus::call(
+            &bus,
+            "github_repo_items",
+            &serde_json::json!({ "repo": "acme/x" }),
+        )
+        .await;
+        assert!(
+            r.is_err(),
+            "unconfigured capability must surface as a dead end"
+        );
 
         let events = mind_observability::read_events(&p);
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].verdict.as_deref(), Some("unavailable"));
-        assert_eq!(events[1].prediction_error, None, "no error number without a meaningful outcome class");
-        assert!(events[1].lesson.as_ref().unwrap().contains("excluded from reliability"));
+        assert_eq!(
+            events[1].prediction_error, None,
+            "no error number without a meaningful outcome class"
+        );
+        assert!(events[1]
+            .lesson
+            .as_ref()
+            .unwrap()
+            .contains("excluded from reliability"));
         let _ = std::fs::remove_file(&p);
     }
 }
- 
+
 #[cfg(test)]
 mod goal_contribution_tests {
     use super::*;
@@ -1315,7 +2148,8 @@ mod goal_contribution_tests {
             r#"{"learned":{"findings":[{"claim":"Teal is a blue-green color","evidence":["E1"]}]},"verb":"FINISH","why":"SUFFICIENT"}"#.to_string(),
             "Teal is a blue-green color, per E1.".to_string(),
         ]));
-        let pool = mind_inference::InferencePool::new(seq.clone() as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let pool =
+            mind_inference::InferencePool::new(seq.clone() as Arc<dyn yantrik_ml::LLMBackend>, 1);
         let engine = Arc::new(
             ConversationEngine::new(
                 Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
@@ -1327,33 +2161,67 @@ mod goal_contribution_tests {
                 "WEBDOC: Teal is a cyan-family blue-green color.",
             ))),
         );
-        let bus: Arc<dyn Bus> = Arc::new(EngineBus::new(engine, TurnIdentity::primary()).for_turn("what color is teal?"));
+        let bus: Arc<dyn Bus> = Arc::new(
+            EngineBus::new(engine, TurnIdentity::primary()).for_turn("what color is teal?"),
+        );
         let spec = GoalSpec {
             contract: mind_spec::goal::Contract {
                 requirements: vec![],
-                completion: mind_spec::goal::CompletionCriteria { min_findings: 1, require_full_coverage: false, ..Default::default() },
+                completion: mind_spec::goal::CompletionCriteria {
+                    min_findings: 1,
+                    require_full_coverage: false,
+                    ..Default::default()
+                },
                 output: mind_spec::goal::OutputContract::default(),
             },
-            budget: mind_spec::goal::Budget { max_steps: 6, max_model_calls: 12, max_wall_ms: 60_000, max_usd: None },
+            budget: mind_spec::goal::Budget {
+                max_steps: 6,
+                max_model_calls: 12,
+                max_wall_ms: 60_000,
+                max_usd: None,
+            },
             ..GoalSpec::simple("what color is teal?")
         };
         let cognition = Cognition::new(pool.clone(), pool, bus, "JARVIS");
         let out = cognition.run(&spec, &mind_types::clock::SystemClock).await;
-        assert!(out.complete(), "the scenario must meet its contract for grading to mean anything");
+        assert!(
+            out.complete(),
+            "the scenario must meet its contract for grading to mean anything"
+        );
 
         // The completion event plus one goal grade per evidence-producing tool (web_fetch).
         let events = mind_observability::read_events(&p);
-        let grades: Vec<_> = events.iter().filter(|e| e.kind == "tool_goal_graded").collect();
+        let grades: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "tool_goal_graded")
+            .collect();
         assert_eq!(grades.len(), 1, "one producing tool, one grade: {grades:?}");
         assert_eq!(grades[0].object_id.as_deref(), Some("tool:web_fetch"));
-        assert_eq!(grades[0].verdict.as_deref(), Some("evidence_used"), "its evidence was cited by the finding");
+        assert_eq!(
+            grades[0].verdict.as_deref(),
+            Some("evidence_used"),
+            "its evidence was cited by the finding"
+        );
+        assert_eq!(
+            grades[0].evaluator_id.as_deref(),
+            Some(mind_agents::GOAL_CONTRIBUTION_EVALUATOR_ID),
+            "the proxy grade names the versioned evaluator that assigned it"
+        );
+        assert_eq!(grades[0].lane.as_deref(), Some("primary"));
+        assert!(grades[0].context_fingerprint.is_some());
         assert!(grades[0].policy.iter().any(|l| l.contains("goal_met=true")));
-        assert_eq!(grades[0].trace_id, out.trace_id, "the grade lives under the same run trace");
+        assert_eq!(
+            grades[0].trace_id, out.trace_id,
+            "the grade lives under the same run trace"
+        );
 
         // The report turns the ledger into the richer capability sentence.
         let report = mind_observability::render_goal_contribution(&events);
         assert!(report.contains("web_fetch"), "{report}");
-        assert!(report.contains("too few runs to rank") || report.contains("1/1"), "young numbers are declared young: {report}");
+        assert!(
+            report.contains("too few runs to rank") || report.contains("1/1"),
+            "young numbers are declared young: {report}"
+        );
         assert_eq!(mind_observability::verify_log(&p), Ok(events.len()));
         let _ = std::fs::remove_file(&p);
     }
@@ -1363,7 +2231,8 @@ mod goal_contribution_tests {
     /// judges the normalized form. Every recorded event is serialised whole and searched for the
     /// sentinel: a leak through any field fails, not just through `outcome`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_malformed_call_on_the_bus_is_refused_before_prediction_and_no_field_carries_a_value() {
+    async fn a_malformed_call_on_the_bus_is_refused_before_prediction_and_no_field_carries_a_value()
+    {
         let dir = mind_types::scratch::dir("p2e_bus");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("bus.decisions.jsonl");
@@ -1374,36 +2243,98 @@ mod goal_contribution_tests {
             1,
         );
         let eng = Arc::new(
-            ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
-                .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log))),
+            ConversationEngine::new(
+                Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+                pool,
+                "JARVIS",
+            )
+            .with_recorder(Arc::new(mind_observability::DecisionLog::open(&log))),
         );
         let bus = EngineBus::new(eng.clone(), TurnIdentity::primary())
             .for_turn("exercise malformed-call handling");
         // The sentinel is a PIN-shaped number the model might have copied from the person.
-        let r = bus.call("run_skill", &serde_json::json!({ "name": 447193, "target": 447193 })).await;
-        assert!(matches!(r.as_deref(), Err(e) if e.to_string().starts_with("(malformed call")), "{r:?}");
-        let r = bus.call("discover_tools", &serde_json::json!({ "query": null })).await;
+        let r = bus
+            .call(
+                "run_skill",
+                &serde_json::json!({ "name": 447193, "target": 447193 }),
+            )
+            .await;
+        assert!(
+            matches!(r.as_deref(), Err(e) if e.to_string().starts_with("(malformed call")),
+            "{r:?}"
+        );
+        let r = bus
+            .call("discover_tools", &serde_json::json!({ "query": null }))
+            .await;
         assert!(r.is_err(), "{r:?}");
-        let r = bus.call("run_skill", &serde_json::json!({ "target": "https://example.org/x.csv" })).await;
-        assert!(matches!(r.as_deref(), Err(e) if e.to_string().contains("missing required name")), "{r:?}");
+        let r = bus
+            .call(
+                "run_skill",
+                &serde_json::json!({ "target": "https://example.org/x.csv" }),
+            )
+            .await;
+        assert!(
+            matches!(r.as_deref(), Err(e) if e.to_string().contains("missing required name")),
+            "{r:?}"
+        );
         // Normalized BEFORE the boundary: a content-block name is a name, and the tool runs on it.
-        let r = bus.call("run_skill", &serde_json::json!({ "name": [{ "type": "text", "content": "csv-clean" }] })).await;
-        assert!(!format!("{r:?}").contains("malformed call"), "a content-block name is a name: {r:?}");
+        let r = bus
+            .call(
+                "run_skill",
+                &serde_json::json!({ "name": [{ "type": "text", "content": "csv-clean" }] }),
+            )
+            .await;
+        assert!(
+            !format!("{r:?}").contains("malformed call"),
+            "a content-block name is a name: {r:?}"
+        );
 
         let events = eng.recorder().read_all();
-        let predicted: Vec<_> = events.iter().filter(|e| e.kind == "tool_predicted").collect();
-        let malformed: Vec<_> = events.iter().filter(|e| e.kind == "tool_observed" && e.verdict.as_deref() == Some("malformed")).collect();
+        let predicted: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "tool_predicted")
+            .collect();
+        let malformed: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "tool_observed" && e.verdict.as_deref() == Some("malformed"))
+            .collect();
         assert_eq!(malformed.len(), 3, "{events:?}");
-        assert_eq!(predicted.len(), 1, "only the call that could be made was predicted: {events:?}");
-        assert!(predicted[0].object_id.as_deref().unwrap_or("").starts_with("run_skill"), "{predicted:?}");
-        assert!(malformed.iter().all(|e| matches!(e.object_id.as_deref(), Some("run_skill:malformed") | Some("discover_tools:malformed"))), "a refused call carries a constant id: {malformed:?}");
+        assert_eq!(
+            predicted.len(),
+            1,
+            "only the call that could be made was predicted: {events:?}"
+        );
+        assert!(
+            predicted[0]
+                .object_id
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("run_skill"),
+            "{predicted:?}"
+        );
+        assert!(
+            malformed.iter().all(|e| matches!(
+                e.object_id.as_deref(),
+                Some("run_skill:malformed") | Some("discover_tools:malformed")
+            )),
+            "a refused call carries a constant id: {malformed:?}"
+        );
         for e in &events {
             let s = serde_json::to_string(e).unwrap();
-            assert!(!s.contains("447193"), "the sentinel reached the record through some field: {s}");
-            assert!(!s.contains("example.org"), "a value reached the record: {s}");
+            assert!(
+                !s.contains("447193"),
+                "the sentinel reached the record through some field: {s}"
+            );
+            assert!(
+                !s.contains("example.org"),
+                "a value reached the record: {s}"
+            );
         }
         let track = mem.tool_track_record().await.unwrap();
-        assert!(!track.iter().any(|(t, _, _)| t == "discover_tools"), "a tool that never ran must not be on the record: {track:?}");
+        assert!(
+            !track.iter().any(|(t, _, _)| t == "discover_tools"),
+            "a tool that never ran must not be on the record: {track:?}"
+        );
         let _ = std::fs::remove_file(&log);
     }
 }

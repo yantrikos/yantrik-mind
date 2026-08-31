@@ -31,7 +31,9 @@ impl super::ConversationEngine {
         let now = local_now().timestamp();
         let (code, interval, expires) = (dc.device_code.clone(), dc.interval, dc.expires_in);
         tokio::spawn(async move {
-            let Some(od) = mind_tools::OneDriveClient::from_env() else { return };
+            let Some(od) = mind_tools::OneDriveClient::from_env() else {
+                return;
+            };
             match od.poll_auth(&code, interval, expires, now).await {
                 Ok(true) => nq.lock().unwrap().push("🗂 OneDrive connected ✅ — I can now reach your older photo years. Try `onedrive onthisday`.".to_string()),
                 _ => nq.lock().unwrap().push("🗂 OneDrive sign-in didn't complete (timed out or declined). `onedrive auth` to try again.".to_string()),
@@ -81,7 +83,9 @@ impl super::ConversationEngine {
         let now = local_now().timestamp();
         let (code, interval, expires) = (dc.device_code.clone(), dc.interval, dc.expires_in);
         tokio::spawn(async move {
-            let Some(gp) = mind_tools::GPhotosClient::from_env() else { return };
+            let Some(gp) = mind_tools::GPhotosClient::from_env() else {
+                return;
+            };
             match gp.poll_auth(&code, interval, expires, now).await {
                 Ok(true) => nq.lock().unwrap().push("📷 Google Photos connected ✅ — `gphotos pick` and I'll send you a picker link.".to_string()),
                 _ => nq.lock().unwrap().push("📷 Google sign-in didn't complete (timed out or declined). `gphotos auth` to try again.".to_string()),
@@ -113,21 +117,30 @@ impl super::ConversationEngine {
         let pq = self.photo_queue.clone();
         let (sid, poll) = (sess.id.clone(), sess.poll_interval);
         tokio::spawn(async move {
-            let Some(gp) = mind_tools::GPhotosClient::from_env() else { return };
+            let Some(gp) = mind_tools::GPhotosClient::from_env() else {
+                return;
+            };
             let ready = gp.poll_session(&sid, poll, now).await.unwrap_or(false);
             if !ready {
-                nq.lock().unwrap().push("📷 No photos picked (the picker timed out). `gphotos pick` to try again.".to_string());
+                nq.lock().unwrap().push(
+                    "📷 No photos picked (the picker timed out). `gphotos pick` to try again."
+                        .to_string(),
+                );
                 return;
             }
             let items = gp.list_picked(&sid, 12, now).await.unwrap_or_default();
             if items.is_empty() {
-                nq.lock().unwrap().push("📷 The picker closed with nothing selected.".to_string());
+                nq.lock()
+                    .unwrap()
+                    .push("📷 The picker closed with nothing selected.".to_string());
                 return;
             }
             let vc = mind_tools::VisionClient::from_env();
             let mut captioned = 0usize;
             for it in items.iter().take(6) {
-                let Some(bytes) = gp.download(&it.base_url, now).await else { continue };
+                let Some(bytes) = gp.download(&it.base_url, now).await else {
+                    continue;
+                };
                 let cap = if let Some(v) = &vc {
                     match v
                         .analyze(
@@ -174,17 +187,28 @@ impl super::ConversationEngine {
             }
         };
         if after.len() != 10 || before.len() != 10 {
-            return "Usage: onedrive find YYYY-MM-DD..YYYY-MM-DD (or a single YYYY-MM-DD)".to_string();
+            return "Usage: onedrive find YYYY-MM-DD..YYYY-MM-DD (or a single YYYY-MM-DD)"
+                .to_string();
         }
         let now = local_now().timestamp();
         match od.taken_between(&after, &before, 40, now).await {
             Ok(items) if !items.is_empty() => {
-                let by_day: std::collections::BTreeMap<String, usize> = items.iter().fold(Default::default(), |mut m, it| {
-                    *m.entry(it.taken.clone()).or_insert(0) += 1;
-                    m
-                });
-                let days: Vec<String> = by_day.iter().rev().take(12).map(|(d, n)| format!("  {d}: {n} photo(s)")).collect();
-                format!("🗂 OneDrive — {} image(s) between {after} and {before}:\n{}", items.len(), days.join("\n"))
+                let by_day: std::collections::BTreeMap<String, usize> =
+                    items.iter().fold(Default::default(), |mut m, it| {
+                        *m.entry(it.taken.clone()).or_insert(0) += 1;
+                        m
+                    });
+                let days: Vec<String> = by_day
+                    .iter()
+                    .rev()
+                    .take(12)
+                    .map(|(d, n)| format!("  {d}: {n} photo(s)"))
+                    .collect();
+                format!(
+                    "🗂 OneDrive — {} image(s) between {after} and {before}:\n{}",
+                    items.len(),
+                    days.join("\n")
+                )
             }
             Ok(_) => format!("🗂 OneDrive holds no images between {after} and {before}."),
             Err(e) => format!("🗂 OneDrive search failed: {e}"),
@@ -212,10 +236,16 @@ impl super::ConversationEngine {
             }
         }
         if lines.is_empty() {
-            format!("🗂 OneDrive has nothing from {} in past years.", today.format("%B %d"))
+            format!(
+                "🗂 OneDrive has nothing from {} in past years.",
+                today.format("%B %d")
+            )
         } else {
-            format!("🗂 On {} in OneDrive's older years:\n{}", today.format("%B %d"), lines.join("\n"))
+            format!(
+                "🗂 On {} in OneDrive's older years:\n{}",
+                today.format("%B %d"),
+                lines.join("\n")
+            )
         }
     }
-
 }

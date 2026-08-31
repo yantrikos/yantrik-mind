@@ -26,7 +26,11 @@ impl super::ConversationEngine {
     }
 
     /// The strict grounded-drafting prompt. The model gets ONLY evidence; thin years stay thin.
-    pub(crate) fn book_chapter_prompt(year: i64, ev: &serde_json::Value, lore: &[serde_json::Value]) -> String {
+    pub(crate) fn book_chapter_prompt(
+        year: i64,
+        ev: &serde_json::Value,
+        lore: &[serde_json::Value],
+    ) -> String {
         let lore_block = if lore.is_empty() {
             "(none yet)".to_string()
         } else {
@@ -39,7 +43,11 @@ impl super::ConversationEngine {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let label = if year == 0 { "the years before the photographs".to_string() } else { year.to_string() };
+        let label = if year == 0 {
+            "the years before the photographs".to_string()
+        } else {
+            year.to_string()
+        };
         format!(
             "You are writing one chapter of a family's private book. Chapter: {label}.\n\nEVIDENCE — the ONLY facts you may use (do not invent events, places, feelings, or people):\nPhotos taken: {}\nPlaces in the photos: {}\nTrips: {}\nNamed occasions: {}\nMost often in frame: {}\nIn the family's own words:\n{lore_block}\n\nWrite 130-210 words, warm and concrete, literary but honest. HARD RULES: use ONLY names that appear in the evidence above — if no names appear, use no names at all; never invent people, relatives, speakers, or scenes; a quote belongs to exactly the person marked as its teller; do not reference outside world events (news, pandemics) unless they are in the evidence; do not write imagined or hypothetical scenes — write what is present, and write honestly about what is absent. If the evidence is thin, the chapter is short. NEVER use bullet points.\nFirst line must be: TITLE: <3-6 word chapter title>\nThen a blank line, then the chapter text.",
             ev["photos"].as_u64().unwrap_or(0),
@@ -58,7 +66,8 @@ impl super::ConversationEngine {
         };
         let guard = "book".to_string();
         if !self.studies.lock().unwrap().insert(guard.clone()) {
-            return "Already compiling the book — the table of contents lands here when it's done.".to_string();
+            return "Already compiling the book — the table of contents lands here when it's done."
+                .to_string();
         }
         let src_name = sources[idx].name().to_string();
         let mem = self.memory.clone();
@@ -76,14 +85,15 @@ impl super::ConversationEngine {
                 return;
             };
             use chrono::Datelike;
-            let this_year = chrono::Utc::now().year() as i64;
+            let this_year = i64::from(chrono::Utc::now().year());
             let mut chapters: Vec<serde_json::Value> = existing;
             let mut drafted = 0usize;
             let mut first_year: Option<i64> = None;
             for year in 2012..=this_year {
                 // --- evidence: photos, places, people ---
                 let mut photos = 0u64;
-                let mut place_tally: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                let mut place_tally: std::collections::HashMap<String, u32> =
+                    std::collections::HashMap::new();
                 let mut sample_ids: Vec<String> = Vec::new();
                 for q in 0..4 {
                     let m0 = q * 3 + 1;
@@ -112,7 +122,8 @@ impl super::ConversationEngine {
                 let mut places: Vec<(String, u32)> = place_tally.into_iter().collect();
                 places.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
                 let places: Vec<String> = places.into_iter().take(4).map(|(c, _)| c).collect();
-                let mut people_tally: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                let mut people_tally: std::collections::HashMap<String, u32> =
+                    std::collections::HashMap::new();
                 for id in sample_ids.iter().take(8) {
                     let (names, _) = src.people_in(id).await;
                     for n in names {
@@ -124,16 +135,28 @@ impl super::ConversationEngine {
                 let people: Vec<String> = people.into_iter().take(5).map(|(n, _)| n).collect();
                 let trips_y: Vec<String> = trips
                     .iter()
-                    .filter(|t| t["start"].as_str().map(|d| d.starts_with(&year.to_string())).unwrap_or(false))
+                    .filter(|t| {
+                        t["start"]
+                            .as_str()
+                            .is_some_and(|d| d.starts_with(&year.to_string()))
+                    })
                     .filter_map(|t| {
-                        Some(format!("{} ({} days)", t["dest"].as_str()?, t["days"].as_u64().unwrap_or(0)))
+                        Some(format!(
+                            "{} ({} days)",
+                            t["dest"].as_str()?,
+                            t["days"].as_u64().unwrap_or(0)
+                        ))
                     })
                     .take(8)
                     .collect();
                 let mut unknown_n = 0u32;
                 let events_y: Vec<String> = events
                     .iter()
-                    .filter(|e| e["date"].as_str().map(|d| d.starts_with(&year.to_string())).unwrap_or(false))
+                    .filter(|e| {
+                        e["date"]
+                            .as_str()
+                            .is_some_and(|d| d.starts_with(&year.to_string()))
+                    })
                     .filter_map(|e| {
                         let label = e["label"].as_str().unwrap_or("");
                         if label.is_empty() {
@@ -148,20 +171,29 @@ impl super::ConversationEngine {
                     "photos": photos, "places": places, "trips": trips_y, "events": events_y,
                     "people": people, "unknown_events": unknown_n,
                 });
-                let lore_y: Vec<serde_json::Value> =
-                    lore_all.iter().filter(|l| l["year"].as_i64() == Some(year)).cloned().collect();
+                let lore_y: Vec<serde_json::Value> = lore_all
+                    .iter()
+                    .filter(|l| l["year"].as_i64() == Some(year))
+                    .cloned()
+                    .collect();
                 // Re-draft only when the chapter is missing or marked stale.
                 let cur = chapters.iter().find(|c| c["year"].as_i64() == Some(year));
-                let needs = cur.map(|c| c["stale"].as_bool().unwrap_or(false)).unwrap_or(true);
+                let needs = cur.is_none_or(|c| c["stale"].as_bool().unwrap_or(false));
                 if !needs {
                     // refresh evidence on the existing chapter, keep the prose
-                    if let Some(c) = chapters.iter_mut().find(|c| c["year"].as_i64() == Some(year)) {
+                    if let Some(c) = chapters
+                        .iter_mut()
+                        .find(|c| c["year"].as_i64() == Some(year))
+                    {
                         c["evidence"] = ev;
                     }
                     continue;
                 }
                 let prompt = Self::book_chapter_prompt(year, &ev, &lore_y);
-                let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
+                let cfg = GenerationConfig {
+                    max_tokens: 500,
+                    ..GenerationConfig::default()
+                };
                 // PRIVATE, and it was one variable name away from invisible (E.SEC9). This prompt
                 // opens "You are writing one chapter of a family's private book" and carries the
                 // places, trips, named occasions, who is most often in frame, and direct quotes
@@ -170,10 +202,18 @@ impl super::ConversationEngine {
                 // see it because it matched `inference.chat(` and this receiver is called `inf`.
                 // Refusal skips the chapter, which is the right degradation: no chapter beats a
                 // chapter written by a third party.
-                let Ok(resp) = inf.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await else { continue };
+                let Ok(resp) = inf
+                    .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+                    .await
+                else {
+                    continue;
+                };
                 let txt = resp.text.trim().to_string();
                 let (title, body) = match txt.split_once('\n') {
-                    Some((t, b)) => (t.trim().trim_start_matches("TITLE:").trim().to_string(), b.trim().to_string()),
+                    Some((t, b)) => (
+                        t.trim().trim_start_matches("TITLE:").trim().to_string(),
+                        b.trim().to_string(),
+                    ),
                     None => (year.to_string(), txt),
                 };
                 chapters.retain(|c| c["year"].as_i64() != Some(year));
@@ -187,10 +227,21 @@ impl super::ConversationEngine {
             let n = chapters.len();
             let span = format!(
                 "{}-{}",
-                chapters.first().and_then(|c| c["year"].as_i64()).unwrap_or(0),
-                chapters.last().and_then(|c| c["year"].as_i64()).unwrap_or(0)
+                chapters
+                    .first()
+                    .and_then(|c| c["year"].as_i64())
+                    .unwrap_or(0),
+                chapters
+                    .last()
+                    .and_then(|c| c["year"].as_i64())
+                    .unwrap_or(0)
             );
-            let _ = mem.profile_set("book_chapters", &serde_json::Value::Array(chapters).to_string()).await;
+            let _ = mem
+                .profile_set(
+                    "book_chapters",
+                    &serde_json::Value::Array(chapters).to_string(),
+                )
+                .await;
             studies.lock().unwrap().remove(&guard);
             nq.lock().unwrap().push(format!(
                 "📖 The Family Book: {n} chapters ({span}), {drafted} freshly drafted. `book` for the table of contents — and I'll start asking about the years the archive can't explain."
@@ -205,8 +256,10 @@ impl super::ConversationEngine {
         let ev = chapters
             .iter()
             .find(|c| c["year"].as_i64() == Some(year))
-            .map(|c| c["evidence"].clone())
-            .unwrap_or_else(|| serde_json::json!({"photos": 0, "places": [], "trips": [], "events": [], "people": [], "unknown_events": 0}));
+            .map_or_else(
+                || serde_json::json!({"photos": 0, "places": [], "trips": [], "events": [], "people": [], "unknown_events": 0}),
+                |c| c["evidence"].clone(),
+            );
         let lore_y: Vec<serde_json::Value> = self
             .load_book_lore()
             .await
@@ -214,13 +267,23 @@ impl super::ConversationEngine {
             .filter(|l| l["year"].as_i64() == Some(year))
             .collect();
         let prompt = Self::book_chapter_prompt(year, &ev, &lore_y);
-        let cfg = GenerationConfig { max_tokens: 500, ..GenerationConfig::default() };
-        let Ok(resp) = self.inference.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await else {
+        let cfg = GenerationConfig {
+            max_tokens: 500,
+            ..GenerationConfig::default()
+        };
+        let Ok(resp) = self
+            .inference
+            .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+            .await
+        else {
             return "Couldn't redraft the chapter right now.".to_string();
         };
         let txt = resp.text.trim().to_string();
         let (title, body) = match txt.split_once('\n') {
-            Some((t, b)) => (t.trim().trim_start_matches("TITLE:").trim().to_string(), b.trim().to_string()),
+            Some((t, b)) => (
+                t.trim().trim_start_matches("TITLE:").trim().to_string(),
+                b.trim().to_string(),
+            ),
             None => (year.to_string(), txt),
         };
         chapters.retain(|c| c["year"].as_i64() != Some(year));
@@ -229,9 +292,26 @@ impl super::ConversationEngine {
             "drafted": chrono::Utc::now().timestamp_millis(), "evidence": ev,
         }));
         chapters.sort_by_key(|c| c["year"].as_i64().unwrap_or(0));
-        let _ = self.memory.profile_set("book_chapters", &serde_json::Value::Array(chapters).to_string()).await;
-        let ylabel = if year == 0 { "the prologue".to_string() } else { format!("chapter {year}") };
-        format!("📖 Rewritten — {ylabel} now reflects everything told. `book {}` to read it.", if year == 0 { "origin".to_string() } else { year.to_string() })
+        let _ = self
+            .memory
+            .profile_set(
+                "book_chapters",
+                &serde_json::Value::Array(chapters).to_string(),
+            )
+            .await;
+        let ylabel = if year == 0 {
+            "the prologue".to_string()
+        } else {
+            format!("chapter {year}")
+        };
+        format!(
+            "📖 Rewritten — {ylabel} now reflects everything told. `book {}` to read it.",
+            if year == 0 {
+                "origin".to_string()
+            } else {
+                year.to_string()
+            }
+        )
     }
 
     pub async fn book_toc(&self) -> String {
@@ -243,12 +323,20 @@ impl super::ConversationEngine {
             .iter()
             .map(|c| {
                 let y = c["year"].as_i64().unwrap_or(0);
-                let ylabel = if y == 0 { "Prologue".to_string() } else { y.to_string() };
+                let ylabel = if y == 0 {
+                    "Prologue".to_string()
+                } else {
+                    y.to_string()
+                };
                 let gaps = c["evidence"]["unknown_events"].as_u64().unwrap_or(0);
                 format!(
                     "{ylabel} — {}{}",
                     c["title"].as_str().unwrap_or("Untitled"),
-                    if gaps > 0 { format!("  ✍️{gaps}") } else { String::new() }
+                    if gaps > 0 {
+                        format!("  ✍️{gaps}")
+                    } else {
+                        String::new()
+                    }
                 )
             })
             .collect();
@@ -264,14 +352,32 @@ impl super::ConversationEngine {
             return format!("No chapter for {year} yet — `book build` compiles, or the archive may be silent that year.");
         };
         let ev = &c["evidence"];
-        let ylabel = if year == 0 { "Prologue".to_string() } else { year.to_string() };
+        let ylabel = if year == 0 {
+            "Prologue".to_string()
+        } else {
+            year.to_string()
+        };
         format!(
             "📖 {ylabel} — {}\n\n{}\n\n— drawn from {} photos{}{}",
             c["title"].as_str().unwrap_or(""),
             c["text"].as_str().unwrap_or(""),
             ev["photos"].as_u64().unwrap_or(0),
-            ev["trips"].as_array().map(|a| if a.is_empty() { String::new() } else { format!(", {} trips", a.len()) }).unwrap_or_default(),
-            ev["events"].as_array().map(|a| if a.is_empty() { String::new() } else { format!(", {} named occasions", a.len()) }).unwrap_or_default(),
+            ev["trips"]
+                .as_array()
+                .map(|a| if a.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} trips", a.len())
+                })
+                .unwrap_or_default(),
+            ev["events"]
+                .as_array()
+                .map(|a| if a.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} named occasions", a.len())
+                })
+                .unwrap_or_default(),
         )
     }
 
@@ -285,7 +391,11 @@ impl super::ConversationEngine {
         let mut md = String::from("# The Family Book\n\n*Compiled by yantrik-mind from the family's own archive — photographs, journeys, occasions, and words.*\n\n");
         for c in &chapters {
             let y = c["year"].as_i64().unwrap_or(0);
-            let ylabel = if y == 0 { "Prologue".to_string() } else { y.to_string() };
+            let ylabel = if y == 0 {
+                "Prologue".to_string()
+            } else {
+                y.to_string()
+            };
             md.push_str(&format!(
                 "## {ylabel} — {}\n\n{}\n\n",
                 c["title"].as_str().unwrap_or(""),
@@ -297,7 +407,14 @@ impl super::ConversationEngine {
             for l in &lore {
                 if let Some(a) = l["a"].as_str() {
                     let y = l["year"].as_i64().unwrap_or(0);
-                    md.push_str(&format!("**{}** — \"{a}\"\n\n", if y == 0 { "Before the photographs".to_string() } else { y.to_string() }));
+                    md.push_str(&format!(
+                        "**{}** — \"{a}\"\n\n",
+                        if y == 0 {
+                            "Before the photographs".to_string()
+                        } else {
+                            y.to_string()
+                        }
+                    ));
                 }
             }
         }
@@ -306,7 +423,10 @@ impl super::ConversationEngine {
         let path = format!("{dir}/family-book.md");
         let words = md.split_whitespace().count();
         match std::fs::write(&path, &md) {
-            Ok(_) => format!("📖 Exported — {} chapters, {words} words → {path}", chapters.len()),
+            Ok(_) => format!(
+                "📖 Exported — {} chapters, {words} words → {path}",
+                chapters.len()
+            ),
             Err(e) => format!("Export failed: {e}"),
         }
     }
@@ -314,10 +434,16 @@ impl super::ConversationEngine {
     /// The open questions the book wants to ask.
     pub async fn book_gaps(&self) -> String {
         match self.book_ask_candidates().await {
-            v if v.is_empty() => "📖 No open questions right now — the chapters hold together.".to_string(),
+            v if v.is_empty() => {
+                "📖 No open questions right now — the chapters hold together.".to_string()
+            }
             v => format!(
                 "📖 What the book still wants to know:\n{}",
-                v.iter().take(8).map(|(_, q)| format!("• {q}")).collect::<Vec<_>>().join("\n")
+                v.iter()
+                    .take(8)
+                    .map(|(_, q)| format!("• {q}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ),
         }
     }
@@ -339,7 +465,12 @@ impl super::ConversationEngine {
         let lore = self.load_book_lore().await;
         let mut out: Vec<(String, String)> = Vec::new();
         // Origin: the story before the archive begins.
-        let first_year = chapters.iter().filter_map(|c| c["year"].as_i64()).filter(|y| *y > 0).min().unwrap_or(0);
+        let first_year = chapters
+            .iter()
+            .filter_map(|c| c["year"].as_i64())
+            .filter(|y| *y > 0)
+            .min()
+            .unwrap_or(0);
         if first_year > 0
             && !asked.contains(&"origin".to_string())
             && !lore.iter().any(|l| l["year"].as_i64() == Some(0))
@@ -350,11 +481,15 @@ impl super::ConversationEngine {
             ));
         }
         // Thin or unexplained years, oldest first.
-        let mut years: Vec<&serde_json::Value> = chapters.iter().filter(|c| c["year"].as_i64().unwrap_or(0) > 0).collect();
+        let mut years: Vec<&serde_json::Value> = chapters
+            .iter()
+            .filter(|c| c["year"].as_i64().unwrap_or(0) > 0)
+            .collect();
         years.sort_by_key(|c| c["year"].as_i64().unwrap_or(0));
         for c in years {
             let y = c["year"].as_i64().unwrap_or(0);
-            if asked.contains(&y.to_string()) || lore.iter().any(|l| l["year"].as_i64() == Some(y)) {
+            if asked.contains(&y.to_string()) || lore.iter().any(|l| l["year"].as_i64() == Some(y))
+            {
                 continue;
             }
             let photos = c["evidence"]["photos"].as_u64().unwrap_or(0);
@@ -378,9 +513,20 @@ impl super::ConversationEngine {
         if self.pending_slot().await.is_some() {
             return false;
         }
-        let period_ms: i64 = std::env::var("YM_BOOKASK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(172_800) * 1000;
+        let period_ms: i64 = std::env::var("YM_BOOKASK_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(172_800)
+            * 1000;
         let period_ms = (period_ms as f64 * self.domain_pace("book").await) as i64;
-        let last: i64 = self.memory.profile_get("book_ask_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let last: i64 = self
+            .memory
+            .profile_get("book_ask_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
@@ -401,11 +547,23 @@ impl super::ConversationEngine {
         if !asked.contains(&key) {
             asked.push(key);
         }
-        let _ = self.memory.profile_set("book_asked", &serde_json::to_string(&asked).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "book_asked",
+                &serde_json::to_string(&asked).unwrap_or_default(),
+            )
+            .await;
         self.set_pending_slot(Some(slot)).await;
-        let _ = self.memory.profile_set("book_ask_last", &chrono::Utc::now().timestamp_millis().to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "book_ask_last",
+                &chrono::Utc::now().timestamp_millis().to_string(),
+            )
+            .await;
         self.note_proactive_sent().await;
-        self.ledger_sent("book", "asked the family about a chapter gap").await;
+        self.ledger_sent("book", "asked the family about a chapter gap")
+            .await;
     }
-
 }

@@ -51,7 +51,11 @@ pub(crate) fn rtf_to_text(s: &str) -> String {
 /// Parse a skill document: optional `--- … ---` frontmatter (name / description / schedule),
 /// else first `# heading` as the name and first paragraph as the description.
 pub(crate) fn parse_agent_doc(raw: &str) -> Option<ImportedAgent> {
-    let text = if raw.trim_start().starts_with("{\\rtf") { rtf_to_text(raw) } else { raw.to_string() };
+    let text = if raw.trim_start().starts_with("{\\rtf") {
+        rtf_to_text(raw)
+    } else {
+        raw.to_string()
+    };
     let text = text.trim();
     if text.len() < 20 {
         return None;
@@ -61,7 +65,9 @@ pub(crate) fn parse_agent_doc(raw: &str) -> Option<ImportedAgent> {
     if let Some(rest) = text.strip_prefix("---") {
         let (fm, after) = rest.split_once("---")?;
         for line in fm.lines() {
-            let Some((k, v)) = line.split_once(':') else { continue };
+            let Some((k, v)) = line.split_once(':') else {
+                continue;
+            };
             let v = v.trim().trim_matches(|c| c == '"' || c == '\'' || c == '>');
             match k.trim() {
                 "name" => name = v.to_string(),
@@ -75,11 +81,15 @@ pub(crate) fn parse_agent_doc(raw: &str) -> Option<ImportedAgent> {
         body = text.to_string();
     }
     if name.is_empty() {
-        name = body
-            .lines()
-            .find(|l| l.starts_with('#'))
-            .map(|l| l.trim_start_matches('#').trim().to_string())
-            .unwrap_or_else(|| body.split_whitespace().take(4).collect::<Vec<_>>().join(" "));
+        name = body.lines().find(|l| l.starts_with('#')).map_or_else(
+            || {
+                body.split_whitespace()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+            |l| l.trim_start_matches('#').trim().to_string(),
+        );
     }
     if description.is_empty() {
         description = body
@@ -103,7 +113,12 @@ pub(crate) fn parse_agent_doc(raw: &str) -> Option<ImportedAgent> {
     if name.is_empty() {
         return None;
     }
-    Some(ImportedAgent { name, description, schedule, instructions: body })
+    Some(ImportedAgent {
+        name,
+        description,
+        schedule,
+        instructions: body,
+    })
 }
 
 /// "weekly mon 09:00" | "daily 07:30" | "once"/"" → the cadence tuple. Deterministic, tiny — the
@@ -111,14 +126,19 @@ pub(crate) fn parse_agent_doc(raw: &str) -> Option<ImportedAgent> {
 pub(crate) fn parse_schedule_line(v: &str) -> Option<(String, u8, u8, u8)> {
     let t: Vec<&str> = v.split_whitespace().collect();
     match t.first().copied()? {
-        "once" => None,
         "daily" => {
             let (h, m) = t.get(1)?.split_once(':')?;
             Some(("daily".into(), 0, h.parse().ok()?, m.parse().ok()?))
         }
         "weekly" => {
             let wd = match t.get(1).copied()? {
-                "mon" => 0u8, "tue" => 1, "wed" => 2, "thu" => 3, "fri" => 4, "sat" => 5, "sun" => 6,
+                "mon" => 0u8,
+                "tue" => 1,
+                "wed" => 2,
+                "thu" => 3,
+                "fri" => 4,
+                "sat" => 5,
+                "sun" => 6,
                 _ => return None,
             };
             let (h, m) = t.get(2)?.split_once(':')?;
@@ -151,7 +171,11 @@ pub(crate) fn instruction_prompt(instructions: &str, input: Option<&str>) -> Str
 ///
 /// `input` is the run's argument woven in where the instructions can see it. A standing order has
 /// none; an on-call run usually does (`run market-check: WMT`).
-pub(crate) fn instruction_steps(name: &str, instructions: &str, input: Option<&str>) -> Vec<RecipeStep> {
+pub(crate) fn instruction_steps(
+    name: &str,
+    instructions: &str,
+    input: Option<&str>,
+) -> Vec<RecipeStep> {
     instruction_steps_from_prompt(name, instruction_prompt(instructions, input))
 }
 
@@ -162,8 +186,16 @@ pub(crate) fn instruction_steps(name: &str, instructions: &str, input: Option<&s
 /// on top of the first.
 pub(crate) fn instruction_steps_from_prompt(name: &str, prompt: String) -> Vec<RecipeStep> {
     vec![
-        RecipeStep::Think { prompt, store_as: "result".into(), on_error: ErrorAction::Fail, max_tokens: None, think: None },
-        RecipeStep::Notify { message: format!("📥 [{name}] {{{{result}}}}") },
+        RecipeStep::Think {
+            prompt,
+            store_as: "result".into(),
+            on_error: ErrorAction::Fail,
+            max_tokens: None,
+            think: None,
+        },
+        RecipeStep::Notify {
+            message: format!("📥 [{name}] {{{{result}}}}"),
+        },
     ]
 }
 
@@ -197,14 +229,19 @@ impl super::ConversationEngine {
                 let rec = Recipe {
                     id: format!("import:{}", agent.name),
                     name: format!("standing: {}", agent.name),
-                    steps: vec![
-                        RecipeStep::Schedule { every: every.clone(), weekday: wd, hour: h, minute: m },
-                    ]
+                    steps: vec![RecipeStep::Schedule {
+                        every: every.clone(),
+                        weekday: wd,
+                        hour: h,
+                        minute: m,
+                    }]
                     .into_iter()
                     .chain(instruction_steps(&agent.name, &agent.instructions, None))
                     .collect(),
                 };
-                let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                let out = recipes
+                    .run_with(&rec, std::collections::HashMap::new())
+                    .await;
                 receipt.push_str(&match out.sleeping_until {
                     Some(_) => format!(
                         "\n   Standing order armed: {every}{} at {h:02}:{m:02} — `ym orders` shows it.",
@@ -233,24 +270,41 @@ mod tests {
 
     #[test]
     fn bare_markdown_derives_name_and_description_one_time() {
-        let a = parse_agent_doc("# Trip Checker\nChecks passports and visas before any trip.\n\nSteps: …").expect("parses");
+        let a = parse_agent_doc(
+            "# Trip Checker\nChecks passports and visas before any trip.\n\nSteps: …",
+        )
+        .expect("parses");
         assert_eq!(a.name, "trip-checker");
         assert!(a.description.contains("passports"));
-        assert!(a.schedule.is_none(), "no schedule line = one-time skill only");
+        assert!(
+            a.schedule.is_none(),
+            "no schedule line = one-time skill only"
+        );
     }
 
     #[test]
     fn rtf_prose_survives_the_strip() {
         let rtf = r"{\rtf1\ansi{\fonttbl\f0 Arial;}\f0\fs24 # Meal Planner\par Plan dinners for the week.}";
         let a = parse_agent_doc(rtf).expect("rtf imports");
-        assert!(a.instructions.contains("Plan dinners"), "{}", a.instructions);
+        assert!(
+            a.instructions.contains("Plan dinners"),
+            "{}",
+            a.instructions
+        );
     }
 
     #[test]
     fn schedule_line_is_deterministic_and_rejects_junk() {
-        assert_eq!(parse_schedule_line("weekly sat 10:30"), Some(("weekly".into(), 5, 10, 30)));
+        assert_eq!(
+            parse_schedule_line("weekly sat 10:30"),
+            Some(("weekly".into(), 5, 10, 30))
+        );
         assert_eq!(parse_schedule_line("once"), None);
         assert_eq!(parse_schedule_line("hourly 5"), None);
-        assert_eq!(parse_schedule_line("weekly monday 09:00"), None, "only mon..sun tokens");
+        assert_eq!(
+            parse_schedule_line("weekly monday 09:00"),
+            None,
+            "only mon..sun tokens"
+        );
     }
 }

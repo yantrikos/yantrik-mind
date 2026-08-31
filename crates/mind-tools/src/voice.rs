@@ -54,7 +54,8 @@ pub struct VoiceSession {
 impl VoiceSession {
     /// Start the synthesiser and pre-render the hold lines.
     pub fn start() -> anyhow::Result<VoiceSession> {
-        let script = std::env::var("YM_TTS_AGENT").unwrap_or_else(|_| "/opt/yantrik-mind/tts_agent.py".into());
+        let script = std::env::var("YM_TTS_AGENT")
+            .unwrap_or_else(|_| "/opt/yantrik-mind/tts_agent.py".into());
         if !std::path::Path::new(&script).exists() {
             anyhow::bail!("the voice is not installed at {script}");
         }
@@ -76,7 +77,10 @@ impl VoiceSession {
             }
             let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
             if v.get("fatal").is_some() {
-                anyhow::bail!("{}", v["fatal"].as_str().unwrap_or("the voice could not start"));
+                anyhow::bail!(
+                    "{}",
+                    v["fatal"].as_str().unwrap_or("the voice could not start")
+                );
             }
         }
         let s = VoiceSession {
@@ -94,7 +98,7 @@ impl VoiceSession {
         let mut cache = Vec::new();
         for line in crate::flow::HOLD_LINES {
             if let Ok(sp) = self.synthesize(line) {
-                cache.push((line.to_string(), sp.wav));
+                cache.push(((*line).to_string(), sp.wav));
             }
         }
         *self.holds.lock().unwrap_or_else(|p| p.into_inner()) = cache;
@@ -114,19 +118,28 @@ impl VoiceSession {
         let req = serde_json::json!({ "say": text });
         {
             let mut si = self.stdin.lock().unwrap_or_else(|p| p.into_inner());
-            let si = si.as_mut().ok_or_else(|| anyhow::anyhow!("the voice is closed"))?;
+            let si = si
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("the voice is closed"))?;
             writeln!(si, "{req}")?;
             si.flush()?;
         }
         let mut so = self.stdout.lock().unwrap_or_else(|p| p.into_inner());
-        let so = so.as_mut().ok_or_else(|| anyhow::anyhow!("the voice is closed"))?;
+        let so = so
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the voice is closed"))?;
         let mut line = String::new();
         if so.read_line(&mut line)? == 0 {
             anyhow::bail!("the voice exited");
         }
         let v: serde_json::Value = serde_json::from_str(&line)?;
         if !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            anyhow::bail!("{}", v.get("error").and_then(|x| x.as_str()).unwrap_or("the voice failed"));
+            anyhow::bail!(
+                "{}",
+                v.get("error")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("the voice failed")
+            );
         }
         let b64 = v.get("wav").and_then(|x| x.as_str()).unwrap_or_default();
         Ok(Spoken {
@@ -204,7 +217,7 @@ fn b64_decode(s: &str) -> Vec<u8> {
         if v == 255 {
             continue;
         }
-        acc = (acc << 6) | v as u32;
+        acc = (acc << 6) | u32::from(v);
         bits += 6;
         if bits >= 8 {
             bits -= 8;
@@ -223,7 +236,10 @@ mod tests {
         // The audio arrives base64 over a pipe; a decoder that mangles it produces silence, which is
         // indistinguishable from a voice that failed to speak.
         assert_eq!(b64_decode("UklGRg=="), b"RIFF");
-        assert_eq!(b64_decode("YW55IGNhcm5hbCBwbGVhc3VyZQ=="), b"any carnal pleasure");
+        assert_eq!(
+            b64_decode("YW55IGNhcm5hbCBwbGVhc3VyZQ=="),
+            b"any carnal pleasure"
+        );
         assert_eq!(b64_decode(""), Vec::<u8>::new());
     }
 
@@ -237,7 +253,11 @@ mod tests {
         gen.fetch_add(1, Ordering::SeqCst); // interrupt A
         let turn_b = gen.fetch_add(1, Ordering::SeqCst) + 1; // new reply
         assert_ne!(turn_a, turn_b);
-        assert_eq!(gen.load(Ordering::SeqCst), turn_b, "the new turn is the current one");
+        assert_eq!(
+            gen.load(Ordering::SeqCst),
+            turn_b,
+            "the new turn is the current one"
+        );
         assert!(turn_a < turn_b, "a stale turn can never look current again");
     }
 
@@ -245,9 +265,13 @@ mod tests {
     fn chunking_is_what_makes_an_interruption_possible() {
         // A reply spoken as ONE utterance cannot be stopped: the audio is rendered and gone. The
         // chunk boundary is both where sound can start and where it can be halted.
-        let reply = "The Nifty is at 24,053, down about a quarter percent. Reliance never came back \
+        let reply =
+            "The Nifty is at 24,053, down about a quarter percent. Reliance never came back \
                      cleanly, so I won't guess it. Want me to re-pull it?";
         let chunks = crate::speech::speakable_chunks(reply, 60, 160);
-        assert!(chunks.len() >= 3, "an interruptible reply needs several stopping points: {chunks:?}");
+        assert!(
+            chunks.len() >= 3,
+            "an interruptible reply needs several stopping points: {chunks:?}"
+        );
     }
 }

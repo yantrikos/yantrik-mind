@@ -31,14 +31,26 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { wall_secs: 15, cpu_secs: 10, mem_bytes: 512 * 1024 * 1024, max_procs: 64, fsize_bytes: 8 * 1024 * 1024 }
+        Self {
+            wall_secs: 15,
+            cpu_secs: 10,
+            mem_bytes: 512 * 1024 * 1024,
+            max_procs: 64,
+            fsize_bytes: 8 * 1024 * 1024,
+        }
     }
 }
 
 impl Limits {
     /// Heavier limits for compiling Rust (rustc/LLVM need more memory, time, and output size).
     pub fn for_rust() -> Self {
-        Self { wall_secs: 40, cpu_secs: 35, mem_bytes: 1536 * 1024 * 1024, max_procs: 128, fsize_bytes: 128 * 1024 * 1024 }
+        Self {
+            wall_secs: 40,
+            cpu_secs: 35,
+            mem_bytes: 1536 * 1024 * 1024,
+            max_procs: 128,
+            fsize_bytes: 128 * 1024 * 1024,
+        }
     }
 }
 
@@ -55,7 +67,11 @@ impl ExecResult {
     pub fn render(&self) -> String {
         let cap = |s: &str| -> String {
             let t = s.trim_end();
-            if t.chars().count() > 4000 { format!("{}\n…(truncated)", t.chars().take(4000).collect::<String>()) } else { t.to_string() }
+            if t.chars().count() > 4000 {
+                format!("{}\n…(truncated)", t.chars().take(4000).collect::<String>())
+            } else {
+                t.to_string()
+            }
         };
         let mut out = String::new();
         let o = cap(&self.stdout);
@@ -77,15 +93,10 @@ impl ExecResult {
     }
 }
 
+#[derive(Default)]
 pub struct Sandbox {
     /// A host dir to mask with a tmpfs inside the sandbox (e.g. the mind's state dir). Optional.
     hidden_dir: Option<String>,
-}
-
-impl Default for Sandbox {
-    fn default() -> Self {
-        Self { hidden_dir: None }
-    }
 }
 
 impl Sandbox {
@@ -105,11 +116,21 @@ impl Sandbox {
     }
 
     pub async fn run_shell(&self, cmd: &str) -> std::io::Result<ExecResult> {
-        self.run(Limits::default(), vec![("prog.sh", cmd.to_string())], "exec /bin/sh prog.sh").await
+        self.run(
+            Limits::default(),
+            vec![("prog.sh", cmd.to_string())],
+            "exec /bin/sh prog.sh",
+        )
+        .await
     }
 
     pub async fn run_python(&self, code: &str) -> std::io::Result<ExecResult> {
-        self.run(Limits::default(), vec![("prog.py", code.to_string())], "exec python3 -I -S -B prog.py").await
+        self.run(
+            Limits::default(),
+            vec![("prog.py", code.to_string())],
+            "exec python3 -I -S -B prog.py",
+        )
+        .await
     }
 
     pub async fn run_rust(&self, code: &str) -> std::io::Result<ExecResult> {
@@ -122,7 +143,12 @@ impl Sandbox {
         .await
     }
 
-    async fn run(&self, lim: Limits, files: Vec<(&'static str, String)>, run_sh: &str) -> std::io::Result<ExecResult> {
+    async fn run(
+        &self,
+        lim: Limits,
+        files: Vec<(&'static str, String)>,
+        run_sh: &str,
+    ) -> std::io::Result<ExecResult> {
         let hidden = self.hidden_dir.clone();
         let run_sh = run_sh.to_string();
         tokio::task::spawn_blocking(move || Self::run_blocking(lim, files, run_sh, hidden))
@@ -130,11 +156,20 @@ impl Sandbox {
             .unwrap_or_else(|e| Err(std::io::Error::other(format!("join: {e}"))))
     }
 
-    fn run_blocking(lim: Limits, files: Vec<(&'static str, String)>, run_sh: String, hidden: Option<String>) -> std::io::Result<ExecResult> {
+    fn run_blocking(
+        lim: Limits,
+        files: Vec<(&'static str, String)>,
+        run_sh: String,
+        hidden: Option<String>,
+    ) -> std::io::Result<ExecResult> {
         // Throwaway scratch dir (unique without rand: pid + seq + time).
         let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let scratch: PathBuf = std::env::temp_dir().join(format!("ym_sbx_{}_{seq}_{ts}", std::process::id()));
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let scratch: PathBuf =
+            std::env::temp_dir().join(format!("ym_sbx_{}_{seq}_{ts}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
         for (name, content) in &files {
             std::fs::write(scratch.join(name), content)?;
@@ -154,9 +189,21 @@ impl Sandbox {
 
         let output = Command::new("timeout")
             .args([
-                "-s", "KILL", &lim.wall_secs.to_string(),
-                "unshare", "--user", "--map-root-user", "--fork", "--pid", "--mount-proc", "--net", "--uts", "--ipc",
-                "/bin/sh", "-euc", &outer,
+                "-s",
+                "KILL",
+                &lim.wall_secs.to_string(),
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--fork",
+                "--pid",
+                "--mount-proc",
+                "--net",
+                "--uts",
+                "--ipc",
+                "/bin/sh",
+                "-euc",
+                &outer,
             ])
             .output();
 
@@ -181,14 +228,24 @@ mod tests {
 
     #[test]
     fn render_shows_output_and_exit() {
-        let r = ExecResult { stdout: "hello".into(), stderr: String::new(), exit_code: 0, timed_out: false };
+        let r = ExecResult {
+            stdout: "hello".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
         let s = r.render();
         assert!(s.contains("hello") && s.contains("exit code: 0"));
     }
 
     #[test]
     fn render_flags_timeout() {
-        let r = ExecResult { stdout: String::new(), stderr: String::new(), exit_code: 137, timed_out: true };
+        let r = ExecResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 137,
+            timed_out: true,
+        };
         assert!(r.render().contains("timed out"));
     }
 
@@ -215,6 +272,10 @@ mod tests {
             .run_python("import socket\ntry:\n socket.create_connection(('1.1.1.1',53),2); print('OPEN')\nexcept Exception: print('BLOCKED')")
             .await
             .unwrap();
-        assert!(r.stdout.contains("BLOCKED"), "network must be unavailable: {}", r.stdout);
+        assert!(
+            r.stdout.contains("BLOCKED"),
+            "network must be unavailable: {}",
+            r.stdout
+        );
     }
 }

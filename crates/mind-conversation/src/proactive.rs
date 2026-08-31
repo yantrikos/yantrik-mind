@@ -12,7 +12,10 @@ impl super::ConversationEngine {
             .unwrap_or_else(|_| "/var/lib/yantrik-mind/selfbuild-cron.log".to_string());
         let log = std::fs::read_to_string(&path).ok()?;
         let about = Self::vigilance_scan_text(&log)?;
-        let _ = self.memory.record_tension(mind_types::TensionKind::Operational, 0.85, &about).await;
+        let _ = self
+            .memory
+            .record_tension(mind_types::TensionKind::Operational, 0.85, &about)
+            .await;
         Some(about)
     }
 
@@ -20,20 +23,36 @@ impl super::ConversationEngine {
     /// and flags it only on an EXPLICIT failure signature — never on a merely-incomplete block (which
     /// could be a run still in progress), so it doesn't false-alarm. Returns a short description, or None.
     pub(crate) fn vigilance_scan_text(log: &str) -> Option<String> {
-        let block = log.rsplit_once("self-build tick start").map(|(_, a)| a).unwrap_or(log);
+        let block = log
+            .rsplit_once("self-build tick start")
+            .map_or(log, |(_, a)| a);
         // Real failures only — NOT "auto-merge BLOCKED" (that's a controlled draft, working as intended).
         // The auth signatures exist because of a real blind spot (2026-07-16): a revoked OAuth token
         // failed the self-improve loop for DAYS — five junk PRs merged with "Failed to authenticate.
         // API Error: 401 …" as the title — and nothing here matched, so the self-healing rung stayed
         // silent and the mind reported itself healthy. The watchdog must know what a lockout looks like.
         const SIGS: &[&str] = &[
-            "No such file", "ABORT:", "MERGE-FAIL", "PR-FAIL", "could not compile",
-            "clone failed", "tests failed", "timeout: failed to run",
-            "Failed to authenticate", "API Error: 401", "API Error: 403",
-            "access token has been revoked", "Invalid authentication credentials", "Invalid API key",
+            "No such file",
+            "ABORT:",
+            "MERGE-FAIL",
+            "PR-FAIL",
+            "could not compile",
+            "clone failed",
+            "tests failed",
+            "timeout: failed to run",
+            "Failed to authenticate",
+            "API Error: 401",
+            "API Error: 403",
+            "access token has been revoked",
+            "Invalid authentication credentials",
+            "Invalid API key",
         ];
         let hit = SIGS.iter().find(|s| block.contains(**s))?;
-        let line = block.lines().find(|l| l.contains(*hit)).unwrap_or(hit).trim();
+        let line = block
+            .lines()
+            .find(|l| l.contains(*hit))
+            .unwrap_or(hit)
+            .trim();
         // STABLE DEDUP KEY. Tensions dedupe on (kind, about), but the log line carries a timestamp,
         // so yesterday's failure and today's identical failure produced DIFFERENT `about` strings and
         // dedup never fired — one fresh 0.85 urge per day, forever (measured: the digest's entire
@@ -56,9 +75,20 @@ impl super::ConversationEngine {
         };
         while i < b.len() {
             // yyyy-mm-dd (optionally followed by T/space + hh:mm[:ss][Z])
-            if digits(i, 4) && i + 10 <= b.len() && b[i + 4] == '-' && digits(i + 5, 2) && b[i + 7] == '-' && digits(i + 8, 2) {
+            if digits(i, 4)
+                && i + 10 <= b.len()
+                && b[i + 4] == '-'
+                && digits(i + 5, 2)
+                && b[i + 7] == '-'
+                && digits(i + 8, 2)
+            {
                 i += 10;
-                if i < b.len() && (b[i] == 'T' || b[i] == ' ') && digits(i + 1, 2) && i + 3 < b.len() && b[i + 3] == ':' {
+                if i < b.len()
+                    && (b[i] == 'T' || b[i] == ' ')
+                    && digits(i + 1, 2)
+                    && i + 3 < b.len()
+                    && b[i + 3] == ':'
+                {
                     i += 1;
                     while i < b.len() && (b[i].is_ascii_digit() || b[i] == ':' || b[i] == '.') {
                         i += 1;
@@ -125,6 +155,21 @@ impl super::ConversationEngine {
                 log.push(format!("[dmn] {}", graded.replace(char::from(10), " ")));
             }
         }
+        // THE PAPER DESK. Restrict it to phase 0, the DMN's non-LLM phase: a due hunt makes one
+        // inference call, while the other two phases already spend their one call on reconciliation
+        // or association. This preserves the tick's global one-call budget instead of making the
+        // autonomous feature steal capacity invisibly.
+        if phase == 0 {
+            if let Some(report) = self.paper_desk_tick().await {
+                log.push(format!("[dmn] paper-desk {report}"));
+            }
+            if let Some(report) = self.day_trader_tick().await {
+                log.push(format!("[dmn] day-trader {report}"));
+            }
+            if let Some(report) = self.crypto_trader_tick().await {
+                log.push(format!("[dmn] crypto-trader {report}"));
+            }
+        }
         // FUTURE-SELF COURIER: expire what aged out, and fire any promise whose trigger a recent
         // observation has satisfied — this is what produces `told`-stamped prepared work for the
         // calibrated knock (which, before the courier existed, had no eligible supply at all).
@@ -150,7 +195,16 @@ impl super::ConversationEngine {
                 let now = Self::now_ms();
                 let rs = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 8, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
+                    .recall_typed(
+                        mind_types::RecallQuery {
+                            text: String::new(),
+                            top_k: 8,
+                            kind: None,
+                        },
+                        &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                            mind_types::Activity::Proactive,
+                        )),
+                    )
                     .await
                     .unwrap_or_default();
                 let mut stale = 0u32;
@@ -192,8 +246,12 @@ impl super::ConversationEngine {
                     "[dmn] rehearse: nothing stored yet".to_string()
                 } else {
                     let mut parts = vec![format!("rehearsed {} memories", rs.len())];
-                    if stale > 0 { parts.push(format!("{stale} stale")); }
-                    if fragile > 0 { parts.push(format!("{fragile} fragile")); }
+                    if stale > 0 {
+                        parts.push(format!("{stale} stale"));
+                    }
+                    if fragile > 0 {
+                        parts.push(format!("{fragile} fragile"));
+                    }
                     format!("[dmn] {}", parts.join(", "))
                 });
             }
@@ -201,7 +259,13 @@ impl super::ConversationEngine {
             // winning and losing belief nodes so confidence scores actually shift, then bank an
             // observability note and emit a COHERENCE tension. UNRESOLVED leaves scores unchanged.
             1 => {
-                let cs = self.memory.conflicts(&mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive))).await.unwrap_or_default();
+                let cs = self
+                    .memory
+                    .conflicts(&mind_types::AccessContext::operator(
+                        mind_types::Purpose::serving_primary(mind_types::Activity::Proactive),
+                    ))
+                    .await
+                    .unwrap_or_default();
                 // ROTATE through the open set rather than always taking `.first()`. An UNRESOLVED
                 // verdict deliberately leaves both scores unchanged, so the same contradiction stays
                 // at the head of the list and `.first()` would re-judge it EVERY cycle, forever —
@@ -215,7 +279,9 @@ impl super::ConversationEngine {
                     );
                     let messages = vec![
                         ChatMessage::system(&self.persona),
-                        ChatMessage::system("You weigh conflicting beliefs cautiously. One sentence."),
+                        ChatMessage::system(
+                            "You weigh conflicting beliefs cautiously. One sentence.",
+                        ),
                         ChatMessage::user(&prompt),
                     ];
                     // PRIVATE-GROUNDED: this prompt carries two of the household's stored beliefs
@@ -223,38 +289,57 @@ impl super::ConversationEngine {
                     // it must PREFER the private (owned-hardware) lane and only escalate to cloud with
                     // an audit. It was an unscoped `chat()` = a silent Household (cloud) call on every
                     // reconcile tick — the same leak agent_loop already fixed, missed on this path.
-                    if let Ok(r) = self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+                    if let Ok(r) = self
+                        .inference
+                        .chat_grounded(messages, GenerationConfig::default())
+                        .await
+                    {
                         let verdict = r.text.trim();
                         let verdict_upper = verdict.to_uppercase();
-                        let (winner, loser, verdict_label) =
-                            if verdict_upper.starts_with('A') {
-                                (Some(c.belief_a.as_str()), Some(c.belief_b.as_str()), "→ A wins")
-                            } else if verdict_upper.starts_with('B') {
-                                (Some(c.belief_b.as_str()), Some(c.belief_a.as_str()), "→ B wins")
-                            } else {
-                                (None, None, "→ unresolved")
-                            };
+                        let (winner, loser, verdict_label) = if verdict_upper.starts_with('A') {
+                            (
+                                Some(c.belief_a.as_str()),
+                                Some(c.belief_b.as_str()),
+                                "→ A wins",
+                            )
+                        } else if verdict_upper.starts_with('B') {
+                            (
+                                Some(c.belief_b.as_str()),
+                                Some(c.belief_a.as_str()),
+                                "→ B wins",
+                            )
+                        } else {
+                            (None, None, "→ unresolved")
+                        };
                         if let (Some(w), Some(l)) = (winner, loser) {
-                            let _ = self.memory.remember_as_belief(BeliefAssertion {
-                                statement: w.to_string(),
-                                polarity: 1.0,
-                                weight: 0.5,
-                                source_event: Some("dmn_reconcile".into()),
-                                provenance: "dmn".into(),
-                            }).await;
-                            let _ = self.memory.remember_as_belief(BeliefAssertion {
-                                statement: l.to_string(),
-                                polarity: -1.0,
-                                weight: 0.5,
-                                source_event: Some("dmn_reconcile".into()),
-                                provenance: "dmn".into(),
-                            }).await;
+                            let _ = self
+                                .memory
+                                .remember_as_belief(BeliefAssertion {
+                                    statement: w.to_string(),
+                                    polarity: 1.0,
+                                    weight: 0.5,
+                                    source_event: Some("dmn_reconcile".into()),
+                                    provenance: "dmn".into(),
+                                })
+                                .await;
+                            let _ = self
+                                .memory
+                                .remember_as_belief(BeliefAssertion {
+                                    statement: l.to_string(),
+                                    polarity: -1.0,
+                                    weight: 0.5,
+                                    source_event: Some("dmn_reconcile".into()),
+                                    provenance: "dmn".into(),
+                                })
+                                .await;
                         }
-                        let note: String =
-                            format!("On the tension '{}' vs '{}': {}", c.belief_a, c.belief_b, verdict)
-                                .chars()
-                                .take(400)
-                                .collect();
+                        let note: String = format!(
+                            "On the tension '{}' vs '{}': {}",
+                            c.belief_a, c.belief_b, verdict
+                        )
+                        .chars()
+                        .take(400)
+                        .collect();
                         let _ = self
                             .memory
                             .remember_as_belief(BeliefAssertion {
@@ -285,14 +370,27 @@ impl super::ConversationEngine {
             _ => {
                 let rs = self
                     .memory
-                    .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 10, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
+                    .recall_typed(
+                        mind_types::RecallQuery {
+                            text: String::new(),
+                            top_k: 10,
+                            kind: None,
+                        },
+                        &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                            mind_types::Activity::Proactive,
+                        )),
+                    )
                     .await
                     .unwrap_or_default();
                 if rs.len() < 3 {
                     log.push("[dmn] associate: too little stored to connect".to_string());
                     return log;
                 }
-                let facts = rs.iter().map(|r| format!("- {}", r.item.text)).collect::<Vec<_>>().join("\n");
+                let facts = rs
+                    .iter()
+                    .map(|r| format!("- {}", r.item.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let prompt = format!(
                     "Here is some of what I know:\n{facts}\n\nName ONE non-obvious connection, pattern, or question that emerges across these — something worth following up. Reply with a single sentence."
                 );
@@ -304,11 +402,17 @@ impl super::ConversationEngine {
                 // PRIVATE-GROUNDED (the widest of the two DMN prompts): this dumps the top-10 recalled
                 // facts VERBATIM — arbitrary private household knowledge, read unrestricted — so it
                 // takes the private lane first with an audited escalation, never a silent cloud call.
-                if let Ok(r) = self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+                if let Ok(r) = self
+                    .inference
+                    .chat_grounded(messages, GenerationConfig::default())
+                    .await
+                {
                     let insight = r.text.trim();
                     if insight.len() > 8 {
-                        let statement: String =
-                            format!("(hypothesis) {insight}").chars().take(400).collect();
+                        let statement: String = format!("(hypothesis) {insight}")
+                            .chars()
+                            .take(400)
+                            .collect();
                         let _ = self
                             .memory
                             .remember_as_belief(BeliefAssertion {
@@ -345,7 +449,10 @@ impl super::ConversationEngine {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.7);
         let open = self.memory.open_tensions(12).await.unwrap_or_default();
-        let winners: Vec<_> = open.into_iter().filter(|t| t.pressure >= min_pressure).collect();
+        let winners: Vec<_> = open
+            .into_iter()
+            .filter(|t| t.pressure >= min_pressure)
+            .collect();
         if winners.is_empty() {
             return None; // nothing clears the bar → stay silent (the default)
         }
@@ -353,11 +460,20 @@ impl super::ConversationEngine {
         // whose subject overlaps with low-confidence beliefs score higher — what the mind most needs
         // to address surfaces first rather than treating all passing tensions as pressure-equivalent.
         let topics: Vec<String> = winners.iter().map(|t| t.about.clone()).collect();
-        let demands = self.memory.knowledge_gaps(&topics).await.unwrap_or_else(|_| vec![0.0; topics.len()]);
+        let demands = self
+            .memory
+            .knowledge_gaps(&topics)
+            .await
+            .unwrap_or_else(|_| vec![0.0; topics.len()]);
         let mut scored: Vec<(usize, f64)> = winners
             .iter()
             .enumerate()
-            .map(|(i, t)| (i, t.pressure * (1.0 + demands.get(i).copied().unwrap_or(0.0))))
+            .map(|(i, t)| {
+                (
+                    i,
+                    t.pressure * (1.0 + demands.get(i).copied().unwrap_or(0.0)),
+                )
+            })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(3);
@@ -386,7 +502,10 @@ impl super::ConversationEngine {
     ///
     /// Silence here is not a failure mode; it is the design. See `knock` for the full rationale.
     pub async fn maybe_knock(&self) -> Option<String> {
-        if std::env::var("YM_KNOCK").map(|v| v == "off").unwrap_or(false) {
+        if std::env::var("YM_KNOCK")
+            .map(|v| v == "off")
+            .unwrap_or(false)
+        {
             return None;
         }
         let now = chrono::Utc::now().timestamp_millis();
@@ -426,7 +545,9 @@ impl super::ConversationEngine {
             // as if it were provenance — every packet classified `inferred` by accident, so the
             // knock could never fire. Absent stamp ⇒ not eligible, by decision now, not luck.
             if !crate::knock::trigger_may_interrupt(
-                p.get("trigger_provenance").and_then(|x| x.as_str()).unwrap_or(""),
+                p.get("trigger_provenance")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(""),
             ) {
                 n_provenance += 1;
                 continue;
@@ -453,14 +574,33 @@ impl super::ConversationEngine {
         // With a young ledger the hardcoded 0.6 dominates; once knocks have real grades, the issued
         // probability earns its way back toward the world model. One number feeds both the band
         // choice and the ledger — the spoken confidence must be the accountable one.
-        let p_raw = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.6);
+        let p_raw = self
+            .memory
+            .proactive_receptivity()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0.6);
         let p_engage = self.shrunk_judgment_p("engagement", p_raw).await;
         // GATES, each recording WHY the mind stayed quiet. Silence is legitimate; unexplained
         // silence is not.
-        let muted = self.memory.profile_get("knock_muted").await.ok().flatten().as_deref() == Some("1");
+        let muted = self
+            .memory
+            .profile_get("knock_muted")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
         let today = local_now().format("%Y-%m-%d").to_string();
-        let cap_spent =
-            self.memory.profile_get("knock_last_date").await.ok().flatten().as_deref() == Some(today.as_str());
+        let cap_spent = self
+            .memory
+            .profile_get("knock_last_date")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(today.as_str());
         let unreceptive = !self.proactive_receptivity_ok().await;
         let band_opt = crate::knock::band_for(p_engage);
         let blocked = if muted {
@@ -475,15 +615,26 @@ impl super::ConversationEngine {
             None
         };
         if let Some(reason) = blocked {
-            self.funnel_bump(&format!("knock:{}", reason.as_str())).await;
+            self.funnel_bump(&format!("knock:{}", reason.as_str()))
+                .await;
             self.escrow_hold(pkt, reason, p_engage, now).await;
             return None;
         }
         self.funnel_bump("knock:sent").await;
         let band = band_opt?;
-        let title = pkt.get("title").and_then(|x| x.as_str()).unwrap_or("a prepared option");
-        let trigger = pkt.get("reason").and_then(|x| x.as_str()).unwrap_or("something you asked me to watch");
-        let pkt_id = pkt.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = pkt
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("a prepared option");
+        let trigger = pkt
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("something you asked me to watch");
+        let pkt_id = pkt
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         // ACCOUNTABILITY: commit the prediction BEFORE the message goes out. `knock:<pkt>` is the
         // grading ref the reply handler resolves.
         let sref = format!("knock:{pkt_id}");
@@ -506,7 +657,12 @@ impl super::ConversationEngine {
     /// Returns None when there is no pending knock or the message isn't one of the three replies,
     /// so ordinary conversation flows through untouched.
     pub async fn knock_reply(&self, msg: &str) -> Option<String> {
-        let pending = self.memory.profile_get("knock_pending").await.ok().flatten()?;
+        let pending = self
+            .memory
+            .profile_get("knock_pending")
+            .await
+            .ok()
+            .flatten()?;
         let reply = crate::knock::KnockReply::parse(msg)?;
         let sref = format!("knock:{pending}");
         let _ = self.memory.profile_set("knock_pending", "").await;
@@ -555,15 +711,31 @@ impl super::ConversationEngine {
         // companies they care about) so grounding, gifts, and the entity-sim have real material. Asks one
         // uncovered dimension per tick; once all are covered it falls through to the purpose taper.
         let covered = self.ask_covered().await;
-        if let Some((key, q)) = INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k)) {
-            self.set_pending_slot(Some(&format!("interest:{key}"))).await;
-            return Some(q.to_string());
+        if let Some((key, q)) = INTEREST_DIMS
+            .iter()
+            .find(|(k, _)| !covered.iter().any(|c| c == k))
+        {
+            self.set_pending_slot(Some(&format!("interest:{key}")))
+                .await;
+            return Some((*q).to_string());
         }
         // OPEN stage — purpose-grounded follow-ups, but taper once the brain knows enough about you.
-        let enough: usize = std::env::var("YM_ASK_ENOUGH").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        let enough: usize = std::env::var("YM_ASK_ENOUGH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
         let known = self
             .memory
-            .recall_typed(mind_types::RecallQuery { text: String::new(), top_k: 64, kind: None }, &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive)))
+            .recall_typed(
+                mind_types::RecallQuery {
+                    text: String::new(),
+                    top_k: 64,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                    mind_types::Activity::Proactive,
+                )),
+            )
             .await
             .map(|r| r.len())
             .unwrap_or(0);
@@ -580,7 +752,9 @@ impl super::ConversationEngine {
     /// that gates cross-turn behavior must live in the substrate, not the process.
     /// Is a question armed to swallow the next message as its answer?
     pub(crate) async fn has_pending_slot(&self) -> bool {
-        self.pending_slot().await.map(|s| !s.trim().is_empty()).unwrap_or(false)
+        self.pending_slot()
+            .await
+            .is_some_and(|s| !s.trim().is_empty())
     }
 
     /// Does this line look like a CONTROL COMMAND rather than a human answer? Deliberately narrow:
@@ -592,7 +766,10 @@ impl super::ConversationEngine {
         if t.is_empty() || t.contains(char::is_whitespace) {
             return false;
         }
-        t.starts_with('/') || ((t.contains('_') || t.contains('-')) && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/'))
+        t.starts_with('/')
+            || ((t.contains('_') || t.contains('-'))
+                && t.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/'))
     }
 
     pub(crate) async fn pending_slot(&self) -> Option<String> {
@@ -605,7 +782,10 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn set_pending_slot(&self, v: Option<&str>) {
-        let _ = self.memory.profile_set("pending_onboard", v.unwrap_or("")).await;
+        let _ = self
+            .memory
+            .profile_set("pending_onboard", v.unwrap_or(""))
+            .await;
     }
 
     /// Curiosity as NORMAL conversation: occasionally close a reply with one get-to-know-you
@@ -613,13 +793,20 @@ impl super::ConversationEngine {
     /// default 4h), skipped while a question is already pending. Most of the "how much do you
     /// actually know about me" gaps close here — in the flow of talk, not in scheduled pings.
     pub(crate) async fn maybe_piggyback_ask(&self) -> Option<String> {
-        if std::env::var("YM_ASK_PIGGYBACK").map(|v| v == "off").unwrap_or(false) {
+        if std::env::var("YM_ASK_PIGGYBACK")
+            .map(|v| v == "off")
+            .unwrap_or(false)
+        {
             return None;
         }
         if self.pending_slot().await.is_some() {
             return None;
         }
-        let period_ms: i64 = std::env::var("YM_ASK_PIGGYBACK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(14_400) * 1000;
+        let period_ms: i64 = std::env::var("YM_ASK_PIGGYBACK_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(14_400)
+            * 1000;
         let now = chrono::Utc::now().timestamp_millis();
         let last: i64 = self
             .memory
@@ -633,10 +820,16 @@ impl super::ConversationEngine {
             return None;
         }
         let covered = self.ask_covered().await;
-        let (key, q) = INTEREST_DIMS.iter().find(|(k, _)| !covered.iter().any(|c| c == k))?;
-        self.set_pending_slot(Some(&format!("interest:{key}"))).await;
-        let _ = self.memory.profile_set("ask_piggyback_ms", &now.to_string()).await;
-        Some(q.to_string())
+        let (key, q) = INTEREST_DIMS
+            .iter()
+            .find(|(k, _)| !covered.iter().any(|c| c == k))?;
+        self.set_pending_slot(Some(&format!("interest:{key}")))
+            .await;
+        let _ = self
+            .memory
+            .profile_set("ask_piggyback_ms", &now.to_string())
+            .await;
+        Some((*q).to_string())
     }
 
     /// Which interest dimensions the ask-drive has already covered (persisted, so it never re-asks).
@@ -655,7 +848,13 @@ impl super::ConversationEngine {
         if !c.iter().any(|x| x == key) {
             c.push(key.to_string());
         }
-        let _ = self.memory.profile_set("ask_covered", &serde_json::to_string(&c).unwrap_or_else(|_| "[]".into())).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "ask_covered",
+                &serde_json::to_string(&c).unwrap_or_else(|_| "[]".into()),
+            )
+            .await;
     }
 
     /// Mark that a proactive message just went out — the world model's engagement resolver picks
@@ -688,9 +887,23 @@ impl super::ConversationEngine {
         // JUDGMENT LEDGER: a proactive send IS a falsifiable prediction — "the recipient engages
         // within the window". p = the learned engagement rate (improvable). Graded on resolve. This
         // is the mandatory-eligibility auto-log (Terra's anti-gaming rule): no opt-in, no post-hoc p.
-        let p_raw = self.memory.proactive_receptivity().await.ok().flatten().unwrap_or(0.5);
+        let p_raw = self
+            .memory
+            .proactive_receptivity()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0.5);
         let p = self.shrunk_judgment_p("engagement", p_raw).await;
-        self.judgment_log("proactive", "engagement", "recipient engages within 90m", p, now + 90 * 60_000, &now.to_string()).await;
+        self.judgment_log(
+            "proactive",
+            "engagement",
+            "recipient engages within 90m",
+            p,
+            now + 90 * 60_000,
+            &now.to_string(),
+        )
+        .await;
         now.to_string()
     }
 
@@ -727,7 +940,13 @@ impl super::ConversationEngine {
     /// The outstanding proactive sends. Reads the legacy single-integer form too, so the upgrade
     /// does not drop the one send that happens to be in flight when the new binary starts.
     async fn proactive_pending(&self) -> Vec<i64> {
-        let raw = self.memory.profile_get("proactive_pending").await.ok().flatten().unwrap_or_default();
+        let raw = self
+            .memory
+            .profile_get("proactive_pending")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let raw = raw.trim();
         if raw.is_empty() {
             return Vec::new();
@@ -739,7 +958,11 @@ impl super::ConversationEngine {
     }
 
     async fn set_proactive_pending(&self, v: &[i64]) {
-        let s = if v.is_empty() { String::new() } else { serde_json::to_string(v).unwrap_or_default() };
+        let s = if v.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(v).unwrap_or_default()
+        };
         let _ = self.memory.profile_set("proactive_pending", &s).await;
     }
 
@@ -777,7 +1000,7 @@ impl super::ConversationEngine {
         let orphans: Vec<(String, i64, i64)> = led
             .iter()
             .filter(|r| r.get("source").and_then(|x| x.as_str()) == Some("proactive"))
-            .filter(|r| r.get("outcome").map(|o| o.is_null()).unwrap_or(false))
+            .filter(|r| r.get("outcome").is_some_and(|o| o.is_null()))
             .filter_map(|r| {
                 let rf = r.get("ref")?.as_str()?.to_string();
                 // The ref IS the send time for this source; fall back to `t` if it ever is not.
@@ -789,9 +1012,16 @@ impl super::ConversationEngine {
             return "no orphaned engagement claims — nothing to settle".to_string();
         }
         let earliest = orphans.iter().map(|(_, t, _)| *t).min().unwrap_or(0);
-        let turns = self.memory.user_turn_times(earliest).await.unwrap_or_default();
+        let turns = self
+            .memory
+            .user_turn_times(earliest)
+            .await
+            .unwrap_or_default();
         let Some(&last_turn) = turns.last() else {
-            return format!("{} orphaned claims, but no transcript to settle them against", orphans.len());
+            return format!(
+                "{} orphaned claims, but no transcript to settle them against",
+                orphans.len()
+            );
         };
         let now = chrono::Utc::now().timestamp_millis();
         let windows: Vec<(i64, i64)> = orphans.iter().map(|(_, s, d)| (*s, *d)).collect();
@@ -802,12 +1032,17 @@ impl super::ConversationEngine {
         if act {
             // ONE ledger write for all of them — it is a single JSON blob, so each grade otherwise
             // rewrites the whole thing.
-            let refs: Vec<(String, bool)> =
-                verdicts.iter().map(|(i, e)| (orphans[*i].0.clone(), *e)).collect();
+            let refs: Vec<(String, bool)> = verdicts
+                .iter()
+                .map(|(i, e)| (orphans[*i].0.clone(), *e))
+                .collect();
             wrote = self.judgment_grade_many(&refs).await;
             // The world model takes its own row per transition, binned on send time.
             for (i, e) in &verdicts {
-                let _ = self.memory.record_proactive_outcome_backfill(orphans[*i].1, *e).await;
+                let _ = self
+                    .memory
+                    .record_proactive_outcome_backfill(orphans[*i].1, *e)
+                    .await;
             }
         }
         let n = engaged + ignored;
@@ -818,11 +1053,21 @@ impl super::ConversationEngine {
             if act { "SETTLED" } else { "would settle" },
             n,
             if act { "" } else { " — pass `act` to write" },
-            if n > 0 { 100.0 * engaged as f64 / n as f64 } else { 0.0 },
+            if n > 0 {
+                100.0 * f64::from(engaged) / f64::from(n)
+            } else {
+                0.0
+            },
             // Report what the ledger actually took, not what was decided. A repair that reports its
             // intent instead of its effect is how the first run looked like it had written 650.
-            if act { format!("
-  ledger accepted {wrote} of {n}") } else { String::new() },
+            if act {
+                format!(
+                    "
+  ledger accepted {wrote} of {n}"
+                )
+            } else {
+                String::new()
+            },
         )
     }
 
@@ -871,7 +1116,10 @@ impl super::ConversationEngine {
         let mut out = Vec::new();
         let mut changed = false;
         for t in &reminders {
-            let deadline = t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today));
+            let deadline = t
+                .due_ms
+                .map(|m| m as i64)
+                .or_else(|| parse_text_date_ms(&t.description, &today));
             let Some(dl) = deadline else { continue };
             let days_left = (dl - now) / 86_400_000;
             let stage = if days_left < 0 {
@@ -902,11 +1150,13 @@ impl super::ConversationEngine {
             });
         }
         if changed {
-            let _ = self.memory.profile_set("task_nudges", &fired.to_string()).await;
+            let _ = self
+                .memory
+                .profile_set("task_nudges", &fired.to_string())
+                .await;
         }
         out
     }
-
 }
 
 /// Decide which orphaned engagement claims the transcript can honestly settle, and how.
@@ -915,13 +1165,19 @@ impl super::ConversationEngine {
 /// are deliberately NOT settled:
 ///   - one whose 90-minute deadline has not passed — it is still live, not unanswered;
 ///   - one whose window runs past the last recorded turn — the transcript simply does not cover it.
+///
 /// The second is the one that matters. The box runs for weeks while the person is away, so silence
 /// after the final recorded turn is the NORMAL state, and reading it as "ignored" would grade
 /// hundreds of claims failed on missing evidence — manufacturing the exact bias this repairs,
 /// while looking like thoroughness.
 ///
 /// `turns` must be ascending. Returns (settled verdicts, count left pending).
-pub(crate) fn settle_plan(orphans: &[(i64, i64)], turns: &[i64], last_turn: i64, now: i64) -> (Vec<(usize, bool)>, usize) {
+pub(crate) fn settle_plan(
+    orphans: &[(i64, i64)],
+    turns: &[i64],
+    last_turn: i64,
+    now: i64,
+) -> (Vec<(usize, bool)>, usize) {
     const WINDOW_MS: i64 = 90 * 60_000;
     let mut out = Vec::new();
     let mut skipped = 0usize;

@@ -45,7 +45,11 @@ pub fn spoken_words(transcript: &str) -> String {
             _ => {}
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    out.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 /// Did a person actually say something?
@@ -59,7 +63,14 @@ pub fn is_speech(transcript: &str) -> bool {
 }
 
 /// Utterances whose whole content is a transcriber artefact, even without brackets.
-const BARE_ARTEFACTS: &[&str] = &["blank_audio", "silence", "inaudible", "music", "applause", "no speech"];
+const BARE_ARTEFACTS: &[&str] = &[
+    "blank_audio",
+    "silence",
+    "inaudible",
+    "music",
+    "applause",
+    "no speech",
+];
 
 /// A last check for artefacts that arrive unbracketed.
 pub fn is_artefact(transcript: &str) -> bool {
@@ -91,7 +102,15 @@ mod tests {
 
     #[test]
     fn the_usual_suspects_are_caught_too() {
-        for noise in ["[SILENCE]", "( upbeat music )", "*laughs*", "[ Inaudible ]", "[APPLAUSE]", "   ", "..."] {
+        for noise in [
+            "[SILENCE]",
+            "( upbeat music )",
+            "*laughs*",
+            "[ Inaudible ]",
+            "[APPLAUSE]",
+            "   ",
+            "...",
+        ] {
             assert_eq!(as_turn(noise), None, "should not be a turn: {noise:?}");
         }
     }
@@ -100,8 +119,14 @@ mod tests {
     fn a_real_sentence_survives_a_stage_direction_inside_it() {
         // The annotation is stripped, not the sentence. Dropping the whole utterance would lose a
         // person speaking over a noise, which is exactly when they are most likely to be interrupting.
-        assert_eq!(as_turn("(door slams) sorry, what were you saying?").as_deref(), Some("sorry, what were you saying?"));
-        assert_eq!(as_turn("what's the nifty at [BLANK_AUDIO]").as_deref(), Some("what's the nifty at"));
+        assert_eq!(
+            as_turn("(door slams) sorry, what were you saying?").as_deref(),
+            Some("sorry, what were you saying?")
+        );
+        assert_eq!(
+            as_turn("what's the nifty at [BLANK_AUDIO]").as_deref(),
+            Some("what's the nifty at")
+        );
     }
 
     #[test]

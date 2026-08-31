@@ -31,9 +31,11 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
     for (x, y) in a.iter().zip(b) {
-        dot += (*x as f64) * (*y as f64);
-        na += (*x as f64) * (*x as f64);
-        nb += (*y as f64) * (*y as f64);
+        let x = f64::from(*x);
+        let y = f64::from(*y);
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
     }
     if na == 0.0 || nb == 0.0 {
         return 0.0;
@@ -84,7 +86,11 @@ pub fn rank(query: &[f32], packs: &[CoverageVectors]) -> Vec<Ranked> {
         .collect();
     // Stable sort: equal similarities keep arrival order, so a tie is reported as a tie by
     // `route` rather than decided by hash order.
-    out.sort_by(|a, b| b.sim.partial_cmp(&a.sim).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.sim
+            .partial_cmp(&a.sim)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -92,24 +98,37 @@ pub fn rank(query: &[f32], packs: &[CoverageVectors]) -> Vec<Ranked> {
 /// otherwise abstain, and say why.
 pub fn route(ranked: &[Ranked], floor: f64, margin: f64) -> PackRoute {
     let Some(top) = ranked.first() else {
-        return PackRoute::Abstain { reason: AbstainReason::NoPacks, best: None };
+        return PackRoute::Abstain {
+            reason: AbstainReason::NoPacks,
+            best: None,
+        };
     };
     let best = Some((top.pack_id.clone(), top.sim));
     if !matches!(
         top.sim.partial_cmp(&floor),
         Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
     ) {
-        return PackRoute::Abstain { reason: AbstainReason::BelowFloor, best };
+        return PackRoute::Abstain {
+            reason: AbstainReason::BelowFloor,
+            best,
+        };
     }
-    let second = ranked.get(1).map(|r| r.sim).unwrap_or(0.0);
+    let second = ranked.get(1).map_or(0.0, |r| r.sim);
     let spread = top.sim - second;
     if !matches!(
         spread.partial_cmp(&margin),
         Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
     ) {
-        return PackRoute::Abstain { reason: AbstainReason::Tie, best };
+        return PackRoute::Abstain {
+            reason: AbstainReason::Tie,
+            best,
+        };
     }
-    PackRoute::Lease { pack_id: top.pack_id.clone(), sim: top.sim, margin: spread }
+    PackRoute::Lease {
+        pack_id: top.pack_id.clone(),
+        sim: top.sim,
+        margin: spread,
+    }
 }
 
 /// `rank` then `route` with the registered constants.
@@ -126,7 +145,11 @@ mod tests {
     fn pack(id: &str, vs: &[&[f32]]) -> CoverageVectors {
         CoverageVectors {
             pack_id: id.into(),
-            phrases: vs.iter().enumerate().map(|(i, _)| format!("{id} phrase {i}")).collect(),
+            phrases: vs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("{id} phrase {i}"))
+                .collect(),
             vectors: vs.iter().map(|v| v.to_vec()).collect(),
         }
     }
@@ -141,27 +164,55 @@ mod tests {
         let ranked = rank(&q, &packs);
         assert_eq!(ranked[0].pack_id, "a");
         assert_eq!(ranked[1].pack_id, "b");
-        assert_eq!(ranked[1].phrase, "b phrase 1", "the phrase that earned the score is reported");
-        assert!(ranked[0].sim > 0.99 && (ranked[1].sim - 0.7071).abs() < 0.01);
+        assert_eq!(
+            ranked[1].phrase, "b phrase 1",
+            "the phrase that earned the score is reported"
+        );
+        assert!(
+            ranked[0].sim > 0.99 && (ranked[1].sim - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01
+        );
     }
 
     #[test]
     fn route_leases_only_a_clear_winner_and_names_every_abstention() {
         let r = |sims: &[f64]| -> Vec<Ranked> {
-            sims.iter().enumerate().map(|(i, s)| Ranked { pack_id: format!("p{i}"), sim: *s, phrase: String::new() }).collect()
+            sims.iter()
+                .enumerate()
+                .map(|(i, s)| Ranked {
+                    pack_id: format!("p{i}"),
+                    sim: *s,
+                    phrase: String::new(),
+                })
+                .collect()
         };
-        assert_eq!(route(&[], 0.5, 0.05), PackRoute::Abstain { reason: AbstainReason::NoPacks, best: None });
+        assert_eq!(
+            route(&[], 0.5, 0.05),
+            PackRoute::Abstain {
+                reason: AbstainReason::NoPacks,
+                best: None
+            }
+        );
         assert_eq!(
             route(&r(&[0.49, 0.10]), 0.5, 0.05),
-            PackRoute::Abstain { reason: AbstainReason::BelowFloor, best: Some(("p0".into(), 0.49)) }
+            PackRoute::Abstain {
+                reason: AbstainReason::BelowFloor,
+                best: Some(("p0".into(), 0.49))
+            }
         );
         assert_eq!(
             route(&r(&[0.80, 0.78]), 0.5, 0.05),
-            PackRoute::Abstain { reason: AbstainReason::Tie, best: Some(("p0".into(), 0.80)) }
+            PackRoute::Abstain {
+                reason: AbstainReason::Tie,
+                best: Some(("p0".into(), 0.80))
+            }
         );
         match route(&r(&[0.80, 0.60]), 0.5, 0.05) {
             // Floating subtraction: 0.80 - 0.60 is 0.2000…07, so the margin is checked to a tolerance.
-            PackRoute::Lease { pack_id, sim, margin } => {
+            PackRoute::Lease {
+                pack_id,
+                sim,
+                margin,
+            } => {
                 assert_eq!(pack_id, "p0");
                 assert_eq!(sim, 0.80);
                 assert!((margin - 0.20).abs() < 1e-9, "margin {margin}");
@@ -169,11 +220,32 @@ mod tests {
             other => panic!("a clear winner must be leased: {other:?}"),
         }
         // A single pack above the floor is a clear winner (no runner-up to beat).
-        assert!(matches!(route(&r(&[0.6]), 0.5, 0.05), PackRoute::Lease { .. }));
+        assert!(matches!(
+            route(&r(&[0.6]), 0.5, 0.05),
+            PackRoute::Lease { .. }
+        ));
         // NaN never leases.
-        assert!(matches!(route(&r(&[f64::NAN]), 0.5, 0.05), PackRoute::Abstain { reason: AbstainReason::BelowFloor, .. }));
-        assert!(matches!(route(&r(&[0.8]), 0.5, f64::NAN), PackRoute::Abstain { reason: AbstainReason::Tie, .. }));
-        assert!(matches!(route(&r(&[0.8, f64::NAN]), 0.5, 0.05), PackRoute::Abstain { reason: AbstainReason::Tie, .. }));
+        assert!(matches!(
+            route(&r(&[f64::NAN]), 0.5, 0.05),
+            PackRoute::Abstain {
+                reason: AbstainReason::BelowFloor,
+                ..
+            }
+        ));
+        assert!(matches!(
+            route(&r(&[0.8]), 0.5, f64::NAN),
+            PackRoute::Abstain {
+                reason: AbstainReason::Tie,
+                ..
+            }
+        ));
+        assert!(matches!(
+            route(&r(&[0.8, f64::NAN]), 0.5, 0.05),
+            PackRoute::Abstain {
+                reason: AbstainReason::Tie,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -181,12 +253,24 @@ mod tests {
         assert_eq!(cosine(&[], &[]), 0.0);
         assert_eq!(cosine(&[1.0], &[1.0, 2.0]), 0.0);
         assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
-        let ranked = rank(&[1.0, 0.0], &[pack("empty", &[]), pack("full", &[&[1.0, 0.0]])]);
-        assert_eq!((ranked[0].pack_id.as_str(), ranked[1].pack_id.as_str()), ("full", "empty"));
+        let ranked = rank(
+            &[1.0, 0.0],
+            &[pack("empty", &[]), pack("full", &[&[1.0, 0.0]])],
+        );
+        assert_eq!(
+            (ranked[0].pack_id.as_str(), ranked[1].pack_id.as_str()),
+            ("full", "empty")
+        );
         assert_eq!(ranked[1].sim, 0.0);
 
         let opposite = rank(&[1.0, 0.0], &[pack("opposite", &[&[-1.0, 0.0]])]);
-        assert_eq!(opposite[0].sim, -1.0, "negative similarity must not be replaced by a synthetic zero");
-        assert_eq!(opposite[0].phrase, "opposite phrase 0", "the actual best phrase stays attributable");
+        assert_eq!(
+            opposite[0].sim, -1.0,
+            "negative similarity must not be replaced by a synthetic zero"
+        );
+        assert_eq!(
+            opposite[0].phrase, "opposite phrase 0",
+            "the actual best phrase stays attributable"
+        );
     }
 }

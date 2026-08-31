@@ -2,6 +2,7 @@
 name = "mind-evals"
 version.workspace = true
 edition.workspace = true
+default-run = "mind-evals"
 
 [features]
 # Expose the sealed-pack fixture builder outside unit tests and forward the capability to the
@@ -16,7 +17,7 @@ mind-observability = { workspace = true }
 mind-memory = { workspace = true }
 mind-inference = { workspace = true }
 mind-conversation = { workspace = true }
-mind-tools = { workspace = true }
+mind-tools = { workspace = true, features = ["test-support"] }
 mind-agents = { workspace = true }
 mind-spec = { workspace = true }
 mind-proactive = { path = "../mind-proactive" }

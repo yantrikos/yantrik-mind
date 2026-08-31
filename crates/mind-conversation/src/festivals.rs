@@ -17,7 +17,10 @@ impl super::ConversationEngine {
     pub(crate) async fn save_festival_dates(&self, v: &[serde_json::Value]) {
         let _ = self
             .memory
-            .profile_set("festival_dates", &serde_json::Value::Array(v.to_vec()).to_string())
+            .profile_set(
+                "festival_dates",
+                &serde_json::Value::Array(v.to_vec()).to_string(),
+            )
             .await;
     }
 
@@ -39,18 +42,22 @@ impl super::ConversationEngine {
         let date_of = |name: &str, year: i32| -> Option<chrono::NaiveDate> {
             dates
                 .iter()
-                .find(|e| e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year as i64))
+                .find(|e| {
+                    e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(i64::from(year))
+                })
                 .and_then(|e| e["date"].as_str())
                 .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
         };
         let mut want: Vec<(&'static str, i32)> = Vec::new();
         for (name, _, _, dur) in Self::FESTIVALS.iter() {
             let y = today.year();
-            if !have.contains(&(name.to_string(), y)) {
+            if !have.contains(&((*name).to_string(), y)) {
                 want.push((name, y));
             } else if let Some(d) = date_of(name, y) {
                 // This year's celebration is over → the horizon needs NEXT year's date.
-                if d + chrono::Duration::days(*dur as i64 + 7) < today && !have.contains(&(name.to_string(), y + 1)) {
+                if d + chrono::Duration::days(i64::from(*dur) + 7) < today
+                    && !have.contains(&((*name).to_string(), y + 1))
+                {
                     want.push((name, y + 1));
                 }
             }
@@ -64,17 +71,21 @@ impl super::ConversationEngine {
     /// other anchors is wrong; re-derive it from them instead of trusting a bad snippet.
     pub(crate) async fn festival_consistency_fix(&self) -> usize {
         let mut entries = self.load_festival_dates().await;
-        let get = |entries: &[serde_json::Value], name: &str, year: i64| -> Option<chrono::NaiveDate> {
-            entries
-                .iter()
-                .find(|e| e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year))
-                .and_then(|e| e["date"].as_str())
-                .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-        };
-        let years: std::collections::HashSet<i64> = entries.iter().filter_map(|e| e["year"].as_i64()).collect();
+        let get =
+            |entries: &[serde_json::Value], name: &str, year: i64| -> Option<chrono::NaiveDate> {
+                entries
+                    .iter()
+                    .find(|e| e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year))
+                    .and_then(|e| e["date"].as_str())
+                    .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+            };
+        let years: std::collections::HashSet<i64> =
+            entries.iter().filter_map(|e| e["year"].as_i64()).collect();
         let mut fixed = 0usize;
         for y in years {
-            let Some(durga) = get(&entries, "Durga Puja", y) else { continue };
+            let Some(durga) = get(&entries, "Durga Puja", y) else {
+                continue;
+            };
             let dashami = durga + chrono::Duration::days(4);
             let mut anchors = 0u32;
             let mut bad = 0u32;
@@ -93,9 +104,13 @@ impl super::ConversationEngine {
             if anchors > 0 && bad == anchors {
                 let derived = get(&entries, "Lakshmi Puja", y)
                     .map(|l| l - chrono::Duration::days(9))
-                    .or_else(|| get(&entries, "Kali Puja", y).map(|k| k - chrono::Duration::days(23)));
+                    .or_else(|| {
+                        get(&entries, "Kali Puja", y).map(|k| k - chrono::Duration::days(23))
+                    });
                 if let Some(nd) = derived {
-                    entries.retain(|e| !(e["name"].as_str() == Some("Durga Puja") && e["year"].as_i64() == Some(y)));
+                    entries.retain(|e| {
+                        !(e["name"].as_str() == Some("Durga Puja") && e["year"].as_i64() == Some(y))
+                    });
                     entries.push(serde_json::json!({
                         "name": "Durga Puja", "year": y, "date": nd.format("%Y-%m-%d").to_string(), "src": "derived-lunar",
                     }));
@@ -105,13 +120,19 @@ impl super::ConversationEngine {
         }
         // Mahalaya is EXACTLY the Amavasya six days before Shashthi — derive it from Durga Puja
         // rather than trusting (or waiting for) a web extraction.
-        let years2: std::collections::HashSet<i64> = entries.iter().filter_map(|e| e["year"].as_i64()).collect();
+        let years2: std::collections::HashSet<i64> =
+            entries.iter().filter_map(|e| e["year"].as_i64()).collect();
         for y in years2 {
-            let Some(durga) = get(&entries, "Durga Puja", y) else { continue };
+            let Some(durga) = get(&entries, "Durga Puja", y) else {
+                continue;
+            };
             let want = durga - chrono::Duration::days(6);
-            let ok = get(&entries, "Mahalaya", y).map(|m| (durga - m).num_days().abs() <= 8 && m < durga).unwrap_or(false);
+            let ok = get(&entries, "Mahalaya", y)
+                .is_some_and(|m| (durga - m).num_days().abs() <= 8 && m < durga);
             if !ok {
-                entries.retain(|e| !(e["name"].as_str() == Some("Mahalaya") && e["year"].as_i64() == Some(y)));
+                entries.retain(|e| {
+                    !(e["name"].as_str() == Some("Mahalaya") && e["year"].as_i64() == Some(y))
+                });
                 entries.push(serde_json::json!({
                     "name": "Mahalaya", "year": y, "date": want.format("%Y-%m-%d").to_string(), "src": "derived-lunar",
                 }));
@@ -145,7 +166,14 @@ impl super::ConversationEngine {
             return "Already resolving festival dates — results land here shortly.".to_string();
         }
         // One-time identity grounding: WHY this calendar exists.
-        if self.memory.profile_get("festival_identity_noted").await.ok().flatten().is_none() {
+        if self
+            .memory
+            .profile_get("festival_identity_noted")
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
             let _ = self
                 .memory
                 .remember_as_belief(BeliefAssertion {
@@ -156,7 +184,10 @@ impl super::ConversationEngine {
                     provenance: "told".into(),
                 })
                 .await;
-            let _ = self.memory.profile_set("festival_identity_noted", "1").await;
+            let _ = self
+                .memory
+                .profile_set("festival_identity_noted", "1")
+                .await;
         }
         let mem = self.memory.clone();
         let nq = self.notify_queue.clone();
@@ -174,7 +205,10 @@ impl super::ConversationEngine {
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default();
             for (name, year) in want {
-                let hits = match searcher.search(&format!("{name} {year} date hindu bengali calendar"), 5).await {
+                let hits = match searcher
+                    .search(&format!("{name} {year} date hindu bengali calendar"), 5)
+                    .await
+                {
                     Ok(h) if !h.is_empty() => h,
                     _ => continue,
                 };
@@ -182,7 +216,11 @@ impl super::ConversationEngine {
                 let prompt = format!(
                     "From these search results, find the {year} Gregorian START date of {name} (the Hindu/Bengali festival).\n\n{listing}\n\nOutput ONLY JSON: {{\"date\":\"YYYY-MM-DD\",\"confidence\":0.0-1.0}}. If the results don't clearly show the {year} date, use confidence 0."
                 );
-                let cfg = GenerationConfig { max_tokens: 80, think: mind_inference::think_for("festival_line", Some(false)), ..GenerationConfig::default() };
+                let cfg = GenerationConfig {
+                    max_tokens: 80,
+                    think: mind_inference::think_for("festival_line", Some(false)),
+                    ..GenerationConfig::default()
+                };
                 let Ok(resp) = inf
                     .chat_household_attributed(
                         vec![ChatMessage::user(&prompt)],
@@ -202,14 +240,24 @@ impl super::ConversationEngine {
                 let conf = j["confidence"].as_f64().unwrap_or(0.0);
                 let date = j["date"].as_str().unwrap_or("");
                 let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok();
-                if conf >= 0.5 && parsed.map(|d| d.format("%Y").to_string() == year.to_string()).unwrap_or(false) {
-                    entries.retain(|e| !(e["name"].as_str() == Some(name) && e["year"].as_i64() == Some(year as i64)));
+                if conf >= 0.5
+                    && parsed.is_some_and(|d| d.format("%Y").to_string() == year.to_string())
+                {
+                    entries.retain(|e| {
+                        !(e["name"].as_str() == Some(name)
+                            && e["year"].as_i64() == Some(i64::from(year)))
+                    });
                     entries.push(serde_json::json!({ "name": name, "year": year, "date": date, "src": "web" }));
                     resolved += 1;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            let _ = mem.profile_set("festival_dates", &serde_json::Value::Array(entries).to_string()).await;
+            let _ = mem
+                .profile_set(
+                    "festival_dates",
+                    &serde_json::Value::Array(entries).to_string(),
+                )
+                .await;
             studies.lock().unwrap().remove(&guard);
             nq.lock()
                 .unwrap()
@@ -224,21 +272,33 @@ impl super::ConversationEngine {
         let entries = self.load_festival_dates().await;
         let mut lines: Vec<(i64, String)> = Vec::new();
         for e in &entries {
-            let (Some(name), Some(date)) = (e["name"].as_str(), e["date"].as_str()) else { continue };
-            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else { continue };
+            let (Some(name), Some(date)) = (e["name"].as_str(), e["date"].as_str()) else {
+                continue;
+            };
+            let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+                continue;
+            };
             let days = (d - today).num_days();
             if !(-30..=420).contains(&days) {
                 continue;
             }
             let reg = Self::FESTIVALS.iter().find(|(n, _, _, _)| *n == name);
-            let hint = reg.map(|(_, _, h, _)| *h).unwrap_or("");
-            let dur = reg.map(|(_, _, _, d)| *d).unwrap_or(1);
+            let hint = reg.map_or("", |(_, _, h, _)| *h);
+            let dur = reg.map_or(1, |(_, _, _, d)| *d);
             let span = if dur > 1 {
-                format!("{} – {}", d.format("%b %d"), (d + chrono::Duration::days(dur as i64 - 1)).format("%b %d"))
+                format!(
+                    "{} – {}",
+                    d.format("%b %d"),
+                    (d + chrono::Duration::days(i64::from(dur) - 1)).format("%b %d")
+                )
             } else {
                 d.format("%b %d, %Y").to_string()
             };
-            let when = if days < 0 { format!("{} days ago", -days) } else { format!("in {days}d") };
+            let when = if days < 0 {
+                format!("{} days ago", -days)
+            } else {
+                format!("in {days}d")
+            };
             lines.push((days, format!("🪔 {name} — {span} ({when}) — {hint}")));
         }
         lines.sort_by_key(|(d, _)| *d);
@@ -248,7 +308,11 @@ impl super::ConversationEngine {
         } else {
             format!(
                 "🪔 The festival year (Bengali Hindu calendar):\n{}",
-                lines.into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("\n")
+                lines
+                    .into_iter()
+                    .map(|(_, l)| l)
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )
         };
         if !unresolved.is_empty() {
@@ -281,7 +345,14 @@ impl super::ConversationEngine {
         let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for a in assets.iter().filter(|a| !mind_tools::is_screenish(a)) {
             // Keep "City, State" — a bare small-town name under-scopes the local search.
-            let city = a.place.split(',').take(2).map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(", ");
+            let city = a
+                .place
+                .split(',')
+                .take(2)
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
             if city.len() > 2 {
                 *counts.entry(city).or_insert(0) += 1;
             }
@@ -302,7 +373,10 @@ impl super::ConversationEngine {
         let searcher = self.searcher.clone()?;
         let city = self.home_city_now().await?;
         let hits = searcher
-            .search(&format!("{name} {year} {city} bengali association celebration event"), 4)
+            .search(
+                &format!("{name} {year} {city} bengali association celebration event"),
+                4,
+            )
             .await
             .ok()
             .filter(|h| !h.is_empty())?;
@@ -310,7 +384,11 @@ impl super::ConversationEngine {
         let prompt = format!(
             "From these search results, write ONE short sentence about where/when {name} {year} is being celebrated near {city} — ONLY if a result actually shows a local celebration (association, temple, community event). If nothing local and concrete, output exactly NONE.\n\n{listing}"
         );
-        let cfg = GenerationConfig { max_tokens: 90, think: mind_inference::think_for("festival_greeting", Some(false)), ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 90,
+            think: mind_inference::think_for("festival_greeting", Some(false)),
+            ..GenerationConfig::default()
+        };
         let resp = self
             .inference
             .chat_household_attributed(
@@ -348,22 +426,38 @@ impl super::ConversationEngine {
         if text.len() < 4 {
             return "Tell me what the tradition actually is.".to_string();
         }
-        let Some((name, _, _, _)) = Self::FESTIVALS.iter().find(|(n, w, _, _)| {
-            n.to_lowercase().contains(&fest_raw) || fest_raw.contains(*w)
-        }) else {
-            let known = Self::FESTIVALS.iter().map(|(n, _, _, _)| *n).collect::<Vec<_>>().join(", ");
+        let Some((name, _, _, _)) = Self::FESTIVALS
+            .iter()
+            .find(|(n, w, _, _)| n.to_lowercase().contains(&fest_raw) || fest_raw.contains(*w))
+        else {
+            let known = Self::FESTIVALS
+                .iter()
+                .map(|(n, _, _, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ");
             return format!("I don't know that festival. Ones I track: {known}");
         };
-        const OUTDOOR: [&str; 9] = ["photo", "shoot", "picture", "pic", "outdoor", "picnic", "park", "garden", "walk"];
+        const OUTDOOR: [&str; 9] = [
+            "photo", "shoot", "picture", "pic", "outdoor", "picnic", "park", "garden", "walk",
+        ];
         let low = text.to_lowercase();
         let weather = OUTDOOR.iter().any(|w| low.contains(w));
         let mut all = self.load_traditions().await;
-        all.retain(|t| !(t["festival"].as_str() == Some(name) && t["tradition"].as_str().map(|x| x.to_lowercase()) == Some(low.clone())));
+        all.retain(|t| {
+            !(t["festival"].as_str() == Some(name)
+                && t["tradition"].as_str().map(|x| x.to_lowercase()) == Some(low.clone()))
+        });
         all.push(serde_json::json!({
             "festival": name, "tradition": text, "weather": weather, "src": "told",
             "added": local_now().format("%Y-%m-%d").to_string(),
         }));
-        let _ = self.memory.profile_set("festival_traditions", &serde_json::Value::Array(all).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "festival_traditions",
+                &serde_json::Value::Array(all).to_string(),
+            )
+            .await;
         let _ = self
             .memory
             .remember_as_belief(BeliefAssertion {
@@ -376,7 +470,11 @@ impl super::ConversationEngine {
             .await;
         format!(
             "🪔 Remembered — around {name}: {text}.{}",
-            if weather { " I'll watch the forecast and suggest the best days when it's close." } else { "" }
+            if weather {
+                " I'll watch the forecast and suggest the best days when it's close."
+            } else {
+                ""
+            }
         )
     }
 
@@ -390,7 +488,11 @@ impl super::ConversationEngine {
             .filter_map(|t| {
                 let f = t["festival"].as_str()?;
                 let tr = t["tradition"].as_str()?;
-                let w = if t["weather"].as_bool().unwrap_or(false) { " 🌤" } else { "" };
+                let w = if t["weather"].as_bool().unwrap_or(false) {
+                    " 🌤"
+                } else {
+                    ""
+                };
                 Some(format!("🪔 {f}{w} — {tr}"))
             })
             .collect();
@@ -406,9 +508,15 @@ impl super::ConversationEngine {
             score -= 25;
         }
         let dl = d.desc.to_lowercase();
-        if ["rain", "thunder", "storm", "snow", "sleet", "freezing"].iter().any(|w| dl.contains(w)) {
+        if ["rain", "thunder", "storm", "snow", "sleet", "freezing"]
+            .iter()
+            .any(|w| dl.contains(w))
+        {
             score -= 40;
-        } else if ["drizzle", "overcast", "fog"].iter().any(|w| dl.contains(w)) {
+        } else if ["drizzle", "overcast", "fog"]
+            .iter()
+            .any(|w| dl.contains(w))
+        {
             score -= 12;
         }
         if d.hi_f < 45.0 {
@@ -429,7 +537,11 @@ impl super::ConversationEngine {
 
     /// Compose the best-days suggestion for one weather-dependent tradition, if the festival's
     /// window [-4, +3] overlaps the forecast. Returns None when out of range or weather missing.
-    pub(crate) async fn tradition_days_suggestion(&self, fest: &str, tradition: &str) -> Option<String> {
+    pub(crate) async fn tradition_days_suggestion(
+        &self,
+        fest: &str,
+        tradition: &str,
+    ) -> Option<String> {
         let weather = self.weather.clone()?;
         let today = local_now().date_naive();
         let fdate = self
@@ -441,14 +553,21 @@ impl super::ConversationEngine {
                     return None;
                 }
                 let d = chrono::NaiveDate::parse_from_str(e["date"].as_str()?, "%Y-%m-%d").ok()?;
-                if d >= today { Some(d) } else { None }
+                if d >= today {
+                    Some(d)
+                } else {
+                    None
+                }
             })
             .min()?;
         let days_until = (fdate - today).num_days();
         if days_until > 14 {
             return None; // beyond a trustworthy forecast
         }
-        let city = self.home_city_now().await.unwrap_or_else(|| "home".to_string());
+        let city = self
+            .home_city_now()
+            .await
+            .unwrap_or_else(|| "home".to_string());
         let outlook = weather.daily_outlook(&city, 16).await.ok()?;
         let w_start = fdate - chrono::Duration::days(4);
         let w_end = fdate + chrono::Duration::days(3);
@@ -471,17 +590,40 @@ impl super::ConversationEngine {
             .take(3)
             .filter(|(s, _)| *s >= 40)
             .map(|(_, d)| {
-                let sunset = if d.sunset.is_empty() { String::new() } else { format!(", sunset {}", d.sunset) };
-                format!("**{} {}** — {}, {:.0}°F, rain {:.0}%{sunset}", d.weekday, &d.date[5..], d.desc, d.hi_f, d.precip_prob)
+                let sunset = if d.sunset.is_empty() {
+                    String::new()
+                } else {
+                    format!(", sunset {}", d.sunset)
+                };
+                format!(
+                    "**{} {}** — {}, {:.0}°F, rain {:.0}%{sunset}",
+                    d.weekday,
+                    &d.date[5..],
+                    d.desc,
+                    d.hi_f,
+                    d.precip_prob
+                )
             })
             .collect();
         let worst = scored
             .iter()
             .rev()
             .find(|(s, _)| *s < 20)
-            .map(|(_, d)| format!(" Skip {} {} ({}, rain {:.0}%).", d.weekday, &d.date[5..], d.desc, d.precip_prob))
+            .map(|(_, d)| {
+                format!(
+                    " Skip {} {} ({}, rain {:.0}%).",
+                    d.weekday,
+                    &d.date[5..],
+                    d.desc,
+                    d.precip_prob
+                )
+            })
             .unwrap_or_default();
-        let day_word = if days_until == 0 { "TODAY".to_string() } else { format!("{} ({days_until}d out)", fdate.format("%A %b %d")) };
+        let day_word = if days_until == 0 {
+            "TODAY".to_string()
+        } else {
+            format!("{} ({days_until}d out)", fdate.format("%A %b %d"))
+        };
         if best.is_empty() {
             return Some(format!(
                 "🪔📸 {fest} is {day_word} — {tradition}. The forecast around it looks rough in {city}; best of it: {}, {:.0}°F, rain {:.0}%. I'd keep plans flexible.{worst}",
@@ -497,8 +639,19 @@ impl super::ConversationEngine {
 
     /// Daily gate for tradition prep.
     pub async fn tradition_prep_due(&self) -> bool {
-        let period_ms: i64 = std::env::var("YM_TRADPREP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
-        let last: i64 = self.memory.profile_get("tradprep_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let period_ms: i64 = std::env::var("YM_TRADPREP_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
+        let last: i64 = self
+            .memory
+            .profile_get("tradprep_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
@@ -507,7 +660,10 @@ impl super::ConversationEngine {
     pub async fn tradition_prep_run(&self) -> Option<String> {
         let _ = self
             .memory
-            .profile_set("tradprep_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .profile_set(
+                "tradprep_last",
+                &chrono::Utc::now().timestamp_millis().to_string(),
+            )
             .await;
         let done: Vec<String> = self
             .memory
@@ -522,7 +678,9 @@ impl super::ConversationEngine {
             if !t["weather"].as_bool().unwrap_or(false) {
                 continue;
             }
-            let (Some(fest), Some(tr)) = (t["festival"].as_str(), t["tradition"].as_str()) else { continue };
+            let (Some(fest), Some(tr)) = (t["festival"].as_str(), t["tradition"].as_str()) else {
+                continue;
+            };
             let occ = format!("{fest}:{}", today.format("%Y"));
             if done.contains(&occ) {
                 continue;
@@ -534,12 +692,21 @@ impl super::ConversationEngine {
                     let cut = done2.len() - 60;
                     done2.drain(..cut);
                 }
-                let _ = self.memory.profile_set("trad_prepped", &serde_json::to_string(&done2).unwrap_or_default()).await;
-                self.ledger_sent("anticipate", &format!("weather-planned days for {fest} tradition")).await;
+                let _ = self
+                    .memory
+                    .profile_set(
+                        "trad_prepped",
+                        &serde_json::to_string(&done2).unwrap_or_default(),
+                    )
+                    .await;
+                self.ledger_sent(
+                    "anticipate",
+                    &format!("weather-planned days for {fest} tradition"),
+                )
+                .await;
                 return Some(msg);
             }
         }
         None
     }
-
 }

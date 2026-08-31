@@ -28,8 +28,21 @@
 
 /// Words that make a question about a price rather than about a company.
 const PRICE_WORDS: &[&str] = &[
-    "price", "quote", "trading at", "trading", "worth", "level", "at now", "doing", "market",
-    "up or down", "how is", "how's", "close", "open", "moving",
+    "price",
+    "quote",
+    "trading at",
+    "trading",
+    "worth",
+    "level",
+    "at now",
+    "doing",
+    "market",
+    "up or down",
+    "how is",
+    "how's",
+    "close",
+    "open",
+    "moving",
 ];
 
 /// Spoken names people actually use, mapped to what a data feed calls them.
@@ -113,7 +126,7 @@ pub fn symbols_in(text: &str) -> Vec<String> {
         if let Some(pos) = find_word(&t, spoken) {
             // Longer names win at the same position: "nifty 50" must not also match "nifty".
             if !found.iter().any(|(p, _)| *p == pos) {
-                found.push((pos, sym.to_string()));
+                found.push((pos, (*sym).to_string()));
             }
         }
     }
@@ -134,7 +147,9 @@ pub fn symbols_in(text: &str) -> Vec<String> {
             let sym = c.to_string();
             // "TCS" also resolves through the spoken map to TCS.NS; keeping both quotes the same
             // company twice, once with the wrong exchange.
-            let already = found.iter().any(|(_, s)| *s == sym || s.starts_with(&format!("{sym}.")));
+            let already = found
+                .iter()
+                .any(|(_, s)| *s == sym || s.starts_with(&format!("{sym}.")));
             if !already {
                 found.push((usize::MAX, sym));
             }
@@ -166,8 +181,21 @@ pub fn is_agreement(text: &str) -> bool {
         return false;
     }
     [
-        "yes", "yes please", "yeah", "yep", "sure", "ok", "okay", "please", "go ahead", "do it",
-        "please do", "sounds good", "go for it", "yes do", "alright",
+        "yes",
+        "yes please",
+        "yeah",
+        "yep",
+        "sure",
+        "ok",
+        "okay",
+        "please",
+        "go ahead",
+        "do it",
+        "please do",
+        "sounds good",
+        "go for it",
+        "yes do",
+        "alright",
     ]
     .iter()
     .any(|a| t == *a || t.starts_with(&format!("{a} ")))
@@ -191,10 +219,16 @@ pub fn symbols_with_context(text: &str, recent: &[String]) -> Vec<String> {
         // ASCII-only: `offer_at` is an offset into `lower` and is used to slice `line`, so the
         // two must agree byte for byte. `to_lowercase` is not length-preserving (E.SEC4).
         let lower = line.to_ascii_lowercase();
-        let offer_at = ["want me to", "shall i", "should i", "would you like", "want to see"]
-            .iter()
-            .filter_map(|p| lower.find(p))
-            .min();
+        let offer_at = [
+            "want me to",
+            "shall i",
+            "should i",
+            "would you like",
+            "want to see",
+        ]
+        .iter()
+        .filter_map(|p| lower.find(p))
+        .min();
         let scope = match offer_at {
             Some(i) => &line[i..],
             None => line.as_str(),
@@ -216,21 +250,39 @@ mod tests {
         // Verbatim from the session where the mind promised and never delivered. "The Indian
         // market" names no ticker but has an obvious answer, and refusing to resolve it is what
         // sent the conversation into deny-promise-fail.
-        assert!(is_price_question("let's see how the Indian market is doing"));
-        assert_eq!(symbols_in("let's see how the Indian market is doing"), vec!["^NSEI"]);
+        assert!(is_price_question(
+            "let's see how the Indian market is doing"
+        ));
+        assert_eq!(
+            symbols_in("let's see how the Indian market is doing"),
+            vec!["^NSEI"]
+        );
         assert!(is_price_question("how is the nifty doing"));
         assert_eq!(symbols_in("how is the nifty doing"), vec!["^NSEI"]);
         assert!(is_price_question("grab the Nifty 50 and Sensex"));
-        assert_eq!(symbols_in("grab the Nifty 50 and Sensex"), vec!["^NSEI", "^BSESN"]);
+        assert_eq!(
+            symbols_in("grab the Nifty 50 and Sensex"),
+            vec!["^NSEI", "^BSESN"]
+        );
     }
 
     #[test]
     fn a_person_says_the_nifty_not_caret_nsei() {
-        assert_eq!(symbols_in("what's reliance trading at"), vec!["RELIANCE.NS"]);
-        assert_eq!(symbols_in("how's infosys and tcs doing"), vec!["INFY.NS", "TCS.NS"]);
+        assert_eq!(
+            symbols_in("what's reliance trading at"),
+            vec!["RELIANCE.NS"]
+        );
+        assert_eq!(
+            symbols_in("how's infosys and tcs doing"),
+            vec!["INFY.NS", "TCS.NS"]
+        );
         // "dow" hides inside "down": this asked about bitcoin and got the Dow Jones as well.
         assert_eq!(symbols_in("is bitcoin up or down"), vec!["BTC-USD"]);
-        assert_eq!(symbols_in("is the dow up"), vec!["^DJI"], "the real Dow still resolves");
+        assert_eq!(
+            symbols_in("is the dow up"),
+            vec!["^DJI"],
+            "the real Dow still resolves"
+        );
     }
 
     #[test]
@@ -246,11 +298,16 @@ mod tests {
         // A price word with nothing nameable is an ordinary conversation, and hijacking it would be
         // worse than the bug being fixed.
         assert!(!is_price_question("how is your day going"));
-        assert!(!is_price_question("what's the market for used cars like"),
-                "'the market' was mapped to the S&P and swallowed this — too generic to keep");
+        assert!(
+            !is_price_question("what's the market for used cars like"),
+            "'the market' was mapped to the S&P and swallowed this — too generic to keep"
+        );
         assert!(!is_price_question("open the door"));
         // The weaker signal still exists for callers that want it.
-        assert!(has_price_words("how is your day going"), "'how is' is a price WORD; naming is what decides");
+        assert!(
+            has_price_words("how is your day going"),
+            "'how is' is a price WORD; naming is what decides"
+        );
     }
 
     #[test]
@@ -270,17 +327,25 @@ mod tests {
     fn a_new_question_ignores_the_old_referent() {
         // Context is a fallback, never an override: naming something new must win.
         let recent = vec!["assistant: want me to pull the Nifty 50?".to_string()];
-        assert_eq!(symbols_with_context("what's reliance at", &recent), vec!["RELIANCE.NS"]);
+        assert_eq!(
+            symbols_with_context("what's reliance at", &recent),
+            vec!["RELIANCE.NS"]
+        );
         // And a non-agreement with no symbol resolves to nothing rather than the last thing seen.
-        assert_eq!(symbols_with_context("what did you mean by that", &recent), Vec::<String>::new());
+        assert_eq!(
+            symbols_with_context("what did you mean by that", &recent),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn agreement_is_short_by_definition() {
         assert!(is_agreement("sure"));
         assert!(is_agreement("go ahead"));
-        assert!(!is_agreement("yes but only if the market is open and you can get a real quote"),
-                "a long sentence is a statement, not a bare agreement");
+        assert!(
+            !is_agreement("yes but only if the market is open and you can get a real quote"),
+            "a long sentence is a statement, not a bare agreement"
+        );
     }
 
     #[test]

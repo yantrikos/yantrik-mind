@@ -2,6 +2,9 @@
 
 use super::*;
 
+type ReelFrame = (Vec<u8>, FaceBounds, String);
+type RankedAsset = (String, FaceBounds, f32);
+
 impl super::ConversationEngine {
     /// Today's pick: (jpeg, caption). Choice cached per day; bytes re-fetched per request.
     pub async fn frame_today(&self) -> Option<(Vec<u8>, String)> {
@@ -34,7 +37,12 @@ impl super::ConversationEngine {
             }
         }
         // Pick fresh. Helper: best-quality real photo from a candidate day/window.
-        async fn best_of(src: &mind_tools::PhotoSource, from: &str, to: &str, person: &[String]) -> Option<(String, String, String)> {
+        async fn best_of(
+            src: &mind_tools::PhotoSource,
+            from: &str,
+            to: &str,
+            person: &[String],
+        ) -> Option<(String, String, String)> {
             let assets = src.taken_between(from, to, person, 60).await;
             let mut best: Option<(f32, String, String, String)> = None;
             let mut tried = 0;
@@ -42,13 +50,17 @@ impl super::ConversationEngine {
                 if tried >= 5 {
                     break;
                 }
-                let Some(bytes) = src.image_bytes(a).await else { continue };
-                let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
+                let Some(bytes) = src.image_bytes(a).await else {
+                    continue;
+                };
+                let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else {
+                    continue;
+                };
                 tried += 1;
-                if sharp < 15.0 || luma < 28.0 || luma > 228.0 {
+                if sharp < 15.0 || !(28.0..=228.0).contains(&luma) {
                     continue;
                 }
-                if best.as_ref().map(|(s, _, _, _)| sharp > *s).unwrap_or(true) {
+                if best.as_ref().is_none_or(|(s, _, _, _)| sharp > *s) {
                     best = Some((sharp, a.id.clone(), a.date.clone(), a.place.clone()));
                 }
             }
@@ -56,13 +68,23 @@ impl super::ConversationEngine {
         }
         let mmdd = today.format("%m-%d").to_string();
         let mut pick: Option<(String, String)> = None; // (asset id, caption)
-        // 1. A person's day (birthday/anniversary) — their best recent frame.
+                                                       // 1. A person's day (birthday/anniversary) — their best recent frame.
         for p in self.load_people_profiles().await {
-            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
-            let dates = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let dates = p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
             let Some(label) = dates.iter().find_map(|d| {
-                (d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str()))
-                    .then(|| d.get("label").and_then(|x| x.as_str()).unwrap_or("day").to_string())
+                (d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str())).then(|| {
+                    d.get("label")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("day")
+                        .to_string()
+                })
             }) else {
                 continue;
             };
@@ -78,7 +100,9 @@ impl super::ConversationEngine {
         // 2. A labeled event's anniversary — a photo from that very day.
         if pick.is_none() {
             for e in self.load_events().await {
-                let (Some(date), Some(label)) = (e["date"].as_str(), e["label"].as_str()) else { continue };
+                let (Some(date), Some(label)) = (e["date"].as_str(), e["label"].as_str()) else {
+                    continue;
+                };
                 if label.is_empty() || !date.ends_with(&mmdd) || date.starts_with(&dkey[..4]) {
                     continue;
                 }
@@ -86,7 +110,11 @@ impl super::ConversationEngine {
                 let to = format!("{date}T23:59:59.000Z");
                 if let Some((id, _, place)) = best_of(src, &from, &to, &[]).await {
                     let year = &date[..4];
-                    let where_ = if place.is_empty() { String::new() } else { format!(" · {}", place.split(',').next().unwrap_or("")) };
+                    let where_ = if place.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", place.split(',').next().unwrap_or(""))
+                    };
                     pick = Some((id, format!("{label} — {year}{where_}")));
                     break;
                 }
@@ -100,7 +128,11 @@ impl super::ConversationEngine {
                 let from = format!("{day}T00:00:00.000Z");
                 let to = format!("{day}T23:59:59.000Z");
                 if let Some((id, _, place)) = best_of(src, &from, &to, &[]).await {
-                    let where_ = if place.is_empty() { String::new() } else { format!(" · {}", place.split(',').next().unwrap_or("")) };
+                    let where_ = if place.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", place.split(',').next().unwrap_or(""))
+                    };
                     pick = Some((id, format!("This day, {year}{where_}")));
                     break;
                 }
@@ -119,8 +151,16 @@ impl super::ConversationEngine {
                 format!("{year}-{:02}-01T00:00:00.000Z", month + 1)
             };
             if let Some((id, d, place)) = best_of(src, &from, &to, &[]).await {
-                let where_ = if place.is_empty() { String::new() } else { format!(" · {}", place.split(',').next().unwrap_or("")) };
-                let ym = if d.len() >= 7 { d[..7].to_string() } else { format!("{year}") };
+                let where_ = if place.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", place.split(',').next().unwrap_or(""))
+                };
+                let ym = if d.len() >= 7 {
+                    d[..7].to_string()
+                } else {
+                    format!("{year}")
+                };
                 pick = Some((id, format!("From the archive · {ym}{where_}")));
             }
         }
@@ -132,7 +172,13 @@ impl super::ConversationEngine {
                 &serde_json::json!({ "date": dkey, "id": id, "caption": caption }).to_string(),
             )
             .await;
-        let a = mind_tools::PhotoAsset { id, date: String::new(), place: String::new(), file: String::new(), camera: true };
+        let a = mind_tools::PhotoAsset {
+            id,
+            date: String::new(),
+            place: String::new(),
+            file: String::new(),
+            camera: true,
+        };
         let bytes = src.image_bytes(&a).await?;
         Some((bytes, caption))
     }
@@ -144,9 +190,15 @@ impl super::ConversationEngine {
         };
         let guard = format!("style:{}", display.to_lowercase());
         if !self.studies.lock().unwrap().insert(guard.clone()) {
-            return format!("Already reading {display}'s visual history — the timeline lands here.");
+            return format!(
+                "Already reading {display}'s visual history — the timeline lands here."
+            );
         }
-        let src_name = sources.iter().find(|s| s.knows_people()).map(|s| s.name().to_string()).unwrap_or_default();
+        let src_name = sources
+            .iter()
+            .find(|s| s.knows_people())
+            .map(|s| s.name().to_string())
+            .unwrap_or_default();
         let mem = self.memory.clone();
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
@@ -179,17 +231,30 @@ impl super::ConversationEngine {
             .map(|r| {
                 let j = |k: &str| {
                     r[k].as_array()
-                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("/"))
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str())
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        })
                         .unwrap_or_default()
                 };
                 format!(
                     "{} · traditional {}% · {} · {} · vibe {} · jewelry {}",
-                    r["year"], r["trad_pct"], j("outfits"), j("colors"), j("vibe"), r["jwl"]
+                    r["year"],
+                    r["trad_pct"],
+                    j("outfits"),
+                    j("colors"),
+                    j("vibe"),
+                    r["jwl"]
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!("📈 {who} — style evolution:\n{table}\n\n{}", kv["trend"].as_str().unwrap_or(""))
+        format!(
+            "📈 {who} — style evolution:\n{table}\n\n{}",
+            kv["trend"].as_str().unwrap_or("")
+        )
     }
 
     pub async fn find_younger_self(&self, who: &str) -> String {
@@ -223,8 +288,11 @@ impl super::ConversationEngine {
             };
             // Target's era anchor: the first year their cluster is DENSE (a handful of mis-tags
             // must not drag the anchor back years).
-            let target_assets = src.assets_of_people(&[pid.clone()], 300, true).await;
-            let mut year_counts: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
+            let target_assets = src
+                .assets_of_people(std::slice::from_ref(&pid), 300, true)
+                .await;
+            let mut year_counts: std::collections::BTreeMap<i32, u32> =
+                std::collections::BTreeMap::new();
             for a in &target_assets {
                 if let Ok(y) = a.date.chars().take(4).collect::<String>().parse::<i32>() {
                     *year_counts.entry(y).or_insert(0) += 1;
@@ -253,13 +321,22 @@ impl super::ConversationEngine {
                 if count < 60 {
                     continue;
                 }
-                let assets = src.assets_of_people(&[p.id.clone()], 300, true).await;
+                let assets = src
+                    .assets_of_people(std::slice::from_ref(&p.id), 300, true)
+                    .await;
                 if assets.is_empty() {
                     continue;
                 }
                 let years: Vec<i32> = assets
                     .iter()
-                    .filter_map(|a| a.date.chars().take(4).collect::<String>().parse::<i32>().ok())
+                    .filter_map(|a| {
+                        a.date
+                            .chars()
+                            .take(4)
+                            .collect::<String>()
+                            .parse::<i32>()
+                            .ok()
+                    })
                     .collect();
                 let (y0, y1) = (
                     years.iter().min().copied().unwrap_or(0),
@@ -276,15 +353,18 @@ impl super::ConversationEngine {
                 for a in assets.iter().step_by(step).take(6) {
                     let (names, _) = src.people_in(&a.id).await;
                     sampled += 1;
-                    if names.iter().any(|n| family.iter().any(|f| f.eq_ignore_ascii_case(n))) {
+                    if names
+                        .iter()
+                        .any(|n| family.iter().any(|f| f.eq_ignore_ascii_case(n)))
+                    {
                         with_family += 1;
                     }
                 }
                 if sampled == 0 {
                     continue;
                 }
-                let co = with_family as f64 / sampled as f64;
-                let adjacency = 1.0 / (1.0 + (target_first - y1).abs() as f64); // ends near target's start
+                let co = f64::from(with_family) / f64::from(sampled);
+                let adjacency = 1.0 / (1.0 + f64::from((target_first - y1).abs())); // ends near target's start
                 let size_score = (count as f64).ln() / 10.0;
                 let score = co * 0.5 + adjacency * 0.3 + size_score * 0.2;
                 scored.push((score, p.id.clone(), count, y0, y1, co));
@@ -299,7 +379,10 @@ impl super::ConversationEngine {
                 .map(|(sc, id, n, y0, y1, co)| serde_json::json!({"id": id, "score": sc, "count": n, "y0": y0, "y1": y1, "co": co}))
                 .collect();
             let _ = mem
-                .profile_set(&format!("youngerself_cands_{}", display.to_lowercase()), &serde_json::Value::Array(runner_ups).to_string())
+                .profile_set(
+                    &format!("youngerself_cands_{}", display.to_lowercase()),
+                    &serde_json::Value::Array(runner_ups).to_string(),
+                )
                 .await;
             let Some((score, cand_id, count, y0, y1, co)) = scored.into_iter().next() else {
                 nq.lock().unwrap().push(format!(
@@ -317,7 +400,12 @@ impl super::ConversationEngine {
                 co * 100.0,
                 score
             );
-            let _ = mem.profile_set("pending_onboard", &format!("mergeface:{display}:{pid}:{cand_id}")).await;
+            let _ = mem
+                .profile_set(
+                    "pending_onboard",
+                    &format!("mergeface:{display}:{pid}:{cand_id}"),
+                )
+                .await;
             pq.lock().unwrap().push((thumb, caption, None));
             studies.lock().unwrap().remove(&guard);
         });
@@ -325,14 +413,21 @@ impl super::ConversationEngine {
     }
 
     /// Compose and queue the pair. Detached; honest notify when the archive is too shallow.
-    pub async fn then_now_run(&self, who: &str, occasion: Option<String>, target: Option<i64>) -> String {
+    pub async fn then_now_run(
+        &self,
+        who: &str,
+        occasion: Option<String>,
+        target: Option<i64>,
+    ) -> String {
         let sources = mind_tools::PhotoSource::all_from_env();
         let Some((idx, pid, display)) = self.resolve_face(&sources, who).await else {
             return format!("I don't have a face for \"{who}\" yet — `whois` teaches me people.");
         };
         let guard = format!("thennow:{}", display.to_lowercase());
         if !self.studies.lock().unwrap().insert(guard.clone()) {
-            return format!("Already composing {display}'s then-and-now — it lands in chat shortly.");
+            return format!(
+                "Already composing {display}'s then-and-now — it lands in chat shortly."
+            );
         }
         let src_name = sources[idx].name().to_string();
         let display2 = display.clone();
@@ -341,10 +436,17 @@ impl super::ConversationEngine {
             let g = self.face_gallery().await;
             g["people"][&display]["c"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect::<Vec<f32>>())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_f64().map(|x| x as f32))
+                        .collect::<Vec<f32>>()
+                })
                 .filter(|c| !c.is_empty())
         };
-        let threshold: f32 = std::env::var("YM_FACE_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.45);
+        let threshold: f32 = std::env::var("YM_FACE_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.45);
         let nq = self.notify_queue.clone();
         let pq = self.photo_queue.clone();
         let studies = self.studies.clone();
@@ -368,44 +470,66 @@ impl super::ConversationEngine {
             ) -> (Option<(Vec<u8>, String, String)>, u32) {
                 let mut best: Option<(f32, Vec<u8>, String, String)> = None;
                 let mut rejected = 0u32;
-                for a in cands.iter().filter(|a| !mind_tools::is_screenish(a)).take(20) {
-                    let Some(bytes) = src.image_bytes(a).await else { continue };
-                    let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
-                    if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
+                for a in cands
+                    .iter()
+                    .filter(|a| !mind_tools::is_screenish(a))
+                    .take(20)
+                {
+                    let Some(bytes) = src.image_bytes(a).await else {
+                        continue;
+                    };
+                    let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else {
+                        continue;
+                    };
+                    if sharp < 22.0 || !(30.0..=225.0).contains(&luma) {
                         continue;
                     }
                     // The source says this photo shows the person; verify with OUR gallery before
                     // trusting it. ML unreachable -> fall back to tag trust rather than stalling.
                     if let Some(c) = centroid {
                         if let Some(eng) = mind_tools::FaceEngine::from_env() {
-                            match eng.faces(bytes.clone()).await {
-                                Ok(faces) => {
-                                    if !faces.iter().any(|f| mind_tools::cosine(&f.embedding, c) >= threshold) {
-                                        rejected += 1;
-                                        continue;
-                                    }
+                            if let Ok(faces) = eng.faces(bytes.clone()).await {
+                                if !faces
+                                    .iter()
+                                    .any(|f| mind_tools::cosine(&f.embedding, c) >= threshold)
+                                {
+                                    rejected += 1;
+                                    continue;
                                 }
-                                Err(_) => {}
                             }
                         }
                     }
-                    if best.as_ref().map(|(s, _, _, _)| sharp > *s).unwrap_or(true) {
+                    if best.as_ref().is_none_or(|(s, _, _, _)| sharp > *s) {
                         best = Some((sharp, bytes, a.date.clone(), a.place.clone()));
                     }
                 }
                 (best.map(|(_, b, d, p)| (b, d, p)), rejected)
             }
-            let mut old = src.assets_of_people(&[pid.clone()], 1000, true).await;
-            let recent = src.assets_of_people(&[pid.clone()], 1000, false).await;
-            let have: std::collections::HashSet<String> = old.iter().map(|a| a.id.clone()).collect();
+            let mut old = src
+                .assets_of_people(std::slice::from_ref(&pid), 1000, true)
+                .await;
+            let recent = src
+                .assets_of_people(std::slice::from_ref(&pid), 1000, false)
+                .await;
+            let have: std::collections::HashSet<String> =
+                old.iter().map(|a| a.id.clone()).collect();
             old.extend(recent.into_iter().filter(|a| !have.contains(&a.id)));
-            let new = src.assets_of_people(&[pid.clone()], 40, false).await;
+            let new = src
+                .assets_of_people(std::slice::from_ref(&pid), 40, false)
+                .await;
             // TEMPORAL IDENTITY CHAIN: a child's earliest face can't match their current centroid,
             // so recognition propagates backward — each verified year's faces update a rolling
             // centroid that then verifies the next-older year. Mis-tags still fail; babyhood passes.
-            let mut by_year: std::collections::BTreeMap<String, Vec<&mind_tools::PhotoAsset>> = std::collections::BTreeMap::new();
-            for a in old.iter().filter(|a| !mind_tools::is_screenish(a) && a.date.len() >= 4) {
-                by_year.entry(a.date.chars().take(4).collect()).or_default().push(a);
+            let mut by_year: std::collections::BTreeMap<String, Vec<&mind_tools::PhotoAsset>> =
+                std::collections::BTreeMap::new();
+            for a in old
+                .iter()
+                .filter(|a| !mind_tools::is_screenish(a) && a.date.len() >= 4)
+            {
+                by_year
+                    .entry(a.date.chars().take(4).collect())
+                    .or_default()
+                    .push(a);
             }
             let mut then_res: Option<(Vec<u8>, String, String)> = None;
             let mut then_rej = 0u32;
@@ -423,20 +547,28 @@ impl super::ConversationEngine {
                         if ml_budget == 0 || tried >= 6 {
                             break;
                         }
-                        let Some(bytes) = src.image_bytes(a).await else { continue };
-                        let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else { continue };
-                        if sharp < 22.0 || luma < 30.0 || luma > 225.0 {
+                        let Some(bytes) = src.image_bytes(a).await else {
+                            continue;
+                        };
+                        let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) else {
+                            continue;
+                        };
+                        if sharp < 22.0 || !(30.0..=225.0).contains(&luma) {
                             continue;
                         }
                         tried += 1;
                         ml_budget -= 1;
-                        let Ok(faces) = eng.faces(bytes.clone()).await else { continue };
+                        let Ok(faces) = eng.faces(bytes.clone()).await else {
+                            continue;
+                        };
                         let cur = rolling.as_ref().unwrap();
                         let hit = faces
                             .iter()
                             .map(|f| (mind_tools::cosine(&f.embedding, cur), &f.embedding))
                             .filter(|(sim, _)| *sim >= chain_threshold)
-                            .max_by(|(a2, _), (b2, _)| a2.partial_cmp(b2).unwrap_or(std::cmp::Ordering::Equal));
+                            .max_by(|(a2, _), (b2, _)| {
+                                a2.partial_cmp(b2).unwrap_or(std::cmp::Ordering::Equal)
+                            });
                         match hit {
                             Some((_, emb)) => {
                                 year_hits.push(emb.clone());
@@ -450,8 +582,8 @@ impl super::ConversationEngine {
                     }
                     if let Some(best) = year_best {
                         then_res = Some(best); // keeps being replaced by ever-older years
-                        // EMA-update the rolling centroid with this year's verified faces so the
-                        // next-older year is judged by a face closer to its own era.
+                                               // EMA-update the rolling centroid with this year's verified faces so the
+                                               // next-older year is judged by a face closer to its own era.
                         if let Some(cur) = rolling.as_mut() {
                             for emb in &year_hits {
                                 for (c1, e1) in cur.iter_mut().zip(emb.iter()) {
@@ -476,7 +608,9 @@ impl super::ConversationEngine {
                 } else {
                     format!("the old archive around {display} is mostly screenshots")
                 };
-                nq.lock().unwrap().push(format!("↔ Couldn't build a truthful then-and-now — {why}."));
+                nq.lock()
+                    .unwrap()
+                    .push(format!("↔ Couldn't build a truthful then-and-now — {why}."));
                 done(&studies, &guard);
                 return;
             };
@@ -485,36 +619,55 @@ impl super::ConversationEngine {
             }
             let (now_res, _) = best_frame(&src, &new, &centroid, threshold).await;
             let Some((now_b, now_d, now_p)) = now_res else {
-                nq.lock().unwrap().push(format!("↔ No clean recent frame of {display} to pair with the old one."));
+                nq.lock().unwrap().push(format!(
+                    "↔ No clean recent frame of {display} to pair with the old one."
+                ));
                 done(&studies, &guard);
                 return;
             };
-            let (y_then, y_now) = (then_d.chars().take(4).collect::<String>(), now_d.chars().take(4).collect::<String>());
+            let (y_then, y_now) = (
+                then_d.chars().take(4).collect::<String>(),
+                now_d.chars().take(4).collect::<String>(),
+            );
             let gap: i64 = y_now.parse::<i64>().unwrap_or(0) - y_then.parse::<i64>().unwrap_or(0);
             if gap < 2 {
                 nq.lock().unwrap().push(format!("↔ {display}'s archive spans only {gap} year(s) so far — then-and-now needs more distance. It'll get better every year."));
                 done(&studies, &guard);
                 return;
             }
-            let Some(img) = mind_tools::make_collage(vec![(then_b, None), (now_b, None)]).await else {
-                nq.lock().unwrap().push("↔ The pair composition failed — honest miss.".to_string());
+            let Some(img) = mind_tools::make_collage(vec![(then_b, None), (now_b, None)]).await
+            else {
+                nq.lock()
+                    .unwrap()
+                    .push("↔ The pair composition failed — honest miss.".to_string());
                 done(&studies, &guard);
                 return;
             };
             // One warm grounded line; deterministic fallback.
             let mut caption = format!("↔ {display} — {y_then} → {y_now}");
             let places = match (then_p.is_empty(), now_p.is_empty()) {
-                (false, false) if then_p != now_p => format!(" · {} → {}", then_p.split(',').next().unwrap_or(""), now_p.split(',').next().unwrap_or("")),
+                (false, false) if then_p != now_p => format!(
+                    " · {} → {}",
+                    then_p.split(',').next().unwrap_or(""),
+                    now_p.split(',').next().unwrap_or("")
+                ),
                 _ => String::new(),
             };
             caption.push_str(&places);
             let prompt = format!(
                 "One warm line (max 14 words) for a side-by-side photo pair of {display}: left from {y_then}, right from {y_now} ({gap} years apart). Use only these facts. No hashtags, no quotes."
             );
-            let cfg = GenerationConfig { max_tokens: 50, think: mind_inference::think_for("studio_title", Some(false)), ..GenerationConfig::default() };
+            let cfg = GenerationConfig {
+                max_tokens: 50,
+                think: mind_inference::think_for("studio_title", Some(false)),
+                ..GenerationConfig::default()
+            };
             // Private: a household member's name with the places and years they were photographed (E.SEC9).
             // Refusal degrades to the deterministic path below rather than propagating.
-            if let Ok(r) = inf.chat_grounded(vec![ChatMessage::user(&prompt)], cfg).await {
+            if let Ok(r) = inf
+                .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+                .await
+            {
                 let line = r.text.trim().trim_matches('"').to_string();
                 if line.len() > 8 && line.len() < 120 {
                     caption.push_str(&format!("\n{line}"));
@@ -543,11 +696,19 @@ impl super::ConversationEngine {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         for p in self.load_people_profiles().await {
-            let Some(name) = p.get("name").and_then(|x| x.as_str()) else { continue };
-            let dates = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let dates = p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
             let is_bday = dates.iter().any(|d| {
                 d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str())
-                    && d.get("label").and_then(|x| x.as_str()).map(|l| l.to_lowercase().contains("birthday")).unwrap_or(false)
+                    && d.get("label")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|l| l.to_lowercase().contains("birthday"))
             });
             if !is_bday {
                 continue;
@@ -575,7 +736,13 @@ impl super::ConversationEngine {
             let cut = sent.len() - 60;
             sent.drain(..cut);
         }
-        let _ = self.memory.profile_set("thennow_sent", &serde_json::to_string(&sent).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "thennow_sent",
+                &serde_json::to_string(&sent).unwrap_or_default(),
+            )
+            .await;
     }
 
     /// Build a growing-up time-lapse for a named person. Walks the archive month by month in a
@@ -595,8 +762,10 @@ impl super::ConversationEngine {
         tokio::spawn(async move {
             use chrono::Datelike;
             let sources = mind_tools::PhotoSource::all_from_env();
-            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else { return };
-            let mut frames: Vec<(Vec<u8>, (f32, f32, f32, f32), String)> = Vec::new();
+            let Some(src) = sources.into_iter().find(|s| s.name() == src_name) else {
+                return;
+            };
+            let mut frames: Vec<ReelFrame> = Vec::new();
             let (mut first_year, mut last_year) = (0i32, 0i32);
             let end = chrono::Utc::now().date_naive();
             let mut cur = chrono::NaiveDate::from_ymd_opt(2014, 1, 1).unwrap_or(end);
@@ -609,21 +778,31 @@ impl super::ConversationEngine {
                 }
                 .unwrap_or(end);
                 let cands = src
-                    .taken_between(&format!("{cur}T00:00:00.000Z"), &format!("{nxt}T00:00:00.000Z"), &[pid.clone()], 3)
+                    .taken_between(
+                        &format!("{cur}T00:00:00.000Z"),
+                        &format!("{nxt}T00:00:00.000Z"),
+                        std::slice::from_ref(&pid),
+                        3,
+                    )
                     .await;
-                let mut best: Option<(String, (f32, f32, f32, f32), f32)> = None;
+                let mut best: Option<RankedAsset> = None;
                 for a in &cands {
                     if let Some((x1, y1, x2, y2, pxw)) = src.face_box(&a.id, &pid).await {
                         if pxw < 48.0 {
                             continue; // too small to carry a frame
                         }
-                        if best.as_ref().map_or(true, |b| pxw > b.2) {
+                        if best.as_ref().is_none_or(|b| pxw > b.2) {
                             best = Some((a.id.clone(), (x1, y1, x2, y2), pxw));
                         }
                     }
                 }
                 if let Some((aid, bbox, _)) = best {
-                    let asset = mind_tools::PhotoAsset { id: aid, date: String::new(), place: String::new(), ..Default::default() };
+                    let asset = mind_tools::PhotoAsset {
+                        id: aid,
+                        date: String::new(),
+                        place: String::new(),
+                        ..Default::default()
+                    };
                     if let Some(bytes) = src.image_bytes(&asset).await {
                         frames.push((bytes, bbox, cur.format("%b %Y").to_string()));
                         if first_year == 0 {
@@ -659,7 +838,13 @@ impl super::ConversationEngine {
     /// One warm line for a photo memory: local vision reads the scene, the people layer knows who
     /// they ARE (relationships), a small pass fuses them. The substrate-grounding is the moat — a
     /// cloud gallery can say "3 years ago"; it can't say who these people are to you.
-    pub(crate) async fn narrate_memory(&self, bytes: &[u8], names: &[String], when: &str, place: &str) -> Option<String> {
+    pub(crate) async fn narrate_memory(
+        &self,
+        bytes: &[u8],
+        names: &[String],
+        when: &str,
+        place: &str,
+    ) -> Option<String> {
         let scene = self
             .analyze_image_bytes(
                 bytes.to_vec(),
@@ -667,7 +852,13 @@ impl super::ConversationEngine {
                 "ONE short line: what's happening in this photo — setting, activity, mood. No names.",
             )
             .await;
-        let scene: String = scene.lines().next().unwrap_or("").chars().take(140).collect();
+        let scene: String = scene
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(140)
+            .collect();
         if scene.len() < 5 {
             return None;
         }
@@ -676,24 +867,49 @@ impl super::ConversationEngine {
         for n in names.iter().take(4) {
             let rel = store
                 .iter()
-                .find(|p| p.get("name").and_then(|x| x.as_str()).map(|s| s.eq_ignore_ascii_case(n)).unwrap_or(false))
+                .find(|p| {
+                    p.get("name")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|s| s.eq_ignore_ascii_case(n))
+                })
                 .and_then(|p| p.get("relationship").and_then(|x| x.as_str()))
                 .unwrap_or("");
-            who.push(if rel.is_empty() { n.clone() } else { format!("{n} (his {rel})") });
+            who.push(if rel.is_empty() {
+                n.clone()
+            } else {
+                format!("{n} (his {rel})")
+            });
         }
         let prompt = format!(
             "Write ONE warm, personal sentence (max 22 words) captioning a photo memory for the user. Taken: {when}{}. People in it: {}. Scene: {scene}. Ground it ONLY in these facts — no invented details, no emoji, no preamble.",
             if place.is_empty() { String::new() } else { format!(" in {place}") },
             if who.is_empty() { "not identified".to_string() } else { who.join(", ") },
         );
-        let cfg = GenerationConfig { max_tokens: 90, think: mind_inference::think_for("studio_blurb", Some(false)), ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 90,
+            think: mind_inference::think_for("studio_blurb", Some(false)),
+            ..GenerationConfig::default()
+        };
         self.inference
             // Private: names WITH relationships ("his wife"), place and date (E.SEC9).
             // Refusal degrades to the deterministic path below rather than propagating.
-            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
             .await
             .ok()
-            .map(|r| r.text.trim().trim_matches('"').chars().take(180).collect::<String>())
+            .map(|r| {
+                r.text
+                    .trim()
+                    .trim_matches('"')
+                    .chars()
+                    .take(180)
+                    .collect::<String>()
+            })
             .filter(|t| t.len() > 10)
     }
 
@@ -712,43 +928,88 @@ impl super::ConversationEngine {
     }
 
     /// Studio with explicit DELIVERY TARGET and SPEAKER ("me"/"us" resolve around the speaker).
-    pub async fn photo_create_for(&self, request: &str, target: Option<i64>, speaker: Option<&str>) -> String {
+    pub async fn photo_create_for(
+        &self,
+        request: &str,
+        target: Option<i64>,
+        speaker: Option<&str>,
+    ) -> String {
         let sources = mind_tools::PhotoSource::all_from_env();
         let Some(src_idx) = sources.iter().position(|s| s.knows_people()) else {
-            return "No face-aware photo source is connected — I can't compose from the library.".to_string();
+            return "No face-aware photo source is connected — I can't compose from the library."
+                .to_string();
         };
         // Parse the ask into structured intent.
         let parse_prompt = format!(
             "User request: \"{}\". Extract photo-creation intent. Output ONLY JSON: {{\"people\":[\"<names mentioned; 'me' for the user themself; 'us' for user+partner>\"],\"theme\":\"<subject/style terms like party traditional outfit / morning cozy light / beach>\",\"format\":\"<collage or single>\",\"count\":<4, 6 or 9 for collages; 1 for single>,\"caption_mood\":\"<warm/funny/poetic/romantic>\"}}",
             request.trim()
         );
-        let cfg = GenerationConfig { max_tokens: 200, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 200,
+            ..GenerationConfig::default()
+        };
         let v = self
             .inference
             // Private: the user's raw request, which names people (E.SEC9).
             // Refusal degrades to the deterministic path below rather than propagating.
-            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&parse_prompt)], cfg)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&parse_prompt),
+                ],
+                cfg,
+            )
             .await
             .map(|r| parse_json_obj(&r.text))
             .unwrap_or_default();
-        let theme = v.get("theme").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let format_kind = v.get("format").and_then(|x| x.as_str()).unwrap_or("collage").trim().to_lowercase();
+        let theme = v
+            .get("theme")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let format_kind = v
+            .get("format")
+            .and_then(|x| x.as_str())
+            .unwrap_or("collage")
+            .trim()
+            .to_lowercase();
         let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(6) as usize;
-        let caption_mood = v.get("caption_mood").and_then(|x| x.as_str()).unwrap_or("warm").trim().to_string();
+        let caption_mood = v
+            .get("caption_mood")
+            .and_then(|x| x.as_str())
+            .unwrap_or("warm")
+            .trim()
+            .to_string();
         // Resolve "me"/"us"/names to faces via the people layer + face-aware source.
         let self_name = match speaker {
             Some(sp) => sp.to_string(),
-            None => self.memory.profile_get("name").await.ok().flatten().unwrap_or_default(),
+            None => self
+                .memory
+                .profile_get("name")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
         };
         let spouse = self
             .load_people_profiles()
             .await
             .iter()
-            .find(|p| p.get("relationship").and_then(|x| x.as_str()).map(|r| r.contains("wife") || r.contains("husband")).unwrap_or(false))
+            .find(|p| {
+                p.get("relationship")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|r| r.contains("wife") || r.contains("husband"))
+            })
             .and_then(|p| p.get("name").and_then(|x| x.as_str()).map(String::from))
             .unwrap_or_default();
         let mut names: Vec<String> = Vec::new();
-        for p in v.get("people").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+        for p in v
+            .get("people")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             let Some(n) = p.as_str() else { continue };
             match n.trim().to_lowercase().as_str() {
                 "me" | "myself" | "i" => {
@@ -783,9 +1044,21 @@ impl super::ConversationEngine {
                 names.join("/")
             );
         }
-        let people_desc = if resolved.is_empty() { "the family library".to_string() } else { resolved.join(" and ") };
+        let people_desc = if resolved.is_empty() {
+            "the family library".to_string()
+        } else {
+            resolved.join(" and ")
+        };
         // Compose in the background — selection + composition + caption take a minute.
-        let guard = format!("create:{}", request.trim().to_lowercase().chars().take(48).collect::<String>());
+        let guard = format!(
+            "create:{}",
+            request
+                .trim()
+                .to_lowercase()
+                .chars()
+                .take(48)
+                .collect::<String>()
+        );
         if !self.studies.lock().unwrap().insert(guard.clone()) {
             return "Already composing that one — it lands here shortly.".to_string();
         }
@@ -799,20 +1072,42 @@ impl super::ConversationEngine {
         let desc2 = people_desc.clone();
         let fmt2 = format_kind.clone();
         tokio::spawn(async move {
-            match studio_task(src_name, person_ids, desc2, theme2, fmt2, count, caption_mood, inference, persona).await {
+            match studio_task(
+                src_name,
+                person_ids,
+                desc2,
+                theme2,
+                fmt2,
+                count,
+                caption_mood,
+                inference,
+                persona,
+            )
+            .await
+            {
                 Ok((img, caption)) => {
                     pq.lock().unwrap().push((img, caption, target));
                 }
                 Err(msg) => {
-                    nq.lock().unwrap().push(format!("🎨 Couldn't compose it: {msg}"));
+                    nq.lock()
+                        .unwrap()
+                        .push(format!("🎨 Couldn't compose it: {msg}"));
                 }
             }
             studies.lock().unwrap().remove(&guard);
         });
         format!(
             "🎨 Composing — {} of {people_desc}{} — it lands here in a minute or two.",
-            if format_kind == "single" { "a picture".to_string() } else { format!("a collage") },
-            if theme.is_empty() { String::new() } else { format!(" ({theme})") }
+            if format_kind == "single" {
+                "a picture".to_string()
+            } else {
+                "a collage".to_string()
+            },
+            if theme.is_empty() {
+                String::new()
+            } else {
+                format!(" ({theme})")
+            }
         )
     }
 
@@ -839,9 +1134,11 @@ impl super::ConversationEngine {
         let total0 = acc["total"].as_u64().unwrap_or(0);
         let guard = format!("tastes:{}", disp.to_lowercase());
         if !self.studies.lock().unwrap().insert(guard.clone()) {
-            return format!("A taste study of {disp} is already running — the update lands here shortly.");
+            return format!(
+                "A taste study of {disp} is already running — the update lands here shortly."
+            );
         }
-        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid.clone(), disp.clone());
+        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid, disp.clone());
         let mem = self.memory.clone();
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
@@ -869,9 +1166,14 @@ impl super::ConversationEngine {
         let key = format!("closet:{}", who.trim().to_lowercase());
         if let Ok(Some(prev)) = self.memory.profile_get(&key).await {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&prev) {
-                if chrono::Utc::now().timestamp_millis() - v["ts"].as_i64().unwrap_or(0) < 30 * 86_400_000 {
+                if chrono::Utc::now().timestamp_millis() - v["ts"].as_i64().unwrap_or(0)
+                    < 30 * 86_400_000
+                {
                     if let Some(t) = v["text"].as_str() {
-                        return format!("{t}\n\n(cached study — `closet {} fresh` to redo)", who.trim());
+                        return format!(
+                            "{t}\n\n(cached study — `closet {} fresh` to redo)",
+                            who.trim()
+                        );
                     }
                 }
             }
@@ -885,9 +1187,11 @@ impl super::ConversationEngine {
         }
         let guard = format!("closet:{}", disp.to_lowercase());
         if !self.studies.lock().unwrap().insert(guard.clone()) {
-            return format!("Already inventorying {disp}'s photos — the catalog lands here shortly.");
+            return format!(
+                "Already inventorying {disp}'s photos — the catalog lands here shortly."
+            );
         }
-        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid.clone(), disp.clone());
+        let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid, disp.clone());
         let mem = self.memory.clone();
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
@@ -912,7 +1216,10 @@ impl super::ConversationEngine {
                 let ts = v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0);
                 if chrono::Utc::now().timestamp_millis() - ts < 30 * 86_400_000 {
                     if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
-                        return format!("{t}\n\n(from my photo study — say `gift {} fresh` to redo it)", who.trim());
+                        return format!(
+                            "{t}\n\n(from my photo study — say `gift {} fresh` to redo it)",
+                            who.trim()
+                        );
                     }
                 }
             }
@@ -928,13 +1235,22 @@ impl super::ConversationEngine {
         let store = self.load_people_profiles().await;
         let known = store
             .iter()
-            .find(|p| p.get("name").and_then(|x| x.as_str()).map(|s| s.eq_ignore_ascii_case(&disp)).unwrap_or(false))
+            .find(|p| {
+                p.get("name")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&disp))
+            })
             .map(|p| {
                 let rel = p.get("relationship").and_then(|x| x.as_str()).unwrap_or("");
                 let facts: Vec<String> = p
                     .get("facts")
                     .and_then(|x| x.as_array())
-                    .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).take(8).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .take(8)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 format!("{rel}. {}", facts.join("; "))
             })
@@ -960,7 +1276,9 @@ impl super::ConversationEngine {
             .unwrap_or_default();
         let guard = format!("gift:{}", disp.to_lowercase());
         if !self.studies.lock().unwrap().insert(guard.clone()) {
-            return format!("Already studying {disp}'s photos for gifts — results land here shortly.");
+            return format!(
+                "Already studying {disp}'s photos for gifts — results land here shortly."
+            );
         }
         let (src_name, pid2, disp2) = (sources[i].name().to_string(), pid.clone(), disp.clone());
         let mem = self.memory.clone();
@@ -969,7 +1287,19 @@ impl super::ConversationEngine {
         let inference = self.inference.clone();
         let persona = self.persona.clone();
         tokio::spawn(async move {
-            if let Some(t) = gift_task(src_name, pid2, disp2, known, closet_note, tastes_note, mem, inference, persona).await {
+            if let Some(t) = gift_task(
+                src_name,
+                pid2,
+                disp2,
+                known,
+                closet_note,
+                tastes_note,
+                mem,
+                inference,
+                persona,
+            )
+            .await
+            {
                 nq.lock().unwrap().push(t);
             }
             studies.lock().unwrap().remove(&guard);
@@ -979,12 +1309,26 @@ impl super::ConversationEngine {
 
     /// Proactive gift scout gate: at most one study per period, only when photo sources exist.
     pub async fn gift_scout_due(&self) -> bool {
-        if !mind_tools::PhotoSource::all_from_env().iter().any(|s| s.knows_people()) {
+        if !mind_tools::PhotoSource::all_from_env()
+            .iter()
+            .any(|s| s.knows_people())
+        {
             return false;
         }
-        let period_ms: i64 = std::env::var("YM_GIFTSCOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms: i64 = std::env::var("YM_GIFTSCOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
         let period_ms = (period_ms as f64 * self.domain_pace("gift").await) as i64;
-        let last: i64 = self.memory.profile_get("gift_scout_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let last: i64 = self
+            .memory
+            .profile_get("gift_scout_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
@@ -993,7 +1337,10 @@ impl super::ConversationEngine {
     pub async fn gift_scout_run(&self) -> Option<String> {
         let _ = self
             .memory
-            .profile_set("gift_scout_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .profile_set(
+                "gift_scout_last",
+                &chrono::Utc::now().timestamp_millis().to_string(),
+            )
             .await;
         let today = local_now();
         let store = self.load_people_profiles().await;
@@ -1002,14 +1349,21 @@ impl super::ConversationEngine {
             if name.is_empty() {
                 continue;
             }
-            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            for d in p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
                 let (Some(mmdd), Some(label)) = (
                     d.get("mmdd").and_then(|x| x.as_str()),
                     d.get("label").and_then(|x| x.as_str()),
                 ) else {
                     continue;
                 };
-                let Some(days) = days_until_mmdd(mmdd, &today) else { continue };
+                let Some(days) = days_until_mmdd(mmdd, &today) else {
+                    continue;
+                };
                 if !(0..=25).contains(&days) {
                     continue;
                 }
@@ -1017,7 +1371,10 @@ impl super::ConversationEngine {
                 let key = format!("gift_intel:{}", name.to_lowercase());
                 if let Ok(Some(prev)) = self.memory.profile_get(&key).await {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&prev) {
-                        if chrono::Utc::now().timestamp_millis() - v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0) < 30 * 86_400_000 {
+                        if chrono::Utc::now().timestamp_millis()
+                            - v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)
+                            < 30 * 86_400_000
+                        {
                             continue;
                         }
                     }
@@ -1027,13 +1384,13 @@ impl super::ConversationEngine {
                     continue;
                 }
                 if kick.starts_with("🎁") {
-                    self.ledger_sent("gift", &format!("proactive gift intel for {name}")).await;
-                return Some(format!("{name}'s {label} is in {days} day(s) — here's what their photos say:\n\n{kick}"));
+                    self.ledger_sent("gift", &format!("proactive gift intel for {name}"))
+                        .await;
+                    return Some(format!("{name}'s {label} is in {days} day(s) — here's what their photos say:\n\n{kick}"));
                 }
                 return Some(format!("{name}'s {label} is in {days} day(s) — I'm studying their photos now; gift ideas will follow shortly."));
             }
         }
         None
     }
-
 }

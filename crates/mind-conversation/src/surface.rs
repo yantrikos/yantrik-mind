@@ -208,7 +208,10 @@ pub(crate) fn ledger_spend_from(text: &str, today: &str) -> Option<LedgerSpend> 
         if l.contains("tokens=UNMEASURED") {
             out.unmeasured += 1;
         }
-        let usd = l.rsplit_once("usd=").and_then(|(_, v)| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
+        let usd = l
+            .rsplit_once("usd=")
+            .and_then(|(_, v)| v.trim().parse::<f64>().ok())
+            .unwrap_or(0.0);
         let toks = l
             .split("tokens=")
             .nth(1)
@@ -223,13 +226,21 @@ pub(crate) fn ledger_spend_from(text: &str, today: &str) -> Option<LedgerSpend> 
         }
         let lane = l.split(" | ").nth(1).unwrap_or("unknown");
         let lane = lane.split(':').next().unwrap_or(lane).to_string();
-        let e = lanes.entry(lane.clone()).or_insert_with(|| LaneSpend { lane, ..Default::default() });
+        let e = lanes.entry(lane.clone()).or_insert_with(|| LaneSpend {
+            lane,
+            ..Default::default()
+        });
         e.runs += 1;
         e.tokens += toks;
         e.usd += usd;
     }
     out.by_lane = lanes.into_values().collect();
-    out.by_lane.sort_by(|a, b| b.usd.partial_cmp(&a.usd).unwrap_or(std::cmp::Ordering::Equal).then(b.tokens.cmp(&a.tokens)));
+    out.by_lane.sort_by(|a, b| {
+        b.usd
+            .partial_cmp(&a.usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.tokens.cmp(&a.tokens))
+    });
     Some(out)
 }
 
@@ -453,6 +464,7 @@ pub const TYPED_VERBS: &[&str] = &[
     "funnel_json",
     "capabilities_json",
     "orders_json",
+    "horizons_json",
     // The executive's CURRENT posture, for the cockpit's Executive pane. Advertised here is what
     // switches the pane on: it is gated on this handshake and shows an honest "predates" state
     // until the box says it serves this.
@@ -544,21 +556,36 @@ impl ConversationEngine {
         for c in conflicts.iter().take(4) {
             attention.push(AttentionItem {
                 kind: AttentionKind::Contradiction,
-                severity: if c.severity >= 0.8 { Severity::Warn } else { Severity::Info },
+                severity: if c.severity >= 0.8 {
+                    Severity::Warn
+                } else {
+                    Severity::Info
+                },
                 headline: "Two things I know disagree".to_string(),
-                detail: format!("\u{201c}{}\u{201d} vs \u{201c}{}\u{201d}", c.belief_a, c.belief_b),
+                detail: format!(
+                    "\u{201c}{}\u{201d} vs \u{201c}{}\u{201d}",
+                    c.belief_a, c.belief_b
+                ),
                 action: Some(":conflicts".to_string()),
             });
         }
 
         // Measured tool unreliability. The agent loop already gets told this in its prompt; the
         // operator was the one who couldn't see it.
-        for (tool, rate, n) in tools.unwrap_or_default().iter().filter(|(_, r, n)| *r < 0.5 && *n >= 3).take(3) {
+        for (tool, rate, n) in tools
+            .unwrap_or_default()
+            .iter()
+            .filter(|(_, r, n)| *r < 0.5 && *n >= 3)
+            .take(3)
+        {
             attention.push(AttentionItem {
                 kind: AttentionKind::UnreliableTool,
                 severity: Severity::Warn,
                 headline: format!("{tool} has been unreliable"),
-                detail: format!("succeeded {:.0}% of the last {n} uses — treat its results with suspicion", rate * 100.0),
+                detail: format!(
+                    "succeeded {:.0}% of the last {n} uses — treat its results with suspicion",
+                    rate * 100.0
+                ),
                 action: None,
             });
         }
@@ -570,7 +597,10 @@ impl ConversationEngine {
         let mut failures: Vec<&crate::delegate::JobRow> = jobs
             .iter()
             .filter(|j| j.status == "failed")
-            .filter(|j| j.finished_ms.map(|f| now_ms - f < FAILURE_WINDOW_MS).unwrap_or(false))
+            .filter(|j| {
+                j.finished_ms
+                    .is_some_and(|f| now_ms - f < FAILURE_WINDOW_MS)
+            })
             .collect();
         failures.sort_by_key(|j| std::cmp::Reverse(j.finished_ms.unwrap_or(0)));
         for j in failures.into_iter().take(2) {
@@ -616,7 +646,11 @@ impl ConversationEngine {
                         started_ms: j.started_ms,
                         // A row whose start was never recorded reports 0 elapsed rather than an
                         // absurd 58-year runtime computed against epoch 0.
-                        elapsed_s: if j.started_ms > 0 { (now_ms - j.started_ms) / 1000 } else { 0 },
+                        elapsed_s: if j.started_ms > 0 {
+                            (now_ms - j.started_ms) / 1000
+                        } else {
+                            0
+                        },
                     })
                     .collect(),
             },
@@ -631,9 +665,9 @@ impl ConversationEngine {
                     // a birthday at 00:00 read as "1d ago" by mid-morning, and the client rendered
                     // any negative as overdue. What the panel means by "today" is the local date,
                     // so compare dates.
-                    in_days: chrono::DateTime::from_timestamp_millis(at_ms)
-                        .map(|t| (t.with_timezone(now.offset()).date_naive() - now.date_naive()).num_days())
-                        .unwrap_or(0),
+                    in_days: chrono::DateTime::from_timestamp_millis(at_ms).map_or(0, |t| {
+                        (t.with_timezone(now.offset()).date_naive() - now.date_naive()).num_days()
+                    }),
                     label,
                     task_id,
                 })
@@ -679,7 +713,9 @@ impl ConversationEngine {
     /// Standing orders, typed. Reads the same recipe store the waking tick reads, so the list is
     /// what will actually happen — not a separate registry that can drift from it.
     pub fn orders_report(&self) -> OrdersReport {
-        let Some(recipes) = &self.recipes else { return OrdersReport::default() };
+        let Some(recipes) = &self.recipes else {
+            return OrdersReport::default();
+        };
         let now = local_now().timestamp_millis();
         let mut orders: Vec<StandingOrder> = Vec::new();
         for (state, rows) in [
@@ -704,7 +740,10 @@ impl ConversationEngine {
         orders.sort_by_key(|o| o.next_ms);
         // `store` is true iff durable scheduling exists. `list_sleeping` returns empty both when
         // there is no store and when there is nothing parked, so ask the engine directly.
-        OrdersReport { store: recipes.has_store(), orders }
+        OrdersReport {
+            store: recipes.has_store(),
+            orders,
+        }
     }
 
     /// Open commitments and where each sits in its life.
@@ -721,7 +760,8 @@ impl ConversationEngine {
         let mut rep = ThreadReport::default();
 
         for t in open {
-            let deadline = parse_deadline_ms(&t.description, &today).or_else(|| t.due_ms.map(|m| m as i64));
+            let deadline =
+                parse_deadline_ms(&t.description, &today).or_else(|| t.due_ms.map(|m| m as i64));
             let prior = asked.get(&t.id).and_then(|v| v.as_i64());
             let state = classify(&t, now, deadline, prior);
             let row = Thread {
@@ -747,8 +787,10 @@ impl ConversationEngine {
             }
         }
         // Soonest deadline first; undated last, since an open-ended intention has no urgency.
-        rep.carrying.sort_by_key(|t| t.deadline_ms.unwrap_or(i64::MAX));
-        rep.closing.sort_by_key(|t| std::cmp::Reverse(t.days_over.unwrap_or(0)));
+        rep.carrying
+            .sort_by_key(|t| t.deadline_ms.unwrap_or(i64::MAX));
+        rep.closing
+            .sort_by_key(|t| std::cmp::Reverse(t.days_over.unwrap_or(0)));
         rep
     }
 
@@ -792,8 +834,16 @@ impl ConversationEngine {
         // Worst first: a failing skill is the one worth looking at, and burying it under the healthy
         // ones is how a quarantine goes unnoticed until something depends on it.
         rep.skills.sort_by(|a, b| {
-            let key = |s: &SkillRow| (s.status != "quarantined", !s.failing, s.success_rate.unwrap_or(2.0));
-            key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
+            let key = |s: &SkillRow| {
+                (
+                    s.status != "quarantined",
+                    !s.failing,
+                    s.success_rate.unwrap_or(2.0),
+                )
+            };
+            key(a)
+                .partial_cmp(&key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         rep
     }
@@ -825,10 +875,24 @@ impl ConversationEngine {
             });
         }
         capabilities.sort_by(|a, b| a.category.cmp(&b.category).then(a.id.cmp(&b.id)));
-        let connected = capabilities.iter().filter(|c| c.availability == Availability::Ready).count();
-        let unavailable = capabilities.iter().filter(|c| c.availability == Availability::Unavailable).count();
-        let disabled = capabilities.iter().filter(|c| c.availability == Availability::Disabled).count();
-        CapabilityReport { capabilities, connected, unavailable, disabled }
+        let connected = capabilities
+            .iter()
+            .filter(|c| c.availability == Availability::Ready)
+            .count();
+        let unavailable = capabilities
+            .iter()
+            .filter(|c| c.availability == Availability::Unavailable)
+            .count();
+        let disabled = capabilities
+            .iter()
+            .filter(|c| c.availability == Availability::Disabled)
+            .count();
+        CapabilityReport {
+            capabilities,
+            connected,
+            unavailable,
+            disabled,
+        }
     }
 
     /// The first DECLARED requirement this engine cannot satisfy, phrased for the operator.
@@ -891,8 +955,8 @@ fn resource_state() -> ResourceState {
 /// LLM spend from the token ledger. `None` when the ledger is absent or empty — "not measured"
 /// must stay distinguishable from "$0.00 spent".
 fn build_spend() -> Option<LedgerSpend> {
-    let path =
-        std::env::var("YM_TOKEN_LEDGER").unwrap_or_else(|_| "/var/lib/yantrik-mind/token_ledger.log".to_string());
+    let path = std::env::var("YM_TOKEN_LEDGER")
+        .unwrap_or_else(|_| "/var/lib/yantrik-mind/token_ledger.log".to_string());
     let text = std::fs::read_to_string(path).ok()?;
     // The ledger stamps UTC, so "today" is UTC too. Local-day bucketing here would put the
     // evening's spend on tomorrow's tally for anyone east of Greenwich.
@@ -901,7 +965,9 @@ fn build_spend() -> Option<LedgerSpend> {
 
 /// Pure transform from the raw ledger to the typed report — separated from the async read so it is
 /// directly testable without a memory handle.
-pub(crate) fn funnel_from_counters(counters: &serde_json::Map<String, serde_json::Value>) -> FunnelReport {
+pub(crate) fn funnel_from_counters(
+    counters: &serde_json::Map<String, serde_json::Value>,
+) -> FunnelReport {
     let mut totals: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     let mut days = 0usize;
     for stages in counters.values() {
@@ -915,7 +981,12 @@ pub(crate) fn funnel_from_counters(counters: &serde_json::Map<String, serde_json
     let get = |k: &str| totals.get(k).copied().unwrap_or(0);
     let events_by_domain: Vec<Count> = totals
         .iter()
-        .filter_map(|(k, v)| k.strip_prefix("event:").map(|d| Count { label: d.to_string(), n: *v }))
+        .filter_map(|(k, v)| {
+            k.strip_prefix("event:").map(|d| Count {
+                label: d.to_string(),
+                n: *v,
+            })
+        })
         .collect();
     let mut kills: Vec<Count> = [
         "no-packets",
@@ -929,7 +1000,10 @@ pub(crate) fn funnel_from_counters(counters: &serde_json::Map<String, serde_json
         "below-band",
     ]
     .iter()
-    .map(|k| Count { label: (*k).to_string(), n: get(&format!("knock:{k}")) })
+    .map(|k| Count {
+        label: (*k).to_string(),
+        n: get(&format!("knock:{k}")),
+    })
     .filter(|c| c.n > 0)
     .collect();
     kills.sort_by(|a, b| b.n.cmp(&a.n));
@@ -963,15 +1037,26 @@ mod tests {
 2026-08-14T01:40:00Z | delegate:a1b2#2 | qwen3.8-max | tokens=100000 (in=10 cache_w=1000 cache_r=98000 out=990) | usd=0.5000
 2026-08-14T02:10:00Z | delegate:c3d4#1 | unknown | tokens=UNMEASURED | usd=UNMEASURED
 ";
-        let s = ledger_spend_from(text, "2026-08-14").expect("a non-empty ledger reports something");
+        let s =
+            ledger_spend_from(text, "2026-08-14").expect("a non-empty ledger reports something");
 
-        assert_eq!(s.total_tokens, 1_070_535, "all-time spans every day in the file");
-        assert_eq!(s.today_tokens, 1_000_000, "yesterday's builder run is not today's spend");
+        assert_eq!(
+            s.total_tokens, 1_070_535,
+            "all-time spans every day in the file"
+        );
+        assert_eq!(
+            s.today_tokens, 1_000_000,
+            "yesterday's builder run is not today's spend"
+        );
         assert!((s.today_usd - 2.0).abs() < 1e-9);
 
         // Rounds of one job roll up into the lane; the delegation lane outspends the builder ~26x,
         // which is the whole reason a single undifferentiated total hid the problem.
-        assert_eq!(s.by_lane.len(), 2, "delegate:a1b2#1, #2 and c3d4#1 are ONE lane, not three");
+        assert_eq!(
+            s.by_lane.len(),
+            2,
+            "delegate:a1b2#1, #2 and c3d4#1 are ONE lane, not three"
+        );
         assert_eq!(s.by_lane[0].lane, "delegate", "biggest spender first");
         assert_eq!(s.by_lane[0].runs, 3);
         assert_eq!(s.by_lane[1].lane, "builder");
@@ -982,8 +1067,14 @@ mod tests {
             "UNMEASURED contributes to the count and to no total — a round nobody measured must never be absorbed as zero"
         );
 
-        assert!(ledger_spend_from("", "2026-08-14").is_none(), "an empty ledger is not-measured, not $0.00");
-        assert!(ledger_spend_from("   \n\n", "2026-08-14").is_none(), "whitespace is still empty");
+        assert!(
+            ledger_spend_from("", "2026-08-14").is_none(),
+            "an empty ledger is not-measured, not $0.00"
+        );
+        assert!(
+            ledger_spend_from("   \n\n", "2026-08-14").is_none(),
+            "whitespace is still empty"
+        );
     }
 
     fn ledger() -> serde_json::Map<String, serde_json::Value> {
@@ -1001,7 +1092,10 @@ mod tests {
         let r = funnel_from_counters(&ledger());
         assert_eq!(r.days, 1);
         assert_eq!(r.events_total, 42, "event domains must sum");
-        assert_eq!(r.kills[0].label, "not-knockworthy", "biggest killer must sort first");
+        assert_eq!(
+            r.kills[0].label, "not-knockworthy",
+            "biggest killer must sort first"
+        );
         assert_eq!(r.kills_total, 12);
         assert_eq!(r.sent, 1);
         // 12 of 13 attempts died.
@@ -1014,7 +1108,10 @@ mod tests {
     #[test]
     fn no_attempts_means_no_rate_not_zero_percent() {
         let r = funnel_from_counters(&serde_json::Map::new());
-        assert!(r.kill_rate.is_none(), "a rate over zero attempts is undefined, not 0%");
+        assert!(
+            r.kill_rate.is_none(),
+            "a rate over zero attempts is undefined, not 0%"
+        );
         assert_eq!(r.days, 0);
         assert!(r.kills.is_empty());
     }
@@ -1026,7 +1123,10 @@ mod tests {
         let m = ledger();
         let text = crate::funnel::render(&m);
         let json = funnel_from_counters(&m);
-        assert!(text.contains(&json.kills_total.to_string()), "kill total must appear in the text report:\n{text}");
+        assert!(
+            text.contains(&json.kills_total.to_string()),
+            "kill total must appear in the text report:\n{text}"
+        );
         // The rate the two views report must be the SAME number, not merely both plausible — the
         // text renderer rounds for display, so compare against its rounding.
         let pct = (json.kill_rate.unwrap() * 100.0).round() as u64;
@@ -1039,7 +1139,7 @@ mod tests {
 
     #[test]
     fn severity_orders_critical_before_warn_before_info() {
-        let mut v = vec![Severity::Info, Severity::Critical, Severity::Warn];
+        let mut v = [Severity::Info, Severity::Critical, Severity::Warn];
         v.sort_by(|a, b| b.cmp(a));
         assert_eq!(v[0], Severity::Critical);
         assert_eq!(v[2], Severity::Info);
@@ -1056,7 +1156,11 @@ mod tests {
             1,
         )
         .with_provider("test-provider");
-        ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+        ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1070,7 +1174,10 @@ mod tests {
             let out = eng.cli_dispatch(verb, &ctx).await;
             let v: serde_json::Value = serde_json::from_str(&out)
                 .unwrap_or_else(|e| panic!("`{verb}` must return JSON, got: {e}\n{out}"));
-            assert!(v.get("error").is_none(), "`{verb}` reported an error: {out}");
+            assert!(
+                v.get("error").is_none(),
+                "`{verb}` reported an error: {out}"
+            );
             assert!(v.is_object(), "`{verb}` must return an object, got: {out}");
         }
     }
@@ -1091,18 +1198,31 @@ mod tests {
             scripted.clone() as Arc<dyn yantrik_ml::LLMBackend>,
             1,
         );
-        let eng = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+        let eng = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            "JARVIS",
+        );
         let ctx = mind_types::AccessContext::operator_audit();
 
         for verb in ["runs_json", "agents_json", "some_future_surface_json"] {
             let out = eng.cli_dispatch(verb, &ctx).await;
             let v: serde_json::Value = serde_json::from_str(&out)
                 .unwrap_or_else(|e| panic!("`{verb}` must fail as JSON, not prose ({e}): {out}"));
-            assert!(v["error"].is_string(), "`{verb}` must carry an error field: {out}");
+            assert!(
+                v["error"].is_string(),
+                "`{verb}` must carry an error field: {out}"
+            );
             assert_eq!(v["surface"], verb);
             // The refusal names what this build DOES serve, so the client can adapt.
-            assert!(v["supported"].is_array(), "the refusal must advertise the real surface list");
-            assert!(!out.contains("I INVENTED THIS ANSWER"), "the model must never have been called");
+            assert!(
+                v["supported"].is_array(),
+                "the refusal must advertise the real surface list"
+            );
+            assert!(
+                !out.contains("I INVENTED THIS ANSWER"),
+                "the model must never have been called"
+            );
         }
         assert!(
             scripted.last_prompt().is_empty(),
@@ -1115,16 +1235,32 @@ mod tests {
     async fn the_handshake_advertises_the_real_surface_list() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
-        let out = eng.cli_dispatch("surfaces", &mind_types::AccessContext::operator_audit()).await;
+        let out = eng
+            .cli_dispatch("surfaces", &mind_types::AccessContext::operator_audit())
+            .await;
         let v: serde_json::Value = serde_json::from_str(&out).expect("handshake must be JSON");
-        let listed: Vec<&str> = v["surfaces"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+        let listed: Vec<&str> = v["surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
         assert!(listed.contains(&"pulse"));
-        assert!(listed.contains(&"surfaces"), "the handshake must include itself, so a client can probe it");
+        assert!(
+            listed.contains(&"surfaces"),
+            "the handshake must include itself, so a client can probe it"
+        );
         // A surface a client gates on must be ADVERTISED, or the pane stays dark while the box
         // happily serves it. `posture_json` is the Executive pane's switch (E.SURF1).
-        assert!(listed.contains(&"posture_json"), "posture_json must be advertised: {listed:?}");
+        assert!(
+            listed.contains(&"posture_json"),
+            "posture_json must be advertised: {listed:?}"
+        );
         for verb in TYPED_VERBS {
-            assert!(listed.contains(verb), "{verb} is in TYPED_VERBS but the handshake omits it: {listed:?}");
+            assert!(
+                listed.contains(verb),
+                "{verb} is in TYPED_VERBS but the handshake omits it: {listed:?}"
+            );
         }
         assert_eq!(listed.len(), TYPED_VERBS.len());
     }
@@ -1138,7 +1274,10 @@ mod tests {
         let eng = test_engine(&mem);
         let member = mind_types::AccessContext::principal(
             mind_types::Scope::parse("asha"),
-            mind_types::Purpose::new(mind_types::Subject::Household, mind_types::Activity::Conversation),
+            mind_types::Purpose::new(
+                mind_types::Subject::Household,
+                mind_types::Activity::Conversation,
+            ),
         );
         for verb in ["pulse", "funnel_json", "capabilities_json"] {
             let out = eng.cli_dispatch(verb, &member).await;
@@ -1146,7 +1285,10 @@ mod tests {
                 out.contains("operator"),
                 "`{verb}` must refuse a non-operator, got: {out}"
             );
-            assert!(serde_json::from_str::<serde_json::Value>(&out).is_err(), "the refusal is prose, by design");
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&out).is_err(),
+                "the refusal is prose, by design"
+            );
         }
     }
 
@@ -1157,10 +1299,18 @@ mod tests {
     async fn pulse_reports_a_real_brain_state() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
-        let p = eng.pulse(&mind_types::AccessContext::operator_audit()).await;
-        assert_eq!(p.brain.provider, "test-provider", "the pulse must name the provider actually serving");
+        let p = eng
+            .pulse(&mind_types::AccessContext::operator_audit())
+            .await;
+        assert_eq!(
+            p.brain.provider, "test-provider",
+            "the pulse must name the provider actually serving"
+        );
         assert!(!p.brain.private_lane, "no private backend was attached");
-        assert!(!p.taken_at.is_empty(), "a snapshot must be stamped so the client can show its age");
+        assert!(
+            !p.taken_at.is_empty(),
+            "a snapshot must be stamped so the client can show its age"
+        );
         // Serialization keeps the null/zero distinction all the way to the wire.
         let json: serde_json::Value = serde_json::from_str(&json_or_error(&p)).unwrap();
         assert!(json["brain"]["beliefs"].is_u64() || json["brain"]["beliefs"].is_null());
@@ -1179,27 +1329,58 @@ mod tests {
             { "id": "old", "name": "ancient", "task": "t1", "kind": "research", "status": "failed",
               "started_ms": now - 9 * day, "finished_ms": now - 8 * day, "result": "long dead" },
             { "id": "new", "name": "market-scan", "task": "scan the market", "kind": "research",
-              "status": "failed", "started_ms": now - 3600_000, "finished_ms": now - 60_000,
+              "status": "failed", "started_ms": now - 3_600_000, "finished_ms": now - 60_000,
               "result": "market data source returned 502" },
             { "id": "quiet", "name": "mystery", "task": "do the thing", "kind": "research",
-              "status": "failed", "started_ms": now - 7200_000, "finished_ms": now - 120_000 },
+              "status": "failed", "started_ms": now - 7_200_000, "finished_ms": now - 120_000 },
         ]);
-        mem.profile_set("delegations", &ledger.to_string()).await.unwrap();
+        mem.profile_set("delegations", &ledger.to_string())
+            .await
+            .unwrap();
 
-        let p = eng.pulse(&mind_types::AccessContext::operator_audit()).await;
-        let failed: Vec<&AttentionItem> =
-            p.attention.iter().filter(|a| a.kind == AttentionKind::JobFailed).collect();
+        let p = eng
+            .pulse(&mind_types::AccessContext::operator_audit())
+            .await;
+        let failed: Vec<&AttentionItem> = p
+            .attention
+            .iter()
+            .filter(|a| a.kind == AttentionKind::JobFailed)
+            .collect();
 
-        assert_eq!(failed.len(), 2, "capped at two, and the 8-day-old failure is history not news");
-        assert!(!failed.iter().any(|a| a.headline.contains("ancient")), "a week-old failure must not nag");
+        assert_eq!(
+            failed.len(),
+            2,
+            "capped at two, and the 8-day-old failure is history not news"
+        );
+        assert!(
+            !failed.iter().any(|a| a.headline.contains("ancient")),
+            "a week-old failure must not nag"
+        );
         // Most recent first.
-        assert!(failed[0].headline.contains("market-scan"), "newest failure leads: {:?}", failed[0].headline);
-        assert!(failed[0].detail.contains("502"), "the recorded reason must be shown, not the task");
+        assert!(
+            failed[0].headline.contains("market-scan"),
+            "newest failure leads: {:?}",
+            failed[0].headline
+        );
+        assert!(
+            failed[0].detail.contains("502"),
+            "the recorded reason must be shown, not the task"
+        );
         // A failure with no recorded reason says so, rather than pretending the task was the reason.
-        let quiet = failed.iter().find(|a| a.headline.contains("mystery")).expect("second failure present");
-        assert!(quiet.detail.contains("no reason was recorded"), "got: {}", quiet.detail);
+        let quiet = failed
+            .iter()
+            .find(|a| a.headline.contains("mystery"))
+            .expect("second failure present");
+        assert!(
+            quiet.detail.contains("no reason was recorded"),
+            "got: {}",
+            quiet.detail
+        );
         // And it still offers a way to act.
-        assert_eq!(failed[0].action.as_deref(), Some("delegate market-scan: scan the market"));
+        assert_eq!(
+            failed[0].action.as_deref(),
+            Some("delegate market-scan: scan the market")
+        );
     }
 
     /// A running job is NAMED in the pulse, not merely counted, and its elapsed time is computed
@@ -1215,16 +1396,37 @@ mod tests {
             // A row with no start stamp must not report a 58-year runtime.
             { "id": "r2", "name": "unstamped", "task": "x", "kind": "research", "status": "running" },
         ]);
-        mem.profile_set("delegations", &ledger.to_string()).await.unwrap();
+        mem.profile_set("delegations", &ledger.to_string())
+            .await
+            .unwrap();
 
-        let p = eng.pulse(&mind_types::AccessContext::operator_audit()).await;
+        let p = eng
+            .pulse(&mind_types::AccessContext::operator_audit())
+            .await;
         assert_eq!(p.work.jobs_running, 2);
         assert_eq!(p.work.jobs_total, 2);
-        let audit = p.work.running.iter().find(|j| j.name == "repo-audit").expect("named in the pulse");
+        let audit = p
+            .work
+            .running
+            .iter()
+            .find(|j| j.name == "repo-audit")
+            .expect("named in the pulse");
         assert_eq!(audit.kind, "code");
-        assert!((240..=260).contains(&audit.elapsed_s), "elapsed should be ~245s, got {}", audit.elapsed_s);
-        let unstamped = p.work.running.iter().find(|j| j.name == "unstamped").unwrap();
-        assert_eq!(unstamped.elapsed_s, 0, "a missing start stamp reports 0, not epoch arithmetic");
+        assert!(
+            (240..=260).contains(&audit.elapsed_s),
+            "elapsed should be ~245s, got {}",
+            audit.elapsed_s
+        );
+        let unstamped = p
+            .work
+            .running
+            .iter()
+            .find(|j| j.name == "unstamped")
+            .unwrap();
+        assert_eq!(
+            unstamped.elapsed_s, 0,
+            "a missing start stamp reports 0, not epoch arithmetic"
+        );
     }
 
     /// With no recipe store, scheduling cannot persist — and the surface must SAY so rather than
@@ -1235,7 +1437,10 @@ mod tests {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
         let r = eng.orders_report();
-        assert!(!r.store, "an engine with no recipe engine has no durable scheduling");
+        assert!(
+            !r.store,
+            "an engine with no recipe engine has no durable scheduling"
+        );
         assert!(r.orders.is_empty());
     }
 
@@ -1258,7 +1463,8 @@ mod tests {
         );
         let host: Arc<dyn mind_recipes::RecipeHost> =
             Arc::new(crate::MindRecipeHost::new(None, None, memory.clone()));
-        let recipes = mind_recipes::RecipeEngine::new(pool.clone(), host, "JARVIS").with_store(store);
+        let recipes =
+            mind_recipes::RecipeEngine::new(pool.clone(), host, "JARVIS").with_store(store);
 
         // Park two orders, then pause one.
         for tag in ["alpha", "beta"] {
@@ -1269,7 +1475,9 @@ mod tests {
                     mind_recipes::RecipeStep::WaitUntil {
                         until_ms: chrono::Utc::now().timestamp_millis() as u64 + 3_600_000,
                     },
-                    mind_recipes::RecipeStep::Notify { message: "done".into() },
+                    mind_recipes::RecipeStep::Notify {
+                        message: "done".into(),
+                    },
                 ],
             };
             recipes.run(&rec).await;
@@ -1280,17 +1488,40 @@ mod tests {
         let eng = ConversationEngine::new(memory, pool, "JARVIS").with_recipes(Arc::new(recipes));
         let r = eng.orders_report();
         assert!(r.store, "a wired store means scheduling is available");
-        assert_eq!(r.orders.len(), 2, "both the sleeping and the paused order are listed");
+        assert_eq!(
+            r.orders.len(),
+            2,
+            "both the sleeping and the paused order are listed"
+        );
 
-        let paused = r.orders.iter().find(|o| o.id == paused_id).expect("paused order present");
+        let paused = r
+            .orders
+            .iter()
+            .find(|o| o.id == paused_id)
+            .expect("paused order present");
         assert_eq!(paused.state, OrderState::Paused);
-        assert_eq!(paused.actions, vec!["resume", "cancel"], "a paused order cannot be run or re-paused");
+        assert_eq!(
+            paused.actions,
+            vec!["resume", "cancel"],
+            "a paused order cannot be run or re-paused"
+        );
 
-        let sleeping = r.orders.iter().find(|o| o.id != paused_id).expect("sleeping order present");
+        let sleeping = r
+            .orders
+            .iter()
+            .find(|o| o.id != paused_id)
+            .expect("sleeping order present");
         assert_eq!(sleeping.state, OrderState::Sleeping);
         assert_eq!(sleeping.actions, vec!["run", "pause", "cancel"]);
-        assert!(sleeping.in_seconds > 3000, "an hour out should read ~3600s, got {}", sleeping.in_seconds);
-        assert!(!sleeping.name.is_empty(), "an order must be nameable in a list");
+        assert!(
+            sleeping.in_seconds > 3000,
+            "an hour out should read ~3600s, got {}",
+            sleeping.in_seconds
+        );
+        assert!(
+            !sleeping.name.is_empty(),
+            "an order must be nameable in a list"
+        );
         let _ = std::fs::remove_file(&db);
     }
 
@@ -1303,24 +1534,50 @@ mod tests {
         let day = 86_400_000u64;
         let now = chrono::Utc::now().timestamp_millis() as u64;
 
-        mem.add_task("file the return", "high", Some(now + 5 * day)).await.unwrap();
-        mem.add_task("call mum more often", "low", None).await.unwrap();
-        mem.add_task("order the watch", "high", Some(now - 21 * day)).await.unwrap();
+        mem.add_task("file the return", "high", Some(now + 5 * day))
+            .await
+            .unwrap();
+        mem.add_task("call mum more often", "low", None)
+            .await
+            .unwrap();
+        mem.add_task("order the watch", "high", Some(now - 21 * day))
+            .await
+            .unwrap();
 
         let r = eng.thread_report().await;
         let carried: Vec<&str> = r.carrying.iter().map(|t| t.description.as_str()).collect();
         let closing: Vec<&str> = r.closing.iter().map(|t| t.description.as_str()).collect();
 
-        assert!(carried.contains(&"file the return"), "a future deadline is carried: {carried:?}");
-        assert!(carried.contains(&"call mum more often"), "an undated intention is carried: {carried:?}");
-        assert!(closing.contains(&"order the watch"), "a three-week-old commitment is closing: {closing:?}");
+        assert!(
+            carried.contains(&"file the return"),
+            "a future deadline is carried: {carried:?}"
+        );
+        assert!(
+            carried.contains(&"call mum more often"),
+            "an undated intention is carried: {carried:?}"
+        );
+        assert!(
+            closing.contains(&"order the watch"),
+            "a three-week-old commitment is closing: {closing:?}"
+        );
 
         // An undated intention must not be shown as if it were overdue.
-        let mum = r.carrying.iter().find(|t| t.description.contains("mum")).unwrap();
-        assert!(mum.deadline_ms.is_none() && mum.days_over.is_none(), "no deadline means no overdue count");
+        let mum = r
+            .carrying
+            .iter()
+            .find(|t| t.description.contains("mum"))
+            .unwrap();
+        assert!(
+            mum.deadline_ms.is_none() && mum.days_over.is_none(),
+            "no deadline means no overdue count"
+        );
         assert_eq!(mum.state, ThreadStateTag::Live);
 
-        let watch = r.closing.iter().find(|t| t.description.contains("watch")).unwrap();
+        let watch = r
+            .closing
+            .iter()
+            .find(|t| t.description.contains("watch"))
+            .unwrap();
         assert_eq!(watch.state, ThreadStateTag::AwaitingClosure);
         assert!(watch.days_over.unwrap() >= 20);
     }
@@ -1355,17 +1612,36 @@ mod tests {
         mem.save_skill(skill("flaky", 8, 2)).await.unwrap();
 
         let r = eng.skill_report().await;
-        let fresh = r.skills.iter().find(|s| s.name == "fresh").expect("fresh present");
-        assert!(fresh.success_rate.is_none(), "never run means NO rate, not 100%");
+        let fresh = r
+            .skills
+            .iter()
+            .find(|s| s.name == "fresh")
+            .expect("fresh present");
+        assert!(
+            fresh.success_rate.is_none(),
+            "never run means NO rate, not 100%"
+        );
         assert!(!fresh.failing);
         assert_eq!(r.untested, 1);
 
-        let flaky = r.skills.iter().find(|s| s.name == "flaky").expect("flaky present");
-        assert!(flaky.failing, "2 of 8 is below the store's own quarantine line");
+        let flaky = r
+            .skills
+            .iter()
+            .find(|s| s.name == "flaky")
+            .expect("flaky present");
+        assert!(
+            flaky.failing,
+            "2 of 8 is below the store's own quarantine line"
+        );
         assert!((flaky.success_rate.unwrap() - 0.25).abs() < 1e-9);
 
         // Worst first: a failing skill is the one worth looking at.
-        assert_eq!(r.skills[0].name, "flaky", "order was {:?}", r.skills.iter().map(|s| &s.name).collect::<Vec<_>>());
+        assert_eq!(
+            r.skills[0].name,
+            "flaky",
+            "order was {:?}",
+            r.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
     }
 
     /// A capability whose backing client is absent must report UNAVAILABLE with a reason a person
@@ -1386,7 +1662,10 @@ mod tests {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
         let report = eng.capability_report();
-        assert!(!report.capabilities.is_empty(), "the registry must expose its specs");
+        assert!(
+            !report.capabilities.is_empty(),
+            "the registry must expose its specs"
+        );
 
         // A bare engine has NO external clients, so a green report here means the probe is broken.
         assert!(
@@ -1397,17 +1676,39 @@ mod tests {
             report.unavailable
         );
 
-        for id in ["github", "wikipedia", "web_search", "web_fetch", "weather", "home", "coder"] {
+        for id in [
+            "github",
+            "wikipedia",
+            "web_search",
+            "web_fetch",
+            "weather",
+            "home",
+            "coder",
+        ] {
             let c = report.capabilities.iter().find(|c| c.id == id);
             let Some(c) = c else { continue };
-            assert_eq!(c.availability, Availability::Unavailable, "`{id}` has no backing client here");
+            assert_eq!(
+                c.availability,
+                Availability::Unavailable,
+                "`{id}` has no backing client here"
+            );
             let why = c.blocked_by.as_deref().unwrap_or_default();
-            assert!(!why.is_empty(), "`{id}` must say WHAT is missing, not just that it is unavailable");
+            assert!(
+                !why.is_empty(),
+                "`{id}` must say WHAT is missing, not just that it is unavailable"
+            );
         }
         // The reason must be actionable — a config key or a concrete thing to install.
-        let gh = report.capabilities.iter().find(|c| c.id == "github").expect("github is declared");
+        let gh = report
+            .capabilities
+            .iter()
+            .find(|c| c.id == "github")
+            .expect("github is declared");
         assert!(
-            gh.blocked_by.as_deref().unwrap_or_default().contains("YM_GITHUB_TOKEN"),
+            gh.blocked_by
+                .as_deref()
+                .unwrap_or_default()
+                .contains("YM_GITHUB_TOKEN"),
             "got: {:?}",
             gh.blocked_by
         );
@@ -1427,8 +1728,16 @@ mod tests {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = test_engine(&mem);
         let report = eng.capability_report();
-        let calc = report.capabilities.iter().find(|c| c.id == "calculator").expect("calculator is declared");
-        assert_eq!(calc.availability, Availability::Ready, "arithmetic needs no client");
+        let calc = report
+            .capabilities
+            .iter()
+            .find(|c| c.id == "calculator")
+            .expect("calculator is declared");
+        assert_eq!(
+            calc.availability,
+            Availability::Ready,
+            "arithmetic needs no client"
+        );
         assert!(calc.blocked_by.is_none());
     }
 
@@ -1438,14 +1747,30 @@ mod tests {
     async fn wiring_a_client_flips_its_capability_to_ready() {
         let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
         let before = test_engine(&mem).capability_report();
-        let wiki_before = before.capabilities.iter().find(|c| c.id == "wikipedia").unwrap();
+        let wiki_before = before
+            .capabilities
+            .iter()
+            .find(|c| c.id == "wikipedia")
+            .unwrap();
         assert_eq!(wiki_before.availability, Availability::Unavailable);
 
         let eng = test_engine(&mem).with_wiki(Arc::new(mind_tools::Wikipedia::new()));
         let after = eng.capability_report();
-        let wiki_after = after.capabilities.iter().find(|c| c.id == "wikipedia").unwrap();
-        assert_eq!(wiki_after.availability, Availability::Ready, "a wired client means ready");
+        let wiki_after = after
+            .capabilities
+            .iter()
+            .find(|c| c.id == "wikipedia")
+            .unwrap();
+        assert_eq!(
+            wiki_after.availability,
+            Availability::Ready,
+            "a wired client means ready"
+        );
         assert!(wiki_after.blocked_by.is_none());
-        assert_eq!(after.connected, before.connected + 1, "exactly one capability changed");
+        assert_eq!(
+            after.connected,
+            before.connected + 1,
+            "exactly one capability changed"
+        );
     }
 }

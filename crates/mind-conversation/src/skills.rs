@@ -10,8 +10,14 @@ pub(crate) fn word_offset(lower: &str, word: &str) -> Option<usize> {
     let mut from = 0usize;
     while let Some(rel) = lower[from..].find(word) {
         let at = from + rel;
-        let before_ok = lower[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
-        let after_ok = lower[at + word.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        let before_ok = lower[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = lower[at + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
         if before_ok && after_ok {
             return Some(at);
         }
@@ -30,7 +36,10 @@ pub(crate) fn track_record(sk: &Skill) -> String {
     match sk.reliability().rate() {
         None if sk.runs > 0 => format!("{} runs, none judged yet", sk.runs),
         None => "untested".to_string(),
-        Some(_) => format!("{}/{} judged ok of {} runs", sk.judged_ok, sk.graded, sk.runs),
+        Some(_) => format!(
+            "{}/{} judged ok of {} runs",
+            sk.judged_ok, sk.graded, sk.runs
+        ),
     }
 }
 
@@ -43,7 +52,10 @@ pub(crate) fn track_record(sk: &Skill) -> String {
 /// fallback interpreter here on purpose: guessing one is the bug this replaces (E.SK2).
 pub(crate) enum SkillBody {
     /// A capability spec: JSON naming a tool to poll until it matches a target.
-    Capability { tool: String, spec: serde_json::Value },
+    Capability {
+        tool: String,
+        spec: serde_json::Value,
+    },
     /// Source. Run in the sandbox, never read aloud to a model.
     Code { lang: CodeLang, source: String },
     /// Prose. Followed by the model, never executed.
@@ -57,7 +69,11 @@ pub(crate) fn classify_skill(sk: &Skill) -> SkillBody {
     // judged rather than its packaging -- undoing a known encoding is not guessing.
     let body = match serde_json::from_str::<serde_json::Value>(&sk.code) {
         Ok(serde_json::Value::Object(map)) => {
-            if let Some(tool) = map.get("tool").and_then(|x| x.as_str()).filter(|t| !t.is_empty()) {
+            if let Some(tool) = map
+                .get("tool")
+                .and_then(|x| x.as_str())
+                .filter(|t| !t.is_empty())
+            {
                 return SkillBody::Capability {
                     tool: tool.to_string(),
                     spec: serde_json::Value::Object(map),
@@ -71,9 +87,18 @@ pub(crate) fn classify_skill(sk: &Skill) -> SkillBody {
     // A DECLARED language means source. Everything else -- `md`, `capability`, whatever a future
     // importer writes -- is prose, and prose goes to the model, not to an interpreter.
     match sk.lang.as_str() {
-        "python" => SkillBody::Code { lang: CodeLang::Python, source: body },
-        "shell" => SkillBody::Code { lang: CodeLang::Shell, source: body },
-        "rust" => SkillBody::Code { lang: CodeLang::Rust, source: body },
+        "python" => SkillBody::Code {
+            lang: CodeLang::Python,
+            source: body,
+        },
+        "shell" => SkillBody::Code {
+            lang: CodeLang::Shell,
+            source: body,
+        },
+        "rust" => SkillBody::Code {
+            lang: CodeLang::Rust,
+            source: body,
+        },
         _ => SkillBody::Instructions { text: body },
     }
 }
@@ -97,12 +122,18 @@ impl super::ConversationEngine {
         // SAVEd SKILL named X" — and because save is dispatched ahead of run, asking to run a
         // banked skill was answered with "Run something green first". I hit this myself on the
         // first live attempt to run a document and mistook it for a routing bug (E.SEC3).
-        let Some(save_at) = word_offset(&l, "save") else { return None };
+        let save_at = word_offset(&l, "save")?;
         if !l.contains("skill") {
             return None;
         }
         // take the token(s) after "skill", "called", or "named"
-        for marker in ["skill called ", "skill named ", "as skill ", "a skill called ", "skill "] {
+        for marker in [
+            "skill called ",
+            "skill named ",
+            "as skill ",
+            "a skill called ",
+            "skill ",
+        ] {
             if let Some(i) = l.find(marker).filter(|i| *i > save_at) {
                 let name = text[i + marker.len()..]
                     .trim()
@@ -110,7 +141,11 @@ impl super::ConversationEngine {
                     .split_whitespace()
                     .next()
                     .unwrap_or("");
-                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                {
                     return Some(name.to_string());
                 }
             }
@@ -126,7 +161,13 @@ impl super::ConversationEngine {
     /// outright. A document without the input it exists to process is not worth running (E.SK2).
     pub(crate) fn parse_run_skill(text: &str) -> Option<(String, String)> {
         let l = text.to_ascii_lowercase();
-        for marker in ["run skill ", "use skill ", "run the skill ", "use the skill ", "invoke skill "] {
+        for marker in [
+            "run skill ",
+            "use skill ",
+            "run the skill ",
+            "use the skill ",
+            "invoke skill ",
+        ] {
             if let Some(i) = l.find(marker) {
                 let rest = text[i + marker.len()..].trim();
                 let (head, target) = match rest.split_once(':') {
@@ -149,18 +190,35 @@ impl super::ConversationEngine {
 
     pub(crate) fn wants_list_skills(text: &str) -> bool {
         let l = text.to_ascii_lowercase();
-        ["list skills", "list my skills", "what skills", "which skills", "your skills", "what can you do"]
-            .iter()
-            .any(|p| l.contains(p))
+        [
+            "list skills",
+            "list my skills",
+            "what skills",
+            "which skills",
+            "your skills",
+            "what can you do",
+        ]
+        .iter()
+        .any(|p| l.contains(p))
     }
 
     /// "find/search (a )?skill for X" / "do you have a skill for/to X" / "any skill for X" → query.
     pub(crate) fn parse_find_skill(text: &str) -> Option<String> {
         let l = text.to_ascii_lowercase();
-        let is_search = ["find a skill", "find skill", "search skill", "search for a skill",
-            "do you have a skill", "any skill for", "is there a skill", "which skill", "skill for ", "skill to "]
-            .iter()
-            .any(|p| l.contains(p));
+        let is_search = [
+            "find a skill",
+            "find skill",
+            "search skill",
+            "search for a skill",
+            "do you have a skill",
+            "any skill for",
+            "is there a skill",
+            "which skill",
+            "skill for ",
+            "skill to ",
+        ]
+        .iter()
+        .any(|p| l.contains(p));
         if !is_search {
             return None;
         }
@@ -169,7 +227,13 @@ impl super::ConversationEngine {
             .iter()
             .filter_map(|m| l.rfind(m).map(|i| (i, m.len())))
             .max_by_key(|(i, _)| *i)
-            .map(|(i, len)| text[i + len..].trim().trim_end_matches(['?', '.', '!']).trim().to_string())
+            .map(|(i, len)| {
+                text[i + len..]
+                    .trim()
+                    .trim_end_matches(['?', '.', '!'])
+                    .trim()
+                    .to_string()
+            })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| text.trim().to_string());
         Some(q)
@@ -183,9 +247,8 @@ impl super::ConversationEngine {
 
     /// Health + a quick parallel `nproc` across the worker pool (the `:workers` command).
     pub async fn workers_status(&self) -> String {
-        let pool = match &self.workers {
-            Some(p) => p,
-            None => return "No worker pool configured (set YM_WORKERS).".into(),
+        let Some(pool) = &self.workers else {
+            return "No worker pool configured (set YM_WORKERS).".into();
         };
         let health = pool.health().await;
         let up = health.iter().filter(|(_, ok)| *ok).count();
@@ -196,7 +259,13 @@ impl super::ConversationEngine {
         let demo = pool.map("nproc", 8).await;
         let cores = demo
             .iter()
-            .map(|(h, r)| format!("{}={}", h.split('@').last().unwrap_or(h), r.as_deref().unwrap_or("?")))
+            .map(|(h, r)| {
+                format!(
+                    "{}={}",
+                    h.split('@').next_back().unwrap_or(h),
+                    r.as_deref().unwrap_or("?")
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
         s.push_str(&format!("cores (parallel probe): {cores}"));
@@ -219,11 +288,17 @@ impl super::ConversationEngine {
         }
         for marker in [" for ", " from ", " about ", "when "] {
             if let Some(idx) = low.find(marker) {
-                let mut tail = text[idx + marker.len()..].trim().trim_end_matches(['.', '!', '?']).trim();
+                let mut tail = text[idx + marker.len()..]
+                    .trim()
+                    .trim_end_matches(['.', '!', '?'])
+                    .trim();
                 for suf in [" emails", " arrives", " comes in", " shows up", " lands"] {
                     tail = tail.strip_suffix(suf).unwrap_or(tail).trim();
                 }
-                if tail.len() >= 2 && !tail.eq_ignore_ascii_case("an email") && !tail.eq_ignore_ascii_case("email") {
+                if tail.len() >= 2
+                    && !tail.eq_ignore_ascii_case("an email")
+                    && !tail.eq_ignore_ascii_case("email")
+                {
                     return Some(tail.to_string());
                 }
             }
@@ -259,10 +334,26 @@ impl super::ConversationEngine {
 
     /// Pull the watched-for target after a connective ("for"/"says"/"shows"/…). Trims trailing noise.
     pub(crate) fn watch_target(text: &str, low: &str) -> Option<String> {
-        for marker in [" for ", " says ", " shows ", " contains ", " mentions ", " about ", " has ", " when it "] {
+        for marker in [
+            " for ",
+            " says ",
+            " shows ",
+            " contains ",
+            " mentions ",
+            " about ",
+            " has ",
+            " when it ",
+        ] {
             if let Some(idx) = low.find(marker) {
-                let t = text[idx + marker.len()..].trim().trim_end_matches(['.', '!', '?']).trim();
-                let t = t.strip_prefix("says ").or_else(|| t.strip_prefix("shows ")).unwrap_or(t).trim();
+                let t = text[idx + marker.len()..]
+                    .trim()
+                    .trim_end_matches(['.', '!', '?'])
+                    .trim();
+                let t = t
+                    .strip_prefix("says ")
+                    .or_else(|| t.strip_prefix("shows "))
+                    .unwrap_or(t)
+                    .trim();
                 if t.len() >= 2 {
                     return Some(t.to_string());
                 }
@@ -288,8 +379,12 @@ impl super::ConversationEngine {
         if !Self::is_monitor_verb(&low) {
             return None;
         }
-        let is_gh = low.contains("github") || low.contains("repo") || low.contains("pull request")
-            || low.contains(" pr ") || low.contains("issue") || low.contains("notification");
+        let is_gh = low.contains("github")
+            || low.contains("repo")
+            || low.contains("pull request")
+            || low.contains(" pr ")
+            || low.contains("issue")
+            || low.contains("notification");
         if !is_gh || mind_tools::first_url(text).is_some() {
             return None;
         }
@@ -330,9 +425,18 @@ impl super::ConversationEngine {
                 }
             }
         }
-        for p in ["automate ", "set up a task to ", "set up a workflow to ", "set up a task that ", "set up a routine to "] {
+        for p in [
+            "automate ",
+            "set up a task to ",
+            "set up a workflow to ",
+            "set up a task that ",
+            "set up a routine to ",
+        ] {
             if let Some(idx) = low.find(p) {
-                let g = l[idx + p.len()..].trim().trim_end_matches(['.', '!']).trim();
+                let g = l[idx + p.len()..]
+                    .trim()
+                    .trim_end_matches(['.', '!'])
+                    .trim();
                 if g.len() >= 3 {
                     return Some(g.to_string());
                 }
@@ -355,9 +459,19 @@ impl super::ConversationEngine {
             }
         }
         let triggers = [
-            "write code to", "write a script", "write me a script", "write a program",
-            "build me a script", "build me a program", "build a script", "build a program",
-            "build a tool", "build me a tool", "code me a", "make a script", "make a program",
+            "write code to",
+            "write a script",
+            "write me a script",
+            "write a program",
+            "build me a script",
+            "build me a program",
+            "build a script",
+            "build a program",
+            "build a tool",
+            "build me a tool",
+            "code me a",
+            "make a script",
+            "make a program",
         ];
         if triggers.iter().any(|t| low.contains(t)) {
             return Some(l.to_string());
@@ -380,7 +494,10 @@ impl super::ConversationEngine {
     /// intent AND a determinable language (never guesses), so ordinary code chat isn't executed.
     pub(crate) fn parse_code_request(text: &str) -> Option<(CodeLang, String)> {
         let l = text.to_ascii_lowercase();
-        if !["run ", "execute ", "exec ", "eval "].iter().any(|p| l.contains(p)) {
+        if !["run ", "execute ", "exec ", "eval "]
+            .iter()
+            .any(|p| l.contains(p))
+        {
             return None;
         }
         let fence = Self::fenced_code(text);
@@ -424,15 +541,27 @@ impl super::ConversationEngine {
         if Self::wants_list_skills(user_text) {
             let skills = self.memory.list_skills().await.unwrap_or_default();
             if skills.is_empty() {
-                return Some("No skills banked yet. Run some code, then say \"save that as skill <name>\".".into());
+                return Some(
+                    "No skills banked yet. Run some code, then say \"save that as skill <name>\"."
+                        .into(),
+                );
             }
             let body = skills
                 .iter()
-                .map(|s| format!(
-                    "- {} [{}] — {} ({}{})",
-                    s.name, s.lang, s.summary, track_record(s),
-                    if s.status == "quarantined" { ", QUARANTINED" } else { "" }
-                ))
+                .map(|s| {
+                    format!(
+                        "- {} [{}] — {} ({}{})",
+                        s.name,
+                        s.lang,
+                        s.summary,
+                        track_record(s),
+                        if s.status == "quarantined" {
+                            ", QUARANTINED"
+                        } else {
+                            ""
+                        }
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             return Some(format!("Skills ({}):\n{body}", skills.len()));
@@ -440,7 +569,11 @@ impl super::ConversationEngine {
 
         // Skill SEARCH: find banked skills relevant to a task.
         if let Some(query) = Self::parse_find_skill(user_text) {
-            let hits = self.memory.recall_skills(&query, 5).await.unwrap_or_default();
+            let hits = self
+                .memory
+                .recall_skills(&query, 5)
+                .await
+                .unwrap_or_default();
             if hits.is_empty() {
                 return Some(format!(
                     "No skill matches \"{query}\" yet. Run code (e.g. \"run python: …\"), then \"save that as skill <name>\" to bank one."
@@ -448,7 +581,16 @@ impl super::ConversationEngine {
             }
             let body = hits
                 .iter()
-                .map(|s| format!("- {} [{}] — {} ({}) → \"run skill {}\"", s.name, s.lang, s.summary, track_record(s), s.name))
+                .map(|s| {
+                    format!(
+                        "- {} [{}] — {} ({}) → \"run skill {}\"",
+                        s.name,
+                        s.lang,
+                        s.summary,
+                        track_record(s),
+                        s.name
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             return Some(format!("Skills matching \"{query}\":\n{body}"));
@@ -456,9 +598,8 @@ impl super::ConversationEngine {
 
         if let Some(name) = Self::parse_save_skill(user_text) {
             let last = self.last_run.lock().unwrap().clone();
-            let (lang, code) = match last {
-                Some(lc) => lc,
-                None => return Some("Run something green first (e.g. \"run python: …\"), then I'll save it as a skill.".into()),
+            let Some((lang, code)) = last else {
+                return Some("Run something green first (e.g. \"run python: …\"), then I'll save it as a skill.".into());
             };
             // Verifier-generated summary for recall (not author prose).
             let summary = self
@@ -468,7 +609,7 @@ impl super::ConversationEngine {
                 .chat_grounded(
                     vec![
                         ChatMessage::system(&self.persona),
-                        ChatMessage::user(&format!(
+                        ChatMessage::user(format!(
                             "In ONE terse sentence, say what this {} code does — for a tool catalog, no preamble:\n\n{code}",
                             Self::lang_str(lang)
                         )),
@@ -476,8 +617,10 @@ impl super::ConversationEngine {
                     GenerationConfig::default(),
                 )
                 .await
-                .map(|r| r.text.trim().to_string())
-                .unwrap_or_else(|_| format!("{} skill", Self::lang_str(lang)));
+                .map_or_else(
+                    |_| format!("{} skill", Self::lang_str(lang)),
+                    |r| r.text.trim().to_string(),
+                );
             let skill = Skill {
                 name: name.clone(),
                 lang: Self::lang_str(lang).into(),
@@ -498,26 +641,38 @@ impl super::ConversationEngine {
         }
 
         if let Some((name, target)) = Self::parse_run_skill(user_text) {
-            let skill = match self.memory.get_skill(&name).await.ok().flatten() {
-                Some(s) => s,
-                None => {
-                    let hits = self.memory.recall_skills(&name, 3).await.unwrap_or_default();
-                    let hint = if hits.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" Did you mean: {}?", hits.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", "))
-                    };
-                    return Some(format!("No skill named \"{name}\".{hint}"));
-                }
+            let Some(skill) = self.memory.get_skill(&name).await.ok().flatten() else {
+                let hits = self
+                    .memory
+                    .recall_skills(&name, 3)
+                    .await
+                    .unwrap_or_default();
+                let hint = if hits.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " Did you mean: {}?",
+                        hits.iter()
+                            .map(|s| s.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                return Some(format!("No skill named \"{name}\".{hint}"));
             };
             // The SAME three runners the tool arm uses, chosen by the SAME classifier. This
             // branch used to dispatch on its own and send everything unrecognised to Python
             // (E.SK2).
             return Some(match classify_skill(&skill) {
-                SkillBody::Code { lang, source } => self.run_code_skill(&skill, lang, &source).await,
-                SkillBody::Instructions { text } => self.run_instruction_skill(&skill, &text, &target).await,
+                SkillBody::Code { lang, source } => {
+                    self.run_code_skill(&skill, lang, &source).await
+                }
+                SkillBody::Instructions { text } => {
+                    self.run_instruction_skill(&skill, &text, &target).await
+                }
                 SkillBody::Capability { tool, spec } => {
-                    self.run_capability_skill(&skill, &tool, &spec, &target, "").await
+                    self.run_capability_skill(&skill, &tool, &spec, &target, "")
+                        .await
                 }
             });
         }
@@ -530,7 +685,10 @@ impl super::ConversationEngine {
     /// sentence reached it (E.SK2).
     pub(crate) async fn run_code_skill(&self, sk: &Skill, lang: CodeLang, source: &str) -> String {
         let Some(sb) = self.sandbox.as_ref() else {
-            return format!("(\"{}\" is {} code, but there is no sandbox on this box to run it in)", sk.name, sk.lang);
+            return format!(
+                "(\"{}\" is {} code, but there is no sandbox on this box to run it in)",
+                sk.name, sk.lang
+            );
         };
         let res = match lang {
             CodeLang::Python => sb.run_python(source).await,
@@ -542,14 +700,28 @@ impl super::ConversationEngine {
                 let ok = r.exit_code == 0 && !r.timed_out;
                 // THE code-skill adapter, and the only path allowed to reach `task_success`
                 // through an exit code (E.P5b).
-                let _ = self.memory.record_skill_outcome(&sk.name, mind_types::SkillOutcome::from_exit(ok)).await;
-                format!("Ran skill \"{}\" (prior: {}):\n\n{}", sk.name, track_record(sk), r.render())
+                let _ = self
+                    .memory
+                    .record_skill_outcome(&sk.name, mind_types::SkillOutcome::from_exit(ok))
+                    .await;
+                format!(
+                    "Ran skill \"{}\" (prior: {}):\n\n{}",
+                    sk.name,
+                    track_record(sk),
+                    r.render()
+                )
             }
             Err(e) => {
                 // No sandbox is an INFRASTRUCTURE failure. It says nothing about the skill, so it
                 // must not enter the denominator that decides whether to keep using it.
-                let _ = self.memory.record_skill_outcome(&sk.name, mind_types::SkillOutcome::executor_failed()).await;
-                format!("Couldn't run skill \"{}\" — sandbox unavailable ({e}).", sk.name)
+                let _ = self
+                    .memory
+                    .record_skill_outcome(&sk.name, mind_types::SkillOutcome::executor_failed())
+                    .await;
+                format!(
+                    "Couldn't run skill \"{}\" — sandbox unavailable ({e}).",
+                    sk.name
+                )
             }
         }
     }
@@ -562,10 +734,20 @@ impl super::ConversationEngine {
         if user_text.split_whitespace().count() < 3 {
             return None;
         }
-        let top = self.memory.recall_skills(user_text, 1).await.ok()?.into_iter().next()?;
+        let top = self
+            .memory
+            .recall_skills(user_text, 1)
+            .await
+            .ok()?
+            .into_iter()
+            .next()?;
         let hay = format!("{} {} {}", top.name, top.summary, top.tags.join(" ")).to_lowercase();
         let q = user_text.to_lowercase();
-        let matches = q.split_whitespace().filter(|w| w.len() >= 4).filter(|w| hay.contains(*w)).count();
+        let matches = q
+            .split_whitespace()
+            .filter(|w| w.len() >= 4)
+            .filter(|w| hay.contains(*w))
+            .count();
         if matches >= 2 {
             Some(format!(
                 "\n\n_(I have a skill \"{}\" that may fit — say \"run skill {}\" to use it.)_",
@@ -575,5 +757,4 @@ impl super::ConversationEngine {
             None
         }
     }
-
 }

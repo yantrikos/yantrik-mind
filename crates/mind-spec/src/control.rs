@@ -34,9 +34,15 @@ pub enum Decision {
     /// Route the next model call to a stronger tier. Not a failure — a considered escalation.
     Escalate { reason: ReasonCode },
     /// Only the user can unblock this. Stop and ask.
-    AskUser { reason: ReasonCode, question: String },
+    AskUser {
+        reason: ReasonCode,
+        question: String,
+    },
     /// Out of budget, or out of ideas. Answer with what exists and disclose the shortfall.
-    FinishPartial { reason: ReasonCode, shortfalls: Vec<String> },
+    FinishPartial {
+        reason: ReasonCode,
+        shortfalls: Vec<String>,
+    },
 }
 
 impl Decision {
@@ -46,7 +52,10 @@ impl Decision {
     }
     /// Does this end the loop?
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Verify { .. } | Self::AskUser { .. } | Self::FinishPartial { .. })
+        matches!(
+            self,
+            Self::Verify { .. } | Self::AskUser { .. } | Self::FinishPartial { .. }
+        )
     }
     pub fn reason(&self) -> Option<ReasonCode> {
         match self {
@@ -191,22 +200,31 @@ impl Controller {
         elapsed_ms: Millis,
         last: StepOutcome,
     ) -> Decision {
-        let verdict = contract.completion.evaluate(capsule, &contract.requirements);
+        let verdict = contract
+            .completion
+            .evaluate(capsule, &contract.requirements);
 
         // ── Budgets: hard stops. ────────────────────────────────────────────────────────────────
         // A run out of budget with a met contract should still be reported as met, so the contract
         // check is folded in here rather than losing the good outcome to a limit.
         if let Some(code) = self.budget_exceeded(capsule, budget, elapsed_ms) {
             return if verdict.met {
-                Decision::Verify { reason: ReasonCode::ContractMet }
+                Decision::Verify {
+                    reason: ReasonCode::ContractMet,
+                }
             } else {
-                Decision::FinishPartial { reason: code, shortfalls: describe(&verdict) }
+                Decision::FinishPartial {
+                    reason: code,
+                    shortfalls: describe(&verdict),
+                }
             };
         }
 
         // ── Done? ──────────────────────────────────────────────────────────────────────────────
         if verdict.met {
-            return Decision::Verify { reason: ReasonCode::ContractMet };
+            return Decision::Verify {
+                reason: ReasonCode::ContractMet,
+            };
         }
 
         // ── High consequence: check before acting, not after. ──────────────────────────────────
@@ -224,7 +242,9 @@ impl Controller {
 
         if let Some(action) = self.repeated_action(capsule) {
             return if replans_left {
-                Decision::Replan { reason: ReasonCode::RepeatedAction }
+                Decision::Replan {
+                    reason: ReasonCode::RepeatedAction,
+                }
             } else {
                 Decision::FinishPartial {
                     reason: ReasonCode::RepeatedAction,
@@ -234,16 +254,26 @@ impl Controller {
         }
         if capsule.progress.barren_steps >= self.limits.max_barren_steps {
             return if replans_left {
-                Decision::Replan { reason: ReasonCode::NoProgress }
+                Decision::Replan {
+                    reason: ReasonCode::NoProgress,
+                }
             } else {
-                Decision::FinishPartial { reason: ReasonCode::NoProgress, shortfalls: describe(&verdict) }
+                Decision::FinishPartial {
+                    reason: ReasonCode::NoProgress,
+                    shortfalls: describe(&verdict),
+                }
             };
         }
         if self.is_circling(capsule) {
             return if replans_left {
-                Decision::Replan { reason: ReasonCode::Circling }
+                Decision::Replan {
+                    reason: ReasonCode::Circling,
+                }
             } else {
-                Decision::FinishPartial { reason: ReasonCode::Circling, shortfalls: describe(&verdict) }
+                Decision::FinishPartial {
+                    reason: ReasonCode::Circling,
+                    shortfalls: describe(&verdict),
+                }
             };
         }
         if capsule.progress.failures >= self.limits.max_failures {
@@ -257,19 +287,28 @@ impl Controller {
         // An unresolved contradiction is exactly the case worth a stronger model: it is a judgment
         // call, which is the one thing cheap tiers are worst at.
         if !capsule.contradictions.is_empty() {
-            return Decision::Escalate { reason: ReasonCode::Contradiction };
+            return Decision::Escalate {
+                reason: ReasonCode::Contradiction,
+            };
         }
         // Confidence falling means the last step made the picture worse. Another cheap step will
         // probably do the same.
         if last.confidence_before - capsule.confidence >= self.limits.confidence_drop {
-            return Decision::Escalate { reason: ReasonCode::ConfidenceDropped };
+            return Decision::Escalate {
+                reason: ReasonCode::ConfidenceDropped,
+            };
         }
 
         Decision::Proceed
     }
 
     /// Which budget, if any, is spent.
-    fn budget_exceeded(&self, capsule: &Capsule, budget: &Budget, elapsed_ms: Millis) -> Option<ReasonCode> {
+    fn budget_exceeded(
+        &self,
+        capsule: &Capsule,
+        budget: &Budget,
+        elapsed_ms: Millis,
+    ) -> Option<ReasonCode> {
         if capsule.progress.steps >= budget.max_steps {
             return Some(ReasonCode::StepBudget);
         }
@@ -310,7 +349,12 @@ impl Controller {
     /// Not after every step — that is three model calls per action for a check that usually says
     /// "fine". Only where being wrong is expensive: at the completion boundary, on a contradiction,
     /// or when confidence moved the wrong way.
-    pub fn should_criticize(&self, capsule: &Capsule, verdict: &Verdict, last: StepOutcome) -> bool {
+    pub fn should_criticize(
+        &self,
+        capsule: &Capsule,
+        verdict: &Verdict,
+        last: StepOutcome,
+    ) -> bool {
         verdict.met
             || !capsule.contradictions.is_empty()
             || (last.confidence_before - capsule.confidence) >= self.limits.confidence_drop
@@ -344,7 +388,11 @@ mod tests {
     fn contract(min_findings: usize) -> Contract {
         Contract {
             requirements: Vec::new(),
-            completion: CompletionCriteria { min_findings, require_full_coverage: false, ..Default::default() },
+            completion: CompletionCriteria {
+                min_findings,
+                require_full_coverage: false,
+                ..Default::default()
+            },
             output: OutputContract::default(),
         }
     }
@@ -367,12 +415,23 @@ mod tests {
     }
 
     fn tiny_budget() -> Budget {
-        Budget { max_steps: 5, max_model_calls: 4, max_wall_ms: 10_000, max_usd: None }
+        Budget {
+            max_steps: 5,
+            max_model_calls: 4,
+            max_wall_ms: 10_000,
+            max_usd: None,
+        }
     }
 
     #[test]
     fn a_healthy_run_proceeds() {
-        let d = Controller::default().decide(&capsule(), &contract(3), &tiny_budget(), 0, StepOutcome::default());
+        let d = Controller::default().decide(
+            &capsule(),
+            &contract(3),
+            &tiny_budget(),
+            0,
+            StepOutcome::default(),
+        );
         assert_eq!(d, Decision::Proceed);
         assert!(d.is_proceed());
         assert!(d.reason().is_none(), "proceeding needs no explanation");
@@ -380,8 +439,19 @@ mod tests {
 
     #[test]
     fn a_met_contract_goes_to_verify() {
-        let d = Controller::default().decide(&met_capsule(), &contract(1), &tiny_budget(), 0, StepOutcome::default());
-        assert_eq!(d, Decision::Verify { reason: ReasonCode::ContractMet });
+        let d = Controller::default().decide(
+            &met_capsule(),
+            &contract(1),
+            &tiny_budget(),
+            0,
+            StepOutcome::default(),
+        );
+        assert_eq!(
+            d,
+            Decision::Verify {
+                reason: ReasonCode::ContractMet
+            }
+        );
         assert!(d.is_terminal());
     }
 
@@ -391,8 +461,20 @@ mod tests {
     fn a_met_contract_survives_an_exhausted_budget() {
         let mut c = met_capsule();
         c.progress.steps = 99;
-        let d = Controller::default().decide(&c, &contract(1), &tiny_budget(), 999_999, StepOutcome::default());
-        assert_eq!(d, Decision::Verify { reason: ReasonCode::ContractMet }, "done is done, even at the limit");
+        let d = Controller::default().decide(
+            &c,
+            &contract(1),
+            &tiny_budget(),
+            999_999,
+            StepOutcome::default(),
+        );
+        assert_eq!(
+            d,
+            Decision::Verify {
+                reason: ReasonCode::ContractMet
+            },
+            "done is done, even at the limit"
+        );
     }
 
     /// An exhausted budget with an unmet contract finishes PARTIAL and says what is missing — never
@@ -401,11 +483,20 @@ mod tests {
     fn an_exhausted_budget_finishes_partial_and_discloses() {
         let mut c = capsule();
         c.progress.steps = 5;
-        let d = Controller::default().decide(&c, &contract(3), &tiny_budget(), 0, StepOutcome::default());
+        let d = Controller::default().decide(
+            &c,
+            &contract(3),
+            &tiny_budget(),
+            0,
+            StepOutcome::default(),
+        );
         match d {
             Decision::FinishPartial { reason, shortfalls } => {
                 assert_eq!(reason, ReasonCode::StepBudget);
-                assert!(shortfalls.iter().any(|s| s.contains("of 3 findings")), "{shortfalls:?}");
+                assert!(
+                    shortfalls.iter().any(|s| s.contains("of 3 findings")),
+                    "{shortfalls:?}"
+                );
             }
             other => panic!("expected FinishPartial, got {other:?}"),
         }
@@ -419,10 +510,17 @@ mod tests {
         let mut c = capsule();
         c.progress.model_calls = 4;
         assert_eq!(
-            ctl.decide(&c, &contract(3), &tiny_budget(), 0, StepOutcome::default()).reason(),
+            ctl.decide(&c, &contract(3), &tiny_budget(), 0, StepOutcome::default())
+                .reason(),
             Some(ReasonCode::ModelBudget)
         );
-        let d = ctl.decide(&capsule(), &contract(3), &tiny_budget(), 10_000, StepOutcome::default());
+        let d = ctl.decide(
+            &capsule(),
+            &contract(3),
+            &tiny_budget(),
+            10_000,
+            StepOutcome::default(),
+        );
         assert_eq!(d.reason(), Some(ReasonCode::Timeout));
     }
 
@@ -431,12 +529,27 @@ mod tests {
     fn alternating_between_two_dead_ends_forces_a_replan() {
         let mut c = capsule();
         for a in ["A", "B", "A", "B", "A", "B"] {
-            c = c.reduce(Observation { action: a.into(), ok: true, ..Default::default() });
+            c = c.reduce(Observation {
+                action: a.into(),
+                ok: true,
+                ..Default::default()
+            });
         }
         // Six steps, two distinct actions — and A has been tried three times.
-        let d = Controller::default().decide(&c, &contract(3), &Budget::background(), 0, StepOutcome::default());
+        let d = Controller::default().decide(
+            &c,
+            &contract(3),
+            &Budget::background(),
+            0,
+            StepOutcome::default(),
+        );
         assert!(
-            matches!(d, Decision::Replan { reason: ReasonCode::RepeatedAction | ReasonCode::Circling }),
+            matches!(
+                d,
+                Decision::Replan {
+                    reason: ReasonCode::RepeatedAction | ReasonCode::Circling
+                }
+            ),
             "got {d:?}"
         );
     }
@@ -446,18 +559,39 @@ mod tests {
         let ctl = Controller::default();
         let mut c = capsule();
         for i in 0..3 {
-            c = c.reduce(Observation { action: format!("distinct{i}"), ok: true, ..Default::default() });
+            c = c.reduce(Observation {
+                action: format!("distinct{i}"),
+                ok: true,
+                ..Default::default()
+            });
         }
         assert_eq!(c.progress.barren_steps, 3);
         assert_eq!(
-            ctl.decide(&c, &contract(3), &Budget::background(), 0, StepOutcome::default()),
-            Decision::Replan { reason: ReasonCode::NoProgress }
+            ctl.decide(
+                &c,
+                &contract(3),
+                &Budget::background(),
+                0,
+                StepOutcome::default()
+            ),
+            Decision::Replan {
+                reason: ReasonCode::NoProgress
+            }
         );
 
         // Once replanning has been tried enough, more of it is superstition — stop and disclose.
         c.progress.replans = 3;
-        match ctl.decide(&c, &contract(3), &Budget::background(), 0, StepOutcome::default()) {
-            Decision::FinishPartial { reason: ReasonCode::NoProgress, .. } => {}
+        match ctl.decide(
+            &c,
+            &contract(3),
+            &Budget::background(),
+            0,
+            StepOutcome::default(),
+        ) {
+            Decision::FinishPartial {
+                reason: ReasonCode::NoProgress,
+                ..
+            } => {}
             other => panic!("expected a partial finish once replans are spent, got {other:?}"),
         }
     }
@@ -467,28 +601,58 @@ mod tests {
     #[test]
     fn a_contradiction_escalates_rather_than_grinding() {
         let mut c = capsule();
-        c.contradictions.push("two sources disagree on the volume figure".into());
-        let d = Controller::default().decide(&c, &contract(3), &Budget::background(), 0, StepOutcome::default());
-        assert_eq!(d, Decision::Escalate { reason: ReasonCode::Contradiction });
-        assert!(!d.is_terminal(), "escalation continues the run at a higher tier");
+        c.contradictions
+            .push("two sources disagree on the volume figure".into());
+        let d = Controller::default().decide(
+            &c,
+            &contract(3),
+            &Budget::background(),
+            0,
+            StepOutcome::default(),
+        );
+        assert_eq!(
+            d,
+            Decision::Escalate {
+                reason: ReasonCode::Contradiction
+            }
+        );
+        assert!(
+            !d.is_terminal(),
+            "escalation continues the run at a higher tier"
+        );
     }
 
     #[test]
     fn a_confidence_drop_escalates() {
         let mut c = met_capsule();
         c.confidence = 0.4;
-        let last = StepOutcome { confidence_before: 0.8, next_is_outward: false };
+        let last = StepOutcome {
+            confidence_before: 0.8,
+            next_is_outward: false,
+        };
         let d = Controller::default().decide(&c, &contract(3), &Budget::background(), 0, last);
-        assert_eq!(d, Decision::Escalate { reason: ReasonCode::ConfidenceDropped });
+        assert_eq!(
+            d,
+            Decision::Escalate {
+                reason: ReasonCode::ConfidenceDropped
+            }
+        );
     }
 
     /// An outward action stops for a human first. The harm gate governs the action itself; this is
     /// the controller refusing to walk into it without asking.
     #[test]
     fn an_outward_next_action_asks_the_user_first() {
-        let last = StepOutcome { confidence_before: 0.0, next_is_outward: true };
-        match Controller::default().decide(&capsule(), &contract(3), &Budget::background(), 0, last) {
-            Decision::AskUser { reason: ReasonCode::HighConsequence, question } => {
+        let last = StepOutcome {
+            confidence_before: 0.0,
+            next_is_outward: true,
+        };
+        match Controller::default().decide(&capsule(), &contract(3), &Budget::background(), 0, last)
+        {
+            Decision::AskUser {
+                reason: ReasonCode::HighConsequence,
+                question,
+            } => {
                 assert!(question.contains("outside the mind"));
             }
             other => panic!("expected AskUser, got {other:?}"),
@@ -501,7 +665,10 @@ mod tests {
         let ctl = Controller::default();
         let healthy = capsule();
         let unmet = contract(3).completion.evaluate(&healthy, &[]);
-        assert!(!ctl.should_criticize(&healthy, &unmet, StepOutcome::default()), "no critic mid-run");
+        assert!(
+            !ctl.should_criticize(&healthy, &unmet, StepOutcome::default()),
+            "no critic mid-run"
+        );
 
         // At the completion boundary it always runs.
         let done = met_capsule();
@@ -515,7 +682,14 @@ mod tests {
         assert!(ctl.should_criticize(&clashing, &v, StepOutcome::default()));
 
         // And when the picture got worse.
-        assert!(ctl.should_criticize(&healthy, &unmet, StepOutcome { confidence_before: 0.9, next_is_outward: false }));
+        assert!(ctl.should_criticize(
+            &healthy,
+            &unmet,
+            StepOutcome {
+                confidence_before: 0.9,
+                next_is_outward: false
+            }
+        ));
     }
 
     /// The cheapest saving there is: an action whose answer is already in the state costs a tool call
@@ -525,17 +699,37 @@ mod tests {
         let ctl = Controller::default();
         let mut c = capsule();
         assert!(!ctl.is_redundant(&c, "search:foo"));
-        c = c.reduce(Observation { action: "search:foo".into(), ok: true, ..Default::default() });
-        c = c.reduce(Observation { action: "search:foo".into(), ok: true, ..Default::default() });
-        assert!(ctl.is_redundant(&c, "search:foo"), "twice is enough; the result is already in state");
+        c = c.reduce(Observation {
+            action: "search:foo".into(),
+            ok: true,
+            ..Default::default()
+        });
+        c = c.reduce(Observation {
+            action: "search:foo".into(),
+            ok: true,
+            ..Default::default()
+        });
+        assert!(
+            ctl.is_redundant(&c, "search:foo"),
+            "twice is enough; the result is already in state"
+        );
     }
 
     #[test]
     fn repeated_tool_failures_stop_the_run() {
         let mut c = capsule();
         c.progress.failures = 5;
-        match Controller::default().decide(&c, &contract(3), &Budget::background(), 0, StepOutcome::default()) {
-            Decision::FinishPartial { reason: ReasonCode::ToolFailures, shortfalls } => {
+        match Controller::default().decide(
+            &c,
+            &contract(3),
+            &Budget::background(),
+            0,
+            StepOutcome::default(),
+        ) {
+            Decision::FinishPartial {
+                reason: ReasonCode::ToolFailures,
+                shortfalls,
+            } => {
                 assert!(shortfalls.iter().any(|s| s.contains("kept failing")));
             }
             other => panic!("expected a partial finish, got {other:?}"),
@@ -546,14 +740,26 @@ mod tests {
     #[test]
     fn every_reason_code_reads_as_english() {
         for code in [
-            ReasonCode::ContractMet, ReasonCode::StepBudget, ReasonCode::ModelBudget, ReasonCode::Timeout,
-            ReasonCode::RepeatedAction, ReasonCode::NoProgress, ReasonCode::Circling, ReasonCode::Contradiction,
-            ReasonCode::ConfidenceDropped, ReasonCode::ToolFailures, ReasonCode::NeedsUserInput,
-            ReasonCode::HighConsequence, ReasonCode::Delivered,
+            ReasonCode::ContractMet,
+            ReasonCode::StepBudget,
+            ReasonCode::ModelBudget,
+            ReasonCode::Timeout,
+            ReasonCode::RepeatedAction,
+            ReasonCode::NoProgress,
+            ReasonCode::Circling,
+            ReasonCode::Contradiction,
+            ReasonCode::ConfidenceDropped,
+            ReasonCode::ToolFailures,
+            ReasonCode::NeedsUserInput,
+            ReasonCode::HighConsequence,
+            ReasonCode::Delivered,
         ] {
             let d = code.describe();
             assert!(d.len() > 12, "{code:?} needs a real description");
-            assert!(d.chars().next().unwrap().is_lowercase(), "{code:?} reads mid-sentence in the UI");
+            assert!(
+                d.chars().next().unwrap().is_lowercase(),
+                "{code:?} reads mid-sentence in the UI"
+            );
         }
     }
 
@@ -565,8 +771,18 @@ mod tests {
             action: "screen".into(),
             ok: true,
             uncertainties: vec![
-                Uncertainty { question: "catalyst?".into(), importance: 0.9, confidence: 0.2, resolved: false },
-                Uncertainty { question: "liquidity?".into(), importance: 0.5, confidence: 0.9, resolved: false },
+                Uncertainty {
+                    question: "catalyst?".into(),
+                    importance: 0.9,
+                    confidence: 0.2,
+                    resolved: false,
+                },
+                Uncertainty {
+                    question: "liquidity?".into(),
+                    importance: 0.5,
+                    confidence: 0.9,
+                    resolved: false,
+                },
             ],
             ..Default::default()
         });

@@ -57,16 +57,25 @@ impl QuotaReport {
 /// A window at exactly 0.0 with no reset time is a placeholder for a plan the account does not
 /// have; those are dropped, because rendering a row of 0% chips buries the one that matters.
 pub fn parse_usage(v: &serde_json::Value) -> Vec<QuotaWindow> {
-    let Some(obj) = v.as_object() else { return Vec::new() };
+    let Some(obj) = v.as_object() else {
+        return Vec::new();
+    };
     let mut out: Vec<QuotaWindow> = obj
         .iter()
         .filter_map(|(name, val)| {
             let u = val.get("utilization")?.as_f64()?;
-            let resets_at = val.get("resets_at").and_then(|r| r.as_str()).map(str::to_string);
+            let resets_at = val
+                .get("resets_at")
+                .and_then(|r| r.as_str())
+                .map(str::to_string);
             if u == 0.0 && resets_at.is_none() {
                 return None; // an inactive plan, not a window with room
             }
-            Some(QuotaWindow { name: name.clone(), utilization: u, resets_at })
+            Some(QuotaWindow {
+                name: name.clone(),
+                utilization: u,
+                resets_at,
+            })
         })
         .collect();
     // Fullest first, then by name so equal windows keep a stable order across polls (a chip that
@@ -118,20 +127,26 @@ fn fetch_uncached() -> QuotaReport {
                 .call();
             match res.and_then(|r| r.into_json::<serde_json::Value>().map_err(Into::into)) {
                 Ok(v) => report.windows = parse_usage(&v),
-                Err(e) => report
-                    .unmonitored
-                    .push(format!("anthropic: usage endpoint unreachable ({})", short(&e.to_string()))),
+                Err(e) => report.unmonitored.push(format!(
+                    "anthropic: usage endpoint unreachable ({})",
+                    short(&e.to_string())
+                )),
             }
         }
-        _ => report.unmonitored.push("anthropic: no CLAUDE_CODE_OAUTH_TOKEN configured".to_string()),
+        _ => report
+            .unmonitored
+            .push("anthropic: no CLAUDE_CODE_OAUTH_TOKEN configured".to_string()),
     }
     // Stated, not measured. The token-plan publishes no usage endpoint — its window surfaces only
     // in the body of a 429, which arrives after the budget is already gone. Saying so is the whole
     // point: an unmonitored provider must not be mistaken for one with headroom.
-    if std::env::var("QWEN_API_KEY").map(|k| !k.trim().is_empty()).unwrap_or(false) {
-        report
-            .unmonitored
-            .push("qwen token-plan: no usage endpoint — the window is only visible in a 429".to_string());
+    if std::env::var("QWEN_API_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
+    {
+        report.unmonitored.push(
+            "qwen token-plan: no usage endpoint — the window is only visible in a 429".to_string(),
+        );
     }
     report
 }
@@ -160,8 +175,15 @@ mod tests {
         .unwrap();
         let w = parse_usage(&v);
 
-        assert_eq!(w.len(), 2, "nulls, inactive placeholders and non-window objects are all dropped");
-        assert_eq!(w[0].name, "seven_day", "the window closest to full must lead — it is the one about to bite");
+        assert_eq!(
+            w.len(),
+            2,
+            "nulls, inactive placeholders and non-window objects are all dropped"
+        );
+        assert_eq!(
+            w[0].name, "seven_day",
+            "the window closest to full must lead — it is the one about to bite"
+        );
         assert_eq!(w[0].utilization, 83.0);
         assert_eq!(w[0].resets_at.as_deref(), Some("2026-08-15T10:00:00Z"));
         assert_eq!(w[1].name, "five_hour");
@@ -176,7 +198,10 @@ mod tests {
     fn a_shapeless_payload_yields_no_windows_rather_than_a_panic() {
         assert!(parse_usage(&serde_json::json!("nope")).is_empty());
         assert!(parse_usage(&serde_json::json!({})).is_empty());
-        assert!(QuotaReport::default().tightest().is_none(), "no windows means no claim about headroom");
+        assert!(
+            QuotaReport::default().tightest().is_none(),
+            "no windows means no claim about headroom"
+        );
     }
 
     /// Equal utilization must not reshuffle between polls, or the chip flaps.
@@ -187,6 +212,9 @@ mod tests {
             "alpha": {"utilization": 50.0, "resets_at": "x"},
         });
         let w = parse_usage(&v);
-        assert_eq!(w.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), vec!["alpha", "zulu"]);
+        assert_eq!(
+            w.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "zulu"]
+        );
     }
 }

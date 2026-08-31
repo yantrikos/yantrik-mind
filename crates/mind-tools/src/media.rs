@@ -66,27 +66,40 @@ pub enum MediaPlan {
 /// free, instant, and the publisher's own words rather than a CPU's guess at them.
 pub fn plan(probe: &MediaProbe, cap_secs: u64, live_window_secs: u64) -> MediaPlan {
     if probe.is_live {
-        return MediaPlan::LiveWindow { secs: live_window_secs.min(cap_secs) };
+        return MediaPlan::LiveWindow {
+            secs: live_window_secs.min(cap_secs),
+        };
     }
     if probe.has_captions {
         return MediaPlan::Captions;
     }
     if probe.duration_secs > cap_secs {
-        return MediaPlan::PartialListen { secs: cap_secs, of_secs: probe.duration_secs };
+        return MediaPlan::PartialListen {
+            secs: cap_secs,
+            of_secs: probe.duration_secs,
+        };
     }
-    MediaPlan::Transcribe { secs: probe.duration_secs.max(1) }
+    MediaPlan::Transcribe {
+        secs: probe.duration_secs.max(1),
+    }
 }
 
 /// The duration ceiling for local hearing. The box is CPU-only, and whisper on CPU runs at roughly
 /// real time — so an eight-hour broadcast is not a long job, it is an impossible one, and saying so
 /// beats queueing work that silently never finishes.
 pub fn cap_secs() -> u64 {
-    std::env::var("YM_MEDIA_MAX_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(1800)
+    std::env::var("YM_MEDIA_MAX_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800)
 }
 
 /// How much of a live broadcast one sample covers.
 pub fn live_window_secs() -> u64 {
-    std::env::var("YM_MEDIA_LIVE_WINDOW_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(180)
+    std::env::var("YM_MEDIA_LIVE_WINDOW_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(180)
 }
 
 fn ytdlp_bin() -> String {
@@ -158,12 +171,26 @@ pub fn probe(url: &str) -> anyhow::Result<MediaProbe> {
     crate::ssrf_check_pub(url)?;
     let bin = ytdlp_bin();
     if !have(&bin) {
-        anyhow::bail!("yt-dlp is not installed on this host, so I cannot reach video or audio at a URL yet");
+        anyhow::bail!(
+            "yt-dlp is not installed on this host, so I cannot reach video or audio at a URL yet"
+        );
     }
-    let out = run_bounded(&bin, &["-J", "--no-playlist", "--no-warnings", "--skip-download", url])?;
+    let out = run_bounded(
+        &bin,
+        &[
+            "-J",
+            "--no-playlist",
+            "--no-warnings",
+            "--skip-download",
+            url,
+        ],
+    )?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("yt-dlp could not read that URL: {}", err.lines().next().unwrap_or("unknown error").trim());
+        anyhow::bail!(
+            "yt-dlp could not read that URL: {}",
+            err.lines().next().unwrap_or("unknown error").trim()
+        );
     }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     Ok(probe_from_json(&v))
@@ -176,8 +203,7 @@ pub fn probe(url: &str) -> anyhow::Result<MediaProbe> {
 fn has_speech_tracks(v: &serde_json::Value, key: &str) -> bool {
     v.get(key)
         .and_then(|s| s.as_object())
-        .map(|m| m.keys().any(|k| k != "live_chat"))
-        .unwrap_or(false)
+        .is_some_and(|m| m.keys().any(|k| k != "live_chat"))
 }
 
 /// Parse yt-dlp's metadata JSON. Split out so the shape can be tested without the binary.
@@ -185,10 +211,27 @@ pub fn probe_from_json(v: &serde_json::Value) -> MediaProbe {
     let subs = has_speech_tracks(v, "subtitles");
     let auto = has_speech_tracks(v, "automatic_captions");
     MediaProbe {
-        id: v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-        title: v.get("title").and_then(|x| x.as_str()).unwrap_or("(untitled)").to_string(),
-        uploader: v.get("uploader").or_else(|| v.get("channel")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        duration_secs: v.get("duration").and_then(|x| x.as_f64()).unwrap_or(0.0).max(0.0) as u64,
+        id: v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        title: v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("(untitled)")
+            .to_string(),
+        uploader: v
+            .get("uploader")
+            .or_else(|| v.get("channel"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        duration_secs: v
+            .get("duration")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0)
+            .max(0.0) as u64,
         is_live: v.get("is_live").and_then(|x| x.as_bool()).unwrap_or(false),
         has_captions: subs || auto,
     }
@@ -204,7 +247,11 @@ pub fn captions_to_text(vtt: &str) -> String {
     let mut last = String::new();
     for raw in vtt.lines() {
         let line = raw.trim();
-        if line.is_empty() || line == "WEBVTT" || line.starts_with("Kind:") || line.starts_with("Language:") {
+        if line.is_empty()
+            || line == "WEBVTT"
+            || line.starts_with("Kind:")
+            || line.starts_with("Language:")
+        {
             continue;
         }
         if line.contains("-->") {
@@ -223,8 +270,16 @@ pub fn captions_to_text(vtt: &str) -> String {
                         hhmmss[1],
                         hhmmss[2].split('.').next().unwrap_or("00")
                     ),
-                    3 => format!("{}:{}", hhmmss[1], hhmmss[2].split('.').next().unwrap_or("00")),
-                    2 => format!("{}:{}", hhmmss[0], hhmmss[1].split('.').next().unwrap_or("00")),
+                    3 => format!(
+                        "{}:{}",
+                        hhmmss[1],
+                        hhmmss[2].split('.').next().unwrap_or("00")
+                    ),
+                    2 => format!(
+                        "{}:{}",
+                        hhmmss[0],
+                        hhmmss[1].split('.').next().unwrap_or("00")
+                    ),
                     _ => String::new(),
                 };
             }
@@ -269,11 +324,19 @@ pub fn captions_window(text: &str, from_secs: u64, secs: u64) -> String {
     let (lo, hi) = (from_secs, from_secs.saturating_add(secs));
     let mut out = Vec::new();
     for line in text.lines() {
-        let Some(rest) = line.strip_prefix('[') else { continue };
-        let Some((stamp, _)) = rest.split_once(']') else { continue };
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
+        };
+        let Some((stamp, _)) = rest.split_once(']') else {
+            continue;
+        };
         let parts: Vec<&str> = stamp.split(':').collect();
         let at = match parts.len() {
-            3 => parts[0].parse::<u64>().unwrap_or(0) * 3600 + parts[1].parse::<u64>().unwrap_or(0) * 60 + parts[2].parse::<u64>().unwrap_or(0),
+            3 => {
+                parts[0].parse::<u64>().unwrap_or(0) * 3600
+                    + parts[1].parse::<u64>().unwrap_or(0) * 60
+                    + parts[2].parse::<u64>().unwrap_or(0)
+            }
             2 => parts[0].parse::<u64>().unwrap_or(0) * 60 + parts[1].parse::<u64>().unwrap_or(0),
             _ => continue,
         };
@@ -281,8 +344,10 @@ pub fn captions_window(text: &str, from_secs: u64, secs: u64) -> String {
             out.push(line);
         }
     }
-    out.join("
-")
+    out.join(
+        "
+",
+    )
 }
 
 /// Fetch the publisher's own transcript. Prefers manual captions, falls back to auto.
@@ -312,12 +377,19 @@ pub fn captions(url: &str) -> anyhow::Result<String> {
         ],
     )?;
     if !out.status.success() {
-        anyhow::bail!("caption download failed: {}", String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").trim());
+        anyhow::bail!(
+            "caption download failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+        );
     }
     let mut found: Option<String> = None;
     for entry in std::fs::read_dir(scratch.path())?.flatten() {
         let p = entry.path();
-        if p.extension().map(|e| e == "vtt").unwrap_or(false) {
+        if p.extension().is_some_and(|e| e == "vtt") {
             if let Ok(text) = std::fs::read_to_string(&p) {
                 found = Some(text);
                 break;
@@ -336,13 +408,30 @@ pub fn captions(url: &str) -> anyhow::Result<String> {
 /// thing. This is what makes sampling a LIVE broadcast possible at all.
 fn stream_url(url: &str, want_audio: bool) -> anyhow::Result<String> {
     let bin = ytdlp_bin();
-    let fmt = if want_audio { "bestaudio/best" } else { "best[height<=720]/best" };
-    let out = run_bounded(&bin, &["-g", "-f", fmt, "--no-playlist", "--no-warnings", url])?;
+    let fmt = if want_audio {
+        "bestaudio/best"
+    } else {
+        "best[height<=720]/best"
+    };
+    let out = run_bounded(
+        &bin,
+        &["-g", "-f", fmt, "--no-playlist", "--no-warnings", url],
+    )?;
     if !out.status.success() {
-        anyhow::bail!("could not resolve a media stream: {}", String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").trim());
+        anyhow::bail!(
+            "could not resolve a media stream: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+        );
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    s.lines().find(|l| l.starts_with("http")).map(|l| l.to_string()).ok_or_else(|| anyhow::anyhow!("no stream url returned"))
+    s.lines()
+        .find(|l| l.starts_with("http"))
+        .map(|l| l.to_string())
+        .ok_or_else(|| anyhow::anyhow!("no stream url returned"))
 }
 
 /// One thing that was said, and when — the unit that lets speech line up with pictures.
@@ -362,8 +451,12 @@ pub fn parse_whisper_segments(out: &str) -> Vec<Utterance> {
     let mut v = Vec::new();
     for line in out.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix('[') else { continue };
-        let Some((stamp, text)) = rest.split_once(']') else { continue };
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
+        };
+        let Some((stamp, text)) = rest.split_once(']') else {
+            continue;
+        };
         let start = stamp.split("-->").next().unwrap_or("").trim();
         let parts: Vec<&str> = start.split(':').collect();
         let secs = match parts.len() {
@@ -382,7 +475,10 @@ pub fn parse_whisper_segments(out: &str) -> Vec<Utterance> {
         };
         let text = text.trim();
         if !text.is_empty() {
-            v.push(Utterance { at_secs: secs, text: text.to_string() });
+            v.push(Utterance {
+                at_secs: secs,
+                text: text.to_string(),
+            });
         }
     }
     v
@@ -390,7 +486,10 @@ pub fn parse_whisper_segments(out: &str) -> Vec<Utterance> {
 
 /// Flatten utterances back to plain prose (for consumers that only want the words).
 pub fn utterances_to_text(u: &[Utterance]) -> String {
-    u.iter().map(|x| x.text.as_str()).collect::<Vec<_>>().join(" ")
+    u.iter()
+        .map(|x| x.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// HEAR: pull `secs` of audio and run the LOCAL whisper over it. Nothing leaves the house — the
@@ -417,7 +516,11 @@ pub fn transcribe_segments(url: &str, secs: u64) -> anyhow::Result<Vec<Utterance
 }
 
 /// Hear `secs` of audio starting `from_secs` into the recording.
-pub fn transcribe_segments_at(url: &str, secs: u64, from_secs: u64) -> anyhow::Result<Vec<Utterance>> {
+pub fn transcribe_segments_at(
+    url: &str,
+    secs: u64,
+    from_secs: u64,
+) -> anyhow::Result<Vec<Utterance>> {
     crate::ssrf_check_pub(url)?;
     if !have(&ytdlp_bin()) {
         anyhow::bail!("yt-dlp is not installed on this host");
@@ -425,8 +528,10 @@ pub fn transcribe_segments_at(url: &str, secs: u64, from_secs: u64) -> anyhow::R
     if !have(&ffmpeg_bin()) {
         anyhow::bail!("ffmpeg is not installed on this host");
     }
-    let whisper = std::env::var("YM_WHISPER_BIN").unwrap_or_else(|_| "/opt/voice/whisper.cpp/build/bin/whisper-cli".into());
-    let model = std::env::var("YM_WHISPER_MODEL").unwrap_or_else(|_| "/opt/voice/models/ggml-base.en.bin".into());
+    let whisper = std::env::var("YM_WHISPER_BIN")
+        .unwrap_or_else(|_| "/opt/voice/whisper.cpp/build/bin/whisper-cli".into());
+    let model = std::env::var("YM_WHISPER_MODEL")
+        .unwrap_or_else(|_| "/opt/voice/models/ggml-base.en.bin".into());
     if !Path::new(&model).exists() {
         anyhow::bail!("the local speech model is missing at {model}, so I cannot hear yet");
     }
@@ -436,10 +541,31 @@ pub fn transcribe_segments_at(url: &str, secs: u64, from_secs: u64) -> anyhow::R
     // 16 kHz mono is exactly what whisper.cpp wants; -t bounds the work at the source.
     let out = run_bounded(
         &ffmpeg_bin(),
-        &["-y", "-ss", &from_secs.to_string(), "-i", &src, "-t", &secs.to_string(), "-vn", "-ar", "16000", "-ac", "1", wav.to_str().unwrap_or("a.wav")],
+        &[
+            "-y",
+            "-ss",
+            &from_secs.to_string(),
+            "-i",
+            &src,
+            "-t",
+            &secs.to_string(),
+            "-vn",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            wav.to_str().unwrap_or("a.wav"),
+        ],
     )?;
     if !wav.exists() {
-        anyhow::bail!("could not extract audio: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim());
+        anyhow::bail!(
+            "could not extract audio: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
+                .trim()
+        );
     }
     // Timestamps KEPT (no `-nt`): they are what lets speech line up with the frames.
     //
@@ -449,7 +575,18 @@ pub fn transcribe_segments_at(url: &str, secs: u64, from_secs: u64) -> anyhow::R
     // wall time is free and total CPU is what actually competes with the mind for the box. More
     // threads bought latency nobody needed at a 24% premium in cores.
     let threads = std::env::var("YM_WHISPER_THREADS").unwrap_or_else(|_| "4".into());
-    let out = run_bounded(&whisper, &["-m", &model, "-f", wav.to_str().unwrap_or("a.wav"), "-np", "-t", &threads])?;
+    let out = run_bounded(
+        &whisper,
+        &[
+            "-m",
+            &model,
+            "-f",
+            wav.to_str().unwrap_or("a.wav"),
+            "-np",
+            "-t",
+            &threads,
+        ],
+    )?;
     let raw = String::from_utf8_lossy(&out.stdout);
     let segments = parse_whisper_segments(&raw);
     if segments.is_empty() {
@@ -471,7 +608,12 @@ pub fn keyframes(url: &str, want: usize, within_secs: u64) -> anyhow::Result<Vec
 }
 
 /// Sample frames starting `from_secs` into the recording.
-pub fn keyframes_at(url: &str, want: usize, within_secs: u64, from_secs: u64) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
+pub fn keyframes_at(
+    url: &str,
+    want: usize,
+    within_secs: u64,
+    from_secs: u64,
+) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
     crate::ssrf_check_pub(url)?;
     if !have(&ffmpeg_bin()) {
         anyhow::bail!("ffmpeg is not installed on this host");
@@ -510,7 +652,7 @@ pub fn keyframes_at(url: &str, want: usize, within_secs: u64, from_secs: u64) ->
     let mut entries: Vec<PathBuf> = std::fs::read_dir(scratch.path())?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "jpg").unwrap_or(false))
+        .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
         .collect();
     entries.sort();
     // Evenly spaced by construction, so the second is exact: frame i sits at i·window/want.
@@ -523,7 +665,11 @@ pub fn keyframes_at(url: &str, want: usize, within_secs: u64, from_secs: u64) ->
     if frames.is_empty() {
         anyhow::bail!(
             "no frames could be sampled: {}",
-            String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim()
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
+                .trim()
         );
     }
     Ok(frames)
@@ -534,7 +680,14 @@ mod tests {
     use super::*;
 
     fn probe_of(dur: u64, live: bool, caps: bool) -> MediaProbe {
-        MediaProbe { id: "vid".into(), title: "t".into(), uploader: "u".into(), duration_secs: dur, is_live: live, has_captions: caps }
+        MediaProbe {
+            id: "vid".into(),
+            title: "t".into(),
+            uploader: "u".into(),
+            duration_secs: dur,
+            is_live: live,
+            has_captions: caps,
+        }
     }
 
     #[test]
@@ -546,18 +699,31 @@ mod tests {
         // this overlap is the normal case.
         let a = Scratch::new("frames").unwrap();
         let b = Scratch::new("frames").unwrap();
-        assert_ne!(a.path(), b.path(), "two concurrent jobs got the same scratch directory");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two concurrent jobs got the same scratch directory"
+        );
         std::fs::write(a.path().join("keep.jpg"), b"x").unwrap();
         drop(b); // the sibling finishing must not touch our files
-        assert!(a.path().join("keep.jpg").exists(), "a sibling job's Drop deleted our working set");
+        assert!(
+            a.path().join("keep.jpg").exists(),
+            "a sibling job's Drop deleted our working set"
+        );
     }
 
     #[test]
     fn captions_beat_transcription_whenever_they_exist() {
         // Free, instant, and the publisher's own words — never spend CPU to re-derive them.
-        assert_eq!(plan(&probe_of(600, false, true), 1800, 180), MediaPlan::Captions);
+        assert_eq!(
+            plan(&probe_of(600, false, true), 1800, 180),
+            MediaPlan::Captions
+        );
         // …even for something long, where transcription would be refused outright.
-        assert_eq!(plan(&probe_of(28_800, false, true), 1800, 180), MediaPlan::Captions);
+        assert_eq!(
+            plan(&probe_of(28_800, false, true), 1800, 180),
+            MediaPlan::Captions
+        );
     }
 
     #[test]
@@ -575,9 +741,15 @@ mod tests {
         // available the whole time. Hear the window; label it honestly.
         assert_eq!(
             plan(&probe_of(28_800, false, false), 1800, 180),
-            MediaPlan::PartialListen { secs: 1800, of_secs: 28_800 }
+            MediaPlan::PartialListen {
+                secs: 1800,
+                of_secs: 28_800
+            }
         );
-        assert_eq!(plan(&probe_of(900, false, false), 1800, 180), MediaPlan::Transcribe { secs: 900 });
+        assert_eq!(
+            plan(&probe_of(900, false, false), 1800, 180),
+            MediaPlan::Transcribe { secs: 900 }
+        );
     }
 
     #[test]
@@ -636,11 +808,24 @@ mod tests {
                    00:00:03.000 --> 00:00:05.000\nthe first thing said\n\n\
                    00:01:07.500 --> 00:01:09.000\n<c>the second</c> thing said\n";
         let text = captions_to_text(vtt);
-        assert!(text.contains("[00:01] the first thing said"), "keeps a coarse anchor: {text}");
-        assert!(text.contains("[01:07] the second thing said"), "strips inline markup: {text}");
+        assert!(
+            text.contains("[00:01] the first thing said"),
+            "keeps a coarse anchor: {text}"
+        );
+        assert!(
+            text.contains("[01:07] the second thing said"),
+            "strips inline markup: {text}"
+        );
         // Rolling auto-captions repeat every line; a stutter is not a transcript.
-        assert_eq!(text.matches("the first thing said").count(), 1, "collapses duplicates: {text}");
-        assert!(!text.contains("WEBVTT") && !text.contains("Kind:"), "drops the header: {text}");
+        assert_eq!(
+            text.matches("the first thing said").count(),
+            1,
+            "collapses duplicates: {text}"
+        );
+        assert!(
+            !text.contains("WEBVTT") && !text.contains("Kind:"),
+            "drops the header: {text}"
+        );
     }
 
     #[test]
@@ -648,7 +833,10 @@ mod tests {
         let srt = "1\n00:00:01,000 --> 00:00:02,000\nreal words\n";
         let text = captions_to_text(srt);
         assert!(text.contains("real words"));
-        assert!(!text.starts_with('1'), "the cue number is not speech: {text}");
+        assert!(
+            !text.starts_with('1'),
+            "the cue number is not speech: {text}"
+        );
     }
 
     /// A tool that runs and dislikes the flag is still installed. `ffmpeg --version` exits 1 (it
@@ -656,11 +844,17 @@ mod tests {
     /// ffmpeg sat on the PATH.
     #[test]
     fn presence_is_spawnability_not_exit_status() {
-        assert!(!have("ym-definitely-not-a-real-binary-9f3a"), "a missing binary is absent");
+        assert!(
+            !have("ym-definitely-not-a-real-binary-9f3a"),
+            "a missing binary is absent"
+        );
         // The check must not depend on the exit code: a spawnable tool counts even when the flag
         // is wrong for it. `cargo` runs these tests, so it is present by construction here.
         if Command::new("cargo").arg("-version").output().is_ok() {
-            assert!(have("cargo"), "a spawnable binary is present regardless of how it exits");
+            assert!(
+                have("cargo"),
+                "a spawnable binary is present regardless of how it exits"
+            );
         }
     }
 
@@ -675,12 +869,22 @@ mod tests {
         let u = parse_whisper_segments(raw);
         assert_eq!(u.len(), 3, "{u:?}");
         assert_eq!(u[0].at_secs, 0);
-        assert_eq!(u[1].at_secs, 4, "seconds come from the START of the segment");
+        assert_eq!(
+            u[1].at_secs, 4,
+            "seconds come from the START of the segment"
+        );
         assert_eq!(u[2].at_secs, 67, "hh:mm:ss carries minutes correctly");
-        assert!(u[1].text.starts_with("reverted if you're contrarian"), "{:?}", u[1].text);
+        assert!(
+            u[1].text.starts_with("reverted if you're contrarian"),
+            "{:?}",
+            u[1].text
+        );
         // Flattening drops the clock but keeps every word, for callers that only want prose.
         let flat = utterances_to_text(&u);
-        assert!(flat.contains("contrarian") && flat.contains("make money"), "{flat}");
+        assert!(
+            flat.contains("contrarian") && flat.contains("make money"),
+            "{flat}"
+        );
     }
 
     #[test]
@@ -702,10 +906,19 @@ mod tests {
 [46:10] taking profit at 110
 [178:00] see you tomorrow";
         let mid = captions_window(text, 2700, 600); // 45m in, 10m wide
-        assert!(mid.contains("long CRWV"), "the mid-session content must survive: {mid}");
+        assert!(
+            mid.contains("long CRWV"),
+            "the mid-session content must survive: {mid}"
+        );
         assert!(mid.contains("taking profit"), "{mid}");
-        assert!(!mid.contains("hello everyone"), "the opening must be excluded: {mid}");
-        assert!(!mid.contains("see you tomorrow"), "the wind-down must be excluded: {mid}");
+        assert!(
+            !mid.contains("hello everyone"),
+            "the opening must be excluded: {mid}"
+        );
+        assert!(
+            !mid.contains("see you tomorrow"),
+            "the wind-down must be excluded: {mid}"
+        );
         // An empty window is empty, not the whole file.
         assert_eq!(captions_window(text, 10_000, 60), "");
     }
@@ -725,17 +938,31 @@ I am long CRWV here
 ";
         let text = captions_to_text(vtt);
         assert!(text.contains("[05:00] early chatter"), "{text}");
-        assert!(text.contains("[01:05:00] I am long CRWV here"), "the hour must survive: {text}");
+        assert!(
+            text.contains("[01:05:00] I am long CRWV here"),
+            "the hour must survive: {text}"
+        );
         // And the window can now actually reach it: 65 minutes in.
         let win = captions_window(&text, 3900, 600);
-        assert!(win.contains("long CRWV"), "a past-the-hour window must match: {win}");
+        assert!(
+            win.contains("long CRWV"),
+            "a past-the-hour window must match: {win}"
+        );
         assert!(!win.contains("early chatter"), "{win}");
     }
 
     #[test]
     fn the_offset_targets_the_middle_and_leaves_short_media_alone() {
-        assert_eq!(sensible_offset(600, 1800), 0, "short enough that the whole thing is the middle");
-        assert_eq!(sensible_offset(10_878, 1800), 3626, "a 181m show is sampled from ~60m in");
+        assert_eq!(
+            sensible_offset(600, 1800),
+            0,
+            "short enough that the whole thing is the middle"
+        );
+        assert_eq!(
+            sensible_offset(10_878, 1800),
+            3626,
+            "a 181m show is sampled from ~60m in"
+        );
         // Never seeks past the point where the window would run off the end.
         assert!(sensible_offset(2000, 1800) + 1800 <= 2000);
     }

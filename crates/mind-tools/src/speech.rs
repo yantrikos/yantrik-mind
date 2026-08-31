@@ -82,7 +82,11 @@ pub fn to_spoken(text: &str) -> String {
     s = s.replace(" & ", " and ");
     // Emoji and other pictographs carry no sound.
     s = s.chars().filter(|c| !is_pictograph(*c)).collect();
-    s.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 /// `.NS` / `.BO` are how a data feed names an exchange, not how a person names a company.
@@ -92,7 +96,10 @@ pub fn to_spoken(text: &str) -> String {
 /// removed nothing. The text came out with its dashes intact and would have been read aloud as
 /// "dash RELIANCE price is still unconfirmed".
 fn strip_exchange_suffixes(s: &str) -> String {
-    s.lines().map(strip_suffixes_in_line).collect::<Vec<_>>().join("\n")
+    s.lines()
+        .map(strip_suffixes_in_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn strip_suffixes_in_line(s: &str) -> String {
@@ -119,7 +126,10 @@ fn spoken_percentages(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         // A minus sign directly before a digit is a direction, not a dash.
-        if (bytes[i] == '-' || bytes[i] == '+') && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+        if (bytes[i] == '-' || bytes[i] == '+')
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
             let prev_is_word = i > 0 && bytes[i - 1].is_alphanumeric();
             if !prev_is_word {
                 out.push_str(if bytes[i] == '-' { "down " } else { "up " });
@@ -172,9 +182,8 @@ pub fn within_budget(text: &str, max_words: usize) -> String {
     if out.is_empty() {
         return spoken;
     }
-    let joined = out.join(" ");
-    // Reborrow: `out` holds slices of `spoken`, so build the owned string before it drops.
-    joined
+    // `join` builds the owned string before `out`'s slices of `spoken` are dropped.
+    out.join(" ")
 }
 
 /// Sentence boundaries, kept simple — an abbreviation is a smaller error than a wrong split.
@@ -254,8 +263,14 @@ mod tests {
         assert!(!said.contains('^'), "a caret is not a word: {said}");
         assert!(!said.contains('%'), "a percent sign is not a word: {said}");
         assert!(!said.contains("📉"), "emoji make no sound: {said}");
-        assert!(said.contains("the Nifty"), "^NSEI is 'the Nifty' to a person: {said}");
-        assert!(said.contains("down 0.27 percent"), "a leading minus is a direction: {said}");
+        assert!(
+            said.contains("the Nifty"),
+            "^NSEI is 'the Nifty' to a person: {said}"
+        );
+        assert!(
+            said.contains("down 0.27 percent"),
+            "a leading minus is a direction: {said}"
+        );
         // Case-insensitive on purpose: this occurrence is the bare word RELIANCE with no exchange
         // suffix, so no mapping applies and it stays as written. Whether an all-caps word should be
         // lower-cased for the synthesiser is a real open question — some voices spell out capitals —
@@ -276,10 +291,23 @@ mod tests {
         // so the mouth honours what the prompt requested.
         let long = "You're sitting on cash — $10,000 in the account, all of it uninvested, with no open positions. Buying power is $40,000, so you've got room for up to 4x leverage if you want to deploy. Given the RELIANCE and INFY threads you've been tracking, the account is ready for a first entry whenever you set a thesis. Want me to pull a fresh RELIANCE quote and sketch a position size?";
         let said = within_budget(long, 45);
-        assert!(said.split_whitespace().count() <= 50, "{} words: {said}", said.split_whitespace().count());
-        assert!(said.ends_with('.'), "stops at a full stop, never mid-word: {said}");
-        assert!(said.contains("10,000"), "the ANSWER survives — it is the first sentence: {said}");
-        assert!(!said.contains("Want me to"), "the trailing offer is not reached: {said}");
+        assert!(
+            said.split_whitespace().count() <= 50,
+            "{} words: {said}",
+            said.split_whitespace().count()
+        );
+        assert!(
+            said.ends_with('.'),
+            "stops at a full stop, never mid-word: {said}"
+        );
+        assert!(
+            said.contains("10,000"),
+            "the ANSWER survives — it is the first sentence: {said}"
+        );
+        assert!(
+            !said.contains("Want me to"),
+            "the trailing offer is not reached: {said}"
+        );
     }
 
     #[test]
@@ -294,7 +322,10 @@ mod tests {
         // Half a sentence is worse than a long one — the listener is left waiting for a verb.
         let one = "The reason the account shows ten thousand dollars of buying power despite having no positions at all is that the broker extends four times leverage on a cash balance of that size.";
         let said = within_budget(one, 10);
-        assert!(said.split_whitespace().count() > 10, "a lone long sentence is not cut: {said}");
+        assert!(
+            said.split_whitespace().count() > 10,
+            "a lone long sentence is not cut: {said}"
+        );
         assert!(said.ends_with('.'));
     }
 
@@ -306,7 +337,11 @@ mod tests {
                     Reliance never came back cleanly, so I won't guess it. Want me to re-pull?";
         let chunks = speakable_chunks(text, 60, 160);
         assert!(chunks.len() >= 2, "{chunks:?}");
-        assert!(chunks[0].len() <= 70, "first chunk must be quick to synthesise: {:?}", chunks[0]);
+        assert!(
+            chunks[0].len() <= 70,
+            "first chunk must be quick to synthesise: {:?}",
+            chunks[0]
+        );
         // And nothing may be lost in the chunking — a dropped clause is a changed answer.
         let rejoined = chunks.join(" ");
         assert!(rejoined.contains("Reliance"), "{rejoined}");
@@ -317,7 +352,10 @@ mod tests {
     fn a_bullet_list_becomes_sentences_rather_than_a_paragraph_of_dashes() {
         let said = to_spoken("Here's the state:\n- one thing\n- another thing");
         assert!(!said.contains(" - "), "{said}");
-        assert!(said.contains("one thing."), "each bullet ends as its own sentence: {said}");
+        assert!(
+            said.contains("one thing."),
+            "each bullet ends as its own sentence: {said}"
+        );
         assert!(said.contains("another thing."), "{said}");
     }
 

@@ -26,7 +26,13 @@ impl super::ConversationEngine {
                         .map(|(m, body)| {
                             let cleanish: String = body
                                 .split_whitespace()
-                                .filter(|w| !w.contains('{') && !w.contains('}') && !w.starts_with('@') && !w.starts_with('.') && !w.contains("=09"))
+                                .filter(|w| {
+                                    !w.contains('{')
+                                        && !w.contains('}')
+                                        && !w.starts_with('@')
+                                        && !w.starts_with('.')
+                                        && !w.contains("=09")
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" ");
                             // Match-centered window: receipts are long and the relevant line (hotel,
@@ -38,7 +44,11 @@ impl super::ConversationEngine {
                             let hit = low.find(&anchor).or_else(|| low.find(first_word));
                             let snip: String = match hit {
                                 Some(pos) => {
-                                    let start = cleanish.char_indices().rev().find(|(i, _)| *i <= pos.saturating_sub(120)).map(|(i, _)| i).unwrap_or(0);
+                                    let start = cleanish
+                                        .char_indices()
+                                        .rev()
+                                        .find(|(i, _)| *i <= pos.saturating_sub(120))
+                                        .map_or(0, |(i, _)| i);
                                     cleanish[start..].chars().take(520).collect()
                                 }
                                 None => cleanish.chars().take(360).collect(),
@@ -53,7 +63,11 @@ impl super::ConversationEngine {
             }
         }
         if sections.is_empty() {
-            let err_note = if errors > 0 { format!(" ({errors} account(s) unreachable)") } else { String::new() };
+            let err_note = if errors > 0 {
+                format!(" ({errors} account(s) unreachable)")
+            } else {
+                String::new()
+            };
             return format!(
                 "📬 Searched the full mailboxes of {} account(s) for \"{q}\" — no matching message{err_note}. If it exists, it's in an account I don't scan yet.",
                 inboxes.len()
@@ -66,7 +80,11 @@ impl super::ConversationEngine {
         if !self.scan_mail.is_empty() {
             return self.scan_mail.clone();
         }
-        self.mail.as_ref().map(|m| ("inbox".to_string(), m.clone())).into_iter().collect()
+        self.mail
+            .as_ref()
+            .map(|m| ("inbox".to_string(), m.clone()))
+            .into_iter()
+            .collect()
     }
 
     /// ---------- DEEP MAIL REPORT ----------
@@ -78,7 +96,8 @@ impl super::ConversationEngine {
     pub async fn mail_report(&self, per_account: usize) -> String {
         let inboxes = self.scan_inboxes();
         if inboxes.is_empty() {
-            return "No inboxes connected yet — set YM_SCAN_EMAIL (+ _2.._6) with app passwords.".to_string();
+            return "No inboxes connected yet — set YM_SCAN_EMAIL (+ _2.._6) with app passwords."
+                .to_string();
         }
         let guard = "mailreport".to_string();
         if !self.studies.lock().unwrap().insert(guard.clone()) {
@@ -115,7 +134,8 @@ impl super::ConversationEngine {
                     continue;
                 }
                 // Deterministic aggregation: per-sender counts, times, sample subjects.
-                let mut agg: std::collections::HashMap<String, SenderAgg> = std::collections::HashMap::new();
+                let mut agg: std::collections::HashMap<String, SenderAgg> =
+                    std::collections::HashMap::new();
                 let (mut t_min, mut t_max) = (i64::MAX, 0i64);
                 for msg in &msgs {
                     let key = msg.from.trim().to_string();
@@ -135,10 +155,15 @@ impl super::ConversationEngine {
                         t_max = t_max.max(ms);
                     }
                     if e.subjects.len() < 3 && !msg.subject.trim().is_empty() {
-                        e.subjects.push(msg.subject.trim().chars().take(90).collect());
+                        e.subjects
+                            .push(msg.subject.trim().chars().take(90).collect());
                     }
                 }
-                let span_days = if t_max > t_min && t_min != i64::MAX { ((t_max - t_min) / 86_400_000).max(1) } else { 0 };
+                let span_days = if t_max > t_min && t_min != i64::MAX {
+                    ((t_max - t_min) / 86_400_000).max(1)
+                } else {
+                    0
+                };
                 // Rank senders; keep the top 60 for classification.
                 let mut senders: Vec<SenderAgg> = agg.into_values().collect();
                 senders.sort_by(|a, b| b.count.cmp(&a.count));
@@ -147,25 +172,48 @@ impl super::ConversationEngine {
                     .iter_mut()
                     .map(|se| {
                         let cad = cadence_label(&mut se.times).unwrap_or("-");
-                        format!("{} | ×{} | {} | {}", se.addr, se.count, cad, se.subjects.join(" ⸱ "))
+                        format!(
+                            "{} | ×{} | {} | {}",
+                            se.addr,
+                            se.count,
+                            cad,
+                            se.subjects.join(" ⸱ ")
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
                 // One classification pass over the aggregate (not per email — that's the trick).
                 let people_csv = known_people.join(", ");
-                let rules_line = if rules.is_empty() { String::new() } else { format!("\nUSER RULES (override): {}", rules.join(" | ")) };
+                let rules_line = if rules.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nUSER RULES (override): {}", rules.join(" | "))
+                };
                 let classify = format!(
                     "Sender table from the user's mailbox: sender | count | cadence | sample subjects.\nClassify EACH sender. Output ONLY a JSON array: [{{\"sender\":\"<sender>\",\"type\":\"subscription|bill|shop|newsletter|service|human|other\",\"name\":\"<clean service/person name>\",\"amount\":<number if a recurring amount is visible in subjects, else null>,\"renewal\":\"<YYYY-MM-DD if a renewal/expiry date is visible, else null>\"}}].\nKnown people (always type human): {people_csv}.{rules_line}\n\n{table}"
                 );
-                let cfg = GenerationConfig { max_tokens: 2600, ..GenerationConfig::default() };
+                let cfg = GenerationConfig {
+                    max_tokens: 2600,
+                    ..GenerationConfig::default()
+                };
                 let classified: Vec<serde_json::Value> = match inference
-                    .chat_grounded(vec![ChatMessage::system("You classify email senders from aggregates. Output only JSON."), ChatMessage::user(&classify)], cfg)
+                    .chat_grounded(
+                        vec![
+                            ChatMessage::system(
+                                "You classify email senders from aggregates. Output only JSON.",
+                            ),
+                            ChatMessage::user(&classify),
+                        ],
+                        cfg,
+                    )
                     .await
                 {
                     Ok(r) => {
                         let body = crate::strip_reasoning(&r.text);
                         match (body.find('['), body.rfind(']')) {
-                            (Some(x), Some(y)) if y > x => serde_json::from_str(&body[x..=y]).unwrap_or_default(),
+                            (Some(x), Some(y)) if y > x => {
+                                serde_json::from_str(&body[x..=y]).unwrap_or_default()
+                            }
                             _ => Vec::new(),
                         }
                     }
@@ -177,7 +225,11 @@ impl super::ConversationEngine {
                 let mut monthly_total = 0f64;
                 for c in &classified {
                     let ty = c.get("type").and_then(|x| x.as_str()).unwrap_or("other");
-                    let nm = c.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+                    let nm = c
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("?")
+                        .to_string();
                     let amt = c.get("amount").and_then(|x| x.as_f64());
                     let renewal = c.get("renewal").and_then(|x| x.as_str()).unwrap_or("");
                     let sender = c.get("sender").and_then(|x| x.as_str()).unwrap_or("");
@@ -192,7 +244,11 @@ impl super::ConversationEngine {
                                 cad.map(|c| format!(" — {c}")).unwrap_or_default(),
                                 amt.map(|a| format!(", ~${a:.2}")).unwrap_or_default()
                             );
-                            if ty == "subscription" { subs.push(line) } else { bills.push(line) }
+                            if ty == "subscription" {
+                                subs.push(line)
+                            } else {
+                                bills.push(line)
+                            }
                             if let Some(a) = amt {
                                 monthly_total += match cad {
                                     Some("yearly") => a / 12.0,
@@ -202,22 +258,41 @@ impl super::ConversationEngine {
                                 };
                                 // Auto-track: a named recurring charge with a clear amount.
                                 let already = subs_now.iter().chain(new_subs.iter()).any(|t| {
-                                    t.get("name").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(&nm)).unwrap_or(false)
+                                    t.get("name")
+                                        .and_then(|x| x.as_str())
+                                        .is_some_and(|x| x.eq_ignore_ascii_case(&nm))
                                 });
                                 if !already && ty == "subscription" {
                                     new_subs.push(serde_json::json!({ "name": nm, "amount": a, "cycle": cad.unwrap_or("monthly") }));
                                 }
                             }
                             if renewal.len() == 10 {
-                                if let Ok(d) = chrono::NaiveDate::parse_from_str(renewal, "%Y-%m-%d") {
-                                    if let Some(ms) = d.and_hms_opt(9, 0, 0).map(|t| t.and_utc().timestamp_millis()) {
+                                if let Ok(d) =
+                                    chrono::NaiveDate::parse_from_str(renewal, "%Y-%m-%d")
+                                {
+                                    if let Some(ms) = d
+                                        .and_hms_opt(9, 0, 0)
+                                        .map(|t| t.and_utc().timestamp_millis())
+                                    {
                                         cal_events.push(serde_json::json!({ "id": ms, "title": format!("{nm} renewal (mail)"), "when_ms": ms, "source": "mail" }));
                                     }
                                 }
                             }
                         }
-                        "shop" => shops.push(format!("• {nm} ×{}", senders.iter().find(|se| se.addr == sender).map(|se| se.count).unwrap_or(0))),
-                        "human" => humans.push(format!("• {nm} ×{}", senders.iter().find(|se| se.addr == sender).map(|se| se.count).unwrap_or(0))),
+                        "shop" => shops.push(format!(
+                            "• {nm} ×{}",
+                            senders
+                                .iter()
+                                .find(|se| se.addr == sender)
+                                .map_or(0, |se| se.count)
+                        )),
+                        "human" => humans.push(format!(
+                            "• {nm} ×{}",
+                            senders
+                                .iter()
+                                .find(|se| se.addr == sender)
+                                .map_or(0, |se| se.count)
+                        )),
                         "service" => services += 1,
                         _ => {}
                     }
@@ -225,7 +300,11 @@ impl super::ConversationEngine {
                 let mut sec = format!(
                     "📊 {label} — {} emails over ~{span_days} day(s) (~{}/day)",
                     msgs.len(),
-                    if span_days > 0 { (msgs.len() as i64 / span_days).max(1) } else { msgs.len() as i64 }
+                    if span_days > 0 {
+                        (msgs.len() as i64 / span_days).max(1)
+                    } else {
+                        msgs.len() as i64
+                    }
                 );
                 if !subs.is_empty() {
                     sec.push_str(&format!(
@@ -237,10 +316,16 @@ impl super::ConversationEngine {
                     sec.push_str(&format!("\n\n🏦 BILLS & UTILITIES:\n{}", bills.join("\n")));
                 }
                 if !shops.is_empty() {
-                    sec.push_str(&format!("\n\n🧾 SHOPPING (by volume):\n{}", shops.join("\n")));
+                    sec.push_str(&format!(
+                        "\n\n🧾 SHOPPING (by volume):\n{}",
+                        shops.join("\n")
+                    ));
                 }
                 if !humans.is_empty() {
-                    sec.push_str(&format!("\n\n👤 PEOPLE writing to you:\n{}", humans.join("\n")));
+                    sec.push_str(&format!(
+                        "\n\n👤 PEOPLE writing to you:\n{}",
+                        humans.join("\n")
+                    ));
                 }
                 sec.push_str(&format!(
                     "\n\n🌐 ACCOUNT SURFACE: {} distinct senders; ~{services} service/notification accounts",
@@ -252,10 +337,22 @@ impl super::ConversationEngine {
             let mut notes: Vec<String> = Vec::new();
             if !new_subs.is_empty() {
                 let mut tracked = subs_now.clone();
-                let names: Vec<String> = new_subs.iter().filter_map(|s| s.get("name").and_then(|x| x.as_str()).map(String::from)).collect();
+                let names: Vec<String> = new_subs
+                    .iter()
+                    .filter_map(|s| s.get("name").and_then(|x| x.as_str()).map(String::from))
+                    .collect();
                 tracked.extend(new_subs);
-                let _ = mem.profile_set("subscriptions", &serde_json::to_string(&tracked).unwrap_or_default()).await;
-                notes.push(format!("auto-tracked {} new subscription(s): {}", names.len(), names.join(", ")));
+                let _ = mem
+                    .profile_set(
+                        "subscriptions",
+                        &serde_json::to_string(&tracked).unwrap_or_default(),
+                    )
+                    .await;
+                notes.push(format!(
+                    "auto-tracked {} new subscription(s): {}",
+                    names.len(),
+                    names.join(", ")
+                ));
             }
             if !cal_events.is_empty() {
                 let mut evs: Vec<serde_json::Value> = cal_now
@@ -264,14 +361,27 @@ impl super::ConversationEngine {
                     .collect();
                 let n_new = cal_events.len();
                 evs.extend(cal_events);
-                let _ = mem.profile_set("calendar_events", &serde_json::to_string(&evs).unwrap_or_default()).await;
+                let _ = mem
+                    .profile_set(
+                        "calendar_events",
+                        &serde_json::to_string(&evs).unwrap_or_default(),
+                    )
+                    .await;
                 notes.push(format!("{n_new} renewal date(s) added to the calendar"));
             }
-            let tail = if notes.is_empty() { String::new() } else { format!("\n\n✅ {}", notes.join("; ")) };
-            if report_sections.is_empty() {
-                nq.lock().unwrap().push("📊 Mail report: couldn't read any inbox.".to_string());
+            let tail = if notes.is_empty() {
+                String::new()
             } else {
-                nq.lock().unwrap().push(format!("{}{tail}", report_sections.join("\n\n———\n\n")));
+                format!("\n\n✅ {}", notes.join("; "))
+            };
+            if report_sections.is_empty() {
+                nq.lock()
+                    .unwrap()
+                    .push("📊 Mail report: couldn't read any inbox.".to_string());
+            } else {
+                nq.lock()
+                    .unwrap()
+                    .push(format!("{}{tail}", report_sections.join("\n\n———\n\n")));
             }
             studies.lock().unwrap().remove(&guard);
         });
@@ -297,7 +407,12 @@ impl super::ConversationEngine {
                     counts.push(format!("{label} ✓{}", msgs.len()));
                     blocks.push(
                         msgs.iter()
-                            .map(|x| format!("- [{label}] #{} {} | {} | {}", x.id, x.date, x.from, x.subject))
+                            .map(|x| {
+                                format!(
+                                    "- [{label}] #{} {} | {} | {}",
+                                    x.id, x.date, x.from, x.subject
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join("\n"),
                     );
@@ -310,19 +425,30 @@ impl super::ConversationEngine {
         }
         let headers = blocks.join("\n");
         // Stage 2: which few are worth OPENING? (state-ambiguous threads, bills, reservations)
-        let cfg_small = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+        let cfg_small = GenerationConfig {
+            max_tokens: 300,
+            ..GenerationConfig::default()
+        };
         let triage = format!(
             "Email headers, one per line as: - [account] #id date | from | subject.\nPick UP TO 6 whose BODY should be opened to verify state or extract amounts/dates — reservations/orders (could be canceled!), bills, deadlines, anything ambiguous. Output ONLY JSON: [{{\"account\":\"<account>\",\"id\":\"<id>\"}}].\n\n{headers}"
         );
         let mut opened = String::new();
         if let Ok(r) = self
             .inference
-            .chat_grounded(vec![ChatMessage::system("You triage email headers. Output only JSON."), ChatMessage::user(&triage)], cfg_small)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system("You triage email headers. Output only JSON."),
+                    ChatMessage::user(&triage),
+                ],
+                cfg_small,
+            )
             .await
         {
             let body = crate::strip_reasoning(&r.text);
             let picks: Vec<serde_json::Value> = match (body.find('['), body.rfind(']')) {
-                (Some(x), Some(y)) if y > x => serde_json::from_str(&body[x..=y]).unwrap_or_default(),
+                (Some(x), Some(y)) if y > x => {
+                    serde_json::from_str(&body[x..=y]).unwrap_or_default()
+                }
                 _ => Vec::new(),
             };
             // Group picked ids per account and peek their bodies.
@@ -340,7 +466,10 @@ impl super::ConversationEngine {
                 if let Ok(bodies) = m.peek_bodies(&ids, 900).await {
                     for (id, text) in bodies {
                         if !text.trim().is_empty() {
-                            opened.push_str(&format!("\n=== [{label}] #{id} OPENED ===\n{}\n", text.trim()));
+                            opened.push_str(&format!(
+                                "\n=== [{label}] #{id} OPENED ===\n{}\n",
+                                text.trim()
+                            ));
                         }
                     }
                 }
@@ -364,7 +493,12 @@ impl super::ConversationEngine {
         } else {
             format!(
                 "\nUSER RULES (these OVERRIDE every category rule):\n{}",
-                user_rules.iter().enumerate().map(|(i, r)| format!("{}. {r}", i + 1)).collect::<Vec<_>>().join("\n")
+                user_rules
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| format!("{}. {r}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )
         };
         let prompt = format!(
@@ -373,7 +507,10 @@ impl super::ConversationEngine {
             known = known_people,
             rules = rules_block,
         );
-        let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 900,
+            ..GenerationConfig::default()
+        };
         match self
             .inference
             .chat_grounded(vec![ChatMessage::system("You analyze email. Terse, factual, never invent amounts, senders, or states."), ChatMessage::user(&prompt)], cfg)
@@ -413,9 +550,20 @@ impl super::ConversationEngine {
         if self.scan_inboxes().is_empty() {
             return false;
         }
-        let period_ms: i64 = std::env::var("YM_MAILSWEEP_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms: i64 = std::env::var("YM_MAILSWEEP_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
         let period_ms = (period_ms as f64 * self.domain_pace("mail").await) as i64;
-        let last: i64 = self.memory.profile_get("mail_sweep_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let last: i64 = self
+            .memory
+            .profile_get("mail_sweep_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
@@ -424,25 +572,28 @@ impl super::ConversationEngine {
     pub async fn mail_sweep_run(&self) -> Option<String> {
         let _ = self
             .memory
-            .profile_set("mail_sweep_last", &chrono::Utc::now().timestamp_millis().to_string())
+            .profile_set(
+                "mail_sweep_last",
+                &chrono::Utc::now().timestamp_millis().to_string(),
+            )
             .await;
         let digest = self.inbox_analytics(30).await;
         let has = |sec: &str| {
-            digest
-                .split(sec)
-                .nth(1)
-                .map(|rest| rest.lines().take(4).any(|l| l.trim_start().starts_with("- ")))
-                .unwrap_or(false)
+            digest.split(sec).nth(1).is_some_and(|rest| {
+                rest.lines()
+                    .take(4)
+                    .any(|l| l.trim_start().starts_with("- "))
+            })
         };
         if has("NEEDS ACTION") || has("MONEY IN MOTION") || has("FROM PEOPLE") {
-            self.ledger_sent("mail", "daily sweep flagged something needing action").await;
+            self.ledger_sent("mail", "daily sweep flagged something needing action")
+                .await;
             Some(format!("📬 Mail sweep — something needs you:\n\n{digest}"))
         } else {
             eprintln!("[mail] sweep clean — staying quiet");
             None
         }
     }
-
 }
 
 impl super::ConversationEngine {
@@ -467,12 +618,18 @@ impl super::ConversationEngine {
             _ => return "Usage: ym draft <to> | <subject> | <body>".to_string(),
         };
         if !to.contains('@') {
-            return format!("\"{to}\" doesn't look like an address — usage: ym draft <to> | <subject> | <body>");
+            return format!(
+                "\"{to}\" doesn't look like an address — usage: ym draft <to> | <subject> | <body>"
+            );
         }
         if body.len() < 2 {
             return "Give me something to say in the draft.".to_string();
         }
-        let subject = if subject.is_empty() { "(no subject)" } else { subject };
+        let subject = if subject.is_empty() {
+            "(no subject)"
+        } else {
+            subject
+        };
         match mail.save_draft(to, subject, body).await {
             Ok(where_) => format!(
                 "✉️ Left it in your drafts — {where_}\n   To: {to}\n   Subject: {subject}\n\nIt is written and unsent. Open your mail client and press send when you're happy with it."

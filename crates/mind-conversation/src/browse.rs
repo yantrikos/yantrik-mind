@@ -21,7 +21,10 @@ use super::*;
 
 /// How many observe→act steps one goal may take before the loop reports where it got to.
 fn max_steps() -> usize {
-    std::env::var("YM_BROWSE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(8)
+    std::env::var("YM_BROWSE_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8)
 }
 
 impl super::ConversationEngine {
@@ -31,7 +34,9 @@ impl super::ConversationEngine {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return "Give me a full URL to start from, e.g. `ym browse https://example.com | find the pricing page`".to_string();
         }
-        let headful = std::env::var("YM_BROWSE_HEADFUL").map(|v| v == "1").unwrap_or(false);
+        let headful = std::env::var("YM_BROWSE_HEADFUL")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let profile = std::env::var("YM_BROWSE_PROFILE").ok();
         let session = match tokio::task::spawn_blocking(move || {
             mind_tools::BrowserSession::start(headful, profile.as_deref())
@@ -81,13 +86,19 @@ impl super::ConversationEngine {
             );
             let messages = vec![
                 ChatMessage::system(&self.persona),
-                ChatMessage::system("You drive a web browser one action at a time. Output ONLY the JSON object."),
+                ChatMessage::system(
+                    "You drive a web browser one action at a time. Output ONLY the JSON object.",
+                ),
                 ChatMessage::user(&prompt),
             ];
             // PRIVATE-GROUNDED: the prompt carries the operator's GOAL, which routinely holds
             // household context ("book the table for Priya's birthday"). Private lane first,
             // escalation audited — the same treatment every other operator-intent prompt gets.
-            let text = match self.inference.chat_grounded(messages, GenerationConfig::default()).await {
+            let text = match self
+                .inference
+                .chat_grounded(messages, GenerationConfig::default())
+                .await
+            {
                 Ok(r) => r.text,
                 Err(e) => {
                     log.push(format!("(model error: {e})"));
@@ -98,15 +109,26 @@ impl super::ConversationEngine {
             let b = body_owned.as_str();
             let b = b.split("```").find(|s| s.contains('{')).unwrap_or(b);
             let v: serde_json::Value = match (b.find('{'), b.rfind('}')) {
-                (Some(s), Some(e)) if e > s => serde_json::from_str(&b[s..=e]).unwrap_or(serde_json::json!({})),
+                (Some(s), Some(e)) if e > s => {
+                    serde_json::from_str(&b[s..=e]).unwrap_or(serde_json::json!({}))
+                }
                 _ => serde_json::json!({}),
             };
             let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("done");
-            let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let why = v
+                .get("why")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let index = v.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
 
             if action == "done" {
-                let answer = v.get("answer").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let answer = v
+                    .get("answer")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 log.push(format!("done — {answer}"));
                 break;
             }
@@ -123,8 +145,16 @@ impl super::ConversationEngine {
                 }
             }
             let s = session.clone();
-            let val = v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let goto_url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let val = v
+                .get("value")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let goto_url = v
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let act = action.to_string();
             let next = tokio::task::spawn_blocking(move || match act.as_str() {
                 "click" => s.click(index, false),
@@ -143,7 +173,14 @@ impl super::ConversationEngine {
                         ));
                         break;
                     }
-                    log.push(format!("{action}{} — {why}", if index > 0 { format!(" [{index}]") } else { String::new() }));
+                    log.push(format!(
+                        "{action}{} — {why}",
+                        if index > 0 {
+                            format!(" [{index}]")
+                        } else {
+                            String::new()
+                        }
+                    ));
                     if o.ok {
                         obs = o;
                     }
@@ -160,7 +197,10 @@ impl super::ConversationEngine {
         let _ = tokio::task::spawn_blocking(move || s.close()).await;
         format!(
             "🌐 Browsed toward: {goal}\n\n{}\n\nEnded on: {}\n{}",
-            log.iter().map(|l| format!("  · {l}")).collect::<Vec<_>>().join("\n"),
+            log.iter()
+                .map(|l| format!("  · {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             obs.url,
             obs.text.chars().take(700).collect::<String>()
         )
@@ -173,7 +213,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_url_is_refused_before_a_browser_is_started() {
-        let mem: Arc<dyn MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
         let pool = mind_inference::InferencePool::new(
             Arc::new(mind_inference::ScriptedLLM::new("{}")) as Arc<dyn yantrik_ml::LLMBackend>,
             1,

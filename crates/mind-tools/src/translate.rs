@@ -71,17 +71,21 @@ impl Translator for GoogleTranslate {
         let tl = lang_code(target);
         tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             // sl=auto detects the source; dt=t returns translation segments.
-            let v: serde_json::Value = ureq::get("https://translate.googleapis.com/translate_a/single")
-                .timeout(std::time::Duration::from_secs(15))
-                .query("client", "gtx")
-                .query("sl", "auto")
-                .query("tl", &tl)
-                .query("dt", "t")
-                .query("q", &text)
-                .call()?
-                .into_json()?;
+            let v: serde_json::Value =
+                ureq::get("https://translate.googleapis.com/translate_a/single")
+                    .timeout(std::time::Duration::from_secs(15))
+                    .query("client", "gtx")
+                    .query("sl", "auto")
+                    .query("tl", &tl)
+                    .query("dt", "t")
+                    .query("q", &text)
+                    .call()?
+                    .into_json()?;
             // shape: [ [ ["translated","src",...], ["seg2",...] ], ..., "detected-lang" ]
-            let segs = v.get(0).and_then(|x| x.as_array()).ok_or_else(|| anyhow::anyhow!("unexpected response"))?;
+            let segs = v
+                .get(0)
+                .and_then(|x| x.as_array())
+                .ok_or_else(|| anyhow::anyhow!("unexpected response"))?;
             let mut out = String::new();
             for seg in segs {
                 if let Some(t) = seg.get(0).and_then(|x| x.as_str()) {

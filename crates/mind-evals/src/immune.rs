@@ -231,7 +231,11 @@ evidence."#;
 
 impl LlmCritic {
     pub fn new(backend: Arc<dyn LLMBackend>) -> Self {
-        Self { backend, prompt_version: 2, flag_threshold: 0.5 }
+        Self {
+            backend,
+            prompt_version: 2,
+            flag_threshold: 0.5,
+        }
     }
 }
 
@@ -240,7 +244,10 @@ impl BeliefCritic for LlmCritic {
         // JSON serialization, not free-text interpolation — the data boundary
         // the prompt promises.
         let user = serde_json::to_string_pretty(case).unwrap_or_default();
-        let messages = [ChatMessage::system(CRITIC_PROMPT_V2), ChatMessage::user(user)];
+        let messages = [
+            ChatMessage::system(CRITIC_PROMPT_V2),
+            ChatMessage::user(user),
+        ];
         let abstained = CriticVerdict {
             p_false: 0.5,
             strongest_counterargument: String::new(),
@@ -255,7 +262,9 @@ impl BeliefCritic for LlmCritic {
         };
         // Tolerate prose around the JSON object (local models do this).
         let text = resp.text;
-        let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) else { return abstained };
+        let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) else {
+            return abstained;
+        };
         match serde_json::from_str::<CriticVerdict>(&text[start..=end]) {
             Ok(v) => validate_verdict(v),
             Err(_) => abstained,
@@ -294,14 +303,20 @@ const INJECT_PREFIX: &str = "Review note: ";
 /// replaced by a `<FAMILY>` sentinel, normalized. Two statements that differ
 /// ONLY in the deranged value collide here — which is exactly how the critic
 /// finds the original belief a seed contradicts. The INJECT_PREFIX is stripped
-/// so an injected "Review note: X on <DATE>" collides with a stored "X on
-/// <DATE>". None when the statement carries no derangeable slot.
+/// so an injected `Review note: X on <DATE>` collides with a stored `X on
+/// <DATE>`. None when the statement carries no derangeable slot.
 pub fn masked_key(statement: &str) -> Option<String> {
     let base = statement.strip_prefix(INJECT_PREFIX).unwrap_or(statement);
     let (family, _value, span) = extract_value(base)?;
     let mut masked = base.to_string();
     masked.replace_range(span, &format!("<{}>", family.to_uppercase()));
-    Some(masked.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "))
+    Some(
+        masked
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -310,25 +325,44 @@ enum TypedValue {
     Number(String),
 }
 
+type FamilyCandidate<'a> = (&'a mind_types::Belief, TypedValue, std::ops::Range<usize>);
+type CandidatesByFamily<'a> = std::collections::BTreeMap<String, Vec<FamilyCandidate<'a>>>;
+
 /// Extract the first mechanically-derangeable value from a statement.
 fn extract_value(statement: &str) -> Option<(String, TypedValue, std::ops::Range<usize>)> {
     const MONTHS: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     // Family "date": "<Month> <day>"
     for m in MONTHS {
         if let Some(pos) = statement.find(m) {
             let after = &statement[pos + m.len()..];
-            let day_str: String =
-                after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+            let day_str: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if let Ok(day) = day_str.parse::<u32>() {
                 if (1..=31).contains(&day) {
                     let ws = after.len() - after.trim_start().len();
                     let end = pos + m.len() + ws + day_str.len();
                     return Some((
                         "date".into(),
-                        TypedValue::Date { month: m.to_string(), day },
+                        TypedValue::Date {
+                            month: m.to_string(),
+                            day,
+                        },
                         pos..end,
                     ));
                 }
@@ -340,7 +374,11 @@ fn extract_value(statement: &str) -> Option<(String, TypedValue, std::ops::Range
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
-            let start = if i > 0 && (bytes[i - 1] == b'v' || bytes[i - 1] == b'V') { i - 1 } else { i };
+            let start = if i > 0 && (bytes[i - 1] == b'v' || bytes[i - 1] == b'V') {
+                i - 1
+            } else {
+                i
+            };
             let mut end = i;
             while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
                 end += 1;
@@ -349,7 +387,8 @@ fn extract_value(statement: &str) -> Option<(String, TypedValue, std::ops::Range
                 end -= 1;
             }
             let token = &statement[start..end];
-            let family = if token.contains('.') || token.starts_with('v') || token.starts_with('V') {
+            let family = if token.contains('.') || token.starts_with('v') || token.starts_with('V')
+            {
                 "version"
             } else {
                 "count"
@@ -365,7 +404,9 @@ fn derange(value: &TypedValue, donor: Option<&TypedValue>) -> String {
     match (value, donor) {
         // Prefer swapping with a REAL value from another belief in the family —
         // the lie then has exactly the distributional shape of a truth.
-        (TypedValue::Date { .. }, Some(TypedValue::Date { month, day })) => format!("{month} {day}"),
+        (TypedValue::Date { .. }, Some(TypedValue::Date { month, day })) => {
+            format!("{month} {day}")
+        }
         (TypedValue::Number(_), Some(TypedValue::Number(n))) => n.clone(),
         // Lone member of its family: deterministic perturbation.
         (TypedValue::Date { month, day }, _) => format!("{month} {}", (day + 13) % 28 + 1),
@@ -399,8 +440,7 @@ pub fn generate_manifest(
     exclude_bases: &[String],
 ) -> Option<SeedManifest> {
     // Candidates: confident, evidenced, human-sourced, value-bearing.
-    let mut by_family: std::collections::BTreeMap<String, Vec<(&mind_types::Belief, TypedValue, std::ops::Range<usize>)>> =
-        std::collections::BTreeMap::new();
+    let mut by_family: CandidatesByFamily<'_> = std::collections::BTreeMap::new();
     for b in beliefs {
         if b.confidence < 0.7 || b.evidence_count == 0 {
             continue;
@@ -408,7 +448,9 @@ pub fn generate_manifest(
         if exclude_bases.contains(&b.statement) {
             continue;
         }
-        if !b.provenance.to_lowercase().contains("told") && !b.provenance.to_lowercase().contains("observed") {
+        if !b.provenance.to_lowercase().contains("told")
+            && !b.provenance.to_lowercase().contains("observed")
+        {
             continue;
         }
         if let Some((family, value, span)) = extract_value(&b.statement) {
@@ -428,7 +470,10 @@ pub fn generate_manifest(
             let (seed_base, seed_val, seed_span) = &members[i];
             let (ctrl_base, ..) = &members[i + 1];
             // Donor value from the NEXT family member beyond the pair, if any.
-            let donor = members.get(i + 2).map(|(_, v, _)| v).filter(|v| *v != seed_val);
+            let donor = members
+                .get(i + 2)
+                .map(|(_, v, _)| v)
+                .filter(|v| *v != seed_val);
             let false_value = derange(seed_val, donor);
             let mut false_statement = seed_base.statement.clone();
             false_statement.replace_range(seed_span.clone(), &false_value);
@@ -481,32 +526,60 @@ pub struct TripPredicate {
 
 /// Parse and verify trip predicates from the raw `profile_get("trips")` JSON.
 pub fn trips_to_predicates(trips_json: &str) -> Vec<TripPredicate> {
-    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(trips_json) else { return Vec::new() };
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(trips_json) else {
+        return Vec::new();
+    };
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for t in rows {
         let dest = t["dest"].as_str().unwrap_or("").trim().to_string();
-        let start = t["start"].as_str().or(t["st"].as_str()).unwrap_or("").to_string();
-        let end = t["end"].as_str().or(t["en"].as_str()).unwrap_or("").to_string();
+        let start = t["start"]
+            .as_str()
+            .or(t["st"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let end = t["end"]
+            .as_str()
+            .or(t["en"].as_str())
+            .unwrap_or("")
+            .to_string();
         let photos = t["photos"].as_u64().unwrap_or(0);
-        let date_ok = |d: &str| d.len() >= 8 && d.as_bytes()[..4].iter().all(|c| c.is_ascii_digit());
-        if dest.is_empty() || dest == "?" || !date_ok(&start) || !date_ok(&end) || end < start || photos < 3 {
+        let date_ok =
+            |d: &str| d.len() >= 8 && d.as_bytes()[..4].iter().all(|c| c.is_ascii_digit());
+        if dest.is_empty()
+            || dest == "?"
+            || !date_ok(&start)
+            || !date_ok(&end)
+            || end < start
+            || photos < 3
+        {
             continue;
         }
         let key = format!("{start}:{end}");
         if !seen.insert(key.clone()) {
             continue; // duplicate interval — ambiguous, excluded
         }
-        out.push(TripPredicate { base_id: format!("archive-trip:{key}"), start, end, dest });
+        out.push(TripPredicate {
+            base_id: format!("archive-trip:{key}"),
+            start,
+            end,
+            dest,
+        });
     }
     out
 }
 
 /// Build trip_dest seed pairs: seeds from a fixed-point-free destination
 /// rotation within the seed pool, controls verbatim from disjoint rows.
-pub fn generate_trip_pairs(preds: &[TripPredicate], max_pairs: usize, exclude_bases: &[String]) -> Vec<SeedPair> {
-    let mut usable: Vec<&TripPredicate> =
-        preds.iter().filter(|p| !exclude_bases.contains(&p.base_id)).collect();
+pub fn generate_trip_pairs(
+    preds: &[TripPredicate],
+    max_pairs: usize,
+    exclude_bases: &[String],
+) -> Vec<SeedPair> {
+    let mut usable: Vec<&TripPredicate> = preds
+        .iter()
+        .filter(|p| !exclude_bases.contains(&p.base_id))
+        .collect();
     usable.sort_by(|a, b| a.base_id.cmp(&b.base_id));
     // Need >= 4 rows: >= 2 seeds (rotation needs 2+ distinct dests) + controls.
     if usable.len() < 4 {
@@ -595,7 +668,9 @@ pub async fn run_seed_trial(
 ) -> Result<TrialReport, String> {
     let snap_path = scratch_dir.join(format!("immune_trial_{}.db", manifest.trial_id));
     let snap_str = snap_path.to_string_lossy().into_owned();
-    live.snapshot_to(&snap_str).await.map_err(|e| format!("snapshot: {e}"))?;
+    live.snapshot_to(&snap_str)
+        .await
+        .map_err(|e| format!("snapshot: {e}"))?;
 
     let result = run_on_snapshot(&snap_str, dim, manifest, critic, flag_threshold).await;
 
@@ -613,7 +688,10 @@ pub async fn run_seed_trial(
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     if !removed {
-        return Err(format!("seeded snapshot could not be deleted: {} — quarantine it manually", snap_path.display()));
+        return Err(format!(
+            "seeded snapshot could not be deleted: {} — quarantine it manually",
+            snap_path.display()
+        ));
     }
     result
 }
@@ -680,7 +758,11 @@ async fn run_on_snapshot(
                 Some((b, ev)) => (
                     b.confidence,
                     b.provenance,
-                    ev.iter().map(|e| e.excerpt.clone()).filter(|x| !x.is_empty()).take(5).collect(),
+                    ev.iter()
+                        .map(|e| e.excerpt.clone())
+                        .filter(|x| !x.is_empty())
+                        .take(5)
+                        .collect(),
                 ),
                 None => (0.5, manifest.inject_provenance.clone(), Vec::new()),
             };
@@ -702,7 +784,14 @@ async fn run_on_snapshot(
             }
             let seen: std::collections::HashSet<String> = related.iter().cloned().collect();
             for r in copy
-                .recall_typed(mind_types::RecallQuery { text: stmt.clone(), top_k: 8, kind: None }, &mind_types::AccessContext::operator_audit())
+                .recall_typed(
+                    mind_types::RecallQuery {
+                        text: stmt.clone(),
+                        top_k: 8,
+                        kind: None,
+                    },
+                    &mind_types::AccessContext::operator_audit(),
+                )
                 .await
                 .unwrap_or_default()
             {
@@ -748,7 +837,11 @@ async fn run_on_snapshot(
             n_controls,
             seeds_flagged,
             controls_flagged,
-            detection_rate: if n_seeds > 0 { seeds_flagged as f64 / n_seeds as f64 } else { 0.0 },
+            detection_rate: if n_seeds > 0 {
+                seeds_flagged as f64 / n_seeds as f64
+            } else {
+                0.0
+            },
             control_damage_rate: if n_controls > 0 {
                 controls_flagged as f64 / n_controls as f64
             } else {
@@ -797,14 +890,21 @@ pub fn wilson_upper_bound(successes: usize, n: usize) -> f64 {
 /// chain — any edited or deleted row breaks every hash after it. Keep the
 /// latest chain head somewhere the mind cannot write if you need custody, not
 /// just tamper-evidence.
-pub fn append_trial_record(ledger_path: &std::path::Path, report: &TrialReport) -> Result<String, String> {
+pub fn append_trial_record(
+    ledger_path: &std::path::Path,
+    report: &TrialReport,
+) -> Result<String, String> {
     // Advisory lock (sol defect #12): concurrent appenders would both read the
     // same head and fork the chain. create_new is atomic on every platform;
     // a lock older than 120s is presumed dead and stolen.
     let lock_path = ledger_path.with_extension("lock");
     let mut acquired = false;
     for _ in 0..100 {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
             Ok(_) => {
                 acquired = true;
                 break;
@@ -834,7 +934,10 @@ pub fn append_trial_record(ledger_path: &std::path::Path, report: &TrialReport) 
     result
 }
 
-fn append_trial_record_locked(ledger_path: &std::path::Path, report: &TrialReport) -> Result<String, String> {
+fn append_trial_record_locked(
+    ledger_path: &std::path::Path,
+    report: &TrialReport,
+) -> Result<String, String> {
     let prev_chain = chain_head(ledger_path).unwrap_or_else(|| "genesis".into());
     let record_json = serde_json::to_string(report).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -860,7 +963,9 @@ fn append_trial_record_locked(ledger_path: &std::path::Path, report: &TrialRepor
 /// chain. Returns Err with a description when the anchor is missing.
 pub fn verify_anchor(ledger_path: &std::path::Path, anchored_head: &str) -> Result<(), String> {
     let Ok(content) = std::fs::read_to_string(ledger_path) else {
-        return Err(format!("ledger missing but anchor {anchored_head} exists — truncated to zero?"));
+        return Err(format!(
+            "ledger missing but anchor {anchored_head} exists — truncated to zero?"
+        ));
     };
     for line in content.lines().filter(|l| !l.trim().is_empty()) {
         if let Some(rest) = line.strip_prefix("{\"chain\":\"") {
@@ -871,7 +976,9 @@ pub fn verify_anchor(ledger_path: &std::path::Path, anchored_head: &str) -> Resu
             }
         }
     }
-    Err(format!("anchored head {anchored_head} not found in ledger — valid-prefix truncation suspected"))
+    Err(format!(
+        "anchored head {anchored_head} not found in ledger — valid-prefix truncation suspected"
+    ))
 }
 
 /// Atomic JSON write (sol defect #13): readers must never observe a partial
@@ -893,7 +1000,9 @@ pub fn write_json_atomic(path: &std::path::Path, json: &str) -> Result<(), Strin
 /// Hashes the record's RAW bytes exactly as written — re-serializing through
 /// `serde_json::Value` would reorder keys and never reproduce the hash.
 pub fn verify_trial_ledger(ledger_path: &std::path::Path) -> Result<usize, usize> {
-    let Ok(content) = std::fs::read_to_string(ledger_path) else { return Ok(0) };
+    let Ok(content) = std::fs::read_to_string(ledger_path) else {
+        return Ok(0);
+    };
     let mut prev = "genesis".to_string();
     let mut count = 0usize;
     for (i, line) in content.lines().filter(|l| !l.trim().is_empty()).enumerate() {
@@ -902,7 +1011,9 @@ pub fn verify_trial_ledger(ledger_path: &std::path::Path) -> Result<usize, usize
         let rest = line.strip_prefix("{\"chain\":\"").ok_or(i)?;
         let sep = rest.find("\",\"record\":").ok_or(i)?;
         let chain = &rest[..sep];
-        let record_raw = rest[sep + "\",\"record\":".len()..].strip_suffix('}').ok_or(i)?;
+        let record_raw = rest[sep + "\",\"record\":".len()..]
+            .strip_suffix('}')
+            .ok_or(i)?;
         let mut hasher = Sha256::new();
         hasher.update(prev.as_bytes());
         hasher.update(record_raw.as_bytes());
@@ -918,7 +1029,9 @@ pub fn verify_trial_ledger(ledger_path: &std::path::Path) -> Result<usize, usize
 /// Read every record back from the ledger (chain is NOT verified here — call
 /// [`verify_trial_ledger`] first when integrity matters).
 pub fn read_trial_ledger(ledger_path: &std::path::Path) -> Vec<TrialReport> {
-    let Ok(content) = std::fs::read_to_string(ledger_path) else { return Vec::new() };
+    let Ok(content) = std::fs::read_to_string(ledger_path) else {
+        return Vec::new();
+    };
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -935,11 +1048,14 @@ pub fn read_trial_ledger(ledger_path: &std::path::Path) -> Vec<TrialReport> {
 /// tamper-evidence becomes custody.
 pub fn chain_head(ledger_path: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(ledger_path).ok().and_then(|s| {
-        s.lines().rev().find(|l| !l.trim().is_empty()).and_then(|l| {
-            serde_json::from_str::<serde_json::Value>(l)
-                .ok()
-                .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from))
-        })
+        s.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .and_then(|l| {
+                serde_json::from_str::<serde_json::Value>(l)
+                    .ok()
+                    .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from))
+            })
     })
 }
 
@@ -980,7 +1096,9 @@ pub fn epoch_summary(reports: &[TrialReport]) -> EpochSummary {
         Some(cfg) => reports
             .iter()
             .filter(|r| {
-                r.critic == cfg.critic && r.prompt_version == cfg.prompt_version && r.model_id == cfg.model_id
+                r.critic == cfg.critic
+                    && r.prompt_version == cfg.prompt_version
+                    && r.model_id == cfg.model_id
             })
             .collect(),
         None => Vec::new(),
@@ -999,7 +1117,11 @@ pub fn epoch_summary(reports: &[TrialReport]) -> EpochSummary {
     }
     // Ledgers written before items were populated can't prove uniqueness —
     // fall back to the (over-)count but the family bar still blocks promotion.
-    let unique_seeds = if unique.is_empty() && seeds > 0 { seeds } else { unique.len() };
+    let unique_seeds = if unique.is_empty() && seeds > 0 {
+        seeds
+    } else {
+        unique.len()
+    };
 
     // Calibration: Brier + reliability over every judged (non-abstained) item.
     let judged: Vec<(f64, bool)> = reports
@@ -1010,13 +1132,20 @@ pub fn epoch_summary(reports: &[TrialReport]) -> EpochSummary {
         .collect();
     let total_items: usize = reports.iter().map(|r| r.items.len()).sum();
     let brier = (!judged.is_empty()).then(|| {
-        judged.iter().map(|(p, s)| (p - if *s { 1.0 } else { 0.0 }).powi(2)).sum::<f64>() / judged.len() as f64
+        judged
+            .iter()
+            .map(|(p, s)| (p - if *s { 1.0 } else { 0.0 }).powi(2))
+            .sum::<f64>()
+            / judged.len() as f64
     });
     let abstention_rate =
         (total_items > 0).then(|| (total_items - judged.len()) as f64 / total_items as f64);
     let mut reliability = Vec::new();
     for bin in [0.05, 0.20, 0.35, 0.50, 0.65, 0.80, 0.95] {
-        let members: Vec<&(f64, bool)> = judged.iter().filter(|(p, _)| (p - bin).abs() < 0.075).collect();
+        let members: Vec<&(f64, bool)> = judged
+            .iter()
+            .filter(|(p, _)| (p - bin).abs() < 0.075)
+            .collect();
         if !members.is_empty() {
             let observed = members.iter().filter(|(_, s)| *s).count() as f64 / members.len() as f64;
             reliability.push((bin, members.len(), observed));
@@ -1062,7 +1191,11 @@ mod tests {
     impl BeliefCritic for OracleCritic {
         fn refute_case(&self, case: &CriticCase) -> CriticVerdict {
             CriticVerdict {
-                p_false: if self.lies.iter().any(|l| *l == case.statement) { 0.9 } else { 0.1 },
+                p_false: if self.lies.contains(&case.statement) {
+                    0.9
+                } else {
+                    0.1
+                },
                 strongest_counterargument: "oracle answer key".into(),
                 missing_evidence: String::new(),
                 abstain: false,
@@ -1110,8 +1243,12 @@ mod tests {
             inject_provenance: "told".into(),
         };
         // Oracle knows one of the two lies → detection 50%, zero damage.
-        let critic = OracleCritic { lies: vec!["Asha's birthday is July 9".into()] };
-        let report = run_seed_trial(&live, 8, &dir, &manifest, &critic, 0.5).await.unwrap();
+        let critic = OracleCritic {
+            lies: vec!["Asha's birthday is July 9".into()],
+        };
+        let report = run_seed_trial(&live, 8, &dir, &manifest, &critic, 0.5)
+            .await
+            .unwrap();
 
         assert_eq!(report.n_seeds, 2);
         assert_eq!(report.n_controls, 2);
@@ -1121,8 +1258,22 @@ mod tests {
         assert_eq!(report.control_damage_rate, 0.0);
 
         // Live mind never saw any injected statement.
-        assert!(live.explain_belief("Asha's birthday is July 9", &mind_types::AccessContext::operator_audit()).await.unwrap().is_none());
-        assert!(live.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::operator_audit()).await.unwrap().is_none());
+        assert!(live
+            .explain_belief(
+                "Asha's birthday is July 9",
+                &mind_types::AccessContext::operator_audit()
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(live
+            .explain_belief(
+                "Asha's birthday is March 3",
+                &mind_types::AccessContext::operator_audit()
+            )
+            .await
+            .unwrap()
+            .is_none());
         // The seeded snapshot was destroyed.
         assert!(!dir.join("immune_trial_t1.db").exists());
 
@@ -1152,7 +1303,9 @@ mod tests {
         assert_eq!(verify_trial_ledger(&ledger), Ok(2));
 
         // Rewrite trial "a"'s result — the chain must break at line 0.
-        let tampered = std::fs::read_to_string(&ledger).unwrap().replace("\"seeds_flagged\":6", "\"seeds_flagged\":14");
+        let tampered = std::fs::read_to_string(&ledger)
+            .unwrap()
+            .replace("\"seeds_flagged\":6", "\"seeds_flagged\":14");
         std::fs::write(&ledger, tampered).unwrap();
         assert_eq!(verify_trial_ledger(&ledger), Err(0));
 
@@ -1191,9 +1344,13 @@ mod tests {
             // Disjoint bases: the pair never contradicts itself.
             assert_ne!(p.false_statement, p.true_control);
             // The lie is not any verbatim input statement.
-            assert!(!beliefs.iter().any(|b| p.false_statement == format!("{INJECT_PREFIX}{}", b.statement)));
+            assert!(!beliefs
+                .iter()
+                .any(|b| p.false_statement == format!("{INJECT_PREFIX}{}", b.statement)));
             // The control IS a verbatim (prefixed) input statement.
-            assert!(beliefs.iter().any(|b| p.true_control == format!("{INJECT_PREFIX}{}", b.statement)));
+            assert!(beliefs
+                .iter()
+                .any(|b| p.true_control == format!("{INJECT_PREFIX}{}", b.statement)));
         }
         // Family holdout removes date pairs entirely.
         let held = generate_manifest(&beliefs, "g2", 10, &["date".into()], &[]);
@@ -1205,7 +1362,11 @@ mod tests {
         weak.confidence = 0.3;
         assert!(generate_manifest(&[weak], "g3", 10, &[], &[]).is_none());
         // Rotation: excluding every base used in m leaves no date reuse.
-        let used: Vec<String> = m.pairs.iter().flat_map(|p| [p.seed_base.clone(), p.control_base.clone()]).collect();
+        let used: Vec<String> = m
+            .pairs
+            .iter()
+            .flat_map(|p| [p.seed_base.clone(), p.control_base.clone()])
+            .collect();
         if let Some(m2) = generate_manifest(&beliefs, "g4", 10, &[], &used) {
             for p2 in &m2.pairs {
                 assert!(!used.contains(&p2.seed_base) && !used.contains(&p2.control_base));
@@ -1278,8 +1439,12 @@ mod tests {
             control_damage_rate: 0.04,
             items,
         };
-        let s = epoch_summary(&[r.clone()]);
-        assert!(s.promotion_bar_met, "detection_lb={} damage_ub={} families={}", s.detection_lower_bound, s.damage_upper_bound, s.families);
+        let s = epoch_summary(std::slice::from_ref(&r));
+        assert!(
+            s.promotion_bar_met,
+            "detection_lb={} damage_ub={} families={}",
+            s.detection_lower_bound, s.damage_upper_bound, s.families
+        );
 
         // …but the SAME numbers from repeated seeds (2 families, 2 unique
         // statements) must NOT clear it, and a mixed-config ledger only
@@ -1361,7 +1526,9 @@ mod tests {
             assert_eq!(p.family, "trip_dest");
             // Fixed-point-free: the lie never states the row's true destination.
             let seed_pred = preds.iter().find(|q| q.base_id == p.seed_base).unwrap();
-            assert!(!p.false_statement.contains(&format!("was {}", seed_pred.dest)));
+            assert!(!p
+                .false_statement
+                .contains(&format!("was {}", seed_pred.dest)));
             // Control is verbatim-true for ITS row.
             let ctrl_pred = preds.iter().find(|q| q.base_id == p.control_base).unwrap();
             assert!(p.true_control.contains(&format!("was {}", ctrl_pred.dest)));
@@ -1369,7 +1536,10 @@ mod tests {
             assert_ne!(p.seed_base, p.control_base);
         }
         // Rotation: excluding all used bases yields no reuse.
-        let used: Vec<String> = pairs.iter().flat_map(|p| [p.seed_base.clone(), p.control_base.clone()]).collect();
+        let used: Vec<String> = pairs
+            .iter()
+            .flat_map(|p| [p.seed_base.clone(), p.control_base.clone()])
+            .collect();
         for p2 in generate_trip_pairs(&preds, 10, &used) {
             assert!(!used.contains(&p2.seed_base) && !used.contains(&p2.control_base));
         }
@@ -1387,7 +1557,9 @@ mod tests {
         // No derangeable slot → no key (won't false-collide on prose).
         assert!(masked_key("Review note: the meeting went well").is_none());
         // Version vs count keep distinct sentinels.
-        assert!(masked_key("firmware is v3.4").unwrap().contains("<version>"));
+        assert!(masked_key("firmware is v3.4")
+            .unwrap()
+            .contains("<version>"));
         assert!(masked_key("has 4 drive bays").unwrap().contains("<count>"));
     }
 

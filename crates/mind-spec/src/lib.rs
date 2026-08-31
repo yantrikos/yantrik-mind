@@ -38,10 +38,15 @@ pub mod capsule;
 pub mod control;
 pub mod coverage;
 pub mod goal;
+pub mod horizon;
 
 pub use capsule::{Capsule, Evidence, EvidenceRef, Observation, Progress, Uncertainty};
 pub use control::{Controller, Decision, Limits, ReasonCode, StepOutcome};
 pub use goal::{Budget, CompletionCriteria, Contract, GoalSpec, OutputContract, Verdict};
+pub use horizon::{
+    ActionTrace, Assumption, AssumptionChange, GoalCheckpoint, HorizonBudget, HorizonControlAction,
+    HorizonControlReceipt, HorizonError, HorizonRun, HorizonStatus, OutcomeReceipt,
+};
 
 /// A number the runtime did not measure.
 ///
@@ -75,13 +80,22 @@ pub enum Basis {
 
 impl Prior {
     pub fn declared(value: f64) -> Self {
-        Self { value: value.clamp(0.0, 1.0), basis: Basis::Declared }
+        Self {
+            value: value.clamp(0.0, 1.0),
+            basis: Basis::Declared,
+        }
     }
     pub fn measured(value: f64, runs: u32) -> Self {
-        Self { value: value.clamp(0.0, 1.0), basis: Basis::Measured { runs } }
+        Self {
+            value: value.clamp(0.0, 1.0),
+            basis: Basis::Measured { runs },
+        }
     }
     pub fn estimated(value: f64) -> Self {
-        Self { value: value.clamp(0.0, 1.0), basis: Basis::Estimated }
+        Self {
+            value: value.clamp(0.0, 1.0),
+            basis: Basis::Estimated,
+        }
     }
     /// Is this backed by enough observation to act on without hedging?
     ///

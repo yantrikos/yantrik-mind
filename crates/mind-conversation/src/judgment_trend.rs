@@ -7,6 +7,7 @@
 //!   1. the mind's judgment genuinely improved  (the claim), or
 //!   2. the QUESTIONS GOT EASIER — a period whose outcomes are 90% one-way is trivially predictable,
 //!      so Brier drops even from a fixed, mediocre forecaster (no wisdom involved at all).
+//!
 //! A chart of raw Brier cannot tell those apart, and (2) drifts on its own as the mind changes what
 //! it chooses to predict about. Publishing (2) as (1) is exactly the failure mode where a
 //! plausible-but-wrong story GAINS force because the system remembers so much.
@@ -77,7 +78,10 @@ fn brier(rows: &[Graded]) -> f64 {
     if rows.is_empty() {
         return f64::NAN;
     }
-    rows.iter().map(|r| (r.p - if r.hit { 1.0 } else { 0.0 }).powi(2)).sum::<f64>() / rows.len() as f64
+    rows.iter()
+        .map(|r| (r.p - if r.hit { 1.0 } else { 0.0 }).powi(2))
+        .sum::<f64>()
+        / rows.len() as f64
 }
 
 fn base_rate(rows: &[Graded]) -> f64 {
@@ -92,7 +96,7 @@ fn base_rate(rows: &[Graded]) -> f64 {
 fn skill(rows: &[Graded]) -> Option<f64> {
     let b = base_rate(rows);
     let uncertainty = b * (1.0 - b);
-    if !(uncertainty > 1e-9) {
+    if uncertainty.is_nan() || uncertainty <= 1e-9 {
         return None; // degenerate period: no spread to have skill over
     }
     Some(1.0 - brier(rows) / uncertainty)
@@ -110,7 +114,12 @@ fn score(label: String, rows: &[Graded]) -> Bucket {
 
 /// Split graded rows into `n_buckets` consecutive windows of `bucket_days`, oldest first, ending at
 /// `now_ms`. Empty buckets are kept so a gap in the record is visible rather than silently closed.
-pub(crate) fn buckets(rows: &[Graded], now_ms: i64, bucket_days: i64, n_buckets: usize) -> Vec<Bucket> {
+pub(crate) fn buckets(
+    rows: &[Graded],
+    now_ms: i64,
+    bucket_days: i64,
+    n_buckets: usize,
+) -> Vec<Bucket> {
     let span = bucket_days * 86_400_000;
     (0..n_buckets)
         .map(|i| {
@@ -118,11 +127,20 @@ pub(crate) fn buckets(rows: &[Graded], now_ms: i64, bucket_days: i64, n_buckets:
             let back = (n_buckets - i) as i64;
             let start = now_ms - back * span;
             let end = start + span;
-            let in_win: Vec<Graded> =
-                rows.iter().copied().filter(|r| r.t_ms >= start && r.t_ms < end).collect();
+            let in_win: Vec<Graded> = rows
+                .iter()
+                .copied()
+                .filter(|r| r.t_ms >= start && r.t_ms < end)
+                .collect();
             let label = format!("-{}d", back * bucket_days);
             if in_win.is_empty() {
-                Bucket { label, n: 0, brier: f64::NAN, base_rate: f64::NAN, bss: None }
+                Bucket {
+                    label,
+                    n: 0,
+                    brier: f64::NAN,
+                    base_rate: f64::NAN,
+                    bss: None,
+                }
             } else {
                 score(label, &in_win)
             }
@@ -139,16 +157,30 @@ pub(crate) fn verdict(rows: &[Graded], now_ms: i64, window_days: i64) -> Verdict
     let span = window_days * 86_400_000;
     let start = now_ms - span;
     let mid = now_ms - span / 2;
-    let older: Vec<Graded> = rows.iter().copied().filter(|r| r.t_ms >= start && r.t_ms < mid).collect();
-    let newer: Vec<Graded> = rows.iter().copied().filter(|r| r.t_ms >= mid && r.t_ms <= now_ms).collect();
+    let older: Vec<Graded> = rows
+        .iter()
+        .copied()
+        .filter(|r| r.t_ms >= start && r.t_ms < mid)
+        .collect();
+    let newer: Vec<Graded> = rows
+        .iter()
+        .copied()
+        .filter(|r| r.t_ms >= mid && r.t_ms <= now_ms)
+        .collect();
     let have = older.len().min(newer.len());
     if have < MIN_PER_HALF {
-        return Verdict::Insufficient { have, need: MIN_PER_HALF };
+        return Verdict::Insufficient {
+            have,
+            need: MIN_PER_HALF,
+        };
     }
     // A degenerate half (all outcomes one way) has no defined skill — refuse to claim a direction
     // rather than fabricate one.
     let (Some(a), Some(b)) = (skill(&older), skill(&newer)) else {
-        return Verdict::Insufficient { have, need: MIN_PER_HALF };
+        return Verdict::Insufficient {
+            have,
+            need: MIN_PER_HALF,
+        };
     };
     let delta = b - a;
     // ORDER MATTERS. A decline is always reported first (never hidden behind another state). Then
@@ -172,7 +204,8 @@ pub(crate) fn render(rows: &[Graded], now_ms: i64, bucket_days: i64, n_buckets: 
     let window_days = bucket_days * n_buckets as i64;
     let bs = buckets(rows, now_ms, bucket_days, n_buckets);
     let v = verdict(rows, now_ms, window_days);
-    let mut out = String::from("📈 Judgment TREND (skill above a base-rate guess; frozen weights)\n");
+    let mut out =
+        String::from("📈 Judgment TREND (skill above a base-rate guess; frozen weights)\n");
     for b in &bs {
         if b.n == 0 {
             out.push_str(&format!("   {:>6} · (no graded outcomes)\n", b.label));
@@ -183,7 +216,10 @@ pub(crate) fn render(rows: &[Graded], now_ms: i64, bucket_days: i64, n_buckets: 
             };
             out.push_str(&format!(
                 "   {:>6} · n={:<3} Brier {:.3} · base rate {:.0}% · {sk}\n",
-                b.label, b.n, b.brier, b.base_rate * 100.0
+                b.label,
+                b.n,
+                b.brier,
+                b.base_rate * 100.0
             ));
         }
     }
@@ -237,7 +273,10 @@ mod tests {
         assert!((skill(&r).unwrap() - 0.0).abs() < 1e-9);
         // A one-sided period has no defined skill (baseline is already perfect).
         let all_true = rows(20, 10, 0.9, 1.0);
-        assert!(skill(&all_true).is_none(), "degenerate period must not report skill");
+        assert!(
+            skill(&all_true).is_none(),
+            "degenerate period must not report skill"
+        );
     }
 
     // The verdict window is split at its midpoint, so with a 180d window "older" must sit beyond
@@ -252,8 +291,16 @@ mod tests {
         // Newer half: SAME 50/50 difficulty, but forecasts now separate the outcomes.
         let mut r = rows(30, OLD_D, 0.9, 0.5);
         for i in 0..20 {
-            r.push(Graded { t_ms: NOW - NEW_D * DAY + i, p: 0.95, hit: true });
-            r.push(Graded { t_ms: NOW - (NEW_D - 1) * DAY + i, p: 0.05, hit: false });
+            r.push(Graded {
+                t_ms: NOW - NEW_D * DAY + i,
+                p: 0.95,
+                hit: true,
+            });
+            r.push(Graded {
+                t_ms: NOW - (NEW_D - 1) * DAY + i,
+                p: 0.05,
+                hit: false,
+            });
         }
         match verdict(&r, NOW, 180) {
             Verdict::Improving { delta } => assert!(delta > 0.05, "delta {delta}"),
@@ -294,7 +341,10 @@ mod tests {
         // The verdict must NOT claim improvement — the forecaster still loses to a base-rate guess.
         match verdict(&r, NOW, 180) {
             Verdict::BelowBaseline { skill, .. } => {
-                assert!(skill <= 0.0, "still not beating the baseline, skill {skill}")
+                assert!(
+                    skill <= 0.0,
+                    "still not beating the baseline, skill {skill}"
+                )
             }
             v => panic!("easier questions must not read as improvement — got {v:?}"),
         }
@@ -305,12 +355,28 @@ mod tests {
         // Older: well-calibrated. Newer: confidently wrong.
         let mut r: Vec<Graded> = Vec::new();
         for i in 0..20 {
-            r.push(Graded { t_ms: NOW - OLD_D * DAY + i, p: 0.95, hit: true });
-            r.push(Graded { t_ms: NOW - (OLD_D - 1) * DAY + i, p: 0.05, hit: false });
+            r.push(Graded {
+                t_ms: NOW - OLD_D * DAY + i,
+                p: 0.95,
+                hit: true,
+            });
+            r.push(Graded {
+                t_ms: NOW - (OLD_D - 1) * DAY + i,
+                p: 0.05,
+                hit: false,
+            });
         }
         for i in 0..20 {
-            r.push(Graded { t_ms: NOW - NEW_D * DAY + i, p: 0.95, hit: false });
-            r.push(Graded { t_ms: NOW - (NEW_D - 1) * DAY + i, p: 0.05, hit: true });
+            r.push(Graded {
+                t_ms: NOW - NEW_D * DAY + i,
+                p: 0.95,
+                hit: false,
+            });
+            r.push(Graded {
+                t_ms: NOW - (NEW_D - 1) * DAY + i,
+                p: 0.05,
+                hit: true,
+            });
         }
         assert!(
             matches!(verdict(&r, NOW, 180), Verdict::Degrading { .. }),
@@ -337,7 +403,14 @@ mod tests {
         let r = rows(10, 15, 0.6, 0.5);
         let bs = buckets(&r, NOW, 30, 6);
         assert_eq!(bs.len(), 6);
-        assert_eq!(bs.iter().filter(|b| b.n > 0).count(), 1, "one populated bucket");
-        assert!(render(&r, NOW, 30, 6).contains("(no graded outcomes)"), "gaps stay visible");
+        assert_eq!(
+            bs.iter().filter(|b| b.n > 0).count(),
+            1,
+            "one populated bucket"
+        );
+        assert!(
+            render(&r, NOW, 30, 6).contains("(no graded outcomes)"),
+            "gaps stay visible"
+        );
     }
 }

@@ -27,7 +27,10 @@ fn build_backend() -> (Arc<dyn LLMBackend>, String) {
         return (backend, label);
     }
     if claude_available() {
-        return (Arc::new(yantrik_ml::ClaudeCliLLM::new(None, 1024)), "claude-cli".to_string());
+        return (
+            Arc::new(yantrik_ml::ClaudeCliLLM::new(None, 1024)),
+            "claude-cli".to_string(),
+        );
     }
     (
         Arc::new(ScriptedLLM::new(
@@ -46,13 +49,23 @@ fn web_handle(mut stream: std::net::TcpStream, dir: &str) {
         _ => return,
     };
     let req = String::from_utf8_lossy(&buf[..n]);
-    let raw = req.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/");
+    let raw = req
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("/");
     let path = raw.split('?').next().unwrap_or("/").trim_start_matches('/');
     let safe = path.replace("..", "").replace('\\', "");
-    let rel = if safe.is_empty() { "index.html".to_string() } else { safe };
+    let rel = if safe.is_empty() {
+        "index.html".to_string()
+    } else {
+        safe
+    };
     // Defense in depth: allowlist extensions, reject dotfiles, and CANONICALIZE — the resolved
     // path must stay inside dir, so no traversal or symlink can escape the public folder.
-    let allowed = [".html", ".txt", ".css", ".js", ".json", ".png", ".jpg", ".svg"];
+    let allowed = [
+        ".html", ".txt", ".css", ".js", ".json", ".png", ".jpg", ".svg",
+    ];
     let ext_ok = allowed.iter().any(|e| rel.ends_with(e));
     let dotfile = rel.split('/').any(|seg| seg.starts_with('.'));
     let file = format!("{dir}/{rel}");
@@ -63,11 +76,27 @@ fn web_handle(mut stream: std::net::TcpStream, dir: &str) {
         .unwrap_or(false);
     let (status, body, ctype) = if ext_ok && !dotfile && confined {
         match std::fs::read(&file) {
-            Ok(b) => ("200 OK", b, if file.ends_with(".html") { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" }),
-            Err(_) => ("404 Not Found", b"not found".to_vec(), "text/plain; charset=utf-8"),
+            Ok(b) => (
+                "200 OK",
+                b,
+                if file.ends_with(".html") {
+                    "text/html; charset=utf-8"
+                } else {
+                    "text/plain; charset=utf-8"
+                },
+            ),
+            Err(_) => (
+                "404 Not Found",
+                b"not found".to_vec(),
+                "text/plain; charset=utf-8",
+            ),
         }
     } else {
-        ("404 Not Found", b"not found".to_vec(), "text/plain; charset=utf-8")
+        (
+            "404 Not Found",
+            b"not found".to_vec(),
+            "text/plain; charset=utf-8",
+        )
     };
     let header = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     let _ = stream.write_all(header.as_bytes());
@@ -80,23 +109,35 @@ fn spawn_web_server() {
     if std::env::var("YM_WEB").map(|v| v == "off").unwrap_or(false) {
         return;
     }
-    let port: u16 = std::env::var("YM_WEB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8088);
-    let dir = std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
+    let port: u16 = std::env::var("YM_WEB_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8088);
+    let dir =
+        std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
     let _ = std::fs::create_dir_all(&dir);
-    std::thread::spawn(move || match std::net::TcpListener::bind(("0.0.0.0", port)) {
-        Ok(listener) => {
-            eprintln!("[web] serving {dir} on :{port}");
-            for stream in listener.incoming().flatten() {
-                let dir = dir.clone();
-                std::thread::spawn(move || web_handle(stream, &dir));
+    std::thread::spawn(
+        move || match std::net::TcpListener::bind(("0.0.0.0", port)) {
+            Ok(listener) => {
+                eprintln!("[web] serving {dir} on :{port}");
+                for stream in listener.incoming().flatten() {
+                    let dir = dir.clone();
+                    std::thread::spawn(move || web_handle(stream, &dir));
+                }
             }
-        }
-        Err(e) => eprintln!("[web] could not bind :{port}: {e}"),
-    });
+            Err(e) => eprintln!("[web] could not bind :{port}: {e}"),
+        },
+    );
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Wallet custody is an operator-only bootstrap path. Handle it before model, memory, web, or
+    // channel startup so key material cannot accidentally enter a prompt, trace, or live memory.
+    if std::env::args().nth(1).as_deref() == Some("wallet") {
+        return mind_core::wallet_setup::run(std::env::args().skip(2));
+    }
+
     // `ym setup` — the first-run onboarding wizard. Handled before anything
     // else boots (no DB, no backend, no channel): it only talks to Telegram
     // and writes the env file, then exits so the service can start clean.
@@ -143,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let db = std::env::var("YM_DB").unwrap_or_else(|_| ":memory:".to_string());
-    // dim 64 = yantrikdb 0.9.0's bundled embedder dimension; YantrikDB::new auto-attaches the
+    // dim 64 = the bundled YantrikDB embedder dimension; YantrikDB::new auto-attaches the
     // in-process model2vec embedder at this dim, so record/recall are genuinely SEMANTIC with no
     // external server. (A dim-8 DB from before this upgrade is incompatible — recreate the file.)
     let mem = MemoryHandle::spawn(&db, 64).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;

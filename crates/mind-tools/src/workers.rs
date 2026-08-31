@@ -26,17 +26,26 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     pub fn new(hosts: Vec<String>, key: impl Into<String>) -> Self {
-        Self { hosts, key: key.into(), next: AtomicUsize::new(0) }
+        Self {
+            hosts,
+            key: key.into(),
+            next: AtomicUsize::new(0),
+        }
     }
 
     /// Build from env (`YM_WORKERS` comma-separated `user@host`, `YM_WORKER_KEY`). `None` if unset.
     pub fn from_env() -> Option<Self> {
         let raw = std::env::var("YM_WORKERS").ok()?;
-        let hosts: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let hosts: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         if hosts.is_empty() {
             return None;
         }
-        let key = std::env::var("YM_WORKER_KEY").unwrap_or_else(|_| "/opt/yantrik-mind/.ssh/id_ed25519".to_string());
+        let key = std::env::var("YM_WORKER_KEY")
+            .unwrap_or_else(|_| "/opt/yantrik-mind/.ssh/id_ed25519".to_string());
         Some(Self::new(hosts, key))
     }
 
@@ -85,15 +94,27 @@ impl WorkerPool {
 
     /// Liveness check across the pool.
     pub async fn health(&self) -> Vec<(String, bool)> {
-        self.map("echo ok", 8).await.into_iter().map(|(h, r)| (h, matches!(r, Ok(ref s) if s == "ok"))).collect()
+        self.map("echo ok", 8)
+            .await
+            .into_iter()
+            .map(|(h, r)| (h, matches!(r, Ok(ref s) if s == "ok")))
+            .collect()
     }
 
     /// Run code in an ISOLATED sandbox ON A WORKER (unprivileged userns, no network, temp-file masked,
     /// time-bounded) — offloads execution off the main companion box. Code is piped over SSH stdin
     /// (no shell-quoting hazard). `python` and `shell` only (workers have python3 + util-linux; rust
     /// would need rustc installed there). Picks the next worker round-robin → concurrent calls spread.
-    pub async fn run_sandboxed(&self, lang: &str, code: &str, timeout_secs: u64) -> anyhow::Result<String> {
-        let host = self.pick().ok_or_else(|| anyhow::anyhow!("no workers in pool"))?.to_string();
+    pub async fn run_sandboxed(
+        &self,
+        lang: &str,
+        code: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<String> {
+        let host = self
+            .pick()
+            .ok_or_else(|| anyhow::anyhow!("no workers in pool"))?
+            .to_string();
         let runner = match lang {
             "python" => "python3 -I -S -B",
             "shell" => "sh",
@@ -119,8 +140,16 @@ impl WorkerPool {
     /// endpoint+token come from the worker's root:600 `/root/.ym-coder.env` (not passed per-call); the
     /// task prompt arrives via stdin (no quoting hazard). Returns claude's summary + the files it wrote.
     /// Picks the next worker round-robin → concurrent `code:` requests spread across machines.
-    pub async fn run_coder(&self, task: &str, model: &str, timeout_secs: u64) -> anyhow::Result<String> {
-        let host = self.pick().ok_or_else(|| anyhow::anyhow!("no workers in pool"))?.to_string();
+    pub async fn run_coder(
+        &self,
+        task: &str,
+        model: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<String> {
+        let host = self
+            .pick()
+            .ok_or_else(|| anyhow::anyhow!("no workers in pool"))?
+            .to_string();
         let inner = timeout_secs.saturating_sub(5).max(30);
         // Source the worker's coder env, then PREFER the subscription: if CLAUDE_CODE_OAUTH_TOKEN is
         // present, run real Claude (drop the MiniMax base/model overrides); else MiniMax with `model`.
@@ -133,18 +162,30 @@ impl WorkerPool {
              echo \"$out\"; for f in \"$d\"/*; do [ -f \"$f\" ] && printf '\\n=== %s ===\\n' \"$(basename \"$f\")\" && cat \"$f\"; done; cd / && rm -rf \"$d\""
         );
         let out = run_ssh_stdin(&self.key, &host, &cmd, task, timeout_secs).await?;
-        Ok(format!("[coded on {host} — Claude Code, write-only]\n{out}"))
+        Ok(format!(
+            "[coded on {host} — Claude Code, write-only]\n{out}"
+        ))
     }
 }
 
 /// SSH to `host`, pipe `stdin_data` into the remote `cmd`, return its stdout (trimmed). For the
 /// remote sandbox: the code is the stdin, so no quoting/encoding of the program is needed.
-async fn run_ssh_stdin(key: &str, host: &str, cmd: &str, stdin_data: &str, timeout_secs: u64) -> anyhow::Result<String> {
+async fn run_ssh_stdin(
+    key: &str,
+    host: &str,
+    cmd: &str,
+    stdin_data: &str,
+    timeout_secs: u64,
+) -> anyhow::Result<String> {
     let mut child = Command::new("ssh")
-        .arg("-i").arg(key)
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("StrictHostKeyChecking=accept-new")
-        .arg("-o").arg(format!("ConnectTimeout={}", timeout_secs.min(20)))
+        .arg("-i")
+        .arg(key)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={}", timeout_secs.min(20)))
         .arg(host)
         .arg(cmd)
         .stdin(Stdio::piped())
@@ -155,7 +196,12 @@ async fn run_ssh_stdin(key: &str, host: &str, cmd: &str, stdin_data: &str, timeo
         si.write_all(stdin_data.as_bytes()).await?;
         si.shutdown().await?;
     }
-    let out = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+    let out = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
         Ok(r) => r?,
         Err(_) => anyhow::bail!("worker {host} timed out after {timeout_secs}s"),
     };
@@ -166,24 +212,36 @@ async fn run_ssh_stdin(key: &str, host: &str, cmd: &str, stdin_data: &str, timeo
 /// own its inputs (spawned tasks must be `'static`).
 async fn run_ssh(key: &str, host: &str, cmd: &str, timeout_secs: u64) -> anyhow::Result<String> {
     let mut c = Command::new("ssh");
-    c.arg("-i").arg(key)
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("StrictHostKeyChecking=accept-new")
-        .arg("-o").arg(format!("ConnectTimeout={}", timeout_secs.min(20)))
+    c.arg("-i")
+        .arg(key)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={}", timeout_secs.min(20)))
         .arg(host)
         .arg(cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let child = c.spawn()?;
-    let out = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+    let out = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
         Ok(r) => r?,
         Err(_) => anyhow::bail!("worker {host} timed out after {timeout_secs}s"),
     };
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
-        anyhow::bail!("worker {host}: {}", String::from_utf8_lossy(&out.stderr).trim())
+        anyhow::bail!(
+            "worker {host}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
     }
 }
 
@@ -193,11 +251,19 @@ mod tests {
 
     #[test]
     fn from_env_and_round_robin() {
-        let p = WorkerPool::new(vec!["root@a".into(), "root@b".into(), "root@c".into()], "/k");
+        let p = WorkerPool::new(
+            vec!["root@a".into(), "root@b".into(), "root@c".into()],
+            "/k",
+        );
         assert_eq!(p.len(), 3);
         // round-robin cycles through all hosts
-        let picks: Vec<String> = (0..6).filter_map(|_| p.pick().map(|s| s.to_string())).collect();
-        assert_eq!(picks, vec!["root@a", "root@b", "root@c", "root@a", "root@b", "root@c"]);
+        let picks: Vec<String> = (0..6)
+            .filter_map(|_| p.pick().map(|s| s.to_string()))
+            .collect();
+        assert_eq!(
+            picks,
+            vec!["root@a", "root@b", "root@c", "root@a", "root@b", "root@c"]
+        );
         let empty = WorkerPool::new(vec![], "/k");
         assert!(empty.pick().is_none());
     }

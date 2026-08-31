@@ -43,7 +43,10 @@ pub(crate) fn render_narrative(date: &str, basis: &NarrativeBasis) -> String {
         basis.corrected, basis.accepted
     );
     match &basis.regret {
-        Some((ask, _)) => p.push_str(&format!(" My regret on record: I missed a foreseeable ask — \"{}\".", ask.chars().take(120).collect::<String>())),
+        Some((ask, _)) => p.push_str(&format!(
+            " My regret on record: I missed a foreseeable ask — \"{}\".",
+            ask.chars().take(120).collect::<String>()
+        )),
         None => p.push_str(" No regrets on the log."),
     }
     match &basis.worst_tool {
@@ -56,8 +59,15 @@ pub(crate) fn render_narrative(date: &str, basis: &NarrativeBasis) -> String {
     if basis.paces.is_empty() {
         p.push_str(" Policy in force: every domain at normal pace.");
     } else {
-        let ps: Vec<String> = basis.paces.iter().map(|(d, m)| format!("{d} slowed {m:.1}x")).collect();
-        p.push_str(&format!(" Policy in force: {} — set by the weekly review, not by mood.", ps.join(", ")));
+        let ps: Vec<String> = basis
+            .paces
+            .iter()
+            .map(|(d, m)| format!("{d} slowed {m:.1}x"))
+            .collect();
+        p.push_str(&format!(
+            " Policy in force: {} — set by the weekly review, not by mood.",
+            ps.join(", ")
+        ));
     }
     p.push_str(&format!(" Forbidden self-claim: {FORBIDDEN_SELF_CLAIM}"));
     p
@@ -74,7 +84,13 @@ impl super::ConversationEngine {
             return false;
         }
         let date = today.format("%Y-%m-%d").to_string();
-        let last = self.memory.profile_get("narrative_last_date").await.ok().flatten().unwrap_or_default();
+        let last = self
+            .memory
+            .profile_get("narrative_last_date")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         last != date
     }
 
@@ -92,7 +108,10 @@ impl super::ConversationEngine {
             .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
             .and_then(|log| {
                 log.last().map(|r| {
-                    (r["ask"].as_str().unwrap_or("?").to_string(), r["ts"].as_i64().unwrap_or(0))
+                    (
+                        r["ask"].as_str().unwrap_or("?").to_string(),
+                        r["ts"].as_i64().unwrap_or(0),
+                    )
                 })
             });
         let basis = NarrativeBasis {
@@ -114,7 +133,10 @@ impl super::ConversationEngine {
             "text": text,
             "basis": serde_json::to_value(&basis).unwrap_or(serde_json::Value::Null),
         });
-        let _ = self.memory.profile_set("narrative_last", &record.to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("narrative_last", &record.to_string())
+            .await;
         let _ = self.memory.profile_set("narrative_last_date", &date).await;
         // Rolling log, capped — yesterday's behavior stays answerable to today's.
         let mut log: Vec<serde_json::Value> = self
@@ -131,15 +153,28 @@ impl super::ConversationEngine {
             let cut = log.len() - 30;
             log.drain(..cut);
         }
-        let _ = self.memory.profile_set("narrative_log", &serde_json::Value::Array(log).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("narrative_log", &serde_json::Value::Array(log).to_string())
+            .await;
         text
     }
 
     /// The latest persisted self-record, if any — what the grounding recalls.
     pub async fn last_narrative(&self) -> Option<(String, String)> {
-        let v: serde_json::Value =
-            serde_json::from_str(&self.memory.profile_get("narrative_last").await.ok().flatten()?).ok()?;
-        Some((v["date"].as_str()?.to_string(), v["text"].as_str()?.to_string()))
+        let v: serde_json::Value = serde_json::from_str(
+            &self
+                .memory
+                .profile_get("narrative_last")
+                .await
+                .ok()
+                .flatten()?,
+        )
+        .ok()?;
+        Some((
+            v["date"].as_str()?.to_string(),
+            v["text"].as_str()?.to_string(),
+        ))
     }
 }
 
@@ -170,12 +205,22 @@ mod tests {
         assert!(p.contains("bills slowed 1.5x"), "{p}");
         assert!(p.contains(FORBIDDEN_SELF_CLAIM), "{p}");
         // …and the render is a pure function: same rows, same paragraph, always.
-        assert_eq!(p, render_narrative("2026-08-16", &basis()), "the checksum property");
+        assert_eq!(
+            p,
+            render_narrative("2026-08-16", &basis()),
+            "the checksum property"
+        );
     }
 
     #[test]
     fn empty_rows_render_as_stated_absence() {
-        let empty = NarrativeBasis { corrected: 0, accepted: 0, regret: None, worst_tool: None, paces: vec![] };
+        let empty = NarrativeBasis {
+            corrected: 0,
+            accepted: 0,
+            regret: None,
+            worst_tool: None,
+            paces: vec![],
+        };
         let p = render_narrative("2026-08-17", &empty);
         assert!(p.contains("No regrets on the log"), "{p}");
         assert!(p.contains("no tool has enough measured runs"), "{p}");

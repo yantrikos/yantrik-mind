@@ -79,7 +79,12 @@ pub(crate) fn merge_system_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessa
 
 /// Pure policy: may a pool labeled `provider` serve a request of `scope`, given the two CSV
 /// allowlists? Pure so it's testable without env races.
-pub fn scope_allows(scope: PrivacyScope, provider: &str, household_csv: &str, private_csv: &str) -> bool {
+pub fn scope_allows(
+    scope: PrivacyScope,
+    provider: &str,
+    household_csv: &str,
+    private_csv: &str,
+) -> bool {
     let pl = provider.to_lowercase();
     let in_list = |csv: &str| {
         csv.split(',')
@@ -146,7 +151,11 @@ fn record_household_callsite(callsite: &'static str) {
     // A public caller can still supply an empty static string. Do not let that create a visually
     // blank dashboard row that looks attributed while naming nobody; fold missing identities into
     // the same explicit compatibility bucket as `chat()`.
-    let callsite = if callsite.trim().is_empty() { "unattributed" } else { callsite };
+    let callsite = if callsite.trim().is_empty() {
+        "unattributed"
+    } else {
+        callsite
+    };
     let mut guard = HOUSEHOLD_CALLSITES.lock().unwrap();
     let sites = guard.get_or_insert_with(HashMap::new);
     *sites.entry(callsite.to_string()).or_insert(0) += 1;
@@ -158,7 +167,12 @@ pub fn household_callsite_stats() -> Vec<(String, u64)> {
     let guard = HOUSEHOLD_CALLSITES.lock().unwrap();
     let mut rows: Vec<(String, u64)> = guard
         .as_ref()
-        .map(|sites| sites.iter().map(|(site, count)| (site.clone(), *count)).collect())
+        .map(|sites| {
+            sites
+                .iter()
+                .map(|(site, count)| (site.clone(), *count))
+                .collect()
+        })
         .unwrap_or_default();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     rows
@@ -166,7 +180,8 @@ pub fn household_callsite_stats() -> Vec<(String, u64)> {
 
 pub fn privacy_report(provider: &str) -> String {
     use std::sync::atomic::Ordering;
-    let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
+    let household =
+        std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
     let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
     let household_sites = household_callsite_stats();
     let household_sites = if household_sites.is_empty() {
@@ -214,7 +229,7 @@ pub fn survival_status() -> String {
     }
     let mins = {
         let g = SURVIVAL_SINCE.lock().unwrap();
-        g.as_ref().map(|t| t.elapsed().as_secs() / 60).unwrap_or(0)
+        g.as_ref().map_or(0, |t| t.elapsed().as_secs() / 60)
     };
     format!(
         "SURVIVAL MODE active ({mins}m): all cloud providers unavailable — running on local inference only. \
@@ -294,7 +309,8 @@ impl InferencePool {
         messages: Vec<ChatMessage>,
         config: GenerationConfig,
     ) -> anyhow::Result<LLMResponse> {
-        self.chat_household_attributed(messages, config, "unattributed").await
+        self.chat_household_attributed(messages, config, "unattributed")
+            .await
     }
 
     /// Household chat with a stable, code-authored call-site identity. Use this instead of
@@ -325,7 +341,8 @@ impl InferencePool {
         config: GenerationConfig,
         scope: PrivacyScope,
     ) -> anyhow::Result<LLMResponse> {
-        self.chat_scoped_tools(messages, config, scope, Vec::new()).await
+        self.chat_scoped_tools(messages, config, scope, Vec::new())
+            .await
     }
 
     /// Scope-aware chat WITH native function-calling: `tools` is the OpenAI-format schema list
@@ -431,7 +448,8 @@ impl InferencePool {
         callsite: &'static str,
     ) -> anyhow::Result<Arc<dyn LLMBackend>> {
         use std::sync::atomic::Ordering;
-        let household = std::env::var("YM_HOUSEHOLD_PROVIDERS").unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
+        let household = std::env::var("YM_HOUSEHOLD_PROVIDERS")
+            .unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
         let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
         let (backend, label, sanctioned) = match (scope, &self.private) {
             (PrivacyScope::Private, Some((be, lbl))) => (be.clone(), lbl.clone(), true),
@@ -511,7 +529,7 @@ impl InferencePool {
     }
 
     /// Private-grounded chat WITH native function-calling — same private-lane-first / audited
-    /// escalation policy as [`chat_grounded`], but forwards the tool schema list so a tool-capable
+    /// escalation policy as [`Self::chat_grounded`], but forwards the tool schema list so a tool-capable
     /// backend returns structured `tool_calls`. This is the agent loop's inference entry point.
     pub async fn chat_grounded_tools(
         &self,
@@ -536,7 +554,8 @@ impl InferencePool {
                 // backend — an outage must reduce capability, never confidentiality (sol 019f8287).
                 // The turn's caller degrades to deterministic rendering / an honest "unavailable".
                 if self.private.is_some() {
-                    PRIVACY_REFUSED[scope_idx(PrivacyScope::Private)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    PRIVACY_REFUSED[scope_idx(PrivacyScope::Private)]
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // `{e:#}`, not `{e}`: this is an anyhow chain, and the OUTERMOST link is the
                     // generic context string ("Ollama API request failed") while the CAUSE — the
                     // transport error, the HTTP status, the TLS complaint — sits underneath it.
@@ -551,14 +570,19 @@ impl InferencePool {
                     // fix (fewer permits, more slots) than an outage.
                     let detail = format!("{e:#}");
                     let (why, hint) = if detail.contains("429") {
-                        ("the local lane is RATE LIMITING (429 after retries)",
-                         "reduce YM_INFER_PERMITS below the endpoint's slot count, or add slots")
+                        (
+                            "the local lane is RATE LIMITING (429 after retries)",
+                            "reduce YM_INFER_PERMITS below the endpoint's slot count, or add slots",
+                        )
                     } else if ["502", "503", "504"].iter().any(|c| detail.contains(c)) {
                         // Distinct from unreachable: the gateway answered, its worker did not.
                         ("the local lane is FLAKY (gateway error after retries)",
                          "the endpoint is up but its backend is failing intermittently — check the model host")
                     } else {
-                        ("the local lane is unreachable", "check YM_LOCAL_OLLAMA_URL and the endpoint")
+                        (
+                            "the local lane is unreachable",
+                            "check YM_LOCAL_OLLAMA_URL and the endpoint",
+                        )
                     };
                     eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {why}: {detail}");
                     return Err(anyhow::anyhow!(
@@ -724,7 +748,12 @@ impl SequencedLLM {
     pub fn with_native(mut self, native: Vec<Option<(&str, serde_json::Value)>>) -> Self {
         self.native = native
             .into_iter()
-            .map(|o| o.map(|(name, arguments)| ToolCall { name: name.to_string(), arguments }))
+            .map(|o| {
+                o.map(|(name, arguments)| ToolCall {
+                    name: name.to_string(),
+                    arguments,
+                })
+            })
             .collect();
         self
     }
@@ -738,11 +767,21 @@ impl SequencedLLM {
     }
     /// The prompt seen on call `i` (0-based), or empty.
     pub fn prompt_at(&self, i: usize) -> String {
-        self.prompts.lock().unwrap().get(i).cloned().unwrap_or_default()
+        self.prompts
+            .lock()
+            .unwrap()
+            .get(i)
+            .cloned()
+            .unwrap_or_default()
     }
     /// The tool schemas passed on call `i` (0-based), or empty if none/out of range.
     pub fn tools_at(&self, i: usize) -> Vec<serde_json::Value> {
-        self.tools_seen.lock().unwrap().get(i).cloned().unwrap_or_default()
+        self.tools_seen
+            .lock()
+            .unwrap()
+            .get(i)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -753,18 +792,38 @@ impl LLMBackend for SequencedLLM {
         _config: &GenerationConfig,
         tools: Option<&[serde_json::Value]>,
     ) -> anyhow::Result<LLMResponse> {
-        let all = messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
+        let all = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
         self.prompts.lock().unwrap().push(all);
-        self.tools_seen.lock().unwrap().push(tools.map(|t| t.to_vec()).unwrap_or_default());
-        let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tools_seen
+            .lock()
+            .unwrap()
+            .push(tools.map(|t| t.to_vec()).unwrap_or_default());
+        let i = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let reply = self
             .replies
             .get(i)
             .or_else(|| self.replies.last())
             .cloned()
             .unwrap_or_default();
-        let tool_calls = self.native.get(i).cloned().flatten().into_iter().collect::<Vec<_>>();
-        let stop_reason = if tool_calls.is_empty() { "stop" } else { "tool_calls" }.to_string();
+        let tool_calls = self
+            .native
+            .get(i)
+            .cloned()
+            .flatten()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let stop_reason = if tool_calls.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        }
+        .to_string();
         Ok(LLMResponse {
             thinking: String::new(),
             text: reply,
@@ -803,7 +862,7 @@ impl LLMBackend for SequencedLLM {
 /// sets the starting point / load distribution. Config: YM_BRAIN_STRATEGY (+ per-link weights).
 #[derive(Clone, Debug)]
 pub enum ChainStrategy {
-    /// Fixed order: links[0] is primary, the rest are pure failover backups. (Default.)
+    /// Fixed order: `links[0]` is primary, the rest are pure failover backups. (Default.)
     Failover,
     /// Rotate the starting link each call (even spread), then failover through the remainder.
     RoundRobin,
@@ -875,7 +934,10 @@ fn local_budget(label: &str, cfg: &GenerationConfig) -> Option<GenerationConfig>
     if cfg.max_tokens < DELIBERATE_BREVITY || cfg.max_tokens >= floor {
         return None;
     }
-    Some(GenerationConfig { max_tokens: floor, ..cfg.clone() })
+    Some(GenerationConfig {
+        max_tokens: floor,
+        ..cfg.clone()
+    })
 }
 
 pub struct ChainBackend {
@@ -918,7 +980,11 @@ impl ChainBackend {
 
     /// Attach a local survival-tier backend (e.g. local Ollama). When all cloud links fail, this
     /// is tried last; on success it activates survival mode until a cloud link recovers.
-    pub fn with_local_fallback(mut self, backend: Arc<dyn LLMBackend>, label: impl Into<String>) -> Self {
+    pub fn with_local_fallback(
+        mut self,
+        backend: Arc<dyn LLMBackend>,
+        label: impl Into<String>,
+    ) -> Self {
         self.local = Some((backend, label.into()));
         self
     }
@@ -956,7 +1022,9 @@ impl ChainBackend {
             _ => match &self.strategy {
                 ChainStrategy::Failover => 0,
                 ChainStrategy::RoundRobin => self.route.fetch_add(1, Ordering::Relaxed) % n,
-                ChainStrategy::Weighted(w) => weighted_index(w, n, self.route.fetch_add(1, Ordering::Relaxed)),
+                ChainStrategy::Weighted(w) => {
+                    weighted_index(w, n, self.route.fetch_add(1, Ordering::Relaxed))
+                }
             },
         };
         if start > 0 {
@@ -964,16 +1032,21 @@ impl ChainBackend {
         }
         // Hot-link demotion (a nanogpt link near its weekly quota) — a STABLE partition preserves the
         // strategy order within the kept/demoted groups. Availability beats thrift; unknown never demotes.
-        let demote_at: f64 = std::env::var("YM_DEMOTE_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(90.0);
+        let demote_at: f64 = std::env::var("YM_DEMOTE_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90.0);
         let hot = |i: &usize| -> bool {
-            let l = self.labels.get(*i).map(String::as_str).unwrap_or("");
-            l.starts_with("nanogpt") && nanogpt_weekly_pct().map(|p| p >= demote_at).unwrap_or(false)
+            let l = self.labels.get(*i).map_or("", String::as_str);
+            l.starts_with("nanogpt") && nanogpt_weekly_pct().is_some_and(|p| p >= demote_at)
         };
-        let (cold, warm): (Vec<usize>, Vec<usize>) = order.iter().partition(|i| !hot(*i));
+        let (cold, warm): (Vec<usize>, Vec<usize>) = order.iter().partition(|i| !hot(i));
         if !warm.is_empty() {
             eprintln!(
                 "[chain] demoting hot link(s) to last: {:?}",
-                warm.iter().map(|i| self.labels.get(*i).cloned().unwrap_or_default()).collect::<Vec<_>>()
+                warm.iter()
+                    .map(|i| self.labels.get(*i).cloned().unwrap_or_default())
+                    .collect::<Vec<_>>()
             );
             order = cold.into_iter().chain(warm).collect();
         }
@@ -1049,7 +1122,8 @@ fn provider_record_usage(name: &str, served: bool, tokens_in: u64, tokens_out: u
 /// Cached NanoGPT weekly utilization (0-100). Probed at most every 30 min; None = unknown
 /// (no key / probe failed) — unknown NEVER demotes. The chain uses this to route headroom-first.
 fn nanogpt_weekly_pct() -> Option<f64> {
-    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<f64>)>> = std::sync::Mutex::new(None);
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<f64>)>> =
+        std::sync::Mutex::new(None);
     {
         let g = CACHE.lock().unwrap();
         if let Some((t, v)) = *g {
@@ -1058,7 +1132,9 @@ fn nanogpt_weekly_pct() -> Option<f64> {
             }
         }
     }
-    let key = std::env::var("NANOGPT_KEY").ok().filter(|k| !k.trim().is_empty());
+    let key = std::env::var("NANOGPT_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
     let v: Option<f64> = key.and_then(|key| {
         ureq::get("https://nano-gpt.com/api/subscription/v1/usage")
             .set("x-api-key", &key)
@@ -1090,7 +1166,8 @@ pub fn provider_usage_rollup() -> Vec<(String, u64, u64, u64, u64, u64)> {
     let today = chrono::Local::now();
     let today_s = today.format("%Y-%m-%d").to_string();
     let week = today.iso_week().week();
-    let mut agg: std::collections::HashMap<String, (u64, u64, u64, u64, u64)> = std::collections::HashMap::new();
+    let mut agg: std::collections::HashMap<String, (u64, u64, u64, u64, u64)> =
+        std::collections::HashMap::new();
     if let Some(days) = v.as_object() {
         for (day, provs) in days {
             let in_week = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
@@ -1114,8 +1191,10 @@ pub fn provider_usage_rollup() -> Vec<(String, u64, u64, u64, u64, u64)> {
             }
         }
     }
-    let mut out: Vec<(String, u64, u64, u64, u64, u64)> =
-        agg.into_iter().map(|(k, (a, b, c, d, e))| (k, a, b, c, d, e)).collect();
+    let mut out: Vec<(String, u64, u64, u64, u64, u64)> = agg
+        .into_iter()
+        .map(|(k, (a, b, c, d, e))| (k, a, b, c, d, e))
+        .collect();
     out.sort_by(|a, b| b.3.cmp(&a.3));
     out
 }
@@ -1146,7 +1225,10 @@ impl LLMBackend for ChainBackend {
         let order = self.routing_order(config.think, config.prefer_reasoner);
         for i in order {
             let be = &self.links[i];
-            let label = self.labels.get(i).map(String::as_str).unwrap_or_else(|| be.backend_name());
+            let label = self
+                .labels
+                .get(i)
+                .map_or_else(|| be.backend_name(), String::as_str);
             // Owned hardware bills time, not tokens — give it room rather than truncating a tool
             // call or an answer to save a token that costs nothing. Cloud links pass through.
             let raised = local_budget(label, config);
@@ -1158,14 +1240,24 @@ impl LLMBackend for ChainBackend {
                         && SURVIVAL_MODE.swap(false, std::sync::atomic::Ordering::SeqCst)
                     {
                         *SURVIVAL_SINCE.lock().unwrap() = None;
-                        eprintln!("[survival] cloud provider recovered ({label}) — exiting survival mode");
+                        eprintln!(
+                            "[survival] cloud provider recovered ({label}) — exiting survival mode"
+                        );
                     }
-                    provider_record_usage(label, true, r.prompt_tokens as u64, r.completion_tokens as u64);
+                    provider_record_usage(
+                        label,
+                        true,
+                        r.prompt_tokens as u64,
+                        r.completion_tokens as u64,
+                    );
                     return Ok(r);
                 }
                 Ok(_) => {
                     provider_record(label, false);
-                    eprintln!("[chain] {} returned empty — failing over", be.backend_name());
+                    eprintln!(
+                        "[chain] {} returned empty — failing over",
+                        be.backend_name()
+                    );
                     last_err = Some(anyhow::anyhow!("empty response from {}", be.backend_name()));
                 }
                 Err(e) => {
@@ -1187,7 +1279,12 @@ impl LLMBackend for ChainBackend {
                         *SURVIVAL_SINCE.lock().unwrap() = Some(std::time::Instant::now());
                         eprintln!("[survival] all cloud providers failed — activating local tier ({local_label})");
                     }
-                    provider_record_usage(local_label, true, r.prompt_tokens as u64, r.completion_tokens as u64);
+                    provider_record_usage(
+                        local_label,
+                        true,
+                        r.prompt_tokens as u64,
+                        r.completion_tokens as u64,
+                    );
                     return Ok(r);
                 }
                 Ok(_) => {
@@ -1252,9 +1349,17 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         None => (spec.trim(), ""),
     };
     let (base, key_env, default_model) = match provider {
-        "nanogpt" => ("https://nano-gpt.com/api/v1", "NANOGPT_KEY", "deepseek/deepseek-v4-pro-cheaper"),
+        "nanogpt" => (
+            "https://nano-gpt.com/api/v1",
+            "NANOGPT_KEY",
+            "deepseek/deepseek-v4-pro-cheaper",
+        ),
         "ollama-cloud" | "ollama" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY", "glm-4.7"),
-        "minimax" => ("https://api.minimax.io/v1", "MINIMAX_API_KEY", "MiniMax-M2.7"),
+        "minimax" => (
+            "https://api.minimax.io/v1",
+            "MINIMAX_API_KEY",
+            "MiniMax-M2.7",
+        ),
         // QwenCloud token-plan. NOTE the host: the public docs point at
         // dashscope-intl.aliyuncs.com, which REJECTS token-plan keys (sk-sp-…) — the working base is
         // the token-plan MaaS endpoint below. Benchmarked 2026-08-03 at 6/6 on brain_bench (this
@@ -1266,17 +1371,33 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             "QWEN_API_KEY",
             "qwen3.8-max",
         ),
-        "openrouter" => ("https://openrouter.ai/api/v1", "OPEN_ROUTER_KEY", "deepseek/deepseek-chat"),
+        "openrouter" => (
+            "https://openrouter.ai/api/v1",
+            "OPEN_ROUTER_KEY",
+            "deepseek/deepseek-chat",
+        ),
         // ── The FREE-TIER lanes (researched 2026-08-16). All OpenAI-compatible. These are for the
         // household/public lanes ONLY — a private-grounded turn stays on owned hardware regardless
         // (enforced at the call sites and canary-tested in privacy_tests below). Free tiers move;
         // the numbers live in the config schema descriptions, not here.
         // NVIDIA NIM: the deepest free catalog (100+ models, ~40 RPM free).
-        "nim" | "nvidia" => ("https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", "deepseek-ai/deepseek-v4"),
+        "nim" | "nvidia" => (
+            "https://integrate.api.nvidia.com/v1",
+            "NVIDIA_API_KEY",
+            "deepseek-ai/deepseek-v4",
+        ),
         // Groq LPU: fastest turnaround per request on a free tier (~30 RPM / 1k RPD).
-        "groq" => ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
+        "groq" => (
+            "https://api.groq.com/openai/v1",
+            "GROQ_API_KEY",
+            "llama-3.3-70b-versatile",
+        ),
         // Cerebras: highest free throughput (~1M tokens/day at ~2k tok/s).
-        "cerebras" => ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "llama-3.3-70b"),
+        "cerebras" => (
+            "https://api.cerebras.ai/v1",
+            "CEREBRAS_API_KEY",
+            "llama-3.3-70b",
+        ),
         "grok" => ("https://api.x.ai/v1", "GROK_API_KEY", "grok-2-latest"),
         // Anthropic direct. Default Sonnet 5 (fast + cheap enough for an
         // always-on brain); swap the model to claude-opus-4-8 or claude-fable-5 (when it un-gates).
@@ -1288,13 +1409,22 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         _ => return None,
     };
     let key = configured_api_key(key_env)?;
-    let model = if model.is_empty() { default_model.to_string() } else { model.to_string() };
+    let model = if model.is_empty() {
+        default_model.to_string()
+    } else {
+        model.to_string()
+    };
     if provider == "anthropic" {
         Some(Arc::new(yantrik_ml::AnthropicBackend::with_base_url(
             key, base, model,
         )) as Arc<dyn LLMBackend>)
     } else {
-        Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", base, Some(key), model)) as Arc<dyn LLMBackend>)
+        Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider(
+            "openai",
+            base,
+            Some(key),
+            model,
+        )) as Arc<dyn LLMBackend>)
     }
 }
 
@@ -1307,7 +1437,9 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
 pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     let local = local_backend_from_env();
     let local_primary = local.is_some()
-        && std::env::var("YM_LOCAL_ROLE").map(|r| r.trim() != "fallback").unwrap_or(true);
+        && std::env::var("YM_LOCAL_ROLE")
+            .map(|r| r.trim() != "fallback")
+            .unwrap_or(true);
 
     let order = [
         ("nanogpt", std::env::var("YM_MODEL").ok()),
@@ -1372,15 +1504,21 @@ pub fn think_for(role: &str, default: Option<bool>) -> Option<bool> {
 }
 
 /// A config-defined pool of LOCAL brain backends with a selectable backup strategy. Set:
-///   YM_BRAIN_POOL   = "url|model[@weight] ; url|model[@weight] ; ..."
-///     e.g. "https://aig.mycluster.cyou|gemma4:e4b@70 ; http://192.168.4.180:11434|qwen3.6:35b-a3b-mtp-q4_K_M@30"
-///   YM_BRAIN_STRATEGY = failover | round_robin | weighted   (default: weighted if any @weight, else failover)
+///
+/// ```text
+/// YM_BRAIN_POOL = "url|model[@weight] ; url|model[@weight] ; ..."
+/// # e.g. "https://aig.mycluster.cyou|gemma4:e4b@70 ; http://192.168.4.180:11434|qwen3.6:35b-a3b-mtp-q4_K_M@30"
+/// YM_BRAIN_STRATEGY = failover | round_robin | weighted
+/// # default: weighted if any @weight, else failover
+/// ```
 /// Every entry is an Ollama endpoint (provider "ollama", native /api/chat), so the per-call `think`
 /// flag (dual-mode) flows to whichever link is chosen. Because all links are owned/local, the pool is
 /// safe as the PRIVATE lane too: a private turn stays on owned hardware, failover is local-only, and
 /// if every link fails the pool returns an error so the lane still FAILS CLOSED (never cloud).
 pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
-    let raw = std::env::var("YM_BRAIN_POOL").ok().filter(|s| !s.trim().is_empty())?;
+    let raw = std::env::var("YM_BRAIN_POOL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
     let mut links: Vec<Arc<dyn LLMBackend>> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
     let mut weights: Vec<u32> = Vec::new();
@@ -1395,9 +1533,13 @@ pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
         };
         let (url, model) = spec
             .split_once('|')
-            .map(|(u, m)| (u.trim(), m.trim()))
-            .unwrap_or((spec, "gemma4:e4b"));
-        let be = yantrik_ml::GenericOpenAIBackend::for_provider("ollama", url, Some("ollama".to_string()), model);
+            .map_or((spec, "gemma4:e4b"), |(u, m)| (u.trim(), m.trim()));
+        let be = yantrik_ml::GenericOpenAIBackend::for_provider(
+            "ollama",
+            url,
+            Some("ollama".to_string()),
+            model,
+        );
         links.push(Arc::new(be) as Arc<dyn LLMBackend>);
         labels.push(format!("ollama-local:{model}"));
         weights.push(weight);
@@ -1429,9 +1571,14 @@ pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     // The reasoner (strong model for think:true and blob-escalations): YM_BRAIN_REASONER names a
     // substring to match a link's model; else auto-detect a MoE/large tag; else the LAST link (the
     // convention is primary = fast dispatch model, reasoner = the capable one).
-    let want = std::env::var("YM_BRAIN_REASONER").unwrap_or_default().trim().to_ascii_lowercase();
+    let want = std::env::var("YM_BRAIN_REASONER")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     let reasoner_idx = if !want.is_empty() {
-        labels.iter().position(|l| l.to_ascii_lowercase().contains(&want))
+        labels
+            .iter()
+            .position(|l| l.to_ascii_lowercase().contains(&want))
     } else {
         labels
             .iter()
@@ -1466,8 +1613,7 @@ pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     // the qwen thinking preamble (OpenAI-compat ignores `think`, burning ~10s/turn). The "ollama"
     // preset routes to native /api/chat, sends `think:false` (fast, clean content), passes tools for
     // the agent loop, and needs no auth. YM_LOCAL_OLLAMA_KEY is accepted but unused (auth "none").
-    let key = std::env::var("YM_LOCAL_OLLAMA_KEY")
-        .unwrap_or_else(|_| "ollama".to_string());
+    let key = std::env::var("YM_LOCAL_OLLAMA_KEY").unwrap_or_else(|_| "ollama".to_string());
     // Thinking is a per-workload quality/latency lever on qwen3.6 MoE (binary; reasoning_effort
     // levels don't scale — ollama maintainer, 2026-07-21). Blanket thinking-ON measured ~96s even
     // for a trivial turn (the agent loop multiplies the reasoning chain across steps) — unusable
@@ -1475,7 +1621,12 @@ pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     // force it globally. The proper split — thinking ON only on background planning paths — is the
     // follow-up; this env keeps the fast default while the builder plumbing is already in place.
     let think = std::env::var("YM_LOCAL_THINK")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "1" | "true" | "yes"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "on" | "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false);
     let label = format!("ollama-local:{model}");
     Some((
@@ -1494,10 +1645,30 @@ pub struct Router {
     default: InferencePool,
 }
 
+/// Build one explicit role pool without losing either half of its route identity. The literal
+/// `provider:model` spec is operational metadata (privacy reports, attribution, diagnostics), not
+/// a backend default: `InferencePool::new` labels itself `scripted`, so failing to set this made
+/// every configured role look like the test seam even while it called a real provider.
+fn role_pool(
+    default: &InferencePool,
+    backend: Arc<dyn LLMBackend>,
+    concurrency: usize,
+    spec: &str,
+) -> InferencePool {
+    let mut pool = InferencePool::new(backend, concurrency).with_provider(spec.trim());
+    if let Some((private_backend, private_label)) = default.private_lane() {
+        pool = pool.with_private_backend(private_backend, &private_label);
+    }
+    pool
+}
+
 impl Router {
     /// All roles resolve to one pool (tests, single-backend setups).
     pub fn uniform(default: InferencePool) -> Self {
-        Self { roles: HashMap::new(), default }
+        Self {
+            roles: HashMap::new(),
+            default,
+        }
     }
 
     /// Read `YM_ROLE_<ROLE>` for each known function; a set+resolvable spec gets its own pool, else
@@ -1521,10 +1692,7 @@ impl Router {
                         // asks for pool("util"), and the goal came back as "I couldn't turn that
                         // into steps — rephrase it as concrete actions". The phrasing was never the
                         // problem; the pool had no brain to think with.
-                        let mut pool = InferencePool::new(be, concurrency);
-                        if let Some((backend, label)) = default.private_lane() {
-                            pool = pool.with_private_backend(backend, &label);
-                        }
+                        let pool = role_pool(&default, be, concurrency, &spec);
                         roles.insert(role.to_string(), pool);
                     } else {
                         eprintln!("[router] {var}={spec:?} — unknown provider or missing key; using default");
@@ -1537,7 +1705,10 @@ impl Router {
 
     /// The pool for a function role (falls back to the default pool).
     pub fn pool(&self, role: &str) -> InferencePool {
-        self.roles.get(role).cloned().unwrap_or_else(|| self.default.clone())
+        self.roles
+            .get(role)
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
     }
 
     /// Roles that have an explicit (non-default) backend — for startup reporting.
@@ -1559,31 +1730,88 @@ mod privacy_tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl LLMBackend for CanaryTrap {
-        fn chat(&self, messages: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+        fn chat(
+            &self,
+            messages: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             for m in messages {
-                assert!(!m.content.contains(&self.canary), "PRIVACY LEAK: private canary reached the cloud backend");
+                assert!(
+                    !m.content.contains(&self.canary),
+                    "PRIVACY LEAK: private canary reached the cloud backend"
+                );
             }
-            Ok(LLMResponse { thinking: String::new(), text: "cloud-ok".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+            Ok(LLMResponse {
+                thinking: String::new(),
+                text: "cloud-ok".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
         }
-        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
             self.chat(m, c, t)
         }
-        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> { Ok(t.len() / 4) }
-        fn backend_name(&self) -> &str { "canary-cloud" }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "canary-cloud"
+        }
     }
 
     /// A local backend that always fails — simulates the local Ollama being down/OOM/timing out.
     struct AlwaysDown;
     impl LLMBackend for AlwaysDown {
-        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
             anyhow::bail!("local ollama down")
         }
-        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
             self.chat(m, c, t)
         }
-        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> { Ok(t.len() / 4) }
-        fn backend_name(&self) -> &str { "always-down" }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "always-down"
+        }
+    }
+
+    #[test]
+    fn explicit_role_pool_keeps_provider_model_identity_and_private_lane() {
+        let backend = Arc::new(AlwaysDown) as Arc<dyn LLMBackend>;
+        let default = InferencePool::new(backend.clone(), 1)
+            .with_provider("default:model")
+            .with_private_backend(backend.clone(), "owned:model");
+
+        let role = role_pool(&default, backend, 2, "  nim:deepseek-ai/deepseek-v4  ");
+
+        assert_eq!(role.provider(), "nim:deepseek-ai/deepseek-v4");
+        assert!(
+            role.has_private_lane(),
+            "role pools must retain fail-closed privacy routing"
+        );
     }
 
     /// THE LEAK-PROOF INVARIANT (sol 019f8287): for a Private-grounded turn, ZERO bytes reach a cloud
@@ -1593,7 +1821,10 @@ mod privacy_tests {
     async fn private_grounded_fails_closed_never_leaks_to_cloud() {
         let canary = "SECRET-CANARY-alice-oncology-47-12-33";
         let cloud_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let cloud = Arc::new(CanaryTrap { canary: canary.into(), calls: cloud_calls.clone() }) as Arc<dyn LLMBackend>;
+        let cloud = Arc::new(CanaryTrap {
+            canary: canary.into(),
+            calls: cloud_calls.clone(),
+        }) as Arc<dyn LLMBackend>;
         let local_down = Arc::new(AlwaysDown) as Arc<dyn LLMBackend>;
         // Default/household backend = the cloud trap; PRIVATE lane = the (failing) local-only backend.
         let pool = InferencePool::new(cloud, 1)
@@ -1601,15 +1832,27 @@ mod privacy_tests {
             .with_private_backend(local_down, "ollama-local");
         assert!(pool.has_private_lane());
 
-        let messages = vec![ChatMessage::user(&format!("remember: {canary}"))];
+        let messages = vec![ChatMessage::user(format!("remember: {canary}"))];
         let res = pool
             .chat_grounded_tools(messages, GenerationConfig::default(), Vec::new())
             .await;
 
         // The private lane failed → the turn FAILS CLOSED (Err), and the cloud backend was NEVER called.
-        assert!(res.is_err(), "a down private lane must fail closed, not silently succeed via cloud");
-        assert!(res.unwrap_err().to_string().contains("refusing to route private context"), "explicit fail-closed reason");
-        assert_eq!(cloud_calls.load(std::sync::atomic::Ordering::SeqCst), 0, "PRIVACY LEAK: the cloud backend was called for a private-grounded turn");
+        assert!(
+            res.is_err(),
+            "a down private lane must fail closed, not silently succeed via cloud"
+        );
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("refusing to route private context"),
+            "explicit fail-closed reason"
+        );
+        assert_eq!(
+            cloud_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "PRIVACY LEAK: the cloud backend was called for a private-grounded turn"
+        );
     }
 
     // (The no-private-lane escalation path — the documented interim gap — is covered by the existing
@@ -1625,27 +1868,46 @@ mod privacy_tests {
     #[tokio::test]
     #[ignore = "needs a live local Ollama with a tool-calling model"]
     async fn real_model_native_tool_call_roundtrip() {
-        let url = std::env::var("YM_SMOKE_OLLAMA_URL").unwrap_or_else(|_| "http://192.168.4.35:11434".into());
+        let url = std::env::var("YM_SMOKE_OLLAMA_URL")
+            .unwrap_or_else(|_| "http://192.168.4.35:11434".into());
         let model = std::env::var("YM_SMOKE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.6:27b".into());
         let backend = yantrik_ml::ApiLLM::new(url, None, model);
-        let pool = InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1).with_provider("ollama-local");
+        let pool = InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1)
+            .with_provider("ollama-local");
         let tools = vec![serde_json::json!({"type":"function","function":{
             "name":"weather","description":"current conditions + today's forecast for a city/town",
             "parameters":{"type":"object","properties":{"place":{"description":"place"}},
                           "required":["place"],"additionalProperties":true}}})];
         let messages = vec![
-            ChatMessage::system("You are an agent, not a chatbot — you ACT. Use ONE tool, observe, then answer."),
+            ChatMessage::system(
+                "You are an agent, not a chatbot — you ACT. Use ONE tool, observe, then answer.",
+            ),
             ChatMessage::user("what's the weather in pune?"),
         ];
         // Public scope: the smoke prompt carries no private data, and Public routes to any provider.
         let r = pool
-            .chat_scoped_tools(messages, GenerationConfig::default(), PrivacyScope::Public, tools)
+            .chat_scoped_tools(
+                messages,
+                GenerationConfig::default(),
+                PrivacyScope::Public,
+                tools,
+            )
             .await
             .expect("live ollama chat");
-        let tc = r.tool_calls.first().expect("the model should return a STRUCTURED tool call");
-        assert_eq!(tc.name, "weather", "picked the offered tool: {:?}", r.tool_calls);
+        let tc = r
+            .tool_calls
+            .first()
+            .expect("the model should return a STRUCTURED tool call");
+        assert_eq!(
+            tc.name, "weather",
+            "picked the offered tool: {:?}",
+            r.tool_calls
+        );
         assert!(
-            tc.arguments.get("place").and_then(|v| v.as_str()).map(|s| s.to_lowercase().contains("pune")).unwrap_or(false),
+            tc.arguments
+                .get("place")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.to_lowercase().contains("pune")),
             "parsed structured args carry the place: {:?}",
             tc.arguments
         );
@@ -1657,12 +1919,32 @@ mod privacy_tests {
         let pv = "";
         assert!(scope_allows(PrivacyScope::Public, "minimax", hh, pv));
         assert!(scope_allows(PrivacyScope::Public, "anything", hh, pv));
-        assert!(scope_allows(PrivacyScope::Household, "nanogpt -> minimax", hh, pv));
-        assert!(!scope_allows(PrivacyScope::Household, "random-cloud", hh, pv));
+        assert!(scope_allows(
+            PrivacyScope::Household,
+            "nanogpt -> minimax",
+            hh,
+            pv
+        ));
+        assert!(!scope_allows(
+            PrivacyScope::Household,
+            "random-cloud",
+            hh,
+            pv
+        ));
         assert!(!scope_allows(PrivacyScope::Private, "minimax", hh, pv));
         assert!(!scope_allows(PrivacyScope::Private, "scripted", hh, pv));
-        assert!(scope_allows(PrivacyScope::Private, "ollama-local:qwen3", hh, "ollama-local"));
-        assert!(!scope_allows(PrivacyScope::Private, "minimax", hh, "ollama-local"));
+        assert!(scope_allows(
+            PrivacyScope::Private,
+            "ollama-local:qwen3",
+            hh,
+            "ollama-local"
+        ));
+        assert!(!scope_allows(
+            PrivacyScope::Private,
+            "minimax",
+            hh,
+            "ollama-local"
+        ));
     }
 
     #[tokio::test]
@@ -1675,10 +1957,19 @@ mod privacy_tests {
         )
         .with_provider("minimax");
         let before = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
-        let out = pool.chat_grounded(vec![ChatMessage::user("private family context")], GenerationConfig::default()).await;
+        let out = pool
+            .chat_grounded(
+                vec![ChatMessage::user("private family context")],
+                GenerationConfig::default(),
+            )
+            .await;
         assert!(out.is_ok(), "chat_grounded must never break the turn");
         let after = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(after, before + 1, "the cloud escalation of a private-grounded turn must be counted");
+        assert_eq!(
+            after,
+            before + 1,
+            "the cloud escalation of a private-grounded turn must be counted"
+        );
     }
 
     #[tokio::test]
@@ -1689,11 +1980,22 @@ mod privacy_tests {
         )
         .with_provider("minimax");
         let out = pool
-            .chat_scoped(vec![ChatMessage::user("family secret")], GenerationConfig::default(), PrivacyScope::Private)
+            .chat_scoped(
+                vec![ChatMessage::user("family secret")],
+                GenerationConfig::default(),
+                PrivacyScope::Private,
+            )
             .await;
-        assert!(out.is_err(), "private scope must refuse a cloud-labeled pool");
+        assert!(
+            out.is_err(),
+            "private scope must refuse a cloud-labeled pool"
+        );
         let ok = pool
-            .chat_scoped(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household)
+            .chat_scoped(
+                vec![ChatMessage::user("hi")],
+                GenerationConfig::default(),
+                PrivacyScope::Household,
+            )
             .await;
         assert!(ok.is_ok());
     }
@@ -1746,8 +2048,7 @@ mod privacy_tests {
         };
         let before = count();
         let pool = InferencePool::new(
-            std::sync::Arc::new(ScriptedLLM::new("must not run"))
-                as std::sync::Arc<dyn LLMBackend>,
+            std::sync::Arc::new(ScriptedLLM::new("must not run")) as std::sync::Arc<dyn LLMBackend>,
             1,
         )
         .with_provider("not-on-the-household-allowlist");
@@ -1760,7 +2061,10 @@ mod privacy_tests {
             )
             .await;
 
-        assert!(out.is_err(), "the Household charter must refuse the provider");
+        assert!(
+            out.is_err(),
+            "the Household charter must refuse the provider"
+        );
         assert_eq!(
             count(),
             before,
@@ -1824,9 +2128,14 @@ mod privacy_tests {
             .await;
 
         assert!(out.is_ok());
-        assert!(count() > before, "blank labels must join the unattributed bucket");
         assert!(
-            household_callsite_stats().iter().all(|(site, _)| !site.trim().is_empty()),
+            count() > before,
+            "blank labels must join the unattributed bucket"
+        );
+        assert!(
+            household_callsite_stats()
+                .iter()
+                .all(|(site, _)| !site.trim().is_empty()),
             "the audit surface must never contain an unnamed producer"
         );
     }
@@ -1865,7 +2174,11 @@ mod tests {
         for c in 0..100 {
             counts[weighted_index(&w, 2, c)] += 1;
         }
-        assert_eq!(counts, [70, 30], "70/30 weights → 70/30 split over a full window");
+        assert_eq!(
+            counts,
+            [70, 30],
+            "70/30 weights → 70/30 split over a full window"
+        );
         // Degenerate weights never panic and fall back to the first link.
         assert_eq!(weighted_index(&[0, 0], 2, 5), 0);
         assert_eq!(weighted_index(&[], 3, 9), 0);
@@ -1884,18 +2197,25 @@ mod tests {
         let cfg = GenerationConfig::default();
 
         // Round-robin: the FIRST link tried rotates A→B→C→A across calls.
-        let rr = ChainBackend::new_labeled(mk(), labels.clone()).with_strategy(ChainStrategy::RoundRobin);
-        let got: Vec<String> = (0..4).map(|_| rr.chat(&[], &cfg, None).unwrap().text).collect();
+        let rr = ChainBackend::new_labeled(mk(), labels.clone())
+            .with_strategy(ChainStrategy::RoundRobin);
+        let got: Vec<String> = (0..4)
+            .map(|_| rr.chat(&[], &cfg, None).unwrap().text)
+            .collect();
         assert_eq!(got, vec!["A", "B", "C", "A"]);
 
         // Failover: always starts at link 0 (each scripted link succeeds, so always "A").
-        let fo = ChainBackend::new_labeled(mk(), labels.clone()).with_strategy(ChainStrategy::Failover);
+        let fo =
+            ChainBackend::new_labeled(mk(), labels.clone()).with_strategy(ChainStrategy::Failover);
         assert_eq!(fo.chat(&[], &cfg, None).unwrap().text, "A");
         assert_eq!(fo.chat(&[], &cfg, None).unwrap().text, "A");
 
         // Weighted [2,0,1] over 3 calls: first link twice, then the third — never the zero-weight one.
-        let wt = ChainBackend::new_labeled(mk(), labels).with_strategy(ChainStrategy::Weighted(vec![2, 0, 1]));
-        let got: Vec<String> = (0..3).map(|_| wt.chat(&[], &cfg, None).unwrap().text).collect();
+        let wt = ChainBackend::new_labeled(mk(), labels)
+            .with_strategy(ChainStrategy::Weighted(vec![2, 0, 1]));
+        let got: Vec<String> = (0..3)
+            .map(|_| wt.chat(&[], &cfg, None).unwrap().text)
+            .collect();
         assert_eq!(got, vec!["A", "A", "C"]);
     }
 
@@ -1908,35 +2228,58 @@ mod tests {
     #[test]
     fn a_local_link_gets_a_generous_budget_and_the_cloud_does_not() {
         let floor = local_min_tokens();
-        let small = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+        let small = GenerationConfig {
+            max_tokens: 300,
+            ..GenerationConfig::default()
+        };
 
         // Local: raised to the floor, and everything else about the config is preserved.
         let raised = local_budget("ollama-local:qwen3.6:35b-a3b-mtp-q4_K_M", &small)
             .expect("a 300-token cap on owned hardware must be raised");
         assert_eq!(raised.max_tokens, floor);
-        assert_eq!(raised.temperature, small.temperature, "only the budget changes");
+        assert_eq!(
+            raised.temperature, small.temperature,
+            "only the budget changes"
+        );
         assert_eq!(raised.think, small.think);
 
         // Cloud: untouched, because there tokens are the bill.
-        for cloud in ["nanogpt:deepseek/deepseek-v4-pro", "minimax", "ollama-cloud", "qwen-cloud"] {
-            assert!(local_budget(cloud, &small).is_none(), "{cloud} must keep its budget");
+        for cloud in [
+            "nanogpt:deepseek/deepseek-v4-pro",
+            "minimax",
+            "ollama-cloud",
+            "qwen-cloud",
+        ] {
+            assert!(
+                local_budget(cloud, &small).is_none(),
+                "{cloud} must keep its budget"
+            );
         }
 
         // Already generous — nothing to do (never LOWER a caller's budget).
-        let big = GenerationConfig { max_tokens: floor + 5_000, ..GenerationConfig::default() };
+        let big = GenerationConfig {
+            max_tokens: floor + 5_000,
+            ..GenerationConfig::default()
+        };
         assert!(local_budget("ollama-local:gemma4:e4b", &big).is_none());
 
         // Deliberate brevity is exempt: these callers want one word or one line, and a paragraph
         // where the code expects a token is its own bug.
         for tiny in [12, 80, 90, DELIBERATE_BREVITY - 1] {
-            let cfg = GenerationConfig { max_tokens: tiny, ..GenerationConfig::default() };
+            let cfg = GenerationConfig {
+                max_tokens: tiny,
+                ..GenerationConfig::default()
+            };
             assert!(
                 local_budget("ollama-local:gemma4:e4b", &cfg).is_none(),
                 "a {tiny}-token cap is a deliberate one-liner, not a truncation risk"
             );
         }
         // …and the boundary itself IS a reply budget, so it gets raised.
-        let boundary = GenerationConfig { max_tokens: DELIBERATE_BREVITY, ..GenerationConfig::default() };
+        let boundary = GenerationConfig {
+            max_tokens: DELIBERATE_BREVITY,
+            ..GenerationConfig::default()
+        };
         assert!(local_budget("ollama-local:gemma4:e4b", &boundary).is_some());
     }
 
@@ -1946,10 +2289,13 @@ mod tests {
             Arc::new(ScriptedLLM::new("FAST")) as Arc<dyn LLMBackend>,
             Arc::new(ScriptedLLM::new("REASONER")) as Arc<dyn LLMBackend>,
         ];
-        let chain = ChainBackend::new_labeled(links, vec!["fast".into(), "reasoner".into()]).with_reasoner(1);
-        let mut cfg = GenerationConfig::default();
+        let chain = ChainBackend::new_labeled(links, vec!["fast".into(), "reasoner".into()])
+            .with_reasoner(1);
+        let mut cfg = GenerationConfig {
+            think: Some(false),
+            ..GenerationConfig::default()
+        };
         // Dispatch (think:false / None) stays on the primary (fast) link.
-        cfg.think = Some(false);
         assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "FAST");
         cfg.think = None;
         assert_eq!(chain.chat(&[], &cfg, None).unwrap().text, "FAST");
@@ -1982,13 +2328,24 @@ mod tests {
         name: String,
     }
     impl LLMBackend for TestBE {
-        fn chat(&self, _: &[ChatMessage], _: &GenerationConfig, _: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
             match &self.reply {
                 None => anyhow::bail!("{} boom", self.name),
                 Some(t) => Ok(resp(t)),
             }
         }
-        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
             self.chat(m, c, t)
         }
         fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
@@ -2002,18 +2359,50 @@ mod tests {
     #[test]
     fn chain_falls_over_past_error_and_empty_then_errors_when_all_dead() {
         let chain = ChainBackend::new(vec![
-            Arc::new(TestBE { reply: None, name: "err".into() }),
-            Arc::new(TestBE { reply: Some(String::new()), name: "empty".into() }),
-            Arc::new(TestBE { reply: Some("hello from C".into()), name: "good".into() }),
+            Arc::new(TestBE {
+                reply: None,
+                name: "err".into(),
+            }),
+            Arc::new(TestBE {
+                reply: Some(String::new()),
+                name: "empty".into(),
+            }),
+            Arc::new(TestBE {
+                reply: Some("hello from C".into()),
+                name: "good".into(),
+            }),
         ]);
-        let out = chain.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None).unwrap();
-        assert_eq!(out.text, "hello from C", "chain should skip err+empty links to the first usable reply");
+        let out = chain
+            .chat(
+                &[ChatMessage::user("hi")],
+                &GenerationConfig::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            out.text, "hello from C",
+            "chain should skip err+empty links to the first usable reply"
+        );
 
         let dead = ChainBackend::new(vec![
-            Arc::new(TestBE { reply: None, name: "e1".into() }),
-            Arc::new(TestBE { reply: None, name: "e2".into() }),
+            Arc::new(TestBE {
+                reply: None,
+                name: "e1".into(),
+            }),
+            Arc::new(TestBE {
+                reply: None,
+                name: "e2".into(),
+            }),
         ]);
-        assert!(dead.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None).is_err(), "all-dead chain must error");
+        assert!(
+            dead.chat(
+                &[ChatMessage::user("hi")],
+                &GenerationConfig::default(),
+                None
+            )
+            .is_err(),
+            "all-dead chain must error"
+        );
     }
 
     /// A backend whose `chat` blocks the calling thread and records peak concurrency.
@@ -2035,7 +2424,7 @@ mod tests {
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(resp(&format!(
                 "echo:{}",
-                messages.last().map(|m| m.content.as_str()).unwrap_or("")
+                messages.last().map_or("", |m| m.content.as_str())
             )))
         }
         fn chat_streaming(
@@ -2077,7 +2466,10 @@ mod tests {
                 t2.fetch_add(1, Ordering::SeqCst);
             }
         });
-        let out = p.chat(vec![ChatMessage::user("hi")], GenerationConfig::default()).await.unwrap();
+        let out = p
+            .chat(vec![ChatMessage::user("hi")], GenerationConfig::default())
+            .await
+            .unwrap();
         ticker.abort();
         assert_eq!(out.text, "echo:hi");
         // ~200ms of blocking work elapsed; the async ticker (5ms cadence) must have advanced.
@@ -2091,8 +2483,11 @@ mod tests {
         for i in 0..6 {
             let p = p.clone();
             hs.push(tokio::spawn(async move {
-                p.chat(vec![ChatMessage::user(format!("q{i}"))], GenerationConfig::default())
-                    .await
+                p.chat(
+                    vec![ChatMessage::user(format!("q{i}"))],
+                    GenerationConfig::default(),
+                )
+                .await
             }));
         }
         for h in hs {
@@ -2108,8 +2503,11 @@ mod tests {
         for i in 0..6 {
             let p = p.clone();
             hs.push(tokio::spawn(async move {
-                p.chat(vec![ChatMessage::user(format!("q{i}"))], GenerationConfig::default())
-                    .await
+                p.chat(
+                    vec![ChatMessage::user(format!("q{i}"))],
+                    GenerationConfig::default(),
+                )
+                .await
             }));
         }
         for h in hs {
@@ -2133,31 +2531,73 @@ mod tests {
         // Phase 1 — all cloud links fail → local tier answers → survival mode activates.
         let chain = ChainBackend::new_labeled(
             vec![
-                Arc::new(TestBE { reply: None, name: "cloud-a".into() }),
-                Arc::new(TestBE { reply: None, name: "cloud-b".into() }),
+                Arc::new(TestBE {
+                    reply: None,
+                    name: "cloud-a".into(),
+                }),
+                Arc::new(TestBE {
+                    reply: None,
+                    name: "cloud-b".into(),
+                }),
             ],
             vec!["cloud-a".into(), "cloud-b".into()],
         )
         .with_local_fallback(Arc::clone(&local_be), "ollama-local:test");
 
-        let r = chain.chat(&[ChatMessage::user("ping")], &GenerationConfig::default(), None).unwrap();
-        assert_eq!(r.text, "local-answer", "local tier must answer when all cloud links fail");
-        assert!(in_survival_mode(), "survival mode must be active after all-cloud failure");
+        let r = chain
+            .chat(
+                &[ChatMessage::user("ping")],
+                &GenerationConfig::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            r.text, "local-answer",
+            "local tier must answer when all cloud links fail"
+        );
+        assert!(
+            in_survival_mode(),
+            "survival mode must be active after all-cloud failure"
+        );
         let notice = survival_status();
-        assert!(!notice.is_empty(), "survival_status must return a degradation notice in survival mode");
-        assert!(notice.contains("SURVIVAL MODE"), "notice must mention SURVIVAL MODE");
+        assert!(
+            !notice.is_empty(),
+            "survival_status must return a degradation notice in survival mode"
+        );
+        assert!(
+            notice.contains("SURVIVAL MODE"),
+            "notice must mention SURVIVAL MODE"
+        );
 
         // Phase 2 — cloud recovers → survival mode clears automatically.
         let recovering = ChainBackend::new_labeled(
-            vec![Arc::new(TestBE { reply: Some("cloud-reply".into()), name: "cloud-a".into() })],
+            vec![Arc::new(TestBE {
+                reply: Some("cloud-reply".into()),
+                name: "cloud-a".into(),
+            })],
             vec!["cloud-a".into()],
         )
         .with_local_fallback(Arc::clone(&local_be), "ollama-local:test");
 
-        let r2 = recovering.chat(&[ChatMessage::user("ping")], &GenerationConfig::default(), None).unwrap();
-        assert_eq!(r2.text, "cloud-reply", "cloud reply must reach the caller on recovery");
-        assert!(!in_survival_mode(), "survival mode must clear when a cloud provider answers");
-        assert!(survival_status().is_empty(), "survival_status must be empty when healthy");
+        let r2 = recovering
+            .chat(
+                &[ChatMessage::user("ping")],
+                &GenerationConfig::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            r2.text, "cloud-reply",
+            "cloud reply must reach the caller on recovery"
+        );
+        assert!(
+            !in_survival_mode(),
+            "survival mode must clear when a cloud provider answers"
+        );
+        assert!(
+            survival_status().is_empty(),
+            "survival_status must be empty when healthy"
+        );
 
         // Clean up so subsequent tests start from a known state.
         super::SURVIVAL_MODE.store(false, Ordering::SeqCst);
@@ -2187,9 +2627,16 @@ mod system_merge_tests {
         ];
         let out = merge_system_messages(msgs);
 
-        assert_eq!(out.len(), 2, "three system blocks collapse to one, user untouched");
+        assert_eq!(
+            out.len(),
+            2,
+            "three system blocks collapse to one, user untouched"
+        );
         assert_eq!(out[0].role, "system");
-        assert_eq!(out[0].content, "persona\n\npack rules\n\nagent instructions", "order preserved, joined readably");
+        assert_eq!(
+            out[0].content, "persona\n\npack rules\n\nagent instructions",
+            "order preserved, joined readably"
+        );
         assert_eq!(out[1].role, "user");
 
         // A system block arriving after a user turn is hoisted, not left mid-conversation.

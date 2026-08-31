@@ -23,6 +23,29 @@ pub enum MemoryKind {
     Routine,
 }
 
+/// Read-only evidence for the memory-curation backlog. This deliberately names the backing
+/// substrate: counts from another memory product or persona store are not evidence about Mind.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MemoryCurationBaseline {
+    pub substrate: String,
+    pub cursor_id: i64,
+    pub latest_id: i64,
+    pub pending: usize,
+    pub oldest_pending_ms: Option<i64>,
+    pub newest_pending_ms: Option<i64>,
+    pub namespaces: Vec<NamespaceBacklog>,
+    pub next_batch_limit: usize,
+    pub next_batch_namespaces: Vec<NamespaceBacklog>,
+}
+
+/// Pending consolidation work in one transcript scope/namespace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NamespaceBacklog {
+    pub namespace: String,
+    pub pending: usize,
+    pub oldest_pending_ms: Option<i64>,
+}
+
 /// Why a belief landed in the uncertain bucket — the specific epistemic cause, not a generic hedge.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum UncertaintyReason {
@@ -210,7 +233,7 @@ impl Scope {
     pub fn primary() -> Scope {
         Scope::Private(PRIMARY.to_string())
     }
-    /// Storage form: "shared" or "private:<owner>".
+    /// Storage form: `shared` or `private:<owner>`.
     pub fn as_tag(&self) -> String {
         match self {
             Scope::Shared => "shared".into(),
@@ -227,9 +250,8 @@ impl Scope {
     /// owner. An untagged/legacy item (stored=None) is private to the PRIMARY (so old single-user facts
     /// never leak to a later-added member). `None` viewer = unrestricted (system/single-user).
     pub fn visible_to(stored: Option<&str>, viewer: Option<&Scope>) -> bool {
-        let viewer = match viewer {
-            None => return true, // unrestricted
-            Some(v) => v,
+        let Some(viewer) = viewer else {
+            return true; // unrestricted
         };
         match stored.map(Scope::parse) {
             None => matches!(viewer, Scope::Private(v) if v == PRIMARY), // legacy → primary only
@@ -264,7 +286,10 @@ pub enum AccessContext {
     Operator { purpose: crate::purpose::Purpose },
     /// Access limited to what `scope` may see, then purpose-filtered on top.
     /// Enforced by the memory layer.
-    Principal { scope: Scope, purpose: crate::purpose::Purpose },
+    Principal {
+        scope: Scope,
+        purpose: crate::purpose::Purpose,
+    },
 }
 
 impl AccessContext {
@@ -279,7 +304,9 @@ impl AccessContext {
     }
     /// The operator's console/eval/verification lane — full visibility, always receipted.
     pub fn operator_audit() -> AccessContext {
-        AccessContext::Operator { purpose: crate::purpose::Purpose::audit() }
+        AccessContext::Operator {
+            purpose: crate::purpose::Purpose::audit(),
+        }
     }
     /// The viewer scope for filtering: None for the operator (unfiltered),
     /// Some(scope) for a principal. Feeds `Scope::visible_to`.
@@ -296,16 +323,23 @@ impl AccessContext {
     /// The declared purpose of this context's reads.
     pub fn purpose(&self) -> &crate::purpose::Purpose {
         match self {
-            AccessContext::Operator { purpose } => purpose,
-            AccessContext::Principal { purpose, .. } => purpose,
+            AccessContext::Operator { purpose } | AccessContext::Principal { purpose, .. } => {
+                purpose
+            }
         }
     }
     /// A short label for sensitive-read receipts.
     pub fn principal_label(&self) -> String {
         match self {
             AccessContext::Operator { .. } => "operator".into(),
-            AccessContext::Principal { scope: Scope::Shared, .. } => "shared".into(),
-            AccessContext::Principal { scope: Scope::Private(o), .. } => format!("private:{o}"),
+            AccessContext::Principal {
+                scope: Scope::Shared,
+                ..
+            } => "shared".into(),
+            AccessContext::Principal {
+                scope: Scope::Private(o),
+                ..
+            } => format!("private:{o}"),
         }
     }
 }
@@ -357,7 +391,7 @@ pub enum TensionKind {
     Staleness,        // vigilance drive — an important belief is decaying/unrefreshed
     Curiosity,        // curiosity drive — a knowledge gap worth exploring
     VerificationDebt, // rigor drive — believed but unverified
-    Operational,      // self-vigilance drive — the mind's OWN functioning needs attention (self-healing)
+    Operational, // self-vigilance drive — the mind's OWN functioning needs attention (self-healing)
 }
 
 impl TensionKind {
@@ -497,7 +531,9 @@ pub const DEFAULT_PACK_SIMILARITY_FLOOR: f64 = 0.55;
 /// declarations are ignored, with the same result. (Codex's review of P.1.)
 pub fn effective_pack_floor(declared: Option<f64>) -> f64 {
     match declared {
-        Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f.max(DEFAULT_PACK_SIMILARITY_FLOOR),
+        Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => {
+            f.max(DEFAULT_PACK_SIMILARITY_FLOOR)
+        }
         _ => DEFAULT_PACK_SIMILARITY_FLOOR,
     }
 }
@@ -582,8 +618,15 @@ pub enum AbstainReason {
 /// The coverage router's answer for one query. SHADOWED in P.3: recorded, never acted on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PackRoute {
-    Lease { pack_id: String, sim: f64, margin: f64 },
-    Abstain { reason: AbstainReason, best: Option<(String, f64)> },
+    Lease {
+        pack_id: String,
+        sim: f64,
+        margin: f64,
+    },
+    Abstain {
+        reason: AbstainReason,
+        best: Option<(String, f64)>,
+    },
 }
 
 impl PackRoute {
@@ -597,9 +640,18 @@ impl PackRoute {
     pub fn label(&self) -> &'static str {
         match self {
             PackRoute::Lease { .. } => "lease",
-            PackRoute::Abstain { reason: AbstainReason::NoPacks, .. } => "abstain:no_packs",
-            PackRoute::Abstain { reason: AbstainReason::BelowFloor, .. } => "abstain:below_floor",
-            PackRoute::Abstain { reason: AbstainReason::Tie, .. } => "abstain:tie",
+            PackRoute::Abstain {
+                reason: AbstainReason::NoPacks,
+                ..
+            } => "abstain:no_packs",
+            PackRoute::Abstain {
+                reason: AbstainReason::BelowFloor,
+                ..
+            } => "abstain:below_floor",
+            PackRoute::Abstain {
+                reason: AbstainReason::Tie,
+                ..
+            } => "abstain:tie",
         }
     }
 }
@@ -781,7 +833,12 @@ pub trait MemoryFacade: Send + Sync {
 
     /// Same as `beliefs_matching` with an explicit result cap — for namespaced knowledge bases
     /// (studied repos) where the default 20 would silently truncate. Default: empty.
-    async fn beliefs_matching_n(&self, needle: &str, limit: usize, ctx: &AccessContext) -> Result<Vec<Belief>> {
+    async fn beliefs_matching_n(
+        &self,
+        needle: &str,
+        limit: usize,
+        ctx: &AccessContext,
+    ) -> Result<Vec<Belief>> {
         let _ = (needle, limit, ctx);
         Ok(vec![])
     }
@@ -793,7 +850,11 @@ pub trait MemoryFacade: Send + Sync {
     /// not strictly greater than the last one applied to this belief is an out-of-order or replayed
     /// update and is dropped, so a stale evidence packet can never silently overwrite a fresher
     /// confidence score. Default: ignores the version (delegates to the unversioned path).
-    async fn remember_as_belief_versioned(&self, a: BeliefAssertion, _evidence_version: u64) -> Result<Belief> {
+    async fn remember_as_belief_versioned(
+        &self,
+        a: BeliefAssertion,
+        _evidence_version: u64,
+    ) -> Result<Belief> {
         self.remember_as_belief(a).await
     }
 
@@ -808,7 +869,11 @@ pub trait MemoryFacade: Send + Sync {
     }
     /// Write a machine-derived OBSERVATION (skill/tool/sub-agent/web output) — provenance-tagged,
     /// secret-scanned, NEVER a naked Belief. This is the gated inward boundary for the moat.
-    async fn remember_observation(&self, text: &str, source: crate::safety::ProvenanceCategory) -> Result<String>;
+    async fn remember_observation(
+        &self,
+        text: &str,
+        source: crate::safety::ProvenanceCategory,
+    ) -> Result<String>;
     /// Create/strengthen a graph edge between entities.
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()>;
     /// Compose typed recalls + open conflicts into a structured reflection, filtered to `ctx`.
@@ -841,7 +906,11 @@ pub trait MemoryFacade: Send + Sync {
     async fn discharge_tension(&self, id: &str) -> Result<bool>;
     /// A belief plus its evidence trail (provenance). A principal gets None for a belief outside
     /// their scope — indistinguishable from "no such belief" (no existence oracle).
-    async fn explain_belief(&self, belief_id: &str, ctx: &AccessContext) -> Result<Option<(Belief, Vec<Evidence>)>>;
+    async fn explain_belief(
+        &self,
+        belief_id: &str,
+        ctx: &AccessContext,
+    ) -> Result<Option<(Belief, Vec<Evidence>)>>;
     /// Build the typed working-set for a focus/turn, filtered to what `ctx` may see.
     async fn hydrate_working_set(&self, focus: &str, ctx: &AccessContext) -> Result<WorkingSet>;
     /// Consolidate aging turns into typed memory (provenance-preserving). Returns #created.
@@ -861,7 +930,9 @@ pub trait MemoryFacade: Send + Sync {
     /// Defaults to refusing: a store that has not implemented this must not silently report a
     /// quarantine it did not perform (E.SEC1c).
     async fn quarantine_memory(&self, _rid: &str, _reason: &str) -> Result<bool> {
-        Err(crate::error::MindError::Memory("this store cannot quarantine by rid".into()))
+        Err(crate::error::MindError::Memory(
+            "this store cannot quarantine by rid".into(),
+        ))
     }
 
     async fn forget_with_reason(&self, id: &str, _reason: &str) -> Result<bool> {
@@ -881,7 +952,12 @@ pub trait MemoryFacade: Send + Sync {
     async fn store_preference(&self, text: &str) -> Result<()>;
 
     // ── cheap task tier (plain CRUD, no cognitive cost) ──
-    async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task>;
+    async fn add_task(
+        &self,
+        description: &str,
+        priority: &str,
+        due_ms: Option<u64>,
+    ) -> Result<Task>;
     async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>>;
     async fn complete_task(&self, id: &str) -> Result<bool>;
 
@@ -912,7 +988,9 @@ pub trait MemoryFacade: Send + Sync {
 
     /// Mount a sealed pack for this process. Returns the pack id.
     async fn mount_pack(&self, _path: &str) -> Result<String> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// Every banked approach (APPROACH:/PROCEDURE:-prefixed craft), newest first — a DETERMINISTIC
     /// enumeration, not similarity search. Exists because the loop's banked craft was write-only:
@@ -923,21 +1001,29 @@ pub trait MemoryFacade: Send + Sync {
     /// Remove a durably-installed pack: unmount AND delete the installed file, so it does not
     /// silently return on the next restart (which is exactly what a plain unmount does).
     async fn uninstall_pack(&self, _id: &str) -> Result<bool> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// Seal the mind's own banked craft — approaches it learned by doing, skills with their
     /// measured track records — into a mountable pack file. The self-improvement loop's EXPORT:
     /// what one mind earned becomes attachable expertise for another. Returns a one-line summary.
     async fn seal_learned_pack(&self, _dest: &str, _name: &str, _version: &str) -> Result<String> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// Copy a pack beside the database and mount it on every open from now on.
     async fn install_pack(&self, _path: &str) -> Result<String> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// Unmount by pack id or name.
     async fn unmount_pack(&self, _id_or_name: &str) -> Result<()> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// What is mounted right now: (name, version, origin, trust, rows).
     async fn mounted_packs(&self) -> Result<Vec<PackBrief>> {
@@ -982,7 +1068,13 @@ pub trait MemoryFacade: Send + Sync {
     /// The coverage router's verdict for a query, with every pack's best match. Read-only: nothing
     /// is leased or mounted by asking.
     async fn route_packs(&self, _query: &str) -> Result<(Vec<CoverageMatch>, PackRoute)> {
-        Ok((Vec::new(), PackRoute::Abstain { reason: AbstainReason::NoPacks, best: None }))
+        Ok((
+            Vec::new(),
+            PackRoute::Abstain {
+                reason: AbstainReason::NoPacks,
+                best: None,
+            },
+        ))
     }
     /// The constitution + coverage block the engine assembles for the system prompt, or None when
     /// nothing is mounted. The ENGINE owns this text so every consumer injects an identical block
@@ -996,12 +1088,22 @@ pub trait MemoryFacade: Send + Sync {
     /// release or expiry unless it is also installed. Refused for an unknown id, for an id that two
     /// library artifacts claim with different digests or signers, for an empty reason, and beyond
     /// `LEASE_CAP`. Nothing is mounted by a refused grant.
-    async fn lease_pack(&self, _pack_id: &str, _days: u32, _reason: &str, _granted_by: &str) -> Result<PackLease> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+    async fn lease_pack(
+        &self,
+        _pack_id: &str,
+        _days: u32,
+        _reason: &str,
+        _granted_by: &str,
+    ) -> Result<PackLease> {
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// End a lease now; `Ok(None)` when there was none. Unmounts unless the pack is installed.
     async fn release_pack(&self, _pack_id: &str, _end: LeaseEnd) -> Result<Option<PackLease>> {
-        Err(crate::MindError::Invalid("this memory backend has no pack support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no pack support".into(),
+        ))
     }
     /// Every lease the operator holds, soonest expiry first — including quarantined ones, which
     /// are not serving and must be visible rather than silent.
@@ -1035,12 +1137,35 @@ pub trait MemoryFacade: Send + Sync {
     /// Append a raw chat line (role = "user" | "assistant").
     async fn append_message(&self, role: &str, text: &str) -> Result<()>;
     /// The most recent chat lines in chronological order: Vec<(role, text)>, filtered to `ctx`.
-    async fn recent_messages(&self, limit: usize, ctx: &AccessContext) -> Result<Vec<(String, String)>>;
+    async fn recent_messages(
+        &self,
+        limit: usize,
+        ctx: &AccessContext,
+    ) -> Result<Vec<(String, String)>>;
     /// Transcript lines with id > `after_id`, ascending: Vec<(id, role, text)>. For the consolidation
     /// pass, which advances a cursor over what it has already distilled into typed memory.
     /// OPERATOR-INTERNAL: only system paths (compaction, research sync) may call this — it is not
     /// reachable from any channel/command/tool. Gets a ctx param when those paths are ctx-threaded.
-    async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>>;
+    async fn messages_since(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String)>>;
+    /// Exact, read-only consolidation backlog at `cursor_id`, including per-scope starvation age.
+    /// The default explicitly says its substrate is unspecified rather than borrowing statistics
+    /// from some other store.
+    async fn memory_curation_baseline(
+        &self,
+        cursor_id: i64,
+        next_batch_limit: usize,
+    ) -> Result<MemoryCurationBaseline> {
+        Ok(MemoryCurationBaseline {
+            substrate: "unspecified MemoryFacade substrate".into(),
+            cursor_id,
+            next_batch_limit,
+            ..MemoryCurationBaseline::default()
+        })
+    }
     /// Wall-clock times (ms) of USER turns at or after `since_ms`, ascending. The record of when
     /// the person actually spoke — the only honest way to settle an engagement claim after its
     /// window has closed. OPERATOR-INTERNAL, same as `messages_since`. Default: no record.
@@ -1052,14 +1177,20 @@ pub trait MemoryFacade: Send + Sync {
     /// Explicitly tag a belief's sensitivity class by canonical proposition —
     /// overrides the deterministic write-time classifier in either direction
     /// (a correction path: "that's not sensitive" / "treat that as health").
-    async fn set_belief_sensitivity(&self, _proposition: &str, _class: crate::purpose::Sensitivity) -> Result<()> {
+    async fn set_belief_sensitivity(
+        &self,
+        _proposition: &str,
+        _class: crate::purpose::Sensitivity,
+    ) -> Result<()> {
         Ok(())
     }
     /// Create a standing purpose grant — the ONLY way a cross-owner or
     /// out-of-policy sensitive-class read opens. Expiring and revocable.
     /// Returns the grant id. OPERATOR-INTERNAL: wire only to owner surfaces.
     async fn grant_purpose(&self, _spec: crate::purpose::PurposeGrantSpec) -> Result<i64> {
-        Err(crate::MindError::Invalid("this memory backend has no purpose-grant support".into()))
+        Err(crate::MindError::Invalid(
+            "this memory backend has no purpose-grant support".into(),
+        ))
     }
     /// Revoke a standing grant by id. Revocation is immediate and permanent.
     async fn revoke_purpose_grant(&self, _id: i64) -> Result<bool> {
@@ -1074,12 +1205,22 @@ pub trait MemoryFacade: Send + Sync {
     /// Feed a graded prediction outcome into the engine's learning layer: the per-action-kind
     /// bandit + isotonic confidence calibration + per-SUBJECT source reliability. This is how
     /// foresight EARNS calibrated confidence instead of asserting raw model numbers.
-    async fn record_prediction_outcome(&self, _domain: &str, _subject: &str, _raw_confidence: f64, _hit: bool) -> Result<()> {
+    async fn record_prediction_outcome(
+        &self,
+        _domain: &str,
+        _subject: &str,
+        _raw_confidence: f64,
+        _hit: bool,
+    ) -> Result<()> {
         Ok(())
     }
-    /// (subject_track_record ∈ [0,1], calibrated_confidence) from the engine's learned state.
+    /// (`subject_track_record ∈ [0, 1]`, calibrated confidence) from the engine's learned state.
     /// Track record defaults to 0.5 (no data); calibrated falls back to the raw value.
-    async fn foresight_reliability(&self, _subject: &str, raw_confidence: f64) -> Result<(f64, f64)> {
+    async fn foresight_reliability(
+        &self,
+        _subject: &str,
+        raw_confidence: f64,
+    ) -> Result<(f64, f64)> {
         Ok((0.5, raw_confidence))
     }
     /// A short metacognitive self-check line when reasoning health is DEGRADED (thin evidence /
@@ -1095,7 +1236,7 @@ pub trait MemoryFacade: Send + Sync {
     async fn activity_rhythm(&self, _local_offset_hours: i32) -> Result<Option<String>> {
         Ok(None)
     }
-    /// Record a tool call's outcome into the engine's bandit ("tool:<name>") — the mind learning
+    /// Record a tool call's outcome into the engine's bandit (`tool:<name>`) — the mind learning
     /// which of its OWN tools are reliable.
     async fn record_tool_outcome(&self, _tool: &str, _ok: bool) -> Result<()> {
         Ok(())
@@ -1147,13 +1288,13 @@ pub trait MemoryFacade: Send + Sync {
     // ── engine demand (cognitive-urgency scoring for the proactive digest) ──────────────────────
     /// How urgently does the mind need to recall / verify the given topic? Derived from the
     /// cumulative confidence-deficit of matching beliefs: a topic backed by many uncertain or
-    /// sparse beliefs scores closer to 1.0; a well-understood topic scores near 0.0. Returns [0,1].
+    /// sparse beliefs scores closer to 1.0; a well-understood topic scores near 0.0. Returns `[0, 1]`.
     /// Default: 0.0 (no engine data — callers must degrade gracefully to raw pressure order).
     async fn recall_demand_for(&self, _about: &str) -> Result<f64> {
         Ok(0.0)
     }
 
-    /// Engine demand — batch variant: one [0,1] demand score per entry in `topics`, in the same
+    /// Engine demand — batch variant: one `[0, 1]` demand score per entry in `topics`, in the same
     /// order. Default: delegates to `recall_demand_for` per entry; override for efficiency.
     async fn knowledge_gaps(&self, topics: &[String]) -> Result<Vec<f64>> {
         let mut out = Vec::with_capacity(topics.len());

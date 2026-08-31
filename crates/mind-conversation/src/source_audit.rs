@@ -81,11 +81,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn crates_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
     }
 
     fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -144,7 +149,10 @@ mod tests {
             }
         }
         let flat = flat.replace(" .", ".");
-        flat.split(';').map(|st| format!("{};", st.trim())).filter(|st| st.len() > 1).collect()
+        flat.split(';')
+            .map(|st| format!("{};", st.trim()))
+            .filter(|st| st.len() > 1)
+            .collect()
     }
 
     /// The variable bound to a lowered copy, and the expression it was lowered FROM.
@@ -195,7 +203,10 @@ mod tests {
         let mut from = 0usize;
         while let Some(rel) = stmt[from..].find(&pat) {
             let at = from + rel;
-            let boundary = stmt[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            let boundary = stmt[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if boundary {
                 return true;
             }
@@ -209,11 +220,12 @@ mod tests {
         let stmts = statements(lines);
         let mut out = Vec::new();
         for (i, stmt) in stmts.iter().enumerate() {
-            let Some((low, root)) = lowered_binding(stmt) else { continue };
-            let sliced = stmts
-                .iter()
-                .enumerate()
-                .any(|(j, other)| j != i && !other.contains(".to_lowercase()") && slices(other, &root));
+            let Some((low, root)) = lowered_binding(stmt) else {
+                continue;
+            };
+            let sliced = stmts.iter().enumerate().any(|(j, other)| {
+                j != i && !other.contains(".to_lowercase()") && slices(other, &root)
+            });
             if sliced {
                 out.push((low, root));
             }
@@ -234,14 +246,24 @@ mod tests {
             let name = f
                 .strip_prefix(crates_dir())
                 .map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
-                .unwrap_or_else(|_| f.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string());
+                .unwrap_or_else(|_| {
+                    f.file_name()
+                        .and_then(|x| x.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
             if ALLOWED.iter().any(|(a, _)| *a == name) {
                 continue;
             }
-            let Ok(body) = std::fs::read_to_string(&f) else { continue };
+            let Ok(body) = std::fs::read_to_string(&f) else {
+                continue;
+            };
             for (start, lines) in functions(&body) {
                 // Tests build adversarial strings on purpose; they are not the production path.
-                if lines.iter().any(|l| l.contains("#[test]") || l.contains("#[cfg(test)]")) {
+                if lines
+                    .iter()
+                    .any(|l| l.contains("#[test]") || l.contains("#[cfg(test)]"))
+                {
                     continue;
                 }
                 for (low, root) in offenders_in(&lines) {
@@ -278,7 +300,11 @@ mod tests {
             "    let x = &text[l.find(\"a\").unwrap()..];",
             "}",
         ];
-        assert_eq!(offenders_in(&one_line).len(), 1, "the plain shape must fire");
+        assert_eq!(
+            offenders_in(&one_line).len(),
+            1,
+            "the plain shape must fire"
+        );
 
         // CODEX'S CASE: rustfmt wrapped the binding itself. The first version saw nothing here -
         // the same line-wrapping blindness this guard was written to replace.
@@ -290,7 +316,11 @@ mod tests {
             "    let x = &text[low.find(\"a\").unwrap()..];",
             "}",
         ];
-        assert_eq!(offenders_in(&wrapped).len(), 1, "a wrapped binding must fire too");
+        assert_eq!(
+            offenders_in(&wrapped).len(),
+            1,
+            "a wrapped binding must fire too"
+        );
 
         // And it must NOT fire on the safe forms, or it gets silenced rather than heeded.
         let ascii = [
@@ -299,7 +329,10 @@ mod tests {
             "    let x = &text[l.find(\"a\").unwrap()..];",
             "}",
         ];
-        assert!(offenders_in(&ascii).is_empty(), "to_ascii_lowercase is the fix, not the defect");
+        assert!(
+            offenders_in(&ascii).is_empty(),
+            "to_ascii_lowercase is the fix, not the defect"
+        );
 
         let wrapped_ascii = [
             "fn f(text: &str) {",
@@ -308,7 +341,10 @@ mod tests {
             "    let x = &text[l.find(\"a\").unwrap()..];",
             "}",
         ];
-        assert!(offenders_in(&wrapped_ascii).is_empty(), "and wrapped, still the fix");
+        assert!(
+            offenders_in(&wrapped_ascii).is_empty(),
+            "and wrapped, still the fix"
+        );
 
         let compare_only = [
             "fn f(text: &str) {",
@@ -316,7 +352,10 @@ mod tests {
             "    let _ = t == \"yes\";",
             "}",
         ];
-        assert!(offenders_in(&compare_only).is_empty(), "a lowered copy that is only COMPARED is not this defect");
+        assert!(
+            offenders_in(&compare_only).is_empty(),
+            "a lowered copy that is only COMPARED is not this defect"
+        );
 
         let joined = [
             "fn f(toks: &[&str]) {",
@@ -324,7 +363,10 @@ mod tests {
             "    let _ = toks[0];",
             "}",
         ];
-        assert!(offenders_in(&joined).is_empty(), "the JOINED string is not `toks`");
+        assert!(
+            offenders_in(&joined).is_empty(),
+            "the JOINED string is not `toks`"
+        );
 
         let substring = [
             "fn f(next: &serde_json::Value) {",
@@ -332,6 +374,9 @@ mod tests {
             "    let _ = next[\"id\"];",
             "}",
         ];
-        assert!(offenders_in(&substring).is_empty(), "`t[` must not match inside `next[\"id\"]`");
+        assert!(
+            offenders_in(&substring).is_empty(),
+            "`t[` must not match inside `next[\"id\"]`"
+        );
     }
 }

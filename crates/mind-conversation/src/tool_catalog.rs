@@ -25,7 +25,6 @@ pub(crate) const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per st
 - myself {}: your LIVE setup — providers, model lanes, keys present, mounted packs. ANY question about your own configuration is answered from THIS, never from memory: your memories about your own code are history, not state\n\
 MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a skill for a task they cover):";
 
-
 /// Standing rule appended after the detailed section, never gated.
 pub(crate) const NEVER_RULE: &str = "- NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly\n\
 - NEVER say a capability is missing, unwired, unavailable or 'not connected this turn' when a tool listed above covers it, and NEVER tell the user to go run a `ym` command themselves — that tool is YOURS and calling it is your job. If a listed tool fits the question, CALL IT; you may only report an inability after a call actually failed, and then say what failed\n\
@@ -54,10 +53,19 @@ pub(crate) const SKILL_SECTION: &str = "SKILL LIBRARY (your growing, reusable ca
 /// for answering honestly at all — the difference between "I looked" and "I can't". So it does not
 /// compete.
 const PINNED: &[&str] = &[
-    "search", "web_fetch", "research", "deals", "watch_price", "learn_about", "family",
-    "about_person", "github_repo_items",
+    "search",
+    "web_fetch",
+    "research",
+    "deals",
+    "watch_price",
+    "learn_about",
+    "family",
+    "about_person",
+    "github_repo_items",
     // the senses
-    "quote", "watch", "browse",
+    "quote",
+    "watch",
+    "browse",
 ];
 
 /// How many relevance-matched (non-pinned) tool lines stay detailed.
@@ -81,7 +89,10 @@ pub(crate) fn tool_name_of_line(line: &str) -> Option<&str> {
 /// schema generation and any "is this tool advertised?" question must see every name.
 #[cfg(test)]
 pub(crate) fn tool_name_of_line_in_fragment(fragment: &str) -> Option<&str> {
-    let body = fragment.trim().strip_prefix("- ").unwrap_or(fragment.trim());
+    let body = fragment
+        .trim()
+        .strip_prefix("- ")
+        .unwrap_or(fragment.trim());
     let name = body.split([' ', '{', ':']).next().unwrap_or("");
     if name.is_empty() || name.chars().all(|c| !c.is_lowercase()) {
         return None;
@@ -94,9 +105,9 @@ pub(crate) fn tool_name_of_line_in_fragment(fragment: &str) -> Option<&str> {
 fn tokenize(text: &str) -> HashSet<String> {
     const STOP: &[&str] = &[
         "the", "and", "for", "with", "you", "your", "are", "can", "this", "that", "its", "was",
-        "does", "from", "into", "has", "have", "what", "when", "where", "who", "how", "why",
-        "she", "him", "her", "his", "they", "them", "our", "one", "get", "use", "any", "all",
-        "not", "but", "about", "over", "per", "via",
+        "does", "from", "into", "has", "have", "what", "when", "where", "who", "how", "why", "she",
+        "him", "her", "his", "they", "them", "our", "one", "get", "use", "any", "all", "not",
+        "but", "about", "over", "per", "via",
     ];
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -109,7 +120,11 @@ fn tokenize(text: &str) -> HashSet<String> {
 /// naming the tool itself worth more than any description match.
 fn score(query: &HashSet<String>, line: &str, name: &str) -> usize {
     let overlap = tokenize(line).intersection(query).count();
-    let named = if query.contains(&name.to_lowercase()) { 5 } else { 0 };
+    let named = if query.contains(&name.to_lowercase()) {
+        5
+    } else {
+        0
+    };
     overlap + named
 }
 
@@ -133,7 +148,7 @@ pub(crate) fn score_of(query: &str, line: &str) -> usize {
 pub(crate) fn catalog_fingerprint(catalog: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in catalog.as_bytes() {
-        h ^= *b as u64;
+        h ^= u64::from(*b);
         h = h.wrapping_mul(0x100000001b3);
     }
     h
@@ -149,7 +164,9 @@ pub(crate) fn gate_catalog(user_text: &str, gated_lines: &str) -> (String, Strin
     let mut scored: Vec<(usize, &str, &str)> = Vec::new();
     let mut tail: Vec<&str> = Vec::new();
     for line in gated_lines.lines().filter(|l| !l.trim().is_empty()) {
-        let Some(name) = tool_name_of_line(line) else { continue };
+        let Some(name) = tool_name_of_line(line) else {
+            continue;
+        };
         if PINNED.contains(&name) {
             detailed.push(line);
         } else {
@@ -191,7 +208,7 @@ pub(crate) fn gate_catalog(user_text: &str, gated_lines: &str) -> (String, Strin
 /// One catalog line → OpenAI function schema(s). A line can pack two tools with a `·` separator
 /// ("- calendar {}: … · calendar_add {text}: …") — each half becomes its own schema.
 fn line_schemas(line: &str) -> Vec<Value> {
-    line.split('·').filter_map(|piece| one_schema(piece)).collect()
+    line.split('·').filter_map(one_schema).collect()
 }
 
 /// The catalog args that legitimately carry a number or a boolean (`{"shares": 3}`, `{"act": true}`).
@@ -199,8 +216,10 @@ fn line_schemas(line: &str) -> Vec<Value> {
 /// shape (the Kyoto-latitude lesson below), and string-checked at the argument boundary
 /// (`tool_outcome::malformed_call`). ONE list, two consumers, so the schema the model is shown and
 /// the contract the runtime enforces can never disagree (ARCH-6 P.2d, Codex's review).
-pub(crate) const SCALAR_ARGS: &[&str] =
-    &["limit", "count", "n", "top_k", "shares", "quantity", "amount", "price", "days", "hours", "minutes", "sections", "year"];
+pub(crate) const SCALAR_ARGS: &[&str] = &[
+    "limit", "count", "n", "top_k", "shares", "quantity", "amount", "price", "days", "hours",
+    "minutes", "sections", "year",
+];
 
 /// Per-tool scalar fields whose NAMES are free text elsewhere: `target` is a price for watch_price
 /// and a URL for run_skill, so a global name list cannot say it. Consulted with `SCALAR_ARGS`
@@ -220,7 +239,10 @@ pub(crate) const SCALAR_FIELDS_BY_TOOL: &[(&str, &[&str])] = &[
 ];
 
 fn scalar_for(tool: &str, key: &str) -> bool {
-    SCALAR_ARGS.contains(&key) || SCALAR_FIELDS_BY_TOOL.iter().any(|(t, f)| *t == tool && f.contains(&key))
+    SCALAR_ARGS.contains(&key)
+        || SCALAR_FIELDS_BY_TOOL
+            .iter()
+            .any(|(t, f)| *t == tool && f.contains(&key))
 }
 
 /// Parse a single "name {arg, arg2?}: description" fragment into a function schema. Returns None for
@@ -283,7 +305,12 @@ fn one_schema(fragment: &str) -> Option<Value> {
 }
 
 /// Assemble the OpenAI `{type:function, function:{…}}` envelope.
-fn function_schema(name: &str, desc: &str, props: serde_json::Map<String, Value>, required: Vec<String>) -> Value {
+fn function_schema(
+    name: &str,
+    desc: &str,
+    props: serde_json::Map<String, Value>,
+    required: Vec<String>,
+) -> Value {
     json!({
         "type": "function",
         "function": {
@@ -307,7 +334,11 @@ fn arg_schema(name: &str, desc: &str, args: &[(&str, bool)]) -> Value {
     for (a, req) in args {
         // Typed like the catalog lines (see `one_schema`): a core tool advertising an untyped
         // `name` invited `{"name": 328}` — and the boundary must hold the model to what it was shown.
-        let prop = if scalar_for(name, a) { json!({ "description": a }) } else { json!({ "type": "string", "description": a }) };
+        let prop = if scalar_for(name, a) {
+            json!({ "description": a })
+        } else {
+            json!({ "type": "string", "description": a })
+        };
         props.insert((*a).to_string(), prop);
         if *req {
             required.push((*a).to_string());
@@ -397,6 +428,60 @@ pub(crate) fn tool_schemas(user_text: &str, gated_src: &str) -> Vec<Value> {
     out
 }
 
+/// Replace prose-derived MCP parameter guesses with the exact bounded schema discovered from the
+/// configured server. Only tools already selected by the catalog gate are eligible, so a server
+/// cannot add a capability through this overlay. Oversized or non-object schemas fail closed to
+/// the existing minimal declaration rather than flooding the model context.
+pub(crate) fn overlay_mcp_input_schemas(
+    schemas: &mut [Value],
+    tools: &[mind_tools::McpTool],
+) -> usize {
+    const MAX_MCP_SCHEMA_BYTES: usize = 16 * 1024;
+    let mut replaced = 0;
+    for schema in schemas {
+        let Some(name) = schema
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(tool) = tools.iter().find(|tool| tool.qualified() == name) else {
+            continue;
+        };
+        if !tool.input_schema.is_object()
+            || serde_json::to_vec(&tool.input_schema)
+                .map(|bytes| bytes.len() > MAX_MCP_SCHEMA_BYTES)
+                .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(function) = schema.get_mut("function").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        function.insert("parameters".into(), tool.input_schema.clone());
+        replaced += 1;
+    }
+    replaced
+}
+
+/// Native schemas for every line in an already-authorized catalog, without adding core/meta tools
+/// or relevance-gating the declarations a second time. This is for tiny policy allowlists such as
+/// E.CTX6's restricted-turn PureLocal surface; callers remain responsible for constructing that
+/// source from typed authority rather than arbitrary prose.
+pub(crate) fn exact_catalog_schemas(catalog: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for line in catalog.lines() {
+        out.extend(line_schemas(line));
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    out.retain(|s| {
+        let name = s["function"]["name"].as_str().unwrap_or("").to_string();
+        !name.is_empty() && seen.insert(name)
+    });
+    out
+}
+
 /// Names a HANDLER accepts in place of a documented argument — the tool's own tolerance, written
 /// down ONCE so that the boundary and the dispatch cannot disagree about it.
 ///
@@ -422,21 +507,59 @@ pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
     (&["research"], "query", &["topic"]),
     (&["code"], "task", &["query"]),
     (&["revoke", "rm", "remove"], "url", &["repo", "query"]),
-    (&["deals", "shop", "shopping", "find_deals", "deal"], "budget", &["max"]),
-    (&["deals", "shop", "shopping", "find_deals", "deal"], "query", &["item", "text"]),
-    (&["watch_price", "track_price", "pricewatch", "watch_deal"], "target", &["budget"]),
-    (&["watch_price", "track_price", "pricewatch", "watch_deal"], "query", &["item"]),
+    (
+        &["deals", "shop", "shopping", "find_deals", "deal"],
+        "budget",
+        &["max"],
+    ),
+    (
+        &["deals", "shop", "shopping", "find_deals", "deal"],
+        "query",
+        &["item", "text"],
+    ),
+    (
+        &["watch_price", "track_price", "pricewatch", "watch_deal"],
+        "target",
+        &["budget"],
+    ),
+    (
+        &["watch_price", "track_price", "pricewatch", "watch_deal"],
+        "query",
+        &["item"],
+    ),
     (&["learn_about", "learn", "study"], "url", &["query"]),
     (&["track_subject", "follow_subject"], "subject", &["query"]),
     (&["about_person", "person"], "name", &["query"]),
-    (&["quote", "price", "get_quote", "market_price"], "symbols", &["symbol", "ticker", "tickers", "query", "text", "input", "name"]),
-    (&["photo_send", "send_photo", "find_photo"], "query", &["text"]),
+    (
+        &["quote", "price", "get_quote", "market_price"],
+        "symbols",
+        &[
+            "symbol", "ticker", "tickers", "query", "text", "input", "name",
+        ],
+    ),
+    (
+        &["photo_send", "send_photo", "find_photo"],
+        "query",
+        &["text"],
+    ),
     (&["photo_patterns", "photo_pattern"], "name", &["query"]),
     (&["growup_reel", "reel", "timelapse"], "name", &["query"]),
-    (&["photo_create", "collage", "compose_photo"], "request", &["query"]),
-    (&["taste_profile", "tastes", "preference_profile"], "name", &["query"]),
+    (
+        &["photo_create", "collage", "compose_photo"],
+        "request",
+        &["query"],
+    ),
+    (
+        &["taste_profile", "tastes", "preference_profile"],
+        "name",
+        &["query"],
+    ),
     (&["person_items", "inventory", "closet"], "name", &["query"]),
-    (&["mail_search", "mailsearch", "search_mail"], "query", &["q"]),
+    (
+        &["mail_search", "mailsearch", "search_mail"],
+        "query",
+        &["q"],
+    ),
     (&["style_timeline", "style"], "person", &["name"]),
     (&["share_with_member", "share"], "member", &["person"]),
     (&["find_younger_self", "younger_self"], "person", &["name"]),
@@ -461,7 +584,12 @@ pub(crate) const ARG_ALIASES: &[(&[&str], &str, &[&str])] = &[
 /// declared alias in order. Trimmed; empty when nothing usable was supplied. Every handler reads
 /// through this, so the dispatch and `ArgContract` can never disagree about what a call means.
 pub(crate) fn read_arg(tool: &str, args: &Value, field: &str) -> String {
-    let take = |k: &str| args.get(k).and_then(|x| x.as_str()).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let take = |k: &str| {
+        args.get(k)
+            .and_then(|x| x.as_str())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
     if let Some(v) = take(field) {
         return v;
     }
@@ -489,16 +617,20 @@ pub(crate) fn read_arg(tool: &str, args: &Value, field: &str) -> String {
 /// * `ArgContract::present` COUNTS it, so the required field is satisfied and the call is admitted;
 /// * `read_arg` IGNORES it, so no value is ever substituted;
 /// * the handler that knows the transformation performs it (`media_url`).
-pub(crate) const ARG_FALLBACKS: &[(&[&str], &str, &[&str])] = &[
-    (&["watch", "watch_media", "listen"], "url", &["query"]),
-];
+pub(crate) const ARG_FALLBACKS: &[(&[&str], &str, &[&str])] =
+    &[(&["watch", "watch_media", "listen"], "url", &["query"])];
 
 /// The transformed fallbacks a tool's handler can work from, as `(field, fallbacks)` pairs.
 pub(crate) fn fallbacks_for(tool: &str) -> Vec<(String, Vec<String>)> {
     ARG_FALLBACKS
         .iter()
         .filter(|(names, _, _)| names.contains(&tool))
-        .map(|(_, field, fbs)| (field.to_string(), fbs.iter().map(|f| f.to_string()).collect()))
+        .map(|(_, field, fbs)| {
+            (
+                (*field).to_string(),
+                fbs.iter().map(|f| (*f).to_string()).collect(),
+            )
+        })
         .collect()
 }
 
@@ -513,17 +645,26 @@ pub(crate) fn fallbacks_for(tool: &str) -> Vec<(String, Vec<String>)> {
 pub(crate) fn egress_target(args: &Value) -> Option<&str> {
     // The blank test belongs INSIDE the search: a present-but-empty `url` must fall through to the
     // repo and the query, not short-circuit the whole resolution to None.
-    ["url", "repo", "query"]
-        .into_iter()
-        .find_map(|k| args.get(k).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()))
+    ["url", "repo", "query"].into_iter().find_map(|k| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.trim().is_empty())
+    })
 }
 
 /// The numeric form of `read_arg`, for the money fields the handlers parse loosely ("$1,200").
 pub(crate) fn read_num(tool: &str, args: &Value, field: &str) -> Option<f64> {
     let take = |k: &str| {
         args.get(k).and_then(|x| {
-            x.as_f64()
-                .or_else(|| x.as_str().and_then(|v| v.trim().trim_start_matches('$').replace(',', "").parse().ok()))
+            x.as_f64().or_else(|| {
+                x.as_str().and_then(|v| {
+                    v.trim()
+                        .trim_start_matches('$')
+                        .replace(',', "")
+                        .parse()
+                        .ok()
+                })
+            })
         })
     };
     if let Some(v) = take(field) {
@@ -546,7 +687,12 @@ pub(crate) fn aliases_for(tool: &str) -> Vec<(String, Vec<String>)> {
     ARG_ALIASES
         .iter()
         .filter(|(names, _, _)| names.contains(&tool))
-        .map(|(_, field, aliases)| (field.to_string(), aliases.iter().map(|a| a.to_string()).collect()))
+        .map(|(_, field, aliases)| {
+            (
+                (*field).to_string(),
+                aliases.iter().map(|a| (*a).to_string()).collect(),
+            )
+        })
         .collect()
 }
 
@@ -571,17 +717,19 @@ impl ArgContract {
         self.aliases
             .iter()
             .find(|(_, aliases)| aliases.iter().any(|a| a == key))
-            .map(|(field, _)| field.as_str())
-            .unwrap_or(key)
+            .map_or(key, |(field, _)| field.as_str())
     }
 
     /// Is `field` supplied — by its own name, an alias, or a transformed fallback the handler can
     /// work from — with something other than null? A fallback counts HERE and nowhere else: the
     /// call is admitted, and the handler does the transforming.
     pub(crate) fn present(&self, obj: &serde_json::Map<String, Value>, field: &str) -> bool {
-        let given = |k: &str| obj.get(k).map_or(false, |v| !v.is_null());
+        let given = |k: &str| obj.get(k).is_some_and(|v| !v.is_null());
         let any_of = |table: &[(String, Vec<String>)]| {
-            table.iter().filter(|(f, _)| f == field).any(|(_, names)| names.iter().any(|n| given(n)))
+            table
+                .iter()
+                .filter(|(f, _)| f == field)
+                .any(|(_, names)| names.iter().any(|n| given(n)))
         };
         given(field) || any_of(&self.aliases) || any_of(&self.fallbacks)
     }
@@ -592,7 +740,11 @@ fn contract_of(schema: &Value) -> Option<(String, ArgContract)> {
     let params = &schema["function"]["parameters"];
     let required: Vec<String> = params["required"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let (mut strings, mut scalars) = (Vec::new(), Vec::new());
     if let Some(props) = params["properties"].as_object() {
@@ -606,7 +758,16 @@ fn contract_of(schema: &Value) -> Option<(String, ArgContract)> {
     }
     let aliases = aliases_for(&name);
     let fallbacks = fallbacks_for(&name);
-    Some((name, ArgContract { required, strings, scalars, aliases, fallbacks }))
+    Some((
+        name,
+        ArgContract {
+            required,
+            strings,
+            scalars,
+            aliases,
+            fallbacks,
+        },
+    ))
 }
 
 /// Every catalogued tool's contract: core + meta first, then each line of `src` — the FULL catalog,
@@ -659,7 +820,11 @@ pub(crate) fn compact_recent(msgs: &[(String, String)]) -> String {
             if role != "assistant" {
                 return format!("{role}: {text}");
             }
-            let keep = if Some(i) == last_assistant { KEEP_LATEST } else { KEEP_OLDER };
+            let keep = if Some(i) == last_assistant {
+                KEEP_LATEST
+            } else {
+                KEEP_OLDER
+            };
             if text.chars().count() <= keep {
                 return format!("{role}: {text}");
             }
@@ -668,8 +833,10 @@ pub(crate) fn compact_recent(msgs: &[(String, String)]) -> String {
             format!("{role}: {head}… [{dropped} chars of my earlier reply elided]")
         })
         .collect::<Vec<_>>()
-        .join("
-")
+        .join(
+            "
+",
+        )
 }
 
 /// Top catalog lines matching a discover_tools query — the escape hatch that turns a name-only
@@ -719,20 +886,72 @@ pub(crate) fn search_lines_with_evidence(
                 .iter()
                 .find(|(t, _, _)| t == name)
                 .filter(|(_, _, n)| *n > 0)
-                .map(|(_, rate, n)| {
-                    EVIDENCE_WEIGHT * (rate - 0.5) * ((*n).min(SAMPLE_CAP) as f64 / SAMPLE_CAP as f64)
-                })
-                .unwrap_or(0.0);
+                .map_or(0.0, |(_, rate, n)| {
+                    EVIDENCE_WEIGHT
+                        * (rate - 0.5)
+                        * ((*n).min(SAMPLE_CAP) as f64 / SAMPLE_CAP as f64)
+                });
             Some((s as f64 + bonus, line))
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.into_iter().take(top_n).map(|(_, l)| l.trim().to_string()).collect()
+    scored
+        .into_iter()
+        .take(top_n)
+        .map(|(_, l)| l.trim().to_string())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::{PluginRegistry, CORE_RESTRICTED_TURN_CLASSES};
+
+    #[test]
+    fn every_core_meta_schema_has_explicit_restricted_turn_class() {
+        let registry = PluginRegistry::builtin();
+        let schemas = core_meta_schemas();
+        let schema_names: HashSet<String> = schemas
+            .iter()
+            .map(|schema| {
+                schema["function"]["name"]
+                    .as_str()
+                    .expect("every core/meta schema has a function name")
+                    .to_string()
+            })
+            .collect();
+        let classified_names: HashSet<String> = CORE_RESTRICTED_TURN_CLASSES
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+
+        assert_eq!(
+            schema_names.len(),
+            schemas.len(),
+            "core/meta schema names must be unique"
+        );
+        assert_eq!(
+            classified_names.len(),
+            CORE_RESTRICTED_TURN_CLASSES.len(),
+            "core/meta restricted-turn declarations must be unique"
+        );
+        assert_eq!(
+            schema_names, classified_names,
+            "the compiled core/meta schema and restricted-turn inventory must stay bijective"
+        );
+        for name in schema_names {
+            let class = registry
+                .restricted_turn_class_for_tool(&name)
+                .unwrap_or_else(|| {
+                    panic!("core/meta tool {name:?} needs an explicit restricted-turn class")
+                });
+            assert_eq!(
+                registry.restricted_turn_allows_tool(&name),
+                class == crate::plugins::RestrictedTurnClass::PureLocal,
+                "core/meta authority for {name:?} must derive from its declared class"
+            );
+        }
+    }
 
     /// The real agent-visible catalog: every enabled builtin capability's lines.
     ///
@@ -756,15 +975,51 @@ mod tests {
     #[test]
     fn every_migrated_household_tool_is_still_in_the_catalog() {
         const MIGRATED: &[&str] = &[
-            "about_person", "ask_whois", "bill_autopay", "calendar", "calendar_add",
-            "calendar_remove", "deals", "enhance_photo", "event_ledger", "family", "family_book",
-            "family_frame", "festival_calendar", "find_younger_self", "forget_date", "gift_intel",
-            "growup_reel", "inbox_analytics", "learn_about", "life_horizon", "mail_report",
-            "mail_rule", "mail_search", "nightly_dream", "on_this_day", "onedrive", "patterns",
-            "person_items", "photo_cleanup", "photo_create", "photo_patterns", "photo_send",
-            "plugin_registry", "see_page", "self_limits", "self_report", "share_with_member",
-            "style_timeline", "taste_profile", "then_and_now", "track_subject", "traditions",
-            "trip_ledger", "watch_price", "watches",
+            "about_person",
+            "ask_whois",
+            "bill_autopay",
+            "calendar",
+            "calendar_add",
+            "calendar_remove",
+            "deals",
+            "enhance_photo",
+            "event_ledger",
+            "family",
+            "family_book",
+            "family_frame",
+            "festival_calendar",
+            "find_younger_self",
+            "forget_date",
+            "gift_intel",
+            "growup_reel",
+            "inbox_analytics",
+            "learn_about",
+            "life_horizon",
+            "mail_report",
+            "mail_rule",
+            "mail_search",
+            "nightly_dream",
+            "on_this_day",
+            "onedrive",
+            "patterns",
+            "person_items",
+            "photo_cleanup",
+            "photo_create",
+            "photo_patterns",
+            "photo_send",
+            "plugin_registry",
+            "see_page",
+            "self_limits",
+            "self_report",
+            "share_with_member",
+            "style_timeline",
+            "taste_profile",
+            "then_and_now",
+            "track_subject",
+            "traditions",
+            "trip_ledger",
+            "watch_price",
+            "watches",
         ];
         let src = catalog();
         // A line may pack two tools with a `·` separator ("- calendar {}: … · calendar_add {…}: …"),
@@ -778,14 +1033,27 @@ mod tests {
             .filter_map(tool_name_of_line_in_fragment)
             .collect();
         let missing: Vec<&&str> = MIGRATED.iter().filter(|t| !present.contains(**t)).collect();
-        assert!(missing.is_empty(), "these tools vanished in the registry migration: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "these tools vanished in the registry migration: {missing:?}"
+        );
 
         // Cross-check against the registry's own declarations: a tool advertised in the catalog but
         // not listed on its spec would be ungoverned by the toggle.
         let reg = crate::plugins::PluginRegistry::builtin();
-        let declared: HashSet<&str> = reg.all_specs().iter().flat_map(|s| s.tools.iter().map(|t| t.as_str())).collect();
-        let undeclared: Vec<&&str> = MIGRATED.iter().filter(|t| !declared.contains(**t)).collect();
-        assert!(undeclared.is_empty(), "advertised but not declared on any spec: {undeclared:?}");
+        let declared: HashSet<&str> = reg
+            .all_specs()
+            .iter()
+            .flat_map(|s| s.tools.iter().map(|t| t.as_str()))
+            .collect();
+        let undeclared: Vec<&&str> = MIGRATED
+            .iter()
+            .filter(|t| !declared.contains(**t))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "advertised but not declared on any spec: {undeclared:?}"
+        );
     }
 
     /// Every catalog line must carry exactly one tool and be parseable — the whole surface is
@@ -795,12 +1063,24 @@ mod tests {
     fn every_generated_catalog_line_is_well_formed() {
         let src = catalog();
         for line in src.lines().filter(|l| !l.trim().is_empty()) {
-            assert!(line.starts_with("- "), "catalog lines start with '- ': {line:?}");
-            assert!(tool_name_of_line(line).is_some(), "unparseable tool line: {line:?}");
-            assert!(line.contains(':'), "a tool line needs a description after ':': {line:?}");
+            assert!(
+                line.starts_with("- "),
+                "catalog lines start with '- ': {line:?}"
+            );
+            assert!(
+                tool_name_of_line(line).is_some(),
+                "unparseable tool line: {line:?}"
+            );
+            assert!(
+                line.contains(':'),
+                "a tool line needs a description after ':': {line:?}"
+            );
             // A `\n` that survived as text means a spec's catalog string was escaped wrong — the
             // lines would concatenate and every tool but the first would disappear.
-            assert!(!line.contains("\\n"), "literal \\n in a catalog line: {line:?}");
+            assert!(
+                !line.contains("\\n"),
+                "literal \\n in a catalog line: {line:?}"
+            );
         }
     }
 
@@ -816,8 +1096,15 @@ mod tests {
     fn every_registered_handler_has_a_spec() {
         let reg = crate::plugins::PluginRegistry::builtin();
         let ids: HashSet<&str> = reg.all_specs().iter().map(|s| s.id.as_str()).collect();
-        let orphans: Vec<&str> = reg.handler_ids().into_iter().filter(|h| !ids.contains(h)).collect();
-        assert!(orphans.is_empty(), "handlers with no PluginSpec (their tools would be invisible): {orphans:?}");
+        let orphans: Vec<&str> = reg
+            .handler_ids()
+            .into_iter()
+            .filter(|h| !ids.contains(h))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "handlers with no PluginSpec (their tools would be invisible): {orphans:?}"
+        );
     }
 
     /// Every spec must contribute at least one catalog line, or its tools are undiscoverable.
@@ -831,7 +1118,11 @@ mod tests {
             .filter_map(tool_name_of_line_in_fragment)
             .collect();
         for spec in reg.all_specs().iter().filter(|s| s.enabled) {
-            assert!(!spec.catalog.trim().is_empty(), "spec `{}` has no catalog line", spec.id);
+            assert!(
+                !spec.catalog.trim().is_empty(),
+                "spec `{}` has no catalog line",
+                spec.id
+            );
             // At least one — not every — declared tool must be advertised. A spec may list ALIASES
             // the dispatch accepts (`web_search` alongside the canonical `search`) while the catalog
             // names only the canonical one, which is right: offering the model two names for one
@@ -855,7 +1146,10 @@ mod tests {
         for spec in reg.all_specs() {
             for tool in &spec.tools {
                 if let Some(prev) = owner.insert(tool, &spec.id) {
-                    panic!("tool `{tool}` is claimed by both `{prev}` and `{}`", spec.id);
+                    panic!(
+                        "tool `{tool}` is claimed by both `{prev}` and `{}`",
+                        spec.id
+                    );
                 }
             }
         }
@@ -863,8 +1157,14 @@ mod tests {
 
     #[test]
     fn name_extraction_skips_rules_and_headers() {
-        assert_eq!(tool_name_of_line("- deals {query, budget?}: find deals"), Some("deals"));
-        assert_eq!(tool_name_of_line("- mcp.gmail.search — search mail"), Some("mcp.gmail.search"));
+        assert_eq!(
+            tool_name_of_line("- deals {query, budget?}: find deals"),
+            Some("deals")
+        );
+        assert_eq!(
+            tool_name_of_line("- mcp.gmail.search — search mail"),
+            Some("mcp.gmail.search")
+        );
         assert_eq!(tool_name_of_line("- NEVER claim you removed a date"), None);
         assert_eq!(tool_name_of_line("LIFE & SHOPPING TOOLS (native):"), None);
     }
@@ -873,10 +1173,19 @@ mod tests {
     fn relevant_tool_is_detailed_and_irrelevant_moves_to_tail() {
         let (detailed, tail) = gate_catalog("what's the weather in pune?", &catalog());
         // zero-overlap tools lose their detail line but keep their name in the tail
-        assert!(!detailed.contains("growup_reel {name}"), "irrelevant tool should not be detailed");
-        assert!(tail.contains("growup_reel"), "gated tool must stay visible by name");
+        assert!(
+            !detailed.contains("growup_reel {name}"),
+            "irrelevant tool should not be detailed"
+        );
+        assert!(
+            tail.contains("growup_reel"),
+            "gated tool must stay visible by name"
+        );
         // pinned tools always keep their full line
-        assert!(detailed.contains("deals {query, budget?}"), "pinned tool must stay detailed");
+        assert!(
+            detailed.contains("deals {query, budget?}"),
+            "pinned tool must stay detailed"
+        );
     }
 
     #[test]
@@ -884,7 +1193,9 @@ mod tests {
         let (detailed, tail) = gate_catalog("show me a photo of the wedding", &catalog());
         let src = catalog();
         for line in src.lines() {
-            let Some(name) = tool_name_of_line(line) else { continue };
+            let Some(name) = tool_name_of_line(line) else {
+                continue;
+            };
             let in_detail = detailed.lines().any(|l| tool_name_of_line(l) == Some(name));
             let in_tail = tail.contains(name);
             assert!(in_detail || in_tail, "{name} vanished from the catalog");
@@ -897,10 +1208,17 @@ mod tests {
     fn gating_cuts_the_catalog_substantially() {
         // Measured over the REAL gated surface — every enabled capability's catalog lines.
         let full = catalog();
-        for turn in ["hey, good morning!", "what's the weather in pune?", "find me a gift for my wife"] {
+        for turn in [
+            "hey, good morning!",
+            "what's the weather in pune?",
+            "find me a gift for my wife",
+        ] {
             let (detailed, tail) = gate_catalog(turn, &full);
             let gated_len = detailed.len() + tail.len();
-            println!("catalog cut for {turn:?}: {} -> {gated_len} chars", full.len());
+            println!(
+                "catalog cut for {turn:?}: {} -> {gated_len} chars",
+                full.len()
+            );
             assert!(
                 gated_len < full.len() / 2,
                 "hybrid catalog should be less than half the full catalog for {turn:?} ({gated_len} vs {})",
@@ -911,36 +1229,80 @@ mod tests {
 
     #[test]
     fn schema_parses_name_args_and_required() {
-        let s = one_schema("- deals {query, budget?}: find + compare REAL deals on something").unwrap();
+        let s =
+            one_schema("- deals {query, budget?}: find + compare REAL deals on something").unwrap();
         assert_eq!(s["function"]["name"], "deals");
-        assert!(s["function"]["description"].as_str().unwrap().contains("compare REAL deals"));
+        assert!(s["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("compare REAL deals"));
         let props = &s["function"]["parameters"]["properties"];
         assert!(props.get("query").is_some() && props.get("budget").is_some());
-        let req: Vec<&str> = s["function"]["parameters"]["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-        assert_eq!(req, vec!["query"], "budget is optional (trailing ?), query is required");
+        let req: Vec<&str> = s["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            req,
+            vec!["query"],
+            "budget is optional (trailing ?), query is required"
+        );
     }
 
     #[test]
     fn schema_splits_dot_joined_line_into_two_tools() {
-        let two = line_schemas("- calendar {}: the unified upcoming view · calendar_add {text}: add an event");
-        let names: Vec<&str> = two.iter().map(|s| s["function"]["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["calendar", "calendar_add"], "the `·`-joined line yields both tools");
+        let two = line_schemas(
+            "- calendar {}: the unified upcoming view · calendar_add {text}: add an event",
+        );
+        let names: Vec<&str> = two
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["calendar", "calendar_add"],
+            "the `·`-joined line yields both tools"
+        );
     }
 
     #[test]
     fn schema_skips_rule_lines() {
-        assert!(one_schema("- NEVER claim you removed/changed a date unless a tool confirmed it").is_none());
+        assert!(
+            one_schema("- NEVER claim you removed/changed a date unless a tool confirmed it")
+                .is_none()
+        );
         assert!(line_schemas("LIFE & SHOPPING TOOLS (native):").is_empty());
     }
 
     #[test]
     fn tool_schemas_always_include_core_and_exclude_answer() {
         let schemas = tool_schemas("what's the weather in pune?", &catalog());
-        let names: HashSet<&str> = schemas.iter().map(|s| s["function"]["name"].as_str().unwrap()).collect();
-        for core in ["recall", "remember", "add_reminder", "drop_reminder", "now", "myself", "discover_tools", "run_skill", "build_capability"] {
-            assert!(names.contains(core), "core/meta schema '{core}' must always be present");
+        let names: HashSet<&str> = schemas
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap())
+            .collect();
+        for core in [
+            "recall",
+            "remember",
+            "add_reminder",
+            "drop_reminder",
+            "now",
+            "myself",
+            "discover_tools",
+            "run_skill",
+            "build_capability",
+        ] {
+            assert!(
+                names.contains(core),
+                "core/meta schema '{core}' must always be present"
+            );
         }
-        assert!(!names.contains("answer"), "answer is not a native tool — text with no call IS the answer");
+        assert!(
+            !names.contains("answer"),
+            "answer is not a native tool — text with no call IS the answer"
+        );
         // the message-relevant tool got a schema; an irrelevant one did not (mirrors the prose gate)
         assert!(names.contains("family"), "pinned tool schema present");
         // every schema is well-formed OpenAI shape
@@ -951,9 +1313,61 @@ mod tests {
     }
 
     #[test]
+    fn unfamiliar_mcp_schema_overlays_changed_required_field_without_adding_capability() {
+        let mut schemas = tool_schemas(
+            "look up teal with the novel integration",
+            "- mcp.novel.lookup {query}: look up a color in the novel integration",
+        );
+        let tool = mind_tools::McpTool {
+            server: "novel".into(),
+            name: "lookup".into(),
+            description: "look up a color".into(),
+            read_only: true,
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"query_v2": {"type": "string"}},
+                "required": ["query_v2"],
+                "additionalProperties": false
+            }),
+        };
+        assert_eq!(overlay_mcp_input_schemas(&mut schemas, &[tool]), 1);
+        let exact = schemas
+            .iter()
+            .find(|schema| schema["function"]["name"] == "mcp.novel.lookup")
+            .unwrap();
+        assert_eq!(
+            exact["function"]["parameters"]["required"],
+            serde_json::json!(["query_v2"])
+        );
+        assert!(exact["function"]["parameters"]["properties"]
+            .get("query")
+            .is_none());
+        assert!(schemas
+            .iter()
+            .all(|schema| schema["function"]["name"] != "mcp.novel.delete"));
+    }
+
+    #[test]
+    fn exact_catalog_schemas_add_nothing_outside_the_authorized_source() {
+        let schemas =
+            exact_catalog_schemas("- calc {expression}: do arithmetic locally (e.g. 12*7+3)");
+        let names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["calc"]);
+        assert!(!names.contains(&"recall"));
+        assert!(!names.contains(&"discover_tools"));
+    }
+
+    #[test]
     fn schema_set_stays_compact_and_relevant() {
         let full = catalog();
-        for turn in ["what's the weather in pune?", "find me a gift for my wife", "hey, good morning!"] {
+        for turn in [
+            "what's the weather in pune?",
+            "find me a gift for my wife",
+            "hey, good morning!",
+        ] {
             let schemas = tool_schemas(turn, &full);
             let json = serde_json::to_string(&schemas).unwrap();
             println!("{turn:?}: {} schemas, {} chars", schemas.len(), json.len());
@@ -967,7 +1381,11 @@ mod tests {
             // price of that, and it is a bound on the always-present set rather than a licence for
             // the gate to leak.
             assert!(schemas.len() >= 7, "core+meta always present");
-            assert!(schemas.len() <= 32, "schema set is gated, not the full catalog ({} tools)", schemas.len());
+            assert!(
+                schemas.len() <= 32,
+                "schema set is gated, not the full catalog ({} tools)",
+                schemas.len()
+            );
         }
     }
 
@@ -987,7 +1405,11 @@ mod tests {
     /// capsule (the non-answer became evidence and reset the cognitive loop's stall counter).
     #[test]
     fn one_weak_word_overlap_is_not_a_fit() {
-        for q in ["zzqx warp drive", "zzqx warp drive one", "quantum flux capacitor"] {
+        for q in [
+            "zzqx warp drive",
+            "zzqx warp drive one",
+            "quantum flux capacitor",
+        ] {
             let hits = search_lines(q, &catalog(), 6);
             assert!(
                 !hits.iter().any(|l| l.contains("browse")),
@@ -1003,7 +1425,8 @@ mod tests {
     fn a_single_word_still_finds_its_tool() {
         let hits = search_lines("weather", &catalog(), 6);
         assert!(
-            hits.iter().any(|l| l.starts_with("- weather") || l.contains("weather {")),
+            hits.iter()
+                .any(|l| l.starts_with("- weather") || l.contains("weather {")),
             "one-word discovery must still work: {hits:?}"
         );
     }
@@ -1028,7 +1451,10 @@ mod tests {
     }
 
     fn rows(pairs: &[(&str, f64, u64)]) -> Vec<(String, f64, u64)> {
-        pairs.iter().map(|(n, r, c)| (n.to_string(), *r, *c)).collect()
+        pairs
+            .iter()
+            .map(|(n, r, c)| ((*n).to_string(), *r, *c))
+            .collect()
     }
 
     /// BASELINE: with no history, pure semantics decide — alpha first.
@@ -1036,7 +1462,10 @@ mod tests {
     fn without_evidence_semantics_alone_rank_the_candidates() {
         let hits = search_lines("search internal indexes", &two_tool_catalog(), 4);
         let first = hits.first().unwrap();
-        assert!(first.contains("alpha_search"), "baseline order is semantic: {hits:?}");
+        assert!(
+            first.contains("alpha_search"),
+            "baseline order is semantic: {hits:?}"
+        );
     }
 
     /// THE FLIP: alpha holds the semantic edge, but twenty observations say it fails 80% of the
@@ -1046,7 +1475,8 @@ mod tests {
     #[test]
     fn measured_history_overturns_a_semantic_edge() {
         let track = rows(&[("alpha_search", 0.2, 20), ("beta_finder", 0.95, 20)]);
-        let hits = search_lines_with_evidence("search internal indexes", &two_tool_catalog(), 4, &track);
+        let hits =
+            search_lines_with_evidence("search internal indexes", &two_tool_catalog(), 4, &track);
         assert!(
             hits.first().unwrap().contains("beta_finder"),
             "strong sampled history must beat a one-token semantic edge: {hits:?}"
@@ -1062,7 +1492,10 @@ mod tests {
         // (1) perfect history, zero relevance bar met: still excluded.
         let track = rows(&[("browse", 1.0, 100)]);
         let hits = search_lines_with_evidence("quantum flux capacitor", &catalog(), 6, &track);
-        assert!(!hits.iter().any(|l| l.contains("browse")), "evidence must not bypass the relevance bar");
+        assert!(
+            !hits.iter().any(|l| l.contains("browse")),
+            "evidence must not bypass the relevance bar"
+        );
 
         // (2+3) gamma has ONE more overlap than beta AND beta carries perfect history — but at
         // n=2 the bonus is ~0.075, so semantics hold. At n=20 the bonus is capped at 0.75,
@@ -1072,10 +1505,16 @@ mod tests {
                    - beta_finder {query}: search across beta indexes\n";
         let small_n = rows(&[("beta_finder", 1.0, 2)]);
         let hits = search_lines_with_evidence("grep query everywhere", cat, 4, &small_n);
-        assert!(hits.first().unwrap().contains("gamma_grep"), "n=2 must not overturn semantics: {hits:?}");
+        assert!(
+            hits.first().unwrap().contains("gamma_grep"),
+            "n=2 must not overturn semantics: {hits:?}"
+        );
         let big_n = rows(&[("beta_finder", 1.0, 20)]);
         let hits = search_lines_with_evidence("grep query everywhere", cat, 4, &big_n);
-        assert!(hits.first().unwrap().contains("gamma_grep"), "the bonus is capped under one token of relevance: {hits:?}");
+        assert!(
+            hits.first().unwrap().contains("gamma_grep"),
+            "the bonus is capped under one token of relevance: {hits:?}"
+        );
     }
 }
 
@@ -1093,7 +1532,10 @@ mod compaction_tests {
     fn user_messages_are_never_abridged() {
         let msgs = vec![m("user", 4000), m("assistant", 100)];
         let out = compact_recent(&msgs);
-        assert!(out.contains(&"x".repeat(4000)), "a long USER message must survive intact");
+        assert!(
+            out.contains(&"x".repeat(4000)),
+            "a long USER message must survive intact"
+        );
         assert!(!out.contains("elided"), "nothing of the user's is elided");
     }
 
@@ -1102,15 +1544,30 @@ mod compaction_tests {
         let msgs = vec![m("assistant", 6253), m("user", 50), m("assistant", 6253)];
         let out = compact_recent(&msgs);
         // Both are abridged, but the LATEST keeps materially more — a follow-up usually refers to it.
-        assert_eq!(out.matches("elided").count(), 2, "both long replies abridged: {}", out.len());
-        assert!(out.len() < 2 * KEEP_LATEST + 500, "total is bounded, not 12.5k: {}", out.len());
-        assert!(KEEP_LATEST > KEEP_OLDER * 3, "the latest reply is deliberately far more generous");
+        assert_eq!(
+            out.matches("elided").count(),
+            2,
+            "both long replies abridged: {}",
+            out.len()
+        );
+        assert!(
+            out.len() < 2 * KEEP_LATEST + 500,
+            "total is bounded, not 12.5k: {}",
+            out.len()
+        );
+        assert!(
+            std::hint::black_box(KEEP_LATEST) > std::hint::black_box(KEEP_OLDER) * 3,
+            "the latest reply is deliberately far more generous"
+        );
     }
 
     #[test]
     fn elision_is_announced_so_the_model_never_invents_the_gap() {
         let out = compact_recent(&[m("assistant", 5000)]);
-        assert!(out.contains("chars of my earlier reply elided"), "{out:.120}");
+        assert!(
+            out.contains("chars of my earlier reply elided"),
+            "{out:.120}"
+        );
         assert!(out.contains('…'), "the cut point is visible");
     }
 
@@ -1118,7 +1575,10 @@ mod compaction_tests {
     fn short_conversations_are_untouched() {
         let msgs = vec![m("user", 30), m("assistant", 200)];
         let out = compact_recent(&msgs);
-        assert!(!out.contains("elided"), "nothing under the cap is abridged: {out:.80}");
+        assert!(
+            !out.contains("elided"),
+            "nothing under the cap is abridged: {out:.80}"
+        );
     }
 
     /// The whole point, in numbers: the live window measured 16,899 B.
@@ -1129,12 +1589,17 @@ mod compaction_tests {
         for _ in 0..6 {
             msgs.push(m("user", 122));
         }
-        for n in [6253, 3603, 2072, 849, 701, 462, 350, 300, 250, 200, 180, 150, 140, 140] {
+        for n in [
+            6253, 3603, 2072, 849, 701, 462, 350, 300, 250, 200, 180, 150, 140, 140,
+        ] {
             msgs.push(m("assistant", n));
         }
         let before: usize = msgs.iter().map(|(r, t)| r.len() + t.len() + 2).sum();
         let after = compact_recent(&msgs).len();
-        assert!(before > 16_000, "setup mirrors the measured window: {before}");
+        assert!(
+            before > 16_000,
+            "setup mirrors the measured window: {before}"
+        );
         assert!(
             after < before / 2,
             "compaction must at least halve the biggest slice of the prompt ({before} -> {after})"
@@ -1151,13 +1616,54 @@ mod alias_tests {
     #[test]
     fn the_resolver_prefers_the_canonical_then_each_alias_in_order() {
         let both = serde_json::json!({ "symbols": "SPY", "ticker": "RELIANCE.NS" });
-        assert_eq!(read_arg("quote", &both, "symbols"), "SPY", "the documented name wins");
-        assert_eq!(read_arg("quote", &serde_json::json!({ "ticker": "RELIANCE.NS" }), "symbols"), "RELIANCE.NS");
-        assert_eq!(read_arg("quote", &serde_json::json!({ "input": "  NIFTY  " }), "symbols"), "NIFTY", "trimmed");
-        assert_eq!(read_arg("recall", &serde_json::json!({ "ticker": "SPY" }), "symbols"), "", "aliases are per tool");
-        assert_eq!(read_arg("deals", &serde_json::json!({ "item": "headphones" }), "query"), "headphones");
-        assert_eq!(read_num("deals", &serde_json::json!({ "max": "$1,200" }), "budget"), Some(1200.0), "money is parsed loosely through the alias");
-        assert_eq!(read_num("watch_price", &serde_json::json!({ "budget": 450 }), "target"), Some(450.0));
+        assert_eq!(
+            read_arg("quote", &both, "symbols"),
+            "SPY",
+            "the documented name wins"
+        );
+        assert_eq!(
+            read_arg(
+                "quote",
+                &serde_json::json!({ "ticker": "RELIANCE.NS" }),
+                "symbols"
+            ),
+            "RELIANCE.NS"
+        );
+        assert_eq!(
+            read_arg(
+                "quote",
+                &serde_json::json!({ "input": "  NIFTY  " }),
+                "symbols"
+            ),
+            "NIFTY",
+            "trimmed"
+        );
+        assert_eq!(
+            read_arg("recall", &serde_json::json!({ "ticker": "SPY" }), "symbols"),
+            "",
+            "aliases are per tool"
+        );
+        assert_eq!(
+            read_arg(
+                "deals",
+                &serde_json::json!({ "item": "headphones" }),
+                "query"
+            ),
+            "headphones"
+        );
+        assert_eq!(
+            read_num("deals", &serde_json::json!({ "max": "$1,200" }), "budget"),
+            Some(1200.0),
+            "money is parsed loosely through the alias"
+        );
+        assert_eq!(
+            read_num(
+                "watch_price",
+                &serde_json::json!({ "budget": 450 }),
+                "target"
+            ),
+            Some(450.0)
+        );
         assert_eq!(read_num("deals", &serde_json::json!({}), "budget"), None);
     }
 }

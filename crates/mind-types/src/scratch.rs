@@ -109,9 +109,13 @@ impl Scratch {
         if self.path.is_dir() {
             return;
         }
-        let (Some(parent), Some(stem)) = (self.path.parent(), self.path.file_name()) else { return };
+        let (Some(parent), Some(stem)) = (self.path.parent(), self.path.file_name()) else {
+            return;
+        };
         let Some(stem) = stem.to_str() else { return };
-        let Ok(entries) = std::fs::read_dir(parent) else { return };
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
         for e in entries.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -120,10 +124,16 @@ impl Scratch {
             // `ym_x_1_2_1` is a prefix of `ym_x_1_2_10` — and dropping the first would delete the
             // second while it was still in use. A sidecar is always `<name>.something` or
             // `<name>-something` (`-wal`, `-shm`, `.read_receipts.jsonl`); a sibling scratch never is.
-            let sidecar = name.strip_prefix(stem).is_some_and(|rest| rest.starts_with(['.', '-']));
+            let sidecar = name
+                .strip_prefix(stem)
+                .is_some_and(|rest| rest.starts_with(['.', '-']));
             if sidecar {
                 let p = e.path();
-                let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+                let _ = if p.is_dir() {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
             }
         }
     }
@@ -161,7 +171,9 @@ pub fn file(tag: &str, ext: &str) -> Scratch {
         name.push('.');
         name.push_str(ext);
     }
-    Scratch { path: std::env::temp_dir().join(name) }
+    Scratch {
+        path: std::env::temp_dir().join(name),
+    }
 }
 
 #[cfg(test)]
@@ -174,19 +186,36 @@ mod tests {
         // uniqueness came from it these would be equal.
         let a = dir("collide");
         let b = dir("collide");
-        assert_ne!(a.path(), b.path(), "two scratch dirs in one process must differ");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two scratch dirs in one process must differ"
+        );
         assert!(a.path().to_string_lossy().contains("collide"));
 
         // And across many, including from several threads at once — one nanosecond clock read can
         // serve two threads, which is what the counter is for.
         let paths: Vec<String> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..8)
-                .map(|_| s.spawn(|| (0..25).map(|_| dir("race").as_str().to_string()).collect::<Vec<_>>()))
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..25)
+                            .map(|_| dir("race").as_str().to_string())
+                            .collect::<Vec<_>>()
+                    })
+                })
                 .collect();
-            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
         });
         let unique: std::collections::HashSet<&String> = paths.iter().collect();
-        assert_eq!(unique.len(), paths.len(), "200 scratch paths across 8 threads must all differ");
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "200 scratch paths across 8 threads must all differ"
+        );
     }
 
     #[test]
@@ -197,7 +226,10 @@ mod tests {
             assert!(s.join("inner.txt").exists());
             s.path().to_path_buf()
         };
-        assert!(!path.exists(), "the directory and everything in it goes when the guard drops");
+        assert!(
+            !path.exists(),
+            "the directory and everything in it goes when the guard drops"
+        );
     }
 
     #[test]
@@ -214,7 +246,10 @@ mod tests {
         }));
         let path = seen.lock().unwrap().clone();
         assert!(!path.as_os_str().is_empty(), "the probe recorded a path");
-        assert!(!path.exists(), "a panicking test still cleans up after itself");
+        assert!(
+            !path.exists(),
+            "a panicking test still cleans up after itself"
+        );
     }
 
     #[test]
@@ -234,7 +269,10 @@ mod tests {
         };
         assert!(!main.exists(), "the file itself");
         assert!(!wal.exists(), "the sqlite write-ahead log");
-        assert!(!receipts.exists(), "and the receipts ledger parked beside it");
+        assert!(
+            !receipts.exists(),
+            "and the receipts ledger parked beside it"
+        );
     }
 
     #[test]
@@ -247,7 +285,10 @@ mod tests {
         std::fs::create_dir_all(&sibling).unwrap();
         std::fs::write(sibling.join("keep.txt"), b"x").unwrap();
         drop(a);
-        assert!(sibling.join("keep.txt").exists(), "a neighbour whose name merely extends ours must survive");
+        assert!(
+            sibling.join("keep.txt").exists(),
+            "a neighbour whose name merely extends ours must survive"
+        );
         let _ = std::fs::remove_dir_all(&sibling);
     }
 

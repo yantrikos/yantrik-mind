@@ -101,7 +101,10 @@ impl Scoreboard {
                 .map(|rs| {
                     rs.iter()
                         .filter_map(|r| {
-                            Some((r["answer"].as_str()?.to_string(), r["correction"].as_str()?.to_string()))
+                            Some((
+                                r["answer"].as_str()?.to_string(),
+                                r["correction"].as_str()?.to_string(),
+                            ))
                         })
                         .collect()
                 })
@@ -109,22 +112,27 @@ impl Scoreboard {
         };
         let domains = domain_stats
             .into_iter()
-            .map(|(domain, (sends, engaged, ignored, corrected, pending))| DomainPanel {
-                pace: paces.get(&domain).copied().unwrap_or(1.0),
-                domain,
-                sends,
-                engaged,
-                ignored,
-                corrected,
-                pending,
-            })
+            .map(
+                |(domain, (sends, engaged, ignored, corrected, pending))| DomainPanel {
+                    pace: paces.get(&domain).copied().unwrap_or(1.0),
+                    domain,
+                    sends,
+                    engaged,
+                    ignored,
+                    corrected,
+                    pending,
+                },
+            )
             .collect();
         Scoreboard {
             window_days,
             turn,
             domains,
             judgment,
-            tools: tools.into_iter().map(|(tool, rate, n)| ToolPanel { tool, rate, n }).collect(),
+            tools: tools
+                .into_iter()
+                .map(|(tool, rate, n)| ToolPanel { tool, rate, n })
+                .collect(),
             packs: Vec::new(),
             receptivity,
             not_instrumented: NOT_INSTRUMENTED,
@@ -167,7 +175,12 @@ impl Scoreboard {
         } else {
             out.push_str("\nTOOLS (measured reliability, worst first):\n");
             for t in self.tools.iter().take(10) {
-                out.push_str(&format!("  {} — {:.0}% over {} runs\n", t.tool, t.rate * 100.0, t.n));
+                out.push_str(&format!(
+                    "  {} — {:.0}% over {} runs\n",
+                    t.tool,
+                    t.rate * 100.0,
+                    t.n
+                ));
             }
         }
         // 3b) Pack evidence — a knowledge pack's local ladder, counts with their denominators.
@@ -196,8 +209,16 @@ impl Scoreboard {
                 } else {
                     "none resolved yet".to_string()
                 };
-                let pace = if (d.pace - 1.0).abs() > f64::EPSILON { format!(" · pace {:.1}x", d.pace) } else { String::new() };
-                let pending = if d.pending > 0 { format!(" · {} pending", d.pending) } else { String::new() };
+                let pace = if (d.pace - 1.0).abs() > f64::EPSILON {
+                    format!(" · pace {:.1}x", d.pace)
+                } else {
+                    String::new()
+                };
+                let pending = if d.pending > 0 {
+                    format!(" · {} pending", d.pending)
+                } else {
+                    String::new()
+                };
                 out.push_str(&format!(
                     "  {}: {} sent → {} · {} ignored · {} corrected{pending}{pace}\n",
                     d.domain, d.sends, rate, d.ignored, d.corrected
@@ -225,8 +246,13 @@ impl super::ConversationEngine {
     /// nightly narrative (organ #3) will render FROM it, never around it.
     pub async fn outer_scoreboard(&self, window_days: i64) -> Scoreboard {
         let since = chrono::Utc::now().timestamp_millis() - window_days * 86_400_000;
-        let grades: Option<serde_json::Value> =
-            self.memory.profile_get("turn_grades").await.ok().flatten().and_then(|s| serde_json::from_str(&s).ok());
+        let grades: Option<serde_json::Value> = self
+            .memory
+            .profile_get("turn_grades")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok());
         let ledger = self.ledger().await;
         let stats = Self::ledger_stats(&ledger, since);
         let mut paces = std::collections::BTreeMap::new();
@@ -242,9 +268,12 @@ impl super::ConversationEngine {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
-            .map(|v| v.len())
-            .unwrap_or(0);
-        let judgment = if graded_rows == 0 { None } else { Some(self.judgment_trend_report().await) };
+            .map_or(0, |v| v.len());
+        let judgment = if graded_rows == 0 {
+            None
+        } else {
+            Some(self.judgment_trend_report().await)
+        };
         let tools: Vec<(String, f64, u64)> = self
             .memory
             .tool_track_record()
@@ -260,9 +289,24 @@ impl super::ConversationEngine {
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|s| PackPanel { pack_id: s.pack_id, surfaced: s.surfaced, used: s.used, graded: s.graded, good: s.good })
+            .map(|s| PackPanel {
+                pack_id: s.pack_id,
+                surfaced: s.surfaced,
+                used: s.used,
+                graded: s.graded,
+                good: s.good,
+            })
             .collect();
-        Scoreboard::from_parts(window_days, grades, stats, paces, judgment, tools, receptivity).with_packs(packs)
+        Scoreboard::from_parts(
+            window_days,
+            grades,
+            stats,
+            paces,
+            judgment,
+            tools,
+            receptivity,
+        )
+        .with_packs(packs)
     }
 }
 
@@ -299,9 +343,18 @@ mod tests {
         let without = board().render();
         assert!(!without.contains("PACK EVIDENCE"), "{without}");
         let with = board()
-            .with_packs(vec![PackPanel { pack_id: "yantrik/web-craft@0.3.0".into(), surfaced: 12, used: 5, graded: 4, good: 3 }])
+            .with_packs(vec![PackPanel {
+                pack_id: "yantrik/web-craft@0.3.0".into(),
+                surfaced: 12,
+                used: 5,
+                graded: 4,
+                good: 3,
+            }])
             .render();
-        assert!(with.contains("yantrik/web-craft@0.3.0: 12 surfaced · 5 used · 4 graded → 3 accepted"), "{with}");
+        assert!(
+            with.contains("yantrik/web-craft@0.3.0: 12 surfaced · 5 used · 4 graded → 3 accepted"),
+            "{with}"
+        );
         assert!(with.contains("censored, not failed"), "{with}");
     }
 
@@ -312,7 +365,10 @@ mod tests {
         // never a naked percentage over self-chosen sends.
         assert!(r.contains("2 of 3 resolved engaged"), "{r}");
         assert!(r.contains("2 pending"), "{r}");
-        assert!(r.contains("self-chosen"), "the silence-gated denominator must be named: {r}");
+        assert!(
+            r.contains("self-chosen"),
+            "the silence-gated denominator must be named: {r}"
+        );
         assert!(!r.contains("33%"), "no naked engagement percentage: {r}");
         // Turn grades stay two counters, never a quotient.
         assert!(r.contains("3 corrected · 41 tacitly accepted"), "{r}");
@@ -326,15 +382,29 @@ mod tests {
             assert!(r.contains(panel), "missing panel {panel}: {r}");
         }
         // The unmeasured axes the vision asks for are declared, not implied healthy.
-        assert!(r.contains("NOT YET INSTRUMENTED: risk tier, channel, latency"), "{r}");
+        assert!(
+            r.contains("NOT YET INSTRUMENTED: risk tier, channel, latency"),
+            "{r}"
+        );
         // Trust order: judgment (graded against reality) renders before the
         // self-selected proactive rows.
-        assert!(r.find("JUDGMENT").unwrap() < r.find("PROACTIVE").unwrap(), "{r}");
+        assert!(
+            r.find("JUDGMENT").unwrap() < r.find("PROACTIVE").unwrap(),
+            "{r}"
+        );
     }
 
     #[test]
     fn empty_stores_render_as_absence_not_zeros_pretending_to_be_health() {
-        let b = Scoreboard::from_parts(14, None, Default::default(), Default::default(), None, vec![], None);
+        let b = Scoreboard::from_parts(
+            14,
+            None,
+            Default::default(),
+            Default::default(),
+            None,
+            vec![],
+            None,
+        );
         let r = b.render();
         assert!(r.contains("no graded predictions yet"), "{r}");
         assert!(r.contains("nothing sent in the window"), "{r}");

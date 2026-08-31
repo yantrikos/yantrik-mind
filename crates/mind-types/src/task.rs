@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct Task {
     pub id: String,
     pub description: String,
-    pub status: String,   // pending | in_progress | completed | cancelled | blocked
+    pub status: String, // pending | in_progress | completed | cancelled | blocked
     pub priority: String, // low | medium | high | critical
     pub due_ms: Option<u64>,
 }

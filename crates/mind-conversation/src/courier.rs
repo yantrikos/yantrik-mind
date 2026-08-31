@@ -32,16 +32,44 @@ const LEADS: &[&str] = &["when ", "once ", "as soon as ", "next time ", "wheneve
 /// The action must be directed at the assistant. Without one of these the sentence is an
 /// observation about the world ("when it rains the roof leaks"), not a commitment to act.
 const ACTION_CUES: &[&str] = &[
-    "remind me", "tell me", "let me know", "show me", "ping me", "flag it", "flag that",
-    "compare", "check", "book", "order", "draft", "send", "look into", "follow up", "chase",
-    "get me", "find me", "put together", "prepare",
+    "remind me",
+    "tell me",
+    "let me know",
+    "show me",
+    "ping me",
+    "flag it",
+    "flag that",
+    "compare",
+    "check",
+    "book",
+    "order",
+    "draft",
+    "send",
+    "look into",
+    "follow up",
+    "chase",
+    "get me",
+    "find me",
+    "put together",
+    "prepare",
 ];
 
 /// Phrases people attach to commitments that carry no content of their own.
-const FILLER: &[&str] = &["before i forget", "don't forget", "dont forget", "please", "can you", "could you"];
+const FILLER: &[&str] = &[
+    "before i forget",
+    "don't forget",
+    "dont forget",
+    "please",
+    "can you",
+    "could you",
+];
 
 fn tidy(s: &str) -> String {
-    let mut t = s.trim().trim_matches(|c: char| c == ',' || c == '.' || c == '"').trim().to_string();
+    let mut t = s
+        .trim()
+        .trim_matches(|c: char| c == ',' || c == '.' || c == '"')
+        .trim()
+        .to_string();
     let low = t.to_ascii_lowercase();
     for f in FILLER {
         if let Some(pos) = low.find(f) {
@@ -53,7 +81,10 @@ fn tidy(s: &str) -> String {
             break;
         }
     }
-    t.trim().trim_matches(|c: char| c == ',' || c == '.').trim().to_string()
+    t.trim()
+        .trim_matches(|c: char| c == ',' || c == '.')
+        .trim()
+        .to_string()
 }
 
 /// Detect an EXPLICIT conditional commitment. `None` for anything less than unambiguous — questions,
@@ -118,9 +149,18 @@ pub(crate) fn observation_satisfies(trigger: &str, observation: &str) -> bool {
 /// closed thread never knocks again.
 pub(crate) fn is_retirement(msg: &str) -> bool {
     let m = msg.trim().to_lowercase();
-    ["done", "handled", "sorted", "not relevant", "never mind", "nevermind", "forget it", "cancel that"]
-        .iter()
-        .any(|s| m == *s || m.starts_with(&format!("{s} ")))
+    [
+        "done",
+        "handled",
+        "sorted",
+        "not relevant",
+        "never mind",
+        "nevermind",
+        "forget it",
+        "cancel that",
+    ]
+    .iter()
+    .any(|s| m == *s || m.starts_with(&format!("{s} ")))
 }
 
 impl super::ConversationEngine {
@@ -137,7 +177,10 @@ impl super::ConversationEngine {
     pub(crate) async fn save_threads(&self, t: &[serde_json::Value]) {
         let _ = self
             .memory
-            .profile_set("courier_threads", &serde_json::to_string(&t).unwrap_or_default())
+            .profile_set(
+                "courier_threads",
+                &serde_json::to_string(&t).unwrap_or_default(),
+            )
             .await;
     }
 
@@ -149,8 +192,10 @@ impl super::ConversationEngine {
         let now = chrono::Utc::now().timestamp_millis();
         // A promise with no horizon becomes a haunting. 180 days is long enough for "when the
         // renewal arrives" and short enough that a forgotten thread dies quietly.
-        let ttl_days: i64 =
-            std::env::var("YM_COURIER_TTL_DAYS").ok().and_then(|s| s.parse().ok()).unwrap_or(180);
+        let ttl_days: i64 = std::env::var("YM_COURIER_TTL_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(180);
         let mut threads = self.load_threads().await;
         // Same promise twice ⇒ refresh it rather than keeping two.
         if threads.iter().any(|t| {
@@ -210,30 +255,50 @@ impl super::ConversationEngine {
         }
         // Recent things the mind actually SAW or was TOLD — the only admissible evidence that a
         // trigger occurred. An inference that it "probably happened" may never fire a thread.
-        let ctx = mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(mind_types::Activity::Proactive));
-        let recent = self.memory.recent_messages(40, &ctx).await.unwrap_or_default();
+        let ctx = mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+            mind_types::Activity::Proactive,
+        ));
+        let recent = self
+            .memory
+            .recent_messages(40, &ctx)
+            .await
+            .unwrap_or_default();
         let mut changed = false;
         let mut fired: Vec<(String, String, String, String)> = Vec::new();
         for t in threads.iter_mut() {
             if t.get("status").and_then(|x| x.as_str()) != Some("open") {
                 continue;
             }
-            if t.get("expires_ms").and_then(|x| x.as_i64()).map(|e| e <= now).unwrap_or(false) {
+            if t.get("expires_ms")
+                .and_then(|x| x.as_i64())
+                .is_some_and(|e| e <= now)
+            {
                 t["status"] = serde_json::json!("expired");
                 changed = true;
                 continue;
             }
-            let trigger = t.get("trigger").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let quote = t.get("quote").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let trigger = t
+                .get("trigger")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let quote = t
+                .get("quote")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             // The PROMISE ITSELF must not fire the thread. The sentence that opened it obviously
             // mentions the trigger, so skip the original wording and require a SEPARATE observation.
-            let Some((_, observation)) = recent
-                .iter()
-                .find(|(_, text)| text.trim() != quote.trim() && observation_satisfies(&trigger, text))
-            else {
+            let Some((_, observation)) = recent.iter().find(|(_, text)| {
+                text.trim() != quote.trim() && observation_satisfies(&trigger, text)
+            }) else {
                 continue;
             };
-            let action = t.get("action").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let action = t
+                .get("action")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             t["status"] = serde_json::json!("fired");
             changed = true;
             fired.push((trigger.clone(), action, quote.clone(), observation.clone()));
@@ -243,8 +308,10 @@ impl super::ConversationEngine {
         }
         for (trigger, action, quote, observation) in fired {
             let title = format!("{action} — you asked for this when {trigger}");
-            let mut evidence =
-                vec![format!("you said: {quote}"), format!("observed: {observation}")];
+            let mut evidence = vec![
+                format!("you said: {quote}"),
+                format!("observed: {observation}"),
+            ];
             // ACTUALLY DO THE WORK. A packet that only restates the promise is a reminder wearing a
             // butler's coat — and it would make the knock's "I've prepared X" a lie. So the moment a
             // thread fires, the sub-agent goes and produces the real deliverable (the comparison,
@@ -268,7 +335,9 @@ impl super::ConversationEngine {
                         .ok()
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(150);
-                    match tokio::time::timeout(std::time::Duration::from_secs(secs), r.run(&task)).await {
+                    match tokio::time::timeout(std::time::Duration::from_secs(secs), r.run(&task))
+                        .await
+                    {
                         Ok(res) => {
                             for u in res.sources.iter().take(4) {
                                 evidence.push(format!("source: {u}"));
@@ -278,7 +347,10 @@ impl super::ConversationEngine {
                             res.ok().then_some(res.answer)
                         }
                         Err(_) => {
-                            out.push("[courier] preparation timed out — holding the reminder only".into());
+                            out.push(
+                                "[courier] preparation timed out — holding the reminder only"
+                                    .into(),
+                            );
                             None
                         }
                     }
@@ -316,7 +388,11 @@ impl super::ConversationEngine {
             self.packet_mark_prepared(&id, prepared.is_some()).await;
             out.push(format!(
                 "[courier] thread fired -> packet {id} ({})",
-                if prepared.is_some() { "work prepared" } else { "reminder only" }
+                if prepared.is_some() {
+                    "work prepared"
+                } else {
+                    "reminder only"
+                }
             ));
         }
         out
@@ -329,11 +405,23 @@ mod tests {
 
     #[test]
     fn captures_an_explicit_conditional_commitment() {
-        let c = detect("when the insurance renewal arrives, compare it with last year before I forget").unwrap();
+        let c =
+            detect("when the insurance renewal arrives, compare it with last year before I forget")
+                .unwrap();
         // The trigger keeps its natural wording (it is quoted back to the user); `trigger_terms`
         // does the stop-word stripping for MATCHING, so the two concerns stay separate.
-        assert!(c.trigger.to_lowercase().contains("insurance renewal"), "trigger: {}", c.trigger);
-        assert!(c.action.to_lowercase().starts_with("compare it with last year"), "action: {}", c.action);
+        assert!(
+            c.trigger.to_lowercase().contains("insurance renewal"),
+            "trigger: {}",
+            c.trigger
+        );
+        assert!(
+            c.action
+                .to_lowercase()
+                .starts_with("compare it with last year"),
+            "action: {}",
+            c.action
+        );
 
         let c2 = detect("Once the Amazon order ships, let me know so I can plan the day").unwrap();
         assert!(c2.trigger.to_lowercase().contains("amazon order"), "{c2:?}");
@@ -361,7 +449,10 @@ mod tests {
     #[test]
     fn an_observation_must_match_the_whole_trigger() {
         let t = "the insurance renewal";
-        assert!(observation_satisfies(t, "The insurance renewal just landed in your inbox"));
+        assert!(observation_satisfies(
+            t,
+            "The insurance renewal just landed in your inbox"
+        ));
         // A partial match is NOT the event — "renewal" alone could be any renewal.
         assert!(!observation_satisfies(t, "your gym renewal is due"));
         // Unrelated text never fires it.

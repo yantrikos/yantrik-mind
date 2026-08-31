@@ -31,7 +31,12 @@ fn redact(text: &str, mask_personal: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut token = String::new();
     for c in text.chars() {
-        if c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '`') {
+        if c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '`'
+            )
+        {
             flush(&mut out, &mut token, mask_personal);
             out.push(c);
         } else {
@@ -52,18 +57,26 @@ fn flush(out: &mut String, token: &mut String, mask_personal: bool) {
 
 fn mask_token(tok: &str, mask_personal: bool) -> String {
     // Strip surrounding punctuation the splitter kept (a trailing period, a colon).
-    let core = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+');
+    let core = tok.trim_matches(|c: char| {
+        !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+'
+    });
     if core.len() < 7 {
         return tok.to_string();
     }
-    let prefix_len = tok.len() - tok.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '@').len();
+    let prefix_len = tok.len()
+        - tok
+            .trim_start_matches(|c: char| !c.is_alphanumeric() && c != '@')
+            .len();
     let head = &tok[..prefix_len];
     let tail = &tok[prefix_len + core.len()..];
 
     // ── Credentials: masked on EVERY surface. ───────────────────────────────────────────────────
     // Known key prefixes first (highest precision), then the shape rule: long, no spaces, mixes
     // letters and digits, not a plain word — the same class `distinctive_pii` calls a long id.
-    const KEY_PREFIXES: &[&str] = &["sk-", "gsk_", "csk-", "nvapi-", "ghp_", "gho_", "xoxb-", "xoxp-", "AKIA", "sk_live_", "pk_live_", "Bearer "];
+    const KEY_PREFIXES: &[&str] = &[
+        "sk-", "gsk_", "csk-", "nvapi-", "ghp_", "gho_", "xoxb-", "xoxp-", "AKIA", "sk_live_",
+        "pk_live_", "Bearer ",
+    ];
     let is_prefixed_key = KEY_PREFIXES.iter().any(|p| core.starts_with(p));
     let digits = core.chars().filter(|c| c.is_ascii_digit()).count();
     let has_upper = core.chars().any(|c| c.is_ascii_uppercase());
@@ -75,10 +88,15 @@ fn mask_token(tok: &str, mask_personal: bool) -> String {
         && digits > 0
         && has_upper
         && has_lower
-        && core.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.'))
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.'))
         && !core.contains('@');
     if is_prefixed_key || is_long_id {
-        return format!("{head}•••{}·masked·{tail}", core.chars().take(4).collect::<String>());
+        return format!(
+            "{head}•••{}·masked·{tail}",
+            core.chars().take(4).collect::<String>()
+        );
     }
 
     if !mask_personal {
@@ -111,29 +129,47 @@ mod tests {
     /// The stream rule: personal values are recognisable in shape, never in value.
     #[test]
     fn streams_mask_personal_values_to_shape() {
-        let s = redact_stream("recalled brishti.sarkar@gmail.com and called 5551234567 for the order");
+        let s =
+            redact_stream("recalled brishti.sarkar@gmail.com and called 5551234567 for the order");
         assert!(!s.contains("brishti.sarkar@gmail.com"), "{s}");
-        assert!(s.contains("b•••@•••.com"), "recognisable shape survives: {s}");
+        assert!(
+            s.contains("b•••@•••.com"),
+            "recognisable shape survives: {s}"
+        );
         assert!(!s.contains("5551234567"), "{s}");
-        assert!(s.contains("•••67"), "the last two digits anchor recognition: {s}");
-        assert!(s.contains("for the order"), "prose around the values is untouched");
+        assert!(
+            s.contains("•••67"),
+            "the last two digits anchor recognition: {s}"
+        );
+        assert!(
+            s.contains("for the order"),
+            "prose around the values is untouched"
+        );
     }
 
     /// Credentials are masked on EVERY surface — including the final answer, even if asked.
     #[test]
     fn credentials_never_render_anywhere() {
-        for surface in [redact_stream as fn(&str) -> String, redact_answer as fn(&str) -> String] {
+        for surface in [
+            redact_stream as fn(&str) -> String,
+            redact_answer as fn(&str) -> String,
+        ] {
             let s = surface("the key is nvapi-8IwezH3XBe8gBGkAGSZNFaMkS1ugmKc62UmKWFCLU3Yg and gsk_dA7T7qxKjURu3ZE5F7No");
             assert!(!s.contains("8IwezH3XBe"), "{s}");
             assert!(!s.contains("dA7T7qxKjURu"), "{s}");
-            assert!(s.contains("·masked·"), "masking must be visible as masking: {s}");
+            assert!(
+                s.contains("·masked·"),
+                "masking must be visible as masking: {s}"
+            );
         }
     }
 
     /// The answer rule: personal values PASS — asking for them is what the mind is for.
     #[test]
     fn answers_keep_personal_values() {
-        let s = redact_answer("Brishti's email is brishti.sarkar@gmail.com and the order line is 5551234567.");
+        let s = redact_answer(
+            "Brishti's email is brishti.sarkar@gmail.com and the order line is 5551234567.",
+        );
         assert!(s.contains("brishti.sarkar@gmail.com"), "{s}");
         assert!(s.contains("5551234567"), "{s}");
     }
@@ -160,7 +196,10 @@ mod tests {
     fn hex_digests_are_not_credentials() {
         let d = "daf7920844e30d5add1db90f9ea7bcf7350ce3f9da03f7f8d01997af7467da89";
         assert_eq!(redact_answer(&format!("blake3 {d}")), format!("blake3 {d}"));
-        assert_eq!(redact_stream(&format!("digest {d} verified")), format!("digest {d} verified"));
+        assert_eq!(
+            redact_stream(&format!("digest {d} verified")),
+            format!("digest {d} verified")
+        );
     }
 
     /// JSON fragments (the live tail often carries them) keep their structure — only values mask.

@@ -15,7 +15,13 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn save_subs(&self, subs: &[serde_json::Value]) {
-        let _ = self.memory.profile_set("subscriptions", &serde_json::Value::Array(subs.to_vec()).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "subscriptions",
+                &serde_json::Value::Array(subs.to_vec()).to_string(),
+            )
+            .await;
     }
 
     /// The finance command router (used by `ym money`/`ym sub(s)` and the chat tool).
@@ -40,7 +46,9 @@ impl super::ConversationEngine {
 
     pub(crate) async fn sub_add(&self, arg: &str) -> String {
         let toks: Vec<&str> = arg.split_whitespace().collect();
-        let amt_idx = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok());
+        let amt_idx = toks
+            .iter()
+            .position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok());
         let Some(i) = amt_idx else {
             return "Usage: ym sub add <name> <amount> [monthly|yearly|weekly]".to_string();
         };
@@ -48,11 +56,28 @@ impl super::ConversationEngine {
         if name.is_empty() {
             return "Need a name — ym sub add <name> <amount> [cycle]".to_string();
         }
-        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
-        let currency = if toks[i].starts_with('₹') { "₹" } else if toks[i].starts_with('€') { "€" } else if toks[i].starts_with('£') { "£" } else { "$" };
-        let cycle = toks.get(i + 1).map(|s| s.to_lowercase()).unwrap_or_else(|| "monthly".to_string());
+        let amount: f64 = strip_currency(toks[i])
+            .replace(',', "")
+            .parse()
+            .unwrap_or(0.0);
+        let currency = if toks[i].starts_with('₹') {
+            "₹"
+        } else if toks[i].starts_with('€') {
+            "€"
+        } else if toks[i].starts_with('£') {
+            "£"
+        } else {
+            "$"
+        };
+        let cycle = toks
+            .get(i + 1)
+            .map_or_else(|| "monthly".to_string(), |s| s.to_lowercase());
         let mut subs = self.load_subs().await;
-        subs.retain(|s| !s.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false));
+        subs.retain(|s| {
+            !s.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(&name))
+        });
         subs.push(serde_json::json!({ "name": name, "amount": amount, "cycle": cycle, "currency": currency }));
         self.save_subs(&subs).await;
         format!("Added {name} — {currency}{amount} {cycle} (~{currency}{:.2}/mo). Tracking {} subscription(s) now.", sub_monthly(amount, &cycle), subs.len())
@@ -64,7 +89,11 @@ impl super::ConversationEngine {
         }
         let mut subs = self.load_subs().await;
         let before = subs.len();
-        subs.retain(|s| !s.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false));
+        subs.retain(|s| {
+            !s.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        });
         if subs.len() == before {
             return format!("No subscription named '{name}'. `ym subs` to see them.");
         }
@@ -75,9 +104,12 @@ impl super::ConversationEngine {
     pub(crate) async fn subs_list(&self) -> String {
         let subs = self.load_subs().await;
         if subs.is_empty() {
-            return "No subscriptions tracked yet — add one: `ym sub add Netflix 15.99 monthly`".to_string();
+            return "No subscriptions tracked yet — add one: `ym sub add Netflix 15.99 monthly`"
+                .to_string();
         }
-        let get_str = |s: &serde_json::Value, k: &str, d: &str| s.get(k).and_then(|x| x.as_str()).unwrap_or(d).to_string();
+        let get_str = |s: &serde_json::Value, k: &str, d: &str| {
+            s.get(k).and_then(|x| x.as_str()).unwrap_or(d).to_string()
+        };
         let cur = get_str(&subs[0], "currency", "$");
         let mut total = 0.0;
         let mut lines = Vec::new();
@@ -90,7 +122,12 @@ impl super::ConversationEngine {
             total += m;
             lines.push(format!("• {name} — {c}{amount} {cycle} (~{c}{m:.2}/mo)"));
         }
-        format!("{}\n— {} subscriptions, ~{cur}{total:.2}/mo (~{cur}{:.0}/yr)", lines.join("\n"), subs.len(), total * 12.0)
+        format!(
+            "{}\n— {} subscriptions, ~{cur}{total:.2}/mo (~{cur}{:.0}/yr)",
+            lines.join("\n"),
+            subs.len(),
+            total * 12.0
+        )
     }
 
     pub(crate) async fn money_overview(&self) -> String {
@@ -100,9 +137,17 @@ impl super::ConversationEngine {
         }
         let total: f64 = subs
             .iter()
-            .map(|s| sub_monthly(s.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0), s.get("cycle").and_then(|x| x.as_str()).unwrap_or("monthly")))
+            .map(|s| {
+                sub_monthly(
+                    s.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    s.get("cycle").and_then(|x| x.as_str()).unwrap_or("monthly"),
+                )
+            })
             .sum();
-        let cur = subs[0].get("currency").and_then(|x| x.as_str()).unwrap_or("$");
+        let cur = subs[0]
+            .get("currency")
+            .and_then(|x| x.as_str())
+            .unwrap_or("$");
         format!("💸 Tracking {} subscription(s), ~{cur}{total:.2}/mo (~{cur}{:.0}/yr). `ym subs` for the breakdown.", subs.len(), total * 12.0)
     }
 
@@ -118,7 +163,13 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn save_holdings(&self, h: &[serde_json::Value]) {
-        let _ = self.memory.profile_set("holdings", &serde_json::Value::Array(h.to_vec()).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "holdings",
+                &serde_json::Value::Array(h.to_vec()).to_string(),
+            )
+            .await;
     }
 
     /// `ym holding ...` router.
@@ -144,7 +195,11 @@ impl super::ConversationEngine {
             return format!("How many {ticker}? Give a positive number of shares/units.");
         }
         let mut cost: Option<f64> = None;
-        let mut kind = if is_crypto_symbol(&ticker) { "crypto" } else { "stock" };
+        let mut kind = if is_crypto_symbol(&ticker) {
+            "crypto"
+        } else {
+            "stock"
+        };
         for t in &toks[2..] {
             let tl = t.to_lowercase();
             if tl == "crypto" || tl == "coin" {
@@ -156,10 +211,18 @@ impl super::ConversationEngine {
             }
         }
         let mut holdings = self.load_holdings().await;
-        holdings.retain(|h| !h.get("ticker").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(&ticker)).unwrap_or(false));
-        holdings.push(serde_json::json!({ "ticker": ticker, "shares": shares, "cost": cost, "kind": kind }));
+        holdings.retain(|h| {
+            !h.get("ticker")
+                .and_then(|x| x.as_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case(&ticker))
+        });
+        holdings.push(
+            serde_json::json!({ "ticker": ticker, "shares": shares, "cost": cost, "kind": kind }),
+        );
         self.save_holdings(&holdings).await;
-        let costnote = cost.map(|c| format!(" @ ${}", money(c))).unwrap_or_default();
+        let costnote = cost
+            .map(|c| format!(" @ ${}", money(c)))
+            .unwrap_or_default();
         format!("Added {} {ticker}{costnote} ({kind}). Tracking {} position(s) — `ym portfolio` to value them.", fmt_shares(shares), holdings.len())
     }
 
@@ -170,12 +233,23 @@ impl super::ConversationEngine {
         }
         let mut holdings = self.load_holdings().await;
         let before = holdings.len();
-        holdings.retain(|h| !h.get("ticker").and_then(|x| x.as_str()).map(|x| x.eq_ignore_ascii_case(ticker)).unwrap_or(false));
+        holdings.retain(|h| {
+            !h.get("ticker")
+                .and_then(|x| x.as_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case(ticker))
+        });
         if holdings.len() == before {
-            return format!("No holding '{}'. `ym portfolio` to see them.", ticker.to_uppercase());
+            return format!(
+                "No holding '{}'. `ym portfolio` to see them.",
+                ticker.to_uppercase()
+            );
         }
         self.save_holdings(&holdings).await;
-        format!("Removed {}. {} position(s) left.", ticker.to_uppercase(), holdings.len())
+        format!(
+            "Removed {}. {} position(s) left.",
+            ticker.to_uppercase(),
+            holdings.len()
+        )
     }
 
     /// Live valuation: each position's price, value, P&L vs cost, allocation %, + a concentration
@@ -185,9 +259,8 @@ impl super::ConversationEngine {
         if holdings.is_empty() {
             return "📊 No holdings tracked yet. Add one: `ym holding add AAPL 10 175.50` (shares + optional cost basis). Crypto too: `ym holding add BTC 0.5 crypto`.".to_string();
         }
-        let markets = match &self.markets {
-            Some(m) => m,
-            None => return "(markets aren't configured — can't value the portfolio)".to_string(),
+        let Some(markets) = &self.markets else {
+            return "(markets aren't configured — can't value the portfolio)".to_string();
         };
         struct Row {
             ticker: String,
@@ -199,14 +272,34 @@ impl super::ConversationEngine {
         let mut rows: Vec<Row> = Vec::new();
         // Sequential — small N, and gentle on the free quote APIs (no concurrent rate-limit hit).
         for h in &holdings {
-            let ticker = h.get("ticker").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+            let ticker = h
+                .get("ticker")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?")
+                .to_string();
             let shares = h.get("shares").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let cost = h.get("cost").and_then(|x| x.as_f64());
             let kind = h.get("kind").and_then(|x| x.as_str()).unwrap_or("stock");
-            let q = if kind == "crypto" { markets.crypto_quote(&ticker).await } else { markets.stock_quote(&ticker).await };
+            let q = if kind == "crypto" {
+                markets.crypto_quote(&ticker).await
+            } else {
+                markets.stock_quote(&ticker).await
+            };
             match q {
-                Ok(quote) => rows.push(Row { ticker, shares, cost, value: Some(shares * quote.price), chg: quote.change_pct }),
-                Err(_) => rows.push(Row { ticker, shares, cost, value: None, chg: 0.0 }),
+                Ok(quote) => rows.push(Row {
+                    ticker,
+                    shares,
+                    cost,
+                    value: Some(shares * quote.price),
+                    chg: quote.change_pct,
+                }),
+                Err(_) => rows.push(Row {
+                    ticker,
+                    shares,
+                    cost,
+                    value: None,
+                    chg: 0.0,
+                }),
             }
         }
         let total: f64 = rows.iter().filter_map(|r| r.value).sum();
@@ -227,10 +320,18 @@ impl super::ConversationEngine {
         let mut lines = Vec::new();
         for r in &rows {
             let Some(value) = r.value else {
-                lines.push(format!("• {} {} — (no live quote)", fmt_shares(r.shares), r.ticker));
+                lines.push(format!(
+                    "• {} {} — (no live quote)",
+                    fmt_shares(r.shares),
+                    r.ticker
+                ));
                 continue;
             };
-            let alloc = if total > 0.0 { value / total * 100.0 } else { 0.0 };
+            let alloc = if total > 0.0 {
+                value / total * 100.0
+            } else {
+                0.0
+            };
             let arrow = if r.chg >= 0.0 { "▲" } else { "▼" };
             let pl = match r.cost {
                 Some(c) if c > 0.0 => {
@@ -239,7 +340,13 @@ impl super::ConversationEngine {
                 }
                 _ => String::new(),
             };
-            lines.push(format!("• {} {} → ${}  {arrow}{:.1}%{pl}   ({alloc:.0}%)", fmt_shares(r.shares), r.ticker, money(value), r.chg.abs()));
+            lines.push(format!(
+                "• {} {} → ${}  {arrow}{:.1}%{pl}   ({alloc:.0}%)",
+                fmt_shares(r.shares),
+                r.ticker,
+                money(value),
+                r.chg.abs()
+            ));
         }
         let mut header = format!("📊 Portfolio — ${}", money(total));
         if total_cost > 0.0 {
@@ -248,14 +355,25 @@ impl super::ConversationEngine {
             let arrow = if pl >= 0.0 { "▲" } else { "▼" };
             let sign = if pl >= 0.0 { "+" } else { "-" };
             // Note when the P&L only covers some positions (the rest have no cost basis recorded).
-            let scope = if priced < rows.len() { format!(" on {priced} of {} positions", rows.len()) } else { String::new() };
-            header.push_str(&format!("  ({arrow} {sign}${}, {sign}{:.1}%{scope})", money(pl.abs()), plpct.abs()));
+            let scope = if priced < rows.len() {
+                format!(" on {priced} of {} positions", rows.len())
+            } else {
+                String::new()
+            };
+            header.push_str(&format!(
+                "  ({arrow} {sign}${}, {sign}{:.1}%{scope})",
+                money(pl.abs()),
+                plpct.abs()
+            ));
         }
         // Concentration observation (factual, not advice): the biggest single position.
         let mut note = String::new();
         if total > 0.0 {
             if let Some(top) = rows.iter().filter(|r| r.value.is_some()).max_by(|a, b| {
-                a.value.unwrap_or(0.0).partial_cmp(&b.value.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
+                a.value
+                    .unwrap_or(0.0)
+                    .partial_cmp(&b.value.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }) {
                 let alloc = top.value.unwrap_or(0.0) / total * 100.0;
                 if alloc >= 40.0 {
@@ -275,22 +393,35 @@ impl super::ConversationEngine {
     pub(crate) async fn analyze_ticker(&self, raw: &str) -> String {
         let toks: Vec<&str> = raw.split_whitespace().collect();
         if toks.is_empty() {
-            return "Analyze what? e.g. `ym analyze AAPL` (or `ym analyze BTC crypto`).".to_string();
+            return "Analyze what? e.g. `ym analyze AAPL` (or `ym analyze BTC crypto`)."
+                .to_string();
         }
         let ticker = toks[0].to_uppercase();
-        let kind = if toks.iter().any(|t| t.eq_ignore_ascii_case("crypto")) || is_crypto_symbol(&ticker) { "crypto" } else { "stock" };
-        let markets = match &self.markets {
-            Some(m) => m,
-            None => return "(markets aren't configured)".to_string(),
+        let kind =
+            if toks.iter().any(|t| t.eq_ignore_ascii_case("crypto")) || is_crypto_symbol(&ticker) {
+                "crypto"
+            } else {
+                "stock"
+            };
+        let Some(markets) = &self.markets else {
+            return "(markets aren't configured)".to_string();
         };
         // 1. The live quote (and the proper name to search the other sources by).
-        let quote = if kind == "crypto" { markets.crypto_quote(&ticker).await } else { markets.stock_quote(&ticker).await };
+        let quote = if kind == "crypto" {
+            markets.crypto_quote(&ticker).await
+        } else {
+            markets.stock_quote(&ticker).await
+        };
         let quote = match quote {
             Ok(q) => q,
             Err(e) => return format!("Couldn't get a quote for {ticker}: {e}. Check the symbol?"),
         };
         let name = quote.name.clone();
-        let qline = if kind == "crypto" { quote.render_crypto() } else { quote.render_stock() };
+        let qline = if kind == "crypto" {
+            quote.render_crypto()
+        } else {
+            quote.render_stock()
+        };
 
         // 2. Gather INDEPENDENT sources (bounded). Each is untrusted reference data.
         let wiki = match &self.wiki {
@@ -309,7 +440,10 @@ impl super::ConversationEngine {
         };
         let mut web_text = String::new();
         if let Some(se) = &self.searcher {
-            if let Ok(hits) = se.search(&format!("{name} {ticker} stock analysis outlook risks"), 6).await {
+            if let Ok(hits) = se
+                .search(&format!("{name} {ticker} stock analysis outlook risks"), 6)
+                .await
+            {
                 for h in hits.iter().take(6) {
                     web_text.push_str(&format!("- {} — {} [{}]\n", h.title, h.snippet, h.url));
                 }
@@ -329,7 +463,11 @@ impl super::ConversationEngine {
         let holdings = self.load_holdings().await;
         let portfolio_note = holdings
             .iter()
-            .find(|h| h.get("ticker").and_then(|x| x.as_str()).map(|t| t.eq_ignore_ascii_case(&ticker)).unwrap_or(false))
+            .find(|h| {
+                h.get("ticker")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|t| t.eq_ignore_ascii_case(&ticker))
+            })
             .map(|h| {
                 let shares = h.get("shares").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 format!("\n\nNOTE: the user HOLDS this — {} {} (~${} now). Work that in, including any concentration consideration.", fmt_shares(shares), ticker, money(shares * quote.price))
@@ -346,8 +484,21 @@ impl super::ConversationEngine {
         let prompt = format!(
             "You are a careful financial ANALYST (NOT an advisor) briefing the user on {name} ({ticker}). Use ONLY the multi-source evidence below, and CONSOLIDATE across the sources — note where they agree and where they disagree, don't just relay headlines.\n\n=== EVIDENCE ===\n{evidence}{portfolio_note}\n\n=== WRITE ===\n1. What {name} is/does — one line, from the profile.\n2. Recent price action — cite the live-quote figure.\n3. What the sources collectively say (consolidated; flag any disagreement).\n4. The BULL case and the BEAR case — both, balanced.\n5. Key RISKS / what to watch.\n\nHARD RULES: Do NOT invent any number, price, ratio, or target not present in the evidence. Do NOT say buy/sell/hold and do NOT predict the price. Stay balanced (always include the bear case). Under 230 words. End with exactly this line: 'This is analysis to consider — not financial advice. You decide.'"
         );
-        let cfg = GenerationConfig { max_tokens: 900, ..GenerationConfig::default() };
-        match self.inference.chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg).await {
+        let cfg = GenerationConfig {
+            max_tokens: 900,
+            ..GenerationConfig::default()
+        };
+        match self
+            .inference
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
+            .await
+        {
             Ok(r) => format!("📊 {name} ({ticker}) — {qline}\n\n{}", r.text.trim()),
             Err(e) => format!("(couldn't complete the analysis: {e})"),
         }
@@ -373,7 +524,8 @@ impl super::ConversationEngine {
             }
         }
         if lines.is_empty() {
-            return "No email to scan right now (none of the connected inboxes returned mail).".to_string();
+            return "No email to scan right now (none of the connected inboxes returned mail)."
+                .to_string();
         }
         let block: String = lines.join("\n");
         let prompt = format!(
@@ -383,7 +535,10 @@ impl super::ConversationEngine {
              actually appears, else null), and cycle (\"monthly\" or \"yearly\" if known, else null). Output ONLY a \
              JSON array, e.g. [{{\"name\":\"Netflix\",\"amount\":15.99,\"cycle\":\"monthly\"}}].\n\nEMAILS:\n{block}"
         );
-        let cfg = GenerationConfig { max_tokens: 1500, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 1500,
+            ..GenerationConfig::default()
+        };
         let text = match self
             .inference
             .chat_grounded(vec![ChatMessage::system("You extract recurring subscriptions from email metadata. Output only a JSON array."), ChatMessage::user(&prompt)], cfg)
@@ -402,16 +557,31 @@ impl super::ConversationEngine {
             return "I scanned your inbox but didn't spot any clear subscriptions.".to_string();
         }
         let mut tracked = self.load_subs().await;
-        let already: std::collections::HashSet<String> =
-            tracked.iter().filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|n| n.to_lowercase())).collect();
+        let already: std::collections::HashSet<String> = tracked
+            .iter()
+            .filter_map(|s| {
+                s.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_lowercase())
+            })
+            .collect();
         let (mut added, mut no_amount) = (Vec::new(), Vec::new());
         let mut changed = false;
         for item in &arr {
-            let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let name = item
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if name.len() < 2 || already.contains(&name.to_lowercase()) {
                 continue;
             }
-            let cycle = item.get("cycle").and_then(|x| x.as_str()).unwrap_or("monthly").to_string();
+            let cycle = item
+                .get("cycle")
+                .and_then(|x| x.as_str())
+                .unwrap_or("monthly")
+                .to_string();
             match item.get("amount").and_then(|x| x.as_f64()) {
                 Some(a) if a > 0.0 => {
                     tracked.push(serde_json::json!({ "name": name, "amount": a, "cycle": cycle, "currency": "$" }));
@@ -426,7 +596,11 @@ impl super::ConversationEngine {
         }
         let mut out = String::new();
         if !added.is_empty() {
-            out.push_str(&format!("📬 Found + tracked {} subscription(s) from your mail: {}.\n", added.len(), added.join(", ")));
+            out.push_str(&format!(
+                "📬 Found + tracked {} subscription(s) from your mail: {}.\n",
+                added.len(),
+                added.join(", ")
+            ));
         }
         if !no_amount.is_empty() {
             out.push_str(&format!("I also see these but couldn't read a price — add with `ym sub add <name> <amount>`: {}.\n", no_amount.join(", ")));
@@ -438,14 +612,24 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn load_bills(&self) -> Vec<serde_json::Value> {
-        self.memory.profile_get("bills").await.ok().flatten()
+        self.memory
+            .profile_get("bills")
+            .await
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default()
     }
 
     pub(crate) async fn save_bills(&self, bills: &[serde_json::Value]) {
-        let _ = self.memory.profile_set("bills", &serde_json::Value::Array(bills.to_vec()).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "bills",
+                &serde_json::Value::Array(bills.to_vec()).to_string(),
+            )
+            .await;
     }
 
     pub(crate) async fn bill_cmd(&self, action: &str, arg: &str) -> String {
@@ -460,7 +644,9 @@ impl super::ConversationEngine {
 
     pub(crate) async fn bill_add(&self, arg: &str) -> String {
         let toks: Vec<&str> = arg.split_whitespace().collect();
-        let amt_idx = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok());
+        let amt_idx = toks
+            .iter()
+            .position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok());
         let Some(i) = amt_idx else {
             return "Usage: ym bill add <name> <amount> <due-day> [monthly|yearly]".to_string();
         };
@@ -468,21 +654,47 @@ impl super::ConversationEngine {
         if name.is_empty() {
             return "Need a name — ym bill add <name> <amount> <due-day>".to_string();
         }
-        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
-        let currency = if toks[i].starts_with('₹') { "₹" } else if toks[i].starts_with('€') { "€" } else if toks[i].starts_with('£') { "£" } else { "$" };
+        let amount: f64 = strip_currency(toks[i])
+            .replace(',', "")
+            .parse()
+            .unwrap_or(0.0);
+        let currency = if toks[i].starts_with('₹') {
+            "₹"
+        } else if toks[i].starts_with('€') {
+            "€"
+        } else if toks[i].starts_with('£') {
+            "£"
+        } else {
+            "$"
+        };
         let (mut due_day, mut cycle) = (1u32, "monthly".to_string());
         for t in &toks[i + 1..] {
-            let tl = t.trim_end_matches(|c: char| c.is_alphabetic()).to_lowercase(); // "23rd" → "23"
+            let tl = t
+                .trim_end_matches(|c: char| c.is_alphabetic())
+                .to_lowercase(); // "23rd" → "23"
             if let Ok(d) = tl.parse::<u32>() {
                 if (1..=31).contains(&d) {
                     due_day = d;
                 }
-            } else if ["monthly", "yearly", "annual", "annually", "weekly", "quarterly"].contains(&t.to_lowercase().as_str()) {
+            } else if [
+                "monthly",
+                "yearly",
+                "annual",
+                "annually",
+                "weekly",
+                "quarterly",
+            ]
+            .contains(&t.to_lowercase().as_str())
+            {
                 cycle = t.to_lowercase();
             }
         }
         let mut bills = self.load_bills().await;
-        bills.retain(|b| !b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false));
+        bills.retain(|b| {
+            !b.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(&name))
+        });
         bills.push(serde_json::json!({
             "name": name, "amount": amount, "due_day": due_day, "cycle": cycle, "currency": currency,
             "src": "told", "added": local_now().format("%b %d, %Y").to_string(),
@@ -497,7 +709,11 @@ impl super::ConversationEngine {
         }
         let mut bills = self.load_bills().await;
         let before = bills.len();
-        bills.retain(|b| !b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false));
+        bills.retain(|b| {
+            !b.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        });
         if bills.len() == before {
             return format!("No bill named '{name}'. `ym bills` to see them.");
         }
@@ -510,7 +726,11 @@ impl super::ConversationEngine {
         if bills.is_empty() {
             return "No bills tracked — add one: `ym bill add electric 120 23 monthly`".to_string();
         }
-        let cur = bills[0].get("currency").and_then(|x| x.as_str()).unwrap_or("$").to_string();
+        let cur = bills[0]
+            .get("currency")
+            .and_then(|x| x.as_str())
+            .unwrap_or("$")
+            .to_string();
         let mut total = 0.0;
         let mut lines = Vec::new();
         for b in &bills {
@@ -521,13 +741,36 @@ impl super::ConversationEngine {
             let c = b.get("currency").and_then(|x| x.as_str()).unwrap_or("$");
             total += sub_monthly(amount, cycle);
             let d = bill_days_until(due_day);
-            let due = if d == 0 { " — due TODAY".to_string() } else if d > 0 && d <= 5 { format!(" — due in {d}d") } else { String::new() };
-            let ap = if b.get("autopay").and_then(|x| x.as_bool()).unwrap_or(false) { " · autopay" } else { "" };
-            let ap = format!("{ap}{}", b.get("added").and_then(|x| x.as_str()).map(|d| format!(" · added {d}")).unwrap_or_default());
+            let due = if d == 0 {
+                " — due TODAY".to_string()
+            } else if d > 0 && d <= 5 {
+                format!(" — due in {d}d")
+            } else {
+                String::new()
+            };
+            let ap = if b.get("autopay").and_then(|x| x.as_bool()).unwrap_or(false) {
+                " · autopay"
+            } else {
+                ""
+            };
+            let ap = format!(
+                "{ap}{}",
+                b.get("added")
+                    .and_then(|x| x.as_str())
+                    .map(|d| format!(" · added {d}"))
+                    .unwrap_or_default()
+            );
             let ap = ap.as_str();
-            lines.push(format!("• {name} — {c}{amount}, the {due_day}{} ({cycle}){due}{ap}", ordinal(due_day)));
+            lines.push(format!(
+                "• {name} — {c}{amount}, the {due_day}{} ({cycle}){due}{ap}",
+                ordinal(due_day)
+            ));
         }
-        format!("{}\n— {} bills, ~{cur}{total:.2}/mo", lines.join("\n"), bills.len())
+        format!(
+            "{}\n— {} bills, ~{cur}{total:.2}/mo",
+            lines.join("\n"),
+            bills.len()
+        )
     }
 
     /// Proactive bill reminder: any bill due within ~2 days that hasn't been flagged this month.
@@ -559,7 +802,11 @@ impl super::ConversationEngine {
             if !(0..=2).contains(&d) {
                 continue;
             }
-            let name = b.get("name").and_then(|x| x.as_str()).unwrap_or("a bill").to_string();
+            let name = b
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("a bill")
+                .to_string();
             let key = format!("{name}:{ym}");
             if reminded.contains(&key) {
                 continue;
@@ -568,13 +815,23 @@ impl super::ConversationEngine {
             dirty = true;
             let amount = b.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let cur = b.get("currency").and_then(|x| x.as_str()).unwrap_or("$");
-            let when = if d == 0 { "today".to_string() } else { format!("in {d} day(s)") };
-            let prov = match (b.get("src").and_then(|x| x.as_str()), b.get("added").and_then(|x| x.as_str())) {
+            let when = if d == 0 {
+                "today".to_string()
+            } else {
+                format!("in {d} day(s)")
+            };
+            let prov = match (
+                b.get("src").and_then(|x| x.as_str()),
+                b.get("added").and_then(|x| x.as_str()),
+            ) {
                 (Some("told"), Some(d)) => format!(" (you added this {d})"),
                 (Some(sr), Some(d)) => format!(" (from {sr}, {d})"),
                 _ => String::new(),
             };
-            out.push(format!("🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).{prov}", ordinal(due_day)));
+            out.push(format!(
+                "🧾 Heads up — {name} ({cur}{amount}) is due {when} (the {due_day}{}).{prov}",
+                ordinal(due_day)
+            ));
         }
         if dirty {
             if reminded.len() > 60 {
@@ -583,11 +840,15 @@ impl super::ConversationEngine {
             }
             let _ = self
                 .memory
-                .profile_set("bills_reminded", &serde_json::to_string(&reminded).unwrap_or_default())
+                .profile_set(
+                    "bills_reminded",
+                    &serde_json::to_string(&reminded).unwrap_or_default(),
+                )
                 .await;
         }
         if !out.is_empty() {
-            self.ledger_sent("bills", &format!("{} bill reminder(s)", out.len())).await;
+            self.ledger_sent("bills", &format!("{} bill reminder(s)", out.len()))
+                .await;
         }
         out
     }
@@ -601,7 +862,10 @@ impl super::ConversationEngine {
         let mut bills = self.load_bills().await;
         let mut hit = false;
         for b in bills.iter_mut() {
-            if b.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false) {
+            if b.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            {
                 b["autopay"] = serde_json::json!(true);
                 hit = true;
             }
@@ -610,19 +874,30 @@ impl super::ConversationEngine {
             return format!("No bill named '{name}'. `ym bills` to see them.");
         }
         self.save_bills(&bills).await;
-        self.ledger_correction("bills", name, "on autopay — stop reminding").await;
-        format!("✅ {name} marked autopay — I'll stop reminding you (it'll still show in `ym bills`).")
+        self.ledger_correction("bills", name, "on autopay — stop reminding")
+            .await;
+        format!(
+            "✅ {name} marked autopay — I'll stop reminding you (it'll still show in `ym bills`)."
+        )
     }
 
     pub(crate) async fn load_budgets(&self) -> serde_json::Map<String, serde_json::Value> {
-        self.memory.profile_get("budgets").await.ok().flatten()
+        self.memory
+            .profile_get("budgets")
+            .await
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default()
     }
 
     pub(crate) async fn load_expenses(&self) -> Vec<serde_json::Value> {
-        self.memory.profile_get("expenses").await.ok().flatten()
+        self.memory
+            .profile_get("expenses")
+            .await
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default()
@@ -635,37 +910,80 @@ impl super::ConversationEngine {
             return self.budget_overview().await;
         }
         let toks: Vec<&str> = arg.split_whitespace().collect();
-        let Some(i) = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok()) else {
-            return "Usage: ym budget <category> <amount>  (or just `ym budget` for the overview)".to_string();
+        let Some(i) = toks
+            .iter()
+            .position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok())
+        else {
+            return "Usage: ym budget <category> <amount>  (or just `ym budget` for the overview)"
+                .to_string();
         };
-        let category = toks.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, t)| *t).collect::<Vec<_>>().join(" ").to_lowercase();
+        let category = toks
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, t)| *t)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         if category.is_empty() {
             return "Which category? ym budget <category> <amount>".to_string();
         }
-        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
+        let amount: f64 = strip_currency(toks[i])
+            .replace(',', "")
+            .parse()
+            .unwrap_or(0.0);
         let mut budgets = self.load_budgets().await;
         budgets.insert(category.clone(), serde_json::json!(amount));
-        let _ = self.memory.profile_set("budgets", &serde_json::Value::Object(budgets).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("budgets", &serde_json::Value::Object(budgets).to_string())
+            .await;
         format!("Budget set: {category} ${amount:.0}/mo. Log spend with `ym spent <amount> {category}`.")
     }
 
     /// Log an expense ("45 dining" or "dining 45") into the current month.
     pub(crate) async fn expense_log(&self, arg: &str) -> String {
         let toks: Vec<&str> = arg.split_whitespace().collect();
-        let Some(i) = toks.iter().position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok()) else {
+        let Some(i) = toks
+            .iter()
+            .position(|t| strip_currency(t).replace(',', "").parse::<f64>().is_ok())
+        else {
             return "Usage: ym spent <amount> <category>".to_string();
         };
-        let amount: f64 = strip_currency(toks[i]).replace(',', "").parse().unwrap_or(0.0);
-        let category = toks.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, t)| *t).collect::<Vec<_>>().join(" ").to_lowercase();
+        let amount: f64 = strip_currency(toks[i])
+            .replace(',', "")
+            .parse()
+            .unwrap_or(0.0);
+        let category = toks
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, t)| *t)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         if category.is_empty() {
             return "What category? ym spent <amount> <category>".to_string();
         }
         let ym = current_ym();
         let mut exp = self.load_expenses().await;
         exp.push(serde_json::json!({ "amount": amount, "category": category, "ym": ym }));
-        let _ = self.memory.profile_set("expenses", &serde_json::Value::Array(exp.clone()).to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "expenses",
+                &serde_json::Value::Array(exp.clone()).to_string(),
+            )
+            .await;
         // show the category's status after logging
-        let spent: f64 = exp.iter().filter(|e| e.get("ym").and_then(|x| x.as_str()) == Some(ym.as_str()) && e.get("category").and_then(|x| x.as_str()) == Some(category.as_str())).filter_map(|e| e.get("amount").and_then(|x| x.as_f64())).sum();
+        let spent: f64 = exp
+            .iter()
+            .filter(|e| {
+                e.get("ym").and_then(|x| x.as_str()) == Some(ym.as_str())
+                    && e.get("category").and_then(|x| x.as_str()) == Some(category.as_str())
+            })
+            .filter_map(|e| e.get("amount").and_then(|x| x.as_f64()))
+            .sum();
         let budgets = self.load_budgets().await;
         match budgets.get(&category).and_then(|x| x.as_f64()) {
             Some(b) => format!("Logged ${amount:.2} on {category}. This month: ${spent:.2} / ${b:.0} ({}).", if spent > b { format!("${:.0} OVER", spent - b) } else { format!("${:.0} left", b - spent) }),
@@ -677,7 +995,11 @@ impl super::ConversationEngine {
         let budgets = self.load_budgets().await;
         let exp = self.load_expenses().await;
         let ym = current_ym();
-        if budgets.is_empty() && exp.iter().all(|e| e.get("ym").and_then(|x| x.as_str()) != Some(ym.as_str())) {
+        if budgets.is_empty()
+            && exp
+                .iter()
+                .all(|e| e.get("ym").and_then(|x| x.as_str()) != Some(ym.as_str()))
+        {
             return "No budgets or spend tracked this month. Set one: `ym budget dining 400`, log: `ym spent 45 dining`.".to_string();
         }
         let mut lines = Vec::new();
@@ -690,15 +1012,28 @@ impl super::ConversationEngine {
             }
         }
         for cat in &cats {
-            let spent: f64 = exp.iter().filter(|e| e.get("ym").and_then(|x| x.as_str()) == Some(ym.as_str()) && e.get("category").and_then(|x| x.as_str()) == Some(cat.as_str())).filter_map(|e| e.get("amount").and_then(|x| x.as_f64())).sum();
+            let spent: f64 = exp
+                .iter()
+                .filter(|e| {
+                    e.get("ym").and_then(|x| x.as_str()) == Some(ym.as_str())
+                        && e.get("category").and_then(|x| x.as_str()) == Some(cat.as_str())
+                })
+                .filter_map(|e| e.get("amount").and_then(|x| x.as_f64()))
+                .sum();
             match budgets.get(cat).and_then(|x| x.as_f64()) {
-                Some(b) => lines.push(format!("• {cat}: ${spent:.0} / ${b:.0} {}", if spent > b { format!("⚠ ${:.0} OVER", spent - b) } else { format!("(${:.0} left)", b - spent) })),
+                Some(b) => lines.push(format!(
+                    "• {cat}: ${spent:.0} / ${b:.0} {}",
+                    if spent > b {
+                        format!("⚠ ${:.0} OVER", spent - b)
+                    } else {
+                        format!("(${:.0} left)", b - spent)
+                    }
+                )),
                 None => lines.push(format!("• {cat}: ${spent:.0} spent (no budget set)")),
             }
         }
         format!("📊 This month:\n{}", lines.join("\n"))
     }
-
 }
 
 /// Finance as a DISPATCHABLE capability: the registry-owned surface for the `ym` money/subs/bills/
@@ -713,9 +1048,16 @@ impl crate::plugins::CapabilityHandler for FinanceCapability {
         "finance"
     }
 
-    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, rest: &str) -> Option<String> {
+    async fn handle_command(
+        &self,
+        host: &super::ConversationEngine,
+        cmd: &str,
+        rest: &str,
+    ) -> Option<String> {
         Some(match cmd {
-            "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => host.finance_cmd(cmd, rest).await,
+            "money" | "finance" | "subs" | "subscriptions" | "sub" | "subscription" => {
+                host.finance_cmd(cmd, rest).await
+            }
             "discover" | "scan" => host.discover_subscriptions().await,
             "bills" => host.bill_cmd("list", "").await,
             "bill" => {
@@ -729,10 +1071,17 @@ impl crate::plugins::CapabilityHandler for FinanceCapability {
         })
     }
 
-    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, _args: &serde_json::Value) -> Option<String> {
+    async fn handle_tool(
+        &self,
+        host: &super::ConversationEngine,
+        tool: &str,
+        _args: &serde_json::Value,
+    ) -> Option<String> {
         Some(match tool {
             "money" | "subscriptions" | "finance" => host.money_overview().await,
-            "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => host.discover_subscriptions().await,
+            "discover_subscriptions" | "find_subscriptions" | "scan_email_subscriptions" => {
+                host.discover_subscriptions().await
+            }
             "bills" => host.bills_list().await,
             "budget" | "budget_overview" => host.budget_overview().await,
             _ => return None,
@@ -750,27 +1099,57 @@ impl crate::plugins::CapabilityHandler for PortfolioCapability {
         "portfolio"
     }
 
-    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, rest: &str) -> Option<String> {
+    async fn handle_command(
+        &self,
+        host: &super::ConversationEngine,
+        cmd: &str,
+        rest: &str,
+    ) -> Option<String> {
         Some(match cmd {
             "portfolio" | "holdings" | "stocks" => host.portfolio_overview().await,
             "holding" | "position" => {
                 let mut p = rest.trim().splitn(2, char::is_whitespace);
                 let action = p.next().unwrap_or("").to_lowercase();
-                host.holding_cmd(&action, p.next().unwrap_or("").trim()).await
+                host.holding_cmd(&action, p.next().unwrap_or("").trim())
+                    .await
             }
             // same guard the old arm had: a bare `ym analyze` falls through to the legacy help
-            "analyze" | "analyse" | "analysis" if !rest.is_empty() => host.analyze_ticker(rest).await,
+            "analyze" | "analyse" | "analysis" if !rest.is_empty() => {
+                host.analyze_ticker(rest).await
+            }
             _ => return None,
         })
     }
 
-    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, args: &serde_json::Value) -> Option<String> {
-        let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    async fn handle_tool(
+        &self,
+        host: &super::ConversationEngine,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Option<String> {
+        let s = |k: &str| {
+            args.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
         Some(match tool {
             "portfolio" | "holdings" | "my_stocks" => host.portfolio_overview().await,
             "analyze" | "analyze_stock" | "stock_analysis" => {
-                let t = { let a = s("ticker"); if a.is_empty() { s("symbol") } else { a } };
-                if t.is_empty() { "(which stock/crypto should I analyze? give a ticker)".to_string() } else { host.analyze_ticker(&t).await }
+                let t = {
+                    let a = s("ticker");
+                    if a.is_empty() {
+                        s("symbol")
+                    } else {
+                        a
+                    }
+                };
+                if t.is_empty() {
+                    "(which stock/crypto should I analyze? give a ticker)".to_string()
+                } else {
+                    host.analyze_ticker(&t).await
+                }
             }
             "add_holding" | "track_holding" => {
                 let ticker = s("ticker");
@@ -778,7 +1157,8 @@ impl crate::plugins::CapabilityHandler for PortfolioCapability {
                 if ticker.is_empty() || shares.is_empty() {
                     "(to track a holding I need a ticker + number of shares)".to_string()
                 } else {
-                    host.holding_add(format!("{ticker} {shares} {}", s("cost")).trim()).await
+                    host.holding_add(format!("{ticker} {shares} {}", s("cost")).trim())
+                        .await
                 }
             }
             _ => return None,

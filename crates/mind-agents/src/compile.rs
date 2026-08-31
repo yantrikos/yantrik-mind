@@ -135,7 +135,10 @@ pub async fn compile(
     match draft {
         Some(d) => assemble(request, d, &available, budget),
         None => Compilation {
-            spec: GoalSpec { budget, ..GoalSpec::simple(request) },
+            spec: GoalSpec {
+                budget,
+                ..GoalSpec::simple(request)
+            },
             origin: Origin::Fallback,
             notes: Vec::new(),
         },
@@ -149,8 +152,12 @@ fn assemble(request: &str, d: Draft, available: &[String], budget: Budget) -> Co
 
     // Split what it asked for into what exists and what does not. A model naming a capability that is
     // not on the list it was given is common enough to handle rather than trust.
-    let (required, missing): (Vec<String>, Vec<String>) =
-        d.capabilities.into_iter().map(|c| c.trim().to_lowercase()).filter(|c| !c.is_empty()).partition(|c| ready.contains(c.as_str()));
+    let (required, missing): (Vec<String>, Vec<String>) = d
+        .capabilities
+        .into_iter()
+        .map(|c| c.trim().to_lowercase())
+        .filter(|c| !c.is_empty())
+        .partition(|c| ready.contains(c.as_str()));
     if !missing.is_empty() {
         notes.push(format!(
             "This needs {} which {} not set up here.",
@@ -159,15 +166,22 @@ fn assemble(request: &str, d: Draft, available: &[String], budget: Budget) -> Co
         ));
     }
 
-    let requirements: Vec<String> =
-        d.requirements.into_iter().map(|r| r.trim().to_string()).filter(|r| r.len() > 3).take(8).collect();
+    let requirements: Vec<String> = d
+        .requirements
+        .into_iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| r.len() > 3)
+        .take(8)
+        .collect();
 
     // A findings floor above what the goal could plausibly produce makes the contract unsatisfiable,
     // and an unsatisfiable contract burns the entire budget before finishing partial. Cap it.
     let min_findings = d.min_findings.unwrap_or(1).clamp(1, 12);
     let max_findings = d.max_findings.filter(|m| *m >= min_findings);
     if d.max_findings.is_some() && max_findings.is_none() {
-        notes.push("The result cap it suggested was below its own minimum, so I dropped it.".to_string());
+        notes.push(
+            "The result cap it suggested was below its own minimum, so I dropped it.".to_string(),
+        );
     }
     // Two sources is a meaningful bar; beyond that the contract is asking for corroboration the web
     // often cannot give, and the run would spend its budget failing the check rather than answering.
@@ -175,13 +189,23 @@ fn assemble(request: &str, d: Draft, available: &[String], budget: Budget) -> Co
 
     let objective = {
         let o = d.objective.trim();
-        if o.len() > 3 { o.to_string() } else { request.trim().to_string() }
+        if o.len() > 3 {
+            o.to_string()
+        } else {
+            request.trim().to_string()
+        }
     };
 
     let spec = GoalSpec {
         id: format!("g-{}", uuid_like(request)),
         goal: objective,
-        constraints: d.constraints.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).take(6).collect(),
+        constraints: d
+            .constraints
+            .into_iter()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .take(6)
+            .collect(),
         required_capabilities: required,
         missing_capabilities: missing,
         contract: Contract {
@@ -206,10 +230,18 @@ fn assemble(request: &str, d: Draft, available: &[String], budget: Budget) -> Co
         },
         budget,
         horizon: 3,
-        risk: if d.outward.unwrap_or(false) { Risk::Outward } else { Risk::ReadOnly },
+        risk: if d.outward.unwrap_or(false) {
+            Risk::Outward
+        } else {
+            Risk::ReadOnly
+        },
     };
 
-    Compilation { spec, origin: Origin::Compiled, notes }
+    Compilation {
+        spec,
+        origin: Origin::Compiled,
+        notes,
+    }
 }
 
 /// Lenient JSON extraction. A reasoner may wrap the object in a `<think>` preamble or a code fence,
@@ -241,7 +273,7 @@ fn humanize(items: &[String]) -> String {
 fn uuid_like(request: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in request.trim().to_lowercase().bytes() {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
     format!("{h:016x}")
@@ -268,14 +300,32 @@ mod tests {
             "requirements":["current market activity","supporting catalyst","identify downside/risk"],
             "capabilities":["markets","web_search"],
             "min_findings":3,"max_findings":8,"min_evidence":2,"needs_risk":true,"ranked":true}"#;
-        let c = compile(&pool(reply), &bus, "find me the best stocks today", Budget::interactive()).await;
+        let c = compile(
+            &pool(reply),
+            &bus,
+            "find me the best stocks today",
+            Budget::interactive(),
+        )
+        .await;
 
         assert_eq!(c.origin, Origin::Compiled);
         assert!(c.spec.is_runnable(), "both capabilities are available");
-        assert_eq!(c.spec.contract.completion.min_findings, 3, "'the best' is not one thing");
-        assert_eq!(c.spec.contract.completion.min_evidence_per_finding, 2, "money deserves corroboration");
-        assert!(c.spec.contract.completion.require_full_coverage, "requirements were stated, so enforce them");
-        assert!(c.spec.contract.output.include_risks, "an advisory answer must state the downside");
+        assert_eq!(
+            c.spec.contract.completion.min_findings, 3,
+            "'the best' is not one thing"
+        );
+        assert_eq!(
+            c.spec.contract.completion.min_evidence_per_finding, 2,
+            "money deserves corroboration"
+        );
+        assert!(
+            c.spec.contract.completion.require_full_coverage,
+            "requirements were stated, so enforce them"
+        );
+        assert!(
+            c.spec.contract.output.include_risks,
+            "an advisory answer must state the downside"
+        );
         assert!(c.spec.contract.output.ranked);
         assert_eq!(c.spec.contract.requirements.len(), 3);
         assert!(c.notes.is_empty(), "nothing needed saying");
@@ -287,13 +337,27 @@ mod tests {
     async fn a_missing_capability_is_reported_before_running() {
         let bus = FakeBus::new(&["web_search"]);
         let reply = r#"{"objective":"summarise my github","capabilities":["github","web_search"],"min_findings":1}"#;
-        let c = compile(&pool(reply), &bus, "what's open on my github?", Budget::interactive()).await;
+        let c = compile(
+            &pool(reply),
+            &bus,
+            "what's open on my github?",
+            Budget::interactive(),
+        )
+        .await;
 
         assert!(!c.spec.is_runnable());
         assert_eq!(c.spec.missing_capabilities, vec!["github"]);
-        assert_eq!(c.spec.required_capabilities, vec!["web_search"], "what IS available still resolves");
+        assert_eq!(
+            c.spec.required_capabilities,
+            vec!["web_search"],
+            "what IS available still resolves"
+        );
         assert_eq!(c.notes.len(), 1);
-        assert!(c.notes[0].contains("github") && c.notes[0].contains("is not set up"), "{}", c.notes[0]);
+        assert!(
+            c.notes[0].contains("github") && c.notes[0].contains("is not set up"),
+            "{}",
+            c.notes[0]
+        );
     }
 
     /// A model naming a capability that was never on the list it was given is common. It must be
@@ -301,7 +365,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_invented_capability_is_treated_as_missing() {
         let bus = FakeBus::new(&["web_search"]);
-        let reply = r#"{"objective":"do a thing","capabilities":["quantum_oracle"],"min_findings":1}"#;
+        let reply =
+            r#"{"objective":"do a thing","capabilities":["quantum_oracle"],"min_findings":1}"#;
         let c = compile(&pool(reply), &bus, "do a thing", Budget::interactive()).await;
         assert_eq!(c.spec.missing_capabilities, vec!["quantum_oracle"]);
         assert!(c.spec.required_capabilities.is_empty());
@@ -313,9 +378,18 @@ mod tests {
     async fn a_simple_question_gets_a_simple_contract() {
         let bus = FakeBus::new(&["weather"]);
         let reply = r#"{"objective":"today's weather in Pune","capabilities":["weather"],"min_findings":1}"#;
-        let c = compile(&pool(reply), &bus, "what's the weather in pune?", Budget::interactive()).await;
+        let c = compile(
+            &pool(reply),
+            &bus,
+            "what's the weather in pune?",
+            Budget::interactive(),
+        )
+        .await;
         assert_eq!(c.spec.contract.completion.min_findings, 1);
-        assert!(!c.spec.contract.completion.require_full_coverage, "no requirements stated, none enforced");
+        assert!(
+            !c.spec.contract.completion.require_full_coverage,
+            "no requirements stated, none enforced"
+        );
         assert!(!c.spec.contract.output.include_risks);
         assert_eq!(c.spec.risk, Risk::ReadOnly);
     }
@@ -324,11 +398,25 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_useless_compile_degrades_instead_of_refusing() {
         let bus = FakeBus::new(&["web_search"]);
-        for junk in ["I'm sorry, I can't help with that.", "", "{}", "{\"objective\":\"\"}"] {
-            let c = compile(&pool(junk), &bus, "why is the sky blue?", Budget::interactive()).await;
+        for junk in [
+            "I'm sorry, I can't help with that.",
+            "",
+            "{}",
+            "{\"objective\":\"\"}",
+        ] {
+            let c = compile(
+                &pool(junk),
+                &bus,
+                "why is the sky blue?",
+                Budget::interactive(),
+            )
+            .await;
             assert_eq!(c.origin, Origin::Fallback, "junk {junk:?} should fall back");
             assert!(c.spec.is_runnable(), "the fallback must always be runnable");
-            assert_eq!(c.spec.goal, "why is the sky blue?", "the fallback keeps the user's own words");
+            assert_eq!(
+                c.spec.goal, "why is the sky blue?",
+                "the fallback keeps the user's own words"
+            );
             assert_eq!(c.spec.contract.completion.min_findings, 1);
         }
     }
@@ -340,36 +428,65 @@ mod tests {
         let bus = FakeBus::new(&["web_search"]);
         let reply = r#"{"objective":"x","requirements":["a"],"min_findings":500,"min_evidence":9}"#;
         let c = compile(&pool(reply), &bus, "x", Budget::interactive()).await;
-        assert_eq!(c.spec.contract.completion.min_findings, 12, "a 500-finding contract cannot be met");
-        assert_eq!(c.spec.contract.completion.min_evidence_per_finding, 2, "beyond 2 the web often cannot corroborate");
+        assert_eq!(
+            c.spec.contract.completion.min_findings, 12,
+            "a 500-finding contract cannot be met"
+        );
+        assert_eq!(
+            c.spec.contract.completion.min_evidence_per_finding, 2,
+            "beyond 2 the web often cannot corroborate"
+        );
 
         // A cap below the floor is a contradiction: dropping it keeps the goal satisfiable, and the
         // note keeps that visible rather than mysterious.
         let reply2 = r#"{"objective":"x","min_findings":5,"max_findings":2}"#;
         let c2 = compile(&pool(reply2), &bus, "x", Budget::interactive()).await;
         assert_eq!(c2.spec.contract.completion.max_findings, None);
-        assert!(c2.notes.iter().any(|n| n.contains("below its own minimum")), "{:?}", c2.notes);
+        assert!(
+            c2.notes.iter().any(|n| n.contains("below its own minimum")),
+            "{:?}",
+            c2.notes
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_outward_request_is_marked_outward() {
         let bus = FakeBus::new(&["mail_intel"]);
-        let reply = r#"{"objective":"email the team the release notes","outward":true,"min_findings":1}"#;
-        let c = compile(&pool(reply), &bus, "email the team about the release", Budget::interactive()).await;
-        assert_eq!(c.spec.risk, Risk::Outward, "the controller stops for a human on an outward goal");
+        let reply =
+            r#"{"objective":"email the team the release notes","outward":true,"min_findings":1}"#;
+        let c = compile(
+            &pool(reply),
+            &bus,
+            "email the team about the release",
+            Budget::interactive(),
+        )
+        .await;
+        assert_eq!(
+            c.spec.risk,
+            Risk::Outward,
+            "the controller stops for a human on an outward goal"
+        );
     }
 
     /// The prompt must offer the model only real capabilities — otherwise it is being invited to
     /// hallucinate one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_prompt_lists_only_available_capabilities() {
-        let backend = Arc::new(mind_inference::SequencedLLM::new(vec![r#"{"objective":"x"}"#]));
+        let backend = Arc::new(mind_inference::SequencedLLM::new(vec![
+            r#"{"objective":"x"}"#,
+        ]));
         let p = InferencePool::new(backend.clone() as Arc<dyn LLMBackend>, 1);
         let bus = FakeBus::new(&["web_search", "weather"]);
         compile(&p, &bus, "anything", Budget::interactive()).await;
         let seen = backend.prompt_at(0);
-        assert!(seen.contains("AVAILABLE CAPABILITIES: [web_search, weather]"), "{seen}");
-        assert!(!seen.contains("github"), "an unavailable capability must not be suggested");
+        assert!(
+            seen.contains("AVAILABLE CAPABILITIES: [web_search, weather]"),
+            "{seen}"
+        );
+        assert!(
+            !seen.contains("github"),
+            "an unavailable capability must not be suggested"
+        );
     }
 
     /// A stable id is what makes an intent cache possible: the same request twice is the same goal.
@@ -381,14 +498,21 @@ mod tests {
 
     #[test]
     fn a_think_preamble_and_code_fence_do_not_lose_the_compile() {
-        let wrapped = "<think>Let me consider {this}.</think>\n```json\n{\"objective\":\"real goal\"}\n```";
+        let wrapped =
+            "<think>Let me consider {this}.</think>\n```json\n{\"objective\":\"real goal\"}\n```";
         assert_eq!(parse(wrapped).unwrap().objective, "real goal");
     }
 
     #[test]
     fn humanize_reads_as_a_sentence() {
         assert_eq!(humanize(&["github".into()]), "github");
-        assert_eq!(humanize(&["github".into(), "mail".into()]), "github and mail");
-        assert_eq!(humanize(&["a".into(), "b".into(), "c".into()]), "a, b and c");
+        assert_eq!(
+            humanize(&["github".into(), "mail".into()]),
+            "github and mail"
+        );
+        assert_eq!(
+            humanize(&["a".into(), "b".into(), "c".into()]),
+            "a, b and c"
+        );
     }
 }

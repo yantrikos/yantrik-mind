@@ -14,6 +14,8 @@
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
+#[cfg(feature = "test-support")]
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -33,10 +35,12 @@ impl McpServerConfig {
     /// `{ "mcpServers": { "<name>": { "command", "args": [..], "env": {..} } } }`. Also accepts the
     /// key `servers`, or the server-map at the top level directly.
     pub fn from_json(v: &Value) -> Vec<Self> {
-        let map = v.get("mcpServers").or_else(|| v.get("servers")).unwrap_or(v);
-        let obj = match map.as_object() {
-            Some(o) => o,
-            None => return vec![],
+        let map = v
+            .get("mcpServers")
+            .or_else(|| v.get("servers"))
+            .unwrap_or(v);
+        let Some(obj) = map.as_object() else {
+            return vec![];
         };
         let mut out = Vec::new();
         for (name, cfg) in obj {
@@ -44,21 +48,38 @@ impl McpServerConfig {
             if cfg.get("disabled").and_then(|x| x.as_bool()) == Some(true) {
                 continue;
             }
-            let command = cfg.get("command").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let command = cfg
+                .get("command")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if command.is_empty() {
                 continue;
             }
             let args = cfg
                 .get("args")
                 .and_then(|x| x.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let env = cfg
                 .get("env")
                 .and_then(|x| x.as_object())
-                .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
                 .unwrap_or_default();
-            out.push(Self { name: name.clone(), command, args, env });
+            out.push(Self {
+                name: name.clone(),
+                command,
+                args,
+                env,
+            });
         }
         out
     }
@@ -84,16 +105,28 @@ impl McpTool {
 /// Read-only if the server annotates it so; otherwise a conservative verb heuristic (when unknown,
 /// treat as mutating so it must clear the harm-gate).
 fn classify_read_only(tool: &Value, name: &str) -> bool {
-    if let Some(b) = tool.get("annotations").and_then(|a| a.get("readOnlyHint")).and_then(|x| x.as_bool()) {
+    if let Some(b) = tool
+        .get("annotations")
+        .and_then(|a| a.get("readOnlyHint"))
+        .and_then(|x| x.as_bool())
+    {
         return b;
     }
-    if tool.get("annotations").and_then(|a| a.get("destructiveHint")).and_then(|x| x.as_bool()) == Some(true) {
+    if tool
+        .get("annotations")
+        .and_then(|a| a.get("destructiveHint"))
+        .and_then(|x| x.as_bool())
+        == Some(true)
+    {
         return false;
     }
     let n = name.to_lowercase();
-    const READ: [&str; 12] =
-        ["get", "list", "search", "read", "fetch", "query", "find", "lookup", "describe", "show", "check", "retrieve"];
-    READ.iter().any(|p| n.starts_with(p) || n.contains(&format!("_{p}")))
+    const READ: [&str; 12] = [
+        "get", "list", "search", "read", "fetch", "query", "find", "lookup", "describe", "show",
+        "check", "retrieve",
+    ];
+    READ.iter()
+        .any(|p| n.starts_with(p) || n.contains(&format!("_{p}")))
 }
 
 /// Flatten an MCP `tools/call` result (`{ content: [{type:"text", text}, ...], isError? }`) to text.
@@ -115,7 +148,11 @@ fn render_tool_result(r: &Value) -> String {
         }
     }
     let out = out.trim().to_string();
-    let out = if out.is_empty() { "(no content)".to_string() } else { out };
+    let out = if out.is_empty() {
+        "(no content)".to_string()
+    } else {
+        out
+    };
     if is_err {
         format!("(tool error) {out}")
     } else {
@@ -136,15 +173,33 @@ struct Conn {
 impl Conn {
     fn connect(cfg: &McpServerConfig, timeout: Duration) -> anyhow::Result<Self> {
         let mut cmd = Command::new(&cfg.command);
-        cmd.args(&cfg.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.args(&cfg.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         for (k, v) in &cfg.env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cfg.command))?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("no stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("no stdout"))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cfg.command))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no stdout"))?;
         let reader = BufReader::new(stdout);
-        let mut c = Self { name: cfg.name.clone(), child, stdin, reader, next_id: 0, tools: vec![] };
+        let mut c = Self {
+            name: cfg.name.clone(),
+            child,
+            stdin,
+            reader,
+            next_id: 0,
+            tools: vec![],
+        };
         c.handshake(timeout)?;
         c.tools = c.list_tools(timeout)?;
         Ok(c)
@@ -177,7 +232,13 @@ impl Conn {
             };
             if v.get("id").and_then(|x| x.as_i64()) == Some(id) {
                 if let Some(err) = v.get("error") {
-                    anyhow::bail!("{}: {}", self.name, err.get("message").and_then(|m| m.as_str()).unwrap_or("error"));
+                    anyhow::bail!(
+                        "{}: {}",
+                        self.name,
+                        err.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("error")
+                    );
                 }
                 return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
@@ -185,7 +246,12 @@ impl Conn {
         }
     }
 
-    fn request(&mut self, method: &str, params: Value, _timeout: Duration) -> anyhow::Result<Value> {
+    fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        _timeout: Duration,
+    ) -> anyhow::Result<Value> {
         self.next_id += 1;
         let id = self.next_id;
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
@@ -212,23 +278,45 @@ impl Conn {
 
     fn list_tools(&mut self, timeout: Duration) -> anyhow::Result<Vec<McpTool>> {
         let r = self.request("tools/list", json!({}), timeout)?;
-        let arr = r.get("tools").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let arr = r
+            .get("tools")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
         let server = self.name.clone();
         Ok(arr
             .iter()
             .map(|t| {
-                let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let description = t.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let name = t
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = t
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let input_schema = t.get("inputSchema").cloned().unwrap_or(json!({}));
                 let read_only = classify_read_only(t, &name);
-                McpTool { server: server.clone(), name, description, read_only, input_schema }
+                McpTool {
+                    server: server.clone(),
+                    name,
+                    description,
+                    read_only,
+                    input_schema,
+                }
             })
             .filter(|t| !t.name.is_empty())
             .collect())
     }
 
     fn call(&mut self, tool: &str, args: &Value, timeout: Duration) -> anyhow::Result<String> {
-        let r = self.request("tools/call", json!({"name": tool, "arguments": args}), timeout)?;
+        let r = self.request(
+            "tools/call",
+            json!({"name": tool, "arguments": args}),
+            timeout,
+        )?;
         Ok(render_tool_result(&r))
     }
 
@@ -252,6 +340,8 @@ pub struct McpHub {
     servers: Mutex<HashMap<String, Arc<Mutex<Conn>>>>,
     tools: Mutex<Vec<McpTool>>,
     timeout: Duration,
+    #[cfg(feature = "test-support")]
+    scripted: Mutex<HashMap<String, VecDeque<Result<String, String>>>>,
 }
 
 impl Default for McpHub {
@@ -262,7 +352,52 @@ impl Default for McpHub {
 
 impl McpHub {
     pub fn new() -> Self {
-        Self { servers: Mutex::new(HashMap::new()), tools: Mutex::new(vec![]), timeout: Duration::from_secs(45) }
+        Self {
+            servers: Mutex::new(HashMap::new()),
+            tools: Mutex::new(vec![]),
+            timeout: Duration::from_secs(45),
+            #[cfg(feature = "test-support")]
+            scripted: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Install a deterministic in-memory MCP tool for end-to-end evaluation. This API is compiled
+    /// only with `test-support`; production builds retain subprocess-backed connections only.
+    #[cfg(feature = "test-support")]
+    pub fn add_scripted_tool(
+        &self,
+        tool: McpTool,
+        responses: Vec<Result<String, String>>,
+    ) -> anyhow::Result<()> {
+        let qualified = tool.qualified();
+        if qualified.len() > 128
+            || !qualified
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        {
+            anyhow::bail!("scripted MCP tool has an unsafe qualified name");
+        }
+        if responses.is_empty() {
+            anyhow::bail!("scripted MCP tool needs at least one response");
+        }
+        if self.lookup(&qualified).is_some() {
+            anyhow::bail!("scripted MCP tool already exists");
+        }
+        self.tools.lock().unwrap().push(tool);
+        self.scripted
+            .lock()
+            .unwrap()
+            .insert(qualified, responses.into());
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn scripted_responses_remaining(&self, qualified: &str) -> Option<usize> {
+        self.scripted
+            .lock()
+            .unwrap()
+            .get(qualified)
+            .map(VecDeque::len)
     }
 
     /// Connect to every configured server. Failures are logged + skipped — one broken/slow server
@@ -272,8 +407,14 @@ impl McpHub {
             match Conn::connect(cfg, self.timeout) {
                 Ok(conn) => {
                     let n = conn.tools.len();
-                    self.tools.lock().unwrap().extend(conn.tools.iter().cloned());
-                    self.servers.lock().unwrap().insert(cfg.name.clone(), Arc::new(Mutex::new(conn)));
+                    self.tools
+                        .lock()
+                        .unwrap()
+                        .extend(conn.tools.iter().cloned());
+                    self.servers
+                        .lock()
+                        .unwrap()
+                        .insert(cfg.name.clone(), Arc::new(Mutex::new(conn)));
                     eprintln!("[mcp] connected '{}' ({n} tools)", cfg.name);
                 }
                 Err(e) => eprintln!("[mcp] '{}' failed: {e}", cfg.name),
@@ -300,20 +441,45 @@ impl McpHub {
             "\nCONNECTED INTEGRATIONS (MCP — call by the EXACT id; read-only run instantly, writes need the user's ok):",
         );
         for t in tools.iter() {
-            let lock = if t.read_only { "" } else { " [write — gated]" };
-            let desc = t.description.lines().next().unwrap_or("").chars().take(100).collect::<String>();
+            let lock = if t.read_only {
+                ""
+            } else {
+                " [write — gated]"
+            };
+            let desc = t
+                .description
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(100)
+                .collect::<String>();
             s.push_str(&format!("\n- {} — {desc}{lock}", t.qualified()));
         }
         s
     }
 
     pub fn lookup(&self, qualified: &str) -> Option<McpTool> {
-        self.tools.lock().unwrap().iter().find(|t| t.qualified() == qualified).cloned()
+        self.tools
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.qualified() == qualified)
+            .cloned()
     }
 
     /// Call a tool by its qualified id (`mcp.<server>.<tool>`). Blocking — run inside `spawn_blocking`.
     pub fn call_blocking(&self, qualified: &str, args: &Value) -> anyhow::Result<String> {
-        let t = self.lookup(qualified).ok_or_else(|| anyhow::anyhow!("no such integration tool"))?;
+        let t = self
+            .lookup(qualified)
+            .ok_or_else(|| anyhow::anyhow!("no such integration tool"))?;
+        #[cfg(feature = "test-support")]
+        if let Some(queue) = self.scripted.lock().unwrap().get_mut(qualified) {
+            return queue
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("scripted MCP responses exhausted"))?
+                .map_err(anyhow::Error::msg);
+        }
         let conn = self
             .servers
             .lock()
@@ -343,16 +509,31 @@ mod tests {
         assert_eq!(cfgs.len(), 1, "skips disabled + command-less entries");
         assert_eq!(cfgs[0].name, "github");
         assert_eq!(cfgs[0].command, "npx");
-        assert_eq!(cfgs[0].args, vec!["-y", "@modelcontextprotocol/server-github"]);
-        assert_eq!(cfgs[0].env, vec![("GITHUB_TOKEN".to_string(), "x".to_string())]);
+        assert_eq!(
+            cfgs[0].args,
+            vec!["-y", "@modelcontextprotocol/server-github"]
+        );
+        assert_eq!(
+            cfgs[0].env,
+            vec![("GITHUB_TOKEN".to_string(), "x".to_string())]
+        );
     }
 
     #[test]
     fn classifies_read_only_by_hint_then_heuristic() {
         // explicit annotation wins
-        assert!(classify_read_only(&json!({"annotations":{"readOnlyHint":true}}), "send_message"));
-        assert!(!classify_read_only(&json!({"annotations":{"readOnlyHint":false}}), "list_things"));
-        assert!(!classify_read_only(&json!({"annotations":{"destructiveHint":true}}), "get_thing"));
+        assert!(classify_read_only(
+            &json!({"annotations":{"readOnlyHint":true}}),
+            "send_message"
+        ));
+        assert!(!classify_read_only(
+            &json!({"annotations":{"readOnlyHint":false}}),
+            "list_things"
+        ));
+        assert!(!classify_read_only(
+            &json!({"annotations":{"destructiveHint":true}}),
+            "get_thing"
+        ));
         // heuristic fallback
         assert!(classify_read_only(&json!({}), "search_repositories"));
         assert!(classify_read_only(&json!({}), "get_file_contents"));
@@ -375,7 +556,13 @@ mod tests {
 
     #[test]
     fn qualified_id_is_collision_free() {
-        let t = McpTool { server: "github".into(), name: "create_issue".into(), description: String::new(), read_only: false, input_schema: json!({}) };
+        let t = McpTool {
+            server: "github".into(),
+            name: "create_issue".into(),
+            description: String::new(),
+            read_only: false,
+            input_schema: json!({}),
+        };
         assert_eq!(t.qualified(), "mcp.github.create_issue");
     }
 }

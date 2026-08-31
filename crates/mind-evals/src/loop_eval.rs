@@ -20,7 +20,7 @@ use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade};
 use yantrik_ml::LLMBackend;
 
-use crate::{CheckResult, Scorecard, ScenarioResult};
+use crate::{CheckResult, ScenarioResult, Scorecard};
 
 /// A graded expectation about the loop's behavior on a scenario.
 pub enum Grade {
@@ -111,7 +111,9 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
         pool,
         mind_types::default_persona("the user"),
     )
-    .with_web(Arc::new(mind_tools::ScriptedFetcher::new("WEBDOC: Teal is a cyan-family blue-green color.")));
+    .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
+        "WEBDOC: Teal is a cyan-family blue-green color.",
+    )));
 
     let answer = conv
         .agent_loop_for_eval(&s.turn, &TurnIdentity::primary())
@@ -122,7 +124,10 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
     let mut checks = Vec::new();
     for g in &s.grades {
         let (desc, pass) = match g {
-            Grade::AnswerContains(x) => (format!("answer contains '{x}'"), answer.contains(x.as_str())),
+            Grade::AnswerContains(x) => (
+                format!("answer contains '{x}'"),
+                answer.contains(x.as_str()),
+            ),
             Grade::AnswerOmits(x) => (format!("answer omits '{x}'"), !answer.contains(x.as_str())),
             Grade::MaxCalls(n) => (format!("model called <= {n} (was {calls})"), calls <= *n),
             Grade::MinCalls(n) => (format!("model called >= {n} (was {calls})"), calls >= *n),
@@ -145,7 +150,13 @@ pub async fn run_loop_scenario(s: &LoopScenario) -> ScenarioResult {
     }
     let passed = checks.iter().filter(|c| c.pass).count();
     let total = checks.len();
-    ScenarioResult { name: s.name.clone(), passed, total, checks, calls }
+    ScenarioResult {
+        name: s.name.clone(),
+        passed,
+        total,
+        checks,
+        calls,
+    }
 }
 
 pub async fn run_loop_suite(scenarios: &[LoopScenario]) -> Scorecard {
@@ -160,7 +171,11 @@ pub async fn run_loop_suite(scenarios: &[LoopScenario]) -> Scorecard {
     Scorecard {
         passed,
         total,
-        score: if total == 0 { 0.0 } else { passed as f64 / total as f64 },
+        score: if total == 0 {
+            0.0
+        } else {
+            passed as f64 / total as f64
+        },
         scenarios: results,
     }
 }
@@ -437,6 +452,83 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn agent_loop_behavioral_suite_passes() {
         let card = run_loop_suite(&loop_suite()).await;
-        assert_eq!(card.passed, card.total, "agent-loop eval regressions:\n{}", card.render());
+        assert_eq!(
+            card.passed,
+            card.total,
+            "agent-loop eval regressions:\n{}",
+            card.render()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unfamiliar_mcp_schema_repairs_after_one_32602_without_inventing_a_tool() {
+        let mem = MemoryHandle::spawn(":memory:", 8).expect("spawn memory");
+        let tool_name = "mcp.novel.lookup";
+        let replies = vec![
+            String::new(),
+            String::new(),
+            answer("Teal is blue-green, according to the novel lookup."),
+        ];
+        let seq = Arc::new(SequencedLLM::new(replies).with_native(vec![
+            Some((tool_name, serde_json::json!({"query": "teal"}))),
+            Some((tool_name, serde_json::json!({"query_v2": "teal"}))),
+            None,
+        ]));
+        let pool = InferencePool::new(seq.clone() as Arc<dyn LLMBackend>, 1)
+            .with_private_backend(seq.clone() as Arc<dyn LLMBackend>, "scripted");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "novel".into(),
+                name: "lookup".into(),
+                description: "look up colors using the novel contract".into(),
+                read_only: true,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"query_v2": {"type": "string"}},
+                    "required": ["query_v2"],
+                    "additionalProperties": false
+                }),
+            },
+            vec![
+                Ok("Invalid params (-32602): missing required query_v2".into()),
+                Ok("NOVELDOC: teal is a blue-green color".into()),
+            ],
+        )
+        .unwrap();
+        let conv =
+            ConversationEngine::new(Arc::new(mem), pool, mind_types::default_persona("the user"))
+                .with_mcp(hub.clone());
+
+        let response = conv
+            .agent_loop_for_eval(
+                "Use the novel lookup integration to identify teal.",
+                &TurnIdentity::primary(),
+            )
+            .await
+            .unwrap();
+        let required_at = |call: usize| {
+            seq.tools_at(call)
+                .into_iter()
+                .find(|schema| schema["function"]["name"] == tool_name)
+                .and_then(|schema| {
+                    schema["function"]["parameters"]["required"]
+                        .as_array()
+                        .cloned()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(required_at(0), vec![serde_json::json!("query_v2")]);
+        assert_eq!(required_at(1), vec![serde_json::json!("query_v2")]);
+        assert!(seq.prompt_at(1).contains("-32602"));
+        assert!(seq.prompt_at(1).contains("arguments did not fit"));
+        assert!(seq.prompt_at(2).contains("NOVELDOC"));
+        assert!(response.contains("Teal is blue-green"));
+        assert_eq!(seq.call_count(), 3);
+        assert_eq!(hub.scripted_responses_remaining(tool_name), Some(0));
+        assert!(seq
+            .tools_at(0)
+            .iter()
+            .all(|schema| schema["function"]["name"] != "mcp.novel.delete"));
     }
 }

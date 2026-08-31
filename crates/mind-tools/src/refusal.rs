@@ -115,8 +115,20 @@ pub fn is_a_dead_end(reply: &str) -> bool {
 /// list of phrasings missed a real example, so the phrasings are normalised away before matching
 /// rather than being enumerated more thoroughly.
 const FILLER: &[&str] = &[
-    "actually", "really", "currently", "right now", "at the moment", "just", "quite", "truly",
-    "unfortunately", "sorry but", "i'm sorry but", "i am sorry but", "at present", "as of now",
+    "actually",
+    "really",
+    "currently",
+    "right now",
+    "at the moment",
+    "just",
+    "quite",
+    "truly",
+    "unfortunately",
+    "sorry but",
+    "i'm sorry but",
+    "i am sorry but",
+    "at present",
+    "as of now",
 ];
 
 /// Strip filler and collapse whitespace, so a pattern matches the sentence's SHAPE.
@@ -143,8 +155,22 @@ pub fn sounds_like_refusal(reply: &str) -> bool {
     // "i do not have access", "i can not pull", "i do not have live data" all reduce to this.
     let negated = ["i do not have", "i can not", "i am not able", "i have no"];
     let object = [
-        "access", "data", "feed", "tool", "pull", "check", "look", "fetch", "watch", "browse",
-        "real-time", "realtime", "live", "figures", "numbers", "quote",
+        "access",
+        "data",
+        "feed",
+        "tool",
+        "pull",
+        "check",
+        "look",
+        "fetch",
+        "watch",
+        "browse",
+        "real-time",
+        "realtime",
+        "live",
+        "figures",
+        "numbers",
+        "quote",
     ];
     negated.iter().any(|n| {
         r.find(n).is_some_and(|i| {
@@ -182,7 +208,9 @@ mod tests {
         // And phrasings nobody wrote down, caught by shape rather than by listing.
         assert!(sounds_like_refusal("I have no access to that feed."));
         assert!(sounds_like_refusal("I am not able to check those numbers."));
-        assert!(sounds_like_refusal("I do not currently have live data for that."));
+        assert!(sounds_like_refusal(
+            "I do not currently have live data for that."
+        ));
     }
 
     #[test]
@@ -203,8 +231,12 @@ mod tests {
     #[test]
     fn an_answer_that_happens_to_contain_a_verb_is_not_a_promise() {
         // "I checked" is done; "I'll check" is not. The tense is the whole difference.
-        assert!(!is_a_dead_end("I checked and there's nothing new since this morning."));
-        assert!(!is_a_dead_end("Nifty's at 24,211, up a hair — 0.08% so far today."));
+        assert!(!is_a_dead_end(
+            "I checked and there's nothing new since this morning."
+        ));
+        assert!(!is_a_dead_end(
+            "Nifty's at 24,211, up a hair — 0.08% so far today."
+        ));
         assert!(!is_a_dead_end("Walmart doesn't report until the 21st."));
     }
 
@@ -226,7 +258,9 @@ mod tests {
     #[test]
     fn a_refusal_about_knowledge_rather_than_capability_still_counts() {
         // "I don't have that data" is a capability claim in disguise — the data is a tool call away.
-        assert!(sounds_like_refusal("I don't have that data for this quarter."));
+        assert!(sounds_like_refusal(
+            "I don't have that data for this quarter."
+        ));
         assert!(sounds_like_refusal("I'm not able to reach that right now."));
     }
 }

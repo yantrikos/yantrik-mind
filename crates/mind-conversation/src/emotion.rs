@@ -11,30 +11,123 @@ use mind_types::{MemoryFacade, Result, TensionKind};
 // ── Word lists ────────────────────────────────────────────────────────────────
 
 static POSITIVE: &[&str] = &[
-    "happy", "great", "good", "awesome", "wonderful", "love", "excited", "excellent",
-    "fantastic", "amazing", "joyful", "pleased", "glad", "delighted", "superb", "brilliant",
-    "perfect", "enjoy", "enjoying", "beautiful", "nice", "lovely", "thankful", "grateful",
-    "thrilled", "cheerful", "content", "satisfied", "proud", "winning", "success", "celebrate",
-    "celebrated", "laugh", "laughing", "smile", "smiling", "fun", "hopeful", "optimistic",
-    "eager", "energized", "inspired", "motivated", "confident", "blessed", "accomplished",
+    "happy",
+    "great",
+    "good",
+    "awesome",
+    "wonderful",
+    "love",
+    "excited",
+    "excellent",
+    "fantastic",
+    "amazing",
+    "joyful",
+    "pleased",
+    "glad",
+    "delighted",
+    "superb",
+    "brilliant",
+    "perfect",
+    "enjoy",
+    "enjoying",
+    "beautiful",
+    "nice",
+    "lovely",
+    "thankful",
+    "grateful",
+    "thrilled",
+    "cheerful",
+    "content",
+    "satisfied",
+    "proud",
+    "winning",
+    "success",
+    "celebrate",
+    "celebrated",
+    "laugh",
+    "laughing",
+    "smile",
+    "smiling",
+    "fun",
+    "hopeful",
+    "optimistic",
+    "eager",
+    "energized",
+    "inspired",
+    "motivated",
+    "confident",
+    "blessed",
+    "accomplished",
 ];
 
 static NEGATIVE: &[&str] = &[
-    "sad", "terrible", "awful", "horrible", "hate", "depressed", "depression", "anxious",
-    "anxiety", "worried", "stress", "angry", "frustrated", "upset", "miserable", "unhappy",
-    "disappointed", "exhausted", "sick", "pain", "hurt", "hurting", "failed", "failure",
-    "scared", "afraid", "alone", "lonely", "hopeless", "overwhelmed", "drained", "defeated",
-    "suffering", "struggling", "crying", "sucks", "terrible", "worst", "broken", "pointless",
-    "empty", "numb", "bleak", "rough",
+    "sad",
+    "terrible",
+    "awful",
+    "horrible",
+    "hate",
+    "depressed",
+    "depression",
+    "anxious",
+    "anxiety",
+    "worried",
+    "stress",
+    "angry",
+    "frustrated",
+    "upset",
+    "miserable",
+    "unhappy",
+    "disappointed",
+    "exhausted",
+    "sick",
+    "pain",
+    "hurt",
+    "hurting",
+    "failed",
+    "failure",
+    "scared",
+    "afraid",
+    "alone",
+    "lonely",
+    "hopeless",
+    "overwhelmed",
+    "drained",
+    "defeated",
+    "suffering",
+    "struggling",
+    "crying",
+    "sucks",
+    "terrible",
+    "worst",
+    "broken",
+    "pointless",
+    "empty",
+    "numb",
+    "bleak",
+    "rough",
 ];
 
 static HIGH_ENERGY: &[&str] = &[
-    "excited", "pumped", "motivated", "ready", "fired", "busy", "productive", "energized",
+    "excited",
+    "pumped",
+    "motivated",
+    "ready",
+    "fired",
+    "busy",
+    "productive",
+    "energized",
     "eager",
 ];
 
 static LOW_ENERGY: &[&str] = &[
-    "tired", "exhausted", "drained", "sleepy", "fatigued", "lethargic", "weak", "burnout",
+    "tired",
+    "exhausted",
+    "drained",
+    "sleepy",
+    "fatigued",
+    "lethargic",
+    "weak",
+    "burnout",
     "dragging",
 ];
 
@@ -86,7 +179,13 @@ pub fn infer(text: &str) -> ValenceReading {
     };
     let hi = HIGH_ENERGY.iter().filter(|&&w| lower.contains(w)).count();
     let lo = LOW_ENERGY.iter().filter(|&&w| lower.contains(w)).count();
-    let energy = if hi > lo { Energy::High } else if lo > hi { Energy::Low } else { Energy::Medium };
+    let energy = if hi > lo {
+        Energy::High
+    } else if lo > hi {
+        Energy::Low
+    } else {
+        Energy::Medium
+    };
     ValenceReading { valence, energy }
 }
 
@@ -122,14 +221,18 @@ fn current_day() -> u64 {
 /// intra-day readings without floating-point churn.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DayEntry {
-    pub(crate) day: u64,   // days since Unix epoch
+    pub(crate) day: u64, // days since Unix epoch
     pub(crate) sum: f64,
     pub(crate) count: u64,
 }
 
 impl DayEntry {
     pub(crate) fn avg(&self) -> f64 {
-        if self.count == 0 { 0.0 } else { self.sum / self.count as f64 }
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum / self.count as f64
+        }
     }
 }
 
@@ -172,7 +275,11 @@ impl Baseline {
             e.sum += valence_score;
             e.count += 1;
         } else {
-            self.entries.push(DayEntry { day: today, sum: valence_score, count: 1 });
+            self.entries.push(DayEntry {
+                day: today,
+                sum: valence_score,
+                count: 1,
+            });
             self.entries.sort_by_key(|e| e.day);
             if self.entries.len() > WINDOW_DAYS {
                 let excess = self.entries.len() - WINDOW_DAYS;
@@ -188,11 +295,23 @@ impl Baseline {
         if self.entries.len() < DEVIATION_DAYS {
             return false;
         }
-        let recent: Vec<f64> = self.entries.iter().rev().take(DEVIATION_DAYS).map(|e| e.avg()).collect();
+        let recent: Vec<f64> = self
+            .entries
+            .iter()
+            .rev()
+            .take(DEVIATION_DAYS)
+            .map(|e| e.avg())
+            .collect();
         if !recent.iter().all(|&v| v <= 0.0) {
             return false;
         }
-        let prior: Vec<f64> = self.entries.iter().rev().skip(DEVIATION_DAYS).map(|e| e.avg()).collect();
+        let prior: Vec<f64> = self
+            .entries
+            .iter()
+            .rev()
+            .skip(DEVIATION_DAYS)
+            .map(|e| e.avg())
+            .collect();
         if prior.is_empty() {
             // No prior baseline yet — require strictly negative (not just neutral) to surface.
             return recent.iter().any(|&v| v < 0.0);
@@ -252,27 +371,42 @@ mod tests {
 
     #[test]
     fn positive_message_detected() {
-        assert_eq!(infer("I'm so happy and excited about today, it's amazing!").valence, Valence::Positive);
+        assert_eq!(
+            infer("I'm so happy and excited about today, it's amazing!").valence,
+            Valence::Positive
+        );
     }
 
     #[test]
     fn negative_message_detected() {
-        assert_eq!(infer("I feel awful and depressed, everything is terrible").valence, Valence::Negative);
+        assert_eq!(
+            infer("I feel awful and depressed, everything is terrible").valence,
+            Valence::Negative
+        );
     }
 
     #[test]
     fn neutral_message_detected() {
-        assert_eq!(infer("What time is the meeting tomorrow?").valence, Valence::Neutral);
+        assert_eq!(
+            infer("What time is the meeting tomorrow?").valence,
+            Valence::Neutral
+        );
     }
 
     #[test]
     fn low_energy_detected() {
-        assert_eq!(infer("I'm so exhausted and drained today").energy, Energy::Low);
+        assert_eq!(
+            infer("I'm so exhausted and drained today").energy,
+            Energy::Low
+        );
     }
 
     #[test]
     fn high_energy_detected() {
-        assert_eq!(infer("I'm so pumped and motivated, let's do this!").energy, Energy::High);
+        assert_eq!(
+            infer("I'm so pumped and motivated, let's do this!").energy,
+            Energy::High
+        );
     }
 
     // ── Baseline update ──────────────────────────────────────────────────────
@@ -281,9 +415,17 @@ mod tests {
     fn baseline_merges_intraday_readings() {
         let mut b = Baseline::default();
         let today = current_day();
-        b.entries.push(DayEntry { day: today, sum: 0.0, count: 1 });
+        b.entries.push(DayEntry {
+            day: today,
+            sum: 0.0,
+            count: 1,
+        });
         b.add_reading(1.0);
-        assert_eq!(b.entries.len(), 1, "intra-day reading must merge, not append");
+        assert_eq!(
+            b.entries.len(),
+            1,
+            "intra-day reading must merge, not append"
+        );
         assert_eq!(b.entries[0].count, 2);
         assert_eq!(b.entries[0].avg(), 0.5);
     }
@@ -292,17 +434,32 @@ mod tests {
     fn baseline_trims_to_window() {
         let mut b = Baseline::default();
         for i in 0..20u64 {
-            b.entries.push(DayEntry { day: i, sum: 0.5, count: 1 });
+            b.entries.push(DayEntry {
+                day: i,
+                sum: 0.5,
+                count: 1,
+            });
         }
         b.add_reading(0.5); // today will be a new day unless today == 19
-        assert!(b.entries.len() <= WINDOW_DAYS, "window must not exceed {WINDOW_DAYS} days");
+        assert!(
+            b.entries.len() <= WINDOW_DAYS,
+            "window must not exceed {WINDOW_DAYS} days"
+        );
     }
 
     #[test]
     fn baseline_serialization_roundtrip() {
         let mut b = Baseline::default();
-        b.entries.push(DayEntry { day: 1000, sum: 1.5, count: 2 });
-        b.entries.push(DayEntry { day: 1001, sum: -0.5, count: 1 });
+        b.entries.push(DayEntry {
+            day: 1000,
+            sum: 1.5,
+            count: 2,
+        });
+        b.entries.push(DayEntry {
+            day: 1001,
+            sum: -0.5,
+            count: 1,
+        });
         let raw = b.save();
         let b2 = Baseline::load(&raw);
         assert_eq!(b2.entries.len(), 2);
@@ -316,7 +473,11 @@ mod tests {
         Baseline {
             entries: day_scores
                 .iter()
-                .map(|&(day, score)| DayEntry { day, sum: score, count: 1 })
+                .map(|&(day, score)| DayEntry {
+                    day,
+                    sum: score,
+                    count: 1,
+                })
                 .collect(),
         }
     }
@@ -324,7 +485,10 @@ mod tests {
     #[test]
     fn no_deviation_without_enough_history() {
         let b = make_baseline(&[(1, -1.0), (2, -1.0)]);
-        assert!(!b.has_sustained_deviation(), "need at least {DEVIATION_DAYS} days");
+        assert!(
+            !b.has_sustained_deviation(),
+            "need at least {DEVIATION_DAYS} days"
+        );
     }
 
     #[test]

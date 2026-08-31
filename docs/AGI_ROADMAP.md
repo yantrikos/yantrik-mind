@@ -86,23 +86,25 @@ The requested minimum event contract, against `mind_observability::DecisionEvent
 
 | Required field | Today | Gap |
 |---|---|---|
-| trace_id | `trace_id` + `parent_id` (spans) | — |
-| goal_id | `goal` (free text) | No stable goal identity across turns; a long goal cannot be joined. **Phase F needs this.** |
-| actor / lane | `actor` | Lane is implicit in the actor string (`primary`/`member`/`sweep`); should be its own field. |
-| context fingerprint | absent | Needed before any before/after claim can be replayed. |
-| model / tool / policy versions | `policy` (free-text lines, e.g. `coverage-router-v1`) | Policy identity is real (E.C3); model and tool versions are not stamped. |
-| predicted outcome + probability | `predicted`, `confidence` | Present for tool calls only. |
-| redacted action signature | `object_id` | Redaction is now enforced at the boundary (E.PK2e: a refused call carries a constant id, never the arguments). |
+| trace_id | `trace_id` + `parent_event_id` (spans) | Compilation is the identified bounded-execution root within one caller-minted turn trace; completion/refusal, tool predictions, and contribution grades parent to it, while tool observations parent to their predictions. Stored forecasts mint collision-safe time/process/sequence `prediction_made` roots and binary grades parent to them. Packet trace/object ids use the same collision-resistant shape so same-millisecond proposals cannot collapse into one lifecycle. |
+| goal_id | `goal_id` + `goal` (free text) | Compiled bounded runs propagate `GoalSpec.id` through tool spans, contribution grades, refusals, and completion; action-packet lifecycles propagate their stable future-node id. `ym why goals` measures coverage. Legacy free-form turns remain unstamped. **Phase F needs complete coverage.** |
+| actor / lane | `actor`, `lane` | Compilation, bounded-run completion/refusal, pack routing/evidence lifecycle events, action-packet lifecycles, forecast grades, grounding assembly, and both tool loops stamp their actor plus `primary|member`; `ym why lanes` measures stamped vs missing events so remaining families stay visible. |
+| context fingerprint | `context_fingerprint` | Grounding assembly, compilation, bounded-run completion/refusal, pack routing/evidence lifecycle, tool prediction/observation, and goal-contribution grades stamp one domain-separated opaque hash of the originating turn context; `ym why contexts` measures coverage across those families without printing identifiers. Other decision families remain unstamped. |
+| model / tool / policy versions | `policy`, `tool_version`, `model_route` | Policy identity is real (E.C3); both tool loops stamp the dispatcher crate/version and `ym why versions` measures coverage. Bounded runs, both tool loops, and model-judged forecast grades stamp their configured routes, with `ym why models` measuring coverage; ledger-receipt forecast grades are correctly excluded as non-model events. Explicit `YM_ROLE_*` pools retain `provider:model` instead of reporting `scripted`. Actual serving-link/version and per-capability implementation versions remain absent. |
+| predicted outcome + probability | `predicted`, `confidence` | Tool calls carry both fields. Action-packet creation carries a bounded confidence value in both its mutable store record and immutable lifecycle root; the packet-chain gate rejects missing confidence, but packet outcomes do not yet define a calibrated predicted proposition. |
+| redacted action signature | `object_id` | Redaction is enforced at the boundary (E.PK2e: a refused call carries a constant id, never the arguments); packet creation and terminal outcomes share their generated opaque packet id. |
 | evidence_ids | `evidence_ids` | Present; used by pack leases and belief explanations. |
-| actual outcome | `outcome`, `verdict` | — |
-| evaluator identity | absent | Every grade today is either the person's next message or the mind's own read. **Phase C cannot promote a lesson without this.** |
-| semantic success | `verdict` (six-way) | Semantic success ≠ mechanical success; only the mechanical one is recorded. |
-| cost / latency | absent | Not one number in this repository is cost-normalised. |
+| actual outcome | `outcome`, `verdict` | Tool, packet, and forecast lifecycles persist outcomes; an `unclear` forecast closes its immutable trace and judgment-ledger mirror with evaluator/execution provenance but remains explicitly excluded from binary calibration and pending counts. The judgment report separates still-pending, overdue-unresolved, and inconclusive rows; overdue accountability persists across the bounded ledger even after the row ages out of the 90-day scoring window. |
+| evaluator identity | `evaluator_id` | Tool outcomes, tool-goal evidence use, packet decisions and expirations, pack lexical-use, pack next-message outcomes, and forecast grades stamp versioned evaluator identities; forecast grades distinguish ledger receipts from grounded model judgments. `ym why evaluators` measures stamped vs missing grades. **Phase C cannot promote a lesson without complete coverage.** |
+| semantic success | `semantic_success` (`Option<bool>`) alongside the six-way `verdict` | Present on tool observations, goal-contribution grades, packet decisions and expirations, pack lexical-use grades, pack next-message outcomes, and hit/miss forecast grades; `ym why semantics` measures coverage by outcome kind and exposes missing grades, including legacy hit/miss forecast outcomes, while explicitly excluding non-binary `unclear` closures. |
+| cost / latency | `latency_ms` on grounding assembly, executed tool observations, compilation, completed bounded runs, and model-judged forecast grades; `model_calls` on compilation, completed bounded runs, and forecast grades | Both execution loops stamp tool-call and shared grounding-assembly wall time; `ym why latency` exposes tool coverage and p50/p95/max, while `ym why resources` separates grounding, compilation, bounded-run, and forecast-grading logical model requests (including zero-call ledger receipts) and forecast-judge latency. Grounding model-call attribution, tokens, monetary cost, provider failover attempts, and legacy full-turn latency remain absent; no metric is cost-normalised. |
 | lesson candidate | `lesson` | Present, but written at emit time, not proposed and tested. |
-| before/after confidence | `prediction_error`, `brier` | Partial: the delta is derivable for tool priors only. |
+| before/after confidence | `prediction_error`, `brier` | Persisted for executed tool priors and hit/miss forecast grades. Forecast grades score the calibrated probability actually stored, spoken, and pre-registered; raw model confidence remains separate training input. `ym why calibration` reports tool and forecast confidence bands separately so one prediction family cannot mask another; broader decision families remain uncalibrated. |
 
-Five gaps — goal identity, context fingerprint, evaluator identity, cost/latency, semantic success
-— are the whole of Phase A. None of them is hard; all of them are load-bearing for everything after.
+Phase A's load-bearing gaps are complete stable-goal identity, context fingerprint, complete evaluator
+identity, cost and broader latency, and measured coverage of the existing `semantic_success` and `lane` fields.
+Complete lane coverage and model/tool version stamps remain required schema work. None is hard; all matter for the claims that
+follow.
 
 ## 4. Memory architecture: six stores, and which exist
 
@@ -118,6 +120,10 @@ Five gaps — goal identity, context fingerprint, evaluator identity, cost/laten
 House invariants already enforced and worth keeping as roadmap constraints: no derived record
 without provenance; corrections preserve history; a re-sealed pack never inherits its predecessor's
 evidence (content-digest keying, E.PK1); consolidation is reversible and source-backed.
+Action-packet trigger authority (`inferred|observed|told`) is written atomically to both the packet
+store and its creation event, so knock eligibility cannot disagree with the audit trail.
+Owner decisions are terminal and idempotent: retrying or reversing an already-confirmed packet does
+not rewrite its status, double-count acceptance, or append a second terminal event.
 
 ## 5. Phases
 
@@ -128,8 +134,32 @@ on a held-out set and the number is published with its failures.*
 the observation contract (they already share `tool_outcome`; they do not share event emission).
 *Gate:* ≥99% of sampled consequential calls carry complete trace/prediction/outcome/provenance;
 zero secret leakage (already regression-tested at the argument boundary); replay reproduces
-classifications. *First measurement available today:* sample 200 live calls and count complete
-chains — this has never been done, and the number is probably not 99%.
+classifications. `ym why chains` now measures the latest 200 tool calls against this completeness
+contract, counts both orphan observations and predictions that never closed, and names aggregate
+missing fields without printing identifiers. Duplicate observations for one prediction fail the
+one-to-one linkage check instead of inflating completeness. On compiled traces, the prediction must
+also parent to the single identified compilation root; a flat same-trace label no longer passes as
+causal provenance. The first live result still needs to be captured as evidence. The gate reads only
+a fully verified hash chain and reports unavailable on the first corrupt or forged line.
+
+`ym why packet-chains` applies the same ≥99% evidence gate to the latest 200 action-packet closure
+candidates, including overdue proposals whose lazy expiry event has not run and duplicate-root
+overdue traces that previously could evade the denominator: exactly one creation and exact
+root-to-terminal expiry-horizon linkage,
+exactly one decision or expiry, causal parent/object/stable-goal,
+actor, and lane links, one allowed trigger-authority stamp, verdict-consistent semantic grade, and
+the expected evaluator version. Still-pending proposals stay outside the denominator.
+
+`ym why forecast-chains` gates the latest 200 forecast closure candidates, including overdue traces
+without a terminal event even when duplicate roots exist, on a single immutable prediction root,
+exact root-to-terminal resolution-deadline linkage, causal
+parent/object/actor/lane linkage, the exact issued probability, consistent
+semantic/error/Brier grades for hit/miss outcomes, explicit absence of those binary calibration
+claims for `unclear`, an actual outcome, and evaluator-specific execution provenance (one timed
+model request for grounded judgment or zero requests for a ledger receipt).
+
+All aggregate `ym why` analytics now share that verified reader; raw trace reconstruction remains
+permissive for forensics, but calibration or coverage claims cannot be computed from a broken log.
 
 **B — Memory curation and continuity.** The E.MQ0 track. Baseline consolidation backlog age and
 per-namespace starvation; namespace-balanced digests; current-chain heads; contradiction and

@@ -9,9 +9,21 @@ impl super::ConversationEngine {
         let first = it.next().unwrap_or("").to_lowercase();
         match first.as_str() {
             "track" | "watch" | "follow" => self.news_track(it.next().unwrap_or("").trim()).await,
-            "untrack" | "unwatch" | "unfollow" | "stop" => self.news_untrack(it.next().unwrap_or("").trim()).await,
+            "untrack" | "unwatch" | "unfollow" | "stop" => {
+                self.news_untrack(it.next().unwrap_or("").trim()).await
+            }
             "tracking" | "tracked" | "topics" => self.news_tracked_list().await,
-            "headlines" | "quick" | "list" => self.news_headlines({ let r = it.next().unwrap_or("").trim(); if r.is_empty() { None } else { Some(r) } }).await,
+            "headlines" | "quick" | "list" => {
+                self.news_headlines({
+                    let r = it.next().unwrap_or("").trim();
+                    if r.is_empty() {
+                        None
+                    } else {
+                        Some(r)
+                    }
+                })
+                .await
+            }
             // A bare `ym news` = quick top headlines; `ym news <topic>` = the in-depth, multi-source brief.
             _ if rest.is_empty() => self.news_headlines(None).await,
             _ => self.news_brief(rest).await,
@@ -29,9 +41,28 @@ impl super::ConversationEngine {
     pub(crate) async fn market_context(&self, topic: &str) -> Option<String> {
         let t = topic.to_lowercase();
         const KEYS: [&str; 22] = [
-            "geopolit", "war", "conflict", "oil", "crude", "energy", "econom", "market", "inflation",
-            "fed", "rate", "opec", "middle east", "hormuz", "russia", "ukraine", "iran", "israel",
-            "gaza", "trade war", "tariff", "sanction",
+            "geopolit",
+            "war",
+            "conflict",
+            "oil",
+            "crude",
+            "energy",
+            "econom",
+            "market",
+            "inflation",
+            "fed",
+            "rate",
+            "opec",
+            "middle east",
+            "hormuz",
+            "russia",
+            "ukraine",
+            "iran",
+            "israel",
+            "gaza",
+            "trade war",
+            "tariff",
+            "sanction",
         ];
         if !KEYS.iter().any(|k| t.contains(k)) {
             return None;
@@ -41,12 +72,19 @@ impl super::ConversationEngine {
         for (sym, name) in [("BZ=F", "Brent"), ("CL=F", "WTI")] {
             if let Ok(q) = m.stock_quote(sym).await {
                 let arrow = if q.change_pct >= 0.0 { "▲" } else { "▼" };
-                parts.push(format!("{name} crude ${:.2} {arrow}{:.1}%", q.price, q.change_pct.abs()));
+                parts.push(format!(
+                    "{name} crude ${:.2} {arrow}{:.1}%",
+                    q.price,
+                    q.change_pct.abs()
+                ));
             }
         }
         let holdings = self.load_holdings().await;
         if !holdings.is_empty() {
-            let tickers: Vec<String> = holdings.iter().filter_map(|h| h.get("ticker").and_then(|x| x.as_str()).map(String::from)).collect();
+            let tickers: Vec<String> = holdings
+                .iter()
+                .filter_map(|h| h.get("ticker").and_then(|x| x.as_str()).map(String::from))
+                .collect();
             if !tickers.is_empty() {
                 parts.push(format!("user's holdings: {}", tickers.join(", ")));
             }
@@ -83,7 +121,12 @@ impl super::ConversationEngine {
         if headlines.is_empty() && hits.is_empty() {
             return format!("I couldn't find current coverage on \"{topic}\" right now.");
         }
-        let snippets: String = hits.iter().take(8).map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url)).collect::<Vec<_>>().join("\n");
+        let snippets: String = hits
+            .iter()
+            .take(8)
+            .map(|h| format!("- {} — {} [{}]", h.title, h.snippet, h.url))
+            .collect::<Vec<_>>()
+            .join("\n");
         // 3. Read the top 3 articles for substance beyond snippets.
         let mut excerpts = String::new();
         if let Some(web) = &self.web {
@@ -114,11 +157,17 @@ impl super::ConversationEngine {
         let prompt = format!(
             "You are a sharp, neutral news analyst briefing the user on \"{topic}\". Using ONLY the multi-source evidence below, write an IN-DEPTH brief that CONSOLIDATES across sources — do NOT just relay headlines.\n\n=== EVIDENCE ===\n{evidence}\n\n=== WRITE ===\n1. **What's happening** — the core development(s).\n2. **Why it matters** — context / background.\n3. **The angles** — how different outlets/sides frame it; note where they AGREE and where they DIFFER, attributing contested claims to a source.\n4. **What to watch** — what's next / still uncertain.\n{market_instr}\n\nRULES: factual + balanced; attribute contested claims; do NOT invent specifics, numbers, or quotes not in the evidence. Use the live market figures verbatim. Under 300 words. Do NOT list the source URLs yourself (they're appended separately)."
         );
-        let cfg = GenerationConfig { max_tokens: 1000, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 1000,
+            ..GenerationConfig::default()
+        };
         let body = match self
             .inference
             .chat_household_attributed(
-                vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)],
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
                 cfg,
                 concat!(module_path!(), ":news-brief"),
             )
@@ -135,14 +184,17 @@ impl super::ConversationEngine {
             .take(6)
             .map(|h| format!("- {} — {}", h.title, h.url))
             .collect();
-        let src_block = if sources.is_empty() { String::new() } else { format!("\n\n📎 Sources:\n{}", sources.join("\n")) };
+        let src_block = if sources.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n📎 Sources:\n{}", sources.join("\n"))
+        };
         format!("📰 {topic} — in-depth\n\n{body}{src_block}")
     }
 
     pub(crate) async fn news_headlines(&self, topic: Option<&str>) -> String {
-        let news = match &self.news {
-            Some(n) => n,
-            None => return "(news isn't configured)".to_string(),
+        let Some(news) = &self.news else {
+            return "(news isn't configured)".to_string();
         };
         match news.headlines(topic, 6).await {
             Ok(items) => {
@@ -157,13 +209,23 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn load_news_topics(&self) -> Vec<String> {
-        self.memory.profile_get("news_topics").await.ok().flatten()
+        self.memory
+            .profile_get("news_topics")
+            .await
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
             .unwrap_or_default()
     }
 
     pub(crate) async fn save_news_topics(&self, t: &[String]) {
-        let _ = self.memory.profile_set("news_topics", &serde_json::to_string(t).unwrap_or_else(|_| "[]".into())).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "news_topics",
+                &serde_json::to_string(t).unwrap_or_else(|_| "[]".into()),
+            )
+            .await;
     }
 
     pub(crate) async fn news_track(&self, topic: &str) -> String {
@@ -208,16 +270,22 @@ impl super::ConversationEngine {
     /// topic (YM_NEWS_DIGEST_HOURS, default 6h) so it's analytical UPDATES, not a per-headline flood.
     /// The poll loop turns each due topic into a full cross-domain `news_brief` (news × live markets).
     pub async fn news_digests_due(&self) -> Vec<String> {
-        let news = match &self.news {
-            Some(n) => n,
-            None => return Vec::new(),
+        let Some(news) = &self.news else {
+            return Vec::new();
         };
         let topics = self.load_news_topics().await;
         if topics.is_empty() {
             return Vec::new();
         }
-        let pace_ms: u64 = std::env::var("YM_NEWS_DIGEST_HOURS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(6) * 3_600_000;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let pace_ms: u64 = std::env::var("YM_NEWS_DIGEST_HOURS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(6)
+            * 3_600_000;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let mut state: serde_json::Value = self
             .memory
             .profile_get("news_digest_state")
@@ -228,20 +296,34 @@ impl super::ConversationEngine {
             .unwrap_or_else(|| serde_json::json!({}));
         let mut due = Vec::new();
         for topic in &topics {
-            let items = match news.headlines(Some(topic), 6).await {
-                Ok(i) => i,
-                Err(_) => continue,
+            let Ok(items) = news.headlines(Some(topic), 6).await else {
+                continue;
             };
-            let urls: Vec<String> = items.iter().map(|i| i.url.clone()).filter(|u| !u.is_empty()).collect();
+            let urls: Vec<String> = items
+                .iter()
+                .map(|i| i.url.clone())
+                .filter(|u| !u.is_empty())
+                .collect();
             let entry = state.get(topic);
             let primed = entry.is_some();
             let mut seen: std::collections::HashSet<String> = entry
                 .and_then(|e| e.get("seen"))
                 .and_then(|s| s.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let last_ms = entry.and_then(|e| e.get("last_ms")).and_then(|x| x.as_u64()).unwrap_or(0);
-            let fresh: Vec<String> = urls.iter().filter(|u| !seen.contains(*u)).cloned().collect();
+            let last_ms = entry
+                .and_then(|e| e.get("last_ms"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let fresh: Vec<String> = urls
+                .iter()
+                .filter(|u| !seen.contains(*u))
+                .cloned()
+                .collect();
             if !primed {
                 // First time we've ever watched this topic → prime silently (don't dump old news).
                 seen.extend(urls);
@@ -260,7 +342,10 @@ impl super::ConversationEngine {
             }
             // else: fresh stays UNSEEN (so the next pace window still fires) or there's nothing new.
         }
-        let _ = self.memory.profile_set("news_digest_state", &state.to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("news_digest_state", &state.to_string())
+            .await;
         due.truncate(2); // at most 2 topic-digests per tick
         due
     }
@@ -270,9 +355,20 @@ impl super::ConversationEngine {
     pub(crate) fn interest_in_recent_news(&self, text: &str) -> Option<String> {
         let l = text.trim().to_lowercase();
         const SIGNALS: [&str; 14] = [
-            "tell me more", "more on that", "more on this", "more about that", "go deeper", "dig in",
-            "dig deeper", "dig into", "what's the latest", "whats the latest", "look into that",
-            "research that", "more details", "expand on that",
+            "tell me more",
+            "more on that",
+            "more on this",
+            "more about that",
+            "go deeper",
+            "dig in",
+            "dig deeper",
+            "dig into",
+            "what's the latest",
+            "whats the latest",
+            "look into that",
+            "research that",
+            "more details",
+            "expand on that",
         ];
         let interested = (l.len() <= 40 && (l == "more" || l == "go on" || l == "details"))
             || SIGNALS.iter().any(|s| l.contains(s));
@@ -282,7 +378,6 @@ impl super::ConversationEngine {
             None
         }
     }
-
 }
 
 /// News as a dispatchable capability — headlines, deep briefs, and topic tracking via the registry.
@@ -294,22 +389,67 @@ impl crate::plugins::CapabilityHandler for NewsCapability {
         "news"
     }
 
-    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, rest: &str) -> Option<String> {
+    async fn handle_command(
+        &self,
+        host: &super::ConversationEngine,
+        cmd: &str,
+        rest: &str,
+    ) -> Option<String> {
         match cmd {
             "news" | "headlines" => Some(host.news_cmd(rest).await),
             _ => None,
         }
     }
 
-    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, args: &serde_json::Value) -> Option<String> {
-        let s = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    async fn handle_tool(
+        &self,
+        host: &super::ConversationEngine,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Option<String> {
+        let s = |k: &str| {
+            args.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
         Some(match tool {
             "news" => {
                 // `news {topic}` → the in-depth multi-source brief; no topic → quick top headlines.
-                let t = { let a = s("topic"); if a.is_empty() { s("query") } else { a } };
-                if t.is_empty() { host.news_headlines(None).await } else { host.news_brief(&t).await }
+                let t = {
+                    let a = s("topic");
+                    if a.is_empty() {
+                        s("query")
+                    } else {
+                        a
+                    }
+                };
+                if t.is_empty() {
+                    host.news_headlines(None).await
+                } else {
+                    host.news_brief(&t).await
+                }
             }
-            "headlines" => host.news_headlines({ let t = s("topic"); if t.is_empty() { let q = s("query"); if q.is_empty() { None } else { Some(q) } } else { Some(t) } }.as_deref()).await,
+            "headlines" => {
+                host.news_headlines(
+                    {
+                        let t = s("topic");
+                        if t.is_empty() {
+                            let q = s("query");
+                            if q.is_empty() {
+                                None
+                            } else {
+                                Some(q)
+                            }
+                        } else {
+                            Some(t)
+                        }
+                    }
+                    .as_deref(),
+                )
+                .await
+            }
             "track_news" | "follow_news" => host.news_track(&s("topic")).await,
             _ => return None,
         })

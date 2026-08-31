@@ -136,11 +136,20 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
         if d.posture == Posture::Act {
             if let Some(r) = &c.resources {
                 let block = if !r.capability_available {
-                    Some(("capability_unavailable", WakeCondition::StateChangeOf("capability".into())))
+                    Some((
+                        "capability_unavailable",
+                        WakeCondition::StateChangeOf("capability".into()),
+                    ))
                 } else if !r.budget_available {
-                    Some(("budget_unavailable", WakeCondition::StateChangeOf("budget".into())))
+                    Some((
+                        "budget_unavailable",
+                        WakeCondition::StateChangeOf("budget".into()),
+                    ))
                 } else if !r.network_available {
-                    Some(("resource_unavailable", WakeCondition::StateChangeOf("network".into())))
+                    Some((
+                        "resource_unavailable",
+                        WakeCondition::StateChangeOf("network".into()),
+                    ))
                 } else {
                     None
                 };
@@ -148,13 +157,17 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
                     d.posture = Posture::Monitor;
                     d.requires_user_interrupt = false;
                     d.reason_code = rc;
-                    d.monitor = Some(MonitorPlan { review_at_ms: None, wake_when: vec![wake] });
+                    d.monitor = Some(MonitorPlan {
+                        review_at_ms: None,
+                        wake_when: vec![wake],
+                    });
                     return d;
                 }
                 if d.requires_user_interrupt {
-                    let imminent = c.deadline_at_ms
-                        .map(|dl| c.urgency >= 3 && dl - c.now_ms <= c.interrupt_lead_ms.unwrap_or(4 * 3_600_000))
-                        .unwrap_or(false);
+                    let imminent = c.deadline_at_ms.is_some_and(|dl| {
+                        c.urgency >= 3
+                            && dl - c.now_ms <= c.interrupt_lead_ms.unwrap_or(4 * 3_600_000)
+                    });
                     if !imminent {
                         if r.quiet_hours {
                             d.posture = Posture::Monitor;
@@ -191,8 +204,16 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
         if cm.fulfilled {
             return dec(Posture::Ignore, false, "commitment_fulfilled", None);
         }
-        if c.useful_action_available && c.intervention_window_open && cm.due_at_ms - c.now_ms <= DAY_MS {
-            return dec(Posture::Act, !c.internal_capability, "obligation_deadline_converging", None);
+        if c.useful_action_available
+            && c.intervention_window_open
+            && cm.due_at_ms - c.now_ms <= DAY_MS
+        {
+            return dec(
+                Posture::Act,
+                !c.internal_capability,
+                "obligation_deadline_converging",
+                None,
+            );
         }
         return dec(
             Posture::Monitor,
@@ -214,12 +235,20 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
                     "waiting_grace_open",
                     Some(MonitorPlan {
                         review_at_ms: Some(grace),
-                        wake_when: vec![WakeCondition::StateChangeOf(c.source_ref.clone()), WakeCondition::DeadlineWithin(DAY_MS)],
+                        wake_when: vec![
+                            WakeCondition::StateChangeOf(c.source_ref.clone()),
+                            WakeCondition::DeadlineWithin(DAY_MS),
+                        ],
                     }),
                 );
             }
             if c.useful_action_available && c.intervention_window_open {
-                return dec(Posture::Act, !c.internal_capability, "dependency_wait_elapsed", None);
+                return dec(
+                    Posture::Act,
+                    !c.internal_capability,
+                    "dependency_wait_elapsed",
+                    None,
+                );
             }
         }
     }
@@ -234,18 +263,24 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
             "execution_blocked",
             Some(MonitorPlan {
                 review_at_ms: None,
-                wake_when: vec![WakeCondition::SourceFresh(format!("resources:{}", c.candidate_id))],
+                wake_when: vec![WakeCondition::SourceFresh(format!(
+                    "resources:{}",
+                    c.candidate_id
+                ))],
             }),
         );
     }
 
     let horizon = c.deadline_at_ms.map(|d| d - c.now_ms);
-    let near_deadline = horizon.map(|h| h <= 2 * DAY_MS).unwrap_or(false);
+    let near_deadline = horizon.is_some_and(|h| h <= 2 * DAY_MS);
 
     // ── EX2 TEMPORAL ESCALATION (E.EX2): explicit window times govern when present.
     // Posture monotonicity is NOT guaranteed; justification at each evaluation time is.
     if let Some(d) = c.deadline_at_ms {
-        if c.intervention_not_before_ms.is_none() && c.intervention_by_ms.is_none() && !c.intervention_window_open {
+        if c.intervention_not_before_ms.is_none()
+            && c.intervention_by_ms.is_none()
+            && !c.intervention_window_open
+        {
             // We know WHEN it must be done, not WHEN acting helps: do not invent a window.
             return dec(
                 Posture::Monitor,
@@ -254,7 +289,10 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
                 Some(MonitorPlan {
                     review_at_ms: None,
                     wake_when: vec![
-                        WakeCondition::StateChangeOf(format!("intervention_window:{}", c.candidate_id)),
+                        WakeCondition::StateChangeOf(format!(
+                            "intervention_window:{}",
+                            c.candidate_id
+                        )),
                         WakeCondition::DeadlineWithin(DAY_MS),
                     ],
                 }),
@@ -268,21 +306,41 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
                     "too_early_wake_scheduled",
                     Some(MonitorPlan {
                         review_at_ms: Some(nb),
-                        wake_when: vec![WakeCondition::DeadlineWithin(DAY_MS), WakeCondition::StateChangeOf(c.source_ref.clone())],
+                        wake_when: vec![
+                            WakeCondition::DeadlineWithin(DAY_MS),
+                            WakeCondition::StateChangeOf(c.source_ref.clone()),
+                        ],
                     }),
                 );
             }
         }
         if let Some(by) = c.intervention_by_ms {
             if c.now_ms > by {
-                let reason = if c.now_ms > d { "deadline_missed_recovery" } else { "preventative_window_missed" };
-                return dec(Posture::Act, !c.internal_capability || c.now_ms > d, reason, None);
+                let reason = if c.now_ms > d {
+                    "deadline_missed_recovery"
+                } else {
+                    "preventative_window_missed"
+                };
+                return dec(
+                    Posture::Act,
+                    !c.internal_capability || c.now_ms > d,
+                    reason,
+                    None,
+                );
             }
         }
-        if c.useful_action_available && (c.intervention_window_open || c.intervention_not_before_ms.is_some() || c.intervention_by_ms.is_some()) {
+        if c.useful_action_available
+            && (c.intervention_window_open
+                || c.intervention_not_before_ms.is_some()
+                || c.intervention_by_ms.is_some())
+        {
             let interrupt = !c.internal_capability
-                || c.interrupt_lead_ms.map(|lead| d - c.now_ms <= lead).unwrap_or(false);
-            let reason = if interrupt { "user_action_required" } else { "prepare_internally" };
+                || c.interrupt_lead_ms.is_some_and(|lead| d - c.now_ms <= lead);
+            let reason = if interrupt {
+                "user_action_required"
+            } else {
+                "prepare_internally"
+            };
             return dec(Posture::Act, interrupt, reason, None);
         }
     }
@@ -295,7 +353,10 @@ pub fn arbitrate(c: &ExecutiveCandidate) -> ExecutiveDecision {
             Posture::Monitor,
             false,
             "too_early_wake_scheduled",
-            Some(MonitorPlan { review_at_ms: c.deadline_at_ms.map(|d| d - DAY_MS), wake_when: wakes }),
+            Some(MonitorPlan {
+                review_at_ms: c.deadline_at_ms.map(|d| d - DAY_MS),
+                wake_when: wakes,
+            }),
         );
     }
 
@@ -315,14 +376,28 @@ mod ex1_tests {
 
     fn base() -> ExecutiveCandidate {
         ExecutiveCandidate {
-            candidate_id: "t".into(), source_ref: "world:t".into(), now_ms: 0,
-            urgency: 2, deadline_at_ms: None, already_resolved: false,
-            useful_action_available: false, internal_capability: false, blocked: false,
-            waiting_on_someone: false, intervention_window_open: false,
-            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.9,
-            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            candidate_id: "t".into(),
+            source_ref: "world:t".into(),
+            now_ms: 0,
+            urgency: 2,
+            deadline_at_ms: None,
+            already_resolved: false,
+            useful_action_available: false,
+            internal_capability: false,
+            blocked: false,
+            waiting_on_someone: false,
+            intervention_window_open: false,
+            execution_cost: 1,
+            interruption_cost: 2,
+            risk: 1,
+            confidence: 0.9,
+            commitment: None,
+            converging_obligation_due_ms: None,
+            wait_grace_until_ms: None,
             resources: None,
-            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
+            intervention_not_before_ms: None,
+            intervention_by_ms: None,
+            interrupt_lead_ms: None,
         }
     }
 
@@ -337,12 +412,14 @@ mod ex1_tests {
     }
 
     #[test]
-    fn too_early_monitors_WITH_wake_condition() {
+    fn too_early_monitors_with_wake_condition() {
         let mut c = base();
         c.deadline_at_ms = Some(14 * DAY_MS);
         let d = arbitrate(&c);
         assert_eq!(d.posture, Posture::Monitor);
-        let m = d.monitor.expect("MONITOR without a wake condition is procrastination");
+        let m = d
+            .monitor
+            .expect("MONITOR without a wake condition is procrastination");
         assert!(!m.wake_when.is_empty());
         assert!(m.wake_when.contains(&WakeCondition::DeadlineWithin(DAY_MS)));
     }
@@ -377,7 +454,12 @@ mod ex1_tests {
         c.blocked = true;
         let d = arbitrate(&c);
         assert_eq!(d.posture, Posture::Monitor);
-        assert!(d.monitor.unwrap().wake_when.iter().any(|w| matches!(w, WakeCondition::SourceFresh(_))));
+        assert!(d
+            .monitor
+            .unwrap()
+            .wake_when
+            .iter()
+            .any(|w| matches!(w, WakeCondition::SourceFresh(_))));
     }
 }
 
@@ -392,15 +474,27 @@ mod ex2_temporal_tests {
     fn cand(now_ms: i64) -> ExecutiveCandidate {
         let d = 30 * DAY_MS;
         ExecutiveCandidate {
-            candidate_id: "curve".into(), source_ref: "world:event".into(), now_ms,
-            urgency: 2, deadline_at_ms: Some(d), already_resolved: false,
-            useful_action_available: true, internal_capability: true, blocked: false,
-            waiting_on_someone: false, intervention_window_open: false,
-            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
+            candidate_id: "curve".into(),
+            source_ref: "world:event".into(),
+            now_ms,
+            urgency: 2,
+            deadline_at_ms: Some(d),
+            already_resolved: false,
+            useful_action_available: true,
+            internal_capability: true,
+            blocked: false,
+            waiting_on_someone: false,
+            intervention_window_open: false,
+            execution_cost: 1,
+            interruption_cost: 2,
+            risk: 1,
+            confidence: 0.95,
             intervention_not_before_ms: Some(d - 9 * DAY_MS),
             intervention_by_ms: Some(d),
             interrupt_lead_ms: Some(4 * 3_600_000),
-            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            commitment: None,
+            converging_obligation_due_ms: None,
+            wait_grace_until_ms: None,
             resources: None,
         }
     }
@@ -449,8 +543,9 @@ mod ex2_temporal_tests {
         let r = arbitrate(&c);
         assert_eq!(r.posture, Posture::Monitor);
         assert_eq!(r.reason_code, "insufficient_timing_basis");
-        assert!(r.monitor.unwrap().wake_when.iter()
-            .any(|w| matches!(w, WakeCondition::StateChangeOf(s) if s.contains("intervention_window"))));
+        assert!(r.monitor.unwrap().wake_when.iter().any(
+            |w| matches!(w, WakeCondition::StateChangeOf(s) if s.contains("intervention_window"))
+        ));
     }
 
     #[test]
@@ -463,7 +558,6 @@ mod ex2_temporal_tests {
     }
 }
 
-
 #[cfg(test)]
 mod ex3_commitment_tests {
     use super::*;
@@ -472,13 +566,27 @@ mod ex3_commitment_tests {
     /// CommitmentView is a NORMALIZED VIEW over authoritative organs, never a registry.
     fn cand() -> ExecutiveCandidate {
         ExecutiveCandidate {
-            candidate_id: "c".into(), source_ref: "world:c".into(), now_ms: 0,
-            urgency: 1, deadline_at_ms: None, already_resolved: false,
-            useful_action_available: false, internal_capability: true, blocked: false,
-            waiting_on_someone: false, intervention_window_open: false,
-            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
-            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
-            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            candidate_id: "c".into(),
+            source_ref: "world:c".into(),
+            now_ms: 0,
+            urgency: 1,
+            deadline_at_ms: None,
+            already_resolved: false,
+            useful_action_available: false,
+            internal_capability: true,
+            blocked: false,
+            waiting_on_someone: false,
+            intervention_window_open: false,
+            execution_cost: 1,
+            interruption_cost: 2,
+            risk: 1,
+            confidence: 0.95,
+            intervention_not_before_ms: None,
+            intervention_by_ms: None,
+            interrupt_lead_ms: None,
+            commitment: None,
+            converging_obligation_due_ms: None,
+            wait_grace_until_ms: None,
             resources: None,
         }
     }
@@ -487,8 +595,11 @@ mod ex3_commitment_tests {
     fn converging_promise_acts_internally() {
         let mut c = cand();
         c.commitment = Some(CommitmentView {
-            ref_id: "task:form-42".into(), source_organ: "mind-tasks",
-            made_at_ms: 0, due_at_ms: 90 * 60_000, fulfilled: false,
+            ref_id: "task:form-42".into(),
+            source_organ: "mind-tasks",
+            made_at_ms: 0,
+            due_at_ms: 90 * 60_000,
+            fulfilled: false,
         });
         c.useful_action_available = true;
         c.intervention_window_open = true;
@@ -502,8 +613,11 @@ mod ex3_commitment_tests {
     fn distant_promise_is_tracked_not_forgotten() {
         let mut c = cand();
         c.commitment = Some(CommitmentView {
-            ref_id: "promise:call-mom".into(), source_organ: "promise-ledger",
-            made_at_ms: 0, due_at_ms: 10 * 3_600_000, fulfilled: false,
+            ref_id: "promise:call-mom".into(),
+            source_organ: "promise-ledger",
+            made_at_ms: 0,
+            due_at_ms: 10 * 3_600_000,
+            fulfilled: false,
         });
         let d = arbitrate(&c);
         assert_eq!(d.posture, Posture::Monitor);
@@ -544,30 +658,51 @@ mod ex3_commitment_tests {
     }
 }
 
-
-
-
 #[cfg(test)]
 mod ex4_resource_tests {
     use super::*;
 
     /// PHASE 3B EX4 RED SPEC - resource failure changes EXECUTABILITY, not importance;
     /// receptivity changes DELIVERY STRATEGY, not world truth. No monotonic assumption.
-    fn res(net: bool, cap: bool, budget: bool, receptive: Option<bool>, quiet: bool) -> ResourceContextView {
+    fn res(
+        net: bool,
+        cap: bool,
+        budget: bool,
+        receptive: Option<bool>,
+        quiet: bool,
+    ) -> ResourceContextView {
         ResourceContextView {
-            network_available: net, capability_available: cap, budget_available: budget,
-            user_receptive: receptive, quiet_hours: quiet, quiet_hours_end_ms: None,
+            network_available: net,
+            capability_available: cap,
+            budget_available: budget,
+            user_receptive: receptive,
+            quiet_hours: quiet,
+            quiet_hours_end_ms: None,
         }
     }
     fn cand() -> ExecutiveCandidate {
         ExecutiveCandidate {
-            candidate_id: "r".into(), source_ref: "world:r".into(), now_ms: 0,
-            urgency: 2, deadline_at_ms: Some(48 * 3_600_000), already_resolved: false,
-            useful_action_available: true, internal_capability: true, blocked: false,
-            waiting_on_someone: false, intervention_window_open: true,
-            execution_cost: 1, interruption_cost: 2, risk: 1, confidence: 0.95,
-            intervention_not_before_ms: None, intervention_by_ms: None, interrupt_lead_ms: None,
-            commitment: None, converging_obligation_due_ms: None, wait_grace_until_ms: None,
+            candidate_id: "r".into(),
+            source_ref: "world:r".into(),
+            now_ms: 0,
+            urgency: 2,
+            deadline_at_ms: Some(48 * 3_600_000),
+            already_resolved: false,
+            useful_action_available: true,
+            internal_capability: true,
+            blocked: false,
+            waiting_on_someone: false,
+            intervention_window_open: true,
+            execution_cost: 1,
+            interruption_cost: 2,
+            risk: 1,
+            confidence: 0.95,
+            intervention_not_before_ms: None,
+            intervention_by_ms: None,
+            interrupt_lead_ms: None,
+            commitment: None,
+            converging_obligation_due_ms: None,
+            wait_grace_until_ms: None,
             resources: None,
         }
     }
@@ -579,7 +714,12 @@ mod ex4_resource_tests {
         let d = arbitrate(&c);
         assert_eq!(d.posture, Posture::Monitor);
         assert_eq!(d.reason_code, "capability_unavailable");
-        assert!(d.monitor.unwrap().wake_when.iter().any(|w| matches!(w, WakeCondition::StateChangeOf(s) if s.contains("capability"))));
+        assert!(d
+            .monitor
+            .unwrap()
+            .wake_when
+            .iter()
+            .any(|w| matches!(w, WakeCondition::StateChangeOf(s) if s.contains("capability"))));
     }
 
     #[test]
@@ -673,5 +813,3 @@ mod ex4_resource_tests {
         assert!(d.requires_user_interrupt);
     }
 }
-
-

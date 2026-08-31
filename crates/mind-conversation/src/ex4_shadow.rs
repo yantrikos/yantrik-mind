@@ -213,7 +213,7 @@ pub(crate) fn upsert(list: &mut Vec<ShadowRecord>, rec: ShadowRecord, extra_eval
 
 /// Attach what the legacy gate ended up doing, and the outcome status that follows from it.
 pub(crate) fn note_legacy(
-    list: &mut Vec<ShadowRecord>,
+    list: &mut [ShadowRecord],
     window_id: i64,
     legacy: LegacyOutcome,
     claim_ref: Option<String>,
@@ -231,10 +231,9 @@ pub(crate) fn note_legacy(
         }
     };
     r.outcome = match legacy {
-        LegacyOutcome::Sent => OutcomeStatus::Pending,
+        LegacyOutcome::Sent | LegacyOutcome::Undetermined => OutcomeStatus::Pending,
         LegacyOutcome::NothingToSay => OutcomeStatus::NotApplicable,
         LegacyOutcome::DeclinedByReceptivity => OutcomeStatus::CensoredByLegacyDrop,
-        LegacyOutcome::Undetermined => OutcomeStatus::Pending,
     };
     r.legacy = legacy;
     if claim_ref.is_some() {
@@ -253,11 +252,17 @@ pub(crate) fn is_instrumentation_defect(r: &ShadowRecord, now_ms: i64) -> bool {
 
 impl crate::ConversationEngine {
     async fn ex4_load(&self) -> Vec<ShadowRecord> {
-        self.memory.profile_get(STORE).await.ok().flatten()
-            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        self.memory
+            .profile_get(STORE)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
     }
     async fn ex4_save(&self, list: &[ShadowRecord]) {
-        let _ = self.memory
+        let _ = self
+            .memory
             .profile_set(STORE, &serde_json::to_string(list).unwrap_or_default())
             .await;
     }
@@ -304,25 +309,31 @@ impl crate::ConversationEngine {
         let cand = candidate_for_digest(now, quiet_hours, quiet_hours_end_ms, receptive);
         let d = mind_proactive::arbitrate(&cand);
         let mut list = self.ex4_load().await;
-        upsert(&mut list, ShadowRecord {
-            window_id,
-            decided_at_ms: now,
-            evaluations: 1,
-            executive_posture: posture_name(d.posture).to_string(),
-            executive_reason: d.reason_code.to_string(),
-            executive_wake: d.monitor.as_ref()
-                .map(|m| m.wake_when.iter().map(|w| format!("{w:?}")).collect())
-                .unwrap_or_default(),
-            executive_requires_interrupt: d.requires_user_interrupt,
-            legacy: LegacyOutcome::Undetermined,
-            content: ContentStatus::UnknownDueToLegacyShortCircuit,
-            outcome: OutcomeStatus::Pending,
-            claim_ref: None,
-            experiment_id: EXPERIMENT_ID.into(),
-            executive_policy: EXECUTIVE_POLICY.into(),
-            build_commit: env!("YM_BUILD_COMMIT").to_string(),
-            call_site: CALL_SITE.into(),
-        }, carry);
+        upsert(
+            &mut list,
+            ShadowRecord {
+                window_id,
+                decided_at_ms: now,
+                evaluations: 1,
+                executive_posture: posture_name(d.posture).to_string(),
+                executive_reason: d.reason_code.to_string(),
+                executive_wake: d
+                    .monitor
+                    .as_ref()
+                    .map(|m| m.wake_when.iter().map(|w| format!("{w:?}")).collect())
+                    .unwrap_or_default(),
+                executive_requires_interrupt: d.requires_user_interrupt,
+                legacy: LegacyOutcome::Undetermined,
+                content: ContentStatus::UnknownDueToLegacyShortCircuit,
+                outcome: OutcomeStatus::Pending,
+                claim_ref: None,
+                experiment_id: EXPERIMENT_ID.into(),
+                executive_policy: EXECUTIVE_POLICY.into(),
+                build_commit: env!("YM_BUILD_COMMIT").to_string(),
+                call_site: CALL_SITE.into(),
+            },
+            carry,
+        );
         self.ex4_save(&list).await;
         posture_name(d.posture).to_string()
     }
@@ -351,8 +362,14 @@ impl crate::ConversationEngine {
     /// which is why `ex4_shadow_decide` takes them as parameters. This is the same value arriving
     /// by the same route, kept so `posture_json` is not forced to guess.
     pub fn note_observed_quiet(&self, quiet_hours: bool, quiet_hours_end_ms: Option<i64>) {
-        *self.observed_quiet.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((quiet_hours, quiet_hours_end_ms, mind_observability::now_ms() as i64));
+        *self
+            .observed_quiet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((
+            quiet_hours,
+            quiet_hours_end_ms,
+            mind_observability::now_ms() as i64,
+        ));
     }
 
     /// `posture_json` — the executive's CURRENT reading, for the cockpit's Executive pane.
@@ -371,7 +388,10 @@ impl crate::ConversationEngine {
     /// `mind-proactive` derives `Serialize` — deliberately, it is a model-free waist — so the JSON
     /// is built here, and `posture` goes through `posture_name` for the uppercase the client reads.
     pub async fn posture_report(&self) -> serde_json::Value {
-        let observed = *self.observed_quiet.lock().unwrap_or_else(|e| e.into_inner());
+        let observed = *self
+            .observed_quiet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         // `user_receptive`: the live world-model bin. `proactive_receptivity_ok` answers TRUE when
         // there is no bin at all (unknown treated as permissive, which is right for a gate); here
@@ -388,7 +408,8 @@ impl crate::ConversationEngine {
             None => Vec::new(),
             Some((quiet_hours, quiet_hours_end_ms, _)) => {
                 let now = mind_observability::now_ms() as i64;
-                let candidate = candidate_for_digest(now, quiet_hours, quiet_hours_end_ms, user_receptive);
+                let candidate =
+                    candidate_for_digest(now, quiet_hours, quiet_hours_end_ms, user_receptive);
                 let d = mind_proactive::arbitrate(&candidate);
                 vec![serde_json::json!({
                     "candidate_id": d.candidate_id,
@@ -407,7 +428,7 @@ impl crate::ConversationEngine {
         serde_json::json!({
             "decisions": decisions,
             "receptivity": {
-                "quiet_hours": observed.map(|(q, _, _)| q).unwrap_or(false),
+                "quiet_hours": observed.is_some_and(|(q, _, _)| q),
                 "quiet_hours_end_ms": observed.and_then(|(_, e, _)| e),
                 "user_receptive": user_receptive,
                 // Additive, and the reason the two fields above can be trusted: when this is null
@@ -427,8 +448,14 @@ impl crate::ConversationEngine {
         // legacy send path, which knows nothing about this module. Joined by the ref captured at
         // send time - never reconstructed from a timestamp, because judgment_log stamps its own `t`
         // after an awaited read and the two differ.
-        let led: Vec<serde_json::Value> = self.memory.profile_get("judgment_ledger").await.ok().flatten()
-            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let led: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         let outcome_of = |rf: &str| -> Option<bool> {
             led.iter()
                 .find(|r| r.get("ref").and_then(|x| x.as_str()) == Some(rf))
@@ -442,7 +469,7 @@ impl crate::ConversationEngine {
         let (mut engaged, mut ignored) = (0u32, 0u32);
         let mut ticks = 0u64;
         for r in &list {
-            ticks += r.evaluations as u64;
+            ticks += u64::from(r.evaluations);
             match r.legacy {
                 LegacyOutcome::Sent => sent += 1,
                 LegacyOutcome::NothingToSay => nothing += 1,
@@ -453,19 +480,36 @@ impl crate::ConversationEngine {
             // a policy comparison. "Nothing to say" answers a different question entirely.
             let exec_would_speak = r.executive_posture == "ACT";
             let legacy_spoke = r.legacy == LegacyOutcome::Sent;
-            if matches!(r.legacy, LegacyOutcome::Sent | LegacyOutcome::DeclinedByReceptivity) {
-                if exec_would_speak == legacy_spoke { agree += 1 } else { disagree += 1 }
+            if matches!(
+                r.legacy,
+                LegacyOutcome::Sent | LegacyOutcome::DeclinedByReceptivity
+            ) {
+                if exec_would_speak == legacy_spoke {
+                    agree += 1
+                } else {
+                    disagree += 1
+                }
             }
             let resolved = r.claim_ref.as_deref().and_then(outcome_of);
             match resolved {
-                Some(true) => { engaged += 1; observed += 1; }
-                Some(false) => { ignored += 1; observed += 1; }
+                Some(true) => {
+                    engaged += 1;
+                    observed += 1;
+                }
+                Some(false) => {
+                    ignored += 1;
+                    observed += 1;
+                }
                 None => match r.outcome {
                     OutcomeStatus::CensoredByLegacyDrop => censored += 1,
                     OutcomeStatus::NotApplicable => {}
                     OutcomeStatus::Observable => observed += 1,
                     OutcomeStatus::Pending => {
-                        if is_instrumentation_defect(r, now) { defects += 1 } else { pending += 1 }
+                        if is_instrumentation_defect(r, now) {
+                            defects += 1
+                        } else {
+                            pending += 1
+                        }
                     }
                 },
             }
@@ -475,13 +519,19 @@ impl crate::ConversationEngine {
         out.push_str(&format!("  call site: {CALL_SITE}\n"));
         out.push_str(&format!("  opportunities {} (from {ticks} eligible-cut evaluations - re-evaluation does NOT inflate the sample)\n", list.len()));
         out.push_str(&format!("  legacy: sent {sent} - nothing-to-say {nothing} - declined-by-receptivity {declined} - undetermined {undetermined}\n"));
-        out.push_str(&format!("  policy agreement {agree} - disagreement {disagree}\n"));
+        out.push_str(&format!(
+            "  policy agreement {agree} - disagreement {disagree}\n"
+        ));
         out.push_str(&format!("  outcomes: observable {observed} (engaged {engaged}, ignored {ignored}) - pending {pending} - CENSORED {censored}\n"));
         if defects > 0 {
             out.push_str(&format!("  !! {defects} record(s) pending far past their window - INSTRUMENTATION DEFECT, not ignored messages\n"));
         }
-        out.push_str("  censored = the legacy gate declined, so nothing was sent and no outcome exists.\n");
-        out.push_str("  Not a failure and not a zero. The disagreement that would justify switching is\n");
+        out.push_str(
+            "  censored = the legacy gate declined, so nothing was sent and no outcome exists.\n",
+        );
+        out.push_str(
+            "  Not a failure and not a zero. The disagreement that would justify switching is\n",
+        );
         out.push_str("  exactly the one this design cannot observe (ledger E.D2 / E.D4).\n");
         out.push_str("  Agreement above is SHADOW-CONSISTENT EVIDENCE, not proof that either policy is better.\n");
         out
@@ -523,8 +573,14 @@ mod tests {
             upsert(&mut list, rec(1_000, 1_000 + i * 25_000), 0);
         }
         assert_eq!(list.len(), 1, "one opportunity is one record");
-        assert_eq!(list[0].evaluations, 144, "but the re-evaluation volume stays visible");
-        assert_eq!(list[0].decided_at_ms, 1_000, "the decision is the FIRST one, not the latest");
+        assert_eq!(
+            list[0].evaluations, 144,
+            "but the re-evaluation volume stays visible"
+        );
+        assert_eq!(
+            list[0].decided_at_ms, 1_000,
+            "the decision is the FIRST one, not the latest"
+        );
 
         // A genuinely new opportunity (the cadence reset) is a new record.
         upsert(&mut list, rec(9_999, 9_999), 0);
@@ -539,13 +595,25 @@ mod tests {
     #[test]
     fn batched_evaluations_are_carried_not_dropped() {
         let mut list = Vec::new();
-        assert!(upsert(&mut list, rec(1, 1), 0), "first sighting creates the opportunity");
+        assert!(
+            upsert(&mut list, rec(1, 1), 0),
+            "first sighting creates the opportunity"
+        );
         assert_eq!(list[0].evaluations, 1);
 
         // A flush arriving after 63 unpersisted ticks must add all of them, plus itself.
-        assert!(!upsert(&mut list, rec(1, 999), 63), "same window is never a new opportunity");
-        assert_eq!(list[0].evaluations, 65, "the carried ticks must survive the batching");
-        assert_eq!(list[0].decided_at_ms, 1, "and the decision still belongs to the first tick");
+        assert!(
+            !upsert(&mut list, rec(1, 999), 63),
+            "same window is never a new opportunity"
+        );
+        assert_eq!(
+            list[0].evaluations, 65,
+            "the carried ticks must survive the batching"
+        );
+        assert_eq!(
+            list[0].decided_at_ms, 1,
+            "and the decision still belongs to the first tick"
+        );
         assert_eq!(list.len(), 1);
     }
 
@@ -561,7 +629,10 @@ mod tests {
             ContentStatus::UnknownDueToLegacyShortCircuit,
             "content existence is unknown when the gate short-circuits before the digest"
         );
-        assert!(list[0].claim_ref.is_none(), "nothing was sent, so there is no claim to join to");
+        assert!(
+            list[0].claim_ref.is_none(),
+            "nothing was sent, so there is no claim to join to"
+        );
     }
 
     /// Gate passed, nothing to say. Not a policy disagreement in either direction.
@@ -579,7 +650,12 @@ mod tests {
     #[test]
     fn a_send_joins_by_the_ref_it_was_logged_under() {
         let mut list = vec![rec(3, 3)];
-        note_legacy(&mut list, 3, LegacyOutcome::Sent, Some("1756142400123".into()));
+        note_legacy(
+            &mut list,
+            3,
+            LegacyOutcome::Sent,
+            Some("1756142400123".into()),
+        );
         assert_eq!(list[0].outcome, OutcomeStatus::Pending);
         assert_eq!(list[0].claim_ref.as_deref(), Some("1756142400123"));
     }
@@ -590,7 +666,10 @@ mod tests {
         let mut list = vec![rec(4, 0)];
         note_legacy(&mut list, 4, LegacyOutcome::Sent, Some("x".into()));
         let inside = WINDOW_MS + PENDING_ALARM_MARGIN_MS - 1;
-        assert!(!is_instrumentation_defect(&list[0], inside), "still legitimately pending");
+        assert!(
+            !is_instrumentation_defect(&list[0], inside),
+            "still legitimately pending"
+        );
         assert!(
             is_instrumentation_defect(&list[0], inside + 2),
             "past the window plus margin the resolver never came back — alarm, do not score"
@@ -602,9 +681,18 @@ mod tests {
     #[test]
     fn the_digest_candidate_claims_only_what_the_site_knows() {
         let c = candidate_for_digest(0, true, Some(8 * 3_600_000), Some(false));
-        assert!(!c.already_resolved, "this site cannot establish resolution of anything");
-        assert!(!c.internal_capability, "a digest exists to be read; it cannot be handled internally");
-        let r = c.resources.as_ref().expect("resource view is the point of EX4");
+        assert!(
+            !c.already_resolved,
+            "this site cannot establish resolution of anything"
+        );
+        assert!(
+            !c.internal_capability,
+            "a digest exists to be read; it cannot be handled internally"
+        );
+        let r = c
+            .resources
+            .as_ref()
+            .expect("resource view is the point of EX4");
         assert!(r.quiet_hours);
         assert_eq!(r.user_receptive, Some(false));
     }
@@ -615,9 +703,19 @@ mod tests {
     fn arbitrate_survives_a_degraded_real_candidate() {
         let c = candidate_for_digest(0, true, Some(8 * 3_600_000), Some(false));
         let d = mind_proactive::arbitrate(&c);
-        assert_eq!(d.posture, Posture::Monitor, "quiet hours defers a low-urgency digest");
-        assert!(!d.requires_user_interrupt, "a deferral must not also demand an interrupt");
-        let m = d.monitor.as_ref().expect("a MONITOR must say what would make it reconsider");
+        assert_eq!(
+            d.posture,
+            Posture::Monitor,
+            "quiet hours defers a low-urgency digest"
+        );
+        assert!(
+            !d.requires_user_interrupt,
+            "a deferral must not also demand an interrupt"
+        );
+        let m = d
+            .monitor
+            .as_ref()
+            .expect("a MONITOR must say what would make it reconsider");
         assert!(!m.wake_when.is_empty());
     }
 
@@ -657,6 +755,11 @@ mod tests {
         // And the thing it DOES add over a silent drop: a named reason and something to wake on.
         let d = mind_proactive::arbitrate(&candidate_for_digest(0, false, None, Some(false)));
         assert_eq!(d.reason_code, "user_unavailable");
-        assert!(!d.monitor.as_ref().expect("a deferral must say what it waits for").wake_when.is_empty());
+        assert!(!d
+            .monitor
+            .as_ref()
+            .expect("a deferral must say what it waits for")
+            .wake_when
+            .is_empty());
     }
 }

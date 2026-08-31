@@ -5,8 +5,10 @@
 use std::path::PathBuf;
 
 fn papers_dir() -> PathBuf {
-    let d = PathBuf::from(std::env::var("YM_CODE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/repos".into()))
-        .join("_papers");
+    let d = PathBuf::from(
+        std::env::var("YM_CODE_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/repos".into()),
+    )
+    .join("_papers");
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -18,16 +20,26 @@ pub fn paper_key(url: &str) -> String {
     if let Some(p) = u.find("arxiv.org/") {
         let tail = &u[p + 10..];
         let id: String = tail
-            .trim_start_matches("abs/").trim_start_matches("pdf/").trim_start_matches("html/")
-            .chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            .trim_start_matches("abs/")
+            .trim_start_matches("pdf/")
+            .trim_start_matches("html/")
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
         if id.len() >= 8 {
             return format!("arxiv{}", id.replace('.', ""));
         }
     }
     let seg = u.rsplit('/').find(|s| s.len() > 3).unwrap_or("paper");
-    let mut k: String = seg.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let mut k: String = seg
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
     k.truncate(40);
-    if k.is_empty() { k = "paper".into(); }
+    if k.is_empty() {
+        k = "paper".into();
+    }
     k
 }
 
@@ -43,7 +55,10 @@ fn drop_tag_bodies(html: String, tag: &str) -> String {
         out.push_str(&html[pos..i]);
         match lower[i..].find(&close) {
             Some(j) => pos = i + j + close.len(),
-            None => { pos = html.len(); break; }
+            None => {
+                pos = html.len();
+                break;
+            }
         }
     }
     out.push_str(&html[pos..]);
@@ -63,12 +78,18 @@ fn strip_html(html: &str) -> String {
         match c {
             '<' => {
                 in_tag = true;
-                if !last_nl { out.push('\n'); last_nl = true; }
+                if !last_nl {
+                    out.push('\n');
+                    last_nl = true;
+                }
             }
             '>' => in_tag = false,
             _ if !in_tag => {
                 if c == '\n' || c == '\r' {
-                    if !last_nl { out.push('\n'); last_nl = true; }
+                    if !last_nl {
+                        out.push('\n');
+                        last_nl = true;
+                    }
                 } else {
                     out.push(c);
                     last_nl = false;
@@ -77,8 +98,12 @@ fn strip_html(html: &str) -> String {
             _ => {}
         }
     }
-    out.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ")
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
 }
 
 /// Fetch a paper/article and extract readable text. arxiv abs/pdf URLs are rerouted to the ar5iv
@@ -89,10 +114,18 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
     let cache = papers_dir().join(format!("{key}.txt"));
     let fetch_url = if url.contains("arxiv.org/") {
         let id: String = url
-            .rsplit('/').next().unwrap_or("")
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
             .trim_end_matches(".pdf")
-            .chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
-        if id.len() >= 8 { format!("https://ar5iv.labs.arxiv.org/html/{id}") } else { url.to_string() }
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if id.len() >= 8 {
+            format!("https://ar5iv.labs.arxiv.org/html/{id}")
+        } else {
+            url.to_string()
+        }
     } else {
         url.to_string()
     };
@@ -109,7 +142,9 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
         let tmp = papers_dir().join(format!("{key}.pdf"));
         std::fs::write(&tmp, &buf)?;
         let out = std::process::Command::new("pdftotext")
-            .arg("-layout").arg(&tmp).arg("-")
+            .arg("-layout")
+            .arg(&tmp)
+            .arg("-")
             .output();
         match out {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -126,7 +161,9 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
         let l = line.trim();
         if l.is_empty() {
             blanks += 1;
-            if blanks <= 1 { clean.push('\n'); }
+            if blanks <= 1 {
+                clean.push('\n');
+            }
         } else {
             blanks = 0;
             clean.push_str(l);
@@ -152,9 +189,18 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
         }
     }
     if clean.len() < 800 {
-        anyhow::bail!("extracted only {} chars — page may be JS-rendered or paywalled", clean.len());
+        anyhow::bail!(
+            "extracted only {} chars — page may be JS-rendered or paywalled",
+            clean.len()
+        );
     }
-    let title = clean.lines().find(|l| l.len() > 15).unwrap_or(&key).chars().take(140).collect::<String>();
+    let title = clean
+        .lines()
+        .find(|l| l.len() > 15)
+        .unwrap_or(&key)
+        .chars()
+        .take(140)
+        .collect::<String>();
     std::fs::write(&cache, &clean)?;
     Ok((title, clean))
 }
@@ -164,20 +210,38 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
 pub fn section_skeleton(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     const HEADS: [&str; 14] = [
-        "abstract", "introduction", "related work", "background", "method", "approach",
-        "architecture", "experiment", "evaluation", "results", "discussion", "limitations",
-        "conclusion", "references",
+        "abstract",
+        "introduction",
+        "related work",
+        "background",
+        "method",
+        "approach",
+        "architecture",
+        "experiment",
+        "evaluation",
+        "results",
+        "discussion",
+        "limitations",
+        "conclusion",
+        "references",
     ];
     for line in text.lines() {
         let l = line.trim();
-        if l.len() > 80 || l.len() < 4 { continue; }
+        if l.len() > 80 || l.len() < 4 {
+            continue;
+        }
         let low = l.to_lowercase();
-        let numbered = l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && l.len() < 60;
-        if HEADS.iter().any(|h| low == *h || (low.contains(h) && (numbered || low.len() < 30))) {
-            if out.last().map(|x: &String| x != l).unwrap_or(true) {
+        let numbered = l.chars().next().is_some_and(|c| c.is_ascii_digit()) && l.len() < 60;
+        if HEADS
+            .iter()
+            .any(|h| low == *h || (low.contains(h) && (numbered || low.len() < 30)))
+        {
+            if out.last().is_none_or(|x: &String| x != l) {
                 out.push(l.to_string());
             }
-            if out.len() >= 20 { break; }
+            if out.len() >= 20 {
+                break;
+            }
         }
     }
     out
@@ -186,7 +250,9 @@ pub fn section_skeleton(text: &str) -> Vec<String> {
 /// Targeted re-read of a cached paper: lines containing any query word (len>=4), with context.
 pub fn paper_lookup(key: &str, words: &[String], max_hits: usize) -> Vec<String> {
     let cache = papers_dir().join(format!("{key}.txt"));
-    let Ok(text) = std::fs::read_to_string(&cache) else { return vec![] };
+    let Ok(text) = std::fs::read_to_string(&cache) else {
+        return vec![];
+    };
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -195,7 +261,9 @@ pub fn paper_lookup(key: &str, words: &[String], max_hits: usize) -> Vec<String>
             let start = i.saturating_sub(1);
             let end = (i + 3).min(lines.len());
             out.push(lines[start..end].join("\n"));
-            if out.len() >= max_hits { break; }
+            if out.len() >= max_hits {
+                break;
+            }
         }
     }
     out
@@ -217,7 +285,10 @@ pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, Stri
         "https://export.arxiv.org/api/query?search_query=all:{q}&sortBy=submittedDate&sortOrder=descending&max_results={max}"
     );
     let body = ureq::get(&url)
-        .set("User-Agent", "yantrik-mind research reader (contact: developer@pranab.co.in)")
+        .set(
+            "User-Agent",
+            "yantrik-mind research reader (contact: developer@pranab.co.in)",
+        )
         .timeout(std::time::Duration::from_secs(30))
         .call()?
         .into_string()?;
@@ -241,7 +312,9 @@ pub fn arxiv_search(query: &str, max: usize) -> anyhow::Result<Vec<(String, Stri
                 out.push((id.replace("http://", "https://"), title, summary));
             }
         }
-        if out.len() >= max { break; }
+        if out.len() >= max {
+            break;
+        }
     }
     Ok(out)
 }

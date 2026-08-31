@@ -10,6 +10,7 @@
 
 pub mod brain_bench;
 pub mod cognition_eval;
+pub mod competitive;
 pub mod immune;
 pub mod loop_compare;
 pub mod loop_eval;
@@ -23,7 +24,6 @@ use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery};
 use serde::Serialize;
 use yantrik_ml::LLMBackend;
 
-
 pub struct Seed {
     pub statement: String,
     pub polarity: f64,
@@ -31,9 +31,27 @@ pub struct Seed {
 }
 
 impl Seed {
-    pub fn pos(s: &str) -> Self { Self { statement: s.into(), polarity: 1.0, weight: 1.5 } }
-    pub fn neg(s: &str) -> Self { Self { statement: s.into(), polarity: -1.0, weight: 1.5 } }
-    pub fn weak(s: &str) -> Self { Self { statement: s.into(), polarity: 1.0, weight: 0.5 } }
+    pub fn pos(s: &str) -> Self {
+        Self {
+            statement: s.into(),
+            polarity: 1.0,
+            weight: 1.5,
+        }
+    }
+    pub fn neg(s: &str) -> Self {
+        Self {
+            statement: s.into(),
+            polarity: -1.0,
+            weight: 1.5,
+        }
+    }
+    pub fn weak(s: &str) -> Self {
+        Self {
+            statement: s.into(),
+            polarity: 1.0,
+            weight: 0.5,
+        }
+    }
 }
 
 pub struct Relation {
@@ -101,8 +119,15 @@ impl Scorecard {
     pub fn render(&self) -> String {
         let mut s = String::new();
         for sc in &self.scenarios {
-            let mark = if sc.passed == sc.total { "PASS" } else { "FAIL" };
-            s.push_str(&format!("[{mark}] {} ({}/{})\n", sc.name, sc.passed, sc.total));
+            let mark = if sc.passed == sc.total {
+                "PASS"
+            } else {
+                "FAIL"
+            };
+            s.push_str(&format!(
+                "[{mark}] {} ({}/{})\n",
+                sc.name, sc.passed, sc.total
+            ));
             for c in &sc.checks {
                 if !c.pass {
                     s.push_str(&format!("        ✗ {}\n", c.desc));
@@ -120,7 +145,11 @@ impl Scorecard {
 }
 
 async fn confidence_of(mem: &MemoryHandle, statement: &str) -> Option<f64> {
-    mem.explain_belief(statement, &mind_types::AccessContext::operator_audit()).await.ok().flatten().map(|(b, _)| b.confidence)
+    mem.explain_belief(statement, &mind_types::AccessContext::operator_audit())
+        .await
+        .ok()
+        .flatten()
+        .map(|(b, _)| b.confidence)
 }
 
 /// Run one scenario against a fresh in-memory mind. Deterministic: the ScriptedLLM records the
@@ -147,30 +176,36 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
 
     let scripted = Arc::new(ScriptedLLM::new("ack"));
     let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
-    let conv = ConversationEngine::new(Arc::new(mem.clone()), pool, mind_types::default_persona("the user"))
-        // The deterministic dispatch chain (agent_primary=false) is the correct harness for evals:
-        // it uses build_prompt (which wraps grounding with the untrusted NOT-instructions marker),
-        // render_grounding (which phrases contradictions as "conflicts with"), and calls
-        // extract_commitment before returning — all behaviors the suite grades.  The agentic loop
-        // is exercised by its own unit tests that can simulate JSON tool responses.
-        .with_agent_primary(false)
-        .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
-            "WEBDOC: Teal is a cyan-family blue-green color.",
-        )))
-        .with_mail(Arc::new(mind_tools::ScriptedMailClient::new(vec![mind_tools::EmailMsg {
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()),
+        pool,
+        mind_types::default_persona("the user"),
+    )
+    // The deterministic dispatch chain (agent_primary=false) is the correct harness for evals:
+    // it uses build_prompt (which wraps grounding with the untrusted NOT-instructions marker),
+    // render_grounding (which phrases contradictions as "conflicts with"), and calls
+    // extract_commitment before returning — all behaviors the suite grades.  The agentic loop
+    // is exercised by its own unit tests that can simulate JSON tool responses.
+    .with_agent_primary(false)
+    .with_web(Arc::new(mind_tools::ScriptedFetcher::new(
+        "WEBDOC: Teal is a cyan-family blue-green color.",
+    )))
+    .with_mail(Arc::new(mind_tools::ScriptedMailClient::new(vec![
+        mind_tools::EmailMsg {
             id: "1".into(),
             from: "INBOXDOC alice@acme.com".into(),
             subject: "Q3 invoice".into(),
             date: "today".into(),
-        }])))
-        .with_github(Arc::new(mind_tools::ScriptedGithubClient::new(vec![
-            mind_tools::GithubNotification {
-                repo: "GHDOC yantrikos/yantrik-os".into(),
-                kind: "PullRequest".into(),
-                title: "logging".into(),
-                reason: "review_requested".into(),
-            },
-        ])));
+        },
+    ])))
+    .with_github(Arc::new(mind_tools::ScriptedGithubClient::new(vec![
+        mind_tools::GithubNotification {
+            repo: "GHDOC yantrikos/yantrik-os".into(),
+            kind: "PullRequest".into(),
+            title: "logging".into(),
+            reason: "review_requested".into(),
+        },
+    ])));
 
     let mut prompt = String::new();
     for turn in &s.turns {
@@ -181,10 +216,16 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
     let mut checks = Vec::new();
     for c in &s.checks {
         let (desc, pass) = match c {
-            Check::PromptContains(x) => (format!("prompt grounds on '{x}'"), prompt.contains(x.as_str())),
+            Check::PromptContains(x) => (
+                format!("prompt grounds on '{x}'"),
+                prompt.contains(x.as_str()),
+            ),
             Check::PromptOmits(x) => (format!("prompt omits '{x}'"), !prompt.contains(x.as_str())),
             Check::MinConflicts(n) => {
-                let cs = mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap_or_default();
+                let cs = mem
+                    .conflicts(&mind_types::AccessContext::operator_audit())
+                    .await
+                    .unwrap_or_default();
                 (format!("detects >= {n} contradiction(s)"), cs.len() >= *n)
             }
             Check::ConfidenceAbove(stmt, th) => {
@@ -197,7 +238,14 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
             }
             Check::RecallSurfaces { query, expect } => {
                 let r = mem
-                    .recall_typed(RecallQuery { text: query.clone(), top_k: 8, kind: None }, &mind_types::AccessContext::operator_audit())
+                    .recall_typed(
+                        RecallQuery {
+                            text: query.clone(),
+                            top_k: 8,
+                            kind: None,
+                        },
+                        &mind_types::AccessContext::operator_audit(),
+                    )
                     .await
                     .unwrap_or_default();
                 (
@@ -207,7 +255,10 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
             }
             Check::TaskOpen(x) => {
                 let ts = mem.list_tasks(false).await.unwrap_or_default();
-                (format!("open task contains '{x}'"), ts.iter().any(|t| t.description.contains(x.as_str())))
+                (
+                    format!("open task contains '{x}'"),
+                    ts.iter().any(|t| t.description.contains(x.as_str())),
+                )
             }
         };
         checks.push(CheckResult { desc, pass });
@@ -215,7 +266,13 @@ pub async fn run_scenario(s: &Scenario) -> ScenarioResult {
 
     let passed = checks.iter().filter(|c| c.pass).count();
     let total = checks.len();
-    ScenarioResult { name: s.name.clone(), passed, total, checks, calls: 0 }
+    ScenarioResult {
+        name: s.name.clone(),
+        passed,
+        total,
+        checks,
+        calls: 0,
+    }
 }
 
 pub async fn run_suite(scenarios: &[Scenario]) -> Scorecard {
@@ -230,7 +287,11 @@ pub async fn run_suite(scenarios: &[Scenario]) -> Scorecard {
     Scorecard {
         passed,
         total,
-        score: if total == 0 { 0.0 } else { passed as f64 / total as f64 },
+        score: if total == 0 {
+            0.0
+        } else {
+            passed as f64 / total as f64
+        },
         scenarios: results,
     }
 }
@@ -244,7 +305,10 @@ pub fn standard_suite() -> Vec<Scenario> {
             relations: vec![],
             tasks: vec![],
             turns: vec![],
-            checks: vec![Check::ConfidenceAbove("Pranab prefers terse replies".into(), 0.5)],
+            checks: vec![Check::ConfidenceAbove(
+                "Pranab prefers terse replies".into(),
+                0.5,
+            )],
         },
         Scenario {
             name: "belief revision: negative evidence lowers confidence".into(),
@@ -378,8 +442,8 @@ pub fn standard_suite() -> Vec<Scenario> {
             tasks: vec![],
             turns: vec!["summarize https://example.com/teal".into()],
             checks: vec![
-                Check::PromptContains("WEBDOC".into()),          // the page reached the prompt
-                Check::PromptContains("web page".into()),         // untrusted-wrapped web block
+                Check::PromptContains("WEBDOC".into()), // the page reached the prompt
+                Check::PromptContains("web page".into()), // untrusted-wrapped web block
             ],
         },
         // GROWTH (email): "check my email" pulls the inbox (read-only) and grounds the reply.
@@ -390,8 +454,8 @@ pub fn standard_suite() -> Vec<Scenario> {
             tasks: vec![],
             turns: vec!["can you check my email?".into()],
             checks: vec![
-                Check::PromptContains("INBOXDOC".into()),        // the inbox reached the prompt
-                Check::PromptContains("<<inbox".into()),         // untrusted-wrapped inbox block
+                Check::PromptContains("INBOXDOC".into()), // the inbox reached the prompt
+                Check::PromptContains("<<inbox".into()),  // untrusted-wrapped inbox block
             ],
         },
         // GROWTH (github): "check my github" pulls notifications (read-only) and grounds the reply.
@@ -402,8 +466,8 @@ pub fn standard_suite() -> Vec<Scenario> {
             tasks: vec![],
             turns: vec!["check my github".into()],
             checks: vec![
-                Check::PromptContains("GHDOC".into()),           // notifications reached the prompt
-                Check::PromptContains("<<github".into()),        // untrusted-wrapped github block
+                Check::PromptContains("GHDOC".into()), // notifications reached the prompt
+                Check::PromptContains("<<github".into()), // untrusted-wrapped github block
             ],
         },
     ]
@@ -418,8 +482,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn standard_suite_is_green() {
         let card = run_suite(&standard_suite()).await;
-        assert_eq!(card.passed, card.total, "eval regressions:\n{}", card.render());
-        assert!(card.total >= 8, "suite should be substantive, got {} checks", card.total);
+        assert_eq!(
+            card.passed,
+            card.total,
+            "eval regressions:\n{}",
+            card.render()
+        );
+        assert!(
+            card.total >= 8,
+            "suite should be substantive, got {} checks",
+            card.total
+        );
     }
 
     /// Guard the three specific regressions that were introduced when run_scenario lost
@@ -437,14 +510,20 @@ mod tests {
             checks: vec![Check::PromptContains("NOT instructions".into())],
         })
         .await;
-        assert_eq!(r.passed, r.total, "grounding must carry the untrusted NOT-instructions marker");
+        assert_eq!(
+            r.passed, r.total,
+            "grounding must carry the untrusted NOT-instructions marker"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn contradiction_grounding_uses_conflicts_with_phrasing() {
         let r = run_scenario(&Scenario {
             name: "contradicts phrasing".into(),
-            seeds: vec![Seed::weak("user is in London"), Seed::weak("user is in Tokyo")],
+            seeds: vec![
+                Seed::weak("user is in London"),
+                Seed::weak("user is in Tokyo"),
+            ],
             relations: vec![Relation {
                 a: "user is in London".into(),
                 b: "user is in Tokyo".into(),
@@ -455,7 +534,10 @@ mod tests {
             checks: vec![Check::PromptContains("conflicts with".into())],
         })
         .await;
-        assert_eq!(r.passed, r.total, "contradictions must be phrased as '... conflicts with ...'");
+        assert_eq!(
+            r.passed, r.total,
+            "contradictions must be phrased as '... conflicts with ...'"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -469,7 +551,10 @@ mod tests {
             checks: vec![Check::TaskOpen("dentist".into())],
         })
         .await;
-        assert_eq!(r.passed, r.total, "'remind me to' must create an open task in memory");
+        assert_eq!(
+            r.passed, r.total,
+            "'remind me to' must create an open task in memory"
+        );
     }
 }
 
@@ -478,7 +563,7 @@ mod tests {
 #[cfg(test)]
 mod world_oracle;
 
-#[cfg(test)]
-mod executive_oracle;
 /// ARCH-6 P.3 — the coverage router's labelled corpus and its pre-registered bar (ledger E.PK3).
 pub mod coverage_oracle;
+#[cfg(test)]
+mod executive_oracle;

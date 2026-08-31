@@ -257,7 +257,8 @@ impl Capsule {
             if let Some(e) = &obs.error {
                 // Keep the action with the reason: "web_fetch: 502" is avoidable next time,
                 // "something failed" is not.
-                self.failures.push(format!("{}: {}", obs.action, first_line(e, 120)));
+                self.failures
+                    .push(format!("{}: {}", obs.action, first_line(e, 120)));
             }
         }
 
@@ -271,7 +272,11 @@ impl Capsule {
         for f in obs.findings {
             // Same claim twice is one finding with the union of its support, not two findings —
             // otherwise a min_findings contract could be satisfied by saying one thing twice.
-            match self.findings.iter_mut().find(|x| same_claim(&x.claim, &f.claim)) {
+            match self
+                .findings
+                .iter_mut()
+                .find(|x| same_claim(&x.claim, &f.claim))
+            {
                 Some(existing) => {
                     for e in f.evidence {
                         if !existing.evidence.contains(&e) {
@@ -292,7 +297,11 @@ impl Capsule {
         }
 
         for u in obs.uncertainties {
-            match self.uncertainties.iter_mut().find(|x| same_claim(&x.question, &u.question)) {
+            match self
+                .uncertainties
+                .iter_mut()
+                .find(|x| same_claim(&x.question, &u.question))
+            {
                 Some(existing) => {
                     if u.resolved && !existing.resolved {
                         resolved_something = true;
@@ -384,7 +393,11 @@ impl Capsule {
             .fold(0.0, f64::max);
 
         // An unresolved contradiction is the strongest reason to distrust a conclusion.
-        let clash = if self.contradictions.is_empty() { 0.0 } else { 0.3 };
+        let clash = if self.contradictions.is_empty() {
+            0.0
+        } else {
+            0.3
+        };
 
         self.confidence = (support - doubt - clash).clamp(0.0, 1.0);
     }
@@ -398,10 +411,15 @@ impl Capsule {
         if self.completed.len() > MAX_COMPLETED {
             let folded = self.completed.len() - (MAX_COMPLETED - 1);
             self.completed.drain(..folded);
-            self.completed.insert(0, format!("(+{folded} earlier steps)"));
+            self.completed
+                .insert(0, format!("(+{folded} earlier steps)"));
         }
         if self.evidence.len() > MAX_EVIDENCE {
-            self.evidence.sort_by(|a, b| b.utility.partial_cmp(&a.utility).unwrap_or(std::cmp::Ordering::Equal));
+            self.evidence.sort_by(|a, b| {
+                b.utility
+                    .partial_cmp(&a.utility)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             self.evidence.truncate(MAX_EVIDENCE);
         }
         self.notes.truncate(MAX_NOTES);
@@ -414,19 +432,29 @@ impl Capsule {
             self.failures.drain(..drop);
         }
         // Resolved, unimportant uncertainties have served their purpose.
-        self.uncertainties.retain(|u| !(u.resolved && u.importance < 0.4));
+        self.uncertainties
+            .retain(|u| !(u.resolved && u.importance < 0.4));
     }
 
     /// Does anything found so far address this requirement?
     pub fn covers(&self, requirement: &str) -> bool {
-        self.findings.iter().any(|f| f.addresses.iter().any(|a| same_claim(a, requirement)))
+        self.findings
+            .iter()
+            .any(|f| f.addresses.iter().any(|a| same_claim(a, requirement)))
     }
 
     /// Unresolved questions important enough to block finishing, most impactful first.
     pub fn open_critical_uncertainties(&self) -> impl Iterator<Item = &Uncertainty> {
-        let mut v: Vec<&Uncertainty> =
-            self.uncertainties.iter().filter(|u| !u.resolved && u.is_critical()).collect();
-        v.sort_by(|a, b| b.priority().partial_cmp(&a.priority()).unwrap_or(std::cmp::Ordering::Equal));
+        let mut v: Vec<&Uncertainty> = self
+            .uncertainties
+            .iter()
+            .filter(|u| !u.resolved && u.is_critical())
+            .collect();
+        v.sort_by(|a, b| {
+            b.priority()
+                .partial_cmp(&a.priority())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         v.into_iter()
     }
 
@@ -435,13 +463,20 @@ impl Capsule {
         self.uncertainties
             .iter()
             .filter(|u| u.is_worth_resolving())
-            .max_by(|a, b| a.priority().partial_cmp(&b.priority()).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.priority()
+                    .partial_cmp(&b.priority())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     /// How many times this exact action has been attempted. The loop guard's input, and the reason
     /// it can catch A→B→A→B rather than only an immediate repeat.
     pub fn attempts_of(&self, action: &str) -> usize {
-        self.attempted.iter().filter(|a| a.as_str() == action).count()
+        self.attempted
+            .iter()
+            .filter(|a| a.as_str() == action)
+            .count()
     }
 
     /// Distinct actions tried. A run with many attempts but few distinct ones is going in circles.
@@ -475,7 +510,10 @@ impl Capsule {
             self.progress.steps,
             self.confidence * 100.0,
             if self.progress.barren_steps > 0 {
-                format!(" \u{b7} {} step(s) without new information", self.progress.barren_steps)
+                format!(
+                    " \u{b7} {} step(s) without new information",
+                    self.progress.barren_steps
+                )
             } else {
                 String::new()
             }
@@ -492,14 +530,26 @@ impl Capsule {
         if !open.is_empty() {
             let mut sec = String::from("OPEN QUESTIONS (most important first)\n");
             let mut sorted = open;
-            sorted.sort_by(|a, b| b.priority().partial_cmp(&a.priority()).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| {
+                b.priority()
+                    .partial_cmp(&a.priority())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             for u in sorted {
-                sec.push_str(&format!("- {} (matters {:.0}%, known {:.0}%)\n", u.question, u.importance * 100.0, u.confidence * 100.0));
+                sec.push_str(&format!(
+                    "- {} (matters {:.0}%, known {:.0}%)\n",
+                    u.question,
+                    u.importance * 100.0,
+                    u.confidence * 100.0
+                ));
             }
             push(sec, &mut s);
         }
         if !self.contradictions.is_empty() {
-            push(format!("CONTRADICTIONS\n- {}\n", self.contradictions.join("\n- ")), &mut s);
+            push(
+                format!("CONTRADICTIONS\n- {}\n", self.contradictions.join("\n- ")),
+                &mut s,
+            );
         }
         if !self.evidence.is_empty() {
             let mut sec = String::from("EVIDENCE (ids only \u{2014} FETCH one to read it)\n");
@@ -512,7 +562,10 @@ impl Capsule {
             push(format!("DONE\n- {}\n", self.completed.join("\n- ")), &mut s);
         }
         if !self.failures.is_empty() {
-            push(format!("FAILED (do not repeat)\n- {}\n", self.failures.join("\n- ")), &mut s);
+            push(
+                format!("FAILED (do not repeat)\n- {}\n", self.failures.join("\n- ")),
+                &mut s,
+            );
         }
         if !self.notes.is_empty() {
             push(format!("NOTES\n- {}\n", self.notes.join("\n- ")), &mut s);
@@ -545,7 +598,11 @@ mod tests {
     use super::*;
 
     fn obs(action: &str) -> Observation {
-        Observation { action: action.into(), ok: true, ..Default::default() }
+        Observation {
+            action: action.into(),
+            ok: true,
+            ..Default::default()
+        }
     }
 
     fn ev(id: &str, summary: &str) -> Evidence {
@@ -607,15 +664,25 @@ mod tests {
         }
         let at_120 = c.render(2000).len();
         assert_eq!(c.progress.steps, 120);
-        assert!(at_120 <= 2000, "the render budget is a hard cap, got {at_120}");
+        assert!(
+            at_120 <= 2000,
+            "the render budget is a hard cap, got {at_120}"
+        );
         // Ninety further steps may change the CONTENT but must not change the SIZE.
         assert!(
             at_120 <= at_30 + 40,
             "capsule grew from {at_30} to {at_120} chars over 90 extra steps \u{2014} it is accumulating, not folding"
         );
-        assert!(c.evidence.len() <= MAX_EVIDENCE, "evidence is capped, got {}", c.evidence.len());
+        assert!(
+            c.evidence.len() <= MAX_EVIDENCE,
+            "evidence is capped, got {}",
+            c.evidence.len()
+        );
         assert!(c.completed.len() <= MAX_COMPLETED);
-        assert!(c.completed[0].contains("earlier steps"), "folded work is counted, not silently dropped");
+        assert!(
+            c.completed[0].contains("earlier steps"),
+            "folded work is counted, not silently dropped"
+        );
     }
 
     /// Evidence bodies must never reach the capsule — that is what makes it small.
@@ -628,19 +695,42 @@ mod tests {
             ..Default::default()
         });
         let rendered = c.render(2000);
-        assert!(rendered.contains("E1: guidance raised"), "the summary and id are shown");
-        assert!(!rendered.contains(&"x".repeat(100)), "the 4KB body must not be in the capsule");
-        assert!(!c.evidence[0].loaded, "nothing is paged in until something needs it");
+        assert!(
+            rendered.contains("E1: guidance raised"),
+            "the summary and id are shown"
+        );
+        assert!(
+            !rendered.contains(&"x".repeat(100)),
+            "the 4KB body must not be in the capsule"
+        );
+        assert!(
+            !c.evidence[0].loaded,
+            "nothing is paged in until something needs it"
+        );
     }
 
     /// Saying the same thing twice must not satisfy a findings count.
     #[test]
     fn a_restated_finding_merges_instead_of_counting_twice() {
         let c = Capsule::new("g", "goal")
-            .reduce(Observation { action: "a".into(), ok: true, findings: vec![finding("XYZ volume is 4.3x average", &["E1"])], ..Default::default() })
-            .reduce(Observation { action: "b".into(), ok: true, findings: vec![finding("xyz volume is 4.3x average.", &["E2"])], ..Default::default() });
+            .reduce(Observation {
+                action: "a".into(),
+                ok: true,
+                findings: vec![finding("XYZ volume is 4.3x average", &["E1"])],
+                ..Default::default()
+            })
+            .reduce(Observation {
+                action: "b".into(),
+                ok: true,
+                findings: vec![finding("xyz volume is 4.3x average.", &["E2"])],
+                ..Default::default()
+            });
         assert_eq!(c.findings.len(), 1, "one claim, however it was phrased");
-        assert_eq!(c.findings[0].evidence, vec!["E1", "E2"], "but the support is the union");
+        assert_eq!(
+            c.findings[0].evidence,
+            vec!["E1", "E2"],
+            "but the support is the union"
+        );
     }
 
     /// Confidence is derived. A run with one thinly-sourced finding and a big open question cannot
@@ -651,25 +741,47 @@ mod tests {
             action: "a".into(),
             ok: true,
             findings: vec![finding("thin claim", &["E1"])],
-            uncertainties: vec![Uncertainty { question: "is it news-driven?".into(), importance: 0.9, confidence: 0.2, resolved: false }],
+            uncertainties: vec![Uncertainty {
+                question: "is it news-driven?".into(),
+                importance: 0.9,
+                confidence: 0.2,
+                resolved: false,
+            }],
             ..Default::default()
         });
-        assert!(c.confidence < 0.4, "one source + a big unknown is not confidence, got {}", c.confidence);
+        assert!(
+            c.confidence < 0.4,
+            "one source + a big unknown is not confidence, got {}",
+            c.confidence
+        );
 
         // Resolve the question and add support: confidence rises because the STATE changed.
         c = c.reduce(Observation {
             action: "b".into(),
             ok: true,
             findings: vec![finding("thin claim", &["E2", "E3"])],
-            uncertainties: vec![Uncertainty { question: "is it news-driven?".into(), importance: 0.9, confidence: 0.95, resolved: true }],
+            uncertainties: vec![Uncertainty {
+                question: "is it news-driven?".into(),
+                importance: 0.9,
+                confidence: 0.95,
+                resolved: true,
+            }],
             ..Default::default()
         });
-        assert!(c.confidence > 0.8, "three sources and nothing important open, got {}", c.confidence);
+        assert!(
+            c.confidence > 0.8,
+            "three sources and nothing important open, got {}",
+            c.confidence
+        );
 
         // A contradiction knocks it down again.
-        c.contradictions.push("two sources disagree on the volume figure".into());
+        c.contradictions
+            .push("two sources disagree on the volume figure".into());
         c.recompute_confidence();
-        assert!(c.confidence < 0.8, "an open contradiction must reduce confidence");
+        assert!(
+            c.confidence < 0.8,
+            "an open contradiction must reduce confidence"
+        );
     }
 
     /// The stall signal: steps that produce nothing are counted, so the controller can act without
@@ -682,14 +794,27 @@ mod tests {
         }
         assert_eq!(c.progress.barren_steps, 3);
 
-        c = c.reduce(Observation { action: "real".into(), ok: true, evidence: vec![ev("E9", "something")], ..Default::default() });
-        assert_eq!(c.progress.barren_steps, 0, "new evidence resets the stall counter");
+        c = c.reduce(Observation {
+            action: "real".into(),
+            ok: true,
+            evidence: vec![ev("E9", "something")],
+            ..Default::default()
+        });
+        assert_eq!(
+            c.progress.barren_steps, 0,
+            "new evidence resets the stall counter"
+        );
 
         // Resolving an uncertainty also counts as progress, even with no new evidence.
         c = c.reduce(Observation {
             action: "resolve".into(),
             ok: true,
-            uncertainties: vec![Uncertainty { question: "q".into(), importance: 0.8, confidence: 0.9, resolved: true }],
+            uncertainties: vec![Uncertainty {
+                question: "q".into(),
+                importance: 0.8,
+                confidence: 0.9,
+                resolved: true,
+            }],
             ..Default::default()
         });
         assert_eq!(c.progress.barren_steps, 0);
@@ -705,7 +830,11 @@ mod tests {
         }
         assert_eq!(c.attempts_of("A"), 3);
         assert_eq!(c.attempts_of("B"), 2);
-        assert_eq!(c.distinct_attempts(), 2, "5 steps, 2 distinct actions \u{2014} going in circles");
+        assert_eq!(
+            c.distinct_attempts(),
+            2,
+            "5 steps, 2 distinct actions \u{2014} going in circles"
+        );
     }
 
     /// A failure carries its reason forward, because "web_fetch: 502" changes the next action and
@@ -728,14 +857,35 @@ mod tests {
     fn the_next_uncertainty_is_the_highest_impact_unknown() {
         let mut c = Capsule::new("g", "goal");
         c.uncertainties = vec![
-            Uncertainty { question: "liquidity sufficient?".into(), importance: 0.7, confidence: 0.96, resolved: false },
-            Uncertainty { question: "news-driven?".into(), importance: 0.9, confidence: 0.35, resolved: false },
-            Uncertainty { question: "logo colour?".into(), importance: 0.1, confidence: 0.1, resolved: false },
+            Uncertainty {
+                question: "liquidity sufficient?".into(),
+                importance: 0.7,
+                confidence: 0.96,
+                resolved: false,
+            },
+            Uncertainty {
+                question: "news-driven?".into(),
+                importance: 0.9,
+                confidence: 0.35,
+                resolved: false,
+            },
+            Uncertainty {
+                question: "logo colour?".into(),
+                importance: 0.1,
+                confidence: 0.1,
+                resolved: false,
+            },
         ];
         assert_eq!(c.next_uncertainty().unwrap().question, "news-driven?");
         // Nearly-known and unimportant questions are not worth an action.
-        assert!(!c.uncertainties[0].is_worth_resolving(), "96% known is not worth a step");
-        assert!(!c.uncertainties[2].is_worth_resolving(), "10% important is not worth a step");
+        assert!(
+            !c.uncertainties[0].is_worth_resolving(),
+            "96% known is not worth a step"
+        );
+        assert!(
+            !c.uncertainties[2].is_worth_resolving(),
+            "10% important is not worth a step"
+        );
     }
 
     /// The render budget is a hard cap, and the sections that survive are the ones a decision needs.
@@ -746,19 +896,30 @@ mod tests {
             c = c.reduce(Observation {
                 action: format!("s{i}"),
                 ok: true,
-                evidence: vec![ev(&format!("E{i}"), &format!("a fairly wordy evidence summary number {i}"))],
+                evidence: vec![ev(
+                    &format!("E{i}"),
+                    &format!("a fairly wordy evidence summary number {i}"),
+                )],
                 notes: vec![format!("note {i} with some length to it")],
                 did: Some(format!("did thing {i}")),
                 ..Default::default()
             });
         }
-        c.uncertainties.push(Uncertainty { question: "the critical unknown".into(), importance: 0.95, confidence: 0.1, resolved: false });
+        c.uncertainties.push(Uncertainty {
+            question: "the critical unknown".into(),
+            importance: 0.95,
+            confidence: 0.1,
+            resolved: false,
+        });
         let small = c.render(600);
         assert!(small.len() <= 600, "budget exceeded: {}", small.len());
         assert!(small.contains("GOAL"), "the goal always survives");
         assert!(small.contains("PROGRESS"), "progress always survives");
         // Even in a tight budget, what the next decision needs is present.
-        assert!(small.contains("the critical unknown"), "open questions outrank evidence:\n{small}");
+        assert!(
+            small.contains("the critical unknown"),
+            "open questions outrank evidence:\n{small}"
+        );
     }
 
     #[test]
@@ -767,7 +928,10 @@ mod tests {
         let mut f = finding("liquidity is fine", &["E1"]);
         f.addresses = vec!["Sufficient Liquidity.".into()];
         c.findings.push(f);
-        assert!(c.covers("sufficient liquidity"), "case and punctuation must not defeat coverage");
+        assert!(
+            c.covers("sufficient liquidity"),
+            "case and punctuation must not defeat coverage"
+        );
         assert!(!c.covers("identify downside/risk"));
     }
 }

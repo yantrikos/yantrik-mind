@@ -43,14 +43,14 @@ use mind_types::contains_secret;
 /// effective target (host/recipient/repo/mcp-tool) is captured separately in `EgressRequest.target`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Connector {
-    Imap,            // mail search/inbox
-    Web,             // http fetch / web search (destination further constrained by SSRF guard)
-    Github,          // github.com API
-    HomeAssistant,   // local smart-home hub
-    ThirdParty,      // translate / wikipedia / crypto / stock public APIs
-    LlmApi,          // a REMOTE inference backend (inventory only — content NOT filtered here)
-    Mcp(String),     // an MCP server, by configured id (read-only or not, always External)
-    Coder,           // the agentic coder subprocess (its OWN network is NOT mediated — see scope note)
+    Imap,          // mail search/inbox
+    Web,           // http fetch / web search (destination further constrained by SSRF guard)
+    Github,        // github.com API
+    HomeAssistant, // local smart-home hub
+    ThirdParty,    // translate / wikipedia / crypto / stock public APIs
+    LlmApi,        // a REMOTE inference backend (inventory only — content NOT filtered here)
+    Mcp(String),   // an MCP server, by configured id (read-only or not, always External)
+    Coder, // the agentic coder subprocess (its OWN network is NOT mediated — see scope note)
 }
 
 impl Connector {
@@ -88,17 +88,19 @@ pub fn classify(tool: &str) -> Option<EgressClass> {
     let ext = |c: Connector| Some(EgressClass::External(c));
     match tool {
         // ── Local: computed in-process, or a memory op already gated by ARCH-1 (no external bytes) ──
-        "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => Some(EgressClass::Local),
-        "calc" | "calculate" | "math" => Some(EgressClass::Local),
-        "recall" | "remember" | "due_tasks" => Some(EgressClass::Local), // memory boundary is ARCH-1's job, not egress
+        // The memory boundary for recall tools is ARCH-1's job, not egress.
+        "now" | "date" | "datetime" | "time" | "getcurrentdatetime" | "calc" | "calculate"
+        | "math" | "recall" | "remember" | "due_tasks" => Some(EgressClass::Local),
         // ── External: model-authored args reach a connector ──
-        "mail_search" | "mailsearch" | "search_mail" | "findmail" => ext(Imap),
-        "inbox" | "mail" | "check_mail" => ext(Imap),
-        "web_fetch" | "fetch" | "web" => ext(Web),
-        "search" | "web_search" | "google" | "ddg" | "research" => ext(Web),
+        "mail_search" | "mailsearch" | "search_mail" | "findmail" | "inbox" | "mail"
+        | "check_mail" => ext(Imap),
+        "web_fetch" | "fetch" | "web" | "search" | "web_search" | "google" | "ddg" | "research" => {
+            ext(Web)
+        }
         "github" | "github_repo_items" | "github_notifications" => ext(Github),
         "home" | "home_status" | "house" | "smart_home" => ext(HomeAssistant),
-        "translate" | "tr" | "wikipedia" | "wiki" | "crypto" | "coin" | "stock" | "ticker" | "weather" | "wx" => ext(ThirdParty),
+        "translate" | "tr" | "wikipedia" | "wiki" | "crypto" | "coin" | "stock" | "ticker"
+        | "weather" | "wx" => ext(ThirdParty),
         "code" | "coder" => ext(Coder),
         _ => None,
     }
@@ -149,7 +151,7 @@ impl EgressPermit {
 pub fn canonicalize(v: &serde_json::Value) -> String {
     fn go(v: &serde_json::Value, out: &mut String, depth: u32) {
         if depth > 32 {
-            out.push_str("…");
+            out.push('…');
             return;
         }
         match v {
@@ -223,7 +225,7 @@ pub struct EgressReceipt {
     pub tool: String,
     pub connector: String,
     pub source: String,
-    /// "allow" | "deny:<reason-code>"
+    /// `"allow" | "deny:<reason-code>"`
     pub decision: String,
     /// keyed HMAC of the canonical args — equality-checkable by an auditor holding the key, but not a
     /// reusable fingerprint that leaks low-entropy content across exports.
@@ -270,7 +272,12 @@ impl EgressBroker {
             let _ = getrandom::getrandom(&mut k);
             (k.to_vec(), None)
         };
-        EgressBroker { hmac_key, ledger, head: Mutex::new(None), trace_seq: std::sync::atomic::AtomicU64::new(0) }
+        EgressBroker {
+            hmac_key,
+            ledger,
+            head: Mutex::new(None),
+            trace_seq: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     /// Authorize (or refuse) one external dispatch. Denies: an unregistered tool (deny-by-default),
@@ -280,14 +287,21 @@ impl EgressBroker {
         let class = classify(req.tool);
         let (connector, deny_reason) = match class {
             None => (Connector::ThirdParty, Some("unregistered-tool".to_string())),
-            Some(EgressClass::Local) => (Connector::ThirdParty, Some("local-tool-not-egress".to_string())),
+            Some(EgressClass::Local) => (
+                Connector::ThirdParty,
+                Some("local-tool-not-egress".to_string()),
+            ),
             Some(EgressClass::External(c)) => {
                 // Credential tripwire (defense in depth, NOT a confidentiality guarantee): scan the
                 // whole canonical arg tree — values AND keys. Two passes: the RAW canonical (markers
                 // like "ghp_" / "app password" carry their own punctuation/spaces), and a
                 // whitespace-stripped copy (catches "g h p _ A B C" spacing evasion). We deliberately
                 // do NOT use `squeeze` here — it drops the underscores/digits that ARE the marker.
-                let ws_stripped: String = req.args_canonical.chars().filter(|ch| !ch.is_whitespace()).collect();
+                let ws_stripped: String = req
+                    .args_canonical
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect();
                 if contains_secret(req.args_canonical) || contains_secret(&ws_stripped) {
                     (c, Some("credential-marker".to_string()))
                 } else {
@@ -295,7 +309,9 @@ impl EgressBroker {
                 }
             }
         };
-        let seq = self.trace_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = self
+            .trace_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let trace = format!("eg-{seq:x}");
         let args_hmac = {
             let mac = hmac_sha256(&self.hmac_key, req.args_canonical.as_bytes());
@@ -317,7 +333,11 @@ impl EgressBroker {
         });
         match deny_reason {
             Some(r) => EgressDecision::Deny(refusal_text(&r, req.tool)),
-            None => EgressDecision::Allow(EgressPermit { connector, trace, _seal: () }),
+            None => EgressDecision::Allow(EgressPermit {
+                connector,
+                trace,
+                _seal: (),
+            }),
         }
     }
 
@@ -356,7 +376,10 @@ impl EgressBroker {
         hasher.update(record_json.as_bytes());
         let chain = format!("{:x}", HexSlice(&hasher.finalize()));
         let line = format!("{{\"chain\":\"{chain}\",\"record\":{record_json}}}\n");
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         f.write_all(line.as_bytes())?;
         f.sync_all()?;
         *head = Some(chain);
@@ -404,7 +427,9 @@ pub fn verify_ledger(path: &Path) -> std::result::Result<usize, usize> {
 }
 
 pub fn read_ledger(path: &Path) -> Vec<EgressReceipt> {
-    let Ok(content) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -467,23 +492,49 @@ mod tests {
     #[test]
     fn registry_rejects_unknown_tools() {
         assert_eq!(classify("now"), Some(EgressClass::Local));
-        assert_eq!(classify("web_search"), Some(EgressClass::External(Connector::Web)));
-        assert!(matches!(classify("mcp.filesystem.read"), Some(EgressClass::External(Connector::Mcp(ref s))) if s == "filesystem"));
-        assert_eq!(classify("some_new_unlisted_tool"), None, "unknown tool must be unregistered");
+        assert_eq!(
+            classify("web_search"),
+            Some(EgressClass::External(Connector::Web))
+        );
+        assert!(
+            matches!(classify("mcp.filesystem.read"), Some(EgressClass::External(Connector::Mcp(ref s))) if s == "filesystem")
+        );
+        assert_eq!(
+            classify("some_new_unlisted_tool"),
+            None,
+            "unknown tool must be unregistered"
+        );
     }
 
     #[test]
     fn unregistered_tool_is_denied() {
         let b = broker();
-        let req = EgressRequest { principal: "primary", tool: "totally_unknown", target: None, source: "test", args_canonical: "{q:hi}" };
-        assert!(matches!(b.authorize(&req), EgressDecision::Deny(_)), "unregistered tool must be denied");
+        let req = EgressRequest {
+            principal: "primary",
+            tool: "totally_unknown",
+            target: None,
+            source: "test",
+            args_canonical: "{q:hi}",
+        };
+        assert!(
+            matches!(b.authorize(&req), EgressDecision::Deny(_)),
+            "unregistered tool must be denied"
+        );
     }
 
     #[test]
     fn credential_marker_in_args_is_denied() {
         let b = broker();
-        let args = canonicalize(&serde_json::json!({ "query": "please email ghp_ABCDEF1234567890 to bob" }));
-        let req = EgressRequest { principal: "primary", tool: "web_search", target: None, source: "test", args_canonical: &args };
+        let args = canonicalize(
+            &serde_json::json!({ "query": "please email ghp_ABCDEF1234567890 to bob" }),
+        );
+        let req = EgressRequest {
+            principal: "primary",
+            tool: "web_search",
+            target: None,
+            source: "test",
+            args_canonical: &args,
+        };
         match b.authorize(&req) {
             EgressDecision::Deny(msg) => {
                 assert!(msg.contains("credential"), "deny reason names the tripwire");
@@ -498,15 +549,30 @@ mod tests {
         // sol #7: keys, not just values.
         let b = broker();
         let args = canonicalize(&serde_json::json!({ "ghp_ABCDEF1234567890": "value" }));
-        let req = EgressRequest { principal: "primary", tool: "web_search", target: None, source: "test", args_canonical: &args };
-        assert!(matches!(b.authorize(&req), EgressDecision::Deny(_)), "a marker in a KEY must also be caught");
+        let req = EgressRequest {
+            principal: "primary",
+            tool: "web_search",
+            target: None,
+            source: "test",
+            args_canonical: &args,
+        };
+        assert!(
+            matches!(b.authorize(&req), EgressDecision::Deny(_)),
+            "a marker in a KEY must also be caught"
+        );
     }
 
     #[test]
     fn benign_external_call_is_allowed_and_permit_gates_dispatch() {
         let b = broker();
         let args = canonicalize(&serde_json::json!({ "query": "weather in Pune tomorrow" }));
-        let req = EgressRequest { principal: "primary", tool: "web_search", target: Some("duckduckgo"), source: "agent_tool", args_canonical: &args };
+        let req = EgressRequest {
+            principal: "primary",
+            tool: "web_search",
+            target: Some("duckduckgo"),
+            source: "agent_tool",
+            args_canonical: &args,
+        };
         match b.authorize(&req) {
             EgressDecision::Allow(permit) => {
                 assert_eq!(permit.connector(), &Connector::Web);
@@ -525,12 +591,20 @@ mod tests {
         let ledger = dir.join("egress_receipts.jsonl");
         for q in ["one", "two", "three"] {
             let args = canonicalize(&serde_json::json!({ "query": q }));
-            let req = EgressRequest { principal: "primary", tool: "web_search", target: None, source: "test", args_canonical: &args };
+            let req = EgressRequest {
+                principal: "primary",
+                tool: "web_search",
+                target: None,
+                source: "test",
+                args_canonical: &args,
+            };
             let _ = b.authorize(&req);
         }
         let rs = read_ledger(&ledger);
         assert_eq!(rs.len(), 3);
-        assert!(rs.iter().all(|r| r.decision == "allow" && !r.args_hmac.is_empty()));
+        assert!(rs
+            .iter()
+            .all(|r| r.decision == "allow" && !r.args_hmac.is_empty()));
         // No raw args in the receipt — only the keyed digest.
         assert!(rs.iter().all(|r| !r.args_hmac.contains("query")));
         assert_eq!(verify_ledger(&ledger), Ok(3));

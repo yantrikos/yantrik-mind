@@ -65,7 +65,8 @@ fn connect_and_subscribe(
         }
     }
     ws.send(tungstenite::Message::Text(
-        serde_json::json!({"id": 1, "type": "subscribe_events", "event_type": "state_changed"}).to_string(),
+        serde_json::json!({"id": 1, "type": "subscribe_events", "event_type": "state_changed"})
+            .to_string(),
     ))?;
     Ok(ws)
 }
@@ -81,11 +82,18 @@ pub fn parse_event(txt: &str) -> Option<HaEvent> {
     // ATTRIBUTE-ONLY churn (media position, sensor precision noise) arrives as state_changed too;
     // require the STATE STRING to actually differ so the debouncer isn't fed pure noise.
     let new_state = data.get("new_state")?.get("state")?.as_str()?.to_string();
-    let old_state = data.get("old_state").and_then(|o| o.get("state")).and_then(|s| s.as_str()).unwrap_or("");
+    let old_state = data
+        .get("old_state")
+        .and_then(|o| o.get("state"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
     if new_state == old_state {
         return None;
     }
-    Some(HaEvent { entity_id, new_state })
+    Some(HaEvent {
+        entity_id,
+        new_state,
+    })
 }
 
 /// Run forever: connect, subscribe, deliver each state change to `on_event`. Reconnects with capped
@@ -126,8 +134,14 @@ mod tests {
 
     #[test]
     fn ws_url_swaps_scheme_and_appends_path() {
-        assert_eq!(ws_url("http://192.168.4.7:8123/"), "ws://192.168.4.7:8123/api/websocket");
-        assert_eq!(ws_url("https://ha.example.com"), "wss://ha.example.com/api/websocket");
+        assert_eq!(
+            ws_url("http://192.168.4.7:8123/"),
+            "ws://192.168.4.7:8123/api/websocket"
+        );
+        assert_eq!(
+            ws_url("https://ha.example.com"),
+            "wss://ha.example.com/api/websocket"
+        );
     }
 
     #[test]

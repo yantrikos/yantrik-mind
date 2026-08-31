@@ -87,13 +87,18 @@ impl Procedure {
     pub fn render(&self) -> String {
         let trust = match self.reliability.basis {
             Basis::Measured { runs } => {
-                format!("worked {:.0}% of {runs} time(s)", self.reliability.value * 100.0)
+                format!(
+                    "worked {:.0}% of {runs} time(s)",
+                    self.reliability.value * 100.0
+                )
             }
             Basis::Declared => "not yet tested".to_string(),
             Basis::Estimated => "an estimate, unverified".to_string(),
         };
         let head = match &self.kind {
-            ProcedureKind::Executable { skill } => format!("{} (run_skill \"{skill}\" — {trust})", self.name),
+            ProcedureKind::Executable { skill } => {
+                format!("{} (run_skill \"{skill}\" — {trust})", self.name)
+            }
             ProcedureKind::Instructions => format!("{} ({trust})", self.name),
         };
         let steps = self
@@ -118,7 +123,11 @@ impl Procedure {
 /// and a blended procedure is a procedure nobody validated.
 pub fn select(mut found: Vec<Procedure>, keep: usize) -> Vec<Procedure> {
     found.retain(|p| !p.is_discredited() && !p.steps.is_empty());
-    found.sort_by(|a, b| b.standing().partial_cmp(&a.standing()).unwrap_or(std::cmp::Ordering::Equal));
+    found.sort_by(|a, b| {
+        b.standing()
+            .partial_cmp(&a.standing())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     found.truncate(keep.max(1));
     found
 }
@@ -170,7 +179,10 @@ mod tests {
     fn a_discredited_procedure_is_refused() {
         let bad = instructions("keeps failing", Some((0.2, 10)));
         assert!(bad.is_discredited());
-        assert!(select(vec![bad], 2).is_empty(), "a failing approach must not be offered");
+        assert!(
+            select(vec![bad], 2).is_empty(),
+            "a failing approach must not be offered"
+        );
     }
 
     /// An UNMEASURED procedure is unproven, not bad. Treating the two the same would stop the library
@@ -181,7 +193,11 @@ mod tests {
         assert!(!new.is_discredited(), "no record is not a bad record");
         let kept = select(vec![new], 2);
         assert_eq!(kept.len(), 1);
-        assert!(kept[0].render().contains("not yet tested"), "{}", kept[0].render());
+        assert!(
+            kept[0].render().contains("not yet tested"),
+            "{}",
+            kept[0].render()
+        );
     }
 
     /// A thin good record must not outrank a thick one. Two-for-two is luck; nine-of-ten is evidence.
@@ -190,14 +206,19 @@ mod tests {
         let lucky = instructions("two for two", Some((1.0, 2)));
         let proven = instructions("nine of ten", Some((0.9, 10)));
         let kept = select(vec![lucky, proven], 1);
-        assert_eq!(kept[0].name, "nine of ten", "a longer record wins over a higher rate on two runs");
+        assert_eq!(
+            kept[0].name, "nine of ten",
+            "a longer record wins over a higher rate on two runs"
+        );
     }
 
     /// One approach, not four. Handing a model competing procedures invites it to blend them, and a
     /// blended procedure is one nobody validated.
     #[test]
     fn only_a_few_survive_selection() {
-        let many: Vec<Procedure> = (0..6).map(|i| instructions(&format!("p{i}"), Some((0.8, 5)))).collect();
+        let many: Vec<Procedure> = (0..6)
+            .map(|i| instructions(&format!("p{i}"), Some((0.8, 5))))
+            .collect();
         assert_eq!(select(many, 2).len(), 2);
     }
 
@@ -224,10 +245,15 @@ mod tests {
             name: "sum_to_ten".into(),
             when: "summing".into(),
             steps: vec!["adds the first ten integers".into()],
-            kind: ProcedureKind::Executable { skill: "sum_to_ten".into() },
+            kind: ProcedureKind::Executable {
+                skill: "sum_to_ten".into(),
+            },
             reliability: Prior::measured(1.0, 6),
         };
-        assert!(as_plan(&[exe.clone()], 3).is_empty(), "a script is something to RUN, not a plan to follow");
+        assert!(
+            as_plan(std::slice::from_ref(&exe), 3).is_empty(),
+            "a script is something to RUN, not a plan to follow"
+        );
         // But it is offered, with the exact call the model should make.
         let block = render_block(&[exe]);
         assert!(block.contains("run_skill \"sum_to_ten\""), "{block}");
@@ -239,12 +265,18 @@ mod tests {
     fn the_block_states_applicability_and_permits_deviation() {
         let block = render_block(&[instructions("repo review", Some((0.9, 8)))]);
         assert!(block.contains("when: evaluating a repository"), "{block}");
-        assert!(block.contains("unless the situation genuinely differs"), "deviation must be allowed:\n{block}");
+        assert!(
+            block.contains("unless the situation genuinely differs"),
+            "deviation must be allowed:\n{block}"
+        );
         assert!(block.contains("worked 90% of 8 time(s)"));
     }
 
     #[test]
     fn no_procedures_means_no_block_at_all() {
-        assert!(render_block(&[]).is_empty(), "an empty section is still tokens");
+        assert!(
+            render_block(&[]).is_empty(),
+            "an empty section is still tokens"
+        );
     }
 }

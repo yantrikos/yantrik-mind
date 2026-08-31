@@ -152,7 +152,11 @@ impl Learned {
     /// a claim about nothing, and accepting it would let the loop manufacture support for itself. Such
     /// citations are dropped, and a finding left with none is dropped entirely — the contract's
     /// evidence floor would have rejected it anyway, but silently. Better to never let it in.
-    pub fn into_observation(self, action: String, known_evidence: &[String]) -> mind_spec::capsule::Observation {
+    pub fn into_observation(
+        self,
+        action: String,
+        known_evidence: &[String],
+    ) -> mind_spec::capsule::Observation {
         use mind_spec::capsule::{Finding, Uncertainty};
         let findings: Vec<Finding> = self
             .findings
@@ -160,8 +164,16 @@ impl Learned {
             .filter(|f| f.claim.trim().len() > 3)
             .map(|f| Finding {
                 claim: f.claim.trim().to_string(),
-                evidence: f.evidence.into_iter().filter(|e| known_evidence.iter().any(|k| k == e)).collect(),
-                addresses: f.addresses.into_iter().filter(|a| !a.trim().is_empty()).collect(),
+                evidence: f
+                    .evidence
+                    .into_iter()
+                    .filter(|e| known_evidence.iter().any(|k| k == e))
+                    .collect(),
+                addresses: f
+                    .addresses
+                    .into_iter()
+                    .filter(|a| !a.trim().is_empty())
+                    .collect(),
                 risk: f.risk.filter(|r| !r.trim().is_empty()),
                 rank: None,
             })
@@ -183,7 +195,7 @@ impl Learned {
                     resolved: u.resolved,
                 })
                 .collect(),
-            notes: self.contradictions.clone(),
+            notes: self.contradictions,
             ..Default::default()
         }
     }
@@ -198,7 +210,12 @@ pub struct StepChoice {
 
 impl Action {
     pub fn finish(why: Why) -> Self {
-        Self { verb: Verb::Finish, target: String::new(), args: Value::Null, why }
+        Self {
+            verb: Verb::Finish,
+            target: String::new(),
+            args: Value::Null,
+            why,
+        }
     }
     /// The signature the capsule records — what dedup and loop detection compare.
     pub fn signature(&self) -> String {
@@ -224,7 +241,10 @@ pub fn allowed_verbs(
 
     // RUN_SKILL only when a banked script was actually recalled. Offering it otherwise invites the
     // model to name a skill that does not exist, which costs a call to find out.
-    if procedures.iter().any(|p| matches!(p.kind, crate::procedure::ProcedureKind::Executable { .. })) {
+    if procedures
+        .iter()
+        .any(|p| matches!(p.kind, crate::procedure::ProcedureKind::Executable { .. }))
+    {
         v.push(Verb::RunSkill);
     }
 
@@ -369,7 +389,13 @@ fn parse(raw: &str) -> Option<StepChoice> {
     let (a, b) = (body.find('{')?, body.rfind('}')?);
     let r: Raw = serde_json::from_str(body.get(a..=b)?).ok()?;
 
-    let verb = match r.verb.trim().to_uppercase().replace(['-', ' '], "_").as_str() {
+    let verb = match r
+        .verb
+        .trim()
+        .to_uppercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
         "CALL_TOOL" | "CALLTOOL" | "TOOL" => Verb::CallTool,
         "FETCH" => Verb::Fetch,
         "RECALL_MEMORY" | "RECALL" | "RETRIEVE_MEMORY" => Verb::RecallMemory,
@@ -382,12 +408,21 @@ fn parse(raw: &str) -> Option<StepChoice> {
     };
     // An action that needs a target but has none is unusable; better to lose the step than to call a
     // tool named "".
-    if matches!(verb, Verb::CallTool | Verb::Fetch | Verb::RecallMemory | Verb::RunSkill)
-        && r.target.trim().is_empty()
+    if matches!(
+        verb,
+        Verb::CallTool | Verb::Fetch | Verb::RecallMemory | Verb::RunSkill
+    ) && r.target.trim().is_empty()
     {
         return None;
     }
-    let why = match r.why.unwrap_or_default().trim().to_uppercase().replace(['-', ' '], "_").as_str() {
+    let why = match r
+        .why
+        .unwrap_or_default()
+        .trim()
+        .to_uppercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
         "RESOLVE_UNCERTAINTY" => Why::ResolveUncertainty,
         "NEED_EVIDENCE" => Why::NeedEvidence,
         "CORROBORATE" => Why::Corroborate,
@@ -397,7 +432,12 @@ fn parse(raw: &str) -> Option<StepChoice> {
         _ => Why::CloseShortfall,
     };
     Some(StepChoice {
-        action: Action { verb, target: r.target.trim().to_string(), args: r.args, why },
+        action: Action {
+            verb,
+            target: r.target.trim().to_string(),
+            args: r.args,
+            why,
+        },
         learned: r.learned,
     })
 }
@@ -415,11 +455,20 @@ mod tests {
     }
 
     fn pool(reply: &str) -> InferencePool {
-        InferencePool::new(Arc::new(mind_inference::SequencedLLM::new(vec![reply])) as Arc<dyn LLMBackend>, 1)
+        InferencePool::new(
+            Arc::new(mind_inference::SequencedLLM::new(vec![reply])) as Arc<dyn LLMBackend>,
+            1,
+        )
     }
 
     fn finding(claim: &str, ev: &[&str]) -> Finding {
-        Finding { claim: claim.into(), evidence: ev.iter().map(|s| s.to_string()).collect(), addresses: vec![], risk: None, rank: None }
+        Finding {
+            claim: claim.into(),
+            evidence: ev.iter().map(|s| s.to_string()).collect(),
+            addresses: vec![],
+            risk: None,
+            rank: None,
+        }
     }
 
     /// A fresh run must not be offered FETCH (nothing to page), VERIFY (nothing found), REPLAN (no
@@ -427,11 +476,18 @@ mod tests {
     #[test]
     fn a_fresh_run_is_offered_only_the_verbs_that_could_work() {
         let v = allowed_verbs(&Capsule::new("g", "goal"), &spec(), &[]);
-        assert!(v.contains(&Verb::CallTool) && v.contains(&Verb::RecallMemory) && v.contains(&Verb::Finish));
+        assert!(
+            v.contains(&Verb::CallTool)
+                && v.contains(&Verb::RecallMemory)
+                && v.contains(&Verb::Finish)
+        );
         assert!(!v.contains(&Verb::Fetch), "nothing to fetch yet");
         assert!(!v.contains(&Verb::Verify), "nothing to verify yet");
         assert!(!v.contains(&Verb::Replan), "no plan to replan");
-        assert!(!v.contains(&Verb::AskUser), "asking the user is not a first resort");
+        assert!(
+            !v.contains(&Verb::AskUser),
+            "asking the user is not a first resort"
+        );
     }
 
     #[test]
@@ -439,18 +495,35 @@ mod tests {
         let mut c = Capsule::new("g", "goal").reduce(Observation {
             action: "search".into(),
             ok: true,
-            evidence: vec![Evidence { id: "E1".into(), summary: "s".into(), source: "web".into(), body: "b".into(), captured_ms: 0 }],
+            evidence: vec![Evidence {
+                id: "E1".into(),
+                summary: "s".into(),
+                source: "web".into(),
+                body: "b".into(),
+                captured_ms: 0,
+            }],
             findings: vec![finding("a claim", &["E1"])],
             ..Default::default()
         });
         let v = allowed_verbs(&c, &spec(), &[]);
-        assert!(v.contains(&Verb::Fetch), "an unread body makes FETCH useful");
+        assert!(
+            v.contains(&Verb::Fetch),
+            "an unread body makes FETCH useful"
+        );
         assert!(v.contains(&Verb::Verify), "a finding makes VERIFY useful");
         assert!(v.contains(&Verb::Replan));
 
         // Stalling unlocks ASK_USER — the run has earned the right to interrupt.
-        c = c.reduce(Observation { action: "x".into(), ok: true, ..Default::default() });
-        c = c.reduce(Observation { action: "y".into(), ok: true, ..Default::default() });
+        c = c.reduce(Observation {
+            action: "x".into(),
+            ok: true,
+            ..Default::default()
+        });
+        c = c.reduce(Observation {
+            action: "y".into(),
+            ok: true,
+            ..Default::default()
+        });
         assert!(allowed_verbs(&c, &spec(), &[]).contains(&Verb::AskUser));
     }
 
@@ -466,27 +539,49 @@ mod tests {
     /// An exhausted tool leaves the menu, so the run cannot spend its budget re-reading one page.
     #[test]
     fn an_exhausted_tool_is_removed_from_the_catalog() {
-        let cat = "- search {query}: web search\n- weather {place}: forecast\n- news {topic}: headlines";
+        let cat =
+            "- search {query}: web search\n- weather {place}: forecast\n- news {topic}: headlines";
         let mut c = Capsule::new("g", "goal");
         for _ in 0..2 {
-            c = c.reduce(Observation { action: "search".into(), ok: true, ..Default::default() });
+            c = c.reduce(Observation {
+                action: "search".into(),
+                ok: true,
+                ..Default::default()
+            });
         }
         let open = open_catalog(&c, cat, 2);
         assert!(!open.contains("search"), "twice is enough:\n{open}");
-        assert!(open.contains("weather") && open.contains("news"), "the rest stay:\n{open}");
+        assert!(
+            open.contains("weather") && open.contains("news"),
+            "the rest stay:\n{open}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_well_formed_choice_parses() {
         let reply = r#"{"verb":"CALL_TOOL","target":"web_search","args":{"query":"xyz catalyst"},"why":"RESOLVE_UNCERTAINTY"}"#;
-        let c = choose(&pool(reply), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &["1 of 3 findings".into()], &[], false)
-            .await
-            .expect("a valid action");
+        let c = choose(
+            &pool(reply),
+            &FakeBus::new(&["web_search"]),
+            &spec(),
+            &Capsule::new("g", "goal"),
+            &["1 of 3 findings".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("a valid action");
         assert_eq!(c.action.verb, Verb::CallTool);
         assert_eq!(c.action.target, "web_search");
         assert_eq!(c.action.why, Why::ResolveUncertainty);
-        assert_eq!(c.action.signature(), "web_search|{\"query\":\"xyz catalyst\"}");
-        assert!(c.learned.is_empty(), "this reply carried no learned block, and that is normal");
+        assert_eq!(
+            c.action.signature(),
+            "web_search|{\"query\":\"xyz catalyst\"}"
+        );
+        assert!(
+            c.learned.is_empty(),
+            "this reply carried no learned block, and that is normal"
+        );
     }
 
     /// A verb the runtime did not offer must be REJECTED, not executed. Otherwise a model could widen
@@ -495,15 +590,39 @@ mod tests {
     async fn a_verb_that_was_not_offered_is_refused() {
         // VERIFY is not on a fresh run's menu.
         let reply = r#"{"verb":"VERIFY","target":"","why":"SUFFICIENT"}"#;
-        let got = choose(&pool(reply), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], &[], false).await;
+        let got = choose(
+            &pool(reply),
+            &FakeBus::new(&["web_search"]),
+            &spec(),
+            &Capsule::new("g", "goal"),
+            &[],
+            &[],
+            false,
+        )
+        .await;
         assert!(got.is_none(), "an un-offered verb must not execute");
     }
 
     /// Nothing usable back means finish with what we have — never an invented action.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn junk_yields_no_action_rather_than_a_guess() {
-        for junk in ["I think we should search the web!", "", "{}", r#"{"verb":"TELEPORT"}"#, r#"{"verb":"CALL_TOOL","target":"  "}"#] {
-            let got = choose(&pool(junk), &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], &[], false).await;
+        for junk in [
+            "I think we should search the web!",
+            "",
+            "{}",
+            r#"{"verb":"TELEPORT"}"#,
+            r#"{"verb":"CALL_TOOL","target":"  "}"#,
+        ] {
+            let got = choose(
+                &pool(junk),
+                &FakeBus::new(&["web_search"]),
+                &spec(),
+                &Capsule::new("g", "goal"),
+                &[],
+                &[],
+                false,
+            )
+            .await;
             assert!(got.is_none(), "junk {junk:?} produced an action");
         }
     }
@@ -512,7 +631,9 @@ mod tests {
     /// ever appears here, the entire token argument is gone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_prompt_carries_the_capsule_and_no_transcript() {
-        let backend = Arc::new(mind_inference::SequencedLLM::new(vec![r#"{"verb":"FINISH","why":"SUFFICIENT"}"#]));
+        let backend = Arc::new(mind_inference::SequencedLLM::new(vec![
+            r#"{"verb":"FINISH","why":"SUFFICIENT"}"#,
+        ]));
         let p = InferencePool::new(backend.clone() as Arc<dyn LLMBackend>, 1);
         let c = Capsule::new("g", "identify strong equities").reduce(Observation {
             action: "screen".into(),
@@ -524,37 +645,88 @@ mod tests {
                 body: "RAW_TOOL_PAYLOAD_".repeat(500),
                 captured_ms: 0,
             }],
-            uncertainties: vec![Uncertainty { question: "is the move news-driven?".into(), importance: 0.9, confidence: 0.2, resolved: false }],
+            uncertainties: vec![Uncertainty {
+                question: "is the move news-driven?".into(),
+                importance: 0.9,
+                confidence: 0.2,
+                resolved: false,
+            }],
             ..Default::default()
         });
-        choose(&p, &FakeBus::new(&["markets"]), &spec(), &c, &["2 of 3 findings so far".into()], &[], false).await;
+        choose(
+            &p,
+            &FakeBus::new(&["markets"]),
+            &spec(),
+            &c,
+            &["2 of 3 findings so far".into()],
+            &[],
+            false,
+        )
+        .await;
 
         let seen = backend.prompt_at(0);
-        assert!(seen.contains("identify strong equities"), "the goal is present");
-        assert!(seen.contains("volume 4.3x baseline"), "the evidence SUMMARY is present");
-        assert!(seen.contains("is the move news-driven?"), "the open question is present \u{2014} it drives the choice");
-        assert!(seen.contains("2 of 3 findings so far"), "the shortfall is present");
-        assert!(!seen.contains("RAW_TOOL_PAYLOAD_"), "a raw tool body must NEVER reach the model here");
-        assert!(seen.len() < 6000, "the whole prompt stays small, got {}", seen.len());
+        assert!(
+            seen.contains("identify strong equities"),
+            "the goal is present"
+        );
+        assert!(
+            seen.contains("volume 4.3x baseline"),
+            "the evidence SUMMARY is present"
+        );
+        assert!(
+            seen.contains("is the move news-driven?"),
+            "the open question is present \u{2014} it drives the choice"
+        );
+        assert!(
+            seen.contains("2 of 3 findings so far"),
+            "the shortfall is present"
+        );
+        assert!(
+            !seen.contains("RAW_TOOL_PAYLOAD_"),
+            "a raw tool body must NEVER reach the model here"
+        );
+        assert!(
+            seen.len() < 6000,
+            "the whole prompt stays small, got {}",
+            seen.len()
+        );
     }
 
     /// The menu in the prompt must match what the runtime will accept, or the model is being invited
     /// to pick something that gets thrown away.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_prompt_offers_exactly_the_allowed_verbs() {
-        let backend = Arc::new(mind_inference::SequencedLLM::new(vec![r#"{"verb":"FINISH","why":"SUFFICIENT"}"#]));
+        let backend = Arc::new(mind_inference::SequencedLLM::new(vec![
+            r#"{"verb":"FINISH","why":"SUFFICIENT"}"#,
+        ]));
         let p = InferencePool::new(backend.clone() as Arc<dyn LLMBackend>, 1);
-        choose(&p, &FakeBus::new(&["web_search"]), &spec(), &Capsule::new("g", "goal"), &[], &[], false).await;
+        choose(
+            &p,
+            &FakeBus::new(&["web_search"]),
+            &spec(),
+            &Capsule::new("g", "goal"),
+            &[],
+            &[],
+            false,
+        )
+        .await;
         let seen = backend.prompt_at(0);
         assert!(seen.contains("CALL_TOOL|RECALL_MEMORY|FINISH"), "{seen}");
-        assert!(!seen.contains("VERIFY"), "an un-offered verb must not appear in the menu");
+        assert!(
+            !seen.contains("VERIFY"),
+            "an un-offered verb must not appear in the menu"
+        );
     }
 
     #[test]
     fn a_missing_reason_code_does_not_lose_the_action() {
         let c = parse(r#"{"verb":"FINISH"}"#).unwrap();
         assert_eq!(c.action.verb, Verb::Finish);
-        assert_eq!(c.action.why, Why::CloseShortfall, "the verb is the decision; the reason is telemetry");
+        assert_eq!(
+            c.action.why,
+            Why::CloseShortfall,
+            "the verb is the decision; the reason is telemetry"
+        );
     }
 
     /// A finding citing an evidence id the capsule does not hold is a claim about nothing. Accepting
@@ -563,15 +735,31 @@ mod tests {
     fn a_finding_citing_unknown_evidence_is_dropped() {
         let learned = Learned {
             findings: vec![
-                LearnedFinding { claim: "grounded claim".into(), evidence: vec!["E1".into()], ..Default::default() },
-                LearnedFinding { claim: "invented claim".into(), evidence: vec!["E99".into()], ..Default::default() },
-                LearnedFinding { claim: "uncited claim".into(), evidence: vec![], ..Default::default() },
+                LearnedFinding {
+                    claim: "grounded claim".into(),
+                    evidence: vec!["E1".into()],
+                    ..Default::default()
+                },
+                LearnedFinding {
+                    claim: "invented claim".into(),
+                    evidence: vec!["E99".into()],
+                    ..Default::default()
+                },
+                LearnedFinding {
+                    claim: "uncited claim".into(),
+                    evidence: vec![],
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
         let obs = learned.into_observation("extract".into(), &["E1".to_string()]);
         let claims: Vec<&str> = obs.findings.iter().map(|f| f.claim.as_str()).collect();
-        assert_eq!(claims, vec!["grounded claim"], "only what the capsule can actually support survives");
+        assert_eq!(
+            claims,
+            vec!["grounded claim"],
+            "only what the capsule can actually support survives"
+        );
     }
 
     /// Confidence and importance arriving out of range are clamped, not trusted — the controller
@@ -605,7 +793,10 @@ mod tests {
         assert_eq!(c.action.verb, Verb::CallTool);
         assert_eq!(c.action.target, "news");
         assert_eq!(c.learned.findings.len(), 1);
-        assert_eq!(c.learned.findings[0].addresses, vec!["current market activity"]);
+        assert_eq!(
+            c.learned.findings[0].addresses,
+            vec!["current market activity"]
+        );
         assert_eq!(c.learned.uncertainties[0].importance, 0.9);
     }
 

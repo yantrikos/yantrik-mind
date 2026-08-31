@@ -16,18 +16,35 @@ impl super::ConversationEngine {
     pub(crate) async fn save_member_tasks(&self, owner: &str, v: &[serde_json::Value]) {
         let _ = self
             .memory
-            .profile_set(&format!("m:{owner}:tasks"), &serde_json::to_string(v).unwrap_or_default())
+            .profile_set(
+                &format!("m:{owner}:tasks"),
+                &serde_json::to_string(v).unwrap_or_default(),
+            )
             .await;
     }
 
     /// Deterministic member intents: reminders, task list, done, daily-brief opt-in/out.
     /// Returns None when the message is plain conversation.
-    pub(crate) async fn member_task_turn(&self, owner: &str, name: &str, text: &str) -> Option<String> {
+    pub(crate) async fn member_task_turn(
+        &self,
+        owner: &str,
+        name: &str,
+        text: &str,
+    ) -> Option<String> {
         let low = text.trim().to_lowercase();
         // "remind me to pick up the cake tomorrow" / "add task ..." / "reminder: ..."
-        for pat in ["remind me to ", "remind me ", "add task ", "add a task ", "reminder: ", "task: "] {
+        for pat in [
+            "remind me to ",
+            "remind me ",
+            "add task ",
+            "add a task ",
+            "reminder: ",
+            "task: ",
+        ] {
             if let Some(rest) = low.strip_prefix(pat) {
-                let body = text.trim()[text.trim().len() - rest.len()..].trim().to_string();
+                let body = text.trim()[text.trim().len() - rest.len()..]
+                    .trim()
+                    .to_string();
                 if body.len() < 2 {
                     return Some("What should I remind you about?".to_string());
                 }
@@ -43,25 +60,59 @@ impl super::ConversationEngine {
                 self.save_member_tasks(owner, &tasks).await;
                 let when = match due {
                     Some(ms) => chrono::DateTime::from_timestamp_millis(ms as i64)
-                        .map(|t| format!(" — I'll nudge you around {}", t.with_timezone(local_now().offset()).format("%a %b %d, %H:%M")))
+                        .map(|t| {
+                            format!(
+                                " — I'll nudge you around {}",
+                                t.with_timezone(local_now().offset())
+                                    .format("%a %b %d, %H:%M")
+                            )
+                        })
                         .unwrap_or_default(),
-                    None => " — no time attached; it'll sit on your list (say `my tasks`)".to_string(),
+                    None => {
+                        " — no time attached; it'll sit on your list (say `my tasks`)".to_string()
+                    }
                 };
                 return Some(format!("Got it, {name}: “{body}”{when}. ✅"));
             }
         }
-        if ["my tasks", "my reminders", "show tasks", "show reminders", "list tasks", "list reminders"].iter().any(|p| low.contains(p)) {
+        if [
+            "my tasks",
+            "my reminders",
+            "show tasks",
+            "show reminders",
+            "list tasks",
+            "list reminders",
+        ]
+        .iter()
+        .any(|p| low.contains(p))
+        {
             let tasks = self.member_tasks(owner).await;
-            let open: Vec<(usize, &serde_json::Value)> = tasks.iter().enumerate().filter(|(_, t)| !t["done"].as_bool().unwrap_or(false)).collect();
+            let open: Vec<(usize, &serde_json::Value)> = tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t["done"].as_bool().unwrap_or(false))
+                .collect();
             if open.is_empty() {
                 return Some("Your list is clear — nothing pending. 🎉".to_string());
             }
             let mut out = format!("📝 Your reminders, {name}:");
             for (n, (_, t)) in open.iter().enumerate() {
-                let due = t["due"].as_u64().and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
-                    .map(|d| format!(" ({})", d.with_timezone(local_now().offset()).format("%b %d %H:%M")))
+                let due = t["due"]
+                    .as_u64()
+                    .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
+                    .map(|d| {
+                        format!(
+                            " ({})",
+                            d.with_timezone(local_now().offset()).format("%b %d %H:%M")
+                        )
+                    })
                     .unwrap_or_default();
-                out.push_str(&format!("\n{}. {}{}", n + 1, t["text"].as_str().unwrap_or("?"), due));
+                out.push_str(&format!(
+                    "\n{}. {}{}",
+                    n + 1,
+                    t["text"].as_str().unwrap_or("?"),
+                    due
+                ));
             }
             out.push_str("\n\n(say `done <number>` to clear one)");
             return Some(out);
@@ -69,24 +120,45 @@ impl super::ConversationEngine {
         if let Some(nstr) = low.strip_prefix("done ") {
             if let Ok(n) = nstr.trim().parse::<usize>() {
                 let mut tasks = self.member_tasks(owner).await;
-                let open_ids: Vec<usize> = tasks.iter().enumerate().filter(|(_, t)| !t["done"].as_bool().unwrap_or(false)).map(|(i, _)| i).collect();
+                let open_ids: Vec<usize> = tasks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| !t["done"].as_bool().unwrap_or(false))
+                    .map(|(i, _)| i)
+                    .collect();
                 if let Some(&idx) = open_ids.get(n.saturating_sub(1)) {
                     tasks[idx]["done"] = serde_json::json!(true);
                     let txt = tasks[idx]["text"].as_str().unwrap_or("?").to_string();
                     self.save_member_tasks(owner, &tasks).await;
                     return Some(format!("Done — “{txt}” cleared. ✔️"));
                 }
-                return Some("I couldn't find that number on your list — say `my tasks` to see it.".to_string());
+                return Some(
+                    "I couldn't find that number on your list — say `my tasks` to see it."
+                        .to_string(),
+                );
             }
         }
-        if low.contains("brief me daily") || low.contains("daily brief") || low.contains("morning brief") {
+        if low.contains("brief me daily")
+            || low.contains("daily brief")
+            || low.contains("morning brief")
+        {
             if low.contains("stop") || low.contains("off") || low.contains("no more") {
-                let _ = self.memory.profile_set(&format!("m:{owner}:brief"), "").await;
-                return Some("Okay — daily briefs off. Say `brief me daily` anytime to restart.".to_string());
+                let _ = self
+                    .memory
+                    .profile_set(&format!("m:{owner}:brief"), "")
+                    .await;
+                return Some(
+                    "Okay — daily briefs off. Say `brief me daily` anytime to restart.".to_string(),
+                );
             }
-            let _ = self.memory.profile_set(&format!("m:{owner}:brief"), "on").await;
+            let _ = self
+                .memory
+                .profile_set(&format!("m:{owner}:brief"), "on")
+                .await;
             let sample = self.compose_member_brief(owner, name).await;
-            return Some(format!("☀️ Daily brief is ON — every morning, just for you. Here's today's:\n\n{sample}"));
+            return Some(format!(
+                "☀️ Daily brief is ON — every morning, just for you. Here's today's:\n\n{sample}"
+            ));
         }
         None
     }
@@ -101,9 +173,15 @@ impl super::ConversationEngine {
         let soon: Vec<String> = tasks
             .iter()
             .filter(|t| !t["done"].as_bool().unwrap_or(false))
-            .filter(|t| t["due"].as_u64().map(|d| d <= now_ms + 48 * 3_600_000).unwrap_or(false))
+            .filter(|t| {
+                t["due"]
+                    .as_u64()
+                    .is_some_and(|d| d <= now_ms + 48 * 3_600_000)
+            })
             .map(|t| {
-                let due = t["due"].as_u64().and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
+                let due = t["due"]
+                    .as_u64()
+                    .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
                     .map(|d| format!(" ({})", d.with_timezone(now.offset()).format("%a %H:%M")))
                     .unwrap_or_default();
                 format!("• {}{due}", t["text"].as_str().unwrap_or("?"))
@@ -120,8 +198,18 @@ impl super::ConversationEngine {
             if pname.is_empty() || pname.eq_ignore_ascii_case(name) {
                 continue;
             }
-            for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                let (Some(mmdd), Some(label)) = (d.get("mmdd").and_then(|x| x.as_str()), d.get("label").and_then(|x| x.as_str())) else { continue };
+            for d in p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let (Some(mmdd), Some(label)) = (
+                    d.get("mmdd").and_then(|x| x.as_str()),
+                    d.get("label").and_then(|x| x.as_str()),
+                ) else {
+                    continue;
+                };
                 if let Some(days) = days_until_mmdd(mmdd, &now) {
                     if (0..=14).contains(&days) {
                         fam.push(format!("• {pname}'s {label} in {days} day(s)"));
@@ -149,13 +237,20 @@ impl super::ConversationEngine {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         let today = now.format("%Y-%m-%d").to_string();
         for p in &people {
-            let (Some(slug), Some(tg)) = (p.get("slug").and_then(|x| x.as_str()), p.get("tg_id").and_then(|x| x.as_i64())) else {
+            let (Some(slug), Some(tg)) = (
+                p.get("slug").and_then(|x| x.as_str()),
+                p.get("tg_id").and_then(|x| x.as_i64()),
+            ) else {
                 continue;
             };
             if tg == 0 {
                 continue;
             }
-            let name = p.get("name").and_then(|x| x.as_str()).unwrap_or(slug).to_string();
+            let name = p
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or(slug)
+                .to_string();
             // Due reminders (mark notified so each fires once).
             let mut tasks = self.member_tasks(slug).await;
             let mut dirty = false;
@@ -166,7 +261,13 @@ impl super::ConversationEngine {
                     && !t["done"].as_bool().unwrap_or(false)
                     && !t["notified"].as_bool().unwrap_or(false)
                 {
-                    out.push((tg, format!("⏰ {name} — reminder: {}", t["text"].as_str().unwrap_or("?"))));
+                    out.push((
+                        tg,
+                        format!(
+                            "⏰ {name} — reminder: {}",
+                            t["text"].as_str().unwrap_or("?")
+                        ),
+                    ));
                     t["notified"] = serde_json::json!(true);
                     dirty = true;
                 }
@@ -181,12 +282,20 @@ impl super::ConversationEngine {
                 .await
                 .ok()
                 .flatten()
-                .map(|v| v == "on")
-                .unwrap_or(false);
+                .is_some_and(|v| v == "on");
             if brief_on && (7..=11).contains(&now.hour()) {
-                let sent = self.memory.profile_get(&format!("m:{slug}:brief_date")).await.ok().flatten().unwrap_or_default();
+                let sent = self
+                    .memory
+                    .profile_get(&format!("m:{slug}:brief_date"))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
                 if sent != today {
-                    let _ = self.memory.profile_set(&format!("m:{slug}:brief_date"), &today).await;
+                    let _ = self
+                        .memory
+                        .profile_set(&format!("m:{slug}:brief_date"), &today)
+                        .await;
                     out.push((tg, self.compose_member_brief(slug, &name).await));
                 }
             }
@@ -203,18 +312,29 @@ impl super::ConversationEngine {
     pub async fn share_with_member(&self, member: &str, note: &str) -> String {
         let want = member.trim().trim_start_matches('@').to_lowercase();
         if want.is_empty() {
-            return "Share with whom? (a household member's name, slug, or relationship)".to_string();
+            return "Share with whom? (a household member's name, slug, or relationship)"
+                .to_string();
         }
         let people = self.load_people().await;
         let Some(p) = people.iter().find(|p| {
             ["slug", "name", "relationship"].iter().any(|f| {
-                p.get(*f).and_then(|x| x.as_str()).map(|v| v.to_lowercase() == want).unwrap_or(false)
+                p.get(*f)
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|v| v.to_lowercase() == want)
             })
         }) else {
             return format!("I don't have \"{member}\" in the household registry yet — `person add <slug> <name> <tg_id> <relationship>` first.");
         };
-        let slug = p.get("slug").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or(&slug).to_string();
+        let slug = p
+            .get("slug")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = p
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&slug)
+            .to_string();
         let Some(chat) = self.chat_of_member(&slug).await else {
             return format!("{name} is registered but I don't have their Telegram chat yet.");
         };
@@ -229,15 +349,25 @@ impl super::ConversationEngine {
             .flatten()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "The family".to_string());
-        let extra = if note.trim().is_empty() { String::new() } else { format!("\n{}", note.trim()) };
+        let extra = if note.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", note.trim())
+        };
         let cap = format!("📨 {primary} shared this with you.{extra}\n{caption}\n\nReply here and I'll pass your take along.");
-        self.photo_queue.lock().unwrap().push((jpeg, cap, Some(chat)));
+        self.photo_queue
+            .lock()
+            .unwrap()
+            .push((jpeg, cap, Some(chat)));
         let take = serde_json::json!({
             "slug": slug, "name": name,
             "until": chrono::Utc::now().timestamp_millis() + 3 * 3_600_000,
             "about": caption.chars().take(120).collect::<String>(),
         });
-        let _ = self.memory.profile_set("member_take", &take.to_string()).await;
+        let _ = self
+            .memory
+            .profile_set("member_take", &take.to_string())
+            .await;
         format!("📨 Sent to {name} with the note — I'll relay whatever they say back to you.")
     }
 
@@ -282,13 +412,21 @@ impl super::ConversationEngine {
         let (name, rel) = people
             .iter()
             .find(|p| p.get("slug").and_then(|x| x.as_str()) == Some(id.owner.as_str()))
-            .map(|p| {
-                (
-                    p.get("name").and_then(|x| x.as_str()).unwrap_or(id.owner.as_str()).to_string(),
-                    p.get("relationship").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                )
-            })
-            .unwrap_or_else(|| (id.owner.clone(), String::new()));
+            .map_or_else(
+                || (id.owner.clone(), String::new()),
+                |p| {
+                    (
+                        p.get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or(id.owner.as_str())
+                            .to_string(),
+                        p.get("relationship")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                },
+            );
         let primary_name = self
             .memory
             .profile_get("name")
@@ -303,11 +441,15 @@ impl super::ConversationEngine {
         if let Some(req) = creative_request(user_text) {
             return self.photo_create_for(&req, member_chat, Some(&name)).await;
         }
-        if photo_followup(user_text) && (self.photo_session_active() || photo_followup_strong(user_text)) {
+        if photo_followup(user_text)
+            && (self.photo_session_active() || photo_followup_strong(user_text))
+        {
             return self.photo_followup_turn(user_text, member_chat).await;
         }
         if let Some(q) = photo_request(user_text) {
-            return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
+            return self
+                .photo_find_and_send_for(&q, member_chat, Some(&name))
+                .await;
         }
         // Their reminders, tasks, and daily-brief switch — owner-keyed, delivered to their chat.
         if let Some(reply) = self.member_task_turn(&id.owner, &name, user_text).await {
@@ -316,9 +458,21 @@ impl super::ConversationEngine {
         // Looser photo intent for members: event phrasings without a photo-noun ("get one from
         // Aadrisha's last birthday") still reach retrieval instead of the chat model.
         if let Some(q) = member_photo_intent(user_text) {
-            return self.photo_find_and_send_for(&q, member_chat, Some(&name)).await;
+            return self
+                .photo_find_and_send_for(&q, member_chat, Some(&name))
+                .await;
         }
-        let recent = self.memory.recent_messages(12, &mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner))).await.unwrap_or_default();
+        let recent = self
+            .memory
+            .recent_messages(
+                12,
+                &mind_types::AccessContext::principal(
+                    id.viewer(),
+                    mind_types::Purpose::conversation(&id.owner),
+                ),
+            )
+            .await
+            .unwrap_or_default();
         let policy = id.output_policy(user_text);
         let mut messages = crate::GatedPrompt::new(&policy, &self.persona);
         if let Some(note) = policy.prompt_note() {
@@ -350,11 +504,13 @@ impl super::ConversationEngine {
         }
         messages.trusted_system("Reply as the companion — warm, natural, concise. No preamble.");
         let messages = messages.finish(user_text);
-        let cfg = GenerationConfig { max_tokens: 700, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 700,
+            ..GenerationConfig::default()
+        };
         match self.inference.chat_grounded(messages, cfg).await {
             Ok(r) => r.text.trim().to_string(),
             Err(e) => format!("(I hit a snag thinking just now: {e})"),
         }
     }
-
 }

@@ -14,8 +14,8 @@ use std::collections::HashMap;
 pub mod receipts;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use rusqlite::OptionalExtension;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use mind_types::{
@@ -26,14 +26,16 @@ use mind_types::{
 
 use yantrikdb_core::belief::{BeliefRevisionConfig, Evidence as YEvidence};
 use yantrikdb_core::contradiction::ContradictionConfig;
+use yantrikdb_core::intent::IntentConfig;
+use yantrikdb_core::personality_bias::BondLevel;
 use yantrikdb_core::state::{
     sigmoid, BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EpisodePayload,
     NodeId, NodeIdAllocator, NodeKind, NodePayload, Priority, Provenance, TaskPayload, TaskStatus,
 };
-use yantrikdb_core::intent::IntentConfig;
-use yantrikdb_core::personality_bias::BondLevel;
 use yantrikdb_core::temporal::BurstConfig;
-use yantrikdb_core::world_model::{ActionKind as WmAction, ActionOutcome as WmOutcome, StateFeatures};
+use yantrikdb_core::world_model::{
+    ActionKind as WmAction, ActionOutcome as WmOutcome, StateFeatures,
+};
 use yantrikdb_core::{InteractionOutcome, YantrikDB};
 
 type Reply<T> = oneshot::Sender<std::result::Result<T, String>>;
@@ -49,110 +51,381 @@ pub enum DeviceAuthorization {
 }
 
 enum Cmd {
-    Record { text: String, reply: Reply<String> },
-    RememberObservation { text: String, source: String, reply: Reply<String> },
-    GetText { rid: String, reply: Reply<Option<String>> },
-    AssertBelief { statement: String, signed_weight: f64, source: String, provenance: String, evidence_version: Option<u64>, reply: Reply<Belief> },
-    RecallTyped { text: String, top_k: usize, reply: Reply<Vec<Recalled>> },
-    BeliefsMatching { needle: String, limit: usize, reply: Reply<Vec<Belief>> },
-    Conflicts { reply: Reply<Vec<Contradiction>> },
-    Explain { statement: String, reply: Reply<Option<(Belief, Vec<MEvidence>)>> },
-    Relate { src: String, dst: String, rel: String, weight: f64, reply: Reply<()> },
+    Record {
+        text: String,
+        reply: Reply<String>,
+    },
+    RememberObservation {
+        text: String,
+        source: String,
+        reply: Reply<String>,
+    },
+    GetText {
+        rid: String,
+        reply: Reply<Option<String>>,
+    },
+    AssertBelief {
+        statement: String,
+        signed_weight: f64,
+        source: String,
+        provenance: String,
+        evidence_version: Option<u64>,
+        reply: Reply<Belief>,
+    },
+    RecallTyped {
+        text: String,
+        top_k: usize,
+        reply: Reply<Vec<Recalled>>,
+    },
+    BeliefsMatching {
+        needle: String,
+        limit: usize,
+        reply: Reply<Vec<Belief>>,
+    },
+    Conflicts {
+        reply: Reply<Vec<Contradiction>>,
+    },
+    Explain {
+        statement: String,
+        reply: Reply<Option<(Belief, Vec<MEvidence>)>>,
+    },
+    Relate {
+        src: String,
+        dst: String,
+        rel: String,
+        weight: f64,
+        reply: Reply<()>,
+    },
     // Belief lifecycle: every tombstone carries a reason ("user-deleted" must stay
     // distinguishable from hygiene forever); None = legacy caller → "unspecified".
-    Forget { statement: String, reason: Option<String>, reply: Reply<bool> },
-    Tombstones { reply: Reply<Vec<(String, String, u64)>> },
-    Export { reply: Reply<String> },
+    Forget {
+        statement: String,
+        reason: Option<String>,
+        reply: Reply<bool>,
+    },
+    Tombstones {
+        reply: Reply<Vec<(String, String, u64)>>,
+    },
+    Export {
+        reply: Reply<String>,
+    },
     // cheap task tier (plain node CRUD — no cognitive ops)
-    AddTask { description: String, priority: String, due_ms: Option<u64>, reply: Reply<Task> },
-    ListTasks { include_done: bool, reply: Reply<Vec<Task>> },
-    CompleteTask { id: String, reply: Reply<bool> },
+    AddTask {
+        description: String,
+        priority: String,
+        due_ms: Option<u64>,
+        reply: Reply<Task>,
+    },
+    ListTasks {
+        include_done: bool,
+        reply: Reply<Vec<Task>>,
+    },
+    CompleteTask {
+        id: String,
+        reply: Reply<bool>,
+    },
     // cheap raw transcript (immediate context; isolated table, not the cognitive graph)
-    AppendMessage { role: String, text: String, scope: String, reply: Reply<()> },
-    RecentMessages { limit: usize, viewer: Option<String>, reply: Reply<Vec<(String, String)>> },
-    MessagesSince { after_id: i64, limit: usize, reply: Reply<Vec<(i64, String, String)>> },
-    UserTurnTimes { since_ms: i64, reply: Reply<Vec<i64>> },
-    ProactiveBaselineRate { reply: Reply<Option<f64>> },
-    RecordProactiveOutcomeBackfill { sent_ms: i64, engaged: bool, reply: Reply<()> },
-    RecordPredictionOutcome { domain: String, subject: String, raw: f64, hit: bool, reply: Reply<()> },
-    RecordEpisode { label: String, reply: Reply<()> },
-    RecordToolOutcome { tool: String, ok: bool, reply: Reply<()> },
-    RecordProactiveOutcome { sent_ms: i64, engaged: bool, reply: Reply<()> },
-    ProactiveReceptivity { reply: Reply<Option<f64>> },
-    RelationshipLens { reply: Reply<Option<String>> },
-    BeliefCount { reply: Reply<u64> },
-    ToolTrackRecord { reply: Reply<Vec<(String, f64, u64)>> },
-    ActivityRhythm { local_offset_hours: i32, reply: Reply<Option<String>> },
-    ForesightReliability { subject: String, raw: f64, reply: Reply<(f64, f64)> },
-    MetacogNote { reply: Reply<Option<String>> },
+    AppendMessage {
+        role: String,
+        text: String,
+        scope: String,
+        reply: Reply<()>,
+    },
+    RecentMessages {
+        limit: usize,
+        viewer: Option<String>,
+        reply: Reply<Vec<(String, String)>>,
+    },
+    MessagesSince {
+        after_id: i64,
+        limit: usize,
+        reply: Reply<Vec<(i64, String, String)>>,
+    },
+    MemoryCurationBaseline {
+        cursor_id: i64,
+        next_batch_limit: usize,
+        reply: Reply<mind_types::MemoryCurationBaseline>,
+    },
+    UserTurnTimes {
+        since_ms: i64,
+        reply: Reply<Vec<i64>>,
+    },
+    ProactiveBaselineRate {
+        reply: Reply<Option<f64>>,
+    },
+    RecordProactiveOutcomeBackfill {
+        sent_ms: i64,
+        engaged: bool,
+        reply: Reply<()>,
+    },
+    RecordPredictionOutcome {
+        domain: String,
+        subject: String,
+        raw: f64,
+        hit: bool,
+        reply: Reply<()>,
+    },
+    RecordEpisode {
+        label: String,
+        reply: Reply<()>,
+    },
+    RecordToolOutcome {
+        tool: String,
+        ok: bool,
+        reply: Reply<()>,
+    },
+    RecordProactiveOutcome {
+        sent_ms: i64,
+        engaged: bool,
+        reply: Reply<()>,
+    },
+    ProactiveReceptivity {
+        reply: Reply<Option<f64>>,
+    },
+    RelationshipLens {
+        reply: Reply<Option<String>>,
+    },
+    BeliefCount {
+        reply: Reply<u64>,
+    },
+    ToolTrackRecord {
+        reply: Reply<Vec<(String, f64, u64)>>,
+    },
+    ActivityRhythm {
+        local_offset_hours: i32,
+        reply: Reply<Option<String>>,
+    },
+    ForesightReliability {
+        subject: String,
+        raw: f64,
+        reply: Reply<(f64, f64)>,
+    },
+    MetacogNote {
+        reply: Reply<Option<String>>,
+    },
     // skill library
-    SaveSkill { skill: Skill, reply: Reply<()> },
-    GetSkill { name: String, reply: Reply<Option<Skill>> },
-    ListSkills { reply: Reply<Vec<Skill>> },
-    RecallSkills { query: String, limit: usize, reply: Reply<Vec<Skill>> },
-    RecordSkillOutcome { name: String, outcome: mind_types::SkillOutcome, reply: Reply<()> },
+    SaveSkill {
+        skill: Skill,
+        reply: Reply<()>,
+    },
+    GetSkill {
+        name: String,
+        reply: Reply<Option<Skill>>,
+    },
+    ListSkills {
+        reply: Reply<Vec<Skill>>,
+    },
+    RecallSkills {
+        query: String,
+        limit: usize,
+        reply: Reply<Vec<Skill>>,
+    },
+    RecordSkillOutcome {
+        name: String,
+        outcome: mind_types::SkillOutcome,
+        reply: Reply<()>,
+    },
     /// Quarantine one host memory BY IDENTIFIER. Never takes content (E.SEC1c).
-    QuarantineRid { rid: String, reason: String, reply: Reply<bool> },
+    QuarantineRid {
+        rid: String,
+        reason: String,
+        reply: Reply<bool>,
+    },
     // Attachable expertise. Mount/unmount are process-local; install copies the pack beside the db
     // so it comes back on every open.
-    MountPack { path: String, reply: Reply<String> },
-    InstallPack { path: String, reply: Reply<String> },
-    UnmountPack { id: String, reply: Reply<()> },
-    UninstallPack { id: String, reply: Reply<bool> },
-    ListApproaches { limit: usize, reply: Reply<Vec<String>> },
-    MountedPacks { reply: Reply<Vec<mind_types::memory::PackBrief>> },
+    MountPack {
+        path: String,
+        reply: Reply<String>,
+    },
+    InstallPack {
+        path: String,
+        reply: Reply<String>,
+    },
+    UnmountPack {
+        id: String,
+        reply: Reply<()>,
+    },
+    UninstallPack {
+        id: String,
+        reply: Reply<bool>,
+    },
+    ListApproaches {
+        limit: usize,
+        reply: Reply<Vec<String>>,
+    },
+    MountedPacks {
+        reply: Reply<Vec<mind_types::memory::PackBrief>>,
+    },
     /// Seal the given craft texts into a pack file: stage them in a dedicated namespace, seal THAT
     /// namespace only, then remove the staging rows win or lose. The texts arrive pre-gathered and
     /// pre-filtered (see `seal_learned_pack`) — the actor only does the parts that need the db.
-    SealCraftPack { dest: String, name: String, version: String, texts: Vec<String>, reply: Reply<u64> },
-    PackContext { reply: Reply<Option<String>> },
-    RecallFromPacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackHit>> },
-    ProbePacks { query: String, top_k: usize, reply: Reply<Vec<mind_types::memory::PackProbe>> },
-    RecordPackEvent { pack_id: String, event: mind_types::memory::PackEvent, reply: Reply<()> },
-    PackStats { reply: Reply<Vec<mind_types::memory::PackStats>> },
+    SealCraftPack {
+        dest: String,
+        name: String,
+        version: String,
+        texts: Vec<String>,
+        reply: Reply<u64>,
+    },
+    PackContext {
+        reply: Reply<Option<String>>,
+    },
+    RecallFromPacks {
+        query: String,
+        top_k: usize,
+        reply: Reply<Vec<mind_types::memory::PackHit>>,
+    },
+    ProbePacks {
+        query: String,
+        top_k: usize,
+        reply: Reply<Vec<mind_types::memory::PackProbe>>,
+    },
+    RecordPackEvent {
+        pack_id: String,
+        event: mind_types::memory::PackEvent,
+        reply: Reply<()>,
+    },
+    PackStats {
+        reply: Reply<Vec<mind_types::memory::PackStats>>,
+    },
     // The coverage router (P.3): a library of unmounted packs, read for manifests only.
-    SetPackLibrary { dir: String, reply: Reply<()> },
-    AvailablePacks { reply: Reply<Vec<mind_types::memory::PackCatalogEntry>> },
-    RoutePacks { query: String, reply: Reply<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute)> },
+    SetPackLibrary {
+        dir: String,
+        reply: Reply<()>,
+    },
+    AvailablePacks {
+        reply: Reply<Vec<mind_types::memory::PackCatalogEntry>>,
+    },
+    RoutePacks {
+        query: String,
+        reply: Reply<(
+            Vec<mind_types::memory::CoverageMatch>,
+            mind_types::memory::PackRoute,
+        )>,
+    },
     // Standing expertise leases (P.4 v1): operator state in `mind_pack_leases`; mount on grant.
-    LeasePack { pack_id: String, days: u32, reason: String, granted_by: String, reply: Reply<mind_types::memory::PackLease> },
-    ReleasePack { pack_id: String, end: mind_types::memory::LeaseEnd, reply: Reply<Option<mind_types::memory::PackLease>> },
-    Leases { reply: Reply<Vec<mind_types::memory::PackLease>> },
-    SweepLeases { now_ms: i64, reply: Reply<Vec<mind_types::memory::PackLease>> },
-    PendingLeaseEvents { reply: Reply<Vec<mind_types::memory::LeaseEvent>> },
+    LeasePack {
+        pack_id: String,
+        days: u32,
+        reason: String,
+        granted_by: String,
+        reply: Reply<mind_types::memory::PackLease>,
+    },
+    ReleasePack {
+        pack_id: String,
+        end: mind_types::memory::LeaseEnd,
+        reply: Reply<Option<mind_types::memory::PackLease>>,
+    },
+    Leases {
+        reply: Reply<Vec<mind_types::memory::PackLease>>,
+    },
+    SweepLeases {
+        now_ms: i64,
+        reply: Reply<Vec<mind_types::memory::PackLease>>,
+    },
+    PendingLeaseEvents {
+        reply: Reply<Vec<mind_types::memory::LeaseEvent>>,
+    },
     /// Test-only: make a lease due NOW, so expiry can be exercised without sleeping or faking a clock.
     #[cfg(any(test, feature = "fixtures"))]
-    BackdateLease { pack_id: String, reply: Reply<()> },
-    AckLeaseEvent { event_id: String, reply: Reply<()> },
-    ReconcileLeases { reply: Reply<Vec<String>> },
+    BackdateLease {
+        pack_id: String,
+        reply: Reply<()>,
+    },
+    AckLeaseEvent {
+        event_id: String,
+        reply: Reply<()>,
+    },
+    ReconcileLeases {
+        reply: Reply<Vec<String>>,
+    },
     // goals / preferences (plain text CRUD; no Bayesian revision)
-    StoreGoalPref { kind: String, text: String, reply: Reply<()> },
-    ListGoalPrefs { kind: String, reply: Reply<Vec<MemoryItem>> },
+    StoreGoalPref {
+        kind: String,
+        text: String,
+        reply: Reply<()>,
+    },
+    ListGoalPrefs {
+        kind: String,
+        reply: Reply<Vec<MemoryItem>>,
+    },
     // profile KV (single value per key, latest-wins — distinct from append-distinct goals/prefs)
-    SetProfile { key: String, value: String, reply: Reply<()> },
+    SetProfile {
+        key: String,
+        value: String,
+        reply: Reply<()>,
+    },
     // group-chat read-isolation: per-belief visibility scope (keyed by proposition)
-    SetBeliefScope { proposition: String, scope: String, reply: Reply<()> },
-    BeliefScopeMap { reply: Reply<std::collections::HashMap<String, String>> },
+    SetBeliefScope {
+        proposition: String,
+        scope: String,
+        reply: Reply<()>,
+    },
+    BeliefScopeMap {
+        reply: Reply<std::collections::HashMap<String, String>>,
+    },
     // Purpose Gate v1: explicit per-belief sensitivity overrides + standing purpose grants
-    SetBeliefSensitivity { proposition: String, class: String, reply: Reply<()> },
-    BeliefSensitivityMap { reply: Reply<std::collections::HashMap<String, String>> },
-    GrantPurpose { spec: mind_types::PurposeGrantSpec, reply: Reply<i64> },
-    RevokePurposeGrant { id: i64, reply: Reply<bool> },
-    ListPurposeGrants { reply: Reply<Vec<mind_types::PurposeGrant>> },
+    SetBeliefSensitivity {
+        proposition: String,
+        class: String,
+        reply: Reply<()>,
+    },
+    BeliefSensitivityMap {
+        reply: Reply<std::collections::HashMap<String, String>>,
+    },
+    GrantPurpose {
+        spec: mind_types::PurposeGrantSpec,
+        reply: Reply<i64>,
+    },
+    RevokePurposeGrant {
+        id: i64,
+        reply: Reply<bool>,
+    },
+    ListPurposeGrants {
+        reply: Reply<Vec<mind_types::PurposeGrant>>,
+    },
     // tension economy (the "urges" drives emit; plain CRUD ledger)
-    RecordTension { kind: String, pressure: f64, about: String, reply: Reply<()> },
-    OpenTensions { limit: usize, reply: Reply<Vec<mind_types::Tension>> },
-    DischargeTension { id: String, reply: Reply<bool> },
-    ExpireStaleTensions { curiosity_days: i64, other_days: i64, reply: Reply<usize> },
-    TensionOutcomeCounts { reply: Reply<(usize, usize)> },
-    RecallDemandFor { about: String, reply: Reply<f64> },
+    RecordTension {
+        kind: String,
+        pressure: f64,
+        about: String,
+        reply: Reply<()>,
+    },
+    OpenTensions {
+        limit: usize,
+        reply: Reply<Vec<mind_types::Tension>>,
+    },
+    DischargeTension {
+        id: String,
+        reply: Reply<bool>,
+    },
+    ExpireStaleTensions {
+        curiosity_days: i64,
+        other_days: i64,
+        reply: Reply<usize>,
+    },
+    TensionOutcomeCounts {
+        reply: Reply<(usize, usize)>,
+    },
+    RecallDemandFor {
+        about: String,
+        reply: Reply<f64>,
+    },
     // retro-dedup: collapse norm_prop/Jaccard near-duplicates written before the write-path dedup existed
-    RetroDedupStore { reply: Reply<(usize, usize)> },
+    RetroDedupStore {
+        reply: Reply<(usize, usize)>,
+    },
     // immune harness: point-in-time snapshot of the live DB (seeded-belief trials run on the COPY)
-    SnapshotTo { dest: String, reply: Reply<()> },
+    SnapshotTo {
+        dest: String,
+        reply: Reply<()>,
+    },
     // test-only: insert a goal/pref row bypassing all dedup checks (simulates pre-PR#19 legacy data)
     #[cfg(test)]
-    ForceInsertGoalPref { kind: String, text: String, reply: Reply<()> },
+    ForceInsertGoalPref {
+        kind: String,
+        text: String,
+        reply: Reply<()>,
+    },
 }
 
 // ── actor scheduling doctrine (measured 2026-08-24) ──────────────────────────
@@ -186,14 +459,20 @@ fn gate_write(text: &str) -> std::result::Result<(), String> {
     // the secret into an error string, a log line and probably a chat reply — the leak the gate
     // exists to prevent (E.SEC1).
     if let Some(found) = mind_types::first_sensitive(text) {
-        return Err(format!("refused: write contains {} (write-gate)", found.kind.label()));
+        return Err(format!(
+            "refused: write contains {} (write-gate)",
+            found.kind.label()
+        ));
     }
     Ok(())
 }
 
 fn now_secs() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Exponential half-life decay toward the 0.5 uninformed prior.
@@ -218,7 +497,10 @@ fn classify_uncertainty(
     statement: &str,
     open: &[Contradiction],
 ) -> UncertaintyReason {
-    if open.iter().any(|c| c.belief_a == statement || c.belief_b == statement) {
+    if open
+        .iter()
+        .any(|c| c.belief_a == statement || c.belief_b == statement)
+    {
         return UncertaintyReason::Contradicted;
     }
     if original_conf - decayed_conf > 0.05 {
@@ -302,7 +584,7 @@ fn evidence_count(n: &CognitiveNode) -> u32 {
 }
 
 fn to_belief_dto(n: &CognitiveNode) -> Belief {
-    let statement = node_prop(n).map(|s| s.to_string()).unwrap_or_else(|| n.label.clone());
+    let statement = node_prop(n).map_or_else(|| n.label.clone(), |s| s.to_string());
     Belief {
         id: statement.clone(),
         statement,
@@ -328,12 +610,18 @@ fn normalize_belief_text(s: &str) -> String {
 /// (Word-overlap dedup is unsafe here: it strips the very tokens — numbers/versions — that
 /// distinguish contradicting claims.)
 fn norm_prop(s: &str) -> String {
-    normalize_belief_text(s).to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    normalize_belief_text(s)
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn find_belief(db: &YantrikDB, statement: &str) -> Option<CognitiveNode> {
     let target = norm_prop(statement);
-    all_beliefs(db).into_iter().find(|n| node_prop(n).map(|p| norm_prop(p) == target).unwrap_or(false))
+    all_beliefs(db)
+        .into_iter()
+        .find(|n| node_prop(n).is_some_and(|p| norm_prop(p) == target))
 }
 
 fn assert_belief(
@@ -365,7 +653,8 @@ fn assert_belief(
             n.attrs.confidence = sigmoid(0.0);
             n.attrs.provenance = prov(provenance);
             db.persist_cognitive_node(&n).map_err(|e| e.to_string())?;
-            db.persist_node_id_allocator(alloc).map_err(|e| e.to_string())?;
+            db.persist_node_id_allocator(alloc)
+                .map_err(|e| e.to_string())?;
             n
         }
     };
@@ -405,25 +694,41 @@ fn assert_belief(
 }
 
 /// Record into the flat vector store. Uses native `record_text` (auto-embed) when an embedder is
-/// attached — 0.9.0 bundles one at dim 64, so this is the live path — giving real semantic recall.
+/// attached — the engine bundles one at dim 64, so this is the live path — giving real semantic recall.
 /// Falls back to a zero-vector `record` only on no-embedder builds (the dim-8 test path), where
 /// recall degrades to keyword rather than erroring with `NoEmbedder`.
-fn record_memory(
-    db: &YantrikDB,
-    text: &str,
-    zero: &[f32],
-    mtype: &str,
+struct RecordSpec<'a> {
+    text: &'a str,
+    zero: &'a [f32],
+    kind: &'a str,
     importance: f64,
     certainty: f64,
-    source: &str,
-    meta: &serde_json::Value,
-) -> std::result::Result<String, String> {
+    source: &'a str,
+    meta: &'a serde_json::Value,
+}
+
+fn record_memory(db: &YantrikDB, spec: RecordSpec<'_>) -> std::result::Result<String, String> {
+    let RecordSpec {
+        text,
+        zero,
+        kind,
+        importance,
+        certainty,
+        source,
+        meta,
+    } = spec;
     if db.has_embedder() {
-        db.record_text(text, mtype, importance, 0.0, 604_800.0, meta, "default", certainty, "general", source, None)
-            .map_err(|e| e.to_string())
+        db.record_text(
+            text, kind, importance, 0.0, 604_800.0, meta, "default", certainty, "general", source,
+            None,
+        )
+        .map_err(|e| e.to_string())
     } else {
-        db.record(text, mtype, importance, 0.0, 604_800.0, meta, zero, "default", certainty, "general", source, None)
-            .map_err(|e| e.to_string())
+        db.record(
+            text, kind, importance, 0.0, 604_800.0, meta, zero, "default", certainty, "general",
+            source, None,
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -468,7 +773,8 @@ fn scrub_sealed_pack(dest: &str) -> std::result::Result<(), String> {
     let conn = rusqlite::Connection::open(dest).map_err(|e| e.to_string())?;
     // FK enforcement is per-connection; with it on, drop order matters and a referenced table
     // fails mid-scrub. The tables are being deleted wholesale — referential order is meaningless.
-    conn.execute_batch("PRAGMA foreign_keys=OFF").map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF")
+        .map_err(|e| e.to_string())?;
     let names: Vec<(String, String)> = conn
         .prepare("SELECT name, type FROM sqlite_master WHERE type IN ('table','view')")
         .and_then(|mut s| {
@@ -483,7 +789,11 @@ fn scrub_sealed_pack(dest: &str) -> std::result::Result<(), String> {
         if !keep {
             // The statement must match the object: DROP TABLE on a view errors even with IF
             // EXISTS ("use DROP VIEW to delete view edges" — the engine keeps `edges` as a view).
-            let stmt = if kind == "view" { "DROP VIEW" } else { "DROP TABLE" };
+            let stmt = if kind == "view" {
+                "DROP VIEW"
+            } else {
+                "DROP TABLE"
+            };
             conn.execute_batch(&format!("{stmt} IF EXISTS \"{}\"", n.replace('"', "\"\"")))
                 .map_err(|e| format!("dropping {n}: {e}"))?;
         }
@@ -492,11 +802,16 @@ fn scrub_sealed_pack(dest: &str) -> std::result::Result<(), String> {
     // The verification is the point: enumerate what SURVIVED and refuse anything off-list.
     let survivors: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        .and_then(|mut s| s.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.filter_map(|r| r.ok()).collect()))
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
         .map_err(|e| e.to_string())?;
     for n in &survivors {
         if !PACK_TABLE_ALLOWLIST.contains(&n.as_str()) && !n.starts_with("memories_fts") {
-            return Err(format!("table {n} survived the pack scrub — refusing to leave this file on disk"));
+            return Err(format!(
+                "table {n} survived the pack scrub — refusing to leave this file on disk"
+            ));
         }
     }
     Ok(())
@@ -516,7 +831,9 @@ fn seal_craft_pack(
     texts: &[String],
 ) -> std::result::Result<u64, String> {
     if texts.is_empty() {
-        return Err("nothing to seal — no banked approaches or skills survived the export filter".into());
+        return Err(
+            "nothing to seal — no banked approaches or skills survived the export filter".into(),
+        );
     }
     const NS: &str = "learned-craft";
     let meta = serde_json::json!({ "source": "yantrik-mind self-learning" });
@@ -524,10 +841,35 @@ fn seal_craft_pack(
     let mut stage_err: Option<String> = None;
     for t in texts {
         let r = if db.has_embedder() {
-            db.record_text(t, "procedural", 0.7, 0.0, 604_800.0, &meta, NS, 0.8, "general", "system", None)
+            db.record_text(
+                t,
+                "procedural",
+                0.7,
+                0.0,
+                604_800.0,
+                &meta,
+                NS,
+                0.8,
+                "general",
+                "system",
+                None,
+            )
         } else {
             let zero = vec![0.0f32; db.embedding_dim()];
-            db.record(t, "procedural", 0.7, 0.0, 604_800.0, &meta, &zero, NS, 0.8, "general", "system", None)
+            db.record(
+                t,
+                "procedural",
+                0.7,
+                0.0,
+                604_800.0,
+                &meta,
+                &zero,
+                NS,
+                0.8,
+                "general",
+                "system",
+                None,
+            )
         };
         match r {
             Ok(rid) => rids.push(rid),
@@ -541,33 +883,41 @@ fn seal_craft_pack(
         Some(e) => Err(format!("staging craft rows failed: {e}")),
         None => {
             let embedder = match db.embedder_identity() {
-                Ok(Some((ename, digest, dim))) => serde_json::json!({ "name": ename, "digest": digest, "dim": dim }),
+                Ok(Some((ename, digest, dim))) => {
+                    serde_json::json!({ "name": ename, "digest": digest, "dim": dim })
+                }
                 _ => serde_json::json!({ "name": null, "digest": null, "dim": db.embedding_dim() }),
             };
             let coverage: Vec<String> = texts
                 .iter()
-                .filter_map(|t| t.lines().next().map(|l| l.chars().take(60).collect::<String>()))
+                .filter_map(|t| {
+                    t.lines()
+                        .next()
+                        .map(|l| l.chars().take(60).collect::<String>())
+                })
                 .take(8)
                 .collect();
             // Built through serde rather than a struct literal ON PURPOSE: every optional
             // manifest field is #[serde(default)], so this compiles against any engine version
             // that has the required fields — a literal broke the build the moment the local
             // engine grew fields the deployment box's checkout did not have yet.
-            let manifest: yantrikdb_core::PackManifest = match serde_json::from_value(serde_json::json!({
-                "name": name,
-                "version": version,
-                "origin": format!("yantrik-mind/{name}"),
-                "description": "Craft this mind learned by doing: banked approaches and measured skills.",
-                "embedder": embedder,
-                // The constitution frames the corpus honestly: these are ONE mind's local
-                // measurements, and a mounting host must not read them as universal claims.
-                "constitution": [
-                    "These approaches were banked by a household mind from its own successful runs. \
-                     Reliability notes are that mind's local measurements, not universal claims — \
-                     prefer your own measured procedures where they exist."
-                ],
-                "coverage": coverage,
-            })) {
+            let manifest: yantrikdb_core::PackManifest = match serde_json::from_value(
+                serde_json::json!({
+                    "name": name,
+                    "version": version,
+                    "origin": format!("yantrik-mind/{name}"),
+                    "description": "Craft this mind learned by doing: banked approaches and measured skills.",
+                    "embedder": embedder,
+                    // The constitution frames the corpus honestly: these are ONE mind's local
+                    // measurements, and a mounting host must not read them as universal claims.
+                    "constitution": [
+                        "These approaches were banked by a household mind from its own successful runs. \
+                         Reliability notes are that mind's local measurements, not universal claims — \
+                         prefer your own measured procedures where they exist."
+                    ],
+                    "coverage": coverage,
+                }),
+            ) {
                 Ok(m) => m,
                 Err(e) => {
                     for rid in &rids {
@@ -626,7 +976,10 @@ struct ManifestView {
 
 impl ManifestView {
     fn of(m: &yantrikdb_core::PackManifest) -> Self {
-        serde_json::to_value(m).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+        serde_json::to_value(m)
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
     }
     /// `origin@version`, the engine's own identity rule.
     fn pack_id(&self) -> String {
@@ -646,13 +999,17 @@ fn default_pack_library(db_path: &str) -> Option<std::path::PathBuf> {
     if db_path == ":memory:" {
         return None;
     }
-    std::path::Path::new(db_path).parent().map(|d| d.join("pack-library"))
+    std::path::Path::new(db_path)
+        .parent()
+        .map(|d| d.join("pack-library"))
 }
 
 /// Every `.ydbpack` in the library, by path, in name order (deterministic catalog order).
 fn library_files(dir: Option<&std::path::Path>) -> Vec<String> {
     let Some(dir) = dir else { return Vec::new() };
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut out: Vec<String> = rd
         .flatten()
         .map(|e| e.path())
@@ -673,27 +1030,37 @@ fn available_packs(
     let mut out: Vec<mind_types::memory::PackCatalogEntry> = Vec::new();
     for p in db.mounted_packs() {
         let m = cached_manifest(manifests, &p.path);
-        catalog_push(&mut out, mind_types::memory::PackCatalogEntry {
-            pack_id: p.pack_id,
-            path: p.path,
-            content_digest: m.and_then(|m| m.content_digest.clone()),
-            coverage: m.map(|m| m.coverage.clone()).unwrap_or_default(),
-            floor: mind_types::memory::effective_pack_floor(m.and_then(|m| m.recommended_min_similarity)),
-            mounted: true,
-            signer: m.and_then(|m| m.publisher_pubkey.clone()),
-        });
+        catalog_push(
+            &mut out,
+            mind_types::memory::PackCatalogEntry {
+                pack_id: p.pack_id,
+                path: p.path,
+                content_digest: m.and_then(|m| m.content_digest.clone()),
+                coverage: m.map(|m| m.coverage.clone()).unwrap_or_default(),
+                floor: mind_types::memory::effective_pack_floor(
+                    m.and_then(|m| m.recommended_min_similarity),
+                ),
+                mounted: true,
+                signer: m.and_then(|m| m.publisher_pubkey.clone()),
+            },
+        );
     }
     for path in library_files(library) {
-        let Some(m) = cached_manifest(manifests, &path) else { continue };
-        catalog_push(&mut out, mind_types::memory::PackCatalogEntry {
-            pack_id: m.pack_id(),
-            path: path.clone(),
-            content_digest: m.content_digest.clone(),
-            coverage: m.coverage.clone(),
-            floor: mind_types::memory::effective_pack_floor(m.recommended_min_similarity),
-            mounted: false,
-            signer: m.publisher_pubkey.clone(),
-        });
+        let Some(m) = cached_manifest(manifests, &path) else {
+            continue;
+        };
+        catalog_push(
+            &mut out,
+            mind_types::memory::PackCatalogEntry {
+                pack_id: m.pack_id(),
+                path: path.clone(),
+                content_digest: m.content_digest.clone(),
+                coverage: m.coverage.clone(),
+                floor: mind_types::memory::effective_pack_floor(m.recommended_min_similarity),
+                mounted: false,
+                signer: m.publisher_pubkey.clone(),
+            },
+        );
     }
     out
 }
@@ -705,7 +1072,10 @@ fn available_packs(
 /// duplicate should be impossible; the rule is applied to both loops anyway — "should be" is not a
 /// property the catalog gets to assume (Codex's review of P.3a). Same id with a different digest or
 /// signer is the conflict P.4's lease refuses outright; here it is only refused a second line.
-fn catalog_push(out: &mut Vec<mind_types::memory::PackCatalogEntry>, entry: mind_types::memory::PackCatalogEntry) {
+fn catalog_push(
+    out: &mut Vec<mind_types::memory::PackCatalogEntry>,
+    entry: mind_types::memory::PackCatalogEntry,
+) {
     if let Some(prev) = out.iter().find(|e| e.pack_id == entry.pack_id) {
         if prev.path != entry.path {
             tracing::warn!(pack_id = %entry.pack_id, kept = %prev.path, ignored = %entry.path, "two entries claim one pack id — keeping the first");
@@ -746,7 +1116,11 @@ fn coverage_vectors(
     entry: &mind_types::memory::PackCatalogEntry,
 ) -> mind_spec::coverage::CoverageVectors {
     let embed_all = |db: &YantrikDB| -> Vec<Vec<f32>> {
-        entry.coverage.iter().map(|ph| db.embed(ph).unwrap_or_default()).collect()
+        entry
+            .coverage
+            .iter()
+            .map(|ph| db.embed(ph).unwrap_or_default())
+            .collect()
     };
     let vectors = match embedder {
         Some(id) => {
@@ -759,7 +1133,11 @@ fn coverage_vectors(
         }
         None => embed_all(db),
     };
-    mind_spec::coverage::CoverageVectors { pack_id: entry.pack_id.clone(), phrases: entry.coverage.clone(), vectors }
+    mind_spec::coverage::CoverageVectors {
+        pack_id: entry.pack_id.clone(),
+        phrases: entry.coverage.clone(),
+        vectors,
+    }
 }
 
 /// `coverage-router-v1` over the catalog: embed the query once, rank every pack by its best
@@ -770,10 +1148,22 @@ fn route_packs(
     coverage_cache: &mut std::collections::HashMap<String, Vec<Vec<f32>>>,
     library: Option<&std::path::Path>,
     query: &str,
-) -> std::result::Result<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute), String> {
+) -> std::result::Result<
+    (
+        Vec<mind_types::memory::CoverageMatch>,
+        mind_types::memory::PackRoute,
+    ),
+    String,
+> {
     let catalog = available_packs(db, manifests, library);
     if catalog.is_empty() {
-        return Ok((Vec::new(), mind_types::memory::PackRoute::Abstain { reason: mind_types::memory::AbstainReason::NoPacks, best: None }));
+        return Ok((
+            Vec::new(),
+            mind_types::memory::PackRoute::Abstain {
+                reason: mind_types::memory::AbstainReason::NoPacks,
+                best: None,
+            },
+        ));
     }
     let q = db.embed(query).map_err(|e| e.to_string())?;
     // The embedder's identity, when it has one: the cache is only sound across calls that provably
@@ -783,12 +1173,18 @@ fn route_packs(
         .ok()
         .flatten()
         .map(|(name, digest, dim)| format!("{}:{digest}:{dim}", name.unwrap_or_default()));
-    let packs: Vec<mind_spec::coverage::CoverageVectors> =
-        catalog.iter().map(|e| coverage_vectors(db, embedder.as_deref(), coverage_cache, e)).collect();
+    let packs: Vec<mind_spec::coverage::CoverageVectors> = catalog
+        .iter()
+        .map(|e| coverage_vectors(db, embedder.as_deref(), coverage_cache, e))
+        .collect();
     let (ranked, route) = mind_spec::coverage::decide(&q, &packs);
     let matches = ranked
         .into_iter()
-        .map(|r| mind_types::memory::CoverageMatch { pack_id: r.pack_id, sim: r.sim, phrase: r.phrase })
+        .map(|r| mind_types::memory::CoverageMatch {
+            pack_id: r.pack_id,
+            sim: r.sim,
+            phrase: r.phrase,
+        })
         .collect();
     Ok((matches, route))
 }
@@ -896,7 +1292,9 @@ fn detach_now(db: &YantrikDB, pack_id: &str) -> std::result::Result<(), String> 
     if seam_fails(4) {
         return Err("unmount failed (test seam)".into());
     }
-    db.unmount_pack(pack_id).map(|_| ()).map_err(|e| e.to_string())
+    db.unmount_pack(pack_id)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn list_leases(db: &YantrikDB) -> std::result::Result<Vec<mind_types::memory::PackLease>, String> {
@@ -905,10 +1303,15 @@ fn list_leases(db: &YantrikDB) -> std::result::Result<Vec<mind_types::memory::Pa
     }
     let conn = db.conn();
     let mut st = conn
-        .prepare(&format!("SELECT {LEASE_COLUMNS} FROM mind_pack_leases ORDER BY expires_ms ASC, pack_id ASC"))
+        .prepare(&format!(
+            "SELECT {LEASE_COLUMNS} FROM mind_pack_leases ORDER BY expires_ms ASC, pack_id ASC"
+        ))
         .map_err(|e| e.to_string())?;
-    let rows = st.query_map([], lease_from_row).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let rows = st
+        .query_map([], lease_from_row)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 /// A lease event's identity, stable across replays: the kind, the pack, and the grant it belongs
@@ -949,7 +1352,9 @@ fn queue_lease_event(
     Ok(())
 }
 
-fn pending_lease_events(db: &YantrikDB) -> std::result::Result<Vec<mind_types::memory::LeaseEvent>, String> {
+fn pending_lease_events(
+    db: &YantrikDB,
+) -> std::result::Result<Vec<mind_types::memory::LeaseEvent>, String> {
     let conn = db.conn();
     let mut st = conn
         .prepare(
@@ -975,17 +1380,23 @@ fn pending_lease_events(db: &YantrikDB) -> std::result::Result<Vec<mind_types::m
                     state: mind_types::memory::LeaseState::Active,
                     note: None,
                 },
-                end_reason: r.get::<_, Option<String>>(10)?.map(|s| mind_types::memory::LeaseEnd::from_label(&s)),
+                end_reason: r
+                    .get::<_, Option<String>>(10)?
+                    .map(|s| mind_types::memory::LeaseEnd::from_label(&s)),
                 ts_ms: r.get(11)?,
             })
         })
         .map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 fn ack_lease_event(db: &YantrikDB, event_id: &str) -> std::result::Result<(), String> {
     db.conn()
-        .execute("DELETE FROM mind_pack_lease_events WHERE event_id = ?1", [event_id])
+        .execute(
+            "DELETE FROM mind_pack_lease_events WHERE event_id = ?1",
+            [event_id],
+        )
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -1012,7 +1423,9 @@ impl Claimant {
     /// refusal, not a pass.
     fn is(&self, lease: &mind_types::memory::PackLease) -> bool {
         match (self.digest.as_deref(), lease.content_digest.as_deref()) {
-            (Some(mine), Some(theirs)) if !mine.trim().is_empty() && mine == theirs => self.signer == lease.signer,
+            (Some(mine), Some(theirs)) if !mine.trim().is_empty() && mine == theirs => {
+                self.signer == lease.signer
+            }
             _ => false,
         }
     }
@@ -1022,7 +1435,9 @@ impl Claimant {
 /// promises — that what serves is what was granted, that a swap is caught, that a lease detaches
 /// only its own — rests on a digest, and none of it can be honoured without one. A pack with no
 /// verifiable digest can still be mounted or installed by hand; it cannot be borrowed.
-fn leasable_identity(entry: &mind_types::memory::PackCatalogEntry) -> std::result::Result<(), String> {
+fn leasable_identity(
+    entry: &mind_types::memory::PackCatalogEntry,
+) -> std::result::Result<(), String> {
     match entry.content_digest.as_deref() {
         Some(d) if !d.trim().is_empty() => Ok(()),
         _ => Err(format!(
@@ -1042,7 +1457,12 @@ fn artifact_claimants(
     library: Option<&std::path::Path>,
     pack_id: &str,
 ) -> (Vec<Claimant>, Vec<String>) {
-    let mounted: Vec<String> = db.mounted_packs().into_iter().filter(|p| p.pack_id == pack_id).map(|p| p.path).collect();
+    let mounted: Vec<String> = db
+        .mounted_packs()
+        .into_iter()
+        .filter(|p| p.pack_id == pack_id)
+        .map(|p| p.path)
+        .collect();
     let mut paths = mounted.clone();
     for path in library_files(library) {
         if !paths.contains(&path) {
@@ -1052,9 +1472,11 @@ fn artifact_claimants(
     let (mut out, mut unreadable) = (Vec::new(), Vec::new());
     for path in paths {
         match cached_manifest(manifests, &path) {
-            Some(m) if m.pack_id() == pack_id => {
-                out.push(Claimant { path, digest: m.content_digest.clone(), signer: m.publisher_pubkey.clone() })
-            }
+            Some(m) if m.pack_id() == pack_id => out.push(Claimant {
+                path,
+                digest: m.content_digest.clone(),
+                signer: m.publisher_pubkey.clone(),
+            }),
             Some(_) => {}
             // Only a file the engine ALREADY has mounted under this id is a proven claimant this
             // host cannot identify — it is serving rows right now. An unreadable LIBRARY file
@@ -1079,7 +1501,10 @@ fn mounted_claimant(
     manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
     pack_id: &str,
 ) -> Option<Claimant> {
-    let p = db.mounted_packs().into_iter().find(|p| p.pack_id == pack_id)?;
+    let p = db
+        .mounted_packs()
+        .into_iter()
+        .find(|p| p.pack_id == pack_id)?;
     let m = cached_manifest(manifests, &p.path);
     Some(Claimant {
         path: p.path,
@@ -1102,7 +1527,12 @@ fn divergent_artifacts(
     // Fail closed: a claimant whose manifest will not read cannot be shown to be the same artifact,
     // so it counts as a divergence rather than as nothing.
     if let Some(bad) = unreadable.first() {
-        return Some((claimants.first().map(|c| c.path.clone()).unwrap_or_else(|| "(none readable)".into()), bad.clone()));
+        return Some((
+            claimants
+                .first()
+                .map_or_else(|| "(none readable)".into(), |c| c.path.clone()),
+            bad.clone(),
+        ));
     }
     let first = claimants.first()?;
     claimants
@@ -1116,7 +1546,9 @@ fn divergent_artifacts(
 /// transient mount. Compared as PATHS, canonicalised: a string `starts_with` made a sibling
 /// directory `packs-evil` look installed because it shares a prefix with `packs` (Codex's review).
 fn is_installed_path(db: &YantrikDB, path: &str) -> bool {
-    let Some(dir) = db.pack_dir() else { return false };
+    let Some(dir) = db.pack_dir() else {
+        return false;
+    };
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(std::path::Path::new(path)).starts_with(canon(&dir))
 }
@@ -1124,7 +1556,10 @@ fn is_installed_path(db: &YantrikDB, path: &str) -> bool {
 /// Free text an operator typed, on its way into a record: control characters stripped, whitespace
 /// collapsed, length bounded. A reason is evidence, not a payload.
 fn clean_lease_text(s: &str, max: usize) -> String {
-    let cleaned: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(max).collect()
 }
@@ -1154,7 +1589,8 @@ fn mount_for_lease(
     if seam_fails(1) {
         return Err("mount failed (test seam)".into());
     }
-    db.mount_pack(&entry.path).map_err(|e| format!("could not mount {pack_id}: {e}"))?;
+    db.mount_pack(&entry.path)
+        .map_err(|e| format!("could not mount {pack_id}: {e}"))?;
     Ok(true)
 }
 
@@ -1183,17 +1619,27 @@ fn unmount_for_lease(
     detach_now(db, &lease.pack_id)
 }
 
+struct LeaseRequest<'a> {
+    pack_id: &'a str,
+    days: u32,
+    reason: &'a str,
+    granted_by: &'a str,
+}
+
 fn lease_pack(
     db: &YantrikDB,
     manifests: &mut std::collections::HashMap<String, Option<ManifestView>>,
     orphans: &mut OrphanedMounts,
     library: Option<&std::path::Path>,
-    pack_id: &str,
-    days: u32,
-    reason: &str,
-    granted_by: &str,
+    request: LeaseRequest<'_>,
 ) -> std::result::Result<mind_types::memory::PackLease, String> {
     use mind_types::memory::{LeaseState, PackLease, LEASE_CAP, MAX_LEASE_DAYS};
+    let LeaseRequest {
+        pack_id,
+        days,
+        reason,
+        granted_by,
+    } = request;
     let reason = clean_lease_text(reason, REASON_MAX);
     if reason.is_empty() {
         return Err("a lease needs a reason — `ym pack lease <id> reason=<why>`".into());
@@ -1205,14 +1651,18 @@ fn lease_pack(
     // Loudly, not silently: a lease is a grant, and a grant must be for the time that was asked
     // for or for none at all (Codex's review of P.4).
     if days == 0 || days > MAX_LEASE_DAYS {
-        return Err(format!("days must be between 1 and {MAX_LEASE_DAYS} — asked for {days}"));
+        return Err(format!(
+            "days must be between 1 and {MAX_LEASE_DAYS} — asked for {days}"
+        ));
     }
     let catalog = available_packs(db, manifests, library);
     let entry = catalog
         .iter()
         .find(|e| e.pack_id == pack_id)
         .cloned()
-        .ok_or_else(|| format!("no pack {pack_id} in the catalog — `ym pack library` lists what can be leased"))?;
+        .ok_or_else(|| {
+            format!("no pack {pack_id} in the catalog — `ym pack library` lists what can be leased")
+        })?;
     leasable_identity(&entry)?;
     if let Some((a, b)) = divergent_artifacts(db, manifests, library, pack_id) {
         return Err(format!(
@@ -1220,14 +1670,17 @@ fn lease_pack(
         ));
     }
     let now = now_ms_i64();
-    let expires = now + days as i64 * 86_400_000;
+    let expires = now + i64::from(days) * 86_400_000;
     let existing = list_leases(db)?;
     if let Some(prev) = existing.iter().find(|l| l.pack_id == pack_id) {
         if prev.state != LeaseState::Active {
             return Err(format!(
                 "{pack_id} has a {} lease — `ym pack release {pack_id}` first{}",
                 prev.state.label(),
-                prev.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default()
+                prev.note
+                    .as_deref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default()
             ));
         }
         // Extending re-verifies the artifact: the file may have been re-sealed under the same id
@@ -1239,8 +1692,8 @@ fn lease_pack(
         }
         let mounted_now = mount_for_lease(db, manifests, pack_id, &entry)?;
         let extended = PackLease {
-            reason: reason.clone(),
-            granted_by: granted_by.clone(),
+            reason,
+            granted_by,
             expires_ms: expires,
             mounted_by_lease: prev.mounted_by_lease || mounted_now,
             ..prev.clone()
@@ -1250,7 +1703,13 @@ fn lease_pack(
             let tx = conn.transaction()?;
             tx.execute(
                 "UPDATE mind_pack_leases SET reason = ?2, granted_by = ?3, expires_ms = ?4, mounted_by_lease = ?5 WHERE pack_id = ?1",
-                rusqlite::params![pack_id, extended.reason, extended.granted_by, expires, extended.mounted_by_lease as i64],
+                rusqlite::params![
+                    pack_id,
+                    extended.reason,
+                    extended.granted_by,
+                    expires,
+                    i64::from(extended.mounted_by_lease)
+                ],
             )?;
             if seam_fails(2) {
                 return Err(rusqlite::Error::InvalidQuery);
@@ -1268,11 +1727,19 @@ fn lease_pack(
         }
         return Ok(extended);
     }
-    let serving = existing.iter().filter(|l| l.state == LeaseState::Active).count();
+    let serving = existing
+        .iter()
+        .filter(|l| l.state == LeaseState::Active)
+        .count();
     if serving >= LEASE_CAP {
         return Err(format!(
             "lease cap: {LEASE_CAP} standing lease(s) already ({}) — release one first",
-            existing.iter().filter(|l| l.state == LeaseState::Active).map(|l| l.pack_id.as_str()).collect::<Vec<_>>().join(", ")
+            existing
+                .iter()
+                .filter(|l| l.state == LeaseState::Active)
+                .map(|l| l.pack_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     // Mount BEFORE the row — a lease that cannot mount is no lease — and undo the mount if the row
@@ -1305,7 +1772,7 @@ fn lease_pack(
                 lease.granted_by,
                 lease.granted_ms,
                 lease.expires_ms,
-                lease.mounted_by_lease as i64,
+                i64::from(lease.mounted_by_lease),
                 lease.state.label(),
                 lease.note
             ],
@@ -1412,19 +1879,29 @@ fn sweep_leases(
     use mind_types::memory::{LeaseEnd, LeaseState};
     let due: Vec<_> = list_leases(db)?
         .into_iter()
-        .filter(|l| l.state == LeaseState::Releasing || (l.state == LeaseState::Active && l.expired_at(now_ms)))
+        .filter(|l| {
+            l.state == LeaseState::Releasing
+                || (l.state == LeaseState::Active && l.expired_at(now_ms))
+        })
         .collect();
     let mut ended = Vec::new();
     for l in due {
         let end = if l.state == LeaseState::Releasing {
-            LeaseEnd::from_label(l.note.as_deref().unwrap_or("").trim_start_matches("ending: "))
+            LeaseEnd::from_label(
+                l.note
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_start_matches("ending: "),
+            )
         } else {
             LeaseEnd::Expired
         };
         match release_pack(db, manifests, &l.pack_id, end) {
             Ok(Some(x)) => ended.push(x),
             Ok(None) => {}
-            Err(e) => tracing::warn!(pack_id = %l.pack_id, error = %e, "a lease could not be ended; it stays for the next sweep"),
+            Err(e) => {
+                tracing::warn!(pack_id = %l.pack_id, error = %e, "a lease could not be ended; it stays for the next sweep")
+            }
         }
     }
     Ok(ended)
@@ -1452,16 +1929,36 @@ fn reconcile_leases(
         match lease.state {
             LeaseState::Quarantined => {}
             LeaseState::Releasing => {
-                let end = LeaseEnd::from_label(lease.note.as_deref().unwrap_or("").trim_start_matches("ending: "));
+                let end = LeaseEnd::from_label(
+                    lease
+                        .note
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim_start_matches("ending: "),
+                );
                 match release_pack(db, manifests, &lease.pack_id, end) {
-                    Ok(_) => log.push(format!("[lease] finished an interrupted release of {}", lease.pack_id)),
-                    Err(e) => log.push(format!("[lease] could not finish releasing {}: {e}", lease.pack_id)),
+                    Ok(_) => log.push(format!(
+                        "[lease] finished an interrupted release of {}",
+                        lease.pack_id
+                    )),
+                    Err(e) => log.push(format!(
+                        "[lease] could not finish releasing {}: {e}",
+                        lease.pack_id
+                    )),
                 }
             }
-            LeaseState::Active if lease.expired_at(now_ms) => match release_pack(db, manifests, &lease.pack_id, LeaseEnd::Expired) {
-                Ok(_) => log.push(format!("[lease] {} expired while the mind was down — returned", lease.pack_id)),
-                Err(e) => log.push(format!("[lease] could not end the expired {}: {e}", lease.pack_id)),
-            },
+            LeaseState::Active if lease.expired_at(now_ms) => {
+                match release_pack(db, manifests, &lease.pack_id, LeaseEnd::Expired) {
+                    Ok(_) => log.push(format!(
+                        "[lease] {} expired while the mind was down — returned",
+                        lease.pack_id
+                    )),
+                    Err(e) => log.push(format!(
+                        "[lease] could not end the expired {}: {e}",
+                        lease.pack_id
+                    )),
+                }
+            }
             LeaseState::Active => {
                 // The artifact this lease was granted over, verified by IDENTITY — content digest
                 // and signer — and never by name or by "something with that id is mounted".
@@ -1472,11 +1969,16 @@ fn reconcile_leases(
                 // with this id is mounted" without checking which. Both are gone: what is mounted
                 // is what gets checked, and a mismatch is quarantined AFTER being detached rather
                 // than left attached and serving.
-                let (mut claimants, unreadable) = artifact_claimants(db, manifests, library, &lease.pack_id);
+                let (mut claimants, unreadable) =
+                    artifact_claimants(db, manifests, library, &lease.pack_id);
                 if !claimants.iter().any(|c| c.path == lease.path) {
                     if let Some(m) = cached_manifest(manifests, &lease.path) {
                         if m.pack_id() == lease.pack_id {
-                            claimants.push(Claimant { path: lease.path.clone(), digest: m.content_digest.clone(), signer: m.publisher_pubkey.clone() });
+                            claimants.push(Claimant {
+                                path: lease.path.clone(),
+                                digest: m.content_digest.clone(),
+                                signer: m.publisher_pubkey.clone(),
+                            });
                         }
                     }
                 }
@@ -1485,11 +1987,20 @@ fn reconcile_leases(
                 // mounted under this id that is not the leased artifact; no readable claimant that
                 // IS the leased artifact.
                 let why = if let Some(bad) = unreadable.first() {
-                    Some(format!("an artifact claiming this id cannot be read ({bad})"))
+                    Some(format!(
+                        "an artifact claiming this id cannot be read ({bad})"
+                    ))
                 } else if mounted.as_ref().is_some_and(|m| !m.is(&lease)) {
-                    Some(format!("a different artifact is mounted under this id ({})", mounted.as_ref().map(|m| m.path.as_str()).unwrap_or("?")))
+                    Some(format!(
+                        "a different artifact is mounted under this id ({})",
+                        mounted.as_ref().map_or("?", |m| m.path.as_str())
+                    ))
                 } else if !claimants.iter().any(|c| c.is(&lease)) {
-                    Some(if claimants.is_empty() { "the artifact is gone".to_string() } else { "the artifact's digest or signer changed".to_string() })
+                    Some(if claimants.is_empty() {
+                        "the artifact is gone".to_string()
+                    } else {
+                        "the artifact's digest or signer changed".to_string()
+                    })
                 } else {
                     None
                 };
@@ -1504,20 +2015,30 @@ fn reconcile_leases(
                         "UPDATE mind_pack_leases SET state = 'quarantined', note = ?2 WHERE pack_id = ?1",
                         rusqlite::params![lease.pack_id, note],
                     );
-                    log.push(format!("[lease] QUARANTINED {} — {note}; `ym pack release {}` to clear", lease.pack_id, lease.pack_id));
+                    log.push(format!(
+                        "[lease] QUARANTINED {} — {note}; `ym pack release {}` to clear",
+                        lease.pack_id, lease.pack_id
+                    ));
                     continue;
                 }
                 if mounted.is_some() {
                     continue; // the leased artifact itself is attached; nothing owed
                 }
-                let path = claimants.iter().find(|c| c.is(&lease)).map(|c| c.path.clone()).unwrap_or_else(|| lease.path.clone());
+                let path = claimants
+                    .iter()
+                    .find(|c| c.is(&lease))
+                    .map_or_else(|| lease.path.clone(), |c| c.path.clone());
                 match db.mount_pack(&path) {
                     Ok(_) => {
                         let _ = db.conn().execute(
                             "UPDATE mind_pack_leases SET mounted_by_lease = 1, path = ?2 WHERE pack_id = ?1",
                             rusqlite::params![lease.pack_id, path],
                         );
-                        log.push(format!("[lease] remounted {} — {:.1} d left", lease.pack_id, lease.days_left(now_ms)));
+                        log.push(format!(
+                            "[lease] remounted {} — {:.1} d left",
+                            lease.pack_id,
+                            lease.days_left(now_ms)
+                        ));
                     }
                     Err(e) => {
                         let why = format!("could not remount: {e}");
@@ -1596,7 +2117,10 @@ fn enforce_lease_visibility(
         }
     };
     // Expiry first: ending a due lease is the ordinary path and it detaches as it goes.
-    if leases.iter().any(|l| l.state != LeaseState::Quarantined && l.expired_at(now_ms)) {
+    if leases
+        .iter()
+        .any(|l| l.state != LeaseState::Quarantined && l.expired_at(now_ms))
+    {
         if let Err(e) = sweep_leases(db, manifests, now_ms) {
             tracing::warn!(error = %e, "expired lease could not be ended at the visibility boundary");
         }
@@ -1610,7 +2134,9 @@ fn enforce_lease_visibility(
         }
     };
     for lease in leases {
-        let Some(mounted) = mounted_claimant(db, manifests, &lease.pack_id) else { continue };
+        let Some(mounted) = mounted_claimant(db, manifests, &lease.pack_id) else {
+            continue;
+        };
         // Only what THIS lease attached is the lease's business at all.
         if !lease.mounted_by_lease {
             continue;
@@ -1631,7 +2157,9 @@ fn enforce_lease_visibility(
             continue;
         }
         match detach_now(db, &lease.pack_id) {
-            Ok(_) => tracing::info!(pack_id = %lease.pack_id, state = %lease.state.label(), "detached a pack whose lease is no longer serving"),
+            Ok(_) => {
+                tracing::info!(pack_id = %lease.pack_id, state = %lease.state.label(), "detached a pack whose lease is no longer serving")
+            }
             Err(e) => {
                 tracing::warn!(pack_id = %lease.pack_id, error = %e, "could not detach a non-serving leased pack — suppressing it instead");
                 vis.suppressed.insert(lease.pack_id.clone());
@@ -1659,13 +2187,17 @@ fn cached_manifest<'a>(
     cache: &'a mut std::collections::HashMap<String, Option<ManifestView>>,
     path: &str,
 ) -> Option<&'a ManifestView> {
-    let canon = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string());
+    let canon = std::fs::canonicalize(path)
+        .map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned());
     let prefix = format!("{canon}|");
     let key = match std::fs::metadata(path) {
         Ok(md) => format!(
             "{prefix}{}|{}",
             md.len(),
-            md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0)
+            md.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos())
         ),
         Err(_) => format!("{prefix}?|?"),
     };
@@ -1715,7 +2247,14 @@ impl PackCandidate {
             .why_retrieved
             .iter()
             .find_map(|w| w.strip_prefix("pack:").map(str::to_string));
-        Self { rid: r.rid, text: r.text, score: r.score, similarity: r.scores.similarity, namespace: r.namespace, pack_name }
+        Self {
+            rid: r.rid,
+            text: r.text,
+            score: r.score,
+            similarity: r.scores.similarity,
+            namespace: r.namespace,
+            pack_name,
+        }
     }
 }
 
@@ -1733,7 +2272,11 @@ impl PackCandidate {
 /// version's evidence and floor on another's rows. (The engine's structured provenance in core 0.18
 /// retires this; the lifecycle registry, ARCH-6 P.7, will refuse the second mount outright.) Rows
 /// without any pack stamp are host rows and never pass, whatever namespace they sit in.
-fn floor_pack_hits(candidates: Vec<PackCandidate>, routes: &[PackRoute], want: usize) -> (Vec<mind_types::memory::PackHit>, usize) {
+fn floor_pack_hits(
+    candidates: Vec<PackCandidate>,
+    routes: &[PackRoute],
+    want: usize,
+) -> (Vec<mind_types::memory::PackHit>, usize) {
     let (judged, ambiguous) = judge_pack_candidates(candidates, routes, want);
     let hits = judged
         .into_iter()
@@ -1761,16 +2304,26 @@ struct Judged<'r> {
 /// floor whatever else is true), then the publisher's per-pack cap, then the turn's overall limit.
 /// Recall keeps the `Cleared` rows; the probe reports every row with its disposition, so what the
 /// operator reads as "would reach a turn" is exactly what a turn would have received.
-fn judge_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [PackRoute], want: usize) -> (Vec<Judged<'r>>, usize) {
+fn judge_pack_candidates<'r>(
+    candidates: Vec<PackCandidate>,
+    routes: &'r [PackRoute],
+    want: usize,
+) -> (Vec<Judged<'r>>, usize) {
     use mind_types::memory::PackDisposition as D;
     let (resolved, ambiguous) = resolve_pack_candidates(candidates, routes);
     let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut cleared = 0usize;
     let mut out = Vec::with_capacity(resolved.len());
     for (route, candidate) in resolved {
-        let disposition = if !(candidate.similarity >= route.floor) {
+        let disposition = if !matches!(
+            candidate.similarity.partial_cmp(&route.floor),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        ) {
             D::WithheldFloor
-        } else if route.cap.is_some_and(|cap| taken.get(&route.pack_id).copied().unwrap_or(0) >= cap) {
+        } else if route
+            .cap
+            .is_some_and(|cap| taken.get(&route.pack_id).copied().unwrap_or(0) >= cap)
+        {
             D::WithheldPackCap
         } else if cleared >= want {
             D::WithheldLimit
@@ -1779,7 +2332,11 @@ fn judge_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [PackRo
             cleared += 1;
             D::Cleared
         };
-        out.push(Judged { route, candidate, disposition });
+        out.push(Judged {
+            route,
+            candidate,
+            disposition,
+        });
     }
     (out, ambiguous)
 }
@@ -1788,15 +2345,26 @@ fn judge_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [PackRo
 /// engine's composite; returns the attributed pairs and the count abstained as ambiguous. The
 /// identity half of `floor_pack_hits`, shared with the probe so the operator sees exactly the rows
 /// recall would have judged.
-fn resolve_pack_candidates<'r>(candidates: Vec<PackCandidate>, routes: &'r [PackRoute]) -> (Vec<(&'r PackRoute, PackCandidate)>, usize) {
+fn resolve_pack_candidates<'r>(
+    candidates: Vec<PackCandidate>,
+    routes: &'r [PackRoute],
+) -> (Vec<(&'r PackRoute, PackCandidate)>, usize) {
     let mut ranked = candidates;
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut out = Vec::new();
     let mut ambiguous = 0usize;
     for c in ranked {
-        let Some(stamp) = c.pack_name.as_deref() else { continue };
-        let named: Vec<&'r PackRoute> =
-            routes.iter().filter(|r| r.namespace == c.namespace && r.name == stamp).collect();
+        let Some(stamp) = c.pack_name.as_deref() else {
+            continue;
+        };
+        let named: Vec<&'r PackRoute> = routes
+            .iter()
+            .filter(|r| r.namespace == c.namespace && r.name == stamp)
+            .collect();
         match named.len() {
             1 => out.push((named[0], c)),
             0 => continue,
@@ -1884,7 +2452,10 @@ fn collect_pack_candidates(
     query: &str,
     want: usize,
 ) -> std::result::Result<(Vec<PackCandidate>, Vec<PackRoute>), String> {
-    debug_assert!((1..=PACK_FETCH_MAX).contains(&want), "callers bound want before collecting");
+    debug_assert!(
+        (1..=PACK_FETCH_MAX).contains(&want),
+        "callers bound want before collecting"
+    );
     let routes: Vec<PackRoute> = db
         .mounted_packs()
         .into_iter()
@@ -1895,8 +2466,12 @@ fn collect_pack_candidates(
                 pack_id: p.pack_id,
                 name: p.name,
                 namespace,
-                floor: mind_types::memory::effective_pack_floor(m.and_then(|m| m.recommended_min_similarity)),
-                cap: m.and_then(|m| m.recommended_top_k).map(|k| k.max(1) as usize),
+                floor: mind_types::memory::effective_pack_floor(
+                    m.and_then(|m| m.recommended_min_similarity),
+                ),
+                cap: m
+                    .and_then(|m| m.recommended_top_k)
+                    .map(|k| k.max(1) as usize),
             })
         })
         .collect();
@@ -1905,7 +2480,8 @@ fn collect_pack_candidates(
     }
     let embedding = db.embed(query).map_err(|e| e.to_string())?;
     let mut candidates: Vec<PackCandidate> = Vec::new();
-    let mut routes_in_ns: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut routes_in_ns: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
     for r in &routes {
         *routes_in_ns.entry(r.namespace.as_str()).or_insert(0) += 1;
     }
@@ -1928,18 +2504,18 @@ fn collect_pack_candidates(
                 Some(query), // query_text (keyword lanes)
                 true,        // skip_reinforce — a publisher's corpus teaches the host nothing
                 Some(namespace),
-                None,        // domain
-                None,        // source
-                None,        // certainty_min
-                None,        // order — relevance
-                false,       // include_superseded
+                None,  // domain
+                None,  // source
+                None,  // certainty_min
+                None,  // order — relevance
+                false, // include_superseded
                 // Valid-time bounds (engine 0.18, issue #149 phase 2). BOTH None: no temporal
                 // filter, which is exactly the behaviour this call had at 0.16. A pack's rows are
                 // reference material — they have no event time to be inside or outside of — so
                 // there is nothing here to filter by, and this is the whole of the adaptation
                 // rather than a deferral (E.18b).
-                None,        // event_after
-                None,        // event_before
+                None, // event_after
+                None, // event_before
             )
             .map_err(|e| e.to_string())?;
         candidates.extend(rs.into_iter().map(PackCandidate::from_engine));
@@ -1954,16 +2530,41 @@ fn collect_pack_candidates(
 /// long mixed alphanumeric tokens. High precision over recall — a false positive silently drops a
 /// real approach from the export, so only value-shaped tokens qualify.
 fn looks_private(text: &str) -> bool {
-    for raw in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | ',' | '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ';' | '/' | '\\' | ':' | '=' | '&' | '?' | '|' | '`')) {
-        let tok = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+');
+    for raw in text.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | ','
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | ';'
+                    | '/'
+                    | '\\'
+                    | ':'
+                    | '='
+                    | '&'
+                    | '?'
+                    | '|'
+                    | '`'
+            )
+    }) {
+        let tok = raw.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+'
+        });
         if tok.len() < 7 {
             continue;
         }
-        let is_email = tok
-            .find('@')
-            .map(|at| at > 0 && tok[at + 1..].contains('.') && !tok[at + 1..].ends_with('.'))
-            .unwrap_or(false);
-        let is_phone_like = tok.chars().all(|c| c.is_ascii_digit()) && (7..=15).contains(&tok.len());
+        let is_email = tok.find('@').is_some_and(|at| {
+            at > 0 && tok[at + 1..].contains('.') && !tok[at + 1..].ends_with('.')
+        });
+        let is_phone_like =
+            tok.chars().all(|c| c.is_ascii_digit()) && (7..=15).contains(&tok.len());
         let digits = tok.chars().filter(|c| c.is_ascii_digit()).count();
         let is_long_id = tok.len() >= 16
             && tok.chars().all(|c| c.is_ascii_alphanumeric())
@@ -1982,7 +2583,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
     let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
     for i in 0..a.len() {
-        let (x, y) = (a[i] as f64, b[i] as f64);
+        let (x, y) = (f64::from(a[i]), f64::from(b[i]));
         dot += x * y;
         na += x * x;
         nb += y * y;
@@ -2010,8 +2611,8 @@ fn belief_item(n: &CognitiveNode) -> MemoryItem {
 
 struct BeliefScore {
     score: f64,
-    why:   Vec<String>,
-    node:  CognitiveNode,
+    why: Vec<String>,
+    node: CognitiveNode,
 }
 
 trait BeliefScorer {
@@ -2031,11 +2632,14 @@ impl<'a> BeliefScorer for EmbedderScorer<'a> {
             .into_iter()
             .map(|n| {
                 let prop = node_prop(&n).unwrap_or("");
-                let sim = self.db.embed(prop).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
+                let sim = self.db.embed(prop).ok().map_or(0.0, |v| cosine(&q, &v));
                 let score = sim + 0.1 * n.attrs.confidence;
                 BeliefScore {
                     score,
-                    why: vec![format!("semantic {:.2}, confidence {:.2}", sim, n.attrs.confidence)],
+                    why: vec![format!(
+                        "semantic {:.2}, confidence {:.2}",
+                        sim, n.attrs.confidence
+                    )],
                     node: n,
                 }
             })
@@ -2047,8 +2651,11 @@ struct KeywordScorer;
 
 impl BeliefScorer for KeywordScorer {
     fn score(&self, query: &str, beliefs: Vec<CognitiveNode>) -> Vec<BeliefScore> {
-        let qwords: Vec<String> =
-            query.to_ascii_lowercase().split_whitespace().map(|w| w.to_string()).collect();
+        let qwords: Vec<String> = query
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .map(|w| w.to_string())
+            .collect();
         beliefs
             .into_iter()
             .map(|n| {
@@ -2077,11 +2684,19 @@ fn recall_beliefs(db: &YantrikDB, text: &str, top_k: usize) -> Vec<Recalled> {
         Box::new(KeywordScorer)
     };
     let mut scored = scorer.score(text, beliefs);
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored
         .into_iter()
         .take(top_k.max(1))
-        .map(|s| Recalled { score: s.score, why: s.why, item: belief_item(&s.node) })
+        .map(|s| Recalled {
+            score: s.score,
+            why: s.why,
+            item: belief_item(&s.node),
+        })
         .collect()
 }
 
@@ -2140,9 +2755,7 @@ fn topical_relatedness(a: &str, b: &str, semantic_cosine: Option<f64>) -> f64 {
     };
     // Cosines around 0.5 are common even for unrelated natural-language sentences. Map the useful
     // 0.5..1.0 range onto 0..1 so only meaningful semantic similarity contributes to this gate.
-    let semantic = semantic_cosine
-        .map(|s| ((s - 0.5) * 2.0).clamp(0.0, 1.0))
-        .unwrap_or(0.0);
+    let semantic = semantic_cosine.map_or(0.0, |s| ((s - 0.5) * 2.0).clamp(0.0, 1.0));
     // KNOWN DEFECT, deliberately left in place — see `the_real_world_false_contradictions_are_ignored`.
     // A shared leading word saturates this to 1.0, which opens the gate for every pair of beliefs
     // about the same person. Attempting to score the PREDICATE instead fixed the false positives
@@ -2165,9 +2778,8 @@ fn beliefs_are_topically_related(db: &YantrikDB, a: &str, b: &str, threshold: f6
 }
 
 fn detect_conflicts(db: &YantrikDB) -> Vec<Contradiction> {
-    let res = match db.detect_belief_contradictions(&contradiction_config_from_env()) {
-        Ok(r) => r,
-        Err(_) => return vec![],
+    let Ok(res) = db.detect_belief_contradictions(&contradiction_config_from_env()) else {
+        return vec![];
     };
     let id_to_prop: HashMap<NodeId, String> = all_beliefs(db)
         .iter()
@@ -2192,10 +2804,12 @@ fn detect_conflicts(db: &YantrikDB) -> Vec<Contradiction> {
         .collect()
 }
 
-fn explain(db: &YantrikDB, statement: &str) -> std::result::Result<Option<(Belief, Vec<MEvidence>)>, String> {
-    let node = match find_belief(db, statement) {
-        Some(n) => n,
-        None => return Ok(None),
+fn explain(
+    db: &YantrikDB,
+    statement: &str,
+) -> std::result::Result<Option<(Belief, Vec<MEvidence>)>, String> {
+    let Some(node) = find_belief(db, statement) else {
+        return Ok(None);
     };
     let belief = to_belief_dto(&node);
     let mut evs = Vec::new();
@@ -2240,7 +2854,8 @@ fn task_dto(n: &CognitiveNode) -> Option<Task> {
 }
 
 fn all_task_nodes(db: &YantrikDB) -> Vec<CognitiveNode> {
-    db.load_cognitive_nodes_by_kind(NodeKind::Task).unwrap_or_default()
+    db.load_cognitive_nodes_by_kind(NodeKind::Task)
+        .unwrap_or_default()
 }
 
 /// Content-word set of a task description (lowercased, stopwords + short tokens dropped) — the basis
@@ -2250,8 +2865,8 @@ fn task_word_set(s: &str) -> std::collections::HashSet<String> {
     // Generic stopwords ONLY — domain words (gift/order/build/page…) carry the meaning that keeps
     // distinct intents apart, so they must stay in the signature.
     const STOP: &[&str] = &[
-        "the", "and", "for", "his", "her", "with", "under", "are", "was", "you", "your",
-        "into", "from", "that", "this", "ensure", "possibly", "within",
+        "the", "and", "for", "his", "her", "with", "under", "are", "was", "you", "your", "into",
+        "from", "that", "this", "ensure", "possibly", "within",
     ];
     s.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -2283,7 +2898,11 @@ fn add_task(
     //     grocery shopping", jaccard 0 yet cosine 0.89) still merges instead of piling up a third
     //     near-identical entry in the morning briefing.
     let new_sig = task_word_set(description);
-    let new_vec = if db.has_embedder() { db.embed(description).ok() } else { None };
+    let new_vec = if db.has_embedder() {
+        db.embed(description).ok()
+    } else {
+        None
+    };
     if !new_sig.is_empty() || new_vec.is_some() {
         for n in all_task_nodes(db) {
             if let NodePayload::Task(ref t) = n.payload {
@@ -2292,10 +2911,9 @@ fn add_task(
                 }
                 let word_dup =
                     !new_sig.is_empty() && jaccard(&new_sig, &task_word_set(&t.description)) >= 0.6;
-                let semantic_dup = new_vec
-                    .as_ref()
-                    .map(|q| db.embed(&t.description).ok().map(|v| cosine(q, &v)).unwrap_or(0.0) >= 0.85)
-                    .unwrap_or(false);
+                let semantic_dup = new_vec.as_ref().is_some_and(|q| {
+                    db.embed(&t.description).ok().map_or(0.0, |v| cosine(q, &v)) >= 0.85
+                });
                 if word_dup || semantic_dup {
                     return task_dto(&n).ok_or_else(|| "task build failed".to_string());
                 }
@@ -2316,19 +2934,24 @@ fn add_task(
             prerequisites: vec![],
         }),
     );
-    db.persist_cognitive_node(&node).map_err(|e| e.to_string())?;
-    db.persist_node_id_allocator(alloc).map_err(|e| e.to_string())?;
+    db.persist_cognitive_node(&node)
+        .map_err(|e| e.to_string())?;
+    db.persist_node_id_allocator(alloc)
+        .map_err(|e| e.to_string())?;
     task_dto(&node).ok_or_else(|| "task build failed".to_string())
 }
 
 fn complete_task(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> {
-    let mut node = match all_task_nodes(db).into_iter().find(|n| format!("{}", n.id) == id) {
-        Some(n) => n,
-        None => return Ok(false),
+    let Some(mut node) = all_task_nodes(db)
+        .into_iter()
+        .find(|n| format!("{}", n.id) == id)
+    else {
+        return Ok(false);
     };
     if let NodePayload::Task(ref mut t) = node.payload {
         t.status = TaskStatus::Completed;
-        db.persist_cognitive_node(&node).map_err(|e| e.to_string())?;
+        db.persist_cognitive_node(&node)
+            .map_err(|e| e.to_string())?;
         Ok(true)
     } else {
         Ok(false)
@@ -2347,7 +2970,10 @@ fn ensure_transcript_table(db: &YantrikDB) {
     );
     // Migrate pre-existing tables: add the scope column; existing rows default to primary-private so a
     // later-added household member never sees the prior single-user transcript. (Errors if column exists.)
-    let _ = c.execute("ALTER TABLE mind_transcript ADD COLUMN scope TEXT NOT NULL DEFAULT 'private:primary'", []);
+    let _ = c.execute(
+        "ALTER TABLE mind_transcript ADD COLUMN scope TEXT NOT NULL DEFAULT 'private:primary'",
+        [],
+    );
 }
 
 // ── skill library (code-tools; same store, plain SQL; reuse always runs in the sandbox) ──
@@ -2365,8 +2991,13 @@ fn ensure_skills_table(db: &YantrikDB) {
     // reading of a number that meant two things is that it means neither. They read as UNTESTED
     // until judged runs accumulate - Codex's "migrate historical to unknown", achieved without
     // destroying the old counts, which are still in the table if anyone wants to audit them.
-    for col in ["graded INTEGER NOT NULL DEFAULT 0", "executor_ok INTEGER NOT NULL DEFAULT 0"] {
-        let _ = db.conn().execute(&format!("ALTER TABLE mind_skills ADD COLUMN {col}"), []);
+    for col in [
+        "graded INTEGER NOT NULL DEFAULT 0",
+        "executor_ok INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = db
+            .conn()
+            .execute(&format!("ALTER TABLE mind_skills ADD COLUMN {col}"), []);
     }
     // `judged_ok` is the numerator `graded` always needed. Adding it succeeds exactly ONCE, which
     // makes it the right place for a one-time reset: between the split and this fix, `successes`
@@ -2378,7 +3009,10 @@ fn ensure_skills_table(db: &YantrikDB) {
     // and remain auditable (E.P5c).
     if db
         .conn()
-        .execute("ALTER TABLE mind_skills ADD COLUMN judged_ok INTEGER NOT NULL DEFAULT 0", [])
+        .execute(
+            "ALTER TABLE mind_skills ADD COLUMN judged_ok INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
         .is_ok()
     {
         let _ = db.conn().execute("UPDATE mind_skills SET graded = 0", []);
@@ -2392,7 +3026,10 @@ fn ensure_skills_table(db: &YantrikDB) {
     // Stamped, so the release is provenance rather than a silent state change.
     if db
         .conn()
-        .execute("ALTER TABLE mind_skills ADD COLUMN rehabilitated_ms INTEGER NOT NULL DEFAULT 0", [])
+        .execute(
+            "ALTER TABLE mind_skills ADD COLUMN rehabilitated_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
         .is_ok()
     {
         let now = std::time::SystemTime::now()
@@ -2448,9 +3085,11 @@ fn record_pack_event(
         .and_then(|p| cached_manifest(manifests, &p.path).and_then(|m| m.content_digest.clone()));
     let conn = db.conn();
     let existing: Option<Option<String>> = conn
-        .query_row("SELECT content_digest FROM mind_pack_stats WHERE pack_id = ?1", [pack_id], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT content_digest FROM mind_pack_stats WHERE pack_id = ?1",
+            [pack_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()
         .map_err(|e| e.to_string())?;
     match existing {
@@ -2478,13 +3117,18 @@ fn record_pack_event(
         PackEvent::Graded { good } => ("graded", good),
     };
     conn.execute(
-        &format!("UPDATE mind_pack_stats SET {column} = {column} + 1, last_ms = ?2 WHERE pack_id = ?1"),
+        &format!(
+            "UPDATE mind_pack_stats SET {column} = {column} + 1, last_ms = ?2 WHERE pack_id = ?1"
+        ),
         rusqlite::params![pack_id, now],
     )
     .map_err(|e| e.to_string())?;
     if good {
-        conn.execute("UPDATE mind_pack_stats SET good = good + 1 WHERE pack_id = ?1", [pack_id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE mind_pack_stats SET good = good + 1 WHERE pack_id = ?1",
+            [pack_id],
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2545,11 +3189,18 @@ fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Resul
     // contradiction semantics, so a moderate 0.6 word-overlap safely collapses re-phrasings of the same
     // intent while keeping distinct intents (gift vs repo-tracking) apart. Keeps the FIRST phrasing.
     let sig = task_word_set(text);
-    if sig.len() >= 2 && existing.iter().any(|m| jaccard(&task_word_set(&m.text), &sig) >= 0.6) {
+    if sig.len() >= 2
+        && existing
+            .iter()
+            .any(|m| jaccard(&task_word_set(&m.text), &sig) >= 0.6)
+    {
         return Ok(()); // a paraphrase already on file — no-op
     }
     db.conn()
-        .execute("INSERT OR IGNORE INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [kind, text])
+        .execute(
+            "INSERT OR IGNORE INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)",
+            [kind, text],
+        )
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -2560,8 +3211,13 @@ fn store_goal_pref(db: &YantrikDB, kind: &str, text: &str) -> std::result::Resul
 /// reader returned a stale older row. Delete-then-insert guarantees a single fresh row per key.
 fn set_profile(db: &YantrikDB, key: &str, value: &str) -> std::result::Result<(), String> {
     let conn = db.conn();
-    conn.execute("DELETE FROM mind_goals_prefs WHERE kind = ?1", [key]).map_err(|e| e.to_string())?;
-    conn.execute("INSERT INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)", [key, value]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mind_goals_prefs WHERE kind = ?1", [key])
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO mind_goals_prefs (kind, text) VALUES (?1, ?2)",
+        [key, value],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2574,7 +3230,11 @@ fn ensure_belief_scope_table(db: &YantrikDB) {
     );
 }
 
-fn set_belief_scope(db: &YantrikDB, proposition: &str, scope: &str) -> std::result::Result<(), String> {
+fn set_belief_scope(
+    db: &YantrikDB,
+    proposition: &str,
+    scope: &str,
+) -> std::result::Result<(), String> {
     db.conn()
         .execute(
             "INSERT INTO mind_belief_scope (proposition, scope) VALUES (?1, ?2) \
@@ -2585,9 +3245,13 @@ fn set_belief_scope(db: &YantrikDB, proposition: &str, scope: &str) -> std::resu
         .map_err(|e| e.to_string())
 }
 
-fn belief_scope_map(db: &YantrikDB) -> std::result::Result<std::collections::HashMap<String, String>, String> {
+fn belief_scope_map(
+    db: &YantrikDB,
+) -> std::result::Result<std::collections::HashMap<String, String>, String> {
     let conn = db.conn();
-    let mut stmt = conn.prepare("SELECT proposition, scope FROM mind_belief_scope").map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT proposition, scope FROM mind_belief_scope")
+        .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(|e| e.to_string())?;
@@ -2620,7 +3284,11 @@ fn ensure_purpose_tables(db: &YantrikDB) {
     );
 }
 
-fn set_belief_sensitivity(db: &YantrikDB, proposition: &str, class: &str) -> std::result::Result<(), String> {
+fn set_belief_sensitivity(
+    db: &YantrikDB,
+    proposition: &str,
+    class: &str,
+) -> std::result::Result<(), String> {
     db.conn()
         .execute(
             "INSERT INTO mind_belief_sensitivity (proposition, class) VALUES (?1, ?2) \
@@ -2631,16 +3299,23 @@ fn set_belief_sensitivity(db: &YantrikDB, proposition: &str, class: &str) -> std
         .map_err(|e| e.to_string())
 }
 
-fn belief_sensitivity_map(db: &YantrikDB) -> std::result::Result<std::collections::HashMap<String, String>, String> {
+fn belief_sensitivity_map(
+    db: &YantrikDB,
+) -> std::result::Result<std::collections::HashMap<String, String>, String> {
     let conn = db.conn();
-    let mut stmt = conn.prepare("SELECT proposition, class FROM mind_belief_sensitivity").map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT proposition, class FROM mind_belief_sensitivity")
+        .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn grant_purpose(db: &YantrikDB, spec: &mind_types::PurposeGrantSpec) -> std::result::Result<i64, String> {
+fn grant_purpose(
+    db: &YantrikDB,
+    spec: &mind_types::PurposeGrantSpec,
+) -> std::result::Result<i64, String> {
     let now_ms = (now_secs() * 1000.0) as i64;
     db.conn()
         .execute(
@@ -2649,8 +3324,10 @@ fn grant_purpose(db: &YantrikDB, spec: &mind_types::PurposeGrantSpec) -> std::re
             rusqlite::params![
                 spec.owner.as_tag(),
                 spec.beneficiary.as_tag(),
-                spec.class.map(|c| c.as_tag().to_string()).unwrap_or_else(|| "*".into()),
-                spec.activity.map(|a| a.as_tag().to_string()).unwrap_or_else(|| "*".into()),
+                spec.class
+                    .map_or_else(|| "*".into(), |c| c.as_tag().to_string()),
+                spec.activity
+                    .map_or_else(|| "*".into(), |a| a.as_tag().to_string()),
                 spec.expires_ms as i64,
                 spec.note,
                 now_ms,
@@ -2662,12 +3339,17 @@ fn grant_purpose(db: &YantrikDB, spec: &mind_types::PurposeGrantSpec) -> std::re
 
 fn revoke_purpose_grant(db: &YantrikDB, id: i64) -> std::result::Result<bool, String> {
     db.conn()
-        .execute("UPDATE mind_purpose_grants SET revoked = 1 WHERE id = ?1 AND revoked = 0", [id])
+        .execute(
+            "UPDATE mind_purpose_grants SET revoked = 1 WHERE id = ?1 AND revoked = 0",
+            [id],
+        )
         .map(|n| n > 0)
         .map_err(|e| e.to_string())
 }
 
-fn list_purpose_grants(db: &YantrikDB) -> std::result::Result<Vec<mind_types::PurposeGrant>, String> {
+fn list_purpose_grants(
+    db: &YantrikDB,
+) -> std::result::Result<Vec<mind_types::PurposeGrant>, String> {
     let conn = db.conn();
     let mut stmt = conn
         .prepare("SELECT id, owner, beneficiary, class, activity, expires_ms, note, revoked, created_ms FROM mind_purpose_grants ORDER BY id")
@@ -2747,7 +3429,11 @@ fn ensure_tombstone_table(db: &YantrikDB) {
     );
 }
 
-fn record_tombstone(db: &YantrikDB, proposition: &str, reason: &str) -> std::result::Result<(), String> {
+fn record_tombstone(
+    db: &YantrikDB,
+    proposition: &str,
+    reason: &str,
+) -> std::result::Result<(), String> {
     let ts = (now_secs() * 1000.0) as i64;
     db.conn()
         .execute(
@@ -2765,7 +3451,13 @@ fn list_tombstones(db: &YantrikDB) -> std::result::Result<Vec<(String, String, u
         .prepare("SELECT proposition, reason, ts_ms FROM mind_belief_tombstone ORDER BY ts_ms DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64)))
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? as u64,
+            ))
+        })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
@@ -2786,13 +3478,17 @@ struct PurposeLens {
 
 impl PurposeLens {
     fn allows(&self, proposition: &str) -> bool {
-        let owner = mind_types::Subject::owner_of_scope_tag(self.scopes.get(proposition).map(|s| s.as_str()));
-        let sens = self
-            .sensitivity
-            .get(proposition)
-            .map(|s| mind_types::Sensitivity::parse(s))
-            .unwrap_or_else(|| mind_types::Sensitivity::classify(proposition));
-        let granted = self.grants.iter().any(|g| g.covers(&self.purpose, &owner, sens, self.now_ms));
+        let owner = mind_types::Subject::owner_of_scope_tag(
+            self.scopes.get(proposition).map(|s| s.as_str()),
+        );
+        let sens = self.sensitivity.get(proposition).map_or_else(
+            || mind_types::Sensitivity::classify(proposition),
+            |s| mind_types::Sensitivity::parse(s),
+        );
+        let granted = self
+            .grants
+            .iter()
+            .any(|g| g.covers(&self.purpose, &owner, sens, self.now_ms));
         mind_types::purpose_allows(&self.purpose, &owner, sens, granted)
     }
 }
@@ -2820,7 +3516,11 @@ fn get_belief_evidence_version(db: &YantrikDB, proposition: &str) -> Option<u64>
     .map(|v| v as u64)
 }
 
-fn set_belief_evidence_version(db: &YantrikDB, proposition: &str, version: u64) -> std::result::Result<(), String> {
+fn set_belief_evidence_version(
+    db: &YantrikDB,
+    proposition: &str,
+    version: u64,
+) -> std::result::Result<(), String> {
     db.conn()
         .execute(
             "INSERT INTO mind_belief_evidence_version (proposition, version) VALUES (?1, ?2) \
@@ -2832,13 +3532,19 @@ fn set_belief_evidence_version(db: &YantrikDB, proposition: &str, version: u64) 
 }
 
 fn list_goal_prefs(db: &YantrikDB, kind: &str) -> std::result::Result<Vec<MemoryItem>, String> {
-    let kind_enum = if kind == "goal" { MemoryKind::Goal } else { MemoryKind::Preference };
+    let kind_enum = if kind == "goal" {
+        MemoryKind::Goal
+    } else {
+        MemoryKind::Preference
+    };
     let conn = db.conn();
     let mut stmt = conn
         .prepare("SELECT id, text FROM mind_goals_prefs WHERE kind = ?1 ORDER BY id ASC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .query_map([kind], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
         .map_err(|e| e.to_string())?;
     Ok(rows
         .filter_map(|r| r.ok())
@@ -2869,10 +3575,14 @@ fn retro_dedup_goals_prefs(db: &YantrikDB) -> usize {
             let sig = task_word_set(&item.text);
             let is_dup = survivors.iter().any(|s| norm_prop(&s.text) == canon)
                 || (sig.len() >= 2
-                    && survivors.iter().any(|s| jaccard(&task_word_set(&s.text), &sig) >= 0.6));
+                    && survivors
+                        .iter()
+                        .any(|s| jaccard(&task_word_set(&s.text), &sig) >= 0.6));
             if is_dup {
                 if let Ok(id) = item.id.parse::<i64>() {
-                    let _ = db.conn().execute("DELETE FROM mind_goals_prefs WHERE id = ?1", [id]);
+                    let _ = db
+                        .conn()
+                        .execute("DELETE FROM mind_goals_prefs WHERE id = ?1", [id]);
                     removed += 1;
                 }
             } else {
@@ -2893,7 +3603,9 @@ fn retro_dedup_beliefs(db: &YantrikDB) -> usize {
     let mut seen: HashMap<String, NodeId> = HashMap::new();
     let mut merged = 0usize;
     for node in &beliefs {
-        let Some(prop) = node_prop(node) else { continue };
+        let Some(prop) = node_prop(node) else {
+            continue;
+        };
         let canon = norm_prop(prop);
         if let Some(&survivor_id) = seen.get(&canon) {
             if let NodePayload::Belief(b) = &node.payload {
@@ -2971,7 +3683,11 @@ pub fn tension_key(about: &str) -> String {
         Some((a, b)) => {
             let (a, b) = (norm(a), norm(b));
             // Sorted, so direction cannot create a second row.
-            if a <= b { format!("{a} vs {b}") } else { format!("{b} vs {a}") }
+            if a <= b {
+                format!("{a} vs {b}")
+            } else {
+                format!("{b} vs {a}")
+            }
         }
         None => norm(s),
     }
@@ -2979,7 +3695,13 @@ pub fn tension_key(about: &str) -> String {
 
 /// Record a tension, deduped on (kind, tension_key(about)) among OPEN rows so a recurring urge
 /// accrues (keeps the max pressure + refreshes created_ms) rather than flooding the ledger.
-fn record_tension_db(db: &YantrikDB, kind: &str, pressure: f64, about: &str, now_ms: i64) -> std::result::Result<(), String> {
+fn record_tension_db(
+    db: &YantrikDB,
+    kind: &str,
+    pressure: f64,
+    about: &str,
+    now_ms: i64,
+) -> std::result::Result<(), String> {
     let conn = db.conn();
     let key = tension_key(about);
     // Compare on the KEY, not the stored string. Scanning open rows of this kind and normalising in
@@ -2989,9 +3711,16 @@ fn record_tension_db(db: &YantrikDB, kind: &str, pressure: f64, about: &str, now
         .prepare("SELECT id, pressure, about FROM mind_tensions WHERE kind=?1 AND status='open'")
         .and_then(|mut st| {
             let rows = st.query_map(rusqlite::params![kind], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
-            Ok(rows.flatten().find(|(_, _, a)| tension_key(a) == key).map(|(i, p, _)| (i, p)))
+            Ok(rows
+                .flatten()
+                .find(|(_, _, a)| tension_key(a) == key)
+                .map(|(i, p, _)| (i, p)))
         })
         .unwrap_or(None);
     match existing {
@@ -3035,12 +3764,15 @@ pub fn effective_pressure(pressure: f64, age_ms: i64) -> f64 {
 /// Decaying by age makes the ranking a genuine competition again — a stale 0.85 alarm falls below a
 /// fresh 0.4 curiosity after ~two half-lives — and pairs with `expire_stale_tensions_db` to keep the
 /// live set bounded. Candidates are drawn by recency, then re-ranked, so the scan stays cheap.
-fn open_tensions_db(db: &YantrikDB, limit: usize) -> std::result::Result<Vec<mind_types::Tension>, String> {
+fn open_tensions_db(
+    db: &YantrikDB,
+    limit: usize,
+) -> std::result::Result<Vec<mind_types::Tension>, String> {
     const CANDIDATES: i64 = 500;
     let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
     let conn = db.conn();
     let mut stmt = conn
         .prepare("SELECT id, kind, pressure, about, created_ms FROM mind_tensions WHERE status='open' ORDER BY created_ms DESC LIMIT ?1")
@@ -3106,7 +3838,10 @@ fn expire_stale_tensions_db(
 fn discharge_tension_db(db: &YantrikDB, id: &str) -> std::result::Result<bool, String> {
     let n = db
         .conn()
-        .execute("UPDATE mind_tensions SET status='discharged' WHERE id=?1 AND status='open'", [id])
+        .execute(
+            "UPDATE mind_tensions SET status='discharged' WHERE id=?1 AND status='open'",
+            [id],
+        )
         .map_err(|e| e.to_string())?;
     Ok(n > 0)
 }
@@ -3128,7 +3863,10 @@ fn recall_demand_for_db(db: &YantrikDB, about: &str) -> f64 {
         .filter_map(|n| {
             let stmt = node_prop(n)?.to_lowercase();
             let toks: Vec<&str> = stmt.split(|c: char| !c.is_alphanumeric()).collect();
-            if words.iter().any(|w| toks.iter().any(|x| x.starts_with(w.as_str()))) {
+            if words
+                .iter()
+                .any(|w| toks.iter().any(|x| x.starts_with(w.as_str())))
+            {
                 Some(1.0_f64 - n.attrs.confidence.clamp(0.0, 1.0))
             } else {
                 None
@@ -3188,11 +3926,18 @@ fn list_skills(db: &YantrikDB) -> std::result::Result<Vec<Skill>, String> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Result<Vec<Skill>, String> {
+fn recall_skills(
+    db: &YantrikDB,
+    query: &str,
+    limit: usize,
+) -> std::result::Result<Vec<Skill>, String> {
     // Quarantined skills are never recalled.
-    let skills: Vec<Skill> = list_skills(db)?.into_iter().filter(|s| s.status != "quarantined").collect();
+    let skills: Vec<Skill> = list_skills(db)?
+        .into_iter()
+        .filter(|s| s.status != "quarantined")
+        .collect();
 
-    // SEMANTIC when an embedder is attached (0.9.0 bundles one) — the earned upgrade now that the
+    // SEMANTIC when an embedder is attached (the engine bundles one) — the earned upgrade now that the
     // moat embeds. Rank by cosine of the query vs each skill's "name. summary. tags", blended with a
     // small reliability prior so a proven skill edges out an equally-relevant flaky one. A similarity
     // floor keeps "no matching skill" first-class (don't surface an unrelated skill). Falls back to
@@ -3203,7 +3948,7 @@ fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Resu
                 .into_iter()
                 .map(|s| {
                     let text = format!("{}. {}. {}", s.name, s.summary, s.tags.join(" "));
-                    let sim = db.embed(&text).ok().map(|v| cosine(&q, &v)).unwrap_or(0.0);
+                    let sim = db.embed(&text).ok().map_or(0.0, |v| cosine(&q, &v));
                     // The optimism prior, named. An untested skill keeps its nudge and gets tried.
                     (sim + 0.1 * s.rank_score(), sim, s)
                 })
@@ -3233,7 +3978,11 @@ fn recall_skills(db: &YantrikDB, query: &str, limit: usize) -> std::result::Resu
     Ok(scored.into_iter().take(limit).map(|(_, s)| s).collect())
 }
 
-fn record_skill_outcome(db: &YantrikDB, name: &str, outcome: mind_types::SkillOutcome) -> std::result::Result<(), String> {
+fn record_skill_outcome(
+    db: &YantrikDB,
+    name: &str,
+    outcome: mind_types::SkillOutcome,
+) -> std::result::Result<(), String> {
     let conn = db.conn();
     // Three counters for three questions. `runs` is every attempt; `executor_ok` is how often the
     // RUNNER got through; `graded` is how often anybody judged the deliverable, and it is the only
@@ -3260,27 +4009,45 @@ fn record_skill_outcome(db: &YantrikDB, name: &str, outcome: mind_types::SkillOu
     // four runs, because a document nobody assessed contributes an attempt and no success — it
     // would read as four straight failures when nothing had failed at all (E.P5b).
     let (graded, judged_ok): (i64, i64) = conn
-        .query_row("SELECT graded, judged_ok FROM mind_skills WHERE name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(
+            "SELECT graded, judged_ok FROM mind_skills WHERE name = ?1",
+            [name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .map_err(|e| e.to_string())?;
     // Status FOLLOWS the verdict rather than latching. Quarantine used to be one-way, which meant a
     // skill could be condemned and then had no route to gather the evidence that would clear it
     // (E.P7). `Candidate` and `Untested` leave status alone: neither is grounds to promote or demote.
     use mind_types::reliability::Verdict;
-    let verdict = mind_types::reliability::Reliability::new(graded.max(0) as u32, judged_ok.max(0) as u32).verdict();
+    let verdict =
+        mind_types::reliability::Reliability::new(graded.max(0) as u32, judged_ok.max(0) as u32)
+            .verdict();
     match verdict {
         Verdict::Discredited => {
-            conn.execute("UPDATE mind_skills SET status='quarantined' WHERE name=?1", [name]).map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE mind_skills SET status='quarantined' WHERE name=?1",
+                [name],
+            )
+            .map_err(|e| e.to_string())?;
         }
         Verdict::Active => {
-            conn.execute("UPDATE mind_skills SET status='active' WHERE name=?1 AND status='quarantined'", [name])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE mind_skills SET status='active' WHERE name=?1 AND status='quarantined'",
+                [name],
+            )
+            .map_err(|e| e.to_string())?;
         }
         Verdict::Candidate | Verdict::Untested => {}
     }
     Ok(())
 }
 
-fn append_message(db: &YantrikDB, role: &str, text: &str, scope: &str) -> std::result::Result<(), String> {
+fn append_message(
+    db: &YantrikDB,
+    role: &str,
+    text: &str,
+    scope: &str,
+) -> std::result::Result<(), String> {
     db.conn()
         .execute(
             "INSERT INTO mind_transcript (role, text, ts, scope) VALUES (?1, ?2, ?3, ?4)",
@@ -3290,7 +4057,11 @@ fn append_message(db: &YantrikDB, role: &str, text: &str, scope: &str) -> std::r
         .map_err(|e| e.to_string())
 }
 
-fn recent_messages(db: &YantrikDB, limit: usize, viewer: Option<&str>) -> std::result::Result<Vec<(String, String)>, String> {
+fn recent_messages(
+    db: &YantrikDB,
+    limit: usize,
+    viewer: Option<&str>,
+) -> std::result::Result<Vec<(String, String)>, String> {
     // 0.9.0's `conn()` returns a temporary guard (was `&Connection`); bind it so the prepared
     // statement doesn't outlive a dropped temporary. When a `viewer` tag is given, read-ISOLATE the
     // transcript to shared lines + that viewer's own private lines (group-chat privacy).
@@ -3301,7 +4072,9 @@ fn recent_messages(db: &YantrikDB, limit: usize, viewer: Option<&str>) -> std::r
                 .prepare("SELECT role, text FROM mind_transcript WHERE scope='shared' OR scope=?1 ORDER BY id DESC LIMIT ?2")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(rusqlite::params![tag, limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .query_map(rusqlite::params![tag, limit as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
                 .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         }
@@ -3310,7 +4083,9 @@ fn recent_messages(db: &YantrikDB, limit: usize, viewer: Option<&str>) -> std::r
                 .prepare("SELECT role, text FROM mind_transcript ORDER BY id DESC LIMIT ?1")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .query_map([limit as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
                 .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         }
@@ -3337,20 +4112,110 @@ fn user_turn_times(db: &YantrikDB, since_ms: i64) -> std::result::Result<Vec<i64
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn messages_since(db: &YantrikDB, after_id: i64, limit: usize) -> std::result::Result<Vec<(i64, String, String)>, String> {
+fn messages_since(
+    db: &YantrikDB,
+    after_id: i64,
+    limit: usize,
+) -> std::result::Result<Vec<(i64, String, String)>, String> {
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT id, role, text FROM mind_transcript WHERE id > ?1 ORDER BY id ASC LIMIT ?2")
+        .prepare(
+            "SELECT id, role, text FROM mind_transcript WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![after_id, limit as i64], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
-fn relate(db: &YantrikDB, src: &str, dst: &str, rel: &str, weight: f64) -> std::result::Result<(), String> {
+fn memory_curation_baseline(
+    db: &YantrikDB,
+    cursor_id: i64,
+    next_batch_limit: usize,
+) -> std::result::Result<mind_types::MemoryCurationBaseline, String> {
+    let conn = db.conn();
+    let latest_id = conn
+        .query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM mind_transcript",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let (pending, oldest_pending_ms, newest_pending_ms): (i64, Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), CAST(MIN(ts) * 1000 AS INTEGER), CAST(MAX(ts) * 1000 AS INTEGER) \
+             FROM mind_transcript WHERE id > ?1",
+            [cursor_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT scope, COUNT(*), CAST(MIN(ts) * 1000 AS INTEGER) \
+             FROM mind_transcript WHERE id > ?1 GROUP BY scope \
+             ORDER BY MIN(ts) ASC, scope ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([cursor_id], |r| {
+            Ok(mind_types::NamespaceBacklog {
+                namespace: r.get(0)?,
+                pending: r.get::<_, i64>(1)?.max(0) as usize,
+                oldest_pending_ms: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let namespaces = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let mut next_stmt = conn
+        .prepare(
+            "SELECT scope, COUNT(*), CAST(MIN(ts) * 1000 AS INTEGER) FROM (\
+                 SELECT scope, ts FROM mind_transcript WHERE id > ?1 ORDER BY id ASC LIMIT ?2\
+             ) GROUP BY scope ORDER BY MIN(ts) ASC, scope ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let sql_limit = next_batch_limit.min(i64::MAX as usize) as i64;
+    let next_rows = next_stmt
+        .query_map(rusqlite::params![cursor_id, sql_limit], |r| {
+            Ok(mind_types::NamespaceBacklog {
+                namespace: r.get(0)?,
+                pending: r.get::<_, i64>(1)?.max(0) as usize,
+                oldest_pending_ms: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let next_batch_namespaces = next_rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(mind_types::MemoryCurationBaseline {
+        substrate: "Mind/YantrikDB mind_transcript".into(),
+        cursor_id,
+        latest_id,
+        pending: pending.max(0) as usize,
+        oldest_pending_ms,
+        newest_pending_ms,
+        namespaces,
+        next_batch_limit,
+        next_batch_namespaces,
+    })
+}
+
+fn relate(
+    db: &YantrikDB,
+    src: &str,
+    dst: &str,
+    rel: &str,
+    weight: f64,
+) -> std::result::Result<(), String> {
     let a = find_belief(db, src).ok_or_else(|| format!("no belief: {src}"))?;
     let b = find_belief(db, dst).ok_or_else(|| format!("no belief: {dst}"))?;
     let edge = CognitiveEdge::new(a.id, b.id, edge_kind(rel), weight);
@@ -3372,7 +4237,8 @@ struct BacklogGauge {
 impl BacklogGauge {
     fn on_send(&self) {
         let d = self.depth.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        self.high_water.fetch_max(d, std::sync::atomic::Ordering::SeqCst);
+        self.high_water
+            .fetch_max(d, std::sync::atomic::Ordering::SeqCst);
     }
     fn on_done(&self) {
         self.depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -3487,14 +4353,38 @@ impl MemoryHandle {
                 while let Some(cmd) = rx.blocking_recv() {
                     match cmd {
                         Cmd::Record { text, reply } => {
-                            let r = gate_write(&text).and_then(|_| record_memory(&db, &text, &zero, "episodic", 0.5, 0.8, "user", &meta));
+                            let r = gate_write(&text).and_then(|_| {
+                                record_memory(
+                                    &db,
+                                    RecordSpec {
+                                        text: &text,
+                                        zero: &zero,
+                                        kind: "episodic",
+                                        importance: 0.5,
+                                        certainty: 0.8,
+                                        source: "user",
+                                        meta: &meta,
+                                    },
+                                )
+                            });
                             let _ = reply.send(r);
                         }
                         Cmd::RememberObservation { text, source, reply } => {
                             // Provenance-tagged, secret-scanned, low-certainty: an Observation, never a Belief.
                             let r = gate_write(&text).and_then(|_| {
                                 let obs_meta = serde_json::json!({ "provenance": source, "observed_at": now_secs(), "kind": "observation" });
-                                record_memory(&db, &text, &zero, "episodic", 0.4, 0.6, &source, &obs_meta)
+                                record_memory(
+                                    &db,
+                                    RecordSpec {
+                                        text: &text,
+                                        zero: &zero,
+                                        kind: "episodic",
+                                        importance: 0.4,
+                                        certainty: 0.6,
+                                        source: &source,
+                                        meta: &obs_meta,
+                                    },
+                                )
                             });
                             let _ = reply.send(r);
                         }
@@ -3557,7 +4447,7 @@ impl MemoryHandle {
                                         words.iter().any(|(w, whole)| {
                                             if *whole || w.len() <= 4 {
                                                 // short words whole-word: "rath" must not hit "RATHer"
-                                                toks.iter().any(|x| *x == w.as_str())
+                                                toks.contains(&w.as_str())
                                             } else {
                                                 // longer words match at word START: "adopt"->"adoption",
                                                 // but never mid-word accidents.
@@ -3782,7 +4672,18 @@ impl MemoryHandle {
                             let _ = reply.send(r);
                         }
                         Cmd::LeasePack { pack_id, days, reason, granted_by, reply } => {
-                            let r = lease_pack(&db, &mut pack_manifests, &mut orphaned_mounts, pack_library.as_deref(), &pack_id, days, &reason, &granted_by);
+                            let r = lease_pack(
+                                &db,
+                                &mut pack_manifests,
+                                &mut orphaned_mounts,
+                                pack_library.as_deref(),
+                                LeaseRequest {
+                                    pack_id: &pack_id,
+                                    days,
+                                    reason: &reason,
+                                    granted_by: &granted_by,
+                                },
+                            );
                             pack_manifests.clear();
                             let _ = reply.send(r);
                         }
@@ -4029,6 +4930,17 @@ impl MemoryHandle {
                         Cmd::MessagesSince { after_id, limit, reply } => {
                             let _ = reply.send(messages_since(&db, after_id, limit));
                         }
+                        Cmd::MemoryCurationBaseline {
+                            cursor_id,
+                            next_batch_limit,
+                            reply,
+                        } => {
+                            let _ = reply.send(memory_curation_baseline(
+                                &db,
+                                cursor_id,
+                                next_batch_limit,
+                            ));
+                        }
                         Cmd::UserTurnTimes { since_ms, reply } => {
                             let _ = reply.send(user_turn_times(&db, since_ms));
                         }
@@ -4117,7 +5029,14 @@ impl MemoryHandle {
     /// Receipt a boundary-crossing read — EVERY context, operator included
     /// (Purpose Gate v1: the background lanes are exactly the reads a purpose
     /// audit exists to catch; a ledger blind to them would be theater).
-    fn receipt_read(&self, ctx: &mind_types::AccessContext, method: &str, detail: &str, results: usize, suppressed: usize) {
+    fn receipt_read(
+        &self,
+        ctx: &mind_types::AccessContext,
+        method: &str,
+        detail: &str,
+        results: usize,
+        suppressed: usize,
+    ) {
         let detail: String = detail.chars().take(120).collect();
         self.receipts.append(receipts::ReadReceipt {
             ts_ms: receipts::now_ms(),
@@ -4126,13 +5045,19 @@ impl MemoryHandle {
             detail,
             results,
             purpose: Some(ctx.purpose().label()),
-            suppressed: if suppressed == 0 { None } else { Some(suppressed) },
+            suppressed: if suppressed == 0 {
+                None
+            } else {
+                Some(suppressed)
+            },
         });
     }
 
     /// Scope-filter helper: the belief-scope map applied to anything belief-shaped.
     async fn belief_scopes(&self) -> HashMap<String, String> {
-        self.call(|reply| Cmd::BeliefScopeMap { reply }).await.unwrap_or_default()
+        self.call(|reply| Cmd::BeliefScopeMap { reply })
+            .await
+            .unwrap_or_default()
     }
 
     /// Build the per-read purpose lens (Purpose Gate v1), or None for the
@@ -4143,23 +5068,44 @@ impl MemoryHandle {
             return None;
         }
         let scopes = self.belief_scopes().await;
-        let sensitivity = self.call(|reply| Cmd::BeliefSensitivityMap { reply }).await.unwrap_or_default();
-        let grants = self.call(|reply| Cmd::ListPurposeGrants { reply }).await.unwrap_or_default();
-        Some(PurposeLens { purpose, scopes, sensitivity, grants, now_ms: (now_secs() * 1000.0) as u64 })
+        let sensitivity = self
+            .call(|reply| Cmd::BeliefSensitivityMap { reply })
+            .await
+            .unwrap_or_default();
+        let grants = self
+            .call(|reply| Cmd::ListPurposeGrants { reply })
+            .await
+            .unwrap_or_default();
+        Some(PurposeLens {
+            purpose,
+            scopes,
+            sensitivity,
+            grants,
+            now_ms: (now_secs() * 1000.0) as u64,
+        })
     }
 
     /// Both read walls in one pass, in their fixed order: scope visibility
     /// (who may VIEW — supreme, never widened by a grant), then the purpose
     /// lens (what this work may USE). Returns the surviving items and how many
     /// scope-visible items the purpose gate suppressed (for the receipt).
-    async fn wall<T>(&self, ctx: &mind_types::AccessContext, items: Vec<T>, key: impl Fn(&T) -> &str) -> (Vec<T>, usize) {
+    async fn wall<T>(
+        &self,
+        ctx: &mind_types::AccessContext,
+        items: Vec<T>,
+        key: impl Fn(&T) -> &str,
+    ) -> (Vec<T>, usize) {
         let lens = self.purpose_lens(ctx).await;
         let viewer = ctx.viewer();
         let scopes_owned;
         let scopes: &HashMap<String, String> = match &lens {
             Some(l) => &l.scopes,
             None => {
-                scopes_owned = if viewer.is_some() { self.belief_scopes().await } else { HashMap::new() };
+                scopes_owned = if viewer.is_some() {
+                    self.belief_scopes().await
+                } else {
+                    HashMap::new()
+                };
                 &scopes_owned
             }
         };
@@ -4167,7 +5113,9 @@ impl MemoryHandle {
             None => items,
             Some(v) => items
                 .into_iter()
-                .filter(|t| mind_types::Scope::visible_to(scopes.get(key(t)).map(|s| s.as_str()), Some(v)))
+                .filter(|t| {
+                    mind_types::Scope::visible_to(scopes.get(key(t)).map(|s| s.as_str()), Some(v))
+                })
                 .collect(),
         };
         let before = scoped.len();
@@ -4182,7 +5130,9 @@ impl MemoryHandle {
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T> {
         let (reply, rx) = oneshot::channel();
         self.gauge.on_send();
-        self.tx.send(make(reply)).map_err(|_| MindError::Memory("memory actor is gone".into()))?;
+        self.tx
+            .send(make(reply))
+            .map_err(|_| MindError::Memory("memory actor is gone".into()))?;
         rx.await
             .map_err(|_| MindError::Memory("memory actor dropped the reply".into()))?
             .map_err(MindError::Memory)
@@ -4193,7 +5143,10 @@ impl MemoryHandle {
     /// signal that would justify moving a heavy command off-thread per the scheduling doctrine.
     pub fn backlog_depth(&self) -> BacklogDepth {
         let (queued_or_running, high_water) = self.gauge.snapshot();
-        BacklogDepth { queued_or_running, high_water }
+        BacklogDepth {
+            queued_or_running,
+            high_water,
+        }
     }
 
     /// Where this handle's store lives (":memory:" for scratch minds).
@@ -4222,17 +5175,27 @@ impl MemoryHandle {
 
     pub async fn store_goal(&self, text: &str) -> Result<()> {
         let (kind, text) = ("goal".to_string(), text.to_string());
-        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply })
+            .await
     }
     pub async fn store_preference(&self, text: &str) -> Result<()> {
         let (kind, text) = ("preference".to_string(), text.to_string());
-        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply })
+            .await
     }
     pub async fn list_goals(&self) -> Result<Vec<MemoryItem>> {
-        self.call(|reply| Cmd::ListGoalPrefs { kind: "goal".to_string(), reply }).await
+        self.call(|reply| Cmd::ListGoalPrefs {
+            kind: "goal".to_string(),
+            reply,
+        })
+        .await
     }
     pub async fn list_preferences(&self) -> Result<Vec<MemoryItem>> {
-        self.call(|reply| Cmd::ListGoalPrefs { kind: "preference".to_string(), reply }).await
+        self.call(|reply| Cmd::ListGoalPrefs {
+            kind: "preference".to_string(),
+            reply,
+        })
+        .await
     }
 
     /// Retro-dedup: collapse norm_prop / Jaccard near-duplicates in the belief graph and
@@ -4253,7 +5216,8 @@ impl MemoryHandle {
     #[cfg(test)]
     async fn force_insert_goal_pref_raw(&self, kind: &str, text: &str) -> Result<()> {
         let (kind, text) = (kind.to_string(), text.to_string());
-        self.call(move |reply| Cmd::ForceInsertGoalPref { kind, text, reply }).await
+        self.call(move |reply| Cmd::ForceInsertGoalPref { kind, text, reply })
+            .await
     }
 }
 
@@ -4262,7 +5226,8 @@ impl MemoryHandle {
     /// Test-only: backdate a lease so it is due now.
     pub async fn expire_lease_for_test(&self, pack_id: &str) -> Result<()> {
         let pack_id = pack_id.to_string();
-        self.call(|reply| Cmd::BackdateLease { pack_id, reply }).await
+        self.call(|reply| Cmd::BackdateLease { pack_id, reply })
+            .await
     }
 }
 
@@ -4273,63 +5238,145 @@ impl MemoryFacade for MemoryHandle {
     // only, never widened by anything), then the purpose lens (what the declared
     // work may USE — every context outside Audit/Maintenance, operator included).
     // Every read is receipted into the hash-chained ledger with its purpose. ──
-    async fn recall_typed(&self, q: RecallQuery, ctx: &mind_types::AccessContext) -> Result<Vec<Recalled>> {
+    async fn recall_typed(
+        &self,
+        q: RecallQuery,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<Vec<Recalled>> {
         let (text, top_k) = (q.text.clone(), q.top_k);
-        let recalled = self.call(|reply| Cmd::RecallTyped { text, top_k, reply }).await?;
-        let (out, suppressed) = self.wall(ctx, recalled, |r: &Recalled| r.item.text.as_str()).await;
+        let recalled = self
+            .call(|reply| Cmd::RecallTyped { text, top_k, reply })
+            .await?;
+        let (out, suppressed) = self
+            .wall(ctx, recalled, |r: &Recalled| r.item.text.as_str())
+            .await;
         self.receipt_read(ctx, "recall_typed", &q.text, out.len(), suppressed);
         Ok(out)
     }
 
-    async fn beliefs_matching(&self, needle: &str, ctx: &mind_types::AccessContext) -> Result<Vec<Belief>> {
+    async fn beliefs_matching(
+        &self,
+        needle: &str,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<Vec<Belief>> {
         self.beliefs_matching_n(needle, 20, ctx).await
     }
 
-    async fn beliefs_matching_n(&self, needle: &str, limit: usize, ctx: &mind_types::AccessContext) -> Result<Vec<Belief>> {
+    async fn beliefs_matching_n(
+        &self,
+        needle: &str,
+        limit: usize,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<Vec<Belief>> {
         let needle_owned = needle.to_string();
-        let hits = self.call(move |reply| Cmd::BeliefsMatching { needle: needle_owned, limit, reply }).await?;
-        let (out, suppressed) = self.wall(ctx, hits, |b: &Belief| b.statement.as_str()).await;
+        let hits = self
+            .call(move |reply| Cmd::BeliefsMatching {
+                needle: needle_owned,
+                limit,
+                reply,
+            })
+            .await?;
+        let (out, suppressed) = self
+            .wall(ctx, hits, |b: &Belief| b.statement.as_str())
+            .await;
         self.receipt_read(ctx, "beliefs_matching", needle, out.len(), suppressed);
         Ok(out)
     }
 
-    async fn remember_observation(&self, text: &str, source: mind_types::ProvenanceCategory) -> Result<String> {
+    async fn remember_observation(
+        &self,
+        text: &str,
+        source: mind_types::ProvenanceCategory,
+    ) -> Result<String> {
         let text = text.to_string();
         let source = source.as_str().to_string();
-        self.call(|reply| Cmd::RememberObservation { text, source, reply }).await
+        self.call(|reply| Cmd::RememberObservation {
+            text,
+            source,
+            reply,
+        })
+        .await
     }
 
     async fn remember_as_belief(&self, a: BeliefAssertion) -> Result<Belief> {
         let signed_weight = a.polarity * a.weight.abs();
-        let (statement, source, provenance) = (a.statement, a.source_event.unwrap_or_default(), a.provenance);
-        self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, evidence_version: None, reply }).await
+        let (statement, source, provenance) = (
+            a.statement,
+            a.source_event.unwrap_or_default(),
+            a.provenance,
+        );
+        self.call(|reply| Cmd::AssertBelief {
+            statement,
+            signed_weight,
+            source,
+            provenance,
+            evidence_version: None,
+            reply,
+        })
+        .await
     }
 
-    async fn remember_as_belief_versioned(&self, a: BeliefAssertion, evidence_version: u64) -> Result<Belief> {
+    async fn remember_as_belief_versioned(
+        &self,
+        a: BeliefAssertion,
+        evidence_version: u64,
+    ) -> Result<Belief> {
         let signed_weight = a.polarity * a.weight.abs();
-        let (statement, source, provenance) = (a.statement, a.source_event.unwrap_or_default(), a.provenance);
-        self.call(|reply| Cmd::AssertBelief { statement, signed_weight, source, provenance, evidence_version: Some(evidence_version), reply }).await
+        let (statement, source, provenance) = (
+            a.statement,
+            a.source_event.unwrap_or_default(),
+            a.provenance,
+        );
+        self.call(|reply| Cmd::AssertBelief {
+            statement,
+            signed_weight,
+            source,
+            provenance,
+            evidence_version: Some(evidence_version),
+            reply,
+        })
+        .await
     }
 
     // ── scoped writes (visibility tagged at ingest) ──
-    async fn remember_as_belief_scoped(&self, a: BeliefAssertion, scope: mind_types::Scope) -> Result<Belief> {
+    async fn remember_as_belief_scoped(
+        &self,
+        a: BeliefAssertion,
+        scope: mind_types::Scope,
+    ) -> Result<Belief> {
         let belief = self.remember_as_belief(a).await?;
         // Tag by the CANONICAL proposition (find_belief may have merged a paraphrase into an existing node).
         let (proposition, tag) = (belief.statement.clone(), scope.as_tag());
-        let _ = self.call(|reply| Cmd::SetBeliefScope { proposition, scope: tag, reply }).await;
+        let _ = self
+            .call(|reply| Cmd::SetBeliefScope {
+                proposition,
+                scope: tag,
+                reply,
+            })
+            .await;
         Ok(belief)
     }
 
     // ── Purpose Gate v1: sensitivity overrides + the standing-grant ledger ──
-    async fn set_belief_sensitivity(&self, proposition: &str, class: mind_types::Sensitivity) -> Result<()> {
+    async fn set_belief_sensitivity(
+        &self,
+        proposition: &str,
+        class: mind_types::Sensitivity,
+    ) -> Result<()> {
         let (proposition, class) = (proposition.to_string(), class.as_tag().to_string());
-        self.call(|reply| Cmd::SetBeliefSensitivity { proposition, class, reply }).await
+        self.call(|reply| Cmd::SetBeliefSensitivity {
+            proposition,
+            class,
+            reply,
+        })
+        .await
     }
     async fn grant_purpose(&self, spec: mind_types::PurposeGrantSpec) -> Result<i64> {
         self.call(|reply| Cmd::GrantPurpose { spec, reply }).await
     }
     async fn revoke_purpose_grant(&self, id: i64) -> Result<bool> {
-        self.call(|reply| Cmd::RevokePurposeGrant { id, reply }).await
+        self.call(|reply| Cmd::RevokePurposeGrant { id, reply })
+            .await
     }
     async fn list_purpose_grants(&self) -> Result<Vec<mind_types::PurposeGrant>> {
         self.call(|reply| Cmd::ListPurposeGrants { reply }).await
@@ -4337,26 +5384,62 @@ impl MemoryFacade for MemoryHandle {
 
     async fn relate(&self, src: &str, dst: &str, rel: &str, weight: f64) -> Result<()> {
         let (src, dst, rel) = (src.to_string(), dst.to_string(), rel.to_string());
-        self.call(|reply| Cmd::Relate { src, dst, rel, weight, reply }).await
+        self.call(|reply| Cmd::Relate {
+            src,
+            dst,
+            rel,
+            weight,
+            reply,
+        })
+        .await
     }
 
     async fn reflect(&self, question: &str, ctx: &mind_types::AccessContext) -> Result<Reflection> {
-        let recalled = self.recall_typed(RecallQuery { text: question.to_string(), top_k: 5, kind: None }, ctx).await?;
+        let recalled = self
+            .recall_typed(
+                RecallQuery {
+                    text: question.to_string(),
+                    top_k: 5,
+                    kind: None,
+                },
+                ctx,
+            )
+            .await?;
         let open_conflicts = self.conflicts(ctx).await?;
         // Goals/preferences are untagged personal state → legacy semantics: primary-private.
         // The operator and the primary see them; any other principal reflects without them —
         // and the declared purpose must be allowed to USE the primary's ordinary facts.
-        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true)
-            && mind_types::purpose_allows(ctx.purpose(), &mind_types::Subject::primary(), mind_types::Sensitivity::Ordinary, false);
-        let goals = if owner_view { self.list_goals().await.unwrap_or_default() } else { vec![] };
-        let preferences = if owner_view { self.list_preferences().await.unwrap_or_default() } else { vec![] };
+        let owner_view = ctx.viewer().is_none_or(
+            |v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY),
+        ) && mind_types::purpose_allows(
+            ctx.purpose(),
+            &mind_types::Subject::primary(),
+            mind_types::Sensitivity::Ordinary,
+            false,
+        );
+        let goals = if owner_view {
+            self.list_goals().await.unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let preferences = if owner_view {
+            self.list_preferences().await.unwrap_or_default()
+        } else {
+            vec![]
+        };
         let beliefs: Vec<Belief> = recalled
             .iter()
             .map(|r| {
                 // Lifecycle: a belief an open conflict names is CONTRADICTED,
                 // and a reflection that hides that is reflecting a fantasy.
-                let contradicted = open_conflicts.iter().any(|c| c.belief_a == r.item.text || c.belief_b == r.item.text);
-                let status = if contradicted { mind_types::BeliefStatus::Contradicted } else { mind_types::BeliefStatus::Active };
+                let contradicted = open_conflicts
+                    .iter()
+                    .any(|c| c.belief_a == r.item.text || c.belief_b == r.item.text);
+                let status = if contradicted {
+                    mind_types::BeliefStatus::Contradicted
+                } else {
+                    mind_types::BeliefStatus::Active
+                };
                 Belief {
                     id: r.item.id.clone(),
                     statement: r.item.text.clone(),
@@ -4373,7 +5456,10 @@ impl MemoryFacade for MemoryHandle {
         Ok(Reflection {
             summary: format!(
                 "{} relevant beliefs, {} open conflicts, {} goals, {} preferences",
-                beliefs.len(), open_conflicts.len(), goals.len(), preferences.len()
+                beliefs.len(),
+                open_conflicts.len(),
+                goals.len(),
+                preferences.len()
             ),
             beliefs,
             open_conflicts,
@@ -4393,7 +5479,11 @@ impl MemoryFacade for MemoryHandle {
         let scopes: &HashMap<String, String> = match &lens {
             Some(l) => &l.scopes,
             None => {
-                scopes_owned = if viewer.is_some() { self.belief_scopes().await } else { HashMap::new() };
+                scopes_owned = if viewer.is_some() {
+                    self.belief_scopes().await
+                } else {
+                    HashMap::new()
+                };
                 &scopes_owned
             }
         };
@@ -4402,15 +5492,23 @@ impl MemoryFacade for MemoryHandle {
             Some(v) => all
                 .into_iter()
                 .filter(|c| {
-                    mind_types::Scope::visible_to(scopes.get(&c.belief_a).map(|s| s.as_str()), Some(v))
-                        && mind_types::Scope::visible_to(scopes.get(&c.belief_b).map(|s| s.as_str()), Some(v))
+                    mind_types::Scope::visible_to(
+                        scopes.get(&c.belief_a).map(|s| s.as_str()),
+                        Some(v),
+                    ) && mind_types::Scope::visible_to(
+                        scopes.get(&c.belief_b).map(|s| s.as_str()),
+                        Some(v),
+                    )
                 })
                 .collect(),
         };
         let before = scoped.len();
         let out: Vec<Contradiction> = match &lens {
             None => scoped,
-            Some(l) => scoped.into_iter().filter(|c| l.allows(&c.belief_a) && l.allows(&c.belief_b)).collect(),
+            Some(l) => scoped
+                .into_iter()
+                .filter(|c| l.allows(&c.belief_a) && l.allows(&c.belief_b))
+                .collect(),
         };
         self.receipt_read(ctx, "conflicts", "", out.len(), before - out.len());
         Ok(out)
@@ -4418,17 +5516,31 @@ impl MemoryFacade for MemoryHandle {
 
     async fn profile_set(&self, key: &str, value: &str) -> Result<()> {
         let (key, value) = (key.to_string(), value.to_string());
-        self.call(|reply| Cmd::SetProfile { key, value, reply }).await
+        self.call(|reply| Cmd::SetProfile { key, value, reply })
+            .await
     }
     async fn profile_get(&self, key: &str) -> Result<Option<String>> {
         let kind = key.to_string();
-        let items = self.call(|reply| Cmd::ListGoalPrefs { kind, reply }).await?;
+        let items = self
+            .call(|reply| Cmd::ListGoalPrefs { kind, reply })
+            .await?;
         Ok(items.last().map(|i| i.text.clone()))
     }
 
-    async fn record_tension(&self, kind: mind_types::TensionKind, pressure: f64, about: &str) -> Result<()> {
+    async fn record_tension(
+        &self,
+        kind: mind_types::TensionKind,
+        pressure: f64,
+        about: &str,
+    ) -> Result<()> {
         let (kind, about) = (kind.as_str().to_string(), about.to_string());
-        self.call(|reply| Cmd::RecordTension { kind, pressure: pressure.clamp(0.0, 1.0), about, reply }).await
+        self.call(|reply| Cmd::RecordTension {
+            kind,
+            pressure: pressure.clamp(0.0, 1.0),
+            about,
+            reply,
+        })
+        .await
     }
     async fn open_tensions(&self, limit: usize) -> Result<Vec<mind_types::Tension>> {
         self.call(|reply| Cmd::OpenTensions { limit, reply }).await
@@ -4438,43 +5550,79 @@ impl MemoryFacade for MemoryHandle {
         self.call(|reply| Cmd::DischargeTension { id, reply }).await
     }
     async fn expire_stale_tensions(&self, curiosity_days: i64, other_days: i64) -> Result<usize> {
-        self.call(|reply| Cmd::ExpireStaleTensions { curiosity_days, other_days, reply }).await
+        self.call(|reply| Cmd::ExpireStaleTensions {
+            curiosity_days,
+            other_days,
+            reply,
+        })
+        .await
     }
     async fn tension_outcome_counts(&self) -> Result<(usize, usize)> {
         self.call(|reply| Cmd::TensionOutcomeCounts { reply }).await
     }
     async fn recall_demand_for(&self, about: &str) -> Result<f64> {
         let about = about.to_string();
-        self.call(|reply| Cmd::RecallDemandFor { about, reply }).await
+        self.call(|reply| Cmd::RecallDemandFor { about, reply })
+            .await
     }
 
-    async fn explain_belief(&self, belief_id: &str, ctx: &mind_types::AccessContext) -> Result<Option<(Belief, Vec<MEvidence>)>> {
+    async fn explain_belief(
+        &self,
+        belief_id: &str,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<Option<(Belief, Vec<MEvidence>)>> {
         let statement = belief_id.to_string();
-        let found: Option<(Belief, Vec<MEvidence>)> = self.call(|reply| Cmd::Explain { statement, reply }).await?;
+        let found: Option<(Belief, Vec<MEvidence>)> =
+            self.call(|reply| Cmd::Explain { statement, reply }).await?;
         // Out-of-scope OR purpose-denied belief → None, indistinguishable from
         // "no such belief" (an existence oracle would itself be a leak).
         let items: Vec<(Belief, Vec<MEvidence>)> = found.into_iter().collect();
-        let (mut kept, suppressed) = self.wall(ctx, items, |(b, _): &(Belief, Vec<MEvidence>)| b.statement.as_str()).await;
+        let (mut kept, suppressed) = self
+            .wall(ctx, items, |(b, _): &(Belief, Vec<MEvidence>)| {
+                b.statement.as_str()
+            })
+            .await;
         let out = kept.pop();
-        self.receipt_read(ctx, "explain_belief", belief_id, usize::from(out.is_some()), suppressed);
+        self.receipt_read(
+            ctx,
+            "explain_belief",
+            belief_id,
+            usize::from(out.is_some()),
+            suppressed,
+        );
         Ok(out)
     }
 
-    async fn hydrate_working_set(&self, focus: &str, ctx: &mind_types::AccessContext) -> Result<WorkingSet> {
+    async fn hydrate_working_set(
+        &self,
+        focus: &str,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<WorkingSet> {
         // The belief recall + conflict list are ctx-filtered at their own boundary; task
         // commitments are untagged personal state → operator + primary only (legacy semantics).
-        let recalled = self.recall_typed(RecallQuery { text: focus.to_string(), top_k: 8, kind: None }, ctx).await?;
+        let recalled = self
+            .recall_typed(
+                RecallQuery {
+                    text: focus.to_string(),
+                    top_k: 8,
+                    kind: None,
+                },
+                ctx,
+            )
+            .await?;
         let open = self.conflicts(ctx).await?;
-        let mut ws = WorkingSet::default();
         // STAMP THE READ (E.SEC10). The isolation decision is known HERE, at the moment it is made,
         // and used to be discarded. Everything downstream then had to infer it from the surface,
         // which is precisely what "the endpoint identity is not provenance" forbids. `viewer()` is
         // None for the operator, which is a truthful stamp saying "unfiltered" -- and that is what
         // makes an operator-hydrated set correctly INELIGIBLE for a member surface.
-        ws.provenance = Some(mind_types::memory::ReadProvenance {
-            viewer: ctx.viewer(),
-            purpose: ctx.purpose().label().to_string(),
-        });
+        let mut ws = WorkingSet {
+            provenance: Some(mind_types::memory::ReadProvenance {
+                viewer: ctx.viewer(),
+                purpose: ctx.purpose().label(),
+            }),
+            ..WorkingSet::default()
+        };
         let halflife_days: f64 = std::env::var("YM_BELIEF_HALFLIFE_DAYS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -4485,15 +5633,26 @@ impl MemoryFacade for MemoryHandle {
             let original_conf = r.item.confidence;
             let eff = decay_confidence(original_conf, age_ms, halflife_days);
             if eff >= 0.7 {
-                ws.stable_facts.push(MemoryItem { confidence: eff, ..r.item });
+                ws.stable_facts.push(MemoryItem {
+                    confidence: eff,
+                    ..r.item
+                });
             } else {
-                let reason = classify_uncertainty(original_conf, eff, r.item.evidence_count, &r.item.text, &open);
+                let reason = classify_uncertainty(
+                    original_conf,
+                    eff,
+                    r.item.evidence_count,
+                    &r.item.text,
+                    &open,
+                );
                 // Lifecycle: the status is DERIVED here, where the context to derive
                 // it exists — the same rows that produced the uncertainty reason.
                 let status = match reason {
                     UncertaintyReason::Contradicted => mind_types::BeliefStatus::Contradicted,
                     UncertaintyReason::Decayed => mind_types::BeliefStatus::Stale,
-                    UncertaintyReason::Sparse | UncertaintyReason::LowPrior => mind_types::BeliefStatus::Active,
+                    UncertaintyReason::Sparse | UncertaintyReason::LowPrior => {
+                        mind_types::BeliefStatus::Active
+                    }
                     // E.SEC11: NOT `Contradicted`. That status is derived from a conflict this
                     // viewer can see, and stamping it here would put the word on a belief whose
                     // partner is hidden -- visible in any operator dump the member might be shown.
@@ -4517,8 +5676,14 @@ impl MemoryFacade for MemoryHandle {
         // untagged personal state: only the operator and the primary VIEW them, and the declared
         // purpose must be allowed to USE the primary's ordinary facts (a background lane serving
         // someone else hydrates no commitments).
-        let owner_view = ctx.viewer().map(|v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY)).unwrap_or(true)
-            && mind_types::purpose_allows(ctx.purpose(), &mind_types::Subject::primary(), mind_types::Sensitivity::Ordinary, false);
+        let owner_view = ctx.viewer().is_none_or(
+            |v| matches!(&v, mind_types::Scope::Private(p) if p == mind_types::PRIMARY),
+        ) && mind_types::purpose_allows(
+            ctx.purpose(),
+            &mind_types::Subject::primary(),
+            mind_types::Sensitivity::Ordinary,
+            false,
+        );
         if owner_view {
             for t in self.list_tasks(false).await.unwrap_or_default() {
                 ws.commitments.push(MemoryItem {
@@ -4552,13 +5717,18 @@ impl MemoryFacade for MemoryHandle {
         let mut hidden_conflict_ms = 0u128;
         if let Some(viewer) = ctx.viewer() {
             let t0 = std::time::Instant::now();
-            let unfiltered: Vec<Contradiction> =
-                self.call(|reply| Cmd::Conflicts { reply }).await.unwrap_or_default();
+            let unfiltered: Vec<Contradiction> = self
+                .call(|reply| Cmd::Conflicts { reply })
+                .await
+                .unwrap_or_default();
             hidden_conflict_ms = t0.elapsed().as_millis();
             if !unfiltered.is_empty() {
                 let scopes = self.belief_scopes().await;
                 let sees = |stmt: &str| {
-                    mind_types::Scope::visible_to(scopes.get(stmt).map(|s| s.as_str()), Some(&viewer))
+                    mind_types::Scope::visible_to(
+                        scopes.get(stmt).map(|s| s.as_str()),
+                        Some(&viewer),
+                    )
                 };
                 for c in &unfiltered {
                     let (a, b) = (sees(&c.belief_a), sees(&c.belief_b));
@@ -4584,8 +5754,10 @@ impl MemoryFacade for MemoryHandle {
                             status: mind_types::BeliefStatus::Active.as_tag().into(),
                             uncertainty_reason: Some(UncertaintyReason::ScopeHiddenConflict),
                         });
-                    } else if let Some(bel) =
-                        ws.uncertain_beliefs.iter_mut().find(|b| &b.statement == visible)
+                    } else if let Some(bel) = ws
+                        .uncertain_beliefs
+                        .iter_mut()
+                        .find(|b| &b.statement == visible)
                     {
                         // Already uncertain for some visible reason. Codex constraint 5: do NOT
                         // rank the hidden conflict above a reason the viewer can actually be told
@@ -4612,17 +5784,28 @@ impl MemoryFacade for MemoryHandle {
 
     async fn forget(&self, id: &str) -> Result<bool> {
         let statement = id.to_string();
-        self.call(|reply| Cmd::Forget { statement, reason: None, reply }).await
+        self.call(|reply| Cmd::Forget {
+            statement,
+            reason: None,
+            reply,
+        })
+        .await
     }
 
     async fn quarantine_memory(&self, rid: &str, reason: &str) -> Result<bool> {
         let (rid, reason) = (rid.to_string(), reason.to_string());
-        self.call(|reply| Cmd::QuarantineRid { rid, reason, reply }).await
+        self.call(|reply| Cmd::QuarantineRid { rid, reason, reply })
+            .await
     }
 
     async fn forget_with_reason(&self, id: &str, reason: &str) -> Result<bool> {
         let (statement, reason) = (id.to_string(), Some(reason.to_string()));
-        self.call(|reply| Cmd::Forget { statement, reason, reply }).await
+        self.call(|reply| Cmd::Forget {
+            statement,
+            reason,
+            reply,
+        })
+        .await
     }
 
     async fn belief_tombstones(&self) -> Result<Vec<(String, String, u64)>> {
@@ -4635,19 +5818,36 @@ impl MemoryFacade for MemoryHandle {
 
     async fn store_goal(&self, text: &str) -> Result<()> {
         let (kind, text) = ("goal".to_string(), text.to_string());
-        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply })
+            .await
     }
     async fn store_preference(&self, text: &str) -> Result<()> {
         let (kind, text) = ("preference".to_string(), text.to_string());
-        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply }).await
+        self.call(|reply| Cmd::StoreGoalPref { kind, text, reply })
+            .await
     }
 
-    async fn add_task(&self, description: &str, priority: &str, due_ms: Option<u64>) -> Result<Task> {
+    async fn add_task(
+        &self,
+        description: &str,
+        priority: &str,
+        due_ms: Option<u64>,
+    ) -> Result<Task> {
         let (description, priority) = (description.to_string(), priority.to_string());
-        self.call(|reply| Cmd::AddTask { description, priority, due_ms, reply }).await
+        self.call(|reply| Cmd::AddTask {
+            description,
+            priority,
+            due_ms,
+            reply,
+        })
+        .await
     }
     async fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
-        self.call(|reply| Cmd::ListTasks { include_done, reply }).await
+        self.call(|reply| Cmd::ListTasks {
+            include_done,
+            reply,
+        })
+        .await
     }
     async fn complete_task(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
@@ -4666,11 +5866,25 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn recall_skills(&self, query: &str, limit: usize) -> Result<Vec<Skill>> {
         let query = query.to_string();
-        self.call(|reply| Cmd::RecallSkills { query, limit, reply }).await
+        self.call(|reply| Cmd::RecallSkills {
+            query,
+            limit,
+            reply,
+        })
+        .await
     }
-    async fn record_skill_outcome(&self, name: &str, outcome: mind_types::SkillOutcome) -> Result<()> {
+    async fn record_skill_outcome(
+        &self,
+        name: &str,
+        outcome: mind_types::SkillOutcome,
+    ) -> Result<()> {
         let name = name.to_string();
-        self.call(|reply| Cmd::RecordSkillOutcome { name, outcome, reply }).await
+        self.call(|reply| Cmd::RecordSkillOutcome {
+            name,
+            outcome,
+            reply,
+        })
+        .await
     }
     async fn uninstall_pack(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
@@ -4678,7 +5892,8 @@ impl MemoryFacade for MemoryHandle {
     }
 
     async fn list_approaches(&self, limit: usize) -> Result<Vec<String>> {
-        self.call(move |reply| Cmd::ListApproaches { limit, reply }).await
+        self.call(move |reply| Cmd::ListApproaches { limit, reply })
+            .await
     }
 
     async fn seal_learned_pack(&self, dest: &str, name: &str, version: &str) -> Result<String> {
@@ -4701,7 +5916,10 @@ impl MemoryFacade for MemoryHandle {
                 s.name, s.summary, measured, s.status, s.lang, s.code
             ));
         }
-        for t in MemoryFacade::list_approaches(self, 200).await.unwrap_or_default() {
+        for t in MemoryFacade::list_approaches(self, 200)
+            .await
+            .unwrap_or_default()
+        {
             if !texts.contains(&t) {
                 texts.push(t);
             }
@@ -4712,7 +5930,13 @@ impl MemoryFacade for MemoryHandle {
 
         let (dest_o, name_o, version_o) = (dest.to_string(), name.to_string(), version.to_string());
         let rows = self
-            .call(move |reply| Cmd::SealCraftPack { dest: dest_o, name: name_o, version: version_o, texts, reply })
+            .call(move |reply| Cmd::SealCraftPack {
+                dest: dest_o,
+                name: name_o,
+                version: version_o,
+                texts,
+                reply,
+            })
             .await?;
         Ok(format!(
             "sealed {rows} craft row(s) into {dest}{}",
@@ -4742,17 +5966,44 @@ impl MemoryFacade for MemoryHandle {
     async fn pack_context(&self) -> Result<Option<String>> {
         self.call(|reply| Cmd::PackContext { reply }).await
     }
-    async fn recall_from_packs(&self, query: &str, top_k: usize) -> Result<Vec<mind_types::memory::PackHit>> {
+    async fn recall_from_packs(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<mind_types::memory::PackHit>> {
         let query = query.to_string();
-        self.call(|reply| Cmd::RecallFromPacks { query, top_k, reply }).await
+        self.call(|reply| Cmd::RecallFromPacks {
+            query,
+            top_k,
+            reply,
+        })
+        .await
     }
-    async fn probe_packs(&self, query: &str, top_k: usize) -> Result<Vec<mind_types::memory::PackProbe>> {
+    async fn probe_packs(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<mind_types::memory::PackProbe>> {
         let query = query.to_string();
-        self.call(|reply| Cmd::ProbePacks { query, top_k, reply }).await
+        self.call(|reply| Cmd::ProbePacks {
+            query,
+            top_k,
+            reply,
+        })
+        .await
     }
-    async fn record_pack_event(&self, pack_id: &str, event: mind_types::memory::PackEvent) -> Result<()> {
+    async fn record_pack_event(
+        &self,
+        pack_id: &str,
+        event: mind_types::memory::PackEvent,
+    ) -> Result<()> {
         let pack_id = pack_id.to_string();
-        self.call(|reply| Cmd::RecordPackEvent { pack_id, event, reply }).await
+        self.call(|reply| Cmd::RecordPackEvent {
+            pack_id,
+            event,
+            reply,
+        })
+        .await
     }
     async fn pack_stats(&self) -> Result<Vec<mind_types::memory::PackStats>> {
         self.call(|reply| Cmd::PackStats { reply }).await
@@ -4764,13 +6015,39 @@ impl MemoryFacade for MemoryHandle {
     async fn available_packs(&self) -> Result<Vec<mind_types::memory::PackCatalogEntry>> {
         self.call(|reply| Cmd::AvailablePacks { reply }).await
     }
-    async fn lease_pack(&self, pack_id: &str, days: u32, reason: &str, granted_by: &str) -> Result<mind_types::memory::PackLease> {
-        let (pack_id, reason, granted_by) = (pack_id.to_string(), reason.to_string(), granted_by.to_string());
-        self.call(|reply| Cmd::LeasePack { pack_id, days, reason, granted_by, reply }).await
+    async fn lease_pack(
+        &self,
+        pack_id: &str,
+        days: u32,
+        reason: &str,
+        granted_by: &str,
+    ) -> Result<mind_types::memory::PackLease> {
+        let (pack_id, reason, granted_by) = (
+            pack_id.to_string(),
+            reason.to_string(),
+            granted_by.to_string(),
+        );
+        self.call(|reply| Cmd::LeasePack {
+            pack_id,
+            days,
+            reason,
+            granted_by,
+            reply,
+        })
+        .await
     }
-    async fn release_pack(&self, pack_id: &str, end: mind_types::memory::LeaseEnd) -> Result<Option<mind_types::memory::PackLease>> {
+    async fn release_pack(
+        &self,
+        pack_id: &str,
+        end: mind_types::memory::LeaseEnd,
+    ) -> Result<Option<mind_types::memory::PackLease>> {
         let pack_id = pack_id.to_string();
-        self.call(|reply| Cmd::ReleasePack { pack_id, end, reply }).await
+        self.call(|reply| Cmd::ReleasePack {
+            pack_id,
+            end,
+            reply,
+        })
+        .await
     }
     async fn leases(&self) -> Result<Vec<mind_types::memory::PackLease>> {
         self.call(|reply| Cmd::Leases { reply }).await
@@ -4783,28 +6060,73 @@ impl MemoryFacade for MemoryHandle {
     }
     async fn ack_lease_event(&self, event_id: &str) -> Result<()> {
         let event_id = event_id.to_string();
-        self.call(|reply| Cmd::AckLeaseEvent { event_id, reply }).await
+        self.call(|reply| Cmd::AckLeaseEvent { event_id, reply })
+            .await
     }
     async fn reconcile_leases(&self) -> Result<Vec<String>> {
         self.call(|reply| Cmd::ReconcileLeases { reply }).await
     }
-    async fn route_packs(&self, query: &str) -> Result<(Vec<mind_types::memory::CoverageMatch>, mind_types::memory::PackRoute)> {
+    async fn route_packs(
+        &self,
+        query: &str,
+    ) -> Result<(
+        Vec<mind_types::memory::CoverageMatch>,
+        mind_types::memory::PackRoute,
+    )> {
         let query = query.to_string();
         self.call(|reply| Cmd::RoutePacks { query, reply }).await
     }
 
     async fn append_message(&self, role: &str, text: &str) -> Result<()> {
         // Unscoped append = primary's private context (single-user default; never leaks to a member).
-        self.append_message_scoped(role, text, mind_types::Scope::primary()).await
+        self.append_message_scoped(role, text, mind_types::Scope::primary())
+            .await
     }
-    async fn append_message_scoped(&self, role: &str, text: &str, scope: mind_types::Scope) -> Result<()> {
+    async fn append_message_scoped(
+        &self,
+        role: &str,
+        text: &str,
+        scope: mind_types::Scope,
+    ) -> Result<()> {
         let (role, text, scope) = (role.to_string(), text.to_string(), scope.as_tag());
-        self.call(|reply| Cmd::AppendMessage { role, text, scope, reply }).await
+        self.call(|reply| Cmd::AppendMessage {
+            role,
+            text,
+            scope,
+            reply,
+        })
+        .await
     }
-    async fn messages_since(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String, String)>> {
-        self.call(|reply| Cmd::MessagesSince { after_id, limit, reply }).await
+    async fn messages_since(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String)>> {
+        self.call(|reply| Cmd::MessagesSince {
+            after_id,
+            limit,
+            reply,
+        })
+        .await
     }
-    async fn recent_messages(&self, limit: usize, ctx: &mind_types::AccessContext) -> Result<Vec<(String, String)>> {
+
+    async fn memory_curation_baseline(
+        &self,
+        cursor_id: i64,
+        next_batch_limit: usize,
+    ) -> Result<mind_types::MemoryCurationBaseline> {
+        self.call(|reply| Cmd::MemoryCurationBaseline {
+            cursor_id,
+            next_batch_limit,
+            reply,
+        })
+        .await
+    }
+    async fn recent_messages(
+        &self,
+        limit: usize,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<Vec<(String, String)>> {
         // Purpose Gate v1 on the transcript: a principal keeps its own scope; an
         // operator-lane read outside Audit/Maintenance is downgraded to the scope
         // its BENEFICIARY could see — dream/proactive/code reads serving the
@@ -4814,31 +6136,65 @@ impl MemoryFacade for MemoryHandle {
             (None, p) if p.is_unrestricted_lane() => None,
             (None, p) => Some(p.serves.as_viewer_scope().as_tag()),
         };
-        let out: Vec<(String, String)> = self.call(|reply| Cmd::RecentMessages { limit, viewer, reply }).await?;
+        let out: Vec<(String, String)> = self
+            .call(|reply| Cmd::RecentMessages {
+                limit,
+                viewer,
+                reply,
+            })
+            .await?;
         self.receipt_read(ctx, "recent_messages", "", out.len(), 0);
         Ok(out)
     }
-    async fn record_prediction_outcome(&self, domain: &str, subject: &str, raw_confidence: f64, hit: bool) -> Result<()> {
+    async fn record_prediction_outcome(
+        &self,
+        domain: &str,
+        subject: &str,
+        raw_confidence: f64,
+        hit: bool,
+    ) -> Result<()> {
         let (domain, subject) = (domain.to_string(), subject.to_lowercase());
-        self.call(move |reply| Cmd::RecordPredictionOutcome { domain, subject, raw: raw_confidence, hit, reply }).await
+        self.call(move |reply| Cmd::RecordPredictionOutcome {
+            domain,
+            subject,
+            raw: raw_confidence,
+            hit,
+            reply,
+        })
+        .await
     }
-    async fn foresight_reliability(&self, subject: &str, raw_confidence: f64) -> Result<(f64, f64)> {
+    async fn foresight_reliability(
+        &self,
+        subject: &str,
+        raw_confidence: f64,
+    ) -> Result<(f64, f64)> {
         let subject = subject.to_lowercase();
-        self.call(move |reply| Cmd::ForesightReliability { subject, raw: raw_confidence, reply }).await
+        self.call(move |reply| Cmd::ForesightReliability {
+            subject,
+            raw: raw_confidence,
+            reply,
+        })
+        .await
     }
     async fn metacog_note(&self) -> Result<Option<String>> {
         self.call(|reply| Cmd::MetacogNote { reply }).await
     }
     async fn record_episode(&self, label: &str) -> Result<()> {
         let label = label.to_string();
-        self.call(move |reply| Cmd::RecordEpisode { label, reply }).await
+        self.call(move |reply| Cmd::RecordEpisode { label, reply })
+            .await
     }
     async fn activity_rhythm(&self, local_offset_hours: i32) -> Result<Option<String>> {
-        self.call(move |reply| Cmd::ActivityRhythm { local_offset_hours, reply }).await
+        self.call(move |reply| Cmd::ActivityRhythm {
+            local_offset_hours,
+            reply,
+        })
+        .await
     }
     async fn record_tool_outcome(&self, tool: &str, ok: bool) -> Result<()> {
         let tool = tool.to_string();
-        self.call(move |reply| Cmd::RecordToolOutcome { tool, ok, reply }).await
+        self.call(move |reply| Cmd::RecordToolOutcome { tool, ok, reply })
+            .await
     }
     async fn tool_track_record(&self) -> Result<Vec<(String, f64, u64)>> {
         self.call(|reply| Cmd::ToolTrackRecord { reply }).await
@@ -4849,16 +6205,28 @@ impl MemoryFacade for MemoryHandle {
         (d.queued_or_running, d.high_water)
     }
     async fn record_proactive_outcome(&self, sent_ms: i64, engaged: bool) -> Result<()> {
-        self.call(move |reply| Cmd::RecordProactiveOutcome { sent_ms, engaged, reply }).await
+        self.call(move |reply| Cmd::RecordProactiveOutcome {
+            sent_ms,
+            engaged,
+            reply,
+        })
+        .await
     }
     async fn record_proactive_outcome_backfill(&self, sent_ms: i64, engaged: bool) -> Result<()> {
-        self.call(move |reply| Cmd::RecordProactiveOutcomeBackfill { sent_ms, engaged, reply }).await
+        self.call(move |reply| Cmd::RecordProactiveOutcomeBackfill {
+            sent_ms,
+            engaged,
+            reply,
+        })
+        .await
     }
     async fn user_turn_times(&self, since_ms: i64) -> Result<Vec<i64>> {
-        self.call(move |reply| Cmd::UserTurnTimes { since_ms, reply }).await
+        self.call(move |reply| Cmd::UserTurnTimes { since_ms, reply })
+            .await
     }
     async fn proactive_baseline_rate(&self) -> Result<Option<f64>> {
-        self.call(|reply| Cmd::ProactiveBaselineRate { reply }).await
+        self.call(|reply| Cmd::ProactiveBaselineRate { reply })
+            .await
     }
     async fn proactive_receptivity(&self) -> Result<Option<f64>> {
         self.call(|reply| Cmd::ProactiveReceptivity { reply }).await
@@ -4892,7 +6260,17 @@ pub mod fixtures {
         recommended_min_similarity: Option<f64>,
         recommended_top_k: Option<u32>,
     ) -> std::result::Result<String, String> {
-        seal_fixture_pack_full(dest, "yantrik-mind-test", name, "0.1.0", namespace, rows, None, recommended_min_similarity, recommended_top_k)
+        seal_fixture_pack_full(
+            dest,
+            "yantrik-mind-test",
+            name,
+            "0.1.0",
+            namespace,
+            rows,
+            None,
+            recommended_min_similarity,
+            recommended_top_k,
+        )
     }
 
     /// The full-control variant: origin, version and AUTHORED coverage phrases (the router ranks
@@ -4939,42 +6317,57 @@ pub mod fixtures {
         constitution: &[&str],
     ) -> std::result::Result<String, String> {
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let staging = std::env::temp_dir().join(format!("ym_fixture_{}_{name}_{n}.db", std::process::id()));
+        let staging =
+            std::env::temp_dir().join(format!("ym_fixture_{}_{name}_{n}.db", std::process::id()));
         let staging_s = staging.to_string_lossy().to_string();
         let _ = std::fs::remove_file(&staging);
         let sealed = (|| {
             let db = YantrikDB::new(&staging_s, 64).map_err(|e| e.to_string())?;
             if !db.has_embedder() {
-                return Err("fixture host has no embedder — the engine's bundled-embedder feature is off".to_string());
+                return Err(
+                    "fixture host has no embedder — the engine's bundled-embedder feature is off"
+                        .to_string(),
+                );
             }
             let meta = serde_json::json!({ "source": "fixture" });
             for r in rows {
-                db.record_text(r, "semantic", 0.6, 0.0, 604_800.0, &meta, namespace, 0.9, "general", "document", None)
-                    .map_err(|e| e.to_string())?;
+                db.record_text(
+                    r, "semantic", 0.6, 0.0, 604_800.0, &meta, namespace, 0.9, "general",
+                    "document", None,
+                )
+                .map_err(|e| e.to_string())?;
             }
             let embedder = match db.embedder_identity() {
-                Ok(Some((ename, digest, dim))) => serde_json::json!({ "name": ename, "digest": digest, "dim": dim }),
+                Ok(Some((ename, digest, dim))) => {
+                    serde_json::json!({ "name": ename, "digest": digest, "dim": dim })
+                }
                 _ => serde_json::json!({ "name": null, "digest": null, "dim": db.embedding_dim() }),
             };
             let coverage: Vec<String> = match coverage {
-                Some(c) => c.iter().map(|s| s.to_string()).collect(),
-                None => rows.iter().map(|r| r.chars().take(60).collect::<String>()).collect(),
+                Some(c) => c.iter().map(|s| (*s).to_string()).collect(),
+                None => rows
+                    .iter()
+                    .map(|r| r.chars().take(60).collect::<String>())
+                    .collect(),
             };
-            let manifest: yantrikdb_core::PackManifest = serde_json::from_value(serde_json::json!({
-                "name": name,
-                "version": version,
-                "origin": format!("{origin_prefix}/{name}"),
-                "description": "test fixture",
-                "embedder": embedder,
-                "namespace": namespace,
-                "constitution": constitution,
-                "coverage": coverage,
-                "recommended_top_k": recommended_top_k,
-                "recommended_min_similarity": recommended_min_similarity,
-            }))
-            .map_err(|e| e.to_string())?;
+            let manifest: yantrikdb_core::PackManifest =
+                serde_json::from_value(serde_json::json!({
+                    "name": name,
+                    "version": version,
+                    "origin": format!("{origin_prefix}/{name}"),
+                    "description": "test fixture",
+                    "embedder": embedder,
+                    "namespace": namespace,
+                    "constitution": constitution,
+                    "coverage": coverage,
+                    "recommended_top_k": recommended_top_k,
+                    "recommended_min_similarity": recommended_min_similarity,
+                }))
+                .map_err(|e| e.to_string())?;
             let _ = std::fs::remove_file(dest);
-            let m = db.seal_pack(dest, &manifest, Some(namespace)).map_err(|e| e.to_string())?;
+            let m = db
+                .seal_pack(dest, &manifest, Some(namespace))
+                .map_err(|e| e.to_string())?;
             Ok(m.pack_id())
         })();
         let _ = std::fs::remove_file(&staging);
@@ -4989,9 +6382,21 @@ mod tests {
     use super::*;
 
     fn route(pack_id: &str, name: &str, ns: &str, floor: f64, cap: Option<usize>) -> PackRoute {
-        PackRoute { pack_id: pack_id.into(), name: name.into(), namespace: ns.into(), floor, cap }
+        PackRoute {
+            pack_id: pack_id.into(),
+            name: name.into(),
+            namespace: ns.into(),
+            floor,
+            cap,
+        }
     }
-    fn cand(rid: &str, ns: &str, stamp: Option<&str>, similarity: f64, score: f64) -> PackCandidate {
+    fn cand(
+        rid: &str,
+        ns: &str,
+        stamp: Option<&str>,
+        similarity: f64,
+        score: f64,
+    ) -> PackCandidate {
         PackCandidate {
             rid: rid.into(),
             text: format!("row {rid}"),
@@ -5016,7 +6421,10 @@ mod tests {
             5,
         );
         assert_eq!(ambiguous, 0);
-        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["relevant"]);
+        assert_eq!(
+            hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(),
+            vec!["relevant"]
+        );
         assert_eq!(hits[0].pack_id, "yantrik/a@1.0.0");
         assert_eq!(hits[0].similarity, 0.72);
     }
@@ -5034,7 +6442,10 @@ mod tests {
             &routes,
             5,
         );
-        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["pack-row"]);
+        assert_eq!(
+            hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(),
+            vec!["pack-row"]
+        );
     }
 
     /// The floor is a wall the publisher may raise and never lower (Codex's review): a declared 0.0
@@ -5042,7 +6453,9 @@ mod tests {
     /// a declared 0.7 is honoured because it is stricter.
     #[test]
     fn a_declared_floor_raises_the_wall_and_never_lowers_it() {
-        use mind_types::memory::{effective_pack_floor as eff, DEFAULT_PACK_SIMILARITY_FLOOR as WALL};
+        use mind_types::memory::{
+            effective_pack_floor as eff, DEFAULT_PACK_SIMILARITY_FLOOR as WALL,
+        };
         assert_eq!(eff(None), WALL);
         assert_eq!(eff(Some(0.0)), WALL);
         assert_eq!(eff(Some(0.30)), WALL);
@@ -5071,14 +6484,26 @@ mod tests {
         ];
         let (judged, ambiguous) = judge_pack_candidates(cands.clone(), &routes, 2);
         assert_eq!(ambiguous, 0);
-        let got: Vec<(&str, D)> = judged.iter().map(|j| (j.candidate.rid.as_str(), j.disposition)).collect();
+        let got: Vec<(&str, D)> = judged
+            .iter()
+            .map(|j| (j.candidate.rid.as_str(), j.disposition))
+            .collect();
         assert_eq!(
             got,
-            vec![("a1", D::Cleared), ("a2", D::WithheldPackCap), ("b1", D::Cleared), ("b2", D::WithheldLimit), ("b3", D::WithheldFloor)]
+            vec![
+                ("a1", D::Cleared),
+                ("a2", D::WithheldPackCap),
+                ("b1", D::Cleared),
+                ("b2", D::WithheldLimit),
+                ("b3", D::WithheldFloor)
+            ]
         );
         // And recall returns exactly the Cleared rows, in the same order.
         let (hits, _) = floor_pack_hits(cands, &routes, 2);
-        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["a1", "b1"]);
+        assert_eq!(
+            hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(),
+            vec!["a1", "b1"]
+        );
     }
 
     /// A row stamped with a name no route carries is never credited to the route that owns its
@@ -5095,7 +6520,10 @@ mod tests {
             5,
         );
         assert_eq!(ambiguous, 0, "unclaimed is not ambiguous");
-        assert_eq!(hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(), vec!["stamped-for-a"]);
+        assert_eq!(
+            hits.iter().map(|h| h.rid.as_str()).collect::<Vec<_>>(),
+            vec!["stamped-for-a"]
+        );
     }
 
     /// The collision the name stamp cannot break: two VERSIONS (or two re-seals) of one pack
@@ -5120,7 +6548,9 @@ mod tests {
         );
         assert_eq!(ambiguous, 2, "both of pack a's rows are unattributable");
         assert_eq!(
-            hits.iter().map(|h| (h.rid.as_str(), h.pack_id.as_str())).collect::<Vec<_>>(),
+            hits.iter()
+                .map(|h| (h.rid.as_str(), h.pack_id.as_str()))
+                .collect::<Vec<_>>(),
             vec![("b-row", "yantrik/b@1.0.0")]
         );
     }
@@ -5144,8 +6574,14 @@ mod tests {
             5,
         );
         assert_eq!(ambiguous, 0, "an orphan is unclaimed, not ambiguous");
-        let ids: Vec<(&str, &str)> = hits.iter().map(|h| (h.rid.as_str(), h.pack_id.as_str())).collect();
-        assert_eq!(ids, vec![("a1", "yantrik/a@1.0.0"), ("n1", "yantrik/a-next@2.0.0")]);
+        let ids: Vec<(&str, &str)> = hits
+            .iter()
+            .map(|h| (h.rid.as_str(), h.pack_id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![("a1", "yantrik/a@1.0.0"), ("n1", "yantrik/a-next@2.0.0")]
+        );
     }
 
     /// P.1 on a REAL sealed pack: a verbatim query clears a strict floor and carries its identity;
@@ -5160,38 +6596,81 @@ mod tests {
             "Typography — set body text on a modular scale with a measure of 45 to 75 characters per line.",
             "Spacing — derive every gap in a layout from one base unit so the page reads as a system.",
         ];
-        let id = fixtures::seal_fixture_pack(strict.to_str().unwrap(), "strict-craft", "strict_craft", &rows, Some(0.9), Some(4)).unwrap();
+        let id = fixtures::seal_fixture_pack(
+            strict.to_str().unwrap(),
+            "strict-craft",
+            "strict_craft",
+            &rows,
+            Some(0.9),
+            Some(4),
+        )
+        .unwrap();
         assert_eq!(id, "yantrik-mind-test/strict-craft@0.1.0");
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.mount_pack(strict.to_str().unwrap()).await.unwrap();
 
         let hits = mem.recall_from_packs(rows[0], 5).await.unwrap();
-        assert_eq!(hits.len(), 1, "the verbatim row and not its sibling: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the verbatim row and not its sibling: {hits:?}"
+        );
         assert_eq!(hits[0].pack_id, id);
         assert!(!hits[0].rid.is_empty());
-        assert!(hits[0].similarity >= 0.9, "verbatim similarity {}", hits[0].similarity);
+        assert!(
+            hits[0].similarity >= 0.9,
+            "verbatim similarity {}",
+            hits[0].similarity
+        );
         assert_eq!(hits[0].namespace, "strict_craft");
         assert!(hits[0].text.starts_with("Typography"));
 
-        let none = mem.recall_from_packs("what is seventeen multiplied by twenty three", 5).await.unwrap();
+        let none = mem
+            .recall_from_packs("what is seventeen multiplied by twenty three", 5)
+            .await
+            .unwrap();
         assert!(none.is_empty(), "noise cleared a 0.9 floor: {none:?}");
 
         // The probe shows BOTH rows: the verbatim one cleared, its sibling withheld with the
         // similarity it reached and the floor it was measured against — the operator can tell
         // "off-coverage" from "too strict" without guessing.
         let probe = mem.probe_packs(rows[0], 5).await.unwrap();
-        assert_eq!(probe.len(), 2, "every attributed candidate, cleared or not: {probe:?}");
-        assert!(probe[0].cleared() && probe[0].text.starts_with("Typography"), "{probe:?}");
-        assert_eq!(probe[1].disposition, mind_types::memory::PackDisposition::WithheldFloor, "{probe:?}");
-        assert!(probe[1].similarity < 0.9 && probe[1].floor == 0.9, "{probe:?}");
+        assert_eq!(
+            probe.len(),
+            2,
+            "every attributed candidate, cleared or not: {probe:?}"
+        );
+        assert!(
+            probe[0].cleared() && probe[0].text.starts_with("Typography"),
+            "{probe:?}"
+        );
+        assert_eq!(
+            probe[1].disposition,
+            mind_types::memory::PackDisposition::WithheldFloor,
+            "{probe:?}"
+        );
+        assert!(
+            probe[1].similarity < 0.9 && probe[1].floor == 0.9,
+            "{probe:?}"
+        );
 
         // An absurd ask must not panic the actor (usize::MAX once reached `clamp(want, 64)` with
         // want > 64, which panics) and must come back bounded.
         let huge = mem.recall_from_packs(rows[0], usize::MAX).await.unwrap();
-        assert_eq!(huge.len(), 1, "bounded, and still just the verbatim row: {huge:?}");
+        assert_eq!(
+            huge.len(),
+            1,
+            "bounded, and still just the verbatim row: {huge:?}"
+        );
         let huge_probe = mem.probe_packs(rows[0], usize::MAX).await.unwrap();
-        assert!(huge_probe.len() <= 48 && huge_probe.len() == 2, "{huge_probe:?}");
-        assert!(mem.mounted_packs().await.is_ok(), "the actor is still alive after the absurd asks");
+        assert!(
+            huge_probe.len() <= 48 && huge_probe.len() == 2,
+            "{huge_probe:?}"
+        );
+        assert!(
+            mem.mounted_packs().await.is_ok(),
+            "the actor is still alive after the absurd asks"
+        );
 
         // The brief shows the operator the floor in force and the identity to key evidence on.
         let briefs = mem.mounted_packs().await.unwrap();
@@ -5199,7 +6678,15 @@ mod tests {
         assert_eq!(briefs[0].id, id);
         assert_eq!(briefs[0].recommended_min_similarity, Some(0.9));
         assert_eq!(briefs[0].recommended_top_k, Some(4));
-        assert!(briefs[0].content_digest.as_deref().unwrap_or("").starts_with("blake3:"), "{:?}", briefs[0].content_digest);
+        assert!(
+            briefs[0]
+                .content_digest
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("blake3:"),
+            "{:?}",
+            briefs[0].content_digest
+        );
         assert_eq!(briefs[0].coverage.len(), 2);
         assert_eq!(briefs[0].signer, None, "an unsigned fixture has no signer");
         let _ = std::fs::remove_file(&strict);
@@ -5214,15 +6701,33 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("zero.ydbpack");
         let row = "Motion — animate only transform and opacity so the compositor does the work.";
-        fixtures::seal_fixture_pack(pack.to_str().unwrap(), "zero-floor", "zero_floor_ns", &[row], Some(0.0), None).unwrap();
+        fixtures::seal_fixture_pack(
+            pack.to_str().unwrap(),
+            "zero-floor",
+            "zero_floor_ns",
+            &[row],
+            Some(0.0),
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
         let briefs = mem.mounted_packs().await.unwrap();
-        assert_eq!(briefs[0].recommended_min_similarity, Some(0.0), "the declaration is shown, not hidden…");
+        assert_eq!(
+            briefs[0].recommended_min_similarity,
+            Some(0.0),
+            "the declaration is shown, not hidden…"
+        );
         let hits = mem.recall_from_packs(row, 5).await.unwrap();
         assert_eq!(hits.len(), 1, "…a verbatim query still lands: {hits:?}");
-        let none = mem.recall_from_packs("what is seventeen multiplied by twenty three", 5).await.unwrap();
-        assert!(none.is_empty(), "…and the host wall still withholds noise despite the declared 0.0: {none:?}");
+        let none = mem
+            .recall_from_packs("what is seventeen multiplied by twenty three", 5)
+            .await
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "…and the host wall still withholds noise despite the declared 0.0: {none:?}"
+        );
         let _ = std::fs::remove_file(&pack);
     }
 
@@ -5240,7 +6745,15 @@ mod tests {
         let host_db = dir.join("crowd_host.db");
         let _ = std::fs::remove_file(&host_db);
         let row = "Focus — every interactive control needs a visible focus ring that is not the browser default.";
-        fixtures::seal_fixture_pack(pack.to_str().unwrap(), "crowd-craft", "crowd_ns", &[row], None, None).unwrap();
+        fixtures::seal_fixture_pack(
+            pack.to_str().unwrap(),
+            "crowd-craft",
+            "crowd_ns",
+            &[row],
+            None,
+            None,
+        )
+        .unwrap();
         {
             // Six host rows in the PACK'S namespace, each a near-verbatim copy of the query.
             let db = YantrikDB::new(host_db.to_str().unwrap(), 64).unwrap();
@@ -5248,7 +6761,16 @@ mod tests {
             for i in 0..6 {
                 db.record_text(
                     &format!("{row} (household note {i})"),
-                    "semantic", 0.9, 0.0, 604_800.0, &meta, "crowd_ns", 0.9, "general", "user", None,
+                    "semantic",
+                    0.9,
+                    0.0,
+                    604_800.0,
+                    &meta,
+                    "crowd_ns",
+                    0.9,
+                    "general",
+                    "user",
+                    None,
                 )
                 .unwrap();
             }
@@ -5256,9 +6778,16 @@ mod tests {
         let mem = MemoryHandle::spawn(host_db.to_str().unwrap(), 64).unwrap();
         mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
         let hits = mem.recall_from_packs(row, 3).await.unwrap();
-        assert_eq!(hits.len(), 1, "the pack row must survive six crowding host rows: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the pack row must survive six crowding host rows: {hits:?}"
+        );
         assert_eq!(hits[0].pack_id, "yantrik-mind-test/crowd-craft@0.1.0");
-        assert!(!hits[0].text.contains("household note"), "a host row can never be a pack hit");
+        assert!(
+            !hits[0].text.contains("household note"),
+            "a host row can never be a pack hit"
+        );
         drop(mem);
         let _ = std::fs::remove_file(&pack);
         let _ = std::fs::remove_file(&host_db);
@@ -5276,33 +6805,106 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |file: &str, name: &str, ns: &str, cov: &[&str]| {
             let dest = dir.join(file);
-            fixtures::seal_fixture_pack_full(dest.to_str().unwrap(), "yantrik", name, "0.1.0", ns, &["one row"], Some(cov), None, None).unwrap()
+            fixtures::seal_fixture_pack_full(
+                dest.to_str().unwrap(),
+                "yantrik",
+                name,
+                "0.1.0",
+                ns,
+                &["one row"],
+                Some(cov),
+                None,
+                None,
+            )
+            .unwrap()
         };
-        let games = mk("games.ydbpack", "game-feel", "game_feel", &["tuning the feel of a 2D platformer", "coyote time, input buffering and jump forgiveness"]);
-        let wages = mk("wages.ydbpack", "uk-rates", "uk_rates", &["UK National Minimum Wage hourly rates by age band", "UK Statutory Sick Pay weekly rate"]);
+        let games = mk(
+            "games.ydbpack",
+            "game-feel",
+            "game_feel",
+            &[
+                "tuning the feel of a 2D platformer",
+                "coyote time, input buffering and jump forgiveness",
+            ],
+        );
+        let wages = mk(
+            "wages.ydbpack",
+            "uk-rates",
+            "uk_rates",
+            &[
+                "UK National Minimum Wage hourly rates by age band",
+                "UK Statutory Sick Pay weekly rate",
+            ],
+        );
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
-        assert!(mem.available_packs().await.unwrap().is_empty(), "an in-memory host has no library until told");
+        assert!(
+            mem.available_packs().await.unwrap().is_empty(),
+            "an in-memory host has no library until told"
+        );
         mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
 
         let cat = mem.available_packs().await.unwrap();
-        assert_eq!(cat.iter().map(|e| e.pack_id.as_str()).collect::<Vec<_>>(), vec![games.as_str(), wages.as_str()]);
-        assert!(cat.iter().all(|e| !e.mounted && e.coverage.len() == 2 && e.floor == 0.55), "{cat:?}");
-        assert!(mem.mounted_packs().await.unwrap().is_empty(), "cataloguing mounts nothing");
+        assert_eq!(
+            cat.iter().map(|e| e.pack_id.as_str()).collect::<Vec<_>>(),
+            vec![games.as_str(), wages.as_str()]
+        );
+        assert!(
+            cat.iter()
+                .all(|e| !e.mounted && e.coverage.len() == 2 && e.floor == 0.55),
+            "{cat:?}"
+        );
+        assert!(
+            mem.mounted_packs().await.unwrap().is_empty(),
+            "cataloguing mounts nothing"
+        );
 
-        let (ranked, route) = mem.route_packs("what coyote time and jump buffering should my platformer use").await.unwrap();
+        let (ranked, route) = mem
+            .route_packs("what coyote time and jump buffering should my platformer use")
+            .await
+            .unwrap();
         assert_eq!(ranked[0].pack_id, games, "{ranked:?}");
-        assert!(ranked[0].phrase.contains("coyote"), "the phrase that earned it is named: {ranked:?}");
-        assert_eq!(route.leased(), Some(games.as_str()), "{route:?} / {ranked:?}");
-        assert!(mem.mounted_packs().await.unwrap().is_empty(), "routing mounts nothing either");
+        assert!(
+            ranked[0].phrase.contains("coyote"),
+            "the phrase that earned it is named: {ranked:?}"
+        );
+        assert_eq!(
+            route.leased(),
+            Some(games.as_str()),
+            "{route:?} / {ranked:?}"
+        );
+        assert!(
+            mem.mounted_packs().await.unwrap().is_empty(),
+            "routing mounts nothing either"
+        );
 
-        let (_, off) = mem.route_packs("remind me to call the plumber on tuesday").await.unwrap();
-        assert!(matches!(off, PackRoute::Abstain { reason: AbstainReason::BelowFloor, .. } | PackRoute::Abstain { reason: AbstainReason::Tie, .. }), "an off-topic ask must abstain: {off:?}");
+        let (_, off) = mem
+            .route_packs("remind me to call the plumber on tuesday")
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                off,
+                PackRoute::Abstain {
+                    reason: AbstainReason::BelowFloor,
+                    ..
+                } | PackRoute::Abstain {
+                    reason: AbstainReason::Tie,
+                    ..
+                }
+            ),
+            "an off-topic ask must abstain: {off:?}"
+        );
 
         // Mount one: it now leads the catalog as mounted and its library copy is not listed twice.
-        mem.mount_pack(dir.join("wages.ydbpack").to_str().unwrap()).await.unwrap();
+        mem.mount_pack(dir.join("wages.ydbpack").to_str().unwrap())
+            .await
+            .unwrap();
         let cat = mem.available_packs().await.unwrap();
         assert_eq!(cat.len(), 2);
-        assert!(cat[0].mounted && cat[0].pack_id == wages && !cat[1].mounted, "{cat:?}");
+        assert!(
+            cat[0].mounted && cat[0].pack_id == wages && !cat[1].mounted,
+            "{cat:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5318,50 +6920,105 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Pack A: one row, coverage about platformers.
         let a = dir.join("a.ydbpack");
-        let a_id = fixtures::seal_fixture_pack_full(a.to_str().unwrap(), "yantrik", "same-rows-a", "0.1.0", "same_rows", &["one shared row"], Some(&["coyote time, input buffering and jump forgiveness"]), None, None).unwrap();
+        let a_id = fixtures::seal_fixture_pack_full(
+            a.to_str().unwrap(),
+            "yantrik",
+            "same-rows-a",
+            "0.1.0",
+            "same_rows",
+            &["one shared row"],
+            Some(&["coyote time, input buffering and jump forgiveness"]),
+            None,
+            None,
+        )
+        .unwrap();
         // Pack B: a BYTE COPY of A — same rows, same rids, same content digest — with only the
         // manifest's identity and coverage rewritten (to UK wages).
         let b = dir.join("b.ydbpack");
         std::fs::copy(&a, &b).unwrap();
         {
             let conn = rusqlite::Connection::open(&b).unwrap();
-            let json: String = conn.query_row("SELECT value FROM meta WHERE key = 'pack_manifest'", [], |r| r.get(0)).unwrap();
+            let json: String = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'pack_manifest'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             let mut m: serde_json::Value = serde_json::from_str(&json).unwrap();
             m["name"] = serde_json::json!("same-rows-b");
             m["origin"] = serde_json::json!("yantrik/same-rows-b");
-            m["coverage"] = serde_json::json!(["UK National Minimum Wage hourly rates by age band"]);
-            conn.execute("UPDATE meta SET value = ?1 WHERE key = 'pack_manifest'", [m.to_string()]).unwrap();
+            m["coverage"] =
+                serde_json::json!(["UK National Minimum Wage hourly rates by age band"]);
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'pack_manifest'",
+                [m.to_string()],
+            )
+            .unwrap();
         }
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
         let cat = mem.available_packs().await.unwrap();
         assert_eq!(cat.len(), 2, "{cat:?}");
-        assert_eq!(cat[0].content_digest, cat[1].content_digest, "the trap: identical digests");
+        assert_eq!(
+            cat[0].content_digest, cat[1].content_digest,
+            "the trap: identical digests"
+        );
         assert_ne!(cat[0].coverage, cat[1].coverage);
 
         // Route a platformer question FIRST (fills the cache under A's phrases), then a wages
         // question: B must rank first on its OWN phrase, not on A's cached vectors.
-        let (r1, _) = mem.route_packs("what coyote time and jump buffering should my platformer use").await.unwrap();
+        let (r1, _) = mem
+            .route_packs("what coyote time and jump buffering should my platformer use")
+            .await
+            .unwrap();
         assert_eq!(r1[0].pack_id, a_id, "{r1:?}");
-        let (r2, _) = mem.route_packs("what is the UK minimum wage for a 20 year old").await.unwrap();
-        assert_eq!(r2[0].pack_id, "yantrik/same-rows-b@0.1.0", "B must route by its own coverage: {r2:?}");
+        let (r2, _) = mem
+            .route_packs("what is the UK minimum wage for a 20 year old")
+            .await
+            .unwrap();
+        assert_eq!(
+            r2[0].pack_id, "yantrik/same-rows-b@0.1.0",
+            "B must route by its own coverage: {r2:?}"
+        );
         assert!(r2[0].phrase.contains("Minimum Wage"), "{r2:?}");
 
         // In-place replacement: re-seal A's file with new coverage; the catalog reads it back
         // without any mount or unmount in between.
         let _ = std::fs::remove_file(&a);
-        fixtures::seal_fixture_pack_full(a.to_str().unwrap(), "yantrik", "same-rows-a", "0.1.0", "same_rows", &["one shared row"], Some(&["React error boundaries, Suspense and concurrent rendering"]), None, None).unwrap();
+        fixtures::seal_fixture_pack_full(
+            a.to_str().unwrap(),
+            "yantrik",
+            "same-rows-a",
+            "0.1.0",
+            "same_rows",
+            &["one shared row"],
+            Some(&["React error boundaries, Suspense and concurrent rendering"]),
+            None,
+            None,
+        )
+        .unwrap();
         let cat = mem.available_packs().await.unwrap();
         let a_now = cat.iter().find(|e| e.pack_id == a_id).unwrap();
-        assert!(a_now.coverage[0].contains("React"), "a replaced library file must be re-read: {a_now:?}");
+        assert!(
+            a_now.coverage[0].contains("React"),
+            "a replaced library file must be re-read: {a_now:?}"
+        );
 
         // Two files, one pack id: the first by path wins, the catalog has one entry for it.
         let dup = dir.join("zz-duplicate-of-b.ydbpack");
         std::fs::copy(&b, &dup).unwrap();
         let cat = mem.available_packs().await.unwrap();
-        let bs: Vec<&mind_types::memory::PackCatalogEntry> = cat.iter().filter(|e| e.pack_id == "yantrik/same-rows-b@0.1.0").collect();
+        let bs: Vec<&mind_types::memory::PackCatalogEntry> = cat
+            .iter()
+            .filter(|e| e.pack_id == "yantrik/same-rows-b@0.1.0")
+            .collect();
         assert_eq!(bs.len(), 1, "{cat:?}");
-        assert!(bs[0].path.ends_with("b.ydbpack"), "first by sorted path: {}", bs[0].path);
+        assert!(
+            bs[0].path.ends_with("b.ydbpack"),
+            "first by sorted path: {}",
+            bs[0].path
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5374,30 +7031,60 @@ mod tests {
         let dir = mind_types::scratch::dir("p2_stats");
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("stats.ydbpack");
-        let id = fixtures::seal_fixture_pack(pack.to_str().unwrap(), "stats-craft", "stats_ns", &["Row one — the first sealing."], None, None).unwrap();
+        let id = fixtures::seal_fixture_pack(
+            pack.to_str().unwrap(),
+            "stats-craft",
+            "stats_ns",
+            &["Row one — the first sealing."],
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
         let digest1 = mem.mounted_packs().await.unwrap()[0].content_digest.clone();
         assert!(digest1.is_some());
-        for e in [E::Surfaced, E::Surfaced, E::Used, E::Graded { good: true }, E::Graded { good: false }] {
+        for e in [
+            E::Surfaced,
+            E::Surfaced,
+            E::Used,
+            E::Graded { good: true },
+            E::Graded { good: false },
+        ] {
             mem.record_pack_event(&id, e).await.unwrap();
         }
         let s = mem.pack_stats().await.unwrap();
         assert_eq!(s.len(), 1);
-        assert_eq!((s[0].surfaced, s[0].used, s[0].graded, s[0].good), (2, 1, 2, 1), "{s:?}");
+        assert_eq!(
+            (s[0].surfaced, s[0].used, s[0].graded, s[0].good),
+            (2, 1, 2, 1),
+            "{s:?}"
+        );
         assert_eq!(s[0].content_digest, digest1);
         assert!(s[0].last_ms >= s[0].first_ms);
 
         // Re-seal under the same id with different rows, remount, count once more.
         mem.unmount_pack(&id).await.unwrap();
-        let id2 = fixtures::seal_fixture_pack(pack.to_str().unwrap(), "stats-craft", "stats_ns", &["Row two — a different corpus, same id."], None, None).unwrap();
+        let id2 = fixtures::seal_fixture_pack(
+            pack.to_str().unwrap(),
+            "stats-craft",
+            "stats_ns",
+            &["Row two — a different corpus, same id."],
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(id, id2, "same origin@version");
         mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
         let digest2 = mem.mounted_packs().await.unwrap()[0].content_digest.clone();
         assert_ne!(digest1, digest2, "different rows, different digest");
         mem.record_pack_event(&id, E::Surfaced).await.unwrap();
         let s = mem.pack_stats().await.unwrap();
-        assert_eq!((s[0].surfaced, s[0].used, s[0].graded, s[0].good), (1, 0, 0, 0), "the old rows' record did not carry over: {s:?}");
+        assert_eq!(
+            (s[0].surfaced, s[0].used, s[0].graded, s[0].good),
+            (1, 0, 0, 0),
+            "the old rows' record did not carry over: {s:?}"
+        );
         assert_eq!(s[0].content_digest, digest2);
         let _ = std::fs::remove_file(&pack);
     }
@@ -5409,16 +7096,34 @@ mod tests {
         let dir = mind_types::scratch::dir("p1_default");
         std::fs::create_dir_all(&dir).unwrap();
         let pack = dir.join("nofloor.ydbpack");
-        let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
-        fixtures::seal_fixture_pack(pack.to_str().unwrap(), "nofloor", "nofloor_ns", &[row], None, None).unwrap();
+        let row =
+            "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+        fixtures::seal_fixture_pack(
+            pack.to_str().unwrap(),
+            "nofloor",
+            "nofloor_ns",
+            &[row],
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.mount_pack(pack.to_str().unwrap()).await.unwrap();
         let briefs = mem.mounted_packs().await.unwrap();
-        assert_eq!(briefs[0].recommended_min_similarity, None, "the pack declares none…");
+        assert_eq!(
+            briefs[0].recommended_min_similarity, None,
+            "the pack declares none…"
+        );
         let hits = mem.recall_from_packs(row, 5).await.unwrap();
         assert_eq!(hits.len(), 1, "…yet a verbatim query still lands: {hits:?}");
-        let none = mem.recall_from_packs("remind me to call the plumber on tuesday", 5).await.unwrap();
-        assert!(none.is_empty(), "…and the default floor still withholds noise: {none:?}");
+        let none = mem
+            .recall_from_packs("remind me to call the plumber on tuesday", 5)
+            .await
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "…and the default floor still withholds noise: {none:?}"
+        );
         let _ = std::fs::remove_file(&pack);
     }
 
@@ -5428,7 +7133,10 @@ mod tests {
     fn member_ctx(scope: mind_types::Scope) -> mind_types::AccessContext {
         let purpose = match &scope {
             mind_types::Scope::Private(o) => mind_types::Purpose::conversation(o),
-            mind_types::Scope::Shared => mind_types::Purpose::new(mind_types::Subject::Household, mind_types::Activity::Conversation),
+            mind_types::Scope::Shared => mind_types::Purpose::new(
+                mind_types::Subject::Household,
+                mind_types::Activity::Conversation,
+            ),
         };
         mind_types::AccessContext::principal(scope, purpose)
     }
@@ -5441,17 +7149,36 @@ mod tests {
         use mind_types::MemoryFacade;
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         mem.append_message("user", "the old topic").await.unwrap();
-        mem.append_message("assistant", "the old answer").await.unwrap();
-        mem.append_message("break", "— context break (operator) —").await.unwrap();
-        mem.append_message("user", "a brand new topic").await.unwrap();
+        mem.append_message("assistant", "the old answer")
+            .await
+            .unwrap();
+        mem.append_message("break", "— context break (operator) —")
+            .await
+            .unwrap();
+        mem.append_message("user", "a brand new topic")
+            .await
+            .unwrap();
 
-        let window = mem.recent_messages(10, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        let window = mem
+            .recent_messages(10, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
         let texts: Vec<&str> = window.iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(texts, vec!["a brand new topic"], "the window starts after the break: {texts:?}");
-        assert!(!texts.iter().any(|t| t.contains("context break")), "the marker is punctuation, not content");
+        assert_eq!(
+            texts,
+            vec!["a brand new topic"],
+            "the window starts after the break: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("context break")),
+            "the marker is punctuation, not content"
+        );
 
         let all = mem.messages_since(0, 50).await.unwrap();
-        assert!(all.iter().any(|(_, _, t)| t.contains("the old topic")), "the full record survives for consolidation");
+        assert!(
+            all.iter().any(|(_, _, t)| t.contains("the old topic")),
+            "the full record survives for consolidation"
+        );
     }
 
     /// The self-learning loop, closed: banked approaches are ENUMERABLE (the library was
@@ -5493,8 +7220,15 @@ mod tests {
 
         // Deterministic enumeration sees BOTH approaches, newest first.
         let approaches = mem.list_approaches(50).await.unwrap();
-        assert_eq!(approaches.len(), 2, "banked craft must be enumerable: {approaches:?}");
-        assert!(approaches[0].starts_with("APPROACH: mail check"), "newest first");
+        assert_eq!(
+            approaches.len(),
+            2,
+            "banked craft must be enumerable: {approaches:?}"
+        );
+        assert!(
+            approaches[0].starts_with("APPROACH: mail check"),
+            "newest first"
+        );
 
         // Sealing exports the skill + the clean approach; the personal value is withheld.
         let dir = mind_types::scratch::dir("seal_test");
@@ -5503,12 +7237,26 @@ mod tests {
         let _ = std::fs::remove_file(&dest);
         // A transcript line stands in for everything the household file carries that a pack
         // must not: the first live seal shipped 1,944 of these before the scrub existed.
-        mem.append_message("user", "a private household line that must never enter a pack").await.unwrap();
+        mem.append_message(
+            "user",
+            "a private household line that must never enter a pack",
+        )
+        .await
+        .unwrap();
 
-        let summary = mem.seal_learned_pack(dest.to_str().unwrap(), "learned-craft", "0.1.0").await.unwrap();
+        let summary = mem
+            .seal_learned_pack(dest.to_str().unwrap(), "learned-craft", "0.1.0")
+            .await
+            .unwrap();
         assert!(dest.exists(), "the pack file must exist: {summary}");
-        assert!(summary.contains("sealed 2"), "skill + clean approach, not the private one: {summary}");
-        assert!(summary.contains("withheld"), "the withholding must be SAID, not silent: {summary}");
+        assert!(
+            summary.contains("sealed 2"),
+            "skill + clean approach, not the private one: {summary}"
+        );
+        assert!(
+            summary.contains("withheld"),
+            "the withholding must be SAID, not silent: {summary}"
+        );
 
         // THE SCRUB, proven on the artifact itself: the pack carries its corpus and nothing of
         // the household's — no transcript table, no belief graph, no skills ledger, and no
@@ -5528,14 +7276,22 @@ mod tests {
                     "off-allowlist table {t} inside a sealed pack — the household leaks: {tables:?}"
                 );
             }
-            let corpus: i64 = conn.query_row("SELECT count(*) FROM memories", [], |r| r.get(0)).unwrap();
+            let corpus: i64 = conn
+                .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(corpus, 2, "exactly the exported craft, nothing else");
         }
         // The staging rows must not linger: a second seal exports the same 2, not 4.
         let dest2 = dir.join("craft2.ydbpack");
         let _ = std::fs::remove_file(&dest2);
-        let summary2 = mem.seal_learned_pack(dest2.to_str().unwrap(), "learned-craft", "0.1.0").await.unwrap();
-        assert!(summary2.contains("sealed 2"), "staging rows leaked into a re-seal: {summary2}");
+        let summary2 = mem
+            .seal_learned_pack(dest2.to_str().unwrap(), "learned-craft", "0.1.0")
+            .await
+            .unwrap();
+        assert!(
+            summary2.contains("sealed 2"),
+            "staging rows leaked into a re-seal: {summary2}"
+        );
         let _ = std::fs::remove_file(&dest);
         let _ = std::fs::remove_file(&dest2);
     }
@@ -5553,9 +7309,21 @@ mod tests {
         let punctuated = "conflict: Pranab lives in Bentonville. vs Pranab owns a Rosefield watch.";
 
         let k = tension_key(assert_path);
-        assert_eq!(tension_key(dmn_path), k, "the two writer formats must collapse to one key");
-        assert_eq!(tension_key(reversed), k, "A vs B and B vs A are the same contradiction");
-        assert_eq!(tension_key(punctuated), k, "a trailing period is not a different claim");
+        assert_eq!(
+            tension_key(dmn_path),
+            k,
+            "the two writer formats must collapse to one key"
+        );
+        assert_eq!(
+            tension_key(reversed),
+            k,
+            "A vs B and B vs A are the same contradiction"
+        );
+        assert_eq!(
+            tension_key(punctuated),
+            k,
+            "a trailing period is not a different claim"
+        );
 
         // Genuinely different pairs must NOT collapse — a dedup that over-merges hides real conflict.
         assert_ne!(
@@ -5566,7 +7334,10 @@ mod tests {
 
         // Non-conflict tensions (urges) have no " vs " and still normalise to something stable,
         // preserving the accrue-don't-flood behaviour they always had.
-        assert_eq!(tension_key("  Curiosity:  unread   papers "), tension_key("curiosity unread papers"));
+        assert_eq!(
+            tension_key("  Curiosity:  unread   papers "),
+            tension_key("curiosity unread papers")
+        );
     }
 
     /// The relatedness gate must reject the pairs that actually polluted the live table.
@@ -5596,8 +7367,15 @@ mod tests {
         }
 
         // The gate must still ADMIT a genuine conflict about the same subject, or it is just off.
-        let real = topical_relatedness(watch, "Pranab gave Brishti a handbag instead of the Rosefield watch", None);
-        assert!(real >= threshold, "a real same-subject conflict must survive the gate, scored {real}");
+        let real = topical_relatedness(
+            watch,
+            "Pranab gave Brishti a handbag instead of the Rosefield watch",
+            None,
+        );
+        assert!(
+            real >= threshold,
+            "a real same-subject conflict must survive the gate, scored {real}"
+        );
     }
 
     /// The dedup must actually collapse the variants at the storage layer, not just in the key fn.
@@ -5613,25 +7391,36 @@ mod tests {
 
         let n: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM mind_tensions WHERE status='open'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM mind_tensions WHERE status='open'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(n, 1, "three spellings of one contradiction must be one row, not three");
+        assert_eq!(
+            n, 1,
+            "three spellings of one contradiction must be one row, not three"
+        );
 
         // Accrual still works: the row keeps the HIGHEST pressure seen, not the latest.
         let p: f64 = db
             .conn()
-            .query_row("SELECT pressure FROM mind_tensions WHERE status='open'", [], |r| r.get(0))
+            .query_row(
+                "SELECT pressure FROM mind_tensions WHERE status='open'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!((p - 0.45).abs() < 1e-9, "a recurring tension keeps its max pressure, got {p}");
+        assert!(
+            (p - 0.45).abs() < 1e-9,
+            "a recurring tension keeps its max pressure, got {p}"
+        );
     }
 
     #[test]
     fn unauthorized_device_cannot_load_memory() {
-        let result = MemoryHandle::spawn_for_device(
-            ":memory:",
-            64,
-            DeviceAuthorization::Unauthorized,
-        );
+        let result =
+            MemoryHandle::spawn_for_device(":memory:", 64, DeviceAuthorization::Unauthorized);
 
         assert!(matches!(
             result,
@@ -5665,81 +7454,229 @@ mod tests {
         let secret = "The safe combination is 47-12-33";
         let shared = "Dinner on Friday is at seven";
         mem.remember_as_belief_scoped(
-            BeliefAssertion { statement: secret.into(), polarity: 1.0, weight: 2.0, source_event: Some("test".into()), provenance: "told".into() },
+            BeliefAssertion {
+                statement: secret.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            },
             Scope::primary(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         mem.remember_as_belief_scoped(
-            BeliefAssertion { statement: shared.into(), polarity: 1.0, weight: 2.0, source_event: Some("test".into()), provenance: "told".into() },
+            BeliefAssertion {
+                statement: shared.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            },
             Scope::Shared,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let member = member_ctx(Scope::Private("asha".into()));
         let owner = mind_types::AccessContext::operator_audit();
 
         // ── Path 1: deterministic exact match ──────────────────────────────
-        let m_secret = mem.beliefs_matching("safe combination", &member_ctx(member.viewer().unwrap())).await.unwrap();
-        assert!(!m_secret.iter().any(|b| b.statement == secret), "MEMBER recovered the primary secret via exact match — isolation breached");
-        let m_shared = mem.beliefs_matching("dinner friday", &member_ctx(member.viewer().unwrap())).await.unwrap();
-        assert!(m_shared.iter().any(|b| b.statement == shared), "member must still see genuinely shared facts");
+        let m_secret = mem
+            .beliefs_matching("safe combination", &member_ctx(member.viewer().unwrap()))
+            .await
+            .unwrap();
+        assert!(
+            !m_secret.iter().any(|b| b.statement == secret),
+            "MEMBER recovered the primary secret via exact match — isolation breached"
+        );
+        let m_shared = mem
+            .beliefs_matching("dinner friday", &member_ctx(member.viewer().unwrap()))
+            .await
+            .unwrap();
+        assert!(
+            m_shared.iter().any(|b| b.statement == shared),
+            "member must still see genuinely shared facts"
+        );
 
         // ── Path 2: semantic recall ────────────────────────────────────────
-        let r_secret = mem.recall_typed(RecallQuery { text: "safe combination".into(), top_k: 10, kind: None }, &member_ctx(member.viewer().unwrap())).await.unwrap();
-        assert!(!r_secret.iter().any(|r| r.item.text == secret), "MEMBER recovered the primary secret via semantic recall — isolation breached");
+        let r_secret = mem
+            .recall_typed(
+                RecallQuery {
+                    text: "safe combination".into(),
+                    top_k: 10,
+                    kind: None,
+                },
+                &member_ctx(member.viewer().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !r_secret.iter().any(|r| r.item.text == secret),
+            "MEMBER recovered the primary secret via semantic recall — isolation breached"
+        );
 
         // ── The owner (operator) sees everything ───────────────────────────
         assert!(owner.is_operator());
-        let o_secret = mem.beliefs_matching("safe combination", &mind_types::AccessContext::operator_audit()).await.unwrap();
-        assert!(o_secret.iter().any(|b| b.statement == secret), "operator must retain full access");
-        let o_secret_scoped = mem.beliefs_matching("safe combination", &member_ctx(Scope::primary())).await.unwrap();
-        assert!(o_secret_scoped.iter().any(|b| b.statement == secret), "primary viewer must see their own private belief");
+        let o_secret = mem
+            .beliefs_matching(
+                "safe combination",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            o_secret.iter().any(|b| b.statement == secret),
+            "operator must retain full access"
+        );
+        let o_secret_scoped = mem
+            .beliefs_matching("safe combination", &member_ctx(Scope::primary()))
+            .await
+            .unwrap();
+        assert!(
+            o_secret_scoped.iter().any(|b| b.statement == secret),
+            "primary viewer must see their own private belief"
+        );
 
         // ── Path 3: explain_belief — out-of-scope belief is indistinguishable from absent ──
-        assert!(mem.explain_belief(secret, &member).await.unwrap().is_none(), "MEMBER explained the primary secret — isolation breached");
-        assert!(mem.explain_belief(shared, &member).await.unwrap().is_some(), "member must still explain shared beliefs");
-        assert!(mem.explain_belief(secret, &owner).await.unwrap().is_some(), "operator must retain explain access");
+        assert!(
+            mem.explain_belief(secret, &member).await.unwrap().is_none(),
+            "MEMBER explained the primary secret — isolation breached"
+        );
+        assert!(
+            mem.explain_belief(shared, &member).await.unwrap().is_some(),
+            "member must still explain shared beliefs"
+        );
+        assert!(
+            mem.explain_belief(secret, &owner).await.unwrap().is_some(),
+            "operator must retain explain access"
+        );
 
         // ── Path 4: conflicts — a contradiction is visible only when BOTH sides are ──
         let secret_b = "The safe combination is 51-09-27";
         mem.remember_as_belief_scoped(
-            BeliefAssertion { statement: secret_b.into(), polarity: 1.0, weight: 2.0, source_event: Some("test".into()), provenance: "told".into() },
+            BeliefAssertion {
+                statement: secret_b.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            },
             Scope::primary(),
-        ).await.unwrap();
-        mem.relate(secret, secret_b, "contradicts", 0.9).await.unwrap();
+        )
+        .await
+        .unwrap();
+        mem.relate(secret, secret_b, "contradicts", 0.9)
+            .await
+            .unwrap();
         let o_conflicts = mem.conflicts(&owner).await.unwrap();
-        assert!(o_conflicts.iter().any(|c| c.belief_a.contains("safe combination")), "operator must see the private-belief conflict");
+        assert!(
+            o_conflicts
+                .iter()
+                .any(|c| c.belief_a.contains("safe combination")),
+            "operator must see the private-belief conflict"
+        );
         let m_conflicts = mem.conflicts(&member).await.unwrap();
         assert!(
-            !m_conflicts.iter().any(|c| c.belief_a.contains("safe combination") || c.belief_b.contains("safe combination")),
+            !m_conflicts
+                .iter()
+                .any(|c| c.belief_a.contains("safe combination")
+                    || c.belief_b.contains("safe combination")),
             "MEMBER saw the primary secret via the conflicts list — isolation breached"
         );
 
         // ── Path 5: reflect — beliefs, conflicts, goals, prefs all filtered ──
-        mem.store_goal("buy the anniversary surprise").await.unwrap();
+        mem.store_goal("buy the anniversary surprise")
+            .await
+            .unwrap();
         let m_reflect = mem.reflect("safe combination", &member).await.unwrap();
-        assert!(!m_reflect.beliefs.iter().any(|b| b.statement.contains("safe combination")), "MEMBER reflect surfaced the secret");
-        assert!(!m_reflect.open_conflicts.iter().any(|c| c.belief_a.contains("safe combination")), "MEMBER reflect surfaced the secret conflict");
-        assert!(m_reflect.goals.is_empty(), "goals are primary-private state — a member reflect must not carry them");
+        assert!(
+            !m_reflect
+                .beliefs
+                .iter()
+                .any(|b| b.statement.contains("safe combination")),
+            "MEMBER reflect surfaced the secret"
+        );
+        assert!(
+            !m_reflect
+                .open_conflicts
+                .iter()
+                .any(|c| c.belief_a.contains("safe combination")),
+            "MEMBER reflect surfaced the secret conflict"
+        );
+        assert!(
+            m_reflect.goals.is_empty(),
+            "goals are primary-private state — a member reflect must not carry them"
+        );
         let o_reflect = mem.reflect("anniversary", &owner).await.unwrap();
-        assert!(!o_reflect.goals.is_empty(), "operator reflect must retain goals");
+        assert!(
+            !o_reflect.goals.is_empty(),
+            "operator reflect must retain goals"
+        );
 
         // ── Path 6: hydrate_working_set — grounding + commitments filtered ──
-        mem.add_task("wrap the safe-combination note", "high", None).await.unwrap();
-        let m_ws = mem.hydrate_working_set("safe combination", &member).await.unwrap();
-        assert!(!m_ws.stable_facts.iter().any(|f| f.text.contains("safe combination")), "MEMBER working set carried the secret");
-        assert!(!m_ws.uncertain_beliefs.iter().any(|b| b.statement.contains("safe combination")), "MEMBER working set carried the secret (uncertain lane)");
-        assert!(!m_ws.active_contradictions.iter().any(|c| c.belief_a.contains("safe combination")), "MEMBER working set carried the secret conflict");
-        assert!(m_ws.commitments.is_empty(), "tasks are primary state — a member working set must not carry them");
-        let o_ws = mem.hydrate_working_set("safe combination", &owner).await.unwrap();
-        assert!(!o_ws.commitments.is_empty(), "operator working set must retain task commitments");
+        mem.add_task("wrap the safe-combination note", "high", None)
+            .await
+            .unwrap();
+        let m_ws = mem
+            .hydrate_working_set("safe combination", &member)
+            .await
+            .unwrap();
+        assert!(
+            !m_ws
+                .stable_facts
+                .iter()
+                .any(|f| f.text.contains("safe combination")),
+            "MEMBER working set carried the secret"
+        );
+        assert!(
+            !m_ws
+                .uncertain_beliefs
+                .iter()
+                .any(|b| b.statement.contains("safe combination")),
+            "MEMBER working set carried the secret (uncertain lane)"
+        );
+        assert!(
+            !m_ws
+                .active_contradictions
+                .iter()
+                .any(|c| c.belief_a.contains("safe combination")),
+            "MEMBER working set carried the secret conflict"
+        );
+        assert!(
+            m_ws.commitments.is_empty(),
+            "tasks are primary state — a member working set must not carry them"
+        );
+        let o_ws = mem
+            .hydrate_working_set("safe combination", &owner)
+            .await
+            .unwrap();
+        assert!(
+            !o_ws.commitments.is_empty(),
+            "operator working set must retain task commitments"
+        );
 
         // ── Path 7: transcript — a primary DM line never reaches a member view ──
-        mem.append_message_scoped("user", "the gift is hidden in the garage", Scope::primary()).await.unwrap();
-        mem.append_message_scoped("user", "dinner moved to eight", Scope::Shared).await.unwrap();
+        mem.append_message_scoped("user", "the gift is hidden in the garage", Scope::primary())
+            .await
+            .unwrap();
+        mem.append_message_scoped("user", "dinner moved to eight", Scope::Shared)
+            .await
+            .unwrap();
         let m_recent = mem.recent_messages(10, &member).await.unwrap();
-        assert!(!m_recent.iter().any(|(_, t)| t.contains("garage")), "MEMBER read the primary transcript — isolation breached");
-        assert!(m_recent.iter().any(|(_, t)| t.contains("dinner moved")), "member must still see shared-channel lines");
+        assert!(
+            !m_recent.iter().any(|(_, t)| t.contains("garage")),
+            "MEMBER read the primary transcript — isolation breached"
+        );
+        assert!(
+            m_recent.iter().any(|(_, t)| t.contains("dinner moved")),
+            "member must still see shared-channel lines"
+        );
         let o_recent = mem.recent_messages(10, &owner).await.unwrap();
-        assert!(o_recent.iter().any(|(_, t)| t.contains("garage")), "operator must retain the full transcript");
+        assert!(
+            o_recent.iter().any(|(_, t)| t.contains("garage")),
+            "operator must retain the full transcript"
+        );
     }
 
     /// ARCH-1 slice 2 (d) + Purpose Gate v1: EVERY read — operator included — is
@@ -5755,9 +7692,17 @@ mod tests {
         let ledger_path = std::path::PathBuf::from(format!("{db_path}.read_receipts.jsonl"));
         let mem = MemoryHandle::spawn(&db_path, 8).unwrap();
         mem.remember_as_belief_scoped(
-            BeliefAssertion { statement: "Dinner on Friday is at seven".into(), polarity: 1.0, weight: 2.0, source_event: None, provenance: "told".into() },
+            BeliefAssertion {
+                statement: "Dinner on Friday is at seven".into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            },
             Scope::Shared,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Operator reads ARE receipted, named "operator", carrying their declared purpose.
         let op = mind_types::AccessContext::operator_audit();
@@ -5765,19 +7710,51 @@ mod tests {
         let rs = receipts::read_ledger(&ledger_path);
         assert_eq!(rs.len(), 1, "an operator read must leave a receipt");
         assert_eq!(rs[0].principal, "operator");
-        assert_eq!(rs[0].purpose.as_deref(), Some("audit→member:primary"), "the receipt carries the declared purpose");
+        assert_eq!(
+            rs[0].purpose.as_deref(),
+            Some("audit→member:primary"),
+            "the receipt carries the declared purpose"
+        );
 
         // Principal reads are receipted with their purpose — one per boundary crossing, chain intact.
         let member = member_ctx(Scope::Private("asha".into()));
         let _ = mem.beliefs_matching("dinner", &member).await.unwrap();
-        let _ = mem.recall_typed(RecallQuery { text: "dinner".into(), top_k: 5, kind: None }, &member).await.unwrap();
+        let _ = mem
+            .recall_typed(
+                RecallQuery {
+                    text: "dinner".into(),
+                    top_k: 5,
+                    kind: None,
+                },
+                &member,
+            )
+            .await
+            .unwrap();
         let _ = mem.conflicts(&member).await.unwrap();
         let rs = receipts::read_ledger(&ledger_path);
-        assert!(rs.len() >= 4, "each read must leave a receipt (got {})", rs.len());
-        assert!(rs[1..].iter().all(|r| r.principal == "private:asha"), "receipts must name the principal");
-        assert!(rs[1..].iter().all(|r| r.purpose.as_deref() == Some("conversation→member:asha")), "every receipt carries its purpose");
-        assert!(rs.iter().any(|r| r.method == "beliefs_matching" && r.detail.contains("dinner")));
-        assert_eq!(receipts::verify_ledger(&ledger_path), Ok(rs.len()), "the receipt chain must verify");
+        assert!(
+            rs.len() >= 4,
+            "each read must leave a receipt (got {})",
+            rs.len()
+        );
+        assert!(
+            rs[1..].iter().all(|r| r.principal == "private:asha"),
+            "receipts must name the principal"
+        );
+        assert!(
+            rs[1..]
+                .iter()
+                .all(|r| r.purpose.as_deref() == Some("conversation→member:asha")),
+            "every receipt carries its purpose"
+        );
+        assert!(rs
+            .iter()
+            .any(|r| r.method == "beliefs_matching" && r.detail.contains("dinner")));
+        assert_eq!(
+            receipts::verify_ledger(&ledger_path),
+            Ok(rs.len()),
+            "the receipt chain must verify"
+        );
         let _ = std::fs::remove_file(&ledger_path);
     }
 
@@ -5793,28 +7770,53 @@ mod tests {
         let b = "The dentist stayed on Oak Avenue";
         for s in [a, b] {
             mem.remember_as_belief(BeliefAssertion {
-                statement: s.into(), polarity: 1.0, weight: 2.0, source_event: Some("t".into()), provenance: "told".into(),
-            }).await.unwrap();
+                statement: s.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: Some("t".into()),
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
         }
         mem.relate(a, b, "contradicts", 0.9).await.unwrap();
 
         // Derived status: reflection marks the conflicted side "contradicted".
         let ctx = mind_types::AccessContext::operator_audit();
         let refl = mem.reflect("dentist street", &ctx).await.unwrap();
-        let conflicted: Vec<&Belief> = refl.beliefs.iter().filter(|x| x.statement == a || x.statement == b).collect();
-        assert!(!conflicted.is_empty(), "the conflicted beliefs must reflect");
-        assert!(conflicted.iter().all(|x| x.status == "contradicted"), "reflection must not report a conflicted belief as active: {conflicted:?}");
+        let conflicted: Vec<&Belief> = refl
+            .beliefs
+            .iter()
+            .filter(|x| x.statement == a || x.statement == b)
+            .collect();
+        assert!(
+            !conflicted.is_empty(),
+            "the conflicted beliefs must reflect"
+        );
+        assert!(
+            conflicted.iter().all(|x| x.status == "contradicted"),
+            "reflection must not report a conflicted belief as active: {conflicted:?}"
+        );
 
         // Tombstone with reason: the privacy path records "user-deleted"; a plain
         // forget records "unspecified" — and both survive as readable rows.
         assert!(mem.forget_with_reason(a, "user-deleted").await.unwrap());
         assert!(mem.forget(b).await.unwrap());
         let ts = mem.belief_tombstones().await.unwrap();
-        assert!(ts.iter().any(|(p, r, _)| p == a && r == "user-deleted"), "{ts:?}");
-        assert!(ts.iter().any(|(p, r, _)| p == b && r == "unspecified"), "{ts:?}");
+        assert!(
+            ts.iter().any(|(p, r, _)| p == a && r == "user-deleted"),
+            "{ts:?}"
+        );
+        assert!(
+            ts.iter().any(|(p, r, _)| p == b && r == "unspecified"),
+            "{ts:?}"
+        );
         // The rows themselves are gone from recall.
         let hits = mem.beliefs_matching("dentist", &ctx).await.unwrap();
-        assert!(hits.is_empty(), "tombstoned beliefs must not recall: {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "tombstoned beliefs must not recall: {hits:?}"
+        );
     }
 
     /// Purpose Gate v1 red-team corpus — the vision's own acceptance metric:
@@ -5824,10 +7826,18 @@ mod tests {
     /// sensitive-class corpora — on every read path, in every background lane.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn purpose_gate_redteam_zero_unauthorized_hydrations() {
-        use mind_types::{Activity, MemoryFacade, Purpose, PurposeGrantSpec, Scope, Sensitivity, Subject};
+        use mind_types::{
+            Activity, MemoryFacade, Purpose, PurposeGrantSpec, Scope, Sensitivity, Subject,
+        };
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let tell = |statement: &str, scope: Scope| {
-            let a = BeliefAssertion { statement: statement.into(), polarity: 1.0, weight: 2.0, source_event: Some("corpus".into()), provenance: "told".into() };
+            let a = BeliefAssertion {
+                statement: statement.into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: Some("corpus".into()),
+                provenance: "told".into(),
+            };
             (a, scope)
         };
         // The corpus. Every fact is stored, scope-tagged, and reachable by exact word match.
@@ -5847,19 +7857,43 @@ mod tests {
         ] {
             mem.remember_as_belief_scoped(a, s).await.unwrap();
         }
-        let queries = ["oncology appointment July", "therapy session Tuesday", "mortgage payment month", "garage code 4921", "dinner Friday seven", "terse replies"];
+        let queries = [
+            "oncology appointment July",
+            "therapy session Tuesday",
+            "mortgage payment month",
+            "garage code 4921",
+            "dinner Friday seven",
+            "terse replies",
+        ];
         let forbidden_for_background = [asha_health, primary_health, primary_finance, primary_cred];
 
         // 1) EVERY background lane serving the primary: ordinary own/household facts hydrate,
         //    cross-owner and sensitive-class facts NEVER do — zero, on every read path.
-        for activity in [Activity::Proactive, Activity::Research, Activity::Dream, Activity::Foresight, Activity::CodeWork, Activity::Recipe] {
+        for activity in [
+            Activity::Proactive,
+            Activity::Research,
+            Activity::Dream,
+            Activity::Foresight,
+            Activity::CodeWork,
+            Activity::Recipe,
+        ] {
             let lane = mind_types::AccessContext::operator(Purpose::serving_primary(activity));
             for q in queries {
                 let hits = mem.beliefs_matching_n(q, 50, &lane).await.unwrap();
                 for f in forbidden_for_background {
                     assert!(!hits.iter().any(|b| b.statement == f), "{activity:?} hydrated a purpose-incompatible fact via beliefs_matching({q}): {f}");
                 }
-                let recalled = mem.recall_typed(RecallQuery { text: q.into(), top_k: 50, kind: None }, &lane).await.unwrap();
+                let recalled = mem
+                    .recall_typed(
+                        RecallQuery {
+                            text: q.into(),
+                            top_k: 50,
+                            kind: None,
+                        },
+                        &lane,
+                    )
+                    .await
+                    .unwrap();
                 for f in forbidden_for_background {
                     assert!(!recalled.iter().any(|r| r.item.text == f), "{activity:?} hydrated a purpose-incompatible fact via recall_typed({q}): {f}");
                 }
@@ -5871,67 +7905,170 @@ mod tests {
             }
             // No existence oracle through explain either.
             for f in forbidden_for_background {
-                assert!(mem.explain_belief(f, &lane).await.unwrap().is_none(), "{activity:?} explained a purpose-denied fact: {f}");
+                assert!(
+                    mem.explain_belief(f, &lane).await.unwrap().is_none(),
+                    "{activity:?} explained a purpose-denied fact: {f}"
+                );
             }
             // The lane still WORKS: ordinary own + household facts hydrate.
-            let ok = mem.beliefs_matching_n("terse replies", 50, &lane).await.unwrap();
-            assert!(ok.iter().any(|b| b.statement == primary_ordinary), "{activity:?} must still hydrate the primary's ordinary facts");
-            let ok2 = mem.beliefs_matching_n("dinner Friday", 50, &lane).await.unwrap();
-            assert!(ok2.iter().any(|b| b.statement == household), "{activity:?} must still hydrate household facts");
+            let ok = mem
+                .beliefs_matching_n("terse replies", 50, &lane)
+                .await
+                .unwrap();
+            assert!(
+                ok.iter().any(|b| b.statement == primary_ordinary),
+                "{activity:?} must still hydrate the primary's ordinary facts"
+            );
+            let ok2 = mem
+                .beliefs_matching_n("dinner Friday", 50, &lane)
+                .await
+                .unwrap();
+            assert!(
+                ok2.iter().any(|b| b.statement == household),
+                "{activity:?} must still hydrate household facts"
+            );
         }
 
         // 2) Direct conversation with the owner: sensitive OWN facts answer ("what's my
         //    garage code?" is the product) — another member's private fact still never appears.
         let primary_convo = member_ctx(Scope::primary());
-        for own in [primary_health, primary_finance, primary_cred, primary_ordinary] {
-            let hits = mem.beliefs_matching_n(own.split_whitespace().take(3).collect::<Vec<_>>().join(" ").as_str(), 50, &primary_convo).await.unwrap();
-            assert!(hits.iter().any(|b| b.statement == own), "the primary's own conversation must hydrate their own fact: {own}");
+        for own in [
+            primary_health,
+            primary_finance,
+            primary_cred,
+            primary_ordinary,
+        ] {
+            let hits = mem
+                .beliefs_matching_n(
+                    own.split_whitespace()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .as_str(),
+                    50,
+                    &primary_convo,
+                )
+                .await
+                .unwrap();
+            assert!(
+                hits.iter().any(|b| b.statement == own),
+                "the primary's own conversation must hydrate their own fact: {own}"
+            );
         }
-        let leak = mem.beliefs_matching_n("oncology appointment July", 50, &primary_convo).await.unwrap();
-        assert!(!leak.iter().any(|b| b.statement == asha_health), "Asha's private fact leaked into the primary's conversation");
+        let leak = mem
+            .beliefs_matching_n("oncology appointment July", 50, &primary_convo)
+            .await
+            .unwrap();
+        assert!(
+            !leak.iter().any(|b| b.statement == asha_health),
+            "Asha's private fact leaked into the primary's conversation"
+        );
         // And Asha's own conversation still answers Asha about her own health.
         let asha_convo = member_ctx(Scope::Private("asha".into()));
-        let asha_hits = mem.beliefs_matching_n("oncology appointment July", 50, &asha_convo).await.unwrap();
-        assert!(asha_hits.iter().any(|b| b.statement == asha_health), "Asha must be answered about her own health fact");
+        let asha_hits = mem
+            .beliefs_matching_n("oncology appointment July", 50, &asha_convo)
+            .await
+            .unwrap();
+        assert!(
+            asha_hits.iter().any(|b| b.statement == asha_health),
+            "Asha must be answered about her own health fact"
+        );
 
         // 3) A standing grant opens EXACTLY its crossing — and expiry/revocation close it.
         //    Grant: Asha's facts may serve the primary's Proactive work (gift planning).
-        let gid = mem.grant_purpose(PurposeGrantSpec {
-            owner: Subject::Member("asha".into()),
-            beneficiary: Subject::primary(),
-            class: None, // wildcard — which deliberately still excludes credentials
-            activity: Some(Activity::Proactive),
-            expires_ms: (receipts::now_ms()) + 60_000,
-            note: "gift planning for Asha's birthday".into(),
-        }).await.unwrap();
-        let proactive = mind_types::AccessContext::operator(Purpose::serving_primary(Activity::Proactive));
-        let granted = mem.beliefs_matching_n("oncology appointment July", 50, &proactive).await.unwrap();
-        assert!(granted.iter().any(|b| b.statement == asha_health), "the standing grant must open the granted crossing");
+        let gid = mem
+            .grant_purpose(PurposeGrantSpec {
+                owner: Subject::Member("asha".into()),
+                beneficiary: Subject::primary(),
+                class: None, // wildcard — which deliberately still excludes credentials
+                activity: Some(Activity::Proactive),
+                expires_ms: (receipts::now_ms()) + 60_000,
+                note: "gift planning for Asha's birthday".into(),
+            })
+            .await
+            .unwrap();
+        let proactive =
+            mind_types::AccessContext::operator(Purpose::serving_primary(Activity::Proactive));
+        let granted = mem
+            .beliefs_matching_n("oncology appointment July", 50, &proactive)
+            .await
+            .unwrap();
+        assert!(
+            granted.iter().any(|b| b.statement == asha_health),
+            "the standing grant must open the granted crossing"
+        );
         // The grant does NOT leak into other activities…
         let dream = mind_types::AccessContext::operator(Purpose::serving_primary(Activity::Dream));
-        let dream_hits = mem.beliefs_matching_n("oncology appointment July", 50, &dream).await.unwrap();
-        assert!(!dream_hits.iter().any(|b| b.statement == asha_health), "a Proactive grant must not open the Dream lane");
+        let dream_hits = mem
+            .beliefs_matching_n("oncology appointment July", 50, &dream)
+            .await
+            .unwrap();
+        assert!(
+            !dream_hits.iter().any(|b| b.statement == asha_health),
+            "a Proactive grant must not open the Dream lane"
+        );
         // …and NEVER widens a principal's viewing scope (viewer isolation stays supreme).
-        let still_walled = mem.beliefs_matching_n("oncology appointment July", 50, &primary_convo).await.unwrap();
-        assert!(!still_walled.iter().any(|b| b.statement == asha_health), "a grant must never widen a principal's scope");
+        let still_walled = mem
+            .beliefs_matching_n("oncology appointment July", 50, &primary_convo)
+            .await
+            .unwrap();
+        assert!(
+            !still_walled.iter().any(|b| b.statement == asha_health),
+            "a grant must never widen a principal's scope"
+        );
         // Revocation closes it again — zero hydrations, immediately.
         assert!(mem.revoke_purpose_grant(gid).await.unwrap());
-        let revoked = mem.beliefs_matching_n("oncology appointment July", 50, &proactive).await.unwrap();
-        assert!(!revoked.iter().any(|b| b.statement == asha_health), "a revoked grant must stop hydrating");
+        let revoked = mem
+            .beliefs_matching_n("oncology appointment July", 50, &proactive)
+            .await
+            .unwrap();
+        assert!(
+            !revoked.iter().any(|b| b.statement == asha_health),
+            "a revoked grant must stop hydrating"
+        );
         let ledger = mem.list_purpose_grants().await.unwrap();
-        assert!(ledger.iter().any(|g| g.id == gid && g.revoked), "the revoked grant must survive on the ledger (the audit story)");
+        assert!(
+            ledger.iter().any(|g| g.id == gid && g.revoked),
+            "the revoked grant must survive on the ledger (the audit story)"
+        );
 
         // 4) An explicit sensitivity correction beats the classifier, both directions.
-        mem.set_belief_sensitivity(primary_ordinary, Sensitivity::Finance).await.unwrap();
-        let now_denied = mem.beliefs_matching_n("terse replies", 50, &proactive).await.unwrap();
-        assert!(!now_denied.iter().any(|b| b.statement == primary_ordinary), "an explicit Finance tag must deny the background lane");
-        mem.set_belief_sensitivity(primary_health, Sensitivity::Ordinary).await.unwrap();
-        let now_allowed = mem.beliefs_matching_n("therapy session Tuesday", 50, &proactive).await.unwrap();
-        assert!(now_allowed.iter().any(|b| b.statement == primary_health), "an explicit Ordinary tag must override the classifier");
+        mem.set_belief_sensitivity(primary_ordinary, Sensitivity::Finance)
+            .await
+            .unwrap();
+        let now_denied = mem
+            .beliefs_matching_n("terse replies", 50, &proactive)
+            .await
+            .unwrap();
+        assert!(
+            !now_denied.iter().any(|b| b.statement == primary_ordinary),
+            "an explicit Finance tag must deny the background lane"
+        );
+        mem.set_belief_sensitivity(primary_health, Sensitivity::Ordinary)
+            .await
+            .unwrap();
+        let now_allowed = mem
+            .beliefs_matching_n("therapy session Tuesday", 50, &proactive)
+            .await
+            .unwrap();
+        assert!(
+            now_allowed.iter().any(|b| b.statement == primary_health),
+            "an explicit Ordinary tag must override the classifier"
+        );
 
         // 5) Audit retains full visibility (and is receipted elsewhere).
-        let audit_hits = mem.beliefs_matching_n("oncology appointment July", 50, &mind_types::AccessContext::operator_audit()).await.unwrap();
-        assert!(audit_hits.iter().any(|b| b.statement == asha_health), "the audit lane must retain full visibility");
+        let audit_hits = mem
+            .beliefs_matching_n(
+                "oncology appointment July",
+                50,
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            audit_hits.iter().any(|b| b.statement == asha_health),
+            "the audit lane must retain full visibility"
+        );
     }
 
     /// Removed when the test ends, ALONG WITH the `-wal`, `-shm` and `.read_receipts.jsonl` files
@@ -5975,10 +8112,31 @@ mod tests {
                 .await;
             assert!(seeded.is_ok(), "copy must accept writes");
             // Copy carried the genuine belief over.
-            assert!(copy.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::operator_audit()).await.unwrap().is_some());
+            assert!(copy
+                .explain_belief(
+                    "Asha's birthday is March 3",
+                    &mind_types::AccessContext::operator_audit()
+                )
+                .await
+                .unwrap()
+                .is_some());
             // Live mind never saw the seed.
-            assert!(live.explain_belief("Asha's birthday is July 9", &mind_types::AccessContext::operator_audit()).await.unwrap().is_none());
-            assert!(live.explain_belief("Asha's birthday is March 3", &mind_types::AccessContext::operator_audit()).await.unwrap().is_some());
+            assert!(live
+                .explain_belief(
+                    "Asha's birthday is July 9",
+                    &mind_types::AccessContext::operator_audit()
+                )
+                .await
+                .unwrap()
+                .is_none());
+            assert!(live
+                .explain_belief(
+                    "Asha's birthday is March 3",
+                    &mind_types::AccessContext::operator_audit()
+                )
+                .await
+                .unwrap()
+                .is_some());
         }
         let _ = std::fs::remove_file(&live_path);
         let _ = std::fs::remove_file(&snap_path);
@@ -6010,16 +8168,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn add_task_semantic_dedup_merges_paraphrase_without_shared_words() {
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
-        mem.add_task("Buy groceries for the week", "medium", None).await.unwrap();
+        mem.add_task("Buy groceries for the week", "medium", None)
+            .await
+            .unwrap();
         // shares no ≥3-char content token with the above (jaccard 0), but cosine ≈ 0.89 → merges
-        mem.add_task("Do the weekly grocery shopping", "medium", None).await.unwrap();
+        mem.add_task("Do the weekly grocery shopping", "medium", None)
+            .await
+            .unwrap();
         assert_eq!(
             mem.list_tasks(false).await.unwrap().len(),
             1,
             "semantic paraphrase with no shared words must collapse via the embedder path"
         );
         // an unrelated task (cosine ≈ 0.01) is NOT swallowed
-        mem.add_task("Fix the leaking kitchen faucet", "medium", None).await.unwrap();
+        mem.add_task("Fix the leaking kitchen faucet", "medium", None)
+            .await
+            .unwrap();
         assert_eq!(
             mem.list_tasks(false).await.unwrap().len(),
             2,
@@ -6059,26 +8223,58 @@ mod tests {
         };
 
         // v1: strong POSITIVE evidence → confidence rises well above the 0.5 prior.
-        let v1 = mem.remember_as_belief_versioned(assertion(1.0, 2.0), 1).await.unwrap();
-        assert!(v1.confidence > 0.5, "positive evidence should raise confidence: {}", v1.confidence);
+        let v1 = mem
+            .remember_as_belief_versioned(assertion(1.0, 2.0), 1)
+            .await
+            .unwrap();
+        assert!(
+            v1.confidence > 0.5,
+            "positive evidence should raise confidence: {}",
+            v1.confidence
+        );
 
         // v3: even stronger POSITIVE evidence → the freshest, highest-confidence state.
-        let fresh = mem.remember_as_belief_versioned(assertion(1.0, 3.0), 3).await.unwrap();
-        assert!(fresh.confidence > v1.confidence, "newer evidence should raise confidence further");
+        let fresh = mem
+            .remember_as_belief_versioned(assertion(1.0, 3.0), 3)
+            .await
+            .unwrap();
+        assert!(
+            fresh.confidence > v1.confidence,
+            "newer evidence should raise confidence further"
+        );
         let fresh_conf = fresh.confidence;
 
         // v2 arrives LATE and is strongly NEGATIVE. It is older than the stored v3, so it must be
         // dropped — the fresher confidence survives untouched, not silently overwritten downward.
-        let stale = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 2).await.unwrap();
-        assert_eq!(stale.confidence, fresh_conf, "stale (older) evidence version must be rejected");
+        let stale = mem
+            .remember_as_belief_versioned(assertion(-1.0, 5.0), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            stale.confidence, fresh_conf,
+            "stale (older) evidence version must be rejected"
+        );
 
         // A replay of the current version (v3) is likewise a no-op — equal is not strictly greater.
-        let replay = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 3).await.unwrap();
-        assert_eq!(replay.confidence, fresh_conf, "replayed (equal) evidence version must be rejected");
+        let replay = mem
+            .remember_as_belief_versioned(assertion(-1.0, 5.0), 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.confidence, fresh_conf,
+            "replayed (equal) evidence version must be rejected"
+        );
 
         // A genuinely newer version (v4) is applied — the guard only blocks stale/replayed writes.
-        let advanced = mem.remember_as_belief_versioned(assertion(-1.0, 5.0), 4).await.unwrap();
-        assert!(advanced.confidence < fresh_conf, "a strictly-newer version must still apply: {}", advanced.confidence);
+        let advanced = mem
+            .remember_as_belief_versioned(assertion(-1.0, 5.0), 4)
+            .await
+            .unwrap();
+        assert!(
+            advanced.confidence < fresh_conf,
+            "a strictly-newer version must still apply: {}",
+            advanced.confidence
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6092,14 +8288,26 @@ mod tests {
             provenance: "told".into(),
         };
 
-        let first = mem.remember_as_belief(assertion("Exercise improves mood.  ")).await.unwrap();
-        let second = mem.remember_as_belief(assertion("exercise improves mood")).await.unwrap();
+        let first = mem
+            .remember_as_belief(assertion("Exercise improves mood.  "))
+            .await
+            .unwrap();
+        let second = mem
+            .remember_as_belief(assertion("exercise improves mood"))
+            .await
+            .unwrap();
 
         assert_eq!(first.statement, "Exercise improves mood");
-        assert_eq!(second.id, first.id, "case and trailing punctuation must not create another belief");
+        assert_eq!(
+            second.id, first.id,
+            "case and trailing punctuation must not create another belief"
+        );
         assert_eq!(mem.belief_count().await.unwrap(), 1);
         assert!(
-            mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap().is_empty(),
+            mem.conflicts(&mind_types::AccessContext::operator_audit())
+                .await
+                .unwrap()
+                .is_empty(),
             "surface variants are not contradictions"
         );
     }
@@ -6108,7 +8316,10 @@ mod tests {
     async fn actor_round_trips_a_write_then_read() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let rid = mem.record("the sky is blue").await.unwrap();
-        assert_eq!(mem.get_text(&rid).await.unwrap().as_deref(), Some("the sky is blue"));
+        assert_eq!(
+            mem.get_text(&rid).await.unwrap().as_deref(),
+            Some("the sky is blue")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6125,12 +8336,25 @@ mod tests {
                 provenance: "told".into(),
             })
             .await;
-        assert!(belief.is_err(), "secret-bearing belief must be refused by the write-gate");
+        assert!(
+            belief.is_err(),
+            "secret-bearing belief must be refused by the write-gate"
+        );
         // …nor as an observation…
-        let obs_secret = mem.remember_observation("here is the key: ghp_SECRET1234567890ab", ProvenanceCategory::SandboxedSkill).await;
-        assert!(obs_secret.is_err(), "secret-bearing observation must be refused");
+        let obs_secret = mem
+            .remember_observation(
+                "here is the key: ghp_SECRET1234567890ab",
+                ProvenanceCategory::SandboxedSkill,
+            )
+            .await;
+        assert!(
+            obs_secret.is_err(),
+            "secret-bearing observation must be refused"
+        );
         // …but a clean observation is stored (provenance-tagged), never a belief.
-        let ok = mem.remember_observation("the CSV had 412 rows", ProvenanceCategory::SandboxedSkill).await;
+        let ok = mem
+            .remember_observation("the CSV had 412 rows", ProvenanceCategory::SandboxedSkill)
+            .await;
         assert!(ok.is_ok(), "clean observation should store: {ok:?}");
     }
 
@@ -6140,7 +8364,9 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..50u32 {
             let m = mem.clone();
-            handles.push(tokio::spawn(async move { m.record(format!("fact number {i}")).await }));
+            handles.push(tokio::spawn(async move {
+                m.record(format!("fact number {i}")).await
+            }));
         }
         let mut rids = Vec::new();
         for h in handles {
@@ -6160,16 +8386,32 @@ mod tests {
         // so the reader returned a STALE older row, breaking holdings/subs/bills on any repeated value.
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         mem.profile_set("holdings", "[A]").await.unwrap();
-        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"));
+        assert_eq!(
+            mem.profile_get("holdings").await.unwrap().as_deref(),
+            Some("[A]")
+        );
         mem.profile_set("holdings", "[A,B]").await.unwrap();
-        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A,B]"));
+        assert_eq!(
+            mem.profile_get("holdings").await.unwrap().as_deref(),
+            Some("[A,B]")
+        );
         // re-store a value seen earlier — MUST read back, not the stale "[A,B]"
         mem.profile_set("holdings", "[A]").await.unwrap();
-        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"), "re-stored prior value must win");
+        assert_eq!(
+            mem.profile_get("holdings").await.unwrap().as_deref(),
+            Some("[A]"),
+            "re-stored prior value must win"
+        );
         // a different key stays independent
         mem.profile_set("name", "Pranab").await.unwrap();
-        assert_eq!(mem.profile_get("name").await.unwrap().as_deref(), Some("Pranab"));
-        assert_eq!(mem.profile_get("holdings").await.unwrap().as_deref(), Some("[A]"));
+        assert_eq!(
+            mem.profile_get("name").await.unwrap().as_deref(),
+            Some("Pranab")
+        );
+        assert_eq!(
+            mem.profile_get("holdings").await.unwrap().as_deref(),
+            Some("[A]")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6177,24 +8419,57 @@ mod tests {
         // Regression: consolidation re-phrases the same goal/pref every pass — paraphrases must collapse
         // (they flooded the store with ~280 near-dups), while distinct intents stay separate.
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        mem.store_preference("Prefers terse one-line summaries").await.unwrap();
-        mem.store_preference("Prefers terse, one-line summaries when possible").await.unwrap(); // paraphrase
-        mem.store_preference("Likes dark mode in the editor").await.unwrap(); // distinct
+        mem.store_preference("Prefers terse one-line summaries")
+            .await
+            .unwrap();
+        mem.store_preference("Prefers terse, one-line summaries when possible")
+            .await
+            .unwrap(); // paraphrase
+        mem.store_preference("Likes dark mode in the editor")
+            .await
+            .unwrap(); // distinct
         let prefs = mem.list_preferences().await.unwrap();
-        assert_eq!(prefs.len(), 2, "paraphrase collapses, distinct stays: {:?}", prefs.iter().map(|p| &p.text).collect::<Vec<_>>());
+        assert_eq!(
+            prefs.len(),
+            2,
+            "paraphrase collapses, distinct stays: {:?}",
+            prefs.iter().map(|p| &p.text).collect::<Vec<_>>()
+        );
 
-        mem.store_goal("Buy a handbag and watch combo for wife by July 23").await.unwrap();
-        mem.store_goal("buy a handbag + watch combo under $200 for wife before July 23, 2026").await.unwrap(); // paraphrase
-        mem.store_goal("Track GitHub repositories for new issues").await.unwrap(); // distinct
+        mem.store_goal("Buy a handbag and watch combo for wife by July 23")
+            .await
+            .unwrap();
+        mem.store_goal("buy a handbag + watch combo under $200 for wife before July 23, 2026")
+            .await
+            .unwrap(); // paraphrase
+        mem.store_goal("Track GitHub repositories for new issues")
+            .await
+            .unwrap(); // distinct
         let goals = mem.list_goals().await.unwrap();
-        assert_eq!(goals.len(), 2, "gift paraphrase collapses, repo-tracking stays: {:?}", goals.iter().map(|g| &g.text).collect::<Vec<_>>());
+        assert_eq!(
+            goals.len(),
+            2,
+            "gift paraphrase collapses, repo-tracking stays: {:?}",
+            goals.iter().map(|g| &g.text).collect::<Vec<_>>()
+        );
 
         // Normalization dedup: a short goal whose only difference is case/punctuation must collapse even
         // though jaccard skips it (<2 significant words). "Exercise" / "exercise." → one entry.
         mem.store_preference("Exercise").await.unwrap();
         mem.store_preference("exercise.").await.unwrap(); // pure formatting variant → SAME entry
-        let ex: Vec<_> = mem.list_preferences().await.unwrap().into_iter().filter(|p| p.text.to_lowercase().starts_with("exercise")).collect();
-        assert_eq!(ex.len(), 1, "case/punctuation variant of a short goal collapses: {:?}", ex.iter().map(|p| &p.text).collect::<Vec<_>>());
+        let ex: Vec<_> = mem
+            .list_preferences()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.text.to_lowercase().starts_with("exercise"))
+            .collect();
+        assert_eq!(
+            ex.len(),
+            1,
+            "case/punctuation variant of a short goal collapses: {:?}",
+            ex.iter().map(|p| &p.text).collect::<Vec<_>>()
+        );
     }
 
     /// Retro-dedup collapses trailing-punctuation and Jaccard paraphrases that were written BEFORE
@@ -6204,33 +8479,70 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
 
         // Trailing-punctuation / case variant (norm_prop dedup)
-        mem.force_insert_goal_pref_raw("preference", "Exercise daily").await.unwrap();
-        mem.force_insert_goal_pref_raw("preference", "exercise daily.").await.unwrap();
+        mem.force_insert_goal_pref_raw("preference", "Exercise daily")
+            .await
+            .unwrap();
+        mem.force_insert_goal_pref_raw("preference", "exercise daily.")
+            .await
+            .unwrap();
 
         // Jaccard paraphrase (≈ 0.71 word overlap — caught by the ≥0.6 threshold)
-        mem.force_insert_goal_pref_raw("preference", "Prefers terse one-line summaries").await.unwrap();
-        mem.force_insert_goal_pref_raw("preference", "Prefers terse, one-line summaries when possible").await.unwrap();
+        mem.force_insert_goal_pref_raw("preference", "Prefers terse one-line summaries")
+            .await
+            .unwrap();
+        mem.force_insert_goal_pref_raw(
+            "preference",
+            "Prefers terse, one-line summaries when possible",
+        )
+        .await
+        .unwrap();
 
         // Distinct entry — must survive unchanged
-        mem.force_insert_goal_pref_raw("preference", "Drink more water").await.unwrap();
+        mem.force_insert_goal_pref_raw("preference", "Drink more water")
+            .await
+            .unwrap();
 
         let before = mem.list_preferences().await.unwrap();
-        assert_eq!(before.len(), 5, "force-insert bypassed dedup; all 5 rows present before retro pass");
+        assert_eq!(
+            before.len(),
+            5,
+            "force-insert bypassed dedup; all 5 rows present before retro pass"
+        );
 
         let (beliefs_merged, goals_prefs_removed) = mem.retro_dedup_store().await.unwrap();
         assert_eq!(beliefs_merged, 0, "no belief duplicates in a fresh DB");
-        assert_eq!(goals_prefs_removed, 2, "one norm_prop dup + one Jaccard dup removed");
+        assert_eq!(
+            goals_prefs_removed, 2,
+            "one norm_prop dup + one Jaccard dup removed"
+        );
 
         let after = mem.list_preferences().await.unwrap();
-        assert_eq!(after.len(), 3, "first occurrences and the distinct entry survive");
+        assert_eq!(
+            after.len(),
+            3,
+            "first occurrences and the distinct entry survive"
+        );
         let texts: Vec<&str> = after.iter().map(|p| p.text.as_str()).collect();
-        assert!(texts.contains(&"Exercise daily"), "norm_prop survivor kept: {texts:?}");
-        assert!(texts.contains(&"Prefers terse one-line summaries"), "Jaccard survivor kept: {texts:?}");
-        assert!(texts.contains(&"Drink more water"), "distinct entry unchanged: {texts:?}");
+        assert!(
+            texts.contains(&"Exercise daily"),
+            "norm_prop survivor kept: {texts:?}"
+        );
+        assert!(
+            texts.contains(&"Prefers terse one-line summaries"),
+            "Jaccard survivor kept: {texts:?}"
+        );
+        assert!(
+            texts.contains(&"Drink more water"),
+            "distinct entry unchanged: {texts:?}"
+        );
 
         // Idempotency: a second pass on the already-clean store removes nothing more.
         let (b2, gp2) = mem.retro_dedup_store().await.unwrap();
-        assert_eq!((b2, gp2), (0, 0), "second retro-dedup pass on clean store is a no-op");
+        assert_eq!(
+            (b2, gp2),
+            (0, 0),
+            "second retro-dedup pass on clean store is a no-op"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6242,15 +8554,41 @@ mod tests {
             let s = s.to_string();
             let m = mem.clone();
             async move {
-                m.remember_as_belief(BeliefAssertion { statement: s, polarity: 1.0, weight: 0.8, source_event: None, provenance: "test".into() }).await.unwrap()
+                m.remember_as_belief(BeliefAssertion {
+                    statement: s,
+                    polarity: 1.0,
+                    weight: 0.8,
+                    source_event: None,
+                    provenance: "test".into(),
+                })
+                .await
+                .unwrap()
             }
         };
         assert("The latest stable Rust release is 1.70").await;
         assert("the latest stable Rust release is 1.70.").await; // formatting/case variant → SAME node
         assert("The latest stable Rust release is 1.96").await; // different content → SEPARATE node
-        let hits = mem.recall_typed(RecallQuery { text: "latest stable Rust release".into(), top_k: 10, kind: None }, &mind_types::AccessContext::operator_audit()).await.unwrap();
-        let rust: Vec<_> = hits.iter().filter(|r| r.item.text.contains("Rust release")).collect();
-        assert_eq!(rust.len(), 2, "formatting variant merges, contradiction (1.70 vs 1.96) stays separate: {:?}", rust.iter().map(|r| &r.item.text).collect::<Vec<_>>());
+        let hits = mem
+            .recall_typed(
+                RecallQuery {
+                    text: "latest stable Rust release".into(),
+                    top_k: 10,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap();
+        let rust: Vec<_> = hits
+            .iter()
+            .filter(|r| r.item.text.contains("Rust release"))
+            .collect();
+        assert_eq!(
+            rust.len(),
+            2,
+            "formatting variant merges, contradiction (1.70 vs 1.96) stays separate: {:?}",
+            rust.iter().map(|r| &r.item.text).collect::<Vec<_>>()
+        );
     }
 
     /// THE GROUP-CHAT MOAT: a private fact from one member must NEVER surface to another. The
@@ -6259,26 +8597,93 @@ mod tests {
     async fn read_isolation_keeps_a_private_belief_from_another_member() {
         use mind_types::Scope;
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        let (primary, wife) = (Scope::Private("primary".into()), Scope::Private("wife".into()));
+        let (primary, wife) = (
+            Scope::Private("primary".into()),
+            Scope::Private("wife".into()),
+        );
         // Pranab (primary), in a private DM, tells the bot his surprise gift plan.
-        mem.remember_as_belief_scoped(BeliefAssertion { statement: "I am getting my wife a gold watch for her birthday".into(), polarity: 1.0, weight: 0.9, source_event: None, provenance: "told".into() }, primary.clone()).await.unwrap();
+        mem.remember_as_belief_scoped(
+            BeliefAssertion {
+                statement: "I am getting my wife a gold watch for her birthday".into(),
+                polarity: 1.0,
+                weight: 0.9,
+                source_event: None,
+                provenance: "told".into(),
+            },
+            primary.clone(),
+        )
+        .await
+        .unwrap();
         // A SHARED household fact (told in the group).
-        mem.remember_as_belief_scoped(BeliefAssertion { statement: "The household is out of milk".into(), polarity: 1.0, weight: 0.8, source_event: None, provenance: "told".into() }, Scope::Shared).await.unwrap();
-        let q = |t: &str| RecallQuery { text: t.into(), top_k: 10, kind: None };
+        mem.remember_as_belief_scoped(
+            BeliefAssertion {
+                statement: "The household is out of milk".into(),
+                polarity: 1.0,
+                weight: 0.8,
+                source_event: None,
+                provenance: "told".into(),
+            },
+            Scope::Shared,
+        )
+        .await
+        .unwrap();
+        let q = |t: &str| RecallQuery {
+            text: t.into(),
+            top_k: 10,
+            kind: None,
+        };
 
         // The WIFE must NOT see the private gift belief.
-        let wife_view = mem.recall_typed(q("birthday gift watch"), &member_ctx(wife.clone())).await.unwrap();
-        assert!(!wife_view.iter().any(|r| r.item.text.contains("gold watch")), "LEAK: wife saw the surprise: {:?}", wife_view.iter().map(|r| &r.item.text).collect::<Vec<_>>());
+        let wife_view = mem
+            .recall_typed(q("birthday gift watch"), &member_ctx(wife.clone()))
+            .await
+            .unwrap();
+        assert!(
+            !wife_view.iter().any(|r| r.item.text.contains("gold watch")),
+            "LEAK: wife saw the surprise: {:?}",
+            wife_view.iter().map(|r| &r.item.text).collect::<Vec<_>>()
+        );
         // Pranab MUST see his own private belief.
-        let p_view = mem.recall_typed(q("birthday gift watch"), &member_ctx(primary.clone())).await.unwrap();
-        assert!(p_view.iter().any(|r| r.item.text.contains("gold watch")), "primary must see his own private belief");
+        let p_view = mem
+            .recall_typed(q("birthday gift watch"), &member_ctx(primary.clone()))
+            .await
+            .unwrap();
+        assert!(
+            p_view.iter().any(|r| r.item.text.contains("gold watch")),
+            "primary must see his own private belief"
+        );
         // BOTH see the shared milk fact.
-        assert!(mem.recall_typed(q("out of milk"), &member_ctx(wife.clone())).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "wife sees shared");
-        assert!(mem.recall_typed(q("out of milk"), &member_ctx(primary)).await.unwrap().iter().any(|r| r.item.text.contains("milk")), "primary sees shared");
+        assert!(
+            mem.recall_typed(q("out of milk"), &member_ctx(wife.clone()))
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.item.text.contains("milk")),
+            "wife sees shared"
+        );
+        assert!(
+            mem.recall_typed(q("out of milk"), &member_ctx(primary))
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.item.text.contains("milk")),
+            "primary sees shared"
+        );
         // The wife's GROUNDING (working set) must also exclude the gift — the LLM never even sees it.
-        let ws = mem.hydrate_working_set("birthday gift watch", &member_ctx(wife)).await.unwrap();
-        let grounded: Vec<String> = ws.stable_facts.iter().map(|m| m.text.clone()).chain(ws.uncertain_beliefs.iter().map(|b| b.statement.clone())).collect();
-        assert!(!grounded.iter().any(|t| t.contains("gold watch")), "LEAK in grounding: {grounded:?}");
+        let ws = mem
+            .hydrate_working_set("birthday gift watch", &member_ctx(wife))
+            .await
+            .unwrap();
+        let grounded: Vec<String> = ws
+            .stable_facts
+            .iter()
+            .map(|m| m.text.clone())
+            .chain(ws.uncertain_beliefs.iter().map(|b| b.statement.clone()))
+            .collect();
+        assert!(
+            !grounded.iter().any(|t| t.contains("gold watch")),
+            "LEAK in grounding: {grounded:?}"
+        );
     }
 
     /// THE MOAT: typed belief + Bayesian revision + contradiction detection + explanation,
@@ -6298,15 +8703,29 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(b.confidence > 0.5, "positive evidence should raise confidence, got {}", b.confidence);
+        assert!(
+            b.confidence > 0.5,
+            "positive evidence should raise confidence, got {}",
+            b.confidence
+        );
         assert_eq!(b.id, "Pranab prefers terse replies");
 
         // Recall finds it by overlapping words.
         let r = mem
-            .recall_typed(RecallQuery { text: "reply style terse".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
+            .recall_typed(
+                RecallQuery {
+                    text: "reply style terse".into(),
+                    top_k: 5,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap();
-        assert!(r.iter().any(|x| x.item.text.contains("terse")), "recall should surface the belief");
+        assert!(
+            r.iter().any(|x| x.item.text.contains("terse")),
+            "recall should surface the belief"
+        );
 
         // A contradicting belief + an explicit contradiction link.
         mem.remember_as_belief(BeliefAssertion {
@@ -6327,18 +8746,32 @@ mod tests {
         .await
         .unwrap();
 
-        let conflicts = mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap();
-        assert!(!conflicts.is_empty(), "the contradiction should be detected");
-        assert!(conflicts.iter().any(|c| c.belief_a.contains("terse") || c.belief_b.contains("terse")));
+        let conflicts = mem
+            .conflicts(&mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
+        assert!(
+            !conflicts.is_empty(),
+            "the contradiction should be detected"
+        );
+        assert!(conflicts
+            .iter()
+            .any(|c| c.belief_a.contains("terse") || c.belief_b.contains("terse")));
 
         // Explanation returns the belief with its evidence trail.
         let (belief, _ev) = mem
-            .explain_belief("Pranab prefers terse replies", &mind_types::AccessContext::operator_audit())
+            .explain_belief(
+                "Pranab prefers terse replies",
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap()
             .expect("belief exists");
         assert!(belief.confidence > 0.5);
-        assert!(belief.evidence_count >= 1, "belief should carry its evidence trail");
+        assert!(
+            belief.evidence_count >= 1,
+            "belief should carry its evidence trail"
+        );
 
         // Negative evidence pushes a belief's confidence down.
         let down = mem
@@ -6351,7 +8784,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(down.confidence < 0.5, "negative evidence should lower confidence, got {}", down.confidence);
+        assert!(
+            down.confidence < 0.5,
+            "negative evidence should lower confidence, got {}",
+            down.confidence
+        );
     }
 
     #[test]
@@ -6386,8 +8823,11 @@ mod tests {
         let threshold = parse_relatedness_threshold(Some("0"));
         assert_eq!(threshold, 0.25);
         assert!(
-            topical_relatedness("The Pacific Ocean is deep", "Rust has improved diagnostics", None)
-                < threshold
+            topical_relatedness(
+                "The Pacific Ocean is deep",
+                "Rust has improved diagnostics",
+                None
+            ) < threshold
         );
     }
 
@@ -6427,8 +8867,15 @@ mod tests {
         .await
         .unwrap();
 
-        let conflicts = mem.conflicts(&mind_types::AccessContext::operator_audit()).await.unwrap();
-        assert_eq!(conflicts.len(), 1, "only the related pair should survive: {conflicts:?}");
+        let conflicts = mem
+            .conflicts(&mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "only the related pair should survive: {conflicts:?}"
+        );
         assert!(conflicts[0].belief_a.contains("Pranab"));
         assert!(conflicts[0].belief_b.contains("Pranab"));
     }
@@ -6437,7 +8884,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cheap_task_crud_and_completion() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        let t = mem.add_task("finish the Q3 report", "high", None).await.unwrap();
+        let t = mem
+            .add_task("finish the Q3 report", "high", None)
+            .await
+            .unwrap();
         assert_eq!(t.status, "pending");
         assert_eq!(t.priority, "high");
 
@@ -6446,32 +8896,80 @@ mod tests {
         assert_eq!(open[0].description, "finish the Q3 report");
 
         assert!(mem.complete_task(&t.id).await.unwrap());
-        assert!(mem.list_tasks(false).await.unwrap().is_empty(), "completed task should drop off the open list");
-        assert_eq!(mem.list_tasks(true).await.unwrap().len(), 1, "but still present when including done");
+        assert!(
+            mem.list_tasks(false).await.unwrap().is_empty(),
+            "completed task should drop off the open list"
+        );
+        assert_eq!(
+            mem.list_tasks(true).await.unwrap().len(),
+            1,
+            "but still present when including done"
+        );
 
         // tasks ride into the working-set as commitments (for grounding)
-        mem.add_task("call the dentist", "medium", None).await.unwrap();
-        let ws = mem.hydrate_working_set("what's on my plate", &mind_types::AccessContext::operator_audit()).await.unwrap();
-        assert!(ws.commitments.iter().any(|c| c.text.contains("dentist")), "open task should surface in working-set");
+        mem.add_task("call the dentist", "medium", None)
+            .await
+            .unwrap();
+        let ws = mem
+            .hydrate_working_set(
+                "what's on my plate",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ws.commitments.iter().any(|c| c.text.contains("dentist")),
+            "open task should surface in working-set"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn add_task_dedups_paraphrases_keeps_distinct_intents() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         // commitment-extraction re-creates the SAME task as different wording each pass — these must collapse
-        mem.add_task("Build a live-updating web page tracking top 10 handbag + watch combos under $200", "medium", None).await.unwrap();
+        mem.add_task(
+            "Build a live-updating web page tracking top 10 handbag + watch combos under $200",
+            "medium",
+            None,
+        )
+        .await
+        .unwrap();
         mem.add_task("Build and deliver a live-updating web page tracking the top 10 handbag and watch combos under $200", "medium", None).await.unwrap();
-        mem.add_task("Build a live-updating web page with the top 10 handbag and watch combos under $200", "medium", None).await.unwrap();
-        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 1, "paraphrased page tasks collapse to one");
+        mem.add_task(
+            "Build a live-updating web page with the top 10 handbag and watch combos under $200",
+            "medium",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mem.list_tasks(false).await.unwrap().len(),
+            1,
+            "paraphrased page tasks collapse to one"
+        );
         // a genuinely different intent is NOT swallowed
-        mem.add_task("Order wife's birthday gift by July 17th to ensure delivery by July 23rd", "high", None).await.unwrap();
-        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 2, "distinct intent stays separate");
+        mem.add_task(
+            "Order wife's birthday gift by July 17th to ensure delivery by July 23rd",
+            "high",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mem.list_tasks(false).await.unwrap().len(),
+            2,
+            "distinct intent stays separate"
+        );
         // and its own paraphrase dedups against it
         mem.add_task("Order wife's birthday gift (handbag + watch combo) by July 17th to ensure delivery by July 23rd", "high", None).await.unwrap();
-        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 2, "gift paraphrase collapses too");
+        assert_eq!(
+            mem.list_tasks(false).await.unwrap().len(),
+            2,
+            "gift paraphrase collapses too"
+        );
     }
 
-    /// THE EMBEDDER MOAT (yantrikdb 0.9.0): at dim 64 the engine auto-attaches its bundled
+    /// THE EMBEDDER MOAT: at dim 64 the engine auto-attaches its bundled
     /// model2vec embedder, so recall is genuinely SEMANTIC — a paraphrase that shares *no words*
     /// with the stored belief still surfaces it. This is what keyword recall structurally cannot do.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6494,7 +8992,14 @@ mod tests {
         }
         // "he likes short responses" shares no keywords with "Pranab prefers concise answers".
         let r = mem
-            .recall_typed(RecallQuery { text: "he likes short responses".into(), top_k: 1, kind: None }, &mind_types::AccessContext::operator_audit())
+            .recall_typed(
+                RecallQuery {
+                    text: "he likes short responses".into(),
+                    top_k: 1,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap();
         assert!(!r.is_empty(), "semantic recall returned nothing");
@@ -6512,7 +9017,11 @@ mod tests {
     async fn semantic_skill_recall_ranks_paraphrase_first() {
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         for (name, summary, tags) in [
-            ("csv_row_counter", "counts the number of rows in a CSV file", vec!["csv", "data"]),
+            (
+                "csv_row_counter",
+                "counts the number of rows in a CSV file",
+                vec!["csv", "data"],
+            ),
             ("greeter", "prints a friendly hello greeting", vec!["text"]),
         ] {
             mem.save_skill(Skill {
@@ -6532,10 +9041,14 @@ mod tests {
             .unwrap();
         }
         // "how many lines are in a spreadsheet" shares no keywords with "counts rows in a CSV file".
-        let hits = mem.recall_skills("how many lines are in a spreadsheet", 3).await.unwrap();
+        let hits = mem
+            .recall_skills("how many lines are in a spreadsheet", 3)
+            .await
+            .unwrap();
         assert!(!hits.is_empty(), "semantic skill recall returned nothing");
         assert_eq!(
-            hits[0].name, "csv_row_counter",
+            hits[0].name,
+            "csv_row_counter",
             "the CSV skill should rank first for the paraphrase, got: {:?}",
             hits.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
@@ -6556,11 +9069,24 @@ mod tests {
         .await
         .unwrap();
         let recalled = mem
-            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
+            .recall_typed(
+                RecallQuery {
+                    text: "earth sun orbit".into(),
+                    top_k: 5,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap();
-        let hit = recalled.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
-        assert_eq!(hit.item.evidence_count, 1, "one assertion → evidence_count must be 1");
+        let hit = recalled
+            .iter()
+            .find(|r| r.item.text.contains("earth"))
+            .expect("belief not recalled");
+        assert_eq!(
+            hit.item.evidence_count, 1,
+            "one assertion → evidence_count must be 1"
+        );
 
         // A second assertion on the same belief increments the count.
         mem.remember_as_belief(BeliefAssertion {
@@ -6573,11 +9099,24 @@ mod tests {
         .await
         .unwrap();
         let recalled2 = mem
-            .recall_typed(RecallQuery { text: "earth sun orbit".into(), top_k: 5, kind: None }, &mind_types::AccessContext::operator_audit())
+            .recall_typed(
+                RecallQuery {
+                    text: "earth sun orbit".into(),
+                    top_k: 5,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap();
-        let hit2 = recalled2.iter().find(|r| r.item.text.contains("earth")).expect("belief not recalled");
-        assert_eq!(hit2.item.evidence_count, 2, "two assertions → evidence_count must be 2");
+        let hit2 = recalled2
+            .iter()
+            .find(|r| r.item.text.contains("earth"))
+            .expect("belief not recalled");
+        assert_eq!(
+            hit2.item.evidence_count, 2,
+            "two assertions → evidence_count must be 2"
+        );
     }
 
     /// reflect() must surface each belief's true evidence_count so that single-source
@@ -6595,9 +9134,19 @@ mod tests {
         .await
         .unwrap();
         // Single-source: reflect must report evidence_count == 1 (not 0).
-        let reflection = mem.reflect("sky colour", &mind_types::AccessContext::operator_audit()).await.unwrap();
-        let belief = reflection.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from reflection");
-        assert_eq!(belief.evidence_count, 1, "reflect must propagate evidence_count from recalled item, got 0");
+        let reflection = mem
+            .reflect("sky colour", &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
+        let belief = reflection
+            .beliefs
+            .iter()
+            .find(|b| b.statement.contains("sky"))
+            .expect("belief missing from reflection");
+        assert_eq!(
+            belief.evidence_count, 1,
+            "reflect must propagate evidence_count from recalled item, got 0"
+        );
 
         // A second assertion increments to 2 — reflect tracks it too.
         mem.remember_as_belief(BeliefAssertion {
@@ -6609,9 +9158,19 @@ mod tests {
         })
         .await
         .unwrap();
-        let reflection2 = mem.reflect("sky colour", &mind_types::AccessContext::operator_audit()).await.unwrap();
-        let belief2 = reflection2.beliefs.iter().find(|b| b.statement.contains("sky")).expect("belief missing from second reflection");
-        assert_eq!(belief2.evidence_count, 2, "reflect must track accumulated evidence_count");
+        let reflection2 = mem
+            .reflect("sky colour", &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
+        let belief2 = reflection2
+            .beliefs
+            .iter()
+            .find(|b| b.statement.contains("sky"))
+            .expect("belief missing from second reflection");
+        assert_eq!(
+            belief2.evidence_count, 2,
+            "reflect must track accumulated evidence_count"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6621,7 +9180,11 @@ mod tests {
         mem.store_goal("become more self-aware").await.unwrap();
         mem.store_goal("become more self-aware").await.unwrap();
         let goals = mem.list_goals().await.unwrap();
-        assert_eq!(goals.len(), 1, "duplicate store_goal calls must not multiply entries");
+        assert_eq!(
+            goals.len(),
+            1,
+            "duplicate store_goal calls must not multiply entries"
+        );
     }
 
     /// assert_belief must immediately emit a Contradiction tension for any conflict that exists
@@ -6649,14 +9212,21 @@ mod tests {
         })
         .await
         .unwrap();
-        mem.relate("Pranab sleeps early", "Pranab stays up late", "contradicts", 0.8)
-            .await
-            .unwrap();
+        mem.relate(
+            "Pranab sleeps early",
+            "Pranab stays up late",
+            "contradicts",
+            0.8,
+        )
+        .await
+        .unwrap();
 
         // Before the next assert_belief there should be no tension yet.
         let before = mem.open_tensions(20).await.unwrap();
         assert!(
-            before.iter().all(|t| !matches!(t.kind, mind_types::TensionKind::Contradiction)),
+            before
+                .iter()
+                .all(|t| !matches!(t.kind, mind_types::TensionKind::Contradiction)),
             "no contradiction tension expected before any assert_belief triggers the scan"
         );
 
@@ -6673,16 +9243,25 @@ mod tests {
 
         let after = mem.open_tensions(20).await.unwrap();
         assert!(
-            after.iter().any(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)),
+            after
+                .iter()
+                .any(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)),
             "assert_belief should have emitted a Contradiction tension for the known conflict"
         );
-        let tension = after.iter().find(|t| matches!(t.kind, mind_types::TensionKind::Contradiction)).unwrap();
+        let tension = after
+            .iter()
+            .find(|t| matches!(t.kind, mind_types::TensionKind::Contradiction))
+            .unwrap();
         assert!(
             tension.about.contains("sleeps early") || tension.about.contains("stays up late"),
             "tension description should name the conflicting beliefs, got: {}",
             tension.about
         );
-        assert!(tension.pressure >= 0.3, "pressure should be clamped to at least 0.3, got {}", tension.pressure);
+        assert!(
+            tension.pressure >= 0.3,
+            "pressure should be clamped to at least 0.3, got {}",
+            tension.pressure
+        );
     }
 
     /// KeywordScorer: confidence breaks the tie when two beliefs have identical keyword overlap.
@@ -6727,13 +9306,29 @@ mod tests {
         .unwrap();
 
         let hits = mem
-            .recall_typed(RecallQuery { text: "red flower".into(), top_k: 10, kind: None }, &mind_types::AccessContext::operator_audit())
+            .recall_typed(
+                RecallQuery {
+                    text: "red flower".into(),
+                    top_k: 10,
+                    kind: None,
+                },
+                &mind_types::AccessContext::operator_audit(),
+            )
             .await
             .unwrap();
 
-        let flower_pos = hits.iter().position(|r| r.item.text.contains("flower")).expect("flower belief missing");
-        let red_pos = hits.iter().position(|r| r.item.text.contains("red car")).expect("red car belief missing");
-        let sky_pos = hits.iter().position(|r| r.item.text.contains("blue")).expect("sky belief missing");
+        let flower_pos = hits
+            .iter()
+            .position(|r| r.item.text.contains("flower"))
+            .expect("flower belief missing");
+        let red_pos = hits
+            .iter()
+            .position(|r| r.item.text.contains("red car"))
+            .expect("red car belief missing");
+        let sky_pos = hits
+            .iter()
+            .position(|r| r.item.text.contains("blue"))
+            .expect("sky belief missing");
 
         assert!(
             flower_pos < red_pos,
@@ -6743,11 +9338,14 @@ mod tests {
         assert!(
             sky_pos > red_pos,
             "zero-overlap belief must rank below any one-overlap belief; got: {:?}",
-            hits.iter().map(|r| (&r.item.text, r.score)).collect::<Vec<_>>()
+            hits.iter()
+                .map(|r| (&r.item.text, r.score))
+                .collect::<Vec<_>>()
         );
         // KeywordScorer always emits "confidence" in the why — distinguishes it from embedder path.
         assert!(
-            hits.iter().all(|r| r.why.iter().any(|w| w.contains("confidence"))),
+            hits.iter()
+                .all(|r| r.why.iter().any(|w| w.contains("confidence"))),
             "KeywordScorer why strings must contain 'confidence'; got: {:?}",
             hits.iter().map(|r| &r.why).collect::<Vec<_>>()
         );
@@ -6763,37 +9361,48 @@ mod tests {
         // High sensitivity (s=1.0): lower thresholds → more conflicts surfaced.
         std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "1.0");
         let high = contradiction_config_from_env();
-        assert!(high.min_confidence_for_conflict < default.min_confidence_for_conflict,
-            "high sensitivity must lower min_confidence");
-        assert!(high.min_severity < default.min_severity,
-            "high sensitivity must lower min_severity");
+        assert!(
+            high.min_confidence_for_conflict < default.min_confidence_for_conflict,
+            "high sensitivity must lower min_confidence"
+        );
+        assert!(
+            high.min_severity < default.min_severity,
+            "high sensitivity must lower min_severity"
+        );
 
         // Low sensitivity (s=0.0): higher thresholds → fewer conflicts surfaced.
         std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "0.0");
         let low = contradiction_config_from_env();
-        assert!(low.min_confidence_for_conflict > default.min_confidence_for_conflict,
-            "low sensitivity must raise min_confidence");
-        assert!(low.min_severity > default.min_severity,
-            "low sensitivity must raise min_severity");
+        assert!(
+            low.min_confidence_for_conflict > default.min_confidence_for_conflict,
+            "low sensitivity must raise min_confidence"
+        );
+        assert!(
+            low.min_severity > default.min_severity,
+            "low sensitivity must raise min_severity"
+        );
 
         // Out-of-range values are clamped, not panicked.
         std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "9999.0");
         let clamped = contradiction_config_from_env();
-        assert!((clamped.min_confidence_for_conflict - high.min_confidence_for_conflict).abs() < 1e-9,
-            "values >1.0 must clamp to 1.0 behaviour");
+        assert!(
+            (clamped.min_confidence_for_conflict - high.min_confidence_for_conflict).abs() < 1e-9,
+            "values >1.0 must clamp to 1.0 behaviour"
+        );
 
         // Garbage value falls back to default.
         std::env::set_var("YM_CONTRADICTION_SENSITIVITY", "not_a_number");
         let fallback = contradiction_config_from_env();
-        assert!((fallback.min_confidence_for_conflict - 0.6).abs() < 1e-9,
-            "unparseable env var must fall back to default");
+        assert!(
+            (fallback.min_confidence_for_conflict - 0.6).abs() < 1e-9,
+            "unparseable env var must fall back to default"
+        );
 
         // Clean up so other tests aren't affected.
         std::env::remove_var("YM_CONTRADICTION_SENSITIVITY");
     }
-
 }
- 
+
 #[cfg(test)]
 mod actor_ordering_tests {
     use super::*;
@@ -6805,7 +9414,13 @@ mod actor_ordering_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_bulk_read_sees_every_prior_write() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        mem.append_message_scoped("user", "the garage code is 4417", mind_types::Scope::Private("primary".into())).await.unwrap();
+        mem.append_message_scoped(
+            "user",
+            "the garage code is 4417",
+            mind_types::Scope::Private("primary".into()),
+        )
+        .await
+        .unwrap();
         let rows = mem.messages_since(0, 50).await.unwrap();
         assert!(
             rows.iter().any(|(_, _, t)| t.contains("4417")),
@@ -6820,7 +9435,13 @@ mod actor_ordering_tests {
     async fn same_caller_ordering_is_deterministic() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         for i in 0..5 {
-            mem.append_message_scoped("user", &format!("msg {i}"), mind_types::Scope::Private("primary".into())).await.unwrap();
+            mem.append_message_scoped(
+                "user",
+                &format!("msg {i}"),
+                mind_types::Scope::Private("primary".into()),
+            )
+            .await
+            .unwrap();
         }
         let rows = mem.messages_since(0, 50).await.unwrap();
         let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
@@ -6829,8 +9450,113 @@ mod actor_ordering_tests {
         assert_eq!(ids, sorted, "bulk window returns ascending ids");
         assert_eq!(rows.len(), 5);
         // A write AFTER the consumed window must not retro-appear in it.
-        mem.append_message_scoped("user", "later msg", mind_types::Scope::Private("primary".into())).await.unwrap();
+        mem.append_message_scoped(
+            "user",
+            "later msg",
+            mind_types::Scope::Private("primary".into()),
+        )
+        .await
+        .unwrap();
         assert!(!rows.iter().any(|(_, _, t)| t.contains("later msg")));
+    }
+
+    /// E.MQ0 starts from the store that actually backs Mind. The baseline must count every row
+    /// after the cursor and preserve scope-level age evidence rather than borrowing persona-store
+    /// digest numbers or reporting only the actor queue depth.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn curation_baseline_is_exact_and_namespaced() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.append_message_scoped("user", "already distilled", mind_types::Scope::primary())
+            .await
+            .unwrap();
+        mem.append_message_scoped("assistant", "primary pending", mind_types::Scope::primary())
+            .await
+            .unwrap();
+        mem.append_message_scoped("user", "shared pending", mind_types::Scope::Shared)
+            .await
+            .unwrap();
+
+        let baseline = mem.memory_curation_baseline(1, 40).await.unwrap();
+        assert_eq!(baseline.substrate, "Mind/YantrikDB mind_transcript");
+        assert_eq!(baseline.cursor_id, 1);
+        assert_eq!(baseline.latest_id, 3);
+        assert_eq!(baseline.pending, 2);
+        assert!(baseline.oldest_pending_ms.is_some());
+        assert_eq!(baseline.namespaces.len(), 2);
+        assert_eq!(baseline.next_batch_limit, 40);
+        assert_eq!(baseline.next_batch_namespaces.len(), 2);
+        assert!(baseline
+            .namespaces
+            .iter()
+            .any(|n| n.namespace == "private:primary" && n.pending == 1));
+        assert!(baseline
+            .namespaces
+            .iter()
+            .any(|n| n.namespace == "shared" && n.pending == 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn curation_baseline_audits_only_the_next_bounded_window() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        for i in 0..3 {
+            mem.append_message_scoped(
+                "user",
+                &format!("primary {i}"),
+                mind_types::Scope::primary(),
+            )
+            .await
+            .unwrap();
+        }
+        mem.append_message_scoped("user", "shared later", mind_types::Scope::Shared)
+            .await
+            .unwrap();
+
+        let baseline = mem.memory_curation_baseline(0, 3).await.unwrap();
+        assert_eq!(
+            baseline.namespaces.len(),
+            2,
+            "full backlog sees both scopes"
+        );
+        assert_eq!(baseline.next_batch_namespaces.len(), 1);
+        assert_eq!(
+            baseline.next_batch_namespaces[0].namespace,
+            "private:primary"
+        );
+        assert_eq!(baseline.next_batch_namespaces[0].pending, 3);
+    }
+
+    #[test]
+    fn curation_baseline_fails_closed_on_an_unreadable_namespace_row() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        ensure_transcript_table(&db);
+        db.conn()
+            .execute(
+                "INSERT INTO mind_transcript (role, text, ts, scope) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["user", "candidate text", now_secs(), vec![0x80_u8]],
+            )
+            .unwrap();
+
+        assert!(
+            memory_curation_baseline(&db, 0, 40).is_err(),
+            "an unreadable scope must invalidate the audit, not disappear and make the window look isolated"
+        );
+    }
+
+    #[test]
+    fn consolidation_window_fails_closed_on_an_unreadable_transcript_row() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        ensure_transcript_table(&db);
+        db.conn()
+            .execute(
+                "INSERT INTO mind_transcript (role, text, ts, scope) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["user", vec![0x80_u8], now_secs(), "private:primary"],
+            )
+            .unwrap();
+
+        assert!(
+            messages_since(&db, 0, 40).is_err(),
+            "a malformed candidate must stop the window, not be skipped while a later cursor advances past it"
+        );
     }
 
     /// Under concurrent load nothing is lost, every reply arrives exactly once, and the backlog
@@ -6844,13 +9570,22 @@ mod actor_ordering_tests {
             joins.push(tokio::spawn(async move {
                 for i in 0..25 {
                     let txt = format!("worker {w} message {i}");
-                    m.append_message_scoped("user", &txt, mind_types::Scope::Private("primary".into())).await.unwrap();
+                    m.append_message_scoped(
+                        "user",
+                        &txt,
+                        mind_types::Scope::Private("primary".into()),
+                    )
+                    .await
+                    .unwrap();
                 }
             }));
         }
         for _ in 0..10 {
             let _ = mem.messages_since(0, 100).await.unwrap();
-            let _ = mem.recent_messages(5, &mind_types::AccessContext::operator_audit()).await.unwrap();
+            let _ = mem
+                .recent_messages(5, &mind_types::AccessContext::operator_audit())
+                .await
+                .unwrap();
         }
         for j in joins {
             j.await.unwrap();
@@ -6863,9 +9598,6 @@ mod actor_ordering_tests {
     }
 }
 
-
-
- 
 #[cfg(test)]
 mod lane_experiment {
     use super::*;
@@ -6890,12 +9622,20 @@ mod lane_experiment {
         let mut batches = 0u32;
         loop {
             for i in 0..500 {
-                mem.append_message_scoped("user", &format!("{batches}:{i} {body}"), mind_types::Scope::Private("primary".into())).await.unwrap();
+                mem.append_message_scoped(
+                    "user",
+                    &format!("{batches}:{i} {body}"),
+                    mind_types::Scope::Private("primary".into()),
+                )
+                .await
+                .unwrap();
             }
             batches += 1;
             let t0 = std::time::Instant::now();
             let probe = dir.join(format!("probe_{batches}.db"));
-            mem.snapshot_to(probe.to_string_lossy().to_string()).await.unwrap();
+            mem.snapshot_to(probe.to_string_lossy().to_string())
+                .await
+                .unwrap();
             if t0.elapsed() >= std::time::Duration::from_millis(80) || batches >= 40 {
                 break;
             }
@@ -6906,7 +9646,9 @@ mod lane_experiment {
         let m2 = mem.clone();
         let bg = tokio::spawn(async move {
             let t = std::time::Instant::now();
-            m2.snapshot_to(dest_path.to_string_lossy().to_string()).await.unwrap();
+            m2.snapshot_to(dest_path.to_string_lossy().to_string())
+                .await
+                .unwrap();
             t.elapsed()
         });
         let dest = dir.join("final.db");
@@ -6918,7 +9660,10 @@ mod lane_experiment {
         assert!(dest.exists(), "bulk op never started");
 
         let t0 = std::time::Instant::now();
-        let _ = mem.recent_messages(10, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        let _ = mem
+            .recent_messages(10, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
         let interactive_dt = t0.elapsed();
         let bg_dt = bg.await.unwrap();
 
@@ -6946,29 +9691,69 @@ mod lane_experiment {
         let dest = dir.join("games.ydbpack");
         let seal = |cov: &str| {
             let _ = std::fs::remove_file(&dest);
-            fixtures::seal_fixture_pack_full(dest.to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["one row"], Some(&[cov]), None, None).unwrap()
+            fixtures::seal_fixture_pack_full(
+                dest.to_str().unwrap(),
+                "yantrik",
+                "game-feel",
+                "0.1.0",
+                "game_feel",
+                &["one row"],
+                Some(&[cov]),
+                None,
+                None,
+            )
+            .unwrap()
         };
         seal("alpha bravo one");
         let size1 = std::fs::metadata(&dest).unwrap().len();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(dir.to_str().unwrap()).await.unwrap();
-        assert_eq!(mem.available_packs().await.unwrap()[0].coverage, vec!["alpha bravo one".to_string()]);
+        assert_eq!(
+            mem.available_packs().await.unwrap()[0].coverage,
+            vec!["alpha bravo one".to_string()]
+        );
         // Immediately: same name, same size, new coverage.
         seal("alpha bravo two");
-        assert_eq!(std::fs::metadata(&dest).unwrap().len(), size1, "the re-seal must be the same size for this to test anything");
-        assert_eq!(mem.available_packs().await.unwrap()[0].coverage, vec!["alpha bravo two".to_string()]);
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().len(),
+            size1,
+            "the re-seal must be the same size for this to test anything"
+        );
+        assert_eq!(
+            mem.available_packs().await.unwrap()[0].coverage,
+            vec!["alpha bravo two".to_string()]
+        );
         // Bounded: two versions of one file, one cache entry. Third seal, then the pure function.
         seal("alpha bravo six");
         let mut cache: std::collections::HashMap<String, Option<ManifestView>> = Default::default();
         assert!(cached_manifest(&mut cache, dest.to_str().unwrap()).is_some());
         assert_eq!(cache.len(), 1);
         seal("alpha bravo ten");
-        assert_eq!(cached_manifest(&mut cache, dest.to_str().unwrap()).map(|m| m.coverage.clone()), Some(vec!["alpha bravo ten".to_string()]));
-        assert_eq!(cache.len(), 1, "older fingerprints of the same path are evicted: {:?}", cache.keys().collect::<Vec<_>>());
+        assert_eq!(
+            cached_manifest(&mut cache, dest.to_str().unwrap()).map(|m| m.coverage.clone()),
+            Some(vec!["alpha bravo ten".to_string()])
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "older fingerprints of the same path are evicted: {:?}",
+            cache.keys().collect::<Vec<_>>()
+        );
         // The bill: a twelve-file library, one cold scan and one warm scan.
         for i in 0..11 {
             let d = dir.join(format!("p{i:02}.ydbpack"));
-            fixtures::seal_fixture_pack_full(d.to_str().unwrap(), "yantrik", &format!("pack-{i}"), "0.1.0", &format!("ns_{i}"), &["one row"], Some(&["a phrase"]), None, None).unwrap();
+            fixtures::seal_fixture_pack_full(
+                d.to_str().unwrap(),
+                "yantrik",
+                &format!("pack-{i}"),
+                "0.1.0",
+                &format!("ns_{i}"),
+                &["one row"],
+                Some(&["a phrase"]),
+                None,
+                None,
+            )
+            .unwrap();
         }
         let t = std::time::Instant::now();
         let cat = mem.available_packs().await.unwrap();
@@ -6978,8 +9763,14 @@ mod lane_experiment {
         let warm = t.elapsed();
         assert_eq!(cat.len(), 12);
         assert_eq!(again.len(), 12);
-        eprintln!("catalog scan of {} library files: cold {cold:?}, warm {warm:?}", cat.len());
-        assert!(cold < std::time::Duration::from_secs(2) && warm < std::time::Duration::from_secs(1), "a scan must stay cheap: cold {cold:?} warm {warm:?}");
+        eprintln!(
+            "catalog scan of {} library files: cold {cold:?}, warm {warm:?}",
+            cat.len()
+        );
+        assert!(
+            cold < std::time::Duration::from_secs(2) && warm < std::time::Duration::from_secs(1),
+            "a scan must stay cheap: cold {cold:?} warm {warm:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7003,15 +9794,33 @@ mod lane_experiment {
         catalog_push(&mut out, entry("yantrik.a@1", "/m/a-copy.ydbpack", true)); // a mounted duplicate
         catalog_push(&mut out, entry("yantrik.a@1", "/m/a.ydbpack", false)); // the library copy of the mount
         catalog_push(&mut out, entry("yantrik.b@1", "/lib/b.ydbpack", false));
-        catalog_push(&mut out, entry("yantrik.b@1", "/lib/b-later.ydbpack", false)); // a later file, same id
+        catalog_push(
+            &mut out,
+            entry("yantrik.b@1", "/lib/b-later.ydbpack", false),
+        ); // a later file, same id
         assert_eq!(out.len(), 2, "{out:?}");
-        assert!(out[0].mounted && out[0].path == "/m/a.ydbpack" && out[0].coverage == vec!["c-/m/a.ydbpack"], "{:?}", out[0]);
-        assert!(!out[1].mounted && out[1].path == "/lib/b.ydbpack", "{:?}", out[1]);
+        assert!(
+            out[0].mounted
+                && out[0].path == "/m/a.ydbpack"
+                && out[0].coverage == vec!["c-/m/a.ydbpack"],
+            "{:?}",
+            out[0]
+        );
+        assert!(
+            !out[1].mounted && out[1].path == "/lib/b.ydbpack",
+            "{:?}",
+            out[1]
+        );
     }
 
     async fn mounted_ids(mem: &MemoryHandle) -> Vec<String> {
         use mind_types::MemoryFacade;
-        mem.mounted_packs().await.unwrap().into_iter().map(|p| p.id).collect()
+        mem.mounted_packs()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect()
     }
 
     /// P.4 v1 (E.PK4): a standing lease MOUNTS the library pack at grant and UNMOUNTS it at release
@@ -7020,7 +9829,7 @@ mod lane_experiment {
     /// not leased is a no-op.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_standing_lease_mounts_at_grant_and_unmounts_at_release_unless_installed() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::{LeaseEnd, LEASE_CAP};
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4_lease");
@@ -7028,53 +9837,160 @@ mod lane_experiment {
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let mk = |file: &str, name: &str, ns: &str, cov: &[&str]| {
-            fixtures::seal_fixture_pack_full(lib.join(file).to_str().unwrap(), "yantrik", name, "0.1.0", ns, &["one row"], Some(cov), None, None).unwrap()
+            fixtures::seal_fixture_pack_full(
+                lib.join(file).to_str().unwrap(),
+                "yantrik",
+                name,
+                "0.1.0",
+                ns,
+                &["one row"],
+                Some(cov),
+                None,
+                None,
+            )
+            .unwrap()
         };
-        let games = mk("games.ydbpack", "game-feel", "game_feel", &["tuning the feel of a 2D platformer"]);
-        let wages = mk("wages.ydbpack", "uk-rates", "uk_rates", &["UK statutory rates"]);
-        let cad = mk("cad.ydbpack", "cad-craft", "cad_craft", &["parametric CAD modelling"]);
+        let games = mk(
+            "games.ydbpack",
+            "game-feel",
+            "game_feel",
+            &["tuning the feel of a 2D platformer"],
+        );
+        let wages = mk(
+            "wages.ydbpack",
+            "uk-rates",
+            "uk_rates",
+            &["UK statutory rates"],
+        );
+        let cad = mk(
+            "cad.ydbpack",
+            "cad-craft",
+            "cad_craft",
+            &["parametric CAD modelling"],
+        );
         let db = dir.join("mind.db");
         let mem = MemoryHandle::spawn(db.to_str().unwrap(), 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
         assert!(mem.leases().await.unwrap().is_empty());
 
-        let l = mem.lease_pack(&games, 2, "platformer week", "operator").await.unwrap();
+        let l = mem
+            .lease_pack(&games, 2, "platformer week", "operator")
+            .await
+            .unwrap();
         assert_eq!(l.pack_id, games);
-        assert!(l.expires_ms > l.granted_ms && l.reason == "platformer week" && l.granted_by == "operator");
-        assert!(l.content_digest.is_some(), "the grant names the artifact it granted: {l:?}");
-        assert_eq!(mounted_ids(&mem).await, vec![games.clone()], "mounted at grant");
-        assert!(mem.available_packs().await.unwrap().iter().any(|e| e.pack_id == games && e.mounted));
+        assert!(
+            l.expires_ms > l.granted_ms
+                && l.reason == "platformer week"
+                && l.granted_by == "operator"
+        );
+        assert!(
+            l.content_digest.is_some(),
+            "the grant names the artifact it granted: {l:?}"
+        );
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![games.clone()],
+            "mounted at grant"
+        );
+        assert!(mem
+            .available_packs()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.pack_id == games && e.mounted));
 
-        let l2 = mem.lease_pack(&games, 5, "one more week", "operator").await.unwrap();
+        let l2 = mem
+            .lease_pack(&games, 5, "one more week", "operator")
+            .await
+            .unwrap();
         assert!(l2.expires_ms > l.expires_ms && l2.reason == "one more week");
-        assert_eq!(mem.leases().await.unwrap().len(), 1, "a second grant extends, it does not duplicate");
+        assert_eq!(
+            mem.leases().await.unwrap().len(),
+            1,
+            "a second grant extends, it does not duplicate"
+        );
 
-        mem.lease_pack(&wages, 1, "payroll", "operator").await.unwrap();
-        let e = mem.lease_pack(&cad, 1, "cad", "operator").await.unwrap_err().to_string();
-        assert!(e.contains("lease cap") && e.contains(&LEASE_CAP.to_string()), "{e}");
-        assert_eq!(mounted_ids(&mem).await.len(), 2, "the refused lease mounted nothing");
+        mem.lease_pack(&wages, 1, "payroll", "operator")
+            .await
+            .unwrap();
+        let e = mem
+            .lease_pack(&cad, 1, "cad", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("lease cap") && e.contains(&LEASE_CAP.to_string()),
+            "{e}"
+        );
+        assert_eq!(
+            mounted_ids(&mem).await.len(),
+            2,
+            "the refused lease mounted nothing"
+        );
 
-        let ended = mem.release_pack(&games, LeaseEnd::Released).await.unwrap().expect("was leased");
+        let ended = mem
+            .release_pack(&games, LeaseEnd::Released)
+            .await
+            .unwrap()
+            .expect("was leased");
         assert_eq!(ended.pack_id, games);
-        assert_eq!(mounted_ids(&mem).await, vec![wages.clone()], "unmounted at release");
-        assert!(mem.release_pack(&games, LeaseEnd::Released).await.unwrap().is_none(), "releasing what is not leased is a no-op");
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![wages.clone()],
+            "unmounted at release"
+        );
+        assert!(
+            mem.release_pack(&games, LeaseEnd::Released)
+                .await
+                .unwrap()
+                .is_none(),
+            "releasing what is not leased is a no-op"
+        );
 
         // Installed: a lease never removes an adopted pack.
         mem.release_pack(&wages, LeaseEnd::Released).await.unwrap();
         assert!(mounted_ids(&mem).await.is_empty());
-        mem.install_pack(lib.join("wages.ydbpack").to_str().unwrap()).await.unwrap();
-        mem.lease_pack(&wages, 1, "payroll again", "operator").await.unwrap();
-        assert!(mem.release_pack(&wages, LeaseEnd::Released).await.unwrap().is_some());
-        assert_eq!(mounted_ids(&mem).await, vec![wages.clone()], "installed stays mounted after its lease ends");
+        mem.install_pack(lib.join("wages.ydbpack").to_str().unwrap())
+            .await
+            .unwrap();
+        mem.lease_pack(&wages, 1, "payroll again", "operator")
+            .await
+            .unwrap();
+        assert!(mem
+            .release_pack(&wages, LeaseEnd::Released)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![wages.clone()],
+            "installed stays mounted after its lease ends"
+        );
 
         // Grants that are refused grant nothing.
-        let e = mem.lease_pack(&games, 0, "zero days", "operator").await.unwrap_err().to_string();
+        let e = mem
+            .lease_pack(&games, 0, "zero days", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("days must be between 1 and 90"), "{e}");
-        let e = mem.lease_pack(&games, 9999, "too long", "operator").await.unwrap_err().to_string();
+        let e = mem
+            .lease_pack(&games, 9999, "too long", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("days must be between 1 and 90"), "{e}");
-        let e = mem.lease_pack("yantrik/nope@9.9.9", 1, "x", "operator").await.unwrap_err().to_string();
+        let e = mem
+            .lease_pack("yantrik/nope@9.9.9", 1, "x", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("no pack"), "{e}");
-        let e = mem.lease_pack(&games, 1, "   ", "operator").await.unwrap_err().to_string();
+        let e = mem
+            .lease_pack(&games, 1, "   ", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("reason"), "{e}");
         assert!(mem.leases().await.unwrap().is_empty());
         assert_eq!(mounted_ids(&mem).await, vec![wages.clone()]);
@@ -7087,18 +10003,35 @@ mod lane_experiment {
     /// ambiguous name.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_expired_lease_is_swept_and_an_ambiguous_artifact_is_refused() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4_sweep");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
-        let games = fixtures::seal_fixture_pack_full(lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["one row"], Some(&["tuning the feel of a 2D platformer"]), None, None).unwrap();
+        let games = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["one row"],
+            Some(&["tuning the feel of a 2D platformer"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
 
-        let l = mem.lease_pack(&games, 1, "a day", "operator").await.unwrap();
-        assert!(mem.sweep_leases(l.expires_ms - 1).await.unwrap().is_empty(), "not due yet");
+        let l = mem
+            .lease_pack(&games, 1, "a day", "operator")
+            .await
+            .unwrap();
+        assert!(
+            mem.sweep_leases(l.expires_ms - 1).await.unwrap().is_empty(),
+            "not due yet"
+        );
         assert_eq!(mounted_ids(&mem).await, vec![games.clone()]);
         let ended = mem.sweep_leases(l.expires_ms).await.unwrap();
         assert_eq!(ended.len(), 1);
@@ -7107,12 +10040,41 @@ mod lane_experiment {
         assert!(mem.leases().await.unwrap().is_empty());
 
         // Two files, one id, different rows (so different digests): ambiguous, refused, nothing mounted.
-        let a = fixtures::seal_fixture_pack_full(lib.join("dup-a.ydbpack").to_str().unwrap(), "yantrik", "dup", "0.1.0", "dup", &["alpha"], Some(&["dup"]), None, None).unwrap();
-        let b = fixtures::seal_fixture_pack_full(lib.join("dup-b.ydbpack").to_str().unwrap(), "yantrik", "dup", "0.1.0", "dup", &["beta"], Some(&["dup"]), None, None).unwrap();
+        let a = fixtures::seal_fixture_pack_full(
+            lib.join("dup-a.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "dup",
+            "0.1.0",
+            "dup",
+            &["alpha"],
+            Some(&["dup"]),
+            None,
+            None,
+        )
+        .unwrap();
+        let b = fixtures::seal_fixture_pack_full(
+            lib.join("dup-b.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "dup",
+            "0.1.0",
+            "dup",
+            &["beta"],
+            Some(&["dup"]),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(a, b, "same id by construction");
-        let e = mem.lease_pack(&a, 1, "x", "operator").await.unwrap_err().to_string();
+        let e = mem
+            .lease_pack(&a, 1, "x", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("different digests"), "{e}");
-        assert!(mounted_ids(&mem).await.is_empty(), "an ambiguous artifact mounts nothing");
+        assert!(
+            mounted_ids(&mem).await.is_empty(),
+            "an ambiguous artifact mounts nothing"
+        );
         assert!(mem.leases().await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7121,11 +10083,10 @@ mod lane_experiment {
     /// `cargo test` is parallel by default and a seam armed in one test would otherwise fail the
     /// mount inside another — which is exactly what it did the first time this suite ran.
     #[cfg(test)]
-    static LEASE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static LEASE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     #[cfg(test)]
-    fn lease_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        // Poisoning is not interesting here: a failed test has already reported itself.
-        LEASE_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+    async fn lease_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        LEASE_TESTS.lock().await
     }
 
     /// A guard that owns the failure-seam switch, so a panicking assertion can never leave the
@@ -7158,7 +10119,10 @@ mod lane_experiment {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("could not delete {} — the test's premise never held", path.display());
+        panic!(
+            "could not delete {} — the test's premise never held",
+            path.display()
+        );
     }
 
     /// THE PREMISE THE RECONCILER EXISTS FOR: a plain `mount_pack` does NOT survive reopening the
@@ -7167,17 +10131,30 @@ mod lane_experiment {
     /// double-attach and this test is where that would be caught.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mount_does_not_survive_a_reopen() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("probe_mount");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
-        let id = fixtures::seal_fixture_pack_full(lib.join("p.ydbpack").to_str().unwrap(), "yantrik", "probe", "0.1.0", "probe_ns", &["one row"], Some(&["a phrase"]), None, None).unwrap();
+        let id = fixtures::seal_fixture_pack_full(
+            lib.join("p.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "probe",
+            "0.1.0",
+            "probe_ns",
+            &["one row"],
+            Some(&["a phrase"]),
+            None,
+            None,
+        )
+        .unwrap();
         let db = dir.join("mind.db");
         {
             let mem = MemoryHandle::spawn(db.to_str().unwrap(), 64).unwrap();
-            mem.mount_pack(lib.join("p.ydbpack").to_str().unwrap()).await.unwrap();
+            mem.mount_pack(lib.join("p.ydbpack").to_str().unwrap())
+                .await
+                .unwrap();
             let briefs = mem.mounted_packs().await.unwrap();
             assert_eq!(briefs.len(), 1, "{briefs:?}");
             assert_eq!(briefs[0].id, id);
@@ -7186,8 +10163,17 @@ mod lane_experiment {
         {
             let mem = MemoryHandle::spawn(db.to_str().unwrap(), 64).unwrap();
             let briefs = mem.mounted_packs().await.unwrap();
-            assert!(briefs.is_empty(), "a transient mount must not come back by itself: {briefs:?}");
-            assert!(mem.recall_from_packs("a phrase one row", 4).await.unwrap().is_empty(), "and its rows must be unreachable");
+            assert!(
+                briefs.is_empty(),
+                "a transient mount must not come back by itself: {briefs:?}"
+            );
+            assert!(
+                mem.recall_from_packs("a phrase one row", 4)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "and its rows must be unreachable"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7198,77 +10184,148 @@ mod lane_experiment {
     /// Single-threaded: the seam switch is process-wide.
     #[tokio::test(flavor = "current_thread")]
     async fn every_lease_seam_that_can_fail_leaves_state_and_mounts_agreeing() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::{LeaseEnd, LeaseState};
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4a_seams");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
-        let games = fixtures::seal_fixture_pack_full(lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["one row"], Some(&["platformer feel"]), None, None).unwrap();
+        let games = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["one row"],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
 
         // 1. MOUNT FAILS → no row, nothing mounted, no event.
         {
             let _seam = Seam::arm(SEAM_MOUNT);
-            let e = mem.lease_pack(&games, 1, "mount fails", "operator").await.unwrap_err().to_string();
+            let e = mem
+                .lease_pack(&games, 1, "mount fails", "operator")
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("mount failed"), "{e}");
         }
         assert!(mem.leases().await.unwrap().is_empty());
-        assert!(mounted_ids(&mem).await.is_empty(), "a failed mount leaves nothing attached");
-        assert!(mem.pending_lease_events().await.unwrap().is_empty(), "and nothing to record");
+        assert!(
+            mounted_ids(&mem).await.is_empty(),
+            "a failed mount leaves nothing attached"
+        );
+        assert!(
+            mem.pending_lease_events().await.unwrap().is_empty(),
+            "and nothing to record"
+        );
 
         // 2. GRANT TRANSACTION FAILS after a successful mount → the mount is compensated.
         {
             let _seam = Seam::arm(SEAM_GRANT_TX);
-            let e = mem.lease_pack(&games, 1, "tx fails", "operator").await.unwrap_err().to_string();
+            let e = mem
+                .lease_pack(&games, 1, "tx fails", "operator")
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("could not record the lease"), "{e}");
         }
         assert!(mem.leases().await.unwrap().is_empty(), "no row");
-        assert!(mounted_ids(&mem).await.is_empty(), "and no untracked mounted pack");
+        assert!(
+            mounted_ids(&mem).await.is_empty(),
+            "and no untracked mounted pack"
+        );
         assert!(mem.pending_lease_events().await.unwrap().is_empty());
 
         // A clean grant, for the release seams. Its event is durable immediately.
-        let l = mem.lease_pack(&games, 1, "the real one", "operator").await.unwrap();
+        let l = mem
+            .lease_pack(&games, 1, "the real one", "operator")
+            .await
+            .unwrap();
         assert!(l.mounted_by_lease && l.state == LeaseState::Active);
         assert_eq!(mounted_ids(&mem).await, vec![games.clone()]);
         let queued = mem.pending_lease_events().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].kind, "leased");
-        assert!(queued[0].event_id.contains(&games), "{:?}", queued[0].event_id);
+        assert!(
+            queued[0].event_id.contains(&games),
+            "{:?}",
+            queued[0].event_id
+        );
 
         // 3. UNMOUNT FAILS → the ending is already durable; the row waits in `releasing`, is not
         //    served, and the pack is still attached (nothing was lost either way).
         {
             let _seam = Seam::arm(SEAM_UNMOUNT);
-            let e = mem.release_pack(&games, LeaseEnd::Released).await.unwrap_err().to_string();
+            let e = mem
+                .release_pack(&games, LeaseEnd::Released)
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("unmount failed"), "{e}");
         }
         let ls = mem.leases().await.unwrap();
         assert_eq!(ls.len(), 1);
-        assert_eq!(ls[0].state, LeaseState::Releasing, "never a healthy lease again");
-        assert!(!ls[0].is_serving(now_ms_i64()), "a releasing lease does not serve");
+        assert_eq!(
+            ls[0].state,
+            LeaseState::Releasing,
+            "never a healthy lease again"
+        );
+        assert!(
+            !ls[0].is_serving(now_ms_i64()),
+            "a releasing lease does not serve"
+        );
         let events = mem.pending_lease_events().await.unwrap();
-        assert_eq!(events.len(), 2, "the end was recorded before the unmount was attempted: {events:?}");
-        assert!(events.iter().any(|e| e.kind == "released" && e.end_reason == Some(LeaseEnd::Released)));
+        assert_eq!(
+            events.len(),
+            2,
+            "the end was recorded before the unmount was attempted: {events:?}"
+        );
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "released" && e.end_reason == Some(LeaseEnd::Released)));
 
         // 4. DELETE FAILS after a successful unmount → still `releasing`, pack detached, retryable.
         {
             let _seam = Seam::arm(SEAM_RELEASE_TX);
-            let e = mem.release_pack(&games, LeaseEnd::Released).await.unwrap_err().to_string();
+            let e = mem
+                .release_pack(&games, LeaseEnd::Released)
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("release transaction failed"), "{e}");
         }
-        assert!(mounted_ids(&mem).await.is_empty(), "the pack really was detached");
+        assert!(
+            mounted_ids(&mem).await.is_empty(),
+            "the pack really was detached"
+        );
         let ls = mem.leases().await.unwrap();
-        assert_eq!(ls[0].state, LeaseState::Releasing, "an active row over an unmounted pack is never exposed");
-        assert_eq!(mem.pending_lease_events().await.unwrap().len(), 2, "and the ending is recorded exactly once");
+        assert_eq!(
+            ls[0].state,
+            LeaseState::Releasing,
+            "an active row over an unmounted pack is never exposed"
+        );
+        assert_eq!(
+            mem.pending_lease_events().await.unwrap().len(),
+            2,
+            "and the ending is recorded exactly once"
+        );
 
         // 5. The retry completes it — the sweep picks up `releasing` rows without waiting for expiry.
         let ended = mem.sweep_leases(now_ms_i64()).await.unwrap();
         assert_eq!(ended.len(), 1, "the interrupted release finished");
         assert!(mem.leases().await.unwrap().is_empty());
-        assert_eq!(mem.pending_lease_events().await.unwrap().len(), 2, "still exactly two events — the id is the identity");
+        assert_eq!(
+            mem.pending_lease_events().await.unwrap().len(),
+            2,
+            "still exactly two events — the id is the identity"
+        );
 
         // 6. DUPLICATE DRAIN: acknowledging twice is a no-op, and a re-queued event with the same
         //    identity cannot become a second record.
@@ -7284,23 +10341,43 @@ mod lane_experiment {
     /// survives its ending.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_lease_unmounts_only_what_it_attached() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::LeaseEnd;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4a_own");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
-        let games = fixtures::seal_fixture_pack_full(lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["one row"], Some(&["platformer feel"]), None, None).unwrap();
+        let games = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["one row"],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
 
         // The operator mounted it themselves; the lease is granted over a pack already attached.
-        mem.mount_pack(lib.join("games.ydbpack").to_str().unwrap()).await.unwrap();
-        let l = mem.lease_pack(&games, 1, "borrowing what is already here", "operator").await.unwrap();
+        mem.mount_pack(lib.join("games.ydbpack").to_str().unwrap())
+            .await
+            .unwrap();
+        let l = mem
+            .lease_pack(&games, 1, "borrowing what is already here", "operator")
+            .await
+            .unwrap();
         assert!(!l.mounted_by_lease, "the lease did not attach it: {l:?}");
         mem.release_pack(&games, LeaseEnd::Released).await.unwrap();
-        assert_eq!(mounted_ids(&mem).await, vec![games.clone()], "the operator's own mount survives the lease");
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![games.clone()],
+            "the operator's own mount survives the lease"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7310,7 +10387,7 @@ mod lane_experiment {
     /// silently re-granted over different content.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restart_reconciles_every_durable_lease_state() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::{LeaseEnd, LeaseState};
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4a_restart");
@@ -7318,7 +10395,18 @@ mod lane_experiment {
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let mk = |file: &str, name: &str, ns: &str, rows: &[&str]| {
-            fixtures::seal_fixture_pack_full(lib.join(file).to_str().unwrap(), "yantrik", name, "0.1.0", ns, rows, Some(&["a phrase"]), None, None).unwrap()
+            fixtures::seal_fixture_pack_full(
+                lib.join(file).to_str().unwrap(),
+                "yantrik",
+                name,
+                "0.1.0",
+                ns,
+                rows,
+                Some(&["a phrase"]),
+                None,
+                None,
+            )
+            .unwrap()
         };
         let games = mk("games.ydbpack", "game-feel", "game_feel", &["one row"]);
         let wages = mk("wages.ydbpack", "uk-rates", "uk_rates", &["one row"]);
@@ -7329,7 +10417,9 @@ mod lane_experiment {
         {
             let mem = open();
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
-            mem.lease_pack(&games, 30, "across a restart", "operator").await.unwrap();
+            mem.lease_pack(&games, 30, "across a restart", "operator")
+                .await
+                .unwrap();
             assert_eq!(mounted_ids(&mem).await, vec![games.clone()]);
         }
         {
@@ -7337,10 +10427,17 @@ mod lane_experiment {
             // back by the time anything can ask for it. That is the property under test; the
             // explicit call below only proves it is idempotent.
             let mem = open();
-            assert_eq!(mounted_ids(&mem).await, vec![games.clone()], "an active lease is served again after a restart");
+            assert_eq!(
+                mounted_ids(&mem).await,
+                vec![games.clone()],
+                "an active lease is served again after a restart"
+            );
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
             let again = mem.reconcile_leases().await.unwrap();
-            assert!(again.is_empty(), "reconciling twice changes nothing: {again:?}");
+            assert!(
+                again.is_empty(),
+                "reconciling twice changes nothing: {again:?}"
+            );
             let ls = mem.leases().await.unwrap();
             assert_eq!(ls[0].state, LeaseState::Active);
             assert!(ls[0].mounted_by_lease);
@@ -7351,7 +10448,9 @@ mod lane_experiment {
             let mem = open();
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
             mem.release_pack(&games, LeaseEnd::Released).await.unwrap();
-            mem.lease_pack(&wages, 1, "will expire", "operator").await.unwrap();
+            mem.lease_pack(&wages, 1, "will expire", "operator")
+                .await
+                .unwrap();
         }
         {
             // Backdate it the way real time would have.
@@ -7361,10 +10460,20 @@ mod lane_experiment {
         }
         {
             let mem = open();
-            assert!(mounted_ids(&mem).await.is_empty(), "an expired lease is never remounted");
-            assert!(mem.leases().await.unwrap().is_empty(), "it was ended on the way up");
             assert!(
-                mem.pending_lease_events().await.unwrap().iter().any(|e| e.kind == "released" && e.end_reason == Some(LeaseEnd::Expired)),
+                mounted_ids(&mem).await.is_empty(),
+                "an expired lease is never remounted"
+            );
+            assert!(
+                mem.leases().await.unwrap().is_empty(),
+                "it was ended on the way up"
+            );
+            assert!(
+                mem.pending_lease_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.kind == "released" && e.end_reason == Some(LeaseEnd::Expired)),
                 "and the ending is durable, waiting for the recorder"
             );
         }
@@ -7375,38 +10484,74 @@ mod lane_experiment {
             for e in mem.pending_lease_events().await.unwrap() {
                 mem.ack_lease_event(&e.event_id).await.unwrap();
             }
-            mem.lease_pack(&games, 30, "granted over the old rows", "operator").await.unwrap();
+            mem.lease_pack(&games, 30, "granted over the old rows", "operator")
+                .await
+                .unwrap();
         }
         must_delete(&lib.join("games.ydbpack"));
-        let regames = mk("games.ydbpack", "game-feel", "game_feel", &["DIFFERENT rows entirely"]);
-        assert_eq!(regames, games, "same id, different content — the case the wall exists for");
+        let regames = mk(
+            "games.ydbpack",
+            "game-feel",
+            "game_feel",
+            &["DIFFERENT rows entirely"],
+        );
+        assert_eq!(
+            regames, games,
+            "same id, different content — the case the wall exists for"
+        );
         {
             let mem = open();
-            assert!(mounted_ids(&mem).await.is_empty(), "a changed artifact is never silently mounted under an old lease");
+            assert!(
+                mounted_ids(&mem).await.is_empty(),
+                "a changed artifact is never silently mounted under an old lease"
+            );
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
             let ls = mem.leases().await.unwrap();
             assert_eq!(ls[0].state, LeaseState::Quarantined, "{ls:?}");
-            assert!(ls[0].note.as_deref().unwrap_or("").contains("digest or signer changed"), "{ls:?}");
+            assert!(
+                ls[0]
+                    .note
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("digest or signer changed"),
+                "{ls:?}"
+            );
             assert!(!ls[0].is_serving(now_ms_i64()));
             // Extending a quarantined lease is refused; releasing it clears it.
-            let e = mem.lease_pack(&games, 5, "extend the quarantined", "operator").await.unwrap_err().to_string();
+            let e = mem
+                .lease_pack(&games, 5, "extend the quarantined", "operator")
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("quarantined"), "{e}");
-            assert!(mem.release_pack(&games, LeaseEnd::Released).await.unwrap().is_some());
+            assert!(mem
+                .release_pack(&games, LeaseEnd::Released)
+                .await
+                .unwrap()
+                .is_some());
             assert!(mem.leases().await.unwrap().is_empty());
         }
         // 4. THE ARTIFACT VANISHED: also quarantined, with its own reason.
         {
             let mem = open();
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
-            mem.lease_pack(&wages, 30, "about to vanish", "operator").await.unwrap();
+            mem.lease_pack(&wages, 30, "about to vanish", "operator")
+                .await
+                .unwrap();
         }
         must_delete(&lib.join("wages.ydbpack"));
         {
             let mem = open();
             let ls = mem.leases().await.unwrap();
-            assert!(mounted_ids(&mem).await.is_empty(), "a lease whose artifact is gone must not be mounted: leases={ls:?}");
+            assert!(
+                mounted_ids(&mem).await.is_empty(),
+                "a lease whose artifact is gone must not be mounted: leases={ls:?}"
+            );
             assert_eq!(ls[0].state, LeaseState::Quarantined, "{ls:?}");
-            assert!(ls[0].note.as_deref().unwrap_or("").contains("gone"), "{ls:?}");
+            assert!(
+                ls[0].note.as_deref().unwrap_or("").contains("gone"),
+                "{ls:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7415,22 +10560,45 @@ mod lane_experiment {
     /// or a stopped loop — can never serve an expired lease.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn expiry_is_enforced_at_the_visibility_boundary_not_only_by_the_poll_loop() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4a_vis");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
-        let games = fixtures::seal_fixture_pack_full(lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["Coyote time: 80 to 100 ms after leaving a ledge."], Some(&["platformer feel"]), None, None).unwrap();
+        let games = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["Coyote time: 80 to 100 ms after leaving a ledge."],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
-        mem.lease_pack(&games, 1, "will expire", "operator").await.unwrap();
-        assert!(!mem.recall_from_packs("coyote time after a ledge", 4).await.unwrap().is_empty());
+        mem.lease_pack(&games, 1, "will expire", "operator")
+            .await
+            .unwrap();
+        assert!(!mem
+            .recall_from_packs("coyote time after a ledge", 4)
+            .await
+            .unwrap()
+            .is_empty());
         mem.expire_lease_for_test(&games).await.unwrap();
         // No sweep is called. The very next recall must not see the pack.
-        let hits = mem.recall_from_packs("coyote time after a ledge", 4).await.unwrap();
+        let hits = mem
+            .recall_from_packs("coyote time after a ledge", 4)
+            .await
+            .unwrap();
         assert!(hits.is_empty(), "an expired lease served a turn: {hits:?}");
-        assert!(mem.mounted_packs().await.unwrap().is_empty(), "and it was detached");
+        assert!(
+            mem.mounted_packs().await.unwrap().is_empty(),
+            "and it was detached"
+        );
         assert!(mem.leases().await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7451,8 +10619,14 @@ mod lane_experiment {
         let evil = format!("{}-evil/x.ydbpack", pack_dir.to_string_lossy());
         let inside = pack_dir.join("x.ydbpack").to_string_lossy().to_string();
         std::fs::create_dir_all(format!("{}-evil", pack_dir.to_string_lossy())).ok();
-        assert!(!is_installed_path(&db, &evil), "a sibling sharing a prefix is not the install dir: {evil}");
-        assert!(is_installed_path(&db, &inside), "a file in the install dir is installed: {inside}");
+        assert!(
+            !is_installed_path(&db, &evil),
+            "a sibling sharing a prefix is not the install dir: {evil}"
+        );
+        assert!(
+            is_installed_path(&db, &inside),
+            "a file in the install dir is installed: {inside}"
+        );
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7463,7 +10637,7 @@ mod lane_experiment {
     /// mounted. The test asks what a TURN would actually get: recall rows and the prompt block.
     #[tokio::test(flavor = "current_thread")]
     async fn a_pack_whose_lease_stopped_serving_cannot_reach_a_turn_even_if_it_is_still_mounted() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::{LeaseEnd, LeaseState};
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4c_vis");
@@ -7471,17 +10645,32 @@ mod lane_experiment {
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let games = fixtures::seal_fixture_pack_full(
-            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
             &["Coyote time: allow the jump for 80 to 100 ms after leaving a ledge."],
-            Some(&["tuning the feel of a 2D platformer"]), None, None,
-        ).unwrap();
+            Some(&["tuning the feel of a 2D platformer"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
         let q = "coyote time after leaving a ledge";
 
-        mem.lease_pack(&games, 5, "serving", "operator").await.unwrap();
-        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "a serving lease reaches a turn");
-        assert!(mem.pack_context().await.unwrap().is_some(), "and its rules reach the prompt");
+        mem.lease_pack(&games, 5, "serving", "operator")
+            .await
+            .unwrap();
+        assert!(
+            !mem.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "a serving lease reaches a turn"
+        );
+        assert!(
+            mem.pack_context().await.unwrap().is_some(),
+            "and its rules reach the prompt"
+        );
 
         // The unmount fails: the ending is durable and the pack is still attached. Everything
         // below stays inside the armed seam, because every read of the mounted list runs the
@@ -7491,19 +10680,35 @@ mod lane_experiment {
             assert!(mem.release_pack(&games, LeaseEnd::Released).await.is_err());
             let ls = mem.leases().await.unwrap();
             assert_eq!(ls[0].state, LeaseState::Releasing);
-            assert_eq!(mounted_ids(&mem).await, vec![games.clone()], "the premise: it really is still mounted");
+            assert_eq!(
+                mounted_ids(&mem).await,
+                vec![games.clone()],
+                "the premise: it really is still mounted"
+            );
 
             // So: what does a TURN get?
             let hits = mem.recall_from_packs(q, 4).await.unwrap();
-            assert!(hits.is_empty(), "a releasing lease's rows reached a turn: {hits:?}");
+            assert!(
+                hits.is_empty(),
+                "a releasing lease's rows reached a turn: {hits:?}"
+            );
             let ctx = mem.pack_context().await.unwrap();
-            assert!(ctx.is_none(), "a releasing lease's rules reached the prompt: {ctx:?}");
-            assert!(mem.probe_packs(q, 4).await.unwrap().is_empty(), "and the probe must agree with the turn");
+            assert!(
+                ctx.is_none(),
+                "a releasing lease's rules reached the prompt: {ctx:?}"
+            );
+            assert!(
+                mem.probe_packs(q, 4).await.unwrap().is_empty(),
+                "and the probe must agree with the turn"
+            );
         }
         // With the seam gone the next visibility check detaches it for real.
         let hits = mem.recall_from_packs(q, 4).await.unwrap();
         assert!(hits.is_empty());
-        assert!(mounted_ids(&mem).await.is_empty(), "detached once it could be");
+        assert!(
+            mounted_ids(&mem).await.is_empty(),
+            "detached once it could be"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7512,7 +10717,7 @@ mod lane_experiment {
     /// attach, even when the id matches.
     #[tokio::test(flavor = "current_thread")]
     async fn reconciliation_checks_the_artifact_that_is_actually_mounted() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::LeaseState;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4c_ident");
@@ -7520,30 +10725,57 @@ mod lane_experiment {
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let mk = |file: &str, rows: &[&str]| {
-            fixtures::seal_fixture_pack_full(lib.join(file).to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", rows, Some(&["platformer feel"]), None, None).unwrap()
+            fixtures::seal_fixture_pack_full(
+                lib.join(file).to_str().unwrap(),
+                "yantrik",
+                "game-feel",
+                "0.1.0",
+                "game_feel",
+                rows,
+                Some(&["platformer feel"]),
+                None,
+                None,
+            )
+            .unwrap()
         };
         let id = mk("games.ydbpack", &["the ORIGINAL row"]);
         let db = dir.join("mind.db");
         {
             let mem = MemoryHandle::spawn(db.to_str().unwrap(), 64).unwrap();
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
-            mem.lease_pack(&id, 30, "over the original", "operator").await.unwrap();
+            mem.lease_pack(&id, 30, "over the original", "operator")
+                .await
+                .unwrap();
         }
         // The file is replaced by DIFFERENT content under the same id, and mounted by someone else
         // before the mind comes back up.
         must_delete(&lib.join("games.ydbpack"));
         let same_id = mk("games.ydbpack", &["a COMPLETELY different row"]);
-        assert_eq!(same_id, id, "same id, different content — the case the wall exists for");
+        assert_eq!(
+            same_id, id,
+            "same id, different content — the case the wall exists for"
+        );
         {
             let mem = MemoryHandle::spawn(db.to_str().unwrap(), 64).unwrap();
             mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
             // Startup reconciliation has already run and must NOT have served the impostor.
             let ls = mem.leases().await.unwrap();
             assert_eq!(ls[0].state, LeaseState::Quarantined, "{ls:?}");
-            assert!(mounted_ids(&mem).await.is_empty(), "a changed artifact must be detached, not left attached");
-            assert!(mem.recall_from_packs("the original row", 4).await.unwrap().is_empty());
+            assert!(
+                mounted_ids(&mem).await.is_empty(),
+                "a changed artifact must be detached, not left attached"
+            );
+            assert!(mem
+                .recall_from_packs("the original row", 4)
+                .await
+                .unwrap()
+                .is_empty());
             // And a fresh grant over the id is refused while the quarantine stands.
-            let e = mem.lease_pack(&id, 5, "try again", "operator").await.unwrap_err().to_string();
+            let e = mem
+                .lease_pack(&id, 5, "try again", "operator")
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("quarantined"), "{e}");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -7554,7 +10786,7 @@ mod lane_experiment {
     /// B (same id, different content), and the lease then ends — B must survive.
     #[tokio::test(flavor = "current_thread")]
     async fn a_lease_never_detaches_someone_elses_artifact_under_the_same_id() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::memory::LeaseEnd;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4c_own");
@@ -7563,27 +10795,66 @@ mod lane_experiment {
         std::fs::create_dir_all(&lib).unwrap();
         // A is in the library (leasable). B lives OUTSIDE it, so the identity wall does not simply
         // refuse the grant — the point here is what happens after a swap, not before it.
-        let a = fixtures::seal_fixture_pack_full(lib.join("a.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["row A"], Some(&["platformer feel"]), None, None).unwrap();
+        let a = fixtures::seal_fixture_pack_full(
+            lib.join("a.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["row A"],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let b_path = dir.join("b.ydbpack");
-        let b = fixtures::seal_fixture_pack_full(b_path.to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &["row B, a different artifact entirely"], Some(&["platformer feel"]), None, None).unwrap();
+        let b = fixtures::seal_fixture_pack_full(
+            b_path.to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["row B, a different artifact entirely"],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(a, b, "same id by construction, different content");
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
 
-        mem.lease_pack(&a, 30, "attached A", "operator").await.unwrap();
+        mem.lease_pack(&a, 30, "attached A", "operator")
+            .await
+            .unwrap();
         assert_eq!(mounted_ids(&mem).await, vec![a.clone()]);
         // The operator swaps the artifact underneath the lease.
         mem.unmount_pack(&a).await.unwrap();
         mem.mount_pack(b_path.to_str().unwrap()).await.unwrap();
-        assert_eq!(mounted_ids(&mem).await, vec![b.clone()], "B is what is attached now");
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![b.clone()],
+            "B is what is attached now"
+        );
         // The lease ends. It attached A; B is not its to remove.
         mem.release_pack(&a, LeaseEnd::Released).await.unwrap();
-        assert_eq!(mounted_ids(&mem).await, vec![b.clone()], "a lease ending removed an artifact it never attached");
-        assert!(mem.leases().await.unwrap().is_empty(), "the lease itself is gone");
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![b.clone()],
+            "a lease ending removed an artifact it never attached"
+        );
+        assert!(
+            mem.leases().await.unwrap().is_empty(),
+            "the lease itself is gone"
+        );
         // ...and a fresh grant cannot be made while two artifacts claim the id. The identity wall
         // refuses it BEFORE the mount check does, which is the stronger of the two refusals: the
         // question "which artifact is this?" has no answer, so nothing may be granted over it.
-        let e = mem.lease_pack(&a, 5, "over the impostor", "operator").await.unwrap_err().to_string();
+        let e = mem
+            .lease_pack(&a, 5, "over the impostor", "operator")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("different digests or signers"), "{e}");
         assert!(e.contains("refusing to lease an ambiguous artifact"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -7600,23 +10871,50 @@ mod lane_experiment {
     /// what was granted", and this reaches them on every platform.
     #[tokio::test(flavor = "current_thread")]
     async fn a_foreign_artifact_under_a_live_lease_is_suppressed_without_a_restart() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4d_swap");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let row = "Coyote time: allow the jump for 80 to 100 ms after leaving a ledge.";
-        let a = fixtures::seal_fixture_pack_full(lib.join("a.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &[row], Some(&["platformer feel"]), None, None).unwrap();
+        let a = fixtures::seal_fixture_pack_full(
+            lib.join("a.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &[row],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let b_path = dir.join("b.ydbpack");
-        let b = fixtures::seal_fixture_pack_full(b_path.to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &[row, "and an extra row nobody granted"], Some(&["platformer feel"]), None, None).unwrap();
+        let b = fixtures::seal_fixture_pack_full(
+            b_path.to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &[row, "and an extra row nobody granted"],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(a, b, "same id, different content");
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
         let q = "coyote time after leaving a ledge";
 
-        mem.lease_pack(&a, 30, "granted over A", "operator").await.unwrap();
-        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "the granted artifact serves");
+        mem.lease_pack(&a, 30, "granted over A", "operator")
+            .await
+            .unwrap();
+        assert!(
+            !mem.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "the granted artifact serves"
+        );
         assert!(mem.pack_context().await.unwrap().is_some());
 
         // A is detached and B is attached under the same id. The lease is untouched: still Active,
@@ -7624,16 +10922,33 @@ mod lane_experiment {
         mem.unmount_pack(&a).await.unwrap();
         mem.mount_pack(b_path.to_str().unwrap()).await.unwrap();
         let ls = mem.leases().await.unwrap();
-        assert_eq!(ls[0].state, mind_types::memory::LeaseState::Active, "the lease still looks healthy — that is the trap");
+        assert_eq!(
+            ls[0].state,
+            mind_types::memory::LeaseState::Active,
+            "the lease still looks healthy — that is the trap"
+        );
         assert!(ls[0].mounted_by_lease);
 
         // What a turn gets: nothing. The lease is over A; A is not what is mounted.
         let hits = mem.recall_from_packs(q, 4).await.unwrap();
-        assert!(hits.is_empty(), "an artifact nobody granted reached a turn: {hits:?}");
-        assert!(mem.probe_packs(q, 4).await.unwrap().is_empty(), "and the probe must agree");
-        assert!(mem.pack_context().await.unwrap().is_none(), "and its rules must not reach the prompt");
+        assert!(
+            hits.is_empty(),
+            "an artifact nobody granted reached a turn: {hits:?}"
+        );
+        assert!(
+            mem.probe_packs(q, 4).await.unwrap().is_empty(),
+            "and the probe must agree"
+        );
+        assert!(
+            mem.pack_context().await.unwrap().is_none(),
+            "and its rules must not reach the prompt"
+        );
         // B is NOT detached — it is not this lease's to remove — only hidden.
-        assert_eq!(mounted_ids(&mem).await, vec![b.clone()], "suppressed, not seized");
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![b.clone()],
+            "suppressed, not seized"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7642,32 +10957,53 @@ mod lane_experiment {
     /// mount served. Nothing may serve while the state is unknown.
     #[tokio::test(flavor = "current_thread")]
     async fn nothing_serves_while_the_lease_state_cannot_be_read() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4d_read");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let id = fixtures::seal_fixture_pack_full(
-            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
             &["Coyote time: allow the jump for 80 to 100 ms after leaving a ledge."],
-            Some(&["platformer feel"]), None, None,
-        ).unwrap();
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
         let q = "coyote time after leaving a ledge";
-        mem.lease_pack(&id, 30, "serving", "operator").await.unwrap();
-        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "the premise: it serves while all is well");
+        mem.lease_pack(&id, 30, "serving", "operator")
+            .await
+            .unwrap();
+        assert!(
+            !mem.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "the premise: it serves while all is well"
+        );
 
         {
             let _seam = Seam::arm(SEAM_LEASE_READ);
             let hits = mem.recall_from_packs(q, 4).await.unwrap();
-            assert!(hits.is_empty(), "packs served while the lease state was unreadable: {hits:?}");
+            assert!(
+                hits.is_empty(),
+                "packs served while the lease state was unreadable: {hits:?}"
+            );
             assert!(mem.probe_packs(q, 4).await.unwrap().is_empty());
-            assert!(mem.pack_context().await.unwrap().is_none(), "the prompt block must be withheld too");
+            assert!(
+                mem.pack_context().await.unwrap().is_none(),
+                "the prompt block must be withheld too"
+            );
         }
         // The uncertainty passes; service resumes.
-        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "and it serves again afterwards");
+        assert!(
+            !mem.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "and it serves again afterwards"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7677,41 +11013,69 @@ mod lane_experiment {
     /// It must still not reach a turn.
     #[tokio::test(flavor = "current_thread")]
     async fn a_mount_nothing_could_record_still_never_reaches_a_turn() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4d_orphan");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let id = fixtures::seal_fixture_pack_full(
-            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
             &["Coyote time: allow the jump for 80 to 100 ms after leaving a ledge."],
-            Some(&["platformer feel"]), None, None,
-        ).unwrap();
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         mem.set_pack_library(lib.to_str().unwrap()).await.unwrap();
         let q = "coyote time after leaving a ledge";
 
         let err = {
             let _seam = Seam::arm(SEAM_GRANT_TX | SEAM_UNMOUNT | SEAM_QUARANTINE_WRITE);
-            mem.lease_pack(&id, 1, "everything fails", "operator").await.unwrap_err().to_string()
+            mem.lease_pack(&id, 1, "everything fails", "operator")
+                .await
+                .unwrap_err()
+                .to_string()
         };
         assert!(err.contains("could not record the lease"), "{err}");
-        assert!(err.contains("suppressed for this process"), "it says what it did instead: {err}");
-        assert!(mem.leases().await.unwrap().is_empty(), "no row exists — that is the premise");
-        assert_eq!(mounted_ids(&mem).await, vec![id.clone()], "and the pack really is attached");
+        assert!(
+            err.contains("suppressed for this process"),
+            "it says what it did instead: {err}"
+        );
+        assert!(
+            mem.leases().await.unwrap().is_empty(),
+            "no row exists — that is the premise"
+        );
+        assert_eq!(
+            mounted_ids(&mem).await,
+            vec![id.clone()],
+            "and the pack really is attached"
+        );
 
         // The turn, with no seams armed at all: nothing durable says this pack may serve, so it does not.
         let hits = mem.recall_from_packs(q, 4).await.unwrap();
-        assert!(hits.is_empty(), "an unrecorded mount reached a turn: {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "an unrecorded mount reached a turn: {hits:?}"
+        );
         assert!(mem.pack_context().await.unwrap().is_none());
         // Detaching it by hand clears the suppression: the note follows the engine, not the reverse.
         mem.unmount_pack(&id).await.unwrap();
         assert!(mem.recall_from_packs(q, 4).await.unwrap().is_empty());
         // Re-mounting it now that no lease claims it: nothing suppresses it any more, because the
         // actor's note was dropped when the pack really went away.
-        mem.mount_pack(lib.join("games.ydbpack").to_str().unwrap()).await.unwrap();
-        assert!(!mem.recall_from_packs(q, 4).await.unwrap().is_empty(), "a stale note must not suppress a fresh mount forever");
+        mem.mount_pack(lib.join("games.ydbpack").to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            !mem.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "a stale note must not suppress a fresh mount forever"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7720,16 +11084,24 @@ mod lane_experiment {
     /// so a single bad pack made every grant fail with an error naming the wrong id.
     #[tokio::test(flavor = "current_thread")]
     async fn a_corrupt_unrelated_library_file_does_not_block_other_leases() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4d_corrupt");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let good = fixtures::seal_fixture_pack_full(
-            lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel",
-            &["one row"], Some(&["platformer feel"]), None, None,
-        ).unwrap();
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &["one row"],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         // A file that is not a pack at all, sitting in the same library.
         std::fs::write(lib.join("broken.ydbpack"), b"this is not a sealed pack").unwrap();
 
@@ -7739,7 +11111,10 @@ mod lane_experiment {
         let cat = mem.available_packs().await.unwrap();
         assert_eq!(cat.len(), 1, "{cat:?}");
         // ...and the good pack is still leasable.
-        let l = mem.lease_pack(&good, 1, "unaffected by a neighbour", "operator").await.unwrap();
+        let l = mem
+            .lease_pack(&good, 1, "unaffected by a neighbour", "operator")
+            .await
+            .unwrap();
         assert_eq!(l.pack_id, good);
         assert_eq!(mounted_ids(&mem).await, vec![good.clone()]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -7752,14 +11127,25 @@ mod lane_experiment {
     /// actor that owns the database.
     #[tokio::test(flavor = "current_thread")]
     async fn two_minds_in_one_process_do_not_share_each_others_orphaned_mounts() {
-        let _lease_tests = lease_test_lock();
+        let _lease_tests = lease_test_lock().await;
         use mind_types::MemoryFacade;
         let dir = mind_types::scratch::dir("p4e_two");
         let _ = std::fs::remove_dir_all(&dir);
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let row = "Coyote time: allow the jump for 80 to 100 ms after leaving a ledge.";
-        let id = fixtures::seal_fixture_pack_full(lib.join("games.ydbpack").to_str().unwrap(), "yantrik", "game-feel", "0.1.0", "game_feel", &[row], Some(&["platformer feel"]), None, None).unwrap();
+        let id = fixtures::seal_fixture_pack_full(
+            lib.join("games.ydbpack").to_str().unwrap(),
+            "yantrik",
+            "game-feel",
+            "0.1.0",
+            "game_feel",
+            &[row],
+            Some(&["platformer feel"]),
+            None,
+            None,
+        )
+        .unwrap();
         let q = "coyote time after leaving a ledge";
 
         let a = MemoryHandle::spawn(":memory:", 64).unwrap();
@@ -7770,19 +11156,36 @@ mod lane_experiment {
         // A ends up with an untracked mount it could neither record nor detach.
         let err = {
             let _seam = Seam::arm(SEAM_GRANT_TX | SEAM_UNMOUNT | SEAM_QUARANTINE_WRITE);
-            a.lease_pack(&id, 1, "everything fails", "operator").await.unwrap_err().to_string()
+            a.lease_pack(&id, 1, "everything fails", "operator")
+                .await
+                .unwrap_err()
+                .to_string()
         };
         assert!(err.contains("suppressed for this process"), "{err}");
-        assert!(a.recall_from_packs(q, 4).await.unwrap().is_empty(), "A must not serve its orphan");
+        assert!(
+            a.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "A must not serve its orphan"
+        );
 
         // B leases the same pack legitimately. Its turns are unaffected by A's trouble...
-        b.lease_pack(&id, 5, "a healthy lease in another mind", "operator").await.unwrap();
+        b.lease_pack(&id, 5, "a healthy lease in another mind", "operator")
+            .await
+            .unwrap();
         let hits = b.recall_from_packs(q, 4).await.unwrap();
-        assert!(!hits.is_empty(), "B's own healthy lease was suppressed by another mind's note: {hits:?}");
-        assert!(b.pack_context().await.unwrap().is_some(), "and B's prompt block is its own");
+        assert!(
+            !hits.is_empty(),
+            "B's own healthy lease was suppressed by another mind's note: {hits:?}"
+        );
+        assert!(
+            b.pack_context().await.unwrap().is_some(),
+            "and B's prompt block is its own"
+        );
 
         // ...and B's visibility pass must not have cleared A's note either.
-        assert!(a.recall_from_packs(q, 4).await.unwrap().is_empty(), "another mind's turn cleared A's suppression");
+        assert!(
+            a.recall_from_packs(q, 4).await.unwrap().is_empty(),
+            "another mind's turn cleared A's suppression"
+        );
         assert!(a.pack_context().await.unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7813,15 +11216,33 @@ mod lane_experiment {
             signer: signer.map(String::from),
         };
         // TWO legacy artifacts, same id, both with digest and signer absent: not the same thing.
-        assert!(!claim("/lib/a.ydbpack", None, None).is(&lease(None, None)), "absence must never match absence");
-        assert!(!claim("/lib/b.ydbpack", None, None).is(&lease(None, None)), "not even a different file with the same nothing");
+        assert!(
+            !claim("/lib/a.ydbpack", None, None).is(&lease(None, None)),
+            "absence must never match absence"
+        );
+        assert!(
+            !claim("/lib/b.ydbpack", None, None).is(&lease(None, None)),
+            "not even a different file with the same nothing"
+        );
         // A blank digest is absence wearing a string.
         assert!(!claim("/lib/a.ydbpack", Some("   "), None).is(&lease(Some("   "), None)));
         // A real digest identifies; a different one does not; a re-signature is a different identity.
-        assert!(claim("/lib/a.ydbpack", Some("blake3:aa"), None).is(&lease(Some("blake3:aa"), None)));
-        assert!(claim("/anywhere/else.ydbpack", Some("blake3:aa"), None).is(&lease(Some("blake3:aa"), None)), "content, not the path");
-        assert!(!claim("/lib/a.ydbpack", Some("blake3:bb"), None).is(&lease(Some("blake3:aa"), None)));
-        assert!(!claim("/lib/a.ydbpack", Some("blake3:aa"), Some("key")).is(&lease(Some("blake3:aa"), None)), "a re-signature is not the same grant");
+        assert!(
+            claim("/lib/a.ydbpack", Some("blake3:aa"), None).is(&lease(Some("blake3:aa"), None))
+        );
+        assert!(
+            claim("/anywhere/else.ydbpack", Some("blake3:aa"), None)
+                .is(&lease(Some("blake3:aa"), None)),
+            "content, not the path"
+        );
+        assert!(
+            !claim("/lib/a.ydbpack", Some("blake3:bb"), None).is(&lease(Some("blake3:aa"), None))
+        );
+        assert!(
+            !claim("/lib/a.ydbpack", Some("blake3:aa"), Some("key"))
+                .is(&lease(Some("blake3:aa"), None)),
+            "a re-signature is not the same grant"
+        );
         // ...and the wall refuses the grant outright rather than leaving it to identity later.
         let entry = |digest: Option<&str>| PackCatalogEntry {
             pack_id: "yantrik/legacy@0.1.0".into(),
@@ -7833,10 +11254,16 @@ mod lane_experiment {
             signer: None,
         };
         let e = leasable_identity(&entry(None)).unwrap_err();
-        assert!(e.contains("no content digest") && e.contains("cannot identify"), "{e}");
+        assert!(
+            e.contains("no content digest") && e.contains("cannot identify"),
+            "{e}"
+        );
         assert!(leasable_identity(&entry(Some(""))).is_err());
         assert!(leasable_identity(&entry(Some("  "))).is_err());
-        assert!(leasable_identity(&entry(Some("blake3:aa"))).is_ok(), "a real artifact is still leasable");
+        assert!(
+            leasable_identity(&entry(Some("blake3:aa"))).is_ok(),
+            "a real artifact is still leasable"
+        );
     }
 }
 
@@ -7876,8 +11303,16 @@ mod sec1b_boundary {
         // The control. A gate that refuses everything proves nothing about the one that refuses
         // secrets, and this is the failure mode the old detector actually had: it refused
         // "asian food recipes" while admitting a password.
-        for clean in ["asian food recipes", "the task list for Tuesday", "how do passwords work?", "order 100000000000 shipped"] {
-            assert!(super::gate_write(clean).is_ok(), "ordinary life must still be writable: {clean:?}");
+        for clean in [
+            "asian food recipes",
+            "the task list for Tuesday",
+            "how do passwords work?",
+            "order 100000000000 shipped",
+        ] {
+            assert!(
+                super::gate_write(clean).is_ok(),
+                "ordinary life must still be writable: {clean:?}"
+            );
         }
     }
 }
@@ -7915,59 +11350,83 @@ mod p5b_ledger {
         // Codex's acceptance test 1. The case that started this: a document ran perfectly and
         // answered "I cannot perform this task", and the ledger recorded a success because the
         // EXECUTOR had finished. It must now record an attempt and no evidence.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "doc", "md").await;
 
         for _ in 0..10 {
-            mem.record_skill_outcome("doc", SkillOutcome::ungraded()).await.unwrap();
+            mem.record_skill_outcome("doc", SkillOutcome::ungraded())
+                .await
+                .unwrap();
         }
         let s = get(&mem, "doc").await;
         assert_eq!(s.runs, 10, "every attempt is counted");
         assert_eq!(s.graded, 0, "and none of them is evidence");
         assert_eq!(s.judged_ok, 0);
-        assert_eq!(s.reliability().rate(), None, "no rate can be computed from nothing");
+        assert_eq!(
+            s.reliability().rate(),
+            None,
+            "no rate can be computed from nothing"
+        );
         assert!(!s.reliability().is_discredited());
 
         // AND THE REGRESSION THIS GUARDS: judged over `runs`, ten unassessed runs would read as ten
         // straight failures and quarantine a document that never failed at all.
-        assert_eq!(s.status, "active", "an unjudged document must not be auto-quarantined");
+        assert_eq!(
+            s.status, "active",
+            "an unjudged document must not be auto-quarantined"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_infrastructure_failure_is_not_a_deliverable_and_not_a_task_failure() {
         // Codex's acceptance test 3, live on the box before fa908a9: an
         // "OpenAI-compatible API request failed" reached the job board under a green tick.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "flaky-provider", "md").await;
 
         for _ in 0..6 {
-            mem.record_skill_outcome("flaky-provider", SkillOutcome::executor_failed()).await.unwrap();
+            mem.record_skill_outcome("flaky-provider", SkillOutcome::executor_failed())
+                .await
+                .unwrap();
         }
         let s = get(&mem, "flaky-provider").await;
         assert_eq!(s.judged_ok, 0, "an outage is never a success");
         assert_eq!(s.graded, 0, "and never evidence against the skill either");
-        assert_eq!(s.status, "active", "the provider having a bad afternoon must not discredit a skill");
+        assert_eq!(
+            s.status, "active",
+            "the provider having a bad afternoon must not discredit a skill"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn only_a_judged_record_moves_the_verdict() {
         // Codex's acceptance test 2: exit 0 reaches task_success through the code adapter, and the
         // quarantine line is drawn over JUDGED runs.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "code", "python").await;
 
-        mem.record_skill_outcome("code", SkillOutcome::from_exit(true)).await.unwrap();
+        mem.record_skill_outcome("code", SkillOutcome::from_exit(true))
+            .await
+            .unwrap();
         let s = get(&mem, "code").await;
         assert_eq!((s.runs, s.graded, s.judged_ok), (1, 1, 1));
         assert_eq!(s.reliability().rate(), Some(1.0));
 
         // Four judged failures against one judged success: below the line, and quarantined.
         for _ in 0..4 {
-            mem.record_skill_outcome("code", SkillOutcome::from_exit(false)).await.unwrap();
+            mem.record_skill_outcome("code", SkillOutcome::from_exit(false))
+                .await
+                .unwrap();
         }
         let s = get(&mem, "code").await;
         assert_eq!((s.runs, s.graded, s.judged_ok), (5, 5, 1));
-        assert!(s.reliability().is_discredited(), "1 of 5 judged is below the line");
+        assert!(
+            s.reliability().is_discredited(),
+            "1 of 5 judged is below the line"
+        );
         assert_eq!(s.status, "quarantined");
     }
 
@@ -7975,17 +11434,26 @@ mod p5b_ledger {
     async fn unjudged_runs_cannot_dilute_a_judged_record() {
         // The mirror of the first test: interleaving unassessed runs must not rescue a skill that
         // IS failing, any more than it should condemn one nobody assessed.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "mixed", "md").await;
 
         for _ in 0..4 {
-            mem.record_skill_outcome("mixed", SkillOutcome::judged(false)).await.unwrap();
-            mem.record_skill_outcome("mixed", SkillOutcome::ungraded()).await.unwrap();
+            mem.record_skill_outcome("mixed", SkillOutcome::judged(false))
+                .await
+                .unwrap();
+            mem.record_skill_outcome("mixed", SkillOutcome::ungraded())
+                .await
+                .unwrap();
         }
         let s = get(&mem, "mixed").await;
         assert_eq!(s.runs, 8, "eight attempts");
         assert_eq!(s.graded, 4, "four of which were judged");
-        assert_eq!(s.reliability().rate(), Some(0.0), "and the rate is over those four");
+        assert_eq!(
+            s.reliability().rate(),
+            Some(0.0),
+            "and the rate is over those four"
+        );
         assert_eq!(s.status, "quarantined");
         assert_eq!(TaskBasis::StructuredJudge.label(), "structured_judge");
     }
@@ -8000,9 +11468,17 @@ mod p5c_numerator {
     /// A row as the migration leaves one: legacy `successes` carried over, post-split counters at 0.
     async fn legacy(mem: &Arc<dyn MemoryFacade>, name: &str, runs: u64, successes: u64) {
         mem.save_skill(Skill {
-            name: name.into(), lang: "python".into(), code: "x".into(), summary: "x".into(),
-            tags: vec![], status: "active".into(),
-            runs, successes, judged_ok: 0, graded: 0, created_ms: 0,
+            name: name.into(),
+            lang: "python".into(),
+            code: "x".into(),
+            summary: "x".into(),
+            tags: vec![],
+            status: "active".into(),
+            runs,
+            successes,
+            judged_ok: 0,
+            graded: 0,
+            created_ms: 0,
         })
         .await
         .unwrap();
@@ -8014,30 +11490,54 @@ mod p5c_numerator {
         // `reliability()` divided the frozen `successes` column by the new `graded` denominator,
         // and `Reliability::new` clamps successes to runs — so a legacy row with 5 conflated wins
         // and TWO JUDGED FAILURES computed 2/2 and reported rate = 1.0. Proven before the fix.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         legacy(&mem, "poisoned", 8, 5).await;
 
         for _ in 0..2 {
-            mem.record_skill_outcome("poisoned", SkillOutcome::judged(false)).await.unwrap();
+            mem.record_skill_outcome("poisoned", SkillOutcome::judged(false))
+                .await
+                .unwrap();
         }
         let s = mem.get_skill("poisoned").await.unwrap().unwrap();
-        assert_eq!(s.successes, 5, "the historical column is frozen, not rewritten");
+        assert_eq!(
+            s.successes, 5,
+            "the historical column is frozen, not rewritten"
+        );
         assert_eq!(s.judged_ok, 0, "and it is NOT the numerator");
         assert_eq!(s.graded, 2);
-        assert_eq!(s.reliability().rate(), Some(0.0), "two judged failures are 0%, not 100%");
-        assert!(s.reliability().is_discredited() == false, "2 judged runs is below the floor to condemn on");
+        assert_eq!(
+            s.reliability().rate(),
+            Some(0.0),
+            "two judged failures are 0%, not 100%"
+        );
+        assert!(
+            !s.reliability().is_discredited(),
+            "2 judged runs is below the floor to condemn on"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_judged_numerator_counts_only_judged_wins() {
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         legacy(&mem, "mixed", 3, 3).await;
 
-        mem.record_skill_outcome("mixed", SkillOutcome::judged(true)).await.unwrap();
-        mem.record_skill_outcome("mixed", SkillOutcome::judged(true)).await.unwrap();
-        mem.record_skill_outcome("mixed", SkillOutcome::judged(false)).await.unwrap();
-        mem.record_skill_outcome("mixed", SkillOutcome::ungraded()).await.unwrap();
-        mem.record_skill_outcome("mixed", SkillOutcome::executor_failed()).await.unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::judged(true))
+            .await
+            .unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::judged(true))
+            .await
+            .unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::judged(false))
+            .await
+            .unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::ungraded())
+            .await
+            .unwrap();
+        mem.record_skill_outcome("mixed", SkillOutcome::executor_failed())
+            .await
+            .unwrap();
 
         let s = mem.get_skill("mixed").await.unwrap().unwrap();
         assert_eq!(s.runs, 8, "3 legacy attempts + 5 new");
@@ -8056,10 +11556,20 @@ mod p7_rehabilitation {
 
     async fn bank(mem: &Arc<dyn MemoryFacade>, name: &str, status: &str) {
         mem.save_skill(Skill {
-            name: name.into(), lang: "python".into(), code: "x".into(), summary: "x".into(),
-            tags: vec![], status: status.into(),
-            runs: 0, successes: 0, judged_ok: 0, graded: 0, created_ms: 0,
-        }).await.unwrap();
+            name: name.into(),
+            lang: "python".into(),
+            code: "x".into(),
+            summary: "x".into(),
+            tags: vec![],
+            status: status.into(),
+            runs: 0,
+            successes: 0,
+            judged_ok: 0,
+            graded: 0,
+            created_ms: 0,
+        })
+        .await
+        .unwrap();
     }
 
     async fn status(mem: &Arc<dyn MemoryFacade>, name: &str) -> String {
@@ -8069,12 +11579,19 @@ mod p7_rehabilitation {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rule_can_still_condemn() {
         // KILL CRITERION 1. If this cannot quarantine, the rest is an amnesty rather than a rule.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "bad", "active").await;
         for _ in 0..4 {
-            mem.record_skill_outcome("bad", SkillOutcome::judged(false)).await.unwrap();
+            mem.record_skill_outcome("bad", SkillOutcome::judged(false))
+                .await
+                .unwrap();
         }
-        assert_eq!(status(&mem, "bad").await, "quarantined", "4 judged failures must condemn");
+        assert_eq!(
+            status(&mem, "bad").await,
+            "quarantined",
+            "4 judged failures must condemn"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8082,39 +11599,62 @@ mod p7_rehabilitation {
         // The path that did not exist: quarantine used to latch, so a condemned skill could never
         // clear itself even when the evidence turned. Direct invocation is how it gathers evidence
         // while `recall_skills` still excludes it.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "recovering", "quarantined").await;
         for _ in 0..4 {
-            mem.record_skill_outcome("recovering", SkillOutcome::judged(true)).await.unwrap();
+            mem.record_skill_outcome("recovering", SkillOutcome::judged(true))
+                .await
+                .unwrap();
         }
-        assert_eq!(status(&mem, "recovering").await, "active", "judged evidence clears the sentence");
+        assert_eq!(
+            status(&mem, "recovering").await,
+            "active",
+            "judged evidence clears the sentence"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn neither_untested_nor_candidate_moves_the_status() {
         // KILL CRITERION 3. An unjudged run is not grounds to promote OR demote.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "quiet", "quarantined").await;
         for _ in 0..6 {
-            mem.record_skill_outcome("quiet", SkillOutcome::ungraded()).await.unwrap();
+            mem.record_skill_outcome("quiet", SkillOutcome::ungraded())
+                .await
+                .unwrap();
         }
-        assert_eq!(status(&mem, "quiet").await, "quarantined", "unjudged runs do not clear a sentence");
+        assert_eq!(
+            status(&mem, "quiet").await,
+            "quarantined",
+            "unjudged runs do not clear a sentence"
+        );
 
         bank(&mem, "fresh", "active").await;
         for _ in 0..3 {
-            mem.record_skill_outcome("fresh", SkillOutcome::judged(true)).await.unwrap();
+            mem.record_skill_outcome("fresh", SkillOutcome::judged(true))
+                .await
+                .unwrap();
         }
-        assert_eq!(status(&mem, "fresh").await, "active", "3 judged runs is Candidate — status untouched");
+        assert_eq!(
+            status(&mem, "fresh").await,
+            "active",
+            "3 judged runs is Candidate — status untouched"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_skill_holding_evidence_against_it_is_not_released() {
         // KILL CRITERION 5. The one-time rehabilitation releases sentences resting on RETRACTED
         // evidence. A skill that has been judged and failed keeps its sentence.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         bank(&mem, "deservedly", "active").await;
         for _ in 0..5 {
-            mem.record_skill_outcome("deservedly", SkillOutcome::judged(false)).await.unwrap();
+            mem.record_skill_outcome("deservedly", SkillOutcome::judged(false))
+                .await
+                .unwrap();
         }
         assert_eq!(status(&mem, "deservedly").await, "quarantined");
         // Re-opening the store re-runs the migration block; the sentence must survive it, because
@@ -8135,7 +11675,8 @@ mod sec1c_quarantine {
     async fn an_unknown_rid_reports_that_nothing_changed() {
         // A remediation that claims success for a row it never touched is worse than one that
         // fails: it closes the finding while the row keeps surfacing.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
         let changed = mem
             .quarantine_memory("00000000-0000-0000-0000-000000000000", "E.SEC1c test")
             .await
@@ -8147,8 +11688,14 @@ mod sec1c_quarantine {
     async fn quarantining_needs_only_an_identifier_and_a_reason() {
         // The signature IS the guarantee: a remediation for content nobody may read must not be
         // able to require the content. This compiles with a rid and a reason and nothing else.
-        let mem: Arc<dyn MemoryFacade> = Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
-        let r = mem.quarantine_memory("some-rid", "E.SEC1c: flagged credential-phrase, pending human classification").await;
+        let mem: Arc<dyn MemoryFacade> =
+            Arc::new(super::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let r = mem
+            .quarantine_memory(
+                "some-rid",
+                "E.SEC1c: flagged credential-phrase, pending human classification",
+            )
+            .await;
         assert!(r.is_ok(), "the store implements it: {r:?}");
     }
 

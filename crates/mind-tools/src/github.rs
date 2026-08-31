@@ -12,7 +12,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubNotification {
     pub repo: String,
-    pub kind: String,   // PullRequest / Issue / Release / ...
+    pub kind: String, // PullRequest / Issue / Release / ...
     pub title: String,
     pub reason: String, // mention / review_requested / assign / ...
 }
@@ -46,8 +46,15 @@ pub fn render_github_digest(items: &[GithubNotification]) -> String {
     }
     let mut s = format!("{} unread notification(s):\n", items.len());
     for n in items {
-        let title = if n.title.trim().is_empty() { "(no title)" } else { n.title.trim() };
-        s.push_str(&format!("- [{}] {} — {} (reason: {})\n", n.kind, n.repo, title, n.reason));
+        let title = if n.title.trim().is_empty() {
+            "(no title)"
+        } else {
+            n.title.trim()
+        };
+        s.push_str(&format!(
+            "- [{}] {} — {} (reason: {})\n",
+            n.kind, n.repo, title, n.reason
+        ));
     }
     s
 }
@@ -77,7 +84,9 @@ pub struct ApiGithubClient {
 
 impl ApiGithubClient {
     pub fn new(token: impl Into<String>) -> Self {
-        Self { token: token.into() }
+        Self {
+            token: token.into(),
+        }
     }
 }
 
@@ -99,11 +108,19 @@ impl GithubClient for ApiGithubClient {
             let arr = v.as_array().cloned().unwrap_or_default();
             let mut out = Vec::new();
             for n in arr {
-                let repo = n["repository"]["full_name"].as_str().unwrap_or("").to_string();
+                let repo = n["repository"]["full_name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 let kind = n["subject"]["type"].as_str().unwrap_or("").to_string();
                 let title = n["subject"]["title"].as_str().unwrap_or("").to_string();
                 let reason = n["reason"].as_str().unwrap_or("").to_string();
-                out.push(GithubNotification { repo, kind, title, reason });
+                out.push(GithubNotification {
+                    repo,
+                    kind,
+                    title,
+                    reason,
+                });
             }
             Ok(out)
         })
@@ -191,8 +208,13 @@ impl ScriptedGithubWriter {
 #[async_trait]
 impl GithubWriter for ScriptedGithubWriter {
     async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<String> {
-        self.posted.lock().unwrap().push((repo.into(), number, body.into()));
-        Ok(format!("https://github.com/{repo}/issues/{number}#scripted"))
+        self.posted
+            .lock()
+            .unwrap()
+            .push((repo.into(), number, body.into()));
+        Ok(format!(
+            "https://github.com/{repo}/issues/{number}#scripted"
+        ))
     }
 }
 
@@ -201,19 +223,31 @@ mod tests {
     use super::*;
 
     fn n(repo: &str, kind: &str, title: &str) -> GithubNotification {
-        GithubNotification { repo: repo.into(), kind: kind.into(), title: title.into(), reason: "mention".into() }
+        GithubNotification {
+            repo: repo.into(),
+            kind: kind.into(),
+            title: title.into(),
+            reason: "mention".into(),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scripted_notifications_respect_limit() {
-        let c = ScriptedGithubClient::new(vec![n("a/b", "Issue", "one"), n("c/d", "PullRequest", "two")]);
+        let c = ScriptedGithubClient::new(vec![
+            n("a/b", "Issue", "one"),
+            n("c/d", "PullRequest", "two"),
+        ]);
         assert_eq!(c.notifications(1).await.unwrap().len(), 1);
     }
 
     #[test]
     fn digest_lists_repo_kind_and_title() {
         let d = render_github_digest(&[n("yantrikos/yantrik-os", "PullRequest", "Add logging")]);
-        assert!(d.contains("yantrikos/yantrik-os") && d.contains("Add logging") && d.contains("PullRequest"));
+        assert!(
+            d.contains("yantrikos/yantrik-os")
+                && d.contains("Add logging")
+                && d.contains("PullRequest")
+        );
         assert!(render_github_digest(&[]).contains("No unread"));
     }
 }

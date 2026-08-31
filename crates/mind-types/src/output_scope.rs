@@ -25,7 +25,9 @@
 //! The harm gate already reasons this way about its normalised views; this is the same trick.
 
 /// Where the answer is going, ordered from most permissive to least.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputScope {
     /// The owner, on a surface only they reach. Concrete detail is the point of the product here.
@@ -61,7 +63,9 @@ impl OutputScope {
 }
 
 /// Classes of concrete thing an answer might name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityClass {
     Person,
@@ -191,7 +195,10 @@ impl OutputPolicy {
     pub fn tighten(&self, request: MinimizationRequest) -> OutputPolicy {
         match request {
             MinimizationRequest::None => self.clone(),
-            MinimizationRequest::NoExamples => OutputPolicy { examples_allowed: false, ..self.clone() },
+            MinimizationRequest::NoExamples => OutputPolicy {
+                examples_allowed: false,
+                ..self.clone()
+            },
             MinimizationRequest::NoPrivateFacts => OutputPolicy {
                 scope: self.scope,
                 examples_allowed: false,
@@ -366,11 +373,21 @@ pub fn admit_working_set(
     // The owner's own surface is exempt because it IS the operator: there is no slice to prove
     // membership of when the reader is entitled to all of it.
     if policy.scope != OutputScope::OperatorPrivate
-        && !ws.provenance.as_ref().is_some_and(|p| p.isolated_to_principal())
+        && !ws
+            .provenance
+            .as_ref()
+            .is_some_and(|p| p.isolated_to_principal())
     {
         return (
             crate::memory::WorkingSet::default(),
-            EvidenceDecision { scope: policy.scope, request, before, admitted: 0, dropped: before, contradictions_kept: 0 },
+            EvidenceDecision {
+                scope: policy.scope,
+                request,
+                before,
+                admitted: 0,
+                dropped: before,
+                contradictions_kept: 0,
+            },
         );
     }
 
@@ -379,7 +396,14 @@ pub fn admit_working_set(
     if policy.entity_classes.is_empty() || policy.max_evidence_items == 0 {
         return (
             crate::memory::WorkingSet::default(),
-            EvidenceDecision { scope: policy.scope, request, before, admitted: 0, dropped: before, contradictions_kept: 0 },
+            EvidenceDecision {
+                scope: policy.scope,
+                request,
+                before,
+                admitted: 0,
+                dropped: before,
+                contradictions_kept: 0,
+            },
         );
     }
 
@@ -396,7 +420,11 @@ pub fn admit_working_set(
     take(&mut out.preferences, &ws.preferences, &mut budget);
     take(&mut out.commitments, &ws.commitments, &mut budget);
     take(&mut out.recent_events, &ws.recent_events, &mut budget);
-    take(&mut out.uncertain_beliefs, &ws.uncertain_beliefs, &mut budget);
+    take(
+        &mut out.uncertain_beliefs,
+        &ws.uncertain_beliefs,
+        &mut budget,
+    );
     out.active_contradictions = ws.active_contradictions.clone();
 
     let admitted = out.stable_facts.len()
@@ -438,7 +466,11 @@ pub fn admitted_evidence<T: Clone>(policy: &OutputPolicy, items: &[T]) -> Vec<T>
     if policy.entity_classes.is_empty() || policy.max_evidence_items == 0 {
         return Vec::new();
     }
-    items.iter().take(policy.max_evidence_items).cloned().collect()
+    items
+        .iter()
+        .take(policy.max_evidence_items)
+        .cloned()
+        .collect()
 }
 
 /// What the user asked for, in this turn, about disclosure.
@@ -453,21 +485,44 @@ pub enum MinimizationRequest {
 
 /// Phrases that ask for no concrete private detail at all.
 const NO_PRIVATE_FACTS: &[&str] = &[
-    "do not reveal", "don't reveal", "dont reveal",
-    "do not mention", "don't mention", "dont mention",
-    "do not name", "don't name", "dont name",
-    "do not share", "don't share", "dont share",
-    "do not disclose", "don't disclose", "dont disclose",
-    "without revealing", "without naming", "without mentioning", "without disclosing",
-    "without specifics", "no specifics", "no private", "nothing private",
-    "keep it general", "in general terms", "generic terms",
+    "do not reveal",
+    "don't reveal",
+    "dont reveal",
+    "do not mention",
+    "don't mention",
+    "dont mention",
+    "do not name",
+    "don't name",
+    "dont name",
+    "do not share",
+    "don't share",
+    "dont share",
+    "do not disclose",
+    "don't disclose",
+    "dont disclose",
+    "without revealing",
+    "without naming",
+    "without mentioning",
+    "without disclosing",
+    "without specifics",
+    "no specifics",
+    "no private",
+    "nothing private",
+    "keep it general",
+    "in general terms",
+    "generic terms",
 ];
 
 /// Phrases that ask only for no worked illustrations, which is weaker.
 const NO_EXAMPLES: &[&str] = &[
-    "without examples", "no examples", "without example",
-    "don't give examples", "do not give examples", "dont give examples",
-    "without illustrations", "no illustrations",
+    "without examples",
+    "no examples",
+    "without example",
+    "don't give examples",
+    "do not give examples",
+    "dont give examples",
+    "without illustrations",
+    "no illustrations",
 ];
 
 /// Openings that mean the user is asking ABOUT disclosure rather than instructing on it.
@@ -477,9 +532,18 @@ const NO_EXAMPLES: &[&str] = &[
 /// question about privacy with a deliberately vague answer is a bad product, so the obvious cases
 /// are excluded.
 const TOPIC_QUESTION: &[&str] = &[
-    "how do i", "how do you", "how does", "how would i", "how can i",
-    "why do", "why does", "what happens if", "what does it mean",
-    "explain how", "tell me how", "what is the difference",
+    "how do i",
+    "how do you",
+    "how does",
+    "how would i",
+    "how can i",
+    "why do",
+    "why does",
+    "what happens if",
+    "what does it mean",
+    "explain how",
+    "tell me how",
+    "what is the difference",
 ];
 
 /// What did the user ask for, about disclosure, in this turn?
@@ -525,8 +589,16 @@ mod tests {
             );
         }
 
-        for text in ["answer without examples from my life", "no examples please", "without illustrations"] {
-            assert_eq!(detect_minimization(text), MinimizationRequest::NoExamples, "{text:?}");
+        for text in [
+            "answer without examples from my life",
+            "no examples please",
+            "without illustrations",
+        ] {
+            assert_eq!(
+                detect_minimization(text),
+                MinimizationRequest::NoExamples,
+                "{text:?}"
+            );
         }
     }
 
@@ -541,7 +613,11 @@ mod tests {
             "explain how without naming works",
             "what happens if i say do not reveal private facts",
         ] {
-            assert_eq!(detect_minimization(text), MinimizationRequest::None, "topic question: {text:?}");
+            assert_eq!(
+                detect_minimization(text),
+                MinimizationRequest::None,
+                "topic question: {text:?}"
+            );
         }
     }
 
@@ -553,7 +629,11 @@ mod tests {
             "summarise the week",
             "",
         ] {
-            assert_eq!(detect_minimization(text), MinimizationRequest::None, "{text:?}");
+            assert_eq!(
+                detect_minimization(text),
+                MinimizationRequest::None,
+                "{text:?}"
+            );
         }
     }
 
@@ -569,13 +649,20 @@ mod tests {
             "no private lane is configured on this box",
             "",
         ];
-        for scope in [OutputScope::OperatorPrivate, OutputScope::HouseholdMember, OutputScope::PublicShare] {
+        for scope in [
+            OutputScope::OperatorPrivate,
+            OutputScope::HouseholdMember,
+            OutputScope::PublicShare,
+        ] {
             let base = OutputPolicy::for_scope(scope);
             for text in inputs {
                 let after = base.tighten(detect_minimization(text));
                 assert!(!after.examples_allowed || base.examples_allowed);
                 assert!(after.max_evidence_items <= base.max_evidence_items);
-                assert!(after.entity_classes.iter().all(|c| base.entity_classes.contains(c)));
+                assert!(after
+                    .entity_classes
+                    .iter()
+                    .all(|c| base.entity_classes.contains(c)));
             }
         }
     }
@@ -601,11 +688,22 @@ mod tests {
         let items: Vec<u8> = (0..50).collect();
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
         let kept = admitted_evidence(&member, &items);
-        assert_eq!(kept.len(), member.max_evidence_items, "a member surface is capped");
-        assert_eq!(kept[0], 0, "and keeps the highest-ranked, not a random slice");
+        assert_eq!(
+            kept.len(),
+            member.max_evidence_items,
+            "a member surface is capped"
+        );
+        assert_eq!(
+            kept[0], 0,
+            "and keeps the highest-ranked, not a random slice"
+        );
 
         let operator = OutputPolicy::for_scope(OutputScope::OperatorPrivate);
-        assert_eq!(admitted_evidence(&operator, &items).len(), 50, "the owner is not capped");
+        assert_eq!(
+            admitted_evidence(&operator, &items).len(),
+            50,
+            "the owner is not capped"
+        );
     }
 
     #[test]
@@ -615,7 +713,10 @@ mod tests {
         // substring rule would be the fifth fuzzy matcher this week wearing a new hat.
         let items: Vec<&str> = vec!["ZQCANARY-PERSON-4a1 handles the rota"];
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
-        assert!(!member.may_name(EntityClass::Account), "the CONTRACT forbids accounts here");
+        assert!(
+            !member.may_name(EntityClass::Account),
+            "the CONTRACT forbids accounts here"
+        );
         assert_eq!(
             admitted_evidence(&member, &items).len(),
             1,
@@ -627,14 +728,21 @@ mod tests {
     #[test]
     fn an_unconstrained_operator_turn_carries_no_extra_instruction() {
         assert!(
-            OutputPolicy::for_scope(OutputScope::OperatorPrivate).prompt_note().is_none(),
+            OutputPolicy::for_scope(OutputScope::OperatorPrivate)
+                .prompt_note()
+                .is_none(),
             "an ordinary owner turn must read exactly as it did before slice 4"
         );
         // And once anything is asked for, it speaks.
         let asked = OutputPolicy::for_scope(OutputScope::OperatorPrivate)
             .tighten(MinimizationRequest::NoPrivateFacts);
-        let note = asked.prompt_note().expect("a total prohibition must be stated");
-        assert!(note.contains("ALREADY been withheld"), "it explains an enforced decision, not a request: {note}");
+        let note = asked
+            .prompt_note()
+            .expect("a total prohibition must be stated");
+        assert!(
+            note.contains("ALREADY been withheld"),
+            "it explains an enforced decision, not a request: {note}"
+        );
     }
 
     // ---- E.SEC8 slice 4: the typed gate ----
@@ -664,7 +772,9 @@ mod tests {
     fn ws(facts: usize, contradictions: usize) -> crate::memory::WorkingSet {
         crate::memory::WorkingSet {
             stable_facts: (0..facts).map(|i| item(&format!("f{i}"))).collect(),
-            active_contradictions: (0..contradictions).map(|i| contradiction(&format!("c{i}"))).collect(),
+            active_contradictions: (0..contradictions)
+                .map(|i| contradiction(&format!("c{i}")))
+                .collect(),
             ..Default::default()
         }
     }
@@ -680,30 +790,48 @@ mod tests {
 
     fn operator_read() -> crate::memory::ReadProvenance {
         // A truthful stamp that proves the WRONG thing: the operator sees past every scope wall.
-        crate::memory::ReadProvenance { viewer: None, purpose: "audit".into() }
+        crate::memory::ReadProvenance {
+            viewer: None,
+            purpose: "audit".into(),
+        }
     }
 
-    fn stamped(p: Option<crate::memory::ReadProvenance>, facts: usize, contradictions: usize) -> crate::memory::WorkingSet {
-        crate::memory::WorkingSet { provenance: p, ..ws(facts, contradictions) }
+    fn stamped(
+        p: Option<crate::memory::ReadProvenance>,
+        facts: usize,
+        contradictions: usize,
+    ) -> crate::memory::WorkingSet {
+        crate::memory::WorkingSet {
+            provenance: p,
+            ..ws(facts, contradictions)
+        }
     }
 
     /// CODEX CRITERION 3 — missing provenance admits none, even on a member surface.
     #[test]
     fn an_unstamped_set_is_denied_on_a_member_surface() {
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
-        let (kept, d) = admit_working_set(&member, MinimizationRequest::None, &stamped(None, 12, 2));
+        let (kept, d) =
+            admit_working_set(&member, MinimizationRequest::None, &stamped(None, 12, 2));
         assert_eq!(d.admitted, 0, "absence of proof is not permission");
         assert_eq!(d.dropped, 14);
         assert!(kept.stable_facts.is_empty());
         // CRITERION 5, first half: budget-exemption is not provenance-exemption.
-        assert!(kept.active_contradictions.is_empty(), "an unstamped contradiction is still unproven");
+        assert!(
+            kept.active_contradictions.is_empty(),
+            "an unstamped contradiction is still unproven"
+        );
     }
 
     /// The case the rule exposed that I had not seen: a stamp that proves the WRONG thing.
     #[test]
     fn an_operator_hydrated_set_cannot_authorise_a_member_turn() {
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
-        let (_, d) = admit_working_set(&member, MinimizationRequest::None, &stamped(Some(operator_read()), 10, 1));
+        let (_, d) = admit_working_set(
+            &member,
+            MinimizationRequest::None,
+            &stamped(Some(operator_read()), 10, 1),
+        );
         assert_eq!(
             d.admitted, 0,
             "an operator read is unfiltered by construction; holding a member endpoint does not narrow it"
@@ -717,9 +845,20 @@ mod tests {
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
         let set = stamped(Some(isolated_to("asha")), 30, 3);
         let (kept, d) = admit_working_set(&member, MinimizationRequest::None, &set);
-        assert_eq!(kept.stable_facts.len(), member.max_evidence_items, "admitted, and capped");
-        assert!(d.admitted > 0, "the whole rule must not collapse to deny-always");
-        assert_eq!(kept.active_contradictions.len(), 3, "contradictions still exempt from the BUDGET");
+        assert_eq!(
+            kept.stable_facts.len(),
+            member.max_evidence_items,
+            "admitted, and capped"
+        );
+        assert!(
+            d.admitted > 0,
+            "the whole rule must not collapse to deny-always"
+        );
+        assert_eq!(
+            kept.active_contradictions.len(),
+            3,
+            "contradictions still exempt from the BUDGET"
+        );
         // CRITERION 4: deterministic.
         let (again, _) = admit_working_set(&member, MinimizationRequest::None, &set);
         assert_eq!(kept.stable_facts.len(), again.stable_facts.len());
@@ -731,7 +870,11 @@ mod tests {
     fn public_and_audit_admit_nothing_however_well_proven() {
         for scope in [OutputScope::PublicShare, OutputScope::AuditRedacted] {
             let p = OutputPolicy::for_scope(scope);
-            let (kept, d) = admit_working_set(&p, MinimizationRequest::None, &stamped(Some(isolated_to("asha")), 9, 2));
+            let (kept, d) = admit_working_set(
+                &p,
+                MinimizationRequest::None,
+                &stamped(Some(isolated_to("asha")), 9, 2),
+            );
             assert_eq!(d.admitted, 0, "{scope:?} names nothing before anyone asks");
             assert!(kept.active_contradictions.is_empty());
         }
@@ -742,7 +885,10 @@ mod tests {
     fn the_owner_is_not_asked_to_prove_membership_of_their_own_slice() {
         let owner = OutputPolicy::for_scope(OutputScope::OperatorPrivate);
         let (_, d) = admit_working_set(&owner, MinimizationRequest::None, &stamped(None, 20, 2));
-        assert_eq!(d.dropped, 0, "there is no slice to prove membership of when the reader owns all of it");
+        assert_eq!(
+            d.dropped, 0,
+            "there is no slice to prove membership of when the reader owns all of it"
+        );
     }
 
     /// KILL CRITERION 1 — the gate must be TRANSPARENT on the owner's own surface.
@@ -751,7 +897,10 @@ mod tests {
         let set = ws(40, 3);
         let policy = OutputPolicy::for_scope(OutputScope::OperatorPrivate);
         let (out, d) = admit_working_set(&policy, MinimizationRequest::None, &set);
-        assert_eq!(d.dropped, 0, "filtering the owner's own surface is a bug, not caution");
+        assert_eq!(
+            d.dropped, 0,
+            "filtering the owner's own surface is a bug, not caution"
+        );
         assert_eq!(d.admitted, d.before);
         assert_eq!(out.stable_facts.len(), 40);
         assert_eq!(out.active_contradictions.len(), 3);
@@ -784,7 +933,10 @@ mod tests {
     #[test]
     fn the_budget_can_never_evict_a_contradiction_while_facts_survive() {
         let member = OutputPolicy::for_scope(OutputScope::HouseholdMember);
-        assert!(member.max_evidence_items < 30, "this test needs the budget to actually bite");
+        assert!(
+            member.max_evidence_items < 30,
+            "this test needs the budget to actually bite"
+        );
 
         // STAMPED: this test is about the BUDGET, not about provenance. Before E.SEC10 an
         // unstamped set was admitted by default, so this read as a budget test while quietly
@@ -792,7 +944,11 @@ mod tests {
         let set = stamped(Some(isolated_to("asha")), 30, 4);
         let (out, d) = admit_working_set(&member, MinimizationRequest::None, &set);
 
-        assert_eq!(out.stable_facts.len(), member.max_evidence_items, "facts ARE capped");
+        assert_eq!(
+            out.stable_facts.len(),
+            member.max_evidence_items,
+            "facts ARE capped"
+        );
         assert!(d.dropped > 0, "and the cap really bit");
         assert_eq!(
             out.active_contradictions.len(),
@@ -833,10 +989,19 @@ mod tests {
             let base = OutputPolicy::for_scope(scope);
             for req in requests {
                 let after = base.tighten(req);
-                assert!(!after.examples_allowed || base.examples_allowed, "examples were re-opened");
-                assert!(after.max_evidence_items <= base.max_evidence_items, "evidence budget grew");
+                assert!(
+                    !after.examples_allowed || base.examples_allowed,
+                    "examples were re-opened"
+                );
+                assert!(
+                    after.max_evidence_items <= base.max_evidence_items,
+                    "evidence budget grew"
+                );
                 for class in &after.entity_classes {
-                    assert!(base.entity_classes.contains(class), "{class:?} was not permitted before");
+                    assert!(
+                        base.entity_classes.contains(class),
+                        "{class:?} was not permitted before"
+                    );
                 }
                 assert!(after.scope >= base.scope, "scope became more permissive");
             }
@@ -850,7 +1015,11 @@ mod tests {
             assert!(!p.examples_allowed);
             assert_eq!(p.max_evidence_items, 0);
             for class in EntityClass::ALL {
-                assert!(!p.may_name(*class), "{class:?} must not be nameable on {}", scope.label());
+                assert!(
+                    !p.may_name(*class),
+                    "{class:?} must not be nameable on {}",
+                    scope.label()
+                );
             }
             assert!(scope.fails_closed());
         }
@@ -865,11 +1034,18 @@ mod tests {
         assert!(base.may_name(EntityClass::Task) && base.examples_allowed);
 
         let asked = base.tighten(MinimizationRequest::NoPrivateFacts);
-        assert_eq!(asked.scope, OutputScope::OperatorPrivate, "the SCOPE does not change; the permission does");
+        assert_eq!(
+            asked.scope,
+            OutputScope::OperatorPrivate,
+            "the SCOPE does not change; the permission does"
+        );
         assert!(!asked.examples_allowed);
         assert_eq!(asked.max_evidence_items, 0);
         for class in EntityClass::ALL {
-            assert!(!asked.may_name(*class), "{class:?} survived an explicit minimization request");
+            assert!(
+                !asked.may_name(*class),
+                "{class:?} survived an explicit minimization request"
+            );
         }
         // Diagnostic, not fail-closed, on the owner's own surface — Codex's call.
         assert!(!OutputScope::OperatorPrivate.fails_closed());
@@ -879,7 +1055,10 @@ mod tests {
     fn a_member_sees_household_life_and_not_the_operators_accounts() {
         let p = OutputPolicy::for_scope(OutputScope::HouseholdMember);
         assert!(p.may_name(EntityClass::Person) && p.may_name(EntityClass::Event));
-        assert!(!p.may_name(EntityClass::Account), "a member surface must not name accounts");
+        assert!(
+            !p.may_name(EntityClass::Account),
+            "a member surface must not name accounts"
+        );
         assert!(!p.may_name(EntityClass::Purchase));
         assert!(OutputScope::HouseholdMember.fails_closed());
     }
@@ -890,7 +1069,10 @@ mod tests {
         let public = OutputPolicy::for_scope(OutputScope::PublicShare);
         let a = operator.tighten_to(&public);
         let b = public.tighten_to(&operator);
-        assert_eq!(a, b, "combining must not depend on which side you start from");
+        assert_eq!(
+            a, b,
+            "combining must not depend on which side you start from"
+        );
         assert_eq!(a.scope, OutputScope::PublicShare, "the stricter scope wins");
         assert_eq!(a.max_evidence_items, 0);
         assert!(a.entity_classes.is_empty());
@@ -903,8 +1085,14 @@ mod tests {
         let no_private = base.tighten(MinimizationRequest::NoPrivateFacts);
 
         assert!(!no_examples.examples_allowed);
-        assert!(no_examples.may_name(EntityClass::Task), "declining EXAMPLES is not declining to name anything");
-        assert!(!no_private.may_name(EntityClass::Task), "declining private facts empties the classes");
+        assert!(
+            no_examples.may_name(EntityClass::Task),
+            "declining EXAMPLES is not declining to name anything"
+        );
+        assert!(
+            !no_private.may_name(EntityClass::Task),
+            "declining private facts empties the classes"
+        );
         assert!(no_private.max_evidence_items <= no_examples.max_evidence_items);
     }
 
@@ -928,7 +1116,10 @@ mod tests {
             Channel::UpcomingDates,
             Channel::OpenReminders,
         ] {
-            assert!(!no_private.admits(channel), "{channel:?} survived a total prohibition");
+            assert!(
+                !no_private.admits(channel),
+                "{channel:?} survived a total prohibition"
+            );
         }
         for channel in [Channel::WebPage, Channel::PackContext, Channel::MetacogNote] {
             assert!(

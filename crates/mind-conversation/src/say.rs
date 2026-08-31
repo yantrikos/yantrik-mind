@@ -71,8 +71,12 @@ impl super::ConversationEngine {
         // reached by a named household member as readily as by the owner, and a voice surface has
         // no way to prove which. HouseholdMember is the honest scope, and it is the stricter of the
         // two — the safe direction when the surface genuinely cannot tell (E.SEC8).
-        let id = super::TurnIdentity::new(person.to_string(), false, mind_types::OutputScope::HouseholdMember)
-            .speaking(true);
+        let id = super::TurnIdentity::new(
+            person.to_string(),
+            false,
+            mind_types::OutputScope::HouseholdMember,
+        )
+        .speaking(true);
         let answer = match self.turn(user_text, id).await {
             Ok(a) => a,
             Err(e) => format!("Something went wrong there: {e}"),
@@ -120,10 +124,17 @@ mod tests {
     fn a_spoken_turn_declares_the_channel_rather_than_flattening_afterwards() {
         // The register has to reach the COMPOSER. Rewriting a written answer afterwards yields a
         // briefing with its bullets stripped — the sentences are still built for a reader.
-        let id = crate::TurnIdentity::new("primary", false, mind_types::OutputScope::HouseholdMember).speaking(true);
+        let id =
+            crate::TurnIdentity::new("primary", false, mind_types::OutputScope::HouseholdMember)
+                .speaking(true);
         assert!(id.voice);
-        assert!(!id.rich, "a listener cannot see a table, so the licence is withdrawn");
-        let note = id.format_note().expect("a spoken turn carries an instruction");
+        assert!(
+            !id.rich,
+            "a listener cannot see a table, so the licence is withdrawn"
+        );
+        let note = id
+            .format_note()
+            .expect("a spoken turn carries an instruction");
         assert!(note.contains("read aloud"));
         assert!(note.contains("FIRST sentence"));
         assert!(note.contains("Most turns should simply stop"));
@@ -133,7 +144,10 @@ mod tests {
     fn speech_and_rendering_can_never_both_be_in_force() {
         // They are contradictory instructions — one grants tables and fenced code, the other says
         // none of it can be seen. A model handed both reads its own markup aloud.
-        let id = crate::TurnIdentity::new("primary", false, mind_types::OutputScope::HouseholdMember).rendering_rich(true).speaking(true);
+        let id =
+            crate::TurnIdentity::new("primary", false, mind_types::OutputScope::HouseholdMember)
+                .rendering_rich(true)
+                .speaking(true);
         assert!(!id.rich);
         assert!(id.format_note().unwrap().contains("SPOKEN CHANNEL"));
     }

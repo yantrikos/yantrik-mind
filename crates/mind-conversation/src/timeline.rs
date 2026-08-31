@@ -14,7 +14,10 @@ impl super::ConversationEngine {
     }
 
     pub(crate) async fn save_events(&self, v: &[serde_json::Value]) {
-        let _ = self.memory.profile_set("events", &serde_json::to_string(v).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set("events", &serde_json::to_string(v).unwrap_or_default())
+            .await;
     }
 
     /// Mine + relate event candidates (detached). Burst = ≥25 photos in a day AND ≥3× the median
@@ -39,7 +42,12 @@ impl super::ConversationEngine {
             .load_events()
             .await
             .into_iter()
-            .filter_map(|e| e.get("date").and_then(|d| d.as_str()).map(String::from).map(|d| (d, e)))
+            .filter_map(|e| {
+                e.get("date")
+                    .and_then(|d| d.as_str())
+                    .map(String::from)
+                    .map(|d| (d, e))
+            })
             .collect();
         tokio::spawn(async move {
             use chrono::Datelike;
@@ -49,9 +57,12 @@ impl super::ConversationEngine {
                 return;
             };
             // Day histogram across the archive (metadata only; screenshots excluded from counts).
-            let mut day_count: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
-            let mut day_place: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            let mut day_assets: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            let mut day_count: std::collections::BTreeMap<String, u32> =
+                std::collections::BTreeMap::new();
+            let mut day_place: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut day_assets: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
             let this_year = chrono::Utc::now().year();
             for year in 2014..=this_year {
                 for q in 0..4 {
@@ -78,7 +89,7 @@ impl super::ConversationEngine {
                 }
             }
             let mut counts: Vec<u32> = day_count.values().cloned().filter(|c| *c >= 3).collect();
-            counts.sort();
+            counts.sort_unstable();
             let median = counts.get(counts.len() / 2).cloned().unwrap_or(5).max(3);
             let vc = mind_tools::VisionClient::from_env();
             let mut events: Vec<serde_json::Value> = Vec::new();
@@ -100,7 +111,13 @@ impl super::ConversationEngine {
                 let place = day_place.get(day).cloned().unwrap_or_default();
                 // WHO from sample assets.
                 let mut who: Vec<String> = Vec::new();
-                for aid in day_assets.get(day).cloned().unwrap_or_default().iter().take(4) {
+                for aid in day_assets
+                    .get(day)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .take(4)
+                {
                     let (names, _) = src.people_in(aid).await;
                     for nm in names {
                         if !who.contains(&nm) {
@@ -114,17 +131,31 @@ impl super::ConversationEngine {
                 let mut label = String::new();
                 let mut src_tag = "";
                 'rel: for p in &profiles {
-                    let Some(pname) = p.get("name").and_then(|x| x.as_str()) else { continue };
-                    for d in p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-                        let (Some(dm), Some(dl)) = (d.get("mmdd").and_then(|x| x.as_str()), d.get("label").and_then(|x| x.as_str())) else {
+                    let Some(pname) = p.get("name").and_then(|x| x.as_str()) else {
+                        continue;
+                    };
+                    for d in p
+                        .get("dates")
+                        .and_then(|x| x.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        let (Some(dm), Some(dl)) = (
+                            d.get("mmdd").and_then(|x| x.as_str()),
+                            d.get("label").and_then(|x| x.as_str()),
+                        ) else {
                             continue;
                         };
                         let close = dm == mmdd
                             || chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
                                 .ok()
                                 .and_then(|dd| {
-                                    chrono::NaiveDate::from_ymd_opt(dd.year(), dm[..2].parse().ok()?, dm[3..].parse().ok()?)
-                                        .map(|target| (dd - target).num_days().abs() <= 1)
+                                    chrono::NaiveDate::from_ymd_opt(
+                                        dd.year(),
+                                        dm[..2].parse().ok()?,
+                                        dm[3..].parse().ok()?,
+                                    )
+                                    .map(|target| (dd - target).num_days().abs() <= 1)
                                 })
                                 .unwrap_or(false);
                         if close {
@@ -138,15 +169,26 @@ impl super::ConversationEngine {
                 let trip_ctx = trips
                     .iter()
                     .find(|t| {
-                        t["start"].as_str().map(|s| s <= day.as_str()).unwrap_or(false)
-                            && t["end"].as_str().map(|e| e >= day.as_str()).unwrap_or(false)
+                        t["start"]
+                            .as_str()
+                            .map(|s| s <= day.as_str())
+                            .unwrap_or(false)
+                            && t["end"]
+                                .as_str()
+                                .map(|e| e >= day.as_str())
+                                .unwrap_or(false)
                     })
                     .and_then(|t| t["dest"].as_str())
                     .map(|d| d.split(',').next().unwrap_or(d).to_string());
                 // Relation 3: vision occasion guess (bounded budget).
                 if label.is_empty() && vision_budget > 0 {
-                    if let (Some(vcl), Some(aid)) = (&vc, day_assets.get(day).and_then(|v| v.first())) {
-                        let asset = mind_tools::PhotoAsset { id: aid.clone(), ..Default::default() };
+                    if let (Some(vcl), Some(aid)) =
+                        (&vc, day_assets.get(day).and_then(|v| v.first()))
+                    {
+                        let asset = mind_tools::PhotoAsset {
+                            id: aid.clone(),
+                            ..Default::default()
+                        };
                         if let Some(bytes) = src.image_bytes(&asset).await {
                             vision_budget -= 1;
                             if let Ok(g) = vcl
@@ -173,11 +215,28 @@ impl super::ConversationEngine {
                 }));
             }
             let n_events = events.len();
-            let related = events.iter().filter(|e| e["src"].as_str() == Some("related")).count();
-            let guessed = events.iter().filter(|e| e["src"].as_str() == Some("guessed")).count();
-            let unknown = events.iter().filter(|e| e["src"].as_str() == Some("unknown")).count();
-            let told = events.iter().filter(|e| e["src"].as_str() == Some("told")).count();
-            let _ = mem.profile_set("events", &serde_json::to_string(&events).unwrap_or_default()).await;
+            let related = events
+                .iter()
+                .filter(|e| e["src"].as_str() == Some("related"))
+                .count();
+            let guessed = events
+                .iter()
+                .filter(|e| e["src"].as_str() == Some("guessed"))
+                .count();
+            let unknown = events
+                .iter()
+                .filter(|e| e["src"].as_str() == Some("unknown"))
+                .count();
+            let told = events
+                .iter()
+                .filter(|e| e["src"].as_str() == Some("told"))
+                .count();
+            let _ = mem
+                .profile_set(
+                    "events",
+                    &serde_json::to_string(&events).unwrap_or_default(),
+                )
+                .await;
             nq.lock().unwrap().push(format!(
                 "🎪 Event ledger built — {n_events} heavily-photographed days found: {related} matched to family dates, {guessed} occasion-guessed from the photos, {told} you've taught me, {unknown} mysteries.\n\nI'll ask about the mysteries one at a time (a photo + 'what was this?'). `events` lists them; `event <date or word>` for one.",
             ));
@@ -200,7 +259,15 @@ impl super::ConversationEngine {
             if !f.is_empty() && !date.starts_with(&f) && !label.to_lowercase().contains(&f) {
                 continue;
             }
-            let who = e["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            let who = e["people"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             let tag = match e["src"].as_str().unwrap_or("") {
                 "told" => "✅",
                 "related" => "🔗",
@@ -209,10 +276,21 @@ impl super::ConversationEngine {
             };
             lines.push(format!(
                 "{tag} {date} — {} ({} photos){}{}",
-                if label.is_empty() { "unknown occasion" } else { label },
+                if label.is_empty() {
+                    "unknown occasion"
+                } else {
+                    label
+                },
                 e["photos"],
-                if who.is_empty() { String::new() } else { format!(" — {who}") },
-                e["trip"].as_str().map(|t| format!(" [{t} trip]")).unwrap_or_default()
+                if who.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {who}")
+                },
+                e["trip"]
+                    .as_str()
+                    .map(|t| format!(" [{t} trip]"))
+                    .unwrap_or_default()
             ));
             if lines.len() >= 20 {
                 break;
@@ -221,7 +299,11 @@ impl super::ConversationEngine {
         if lines.is_empty() {
             format!("No events matching \"{}\".", filter.trim())
         } else {
-            format!("🎪 Life events ({} total — ✅ taught, 🔗 related, 🤔 guessed, ❓ unknown):\n{}", events.len(), lines.join("\n"))
+            format!(
+                "🎪 Life events ({} total — ✅ taught, 🔗 related, 🤔 guessed, ❓ unknown):\n{}",
+                events.len(),
+                lines.join("\n")
+            )
         }
     }
 
@@ -244,7 +326,10 @@ impl super::ConversationEngine {
             .filter(|e| {
                 let src_tag = e["src"].as_str().unwrap_or("");
                 (src_tag == "unknown" || src_tag == "guessed")
-                    && e["date"].as_str().map(|d| !asked.contains(&d.to_string())).unwrap_or(false)
+                    && e["date"]
+                        .as_str()
+                        .map(|d| !asked.contains(&d.to_string()))
+                        .unwrap_or(false)
             })
             .collect();
         cands.sort_by_key(|e| std::cmp::Reverse(e["photos"].as_u64().unwrap_or(0)));
@@ -252,18 +337,43 @@ impl super::ConversationEngine {
         let date = e["date"].as_str()?;
         // A sample photo from that day.
         let hits = src
-            .taken_between(&format!("{date}T00:00:00.000Z"), &format!("{date}T23:59:59.000Z"), &[], 8)
+            .taken_between(
+                &format!("{date}T00:00:00.000Z"),
+                &format!("{date}T23:59:59.000Z"),
+                &[],
+                8,
+            )
             .await;
         let photo = hits.iter().find(|a| !mind_tools::is_screenish(a))?;
         let bytes = src.image_bytes(photo).await?;
-        let who = e["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        let who = e["people"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         let guess = e["label"].as_str().unwrap_or("");
         let caption = format!(
             "🎪 Help me understand this day — {date}: {} photos{}{}. What was the occasion?{}",
             e["photos"],
-            if e["place"].as_str().unwrap_or("").is_empty() { String::new() } else { format!(" in {}", e["place"].as_str().unwrap_or("")) },
-            if who.is_empty() { String::new() } else { format!(", with {who}") },
-            if guess.is_empty() { String::new() } else { format!(" (my guess: {guess} — correct me!)") }
+            if e["place"].as_str().unwrap_or("").is_empty() {
+                String::new()
+            } else {
+                format!(" in {}", e["place"].as_str().unwrap_or(""))
+            },
+            if who.is_empty() {
+                String::new()
+            } else {
+                format!(", with {who}")
+            },
+            if guess.is_empty() {
+                String::new()
+            } else {
+                format!(" (my guess: {guess} — correct me!)")
+            }
         );
         Some((caption, bytes, format!("event:{date}")))
     }
@@ -282,11 +392,24 @@ impl super::ConversationEngine {
         if !asked.contains(&date) {
             asked.push(date);
         }
-        let _ = self.memory.profile_set("events_asked", &serde_json::to_string(&asked).unwrap_or_default()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "events_asked",
+                &serde_json::to_string(&asked).unwrap_or_default(),
+            )
+            .await;
         self.set_pending_slot(Some(slot)).await;
-        let _ = self.memory.profile_set("event_ask_last", &chrono::Utc::now().timestamp_millis().to_string()).await;
+        let _ = self
+            .memory
+            .profile_set(
+                "event_ask_last",
+                &chrono::Utc::now().timestamp_millis().to_string(),
+            )
+            .await;
         self.note_proactive_sent().await;
-        self.ledger_sent("events", "asked what a heavily-photographed day was").await;
+        self.ledger_sent("events", "asked what a heavily-photographed day was")
+            .await;
     }
 
     /// Cadence gate: unknown events exist, no pending question, once per period.
@@ -294,9 +417,20 @@ impl super::ConversationEngine {
         if self.pending_slot().await.is_some() {
             return false;
         }
-        let period_ms: i64 = std::env::var("YM_EVENTASK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(86_400) * 1000;
+        let period_ms: i64 = std::env::var("YM_EVENTASK_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
         let period_ms = (period_ms as f64 * self.domain_pace("events").await) as i64;
-        let last: i64 = self.memory.profile_get("event_ask_last").await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let last: i64 = self
+            .memory
+            .profile_get("event_ask_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         chrono::Utc::now().timestamp_millis() - last >= period_ms
     }
 
@@ -332,8 +466,12 @@ impl super::ConversationEngine {
                 return;
             };
             // 1. Sweep the archive quarterly for (date, place) — metadata only, no vision.
-            let mut day_place: std::collections::BTreeMap<String, std::collections::HashMap<String, u32>> = std::collections::BTreeMap::new();
-            let mut day_assets: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            let mut day_place: std::collections::BTreeMap<
+                String,
+                std::collections::HashMap<String, u32>,
+            > = std::collections::BTreeMap::new();
+            let mut day_assets: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
             let this_year = chrono::Utc::now().year();
             for year in 2014..=this_year {
                 for q in 0..4 {
@@ -350,7 +488,11 @@ impl super::ConversationEngine {
                         }
                         let day = a.date.clone();
                         if !a.place.is_empty() {
-                            *day_place.entry(day.clone()).or_default().entry(a.place.clone()).or_insert(0) += 1;
+                            *day_place
+                                .entry(day.clone())
+                                .or_default()
+                                .entry(a.place.clone())
+                                .or_insert(0) += 1;
                         }
                         let e = day_assets.entry(day).or_default();
                         if e.len() < 4 {
@@ -360,16 +502,25 @@ impl super::ConversationEngine {
                 }
             }
             if day_place.len() < 10 {
-                nq.lock().unwrap().push("🧳 Trip ledger: too little GPS-tagged history to mine trips from.".to_string());
+                nq.lock().unwrap().push(
+                    "🧳 Trip ledger: too little GPS-tagged history to mine trips from.".to_string(),
+                );
                 studies.lock().unwrap().remove(&guard);
                 return;
             }
             // 2. Home per year = that year's modal city.
-            let mut year_city: std::collections::HashMap<i32, std::collections::HashMap<String, u32>> = std::collections::HashMap::new();
+            let mut year_city: std::collections::HashMap<
+                i32,
+                std::collections::HashMap<String, u32>,
+            > = std::collections::HashMap::new();
             for (day, places) in &day_place {
                 let y: i32 = day[..4].parse().unwrap_or(0);
                 for (p, n) in places {
-                    *year_city.entry(y).or_default().entry(p.clone()).or_insert(0) += n;
+                    *year_city
+                        .entry(y)
+                        .or_default()
+                        .entry(p.clone())
+                        .or_insert(0) += n;
                 }
             }
             let home_of = |y: i32| -> String {
@@ -381,16 +532,25 @@ impl super::ConversationEngine {
             // FAMILIAR SET: a place photographed in >=4 distinct months of a year is home-region
             // (the neighboring suburb, the office town) — not a trip destination. Kills the
             // Bentonville-as-a-trip artifact around a Centerton home.
-            let mut year_city_months: std::collections::HashMap<(i32, String), std::collections::HashSet<String>> = std::collections::HashMap::new();
+            let mut year_city_months: std::collections::HashMap<
+                (i32, String),
+                std::collections::HashSet<String>,
+            > = std::collections::HashMap::new();
             for (day, places) in &day_place {
                 let y: i32 = day[..4].parse().unwrap_or(0);
                 let month: String = day[..7].to_string();
                 for p in places.keys() {
-                    year_city_months.entry((y, p.clone())).or_default().insert(month.clone());
+                    year_city_months
+                        .entry((y, p.clone()))
+                        .or_default()
+                        .insert(month.clone());
                 }
             }
             let familiar = |y: i32, city: &str| -> bool {
-                year_city_months.get(&(y, city.to_string())).map(|m| m.len() >= 4).unwrap_or(false)
+                year_city_months
+                    .get(&(y, city.to_string()))
+                    .map(|m| m.len() >= 4)
+                    .unwrap_or(false)
             };
             // 3. Away-day runs (gap tolerance 2 days) → trip candidates.
             #[derive(Clone)]
@@ -405,19 +565,34 @@ impl super::ConversationEngine {
             let mut cur: Option<Run> = None;
             let mut last_away: Option<chrono::NaiveDate> = None;
             for (day, places) in &day_place {
-                let Ok(d) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") else { continue };
+                let Ok(d) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+                    continue;
+                };
                 let y: i32 = day[..4].parse().unwrap_or(0);
                 let home = home_of(y);
-                let (modal, n) = places.iter().max_by_key(|(_, n)| **n).map(|(p, n)| (p.clone(), *n)).unwrap();
+                let (modal, n) = places
+                    .iter()
+                    .max_by_key(|(_, n)| **n)
+                    .map(|(p, n)| (p.clone(), *n))
+                    .unwrap();
                 let away = !home.is_empty() && modal != home && !familiar(y, &modal);
                 if away {
-                    let gap_ok = last_away.map(|la| (d - la).num_days() <= 3).unwrap_or(false);
+                    let gap_ok = last_away
+                        .map(|la| (d - la).num_days() <= 3)
+                        .unwrap_or(false);
                     if let (Some(r), true) = (cur.as_mut(), gap_ok) {
                         r.end = day.clone();
                         *r.places.entry(modal.clone()).or_insert(0) += n;
                         r.photos += places.values().sum::<u32>();
                         if r.sample.len() < 8 {
-                            r.sample.extend(day_assets.get(day).cloned().unwrap_or_default().into_iter().take(2));
+                            r.sample.extend(
+                                day_assets
+                                    .get(day)
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .take(2),
+                            );
                         }
                     } else {
                         if let Some(r) = cur.take() {
@@ -441,14 +616,23 @@ impl super::ConversationEngine {
             let mut trips: Vec<serde_json::Value> = Vec::new();
             for r in runs {
                 let days = chrono::NaiveDate::parse_from_str(&r.end, "%Y-%m-%d")
-                    .and_then(|e| chrono::NaiveDate::parse_from_str(&r.start, "%Y-%m-%d").map(|s| (e - s).num_days() + 1))
+                    .and_then(|e| {
+                        chrono::NaiveDate::parse_from_str(&r.start, "%Y-%m-%d")
+                            .map(|s| (e - s).num_days() + 1)
+                    })
                     .unwrap_or(1);
                 if days < 2 && r.photos < 12 {
                     continue;
                 }
-                let dest = r.places.iter().max_by_key(|(_, n)| **n).map(|(p, _)| p.clone()).unwrap_or_default();
+                let dest = r
+                    .places
+                    .iter()
+                    .max_by_key(|(_, n)| **n)
+                    .map(|(p, _)| p.clone())
+                    .unwrap_or_default();
                 // WHO: named faces across sample assets.
-                let mut who_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                let mut who_counts: std::collections::HashMap<String, u32> =
+                    std::collections::HashMap::new();
                 for aid in r.sample.iter().take(6) {
                     let (names, _) = src.people_in(aid).await;
                     for n in names {
@@ -473,9 +657,18 @@ impl super::ConversationEngine {
             let n_trips = trips.len();
             // Top chapters become typed beliefs (provenance-tagged).
             for t in trips.iter().take(12) {
-                let people = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-                let _ = mem.remember_as_belief(BeliefAssertion {
-                    statement: format!(
+                let people = t["people"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let _ = mem
+                    .remember_as_belief(BeliefAssertion {
+                        statement: format!(
                         "Life chapter (from photos): trip to {} — {} to {} ({} days, {} photos){}",
                         t["dest"].as_str().unwrap_or("?"),
                         t["start"].as_str().unwrap_or("?"),
@@ -484,13 +677,16 @@ impl super::ConversationEngine {
                         t["photos"],
                         if people.is_empty() { String::new() } else { format!(", with {people}") }
                     ),
-                    polarity: 1.0,
-                    weight: 0.75,
-                    source_event: Some("trip-ledger".into()),
-                    provenance: "photos".into(),
-                }).await;
+                        polarity: 1.0,
+                        weight: 0.75,
+                        source_event: Some("trip-ledger".into()),
+                        provenance: "photos".into(),
+                    })
+                    .await;
             }
-            let _ = mem.profile_set("trips", &serde_json::to_string(&trips).unwrap_or_default()).await;
+            let _ = mem
+                .profile_set("trips", &serde_json::to_string(&trips).unwrap_or_default())
+                .await;
             let preview: Vec<String> = trips
                 .iter()
                 .take(6)
@@ -517,7 +713,8 @@ impl super::ConversationEngine {
     pub async fn trips_list(&self, filter: &str) -> String {
         let trips = self.load_trips().await;
         if trips.is_empty() {
-            return "🧳 No trip ledger yet — say `trips build` and I'll mine the photo archive.".to_string();
+            return "🧳 No trip ledger yet — say `trips build` and I'll mine the photo archive."
+                .to_string();
         }
         let f = filter.trim().to_lowercase();
         let mut lines = Vec::new();
@@ -527,13 +724,25 @@ impl super::ConversationEngine {
             if !f.is_empty() && !dest.to_lowercase().contains(&f) && !start.starts_with(&f) {
                 continue;
             }
-            let people = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            let people = t["people"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             lines.push(format!(
                 "• {dest} — {start} → {} ({}d, {} photos){}",
                 t["end"].as_str().unwrap_or(""),
                 t["days"],
                 t["photos"],
-                if people.is_empty() { String::new() } else { format!(" — with {people}") }
+                if people.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — with {people}")
+                }
             ));
             if lines.len() >= 20 {
                 break;
@@ -542,7 +751,11 @@ impl super::ConversationEngine {
         if lines.is_empty() {
             format!("No trips matching \"{}\" in the ledger.", filter.trim())
         } else {
-            format!("🧳 Life chapters ({} total):\n{}", trips.len(), lines.join("\n"))
+            format!(
+                "🧳 Life chapters ({} total):\n{}",
+                trips.len(),
+                lines.join("\n")
+            )
         }
     }
 
@@ -551,12 +764,29 @@ impl super::ConversationEngine {
         let trips = self.load_trips().await;
         let q = query.trim().to_lowercase();
         let Some(t) = trips.iter().find(|t| {
-            t["dest"].as_str().map(|d| d.to_lowercase().contains(&q)).unwrap_or(false)
-                || t["start"].as_str().map(|s| s.starts_with(&q)).unwrap_or(false)
+            t["dest"]
+                .as_str()
+                .map(|d| d.to_lowercase().contains(&q))
+                .unwrap_or(false)
+                || t["start"]
+                    .as_str()
+                    .map(|s| s.starts_with(&q))
+                    .unwrap_or(false)
         }) else {
-            return format!("No chapter matching \"{}\" — `trips` lists what I know; `trips build` re-mines.", query.trim());
+            return format!(
+                "No chapter matching \"{}\" — `trips` lists what I know; `trips build` re-mines.",
+                query.trim()
+            );
         };
-        let people = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        let people = t["people"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         format!(
             "🧳 {} — {} to {} ({} days, {} photos{}).\n\nSay `trip collage {}` and I'll compose the album page.",
             t["dest"].as_str().unwrap_or("?"),
@@ -573,8 +803,16 @@ impl super::ConversationEngine {
     pub async fn trip_collage(&self, query: &str, target: Option<i64>) -> String {
         let trips = self.load_trips().await;
         let q = query.trim().to_lowercase();
-        let Some(t) = trips.iter().find(|t| t["dest"].as_str().map(|d| d.to_lowercase().contains(&q)).unwrap_or(false)) else {
-            return format!("No chapter matching \"{}\" — `trips` lists them.", query.trim());
+        let Some(t) = trips.iter().find(|t| {
+            t["dest"]
+                .as_str()
+                .map(|d| d.to_lowercase().contains(&q))
+                .unwrap_or(false)
+        }) else {
+            return format!(
+                "No chapter matching \"{}\" — `trips` lists them.",
+                query.trim()
+            );
         };
         let (dest, start, end) = (
             t["dest"].as_str().unwrap_or("?").to_string(),
@@ -593,7 +831,15 @@ impl super::ConversationEngine {
         let pq = self.photo_queue.clone();
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
-        let people_line = t["people"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        let people_line = t["people"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         let (dest2, start2, end2) = (dest.clone(), start.clone(), end.clone());
         tokio::spawn(async move {
             let sources = mind_tools::PhotoSource::all_from_env();
@@ -603,10 +849,15 @@ impl super::ConversationEngine {
             };
             let (dest, start, end) = (dest2, start2, end2);
             let assets = src
-                .taken_between(&format!("{start}T00:00:00.000Z"), &format!("{end}T23:59:59.000Z"), &[], 60)
+                .taken_between(
+                    &format!("{start}T00:00:00.000Z"),
+                    &format!("{end}T23:59:59.000Z"),
+                    &[],
+                    60,
+                )
                 .await;
             // Day-spread + technical triage, then compose.
-            let mut cells: Vec<(Vec<u8>, Option<(f32, f32, f32, f32)>)> = Vec::new();
+            let mut cells: Vec<PhotoCell> = Vec::new();
             let mut used_days: std::collections::HashSet<String> = std::collections::HashSet::new();
             for a in &assets {
                 if cells.len() >= 9 {
@@ -618,9 +869,11 @@ impl super::ConversationEngine {
                 if !used_days.insert(a.date.clone()) && assets.len() > 12 {
                     continue;
                 }
-                let Some(bytes) = src.image_bytes(a).await else { continue };
+                let Some(bytes) = src.image_bytes(a).await else {
+                    continue;
+                };
                 if let Some((sharp, luma, _)) = mind_tools::photo_quality(&bytes) {
-                    if sharp < 30.0 || luma < 35.0 || luma > 220.0 {
+                    if sharp < 30.0 || !(35.0..=220.0).contains(&luma) {
                         continue;
                     }
                 }
@@ -628,19 +881,29 @@ impl super::ConversationEngine {
             }
             let n = cells.len();
             if n < 2 {
-                nq.lock().unwrap().push(format!("🧳 Couldn't gather enough good frames for the {dest} collage."));
+                nq.lock().unwrap().push(format!(
+                    "🧳 Couldn't gather enough good frames for the {dest} collage."
+                ));
             } else if let Some(img) = mind_tools::make_collage(cells).await {
                 let cap = format!(
                     "🧳 {dest} — {start} → {end}{}",
-                    if people_line.is_empty() { String::new() } else { format!(" · {people_line}") }
+                    if people_line.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {people_line}")
+                    }
                 );
                 pq.lock().unwrap().push((img, cap, target));
             } else {
-                nq.lock().unwrap().push(format!("🧳 The {dest} collage composition failed — honest miss."));
+                nq.lock().unwrap().push(format!(
+                    "🧳 The {dest} collage composition failed — honest miss."
+                ));
             }
             studies.lock().unwrap().remove(&guard);
         });
-        format!("🧳 Composing the {dest} chapter ({start} → {end}) — it lands here in a minute or two.")
+        format!(
+            "🧳 Composing the {dest} chapter ({start} → {end}) — it lands here in a minute or two."
+        )
     }
 
     /// ON THIS DAY — a real photo from this exact date in a past year, captioned with who's in it
@@ -648,7 +911,9 @@ impl super::ConversationEngine {
     pub async fn queue_on_this_day(&self) -> bool {
         use chrono::Datelike;
         let sources = mind_tools::PhotoSource::all_from_env();
-        let Some(src) = sources.iter().find(|s| s.knows_people()) else { return false };
+        let Some(src) = sources.iter().find(|s| s.knows_people()) else {
+            return false;
+        };
         let today = local_now();
         let sent = self.photos_sent().await;
         // 1. A SIGNIFICANT day first — someone's birthday/anniversary from the people layer means
@@ -662,7 +927,11 @@ impl super::ConversationEngine {
             if name.is_empty() {
                 continue;
             }
-            let dates = p.get("dates").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let dates = p
+                .get("dates")
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default();
             let Some(label) = dates
                 .iter()
                 .find(|d| d.get("mmdd").and_then(|x| x.as_str()) == Some(mmdd.as_str()))
@@ -671,28 +940,43 @@ impl super::ConversationEngine {
             else {
                 continue;
             };
-            let Some((i, pid, disp)) = self.resolve_face(&sources, name).await else { continue };
+            let Some((i, pid, disp)) = self.resolve_face(&sources, name).await else {
+                continue;
+            };
             for back in 1..=8 {
-                let Some(day) = chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day()) else {
+                let Some(day) = chrono::NaiveDate::from_ymd_opt(
+                    today.year() - back,
+                    today.month(),
+                    today.day(),
+                ) else {
                     continue;
                 };
                 let from = day - chrono::Duration::days(3);
                 let to = day + chrono::Duration::days(4);
                 let hits = sources[i]
-                    .taken_between(&format!("{from}T00:00:00.000Z"), &format!("{to}T00:00:00.000Z"), &[pid.clone()], 4)
+                    .taken_between(
+                        &format!("{from}T00:00:00.000Z"),
+                        &format!("{to}T00:00:00.000Z"),
+                        std::slice::from_ref(&pid),
+                        4,
+                    )
                     .await;
                 for a in hits {
                     if sent.contains(&a.id) || mind_tools::is_screenish(&a) {
                         continue;
                     }
-                    let Some(bytes) = sources[i].image_bytes(&a).await else { continue };
+                    let Some(bytes) = sources[i].image_bytes(&a).await else {
+                        continue;
+                    };
                     let (names, _) = sources[i].people_in(&a.id).await;
                     let when = format!("{} ({} years ago, around {disp}'s {label})", a.date, back);
                     let story = self.narrate_memory(&bytes, &names, &when, &a.place).await;
                     let mut cap = format!("🎉 {disp}'s {label} — {}", day.year());
                     match story {
                         Some(st) => cap.push_str(&format!("\n{st}")),
-                        None if !names.is_empty() => cap.push_str(&format!(" · {}", names.join(", "))),
+                        None if !names.is_empty() => {
+                            cap.push_str(&format!(" · {}", names.join(", ")))
+                        }
                         None => {}
                     }
                     self.note_photo_sent(&a.id).await;
@@ -707,7 +991,9 @@ impl super::ConversationEngine {
         {
             let mmdd = today.format("%m-%d").to_string();
             for e in self.load_events().await.iter().take(150) {
-                let Some(date) = e["date"].as_str() else { continue };
+                let Some(date) = e["date"].as_str() else {
+                    continue;
+                };
                 let label = e["label"].as_str().unwrap_or("");
                 if label.is_empty() || date.len() != 10 || &date[5..] != mmdd.as_str() {
                     continue;
@@ -717,14 +1003,24 @@ impl super::ConversationEngine {
                     continue;
                 }
                 let hits = src
-                    .taken_between(&format!("{date}T00:00:00.000Z"), &format!("{date}T23:59:59.000Z"), &[], 6)
+                    .taken_between(
+                        &format!("{date}T00:00:00.000Z"),
+                        &format!("{date}T23:59:59.000Z"),
+                        &[],
+                        6,
+                    )
                     .await;
                 for a in hits {
                     if sent.contains(&a.id) || mind_tools::is_screenish(&a) {
                         continue;
                     }
-                    let Some(bytes) = src.image_bytes(&a).await else { continue };
-                    let cap = format!("🎪 {years} year(s) ago today — {label} ({} photos that day)", e["photos"]);
+                    let Some(bytes) = src.image_bytes(&a).await else {
+                        continue;
+                    };
+                    let cap = format!(
+                        "🎪 {years} year(s) ago today — {label} ({} photos that day)",
+                        e["photos"]
+                    );
                     self.note_photo_sent(&a.id).await;
                     self.photo_queue.lock().unwrap().push((bytes, cap, None));
                     return true;
@@ -736,7 +1032,9 @@ impl super::ConversationEngine {
         {
             let mmdd = today.format("%m-%d").to_string();
             for t in self.load_trips().await.iter().take(60) {
-                let Some(start) = t["start"].as_str() else { continue };
+                let Some(start) = t["start"].as_str() else {
+                    continue;
+                };
                 if start.len() == 10 && &start[5..] == mmdd.as_str() {
                     let years = today.year() - start[..4].parse::<i32>().unwrap_or(today.year());
                     if years < 1 {
@@ -744,17 +1042,36 @@ impl super::ConversationEngine {
                     }
                     let dest = t["dest"].as_str().unwrap_or("?");
                     let hits = src
-                        .taken_between(&format!("{start}T00:00:00.000Z"), &format!("{}T23:59:59.000Z", t["end"].as_str().unwrap_or(start)), &[], 6)
+                        .taken_between(
+                            &format!("{start}T00:00:00.000Z"),
+                            &format!("{}T23:59:59.000Z", t["end"].as_str().unwrap_or(start)),
+                            &[],
+                            6,
+                        )
                         .await;
                     for a in hits {
                         if sent.contains(&a.id) || mind_tools::is_screenish(&a) {
                             continue;
                         }
-                        let Some(bytes) = src.image_bytes(&a).await else { continue };
-                        let people = t["people"].as_array().map(|x| x.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                        let Some(bytes) = src.image_bytes(&a).await else {
+                            continue;
+                        };
+                        let people = t["people"]
+                            .as_array()
+                            .map(|x| {
+                                x.iter()
+                                    .filter_map(|p| p.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
                         let cap = format!(
                             "🧳 {years} year(s) ago today, this trip began — {dest}{}",
-                            if people.is_empty() { String::new() } else { format!(", with {people}") }
+                            if people.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", with {people}")
+                            }
                         );
                         self.note_photo_sent(&a.id).await;
                         self.photo_queue.lock().unwrap().push((bytes, cap, None));
@@ -765,11 +1082,20 @@ impl super::ConversationEngine {
         }
         // 3. Otherwise this exact day in a past year — still narrated (who they ARE + the scene).
         for back in 1..=10 {
-            let Some(day) = chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day()) else {
+            let Some(day) =
+                chrono::NaiveDate::from_ymd_opt(today.year() - back, today.month(), today.day())
+            else {
                 continue;
             };
             let Some(nxt) = day.succ_opt() else { continue };
-            let hits = src.taken_between(&format!("{day}T00:00:00.000Z"), &format!("{nxt}T00:00:00.000Z"), &[], 6).await;
+            let hits = src
+                .taken_between(
+                    &format!("{day}T00:00:00.000Z"),
+                    &format!("{nxt}T00:00:00.000Z"),
+                    &[],
+                    6,
+                )
+                .await;
             if hits.is_empty() {
                 continue;
             }
@@ -788,8 +1114,14 @@ impl super::ConversationEngine {
                 }
             }
             let Some((a, names)) = pick else { continue };
-            let Some(bytes) = src.image_bytes(a).await else { continue };
-            let years = if back == 1 { "a year ago today".to_string() } else { format!("{back} years ago today") };
+            let Some(bytes) = src.image_bytes(a).await else {
+                continue;
+            };
+            let years = if back == 1 {
+                "a year ago today".to_string()
+            } else {
+                format!("{back} years ago today")
+            };
             let when = format!("{} ({years})", day.format("%b %d, %Y"));
             let story = self.narrate_memory(&bytes, &names, &when, &a.place).await;
             let mut cap = format!("📸 {years} — {}", day.format("%b %d, %Y"));
@@ -809,5 +1141,4 @@ impl super::ConversationEngine {
         }
         false
     }
-
 }

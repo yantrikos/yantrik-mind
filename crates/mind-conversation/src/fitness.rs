@@ -89,7 +89,11 @@ impl Snapshot {
             s.push_str(&format!(
                 "- Tool reliability: {:.0}% across {n} measured tools.{}\n",
                 r * 100.0,
-                if r < 0.7 { " Weak — unreliable tools poison every answer built on them." } else { "" }
+                if r < 0.7 {
+                    " Weak — unreliable tools poison every answer built on them."
+                } else {
+                    ""
+                }
             ));
         }
         if let Some(d) = self.urge_discharge_rate {
@@ -103,7 +107,10 @@ impl Snapshot {
                 }
             ));
         }
-        s.push_str(&format!("- Explicit promises I am holding for the user: {}\n", self.open_promises));
+        s.push_str(&format!(
+            "- Explicit promises I am holding for the user: {}\n",
+            self.open_promises
+        ));
         s.push_str(
             "Prefer a goal that would MOVE one of these numbers over one that merely adds surface or \
              tidies code. If a number above is missing or unprovable, making it measurable is itself \
@@ -161,8 +168,11 @@ impl super::ConversationEngine {
                 })
             })
             .collect();
-        let recent: Vec<_> =
-            rows.iter().copied().filter(|r| now - r.t_ms <= 90 * 86_400_000).collect();
+        let recent: Vec<_> = rows
+            .iter()
+            .copied()
+            .filter(|r| now - r.t_ms <= 90 * 86_400_000)
+            .collect();
         let skill = crate::judgment_trend::buckets(&recent, now, 90, 1)
             .first()
             .and_then(|b| b.bss);
@@ -187,8 +197,11 @@ impl super::ConversationEngine {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-            .map(|t| t.iter().filter(|x| x.get("status").and_then(|s| s.as_str()) == Some("open")).count())
-            .unwrap_or(0);
+            .map_or(0, |t| {
+                t.iter()
+                    .filter(|x| x.get("status").and_then(|s| s.as_str()) == Some("open"))
+                    .count()
+            });
 
         Snapshot {
             skill,
@@ -227,7 +240,10 @@ impl super::ConversationEngine {
         }
         let _ = self
             .memory
-            .profile_set("fitness_changes", &serde_json::to_string(&log).unwrap_or_default())
+            .profile_set(
+                "fitness_changes",
+                &serde_json::to_string(&log).unwrap_or_default(),
+            )
             .await;
     }
 
@@ -236,8 +252,10 @@ impl super::ConversationEngine {
     /// whether anything it built ever helped. Run on the idle tick.
     pub async fn fitness_grade_due(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let wait_days: i64 =
-            std::env::var("YM_FITNESS_GRADE_DAYS").ok().and_then(|s| s.parse().ok()).unwrap_or(14);
+        let wait_days: i64 = std::env::var("YM_FITNESS_GRADE_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(14);
         let now = chrono::Utc::now().timestamp_millis();
         let mut log: Vec<Value> = self
             .memory
@@ -253,7 +271,7 @@ impl super::ConversationEngine {
         let after = self.fitness_snapshot().await;
         let mut changed = false;
         for row in log.iter_mut() {
-            if !row.get("verdict_delta").map(|v| v.is_null()).unwrap_or(false) {
+            if !row.get("verdict_delta").is_some_and(|v| v.is_null()) {
                 continue; // already graded — immutable once written
             }
             let at = row.get("at_ms").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -278,7 +296,10 @@ impl super::ConversationEngine {
         if changed {
             let _ = self
                 .memory
-                .profile_set("fitness_changes", &serde_json::to_string(&log).unwrap_or_default())
+                .profile_set(
+                    "fitness_changes",
+                    &serde_json::to_string(&log).unwrap_or_default(),
+                )
                 .await;
         }
         out
@@ -297,8 +318,10 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|x| serde_json::from_str(&x).ok())
             .unwrap_or_default();
-        let graded: Vec<&Value> =
-            log.iter().filter(|r| !r.get("verdict_delta").map(|v| v.is_null()).unwrap_or(true)).collect();
+        let graded: Vec<&Value> = log
+            .iter()
+            .filter(|r| r.get("verdict_delta").is_some_and(|v| !v.is_null()))
+            .collect();
         s.push_str(&format!(
             "\nSelf-build changes tracked: {} ({} graded, {} still ripening)\n",
             log.len(),
@@ -337,7 +360,10 @@ mod tests {
     /// between a metric and a decoration.
     #[test]
     fn refuses_to_fabricate_a_score() {
-        assert!(snap(None, 0, Some(0.9), Some(0.9)).scalar().is_none(), "no skill => no score");
+        assert!(
+            snap(None, 0, Some(0.9), Some(0.9)).scalar().is_none(),
+            "no skill => no score"
+        );
         assert!(delta(&snap(None, 0, None, None), &snap(Some(0.5), 40, None, None)).is_none());
     }
 
@@ -345,7 +371,8 @@ mod tests {
     fn skill_dominates_the_scalar() {
         // Health signals must not be able to paper over bad judgment.
         let good_judgment_bad_health = snap(Some(0.9), 40, Some(0.2), Some(0.1)).scalar().unwrap();
-        let bad_judgment_great_health = snap(Some(-0.3), 40, Some(1.0), Some(1.0)).scalar().unwrap();
+        let bad_judgment_great_health =
+            snap(Some(-0.3), 40, Some(1.0), Some(1.0)).scalar().unwrap();
         assert!(
             good_judgment_bad_health > bad_judgment_great_health,
             "judgment must outweigh busywork metrics ({good_judgment_bad_health:.3} vs {bad_judgment_great_health:.3})"
@@ -356,12 +383,24 @@ mod tests {
     fn the_goal_prompt_names_the_weakness_not_just_the_number() {
         // The live reading on 2026-07-25 was skill -0.36 over 74 graded: worse than a base-rate guess.
         let p = snap(Some(-0.36), 74, Some(0.55), Some(0.05)).render_for_goal_prompt();
-        assert!(p.contains("NEGATIVE"), "a negative skill must be named as the biggest problem: {p}");
-        assert!(p.contains("never seen by anyone"), "a 5% discharge rate must read as waste: {p}");
-        assert!(p.contains("MOVE one of these numbers"), "the prompt must steer at outcomes: {p}");
+        assert!(
+            p.contains("NEGATIVE"),
+            "a negative skill must be named as the biggest problem: {p}"
+        );
+        assert!(
+            p.contains("never seen by anyone"),
+            "a 5% discharge rate must read as waste: {p}"
+        );
+        assert!(
+            p.contains("MOVE one of these numbers"),
+            "the prompt must steer at outcomes: {p}"
+        );
         // Unprovable skill should invite making it measurable rather than pretending.
         let thin = snap(None, 3, None, None).render_for_goal_prompt();
-        assert!(thin.contains("NOT YET PROVABLE") && thin.contains("GRADED"), "{thin}");
+        assert!(
+            thin.contains("NOT YET PROVABLE") && thin.contains("GRADED"),
+            "{thin}"
+        );
     }
 
     #[test]

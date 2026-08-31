@@ -28,7 +28,11 @@ impl HaEntity {
         })
     }
     fn name(&self) -> &str {
-        if self.friendly_name.trim().is_empty() { &self.entity_id } else { self.friendly_name.trim() }
+        if self.friendly_name.trim().is_empty() {
+            &self.entity_id
+        } else {
+            self.friendly_name.trim()
+        }
     }
 }
 
@@ -58,15 +62,34 @@ pub fn render_home_digest(entities: &[HaEntity]) -> String {
 
     // Climate: current vs target + what it's doing.
     for e in entities.iter().filter(|e| e.domain == "climate") {
-        let cur = e.attr_str("current_temperature").map(|t| format!("{t}°")).unwrap_or_default();
-        let target = e.attr_str("temperature").map(|t| format!(" → {t}°")).unwrap_or_default();
-        let action = e.attr_str("hvac_action").map(|a| format!(" ({a})")).unwrap_or_default();
-        lines.push(format!("{} — {}{}{} [{}]", e.name(), cur, target, action, e.state));
+        let cur = e
+            .attr_str("current_temperature")
+            .map(|t| format!("{t}°"))
+            .unwrap_or_default();
+        let target = e
+            .attr_str("temperature")
+            .map(|t| format!(" → {t}°"))
+            .unwrap_or_default();
+        let action = e
+            .attr_str("hvac_action")
+            .map(|a| format!(" ({a})"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "{} — {}{}{} [{}]",
+            e.name(),
+            cur,
+            target,
+            action,
+            e.state
+        ));
     }
 
     // Weather.
     for e in entities.iter().filter(|e| e.domain == "weather") {
-        let temp = e.attr_str("temperature").map(|t| format!(", {t}°")).unwrap_or_default();
+        let temp = e
+            .attr_str("temperature")
+            .map(|t| format!(", {t}°"))
+            .unwrap_or_default();
         lines.push(format!("{} — {}{}", e.name(), e.state, temp));
     }
 
@@ -74,8 +97,10 @@ pub fn render_home_digest(entities: &[HaEntity]) -> String {
     let on: Vec<String> = entities
         .iter()
         .filter(|e| {
-            matches!(e.domain.as_str(), "light" | "switch" | "fan" | "media_player")
-                && matches!(e.state.as_str(), "on" | "playing")
+            matches!(
+                e.domain.as_str(),
+                "light" | "switch" | "fan" | "media_player"
+            ) && matches!(e.state.as_str(), "on" | "playing")
                 || (e.domain == "binary_sensor" && e.state == "on")
                 || (e.domain == "lock" && e.state == "unlocked")
                 || (e.domain == "cover" && e.state == "open")
@@ -87,7 +112,10 @@ pub fn render_home_digest(entities: &[HaEntity]) -> String {
     }
 
     if lines.is_empty() {
-        return format!("Home looks quiet — nothing notable right now ({} entities).", entities.len());
+        return format!(
+            "Home looks quiet — nothing notable right now ({} entities).",
+            entities.len()
+        );
     }
     format!("{}\n({} entities total)", lines.join("\n"), entities.len())
 }
@@ -98,38 +126,67 @@ pub fn render_home_digest(entities: &[HaEntity]) -> String {
 /// home) — never on merely-unknown presence (avoids false nags). This is the cross-domain magic a
 /// flat assistant can't do: presence × device, grounded in real state.
 pub fn home_alerts(entities: &[HaEntity]) -> Vec<(String, String)> {
-    let presence: Vec<&HaEntity> = entities.iter().filter(|e| e.domain == "person" || e.domain == "device_tracker").collect();
+    let presence: Vec<&HaEntity> = entities
+        .iter()
+        .filter(|e| e.domain == "person" || e.domain == "device_tracker")
+        .collect();
     let anyone_home = presence.iter().any(|e| e.state == "home");
-    let anyone_away = presence.iter().any(|e| e.state == "not_home" || e.state == "away");
+    let anyone_away = presence
+        .iter()
+        .any(|e| e.state == "not_home" || e.state == "away");
     let away = !anyone_home && anyone_away;
 
     let mut out: Vec<(String, String)> = Vec::new();
     if away {
-        for e in entities.iter().filter(|e| e.domain == "media_player" && matches!(e.state.as_str(), "playing" | "on")) {
-            out.push((format!("tv_on_away:{}", e.entity_id), format!("📺 {} is on but nobody's home.", e.name())));
+        for e in entities
+            .iter()
+            .filter(|e| e.domain == "media_player" && matches!(e.state.as_str(), "playing" | "on"))
+        {
+            out.push((
+                format!("tv_on_away:{}", e.entity_id),
+                format!("📺 {} is on but nobody's home.", e.name()),
+            ));
         }
         for e in entities.iter().filter(|e| e.domain == "climate") {
             if let Some(a) = e.attr_str("hvac_action") {
                 if a == "heating" || a == "cooling" {
-                    out.push((format!("climate_away:{}", e.entity_id), format!("🌡 {} is {} but nobody's home.", e.name(), a)));
+                    out.push((
+                        format!("climate_away:{}", e.entity_id),
+                        format!("🌡 {} is {} but nobody's home.", e.name(), a),
+                    ));
                 }
             }
         }
-        for e in entities.iter().filter(|e| e.domain == "lock" && e.state == "unlocked") {
-            out.push((format!("unlocked_away:{}", e.entity_id), format!("🔓 {} is unlocked while you're out.", e.name())));
+        for e in entities
+            .iter()
+            .filter(|e| e.domain == "lock" && e.state == "unlocked")
+        {
+            out.push((
+                format!("unlocked_away:{}", e.entity_id),
+                format!("🔓 {} is unlocked while you're out.", e.name()),
+            ));
         }
     }
     // Internet down (a connectivity binary_sensor reading off) — relevant regardless of presence.
-    for e in entities.iter().filter(|e| e.domain == "binary_sensor" && e.state == "off") {
+    for e in entities
+        .iter()
+        .filter(|e| e.domain == "binary_sensor" && e.state == "off")
+    {
         if e.attr_str("device_class").as_deref() == Some("connectivity") {
-            out.push((format!("net_down:{}", e.entity_id), format!("📡 {} — the internet looks down.", e.name())));
+            out.push((
+                format!("net_down:{}", e.entity_id),
+                format!("📡 {} — the internet looks down.", e.name()),
+            ));
         }
     }
     // Low printer ink (<15%).
     for e in entities.iter().filter(|e| e.entity_id.contains("ink")) {
         if let Ok(v) = e.state.parse::<f64>() {
             if v < 15.0 {
-                out.push((format!("ink_low:{}", e.entity_id), format!("🖨 {} is low ({}%).", e.name(), e.state)));
+                out.push((
+                    format!("ink_low:{}", e.entity_id),
+                    format!("🖨 {} is low ({}%).", e.name(), e.state),
+                ));
             }
         }
     }
@@ -160,20 +217,41 @@ impl HomeAssistantClient for ScriptedHomeAssistantClient {
 #[async_trait]
 pub trait HomeWriter: Send + Sync {
     /// e.g. ("light", "turn_off", "light.porch"). Returns a short human receipt.
-    async fn call_service(&self, domain: &str, service: &str, entity_id: &str) -> anyhow::Result<String>;
+    async fn call_service(
+        &self,
+        domain: &str,
+        service: &str,
+        entity_id: &str,
+    ) -> anyhow::Result<String>;
 }
 
 #[async_trait]
 impl HomeWriter for ApiHomeAssistantClient {
-    async fn call_service(&self, domain: &str, service: &str, entity_id: &str) -> anyhow::Result<String> {
+    async fn call_service(
+        &self,
+        domain: &str,
+        service: &str,
+        entity_id: &str,
+    ) -> anyhow::Result<String> {
         // Belt-and-braces syntax gate. POLICY lives in the executor (deny-list + allowlist); this
         // only refuses inputs that could smuggle a path or a second call.
-        let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        };
         if !ok(domain) || !ok(service) || !ok(entity_id) || !entity_id.contains('.') {
             anyhow::bail!("malformed service call");
         }
-        let (base, token) = (self.base_url.trim_end_matches('/').to_string(), self.token.clone());
-        let (d, s, e) = (domain.to_string(), service.to_string(), entity_id.to_string());
+        let (base, token) = (
+            self.base_url.trim_end_matches('/').to_string(),
+            self.token.clone(),
+        );
+        let (d, s, e) = (
+            domain.to_string(),
+            service.to_string(),
+            entity_id.to_string(),
+        );
         tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             let url = format!("{base}/api/services/{d}/{s}");
             ureq::post(&url)
@@ -197,14 +275,20 @@ pub struct ApiHomeAssistantClient {
 impl ApiHomeAssistantClient {
     /// `base_url` like "http://192.168.4.97:8123"; `token` = a long-lived access token.
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), token: token.into() }
+        Self {
+            base_url: base_url.into(),
+            token: token.into(),
+        }
     }
 }
 
 #[async_trait]
 impl HomeAssistantClient for ApiHomeAssistantClient {
     async fn states(&self) -> anyhow::Result<Vec<HaEntity>> {
-        let (base, token) = (self.base_url.trim_end_matches('/').to_string(), self.token.clone());
+        let (base, token) = (
+            self.base_url.trim_end_matches('/').to_string(),
+            self.token.clone(),
+        );
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<HaEntity>> {
             let url = format!("{base}/api/states");
             let resp = ureq::get(&url)
@@ -222,9 +306,21 @@ impl HomeAssistantClient for ApiHomeAssistantClient {
                 }
                 let domain = entity_id.split('.').next().unwrap_or("").to_string();
                 let state = e["state"].as_str().unwrap_or("").to_string();
-                let friendly_name = e["attributes"]["friendly_name"].as_str().unwrap_or("").to_string();
-                let attributes = e.get("attributes").cloned().unwrap_or_else(|| serde_json::json!({}));
-                out.push(HaEntity { entity_id, domain, state, friendly_name, attributes });
+                let friendly_name = e["attributes"]["friendly_name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let attributes = e
+                    .get("attributes")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                out.push(HaEntity {
+                    entity_id,
+                    domain,
+                    state,
+                    friendly_name,
+                    attributes,
+                });
             }
             Ok(out)
         })
@@ -250,17 +346,39 @@ mod tests {
     fn digest_surfaces_the_signals_that_matter() {
         let ents = vec![
             ent("person.pranab", "home", "Pranab", serde_json::json!({})),
-            ent("climate.living_room", "heat", "Living Room", serde_json::json!({"current_temperature": 19.5, "temperature": 22, "hvac_action": "heating"})),
-            ent("weather.forecast_home", "clear-night", "Forecast Home", serde_json::json!({"temperature": 14})),
+            ent(
+                "climate.living_room",
+                "heat",
+                "Living Room",
+                serde_json::json!({"current_temperature": 19.5, "temperature": 22, "hvac_action": "heating"}),
+            ),
+            ent(
+                "weather.forecast_home",
+                "clear-night",
+                "Forecast Home",
+                serde_json::json!({"temperature": 14}),
+            ),
             ent("light.porch", "on", "Porch Light", serde_json::json!({})),
             ent("sensor.cpu", "3.1", "CPU", serde_json::json!({})), // noise — must NOT clutter
         ];
         let d = render_home_digest(&ents);
         assert!(d.contains("Pranab: home"), "presence: {d}");
-        assert!(d.contains("Living Room") && d.contains("19.5°") && d.contains("22°") && d.contains("heating"), "climate: {d}");
-        assert!(d.contains("clear-night") && d.contains("14°"), "weather: {d}");
+        assert!(
+            d.contains("Living Room")
+                && d.contains("19.5°")
+                && d.contains("22°")
+                && d.contains("heating"),
+            "climate: {d}"
+        );
+        assert!(
+            d.contains("clear-night") && d.contains("14°"),
+            "weather: {d}"
+        );
         assert!(d.contains("Porch Light"), "active light: {d}");
-        assert!(!d.contains("CPU"), "internal sensor noise must be filtered: {d}");
+        assert!(
+            !d.contains("CPU"),
+            "internal sensor noise must be filtered: {d}"
+        );
         assert!(d.contains("5 entities total"));
     }
 
@@ -273,28 +391,76 @@ mod tests {
 
     #[test]
     fn home_alerts_fire_only_when_explicitly_away() {
-        let tv = ent("media_player.tv", "playing", "Living Room TV", serde_json::json!({}));
-        let net_down = ent("binary_sensor.wan", "off", "WAN", serde_json::json!({ "device_class": "connectivity" }));
+        let tv = ent(
+            "media_player.tv",
+            "playing",
+            "Living Room TV",
+            serde_json::json!({}),
+        );
+        let net_down = ent(
+            "binary_sensor.wan",
+            "off",
+            "WAN",
+            serde_json::json!({ "device_class": "connectivity" }),
+        );
         // AWAY (person not_home, nobody home): TV-on-while-away fires, plus the always-on net-down rule
-        let away = vec![ent("person.pranab", "not_home", "Pranab", serde_json::json!({})), tv.clone(), net_down.clone()];
+        let away = vec![
+            ent("person.pranab", "not_home", "Pranab", serde_json::json!({})),
+            tv.clone(),
+            net_down.clone(),
+        ];
         let keys: Vec<String> = home_alerts(&away).into_iter().map(|(k, _)| k).collect();
-        assert!(keys.iter().any(|k| k.starts_with("tv_on_away")), "TV-on-while-away fires: {keys:?}");
-        assert!(keys.iter().any(|k| k.starts_with("net_down")), "internet-down fires regardless of presence");
+        assert!(
+            keys.iter().any(|k| k.starts_with("tv_on_away")),
+            "TV-on-while-away fires: {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|k| k.starts_with("net_down")),
+            "internet-down fires regardless of presence"
+        );
         // HOME: the same TV does NOT fire an away-alert (presence × device), but net-down still does
-        let home = vec![ent("person.pranab", "home", "Pranab", serde_json::json!({})), tv.clone(), net_down.clone()];
+        let home = vec![
+            ent("person.pranab", "home", "Pranab", serde_json::json!({})),
+            tv.clone(),
+            net_down.clone(),
+        ];
         let hk: Vec<String> = home_alerts(&home).into_iter().map(|(k, _)| k).collect();
-        assert!(!hk.iter().any(|k| k.starts_with("tv_on_away")), "no away-alert when home: {hk:?}");
+        assert!(
+            !hk.iter().any(|k| k.starts_with("tv_on_away")),
+            "no away-alert when home: {hk:?}"
+        );
         assert!(hk.iter().any(|k| k.starts_with("net_down")));
         // UNKNOWN presence (no explicit away) → conservative: no away-alerts (no false nags)
-        let unknown = vec![ent("person.pranab", "unknown", "Pranab", serde_json::json!({})), tv];
-        assert!(home_alerts(&unknown).is_empty(), "unknown presence must not nag");
+        let unknown = vec![
+            ent("person.pranab", "unknown", "Pranab", serde_json::json!({})),
+            tv,
+        ];
+        assert!(
+            home_alerts(&unknown).is_empty(),
+            "unknown presence must not nag"
+        );
     }
 
     #[test]
     fn home_alerts_low_ink() {
-        let low = vec![ent("sensor.printer_black_ink", "8", "Printer black ink", serde_json::json!({}))];
-        assert!(home_alerts(&low).iter().any(|(k, _)| k.starts_with("ink_low")), "low ink fires");
-        let ok = vec![ent("sensor.printer_black_ink", "80", "Printer black ink", serde_json::json!({}))];
+        let low = vec![ent(
+            "sensor.printer_black_ink",
+            "8",
+            "Printer black ink",
+            serde_json::json!({}),
+        )];
+        assert!(
+            home_alerts(&low)
+                .iter()
+                .any(|(k, _)| k.starts_with("ink_low")),
+            "low ink fires"
+        );
+        let ok = vec![ent(
+            "sensor.printer_black_ink",
+            "80",
+            "Printer black ink",
+            serde_json::json!({}),
+        )];
         assert!(home_alerts(&ok).is_empty(), "healthy ink is quiet");
     }
 }

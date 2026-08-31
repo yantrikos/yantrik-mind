@@ -40,7 +40,10 @@ pub struct ShadowConfig {
 impl Default for ShadowConfig {
     fn default() -> Self {
         // 15bp a side is not pessimism, it is what a thin small-cap actually costs to cross.
-        Self { lag_secs: 180, cost_bps_per_side: 15.0 }
+        Self {
+            lag_secs: 180,
+            cost_bps_per_side: 15.0,
+        }
     }
 }
 
@@ -82,7 +85,11 @@ impl ShadowReport {
             "SHADOW at {}s lag — {} round trip(s){}\n",
             self.lag_secs,
             n,
-            if self.unpriced > 0 { format!(", {} unpriced and excluded", self.unpriced) } else { String::new() }
+            if self.unpriced > 0 {
+                format!(", {} unpriced and excluded", self.unpriced)
+            } else {
+                String::new()
+            }
         );
         if n == 0 {
             s.push_str("  nothing to report — no round trip could be priced.\n");
@@ -113,7 +120,7 @@ pub fn price_at_or_after(bars: &[Bar], at_ms: i64) -> Option<f64> {
     let mut best: Option<(i64, f64)> = None;
     for b in bars {
         let t = parse_rfc3339_ms(&b.time)?;
-        if t >= at_ms && best.map(|(bt, _)| t < bt).unwrap_or(true) {
+        if t >= at_ms && best.is_none_or(|(bt, _)| t < bt) {
             best = Some((t, b.close));
         }
     }
@@ -125,7 +132,11 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T')?;
     let mut d = date.split('-');
-    let (y, mo, da): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let (y, mo, da): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
     let time = rest.trim_end_matches('Z');
     let time = time.split(['+', '-']).next().unwrap_or(time);
     let mut t = time.split(':');
@@ -159,9 +170,16 @@ fn round_trips(transitions: &[Transition]) -> Vec<(Transition, Transition)> {
 }
 
 /// Run the counterfactual at one lag.
-pub fn simulate(transitions: &[Transition], bars: &HashMap<String, Vec<Bar>>, cfg: ShadowConfig) -> ShadowReport {
+pub fn simulate(
+    transitions: &[Transition],
+    bars: &HashMap<String, Vec<Bar>>,
+    cfg: ShadowConfig,
+) -> ShadowReport {
     let lag_ms = cfg.lag_secs * 1000;
-    let mut rep = ShadowReport { lag_secs: cfg.lag_secs, ..Default::default() };
+    let mut rep = ShadowReport {
+        lag_secs: cfg.lag_secs,
+        ..Default::default()
+    };
     let mut wins = 0usize;
     let mut hold_total = 0.0;
     for (entry, exit) in round_trips(transitions) {
@@ -186,14 +204,21 @@ pub fn simulate(transitions: &[Transition], bars: &HashMap<String, Vec<Bar>>, cf
             continue;
         }
         let raw_bps = (xpx - epx) / epx * 10_000.0;
-        let signed = if entry.side == Side::Short { -raw_bps } else { raw_bps };
+        let signed = if entry.side == Side::Short {
+            -raw_bps
+        } else {
+            raw_bps
+        };
         let net = signed - cfg.cost_bps_per_side * 2.0;
         if net > 0.0 {
             wins += 1;
         }
         rep.total_net_bps += net;
         // Passive comparison over the SAME window: what holding it would have done, uncharged.
-        if let (Some(h0), Some(h1)) = (price_at_or_after(series, entry.at_ms), price_at_or_after(series, exit.at_ms)) {
+        if let (Some(h0), Some(h1)) = (
+            price_at_or_after(series, entry.at_ms),
+            price_at_or_after(series, exit.at_ms),
+        ) {
             if h0 > 0.0 {
                 hold_total += (h1 - h0) / h0 * 10_000.0;
             }
@@ -215,15 +240,30 @@ pub fn simulate(transitions: &[Transition], bars: &HashMap<String, Vec<Bar>>, cf
 }
 
 /// The answer to "how fast would I have to be" — the same tape at several delays.
-pub fn lag_curve(transitions: &[Transition], bars: &HashMap<String, Vec<Bar>>, lags: &[i64], cost_bps: f64) -> Vec<ShadowReport> {
+pub fn lag_curve(
+    transitions: &[Transition],
+    bars: &HashMap<String, Vec<Bar>>,
+    lags: &[i64],
+    cost_bps: f64,
+) -> Vec<ShadowReport> {
     lags.iter()
-        .map(|&l| simulate(transitions, bars, ShadowConfig { lag_secs: l, cost_bps_per_side: cost_bps }))
+        .map(|&l| {
+            simulate(
+                transitions,
+                bars,
+                ShadowConfig {
+                    lag_secs: l,
+                    cost_bps_per_side: cost_bps,
+                },
+            )
+        })
         .collect()
 }
 
 /// Render the curve, which is the artefact that actually decides the question.
 pub fn render_curve(reports: &[ShadowReport]) -> String {
-    let mut s = String::from("LAG CURVE — net basis points after costs, by how late the shadow acts\n");
+    let mut s =
+        String::from("LAG CURVE — net basis points after costs, by how late the shadow acts\n");
     for r in reports {
         s.push_str(&format!(
             "  {:>4}s  {:>8.1} bps  ({} trips, {:.0}% win, vs hold {:+.1})\n",
@@ -234,8 +274,13 @@ pub fn render_curve(reports: &[ShadowReport]) -> String {
             r.buy_hold_bps
         ));
     }
-    if reports.iter().all(|r| r.trades.len() < MIN_TRADES_TO_CONCLUDE) {
-        s.push_str(&format!("  NOT YET CONCLUSIVE at any lag — under {MIN_TRADES_TO_CONCLUDE} round trips.\n"));
+    if reports
+        .iter()
+        .all(|r| r.trades.len() < MIN_TRADES_TO_CONCLUDE)
+    {
+        s.push_str(&format!(
+            "  NOT YET CONCLUSIVE at any lag — under {MIN_TRADES_TO_CONCLUDE} round trips.\n"
+        ));
     }
     s
 }
@@ -245,15 +290,30 @@ mod tests {
     use super::*;
 
     fn bar(t: &str, close: f64) -> Bar {
-        Bar { time: t.into(), open: close, high: close, low: close, close, volume: 1.0 }
+        Bar {
+            time: t.into(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1.0,
+        }
     }
     fn tr(kind: &str, at_ms: i64, side: Side) -> Transition {
-        Transition { at_ms, trader: "CHERIF".into(), kind: kind.into(), symbol: Some("OSHR".into()), side }
+        Transition {
+            at_ms,
+            trader: "CHERIF".into(),
+            kind: kind.into(),
+            symbol: Some("OSHR".into()),
+            side,
+        }
     }
     fn series() -> HashMap<String, Vec<Bar>> {
         // A rising minute series from 10:00 to 10:09 at $100 → $109.
         let mut m = HashMap::new();
-        let bars: Vec<Bar> = (0..10).map(|i| bar(&format!("2026-08-18T10:{:02}:00Z", i), 100.0 + i as f64)).collect();
+        let bars: Vec<Bar> = (0..10)
+            .map(|i| bar(&format!("2026-08-18T10:{:02}:00Z", i), 100.0 + f64::from(i)))
+            .collect();
         m.insert("OSHR".to_string(), bars);
         m
     }
@@ -261,7 +321,10 @@ mod tests {
     #[test]
     fn epoch_parsing_is_right_or_every_number_here_is_wrong() {
         assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_rfc3339_ms("2026-08-18T10:00:00Z"), Some(1_787_047_200_000));
+        assert_eq!(
+            parse_rfc3339_ms("2026-08-18T10:00:00Z"),
+            Some(1_787_047_200_000)
+        );
     }
 
     #[test]
@@ -269,33 +332,86 @@ mod tests {
         let s = series();
         let t0 = parse_rfc3339_ms("2026-08-18T10:00:00Z").unwrap();
         // They enter at 10:00 and exit at 10:05 — a clean +5 move for them.
-        let trans = vec![tr("entry", t0, Side::Long), tr("exit", t0 + 5 * 60_000, Side::Long)];
+        let trans = vec![
+            tr("entry", t0, Side::Long),
+            tr("exit", t0 + 5 * 60_000, Side::Long),
+        ];
         // A shadow 3 minutes late buys at 10:03 ($103) and SELLS at 10:08 ($108) — still +5 here,
         // because this series only rises. The point is that the exit moved too.
-        let r = simulate(&trans, &s, ShadowConfig { lag_secs: 180, cost_bps_per_side: 0.0 });
+        let r = simulate(
+            &trans,
+            &s,
+            ShadowConfig {
+                lag_secs: 180,
+                cost_bps_per_side: 0.0,
+            },
+        );
         assert_eq!(r.trades.len(), 1);
         assert_eq!(r.trades[0].entry_px, 103.0, "entry lagged");
-        assert_eq!(r.trades[0].exit_px, 108.0, "EXIT lagged too — lagging only the entry invents a perfect exit");
+        assert_eq!(
+            r.trades[0].exit_px, 108.0,
+            "EXIT lagged too — lagging only the entry invents a perfect exit"
+        );
     }
 
     #[test]
     fn costs_are_charged_on_both_sides() {
         let s = series();
         let t0 = parse_rfc3339_ms("2026-08-18T10:00:00Z").unwrap();
-        let trans = vec![tr("entry", t0, Side::Long), tr("exit", t0 + 60_000, Side::Long)];
-        let free = simulate(&trans, &s, ShadowConfig { lag_secs: 0, cost_bps_per_side: 0.0 });
-        let charged = simulate(&trans, &s, ShadowConfig { lag_secs: 0, cost_bps_per_side: 15.0 });
-        assert!((free.total_net_bps - charged.total_net_bps - 30.0).abs() < 1e-6, "two sides of 15bp");
+        let trans = vec![
+            tr("entry", t0, Side::Long),
+            tr("exit", t0 + 60_000, Side::Long),
+        ];
+        let free = simulate(
+            &trans,
+            &s,
+            ShadowConfig {
+                lag_secs: 0,
+                cost_bps_per_side: 0.0,
+            },
+        );
+        let charged = simulate(
+            &trans,
+            &s,
+            ShadowConfig {
+                lag_secs: 0,
+                cost_bps_per_side: 15.0,
+            },
+        );
+        assert!(
+            (free.total_net_bps - charged.total_net_bps - 30.0).abs() < 1e-6,
+            "two sides of 15bp"
+        );
     }
 
     #[test]
     fn a_short_makes_money_when_the_price_falls() {
         let mut m = HashMap::new();
-        m.insert("OSHR".to_string(), vec![bar("2026-08-18T10:00:00Z", 100.0), bar("2026-08-18T10:01:00Z", 90.0)]);
+        m.insert(
+            "OSHR".to_string(),
+            vec![
+                bar("2026-08-18T10:00:00Z", 100.0),
+                bar("2026-08-18T10:01:00Z", 90.0),
+            ],
+        );
         let t0 = parse_rfc3339_ms("2026-08-18T10:00:00Z").unwrap();
-        let trans = vec![tr("entry", t0, Side::Short), tr("exit", t0 + 60_000, Side::Short)];
-        let r = simulate(&trans, &m, ShadowConfig { lag_secs: 0, cost_bps_per_side: 0.0 });
-        assert!(r.total_net_bps > 900.0, "a 10% drop shorted is ~+1000bp: {}", r.total_net_bps);
+        let trans = vec![
+            tr("entry", t0, Side::Short),
+            tr("exit", t0 + 60_000, Side::Short),
+        ];
+        let r = simulate(
+            &trans,
+            &m,
+            ShadowConfig {
+                lag_secs: 0,
+                cost_bps_per_side: 0.0,
+            },
+        );
+        assert!(
+            r.total_net_bps > 900.0,
+            "a 10% drop shorted is ~+1000bp: {}",
+            r.total_net_bps
+        );
     }
 
     #[test]
@@ -317,7 +433,10 @@ mod tests {
     fn a_thin_sample_refuses_to_conclude() {
         let s = series();
         let t0 = parse_rfc3339_ms("2026-08-18T10:00:00Z").unwrap();
-        let trans = vec![tr("entry", t0, Side::Long), tr("exit", t0 + 60_000, Side::Long)];
+        let trans = vec![
+            tr("entry", t0, Side::Long),
+            tr("exit", t0 + 60_000, Side::Long),
+        ];
         let r = simulate(&trans, &s, ShadowConfig::default());
         assert!(r.render().contains("NOT YET CONCLUSIVE"), "{}", r.render());
         assert!(render_curve(&[r]).contains("NOT YET CONCLUSIVE"));
@@ -327,17 +446,34 @@ mod tests {
     fn buy_and_hold_is_reported_so_a_rising_tide_cannot_pass_as_edge() {
         let s = series();
         let t0 = parse_rfc3339_ms("2026-08-18T10:00:00Z").unwrap();
-        let trans = vec![tr("entry", t0, Side::Long), tr("exit", t0 + 5 * 60_000, Side::Long)];
-        let r = simulate(&trans, &s, ShadowConfig { lag_secs: 0, cost_bps_per_side: 0.0 });
+        let trans = vec![
+            tr("entry", t0, Side::Long),
+            tr("exit", t0 + 5 * 60_000, Side::Long),
+        ];
+        let r = simulate(
+            &trans,
+            &s,
+            ShadowConfig {
+                lag_secs: 0,
+                cost_bps_per_side: 0.0,
+            },
+        );
         assert!(r.buy_hold_bps > 0.0, "the passive comparison is computed");
-        assert!(r.render().contains("edge over simply holding"), "{}", r.render());
+        assert!(
+            r.render().contains("edge over simply holding"),
+            "{}",
+            r.render()
+        );
     }
 
     #[test]
     fn the_curve_answers_how_fast_you_would_need_to_be() {
         let s = series();
         let t0 = parse_rfc3339_ms("2026-08-18T10:00:00Z").unwrap();
-        let trans = vec![tr("entry", t0, Side::Long), tr("exit", t0 + 5 * 60_000, Side::Long)];
+        let trans = vec![
+            tr("entry", t0, Side::Long),
+            tr("exit", t0 + 5 * 60_000, Side::Long),
+        ];
         let c = lag_curve(&trans, &s, &[0, 60, 180], 15.0);
         assert_eq!(c.len(), 3);
         assert!(render_curve(&c).contains("LAG CURVE"));

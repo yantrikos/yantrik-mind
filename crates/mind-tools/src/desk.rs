@@ -56,7 +56,9 @@ pub fn exposure(reading: &str) -> Option<std::collections::BTreeSet<String>> {
         saw_a_trader = true;
         let name = up.split('|').next().unwrap_or("").trim().to_string();
         for side in ["LONG", "SHORT"] {
-            let Some(rest) = up.split(&format!("{side}=")).nth(1) else { continue };
+            let Some(rest) = up.split(&format!("{side}=")).nth(1) else {
+                continue;
+            };
             let val = rest.split('|').next().unwrap_or("").trim();
             let empty = val.is_empty()
                 || val.starts_with("NONE")
@@ -105,7 +107,10 @@ mod tests {
 
         let flat = "CHERIF | LONG=NONE | SHORT=NONE\nJOE | LONG=NONE | SHORT=NONE";
         assert_eq!(exposure(flat), Some(Default::default()));
-        assert!(changed(held, flat), "closing both positions is a transition");
+        assert!(
+            changed(held, flat),
+            "closing both positions is a transition"
+        );
         assert!(changed(flat, held), "and opening them is the signal");
     }
 
@@ -113,7 +118,10 @@ mod tests {
     fn a_price_beside_the_ticker_is_not_part_of_the_position() {
         let a = "CHERIF | LONG=NONE | SHORT=NVAX 8.54\nJOE | LONG=TQQQ 71.15 | SHORT=NONE";
         let b = "CHERIF | LONG=NONE | SHORT=NVAX 8.61\nJOE | LONG=TQQQ 71.20 | SHORT=NONE";
-        assert!(!changed(a, b), "the same positions at new prices are not a transition");
+        assert!(
+            !changed(a, b),
+            "the same positions at new prices are not a transition"
+        );
     }
 
     #[test]
@@ -127,7 +135,13 @@ mod tests {
         // Prose from a model that ignored the format, and the readings the OLD prompt produced.
         // Both are unusable, and unusable must never compare unequal and invent a signal.
         assert_eq!(exposure("I cannot make out this image."), None);
-        assert_eq!(exposure("POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: TSM, AAPL"), None);
-        assert!(!changed("CHERIF | LONG=NONE | SHORT=NONE", "I cannot make out this image."));
+        assert_eq!(
+            exposure("POSITIONS: CHERIF=FLAT, JOE=FLAT\nTICKERS: TSM, AAPL"),
+            None
+        );
+        assert!(!changed(
+            "CHERIF | LONG=NONE | SHORT=NONE",
+            "I cannot make out this image."
+        ));
     }
 }

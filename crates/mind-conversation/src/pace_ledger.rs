@@ -1,5 +1,13 @@
 //! Proactive-mirror pace ledger -- tracks the mind's own proactive sends vs the user's reactions per domain. Extracted from lib.rs.
 
+/// Versioned identity for the conservative next-message correction heuristic. A non-correction is
+/// only tacit acceptance, and the recorded outcome keeps that weaker evidence explicit.
+pub(crate) const PACK_EVIDENCE_EVALUATOR_ID: &str = "next-message-correction-heuristic-v1";
+
+/// Versioned identity for the lexical proxy that grades whether surfaced pack evidence appeared in
+/// the answer. This is evidence-use correlation, not a claim that the evidence caused the answer.
+pub(crate) const PACK_EVIDENCE_USE_EVALUATOR_ID: &str = "pack-evidence-word-overlap-v1";
+
 /// Does this message read as a correction of what was just said?
 ///
 /// Deliberately conservative: only openings and phrases that are overwhelmingly correction-shaped.
@@ -9,12 +17,34 @@
 pub(crate) fn reads_as_correction(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     const OPENERS: &[&str] = &[
-        "no, ", "no - ", "no — ", "nope, ", "wrong", "that's wrong", "thats wrong", "that is wrong",
-        "not true", "that's not", "thats not", "that is not what", "i didn't ask", "i didnt ask",
-        "i meant ", "that's incorrect", "incorrect.", "you're wrong", "youre wrong", "not what i asked",
-        "not what i meant", "you misunderstood", "you got it wrong", "actually, no",
+        "no, ",
+        "no - ",
+        "no — ",
+        "nope, ",
+        "wrong",
+        "that's wrong",
+        "thats wrong",
+        "that is wrong",
+        "not true",
+        "that's not",
+        "thats not",
+        "that is not what",
+        "i didn't ask",
+        "i didnt ask",
+        "i meant ",
+        "that's incorrect",
+        "incorrect.",
+        "you're wrong",
+        "youre wrong",
+        "not what i asked",
+        "not what i meant",
+        "you misunderstood",
+        "you got it wrong",
+        "actually, no",
     ];
-    OPENERS.iter().any(|o| t.starts_with(o) || (o.len() > 8 && t.contains(o)))
+    OPENERS
+        .iter()
+        .any(|o| t.starts_with(o) || (o.len() > 8 && t.contains(o)))
 }
 
 impl super::ConversationEngine {
@@ -32,7 +62,10 @@ impl super::ConversationEngine {
         let start = v.len().saturating_sub(600);
         let _ = self
             .memory
-            .profile_set("ledger", &serde_json::to_string(&v[start..]).unwrap_or_default())
+            .profile_set(
+                "ledger",
+                &serde_json::to_string(&v[start..]).unwrap_or_default(),
+            )
             .await;
     }
 
@@ -73,10 +106,18 @@ impl super::ConversationEngine {
         let packs = std::mem::take(&mut *self.turn_packs.lock().unwrap());
         for p in packs {
             let Some(used) = p.used else { continue };
-            let mut ev = mind_observability::DecisionEvent::span(&p.trace, p.used_event_id.as_deref(), "pack_evidence_graded");
+            let mut ev = mind_observability::DecisionEvent::span(
+                &p.trace,
+                p.used_event_id.as_deref(),
+                "pack_evidence_graded",
+            );
+            ev.actor = Some("conversation".into());
+            ev.lane = Some(p.lane.clone());
+            ev.context_fingerprint = Some(p.context_fingerprint.clone());
             ev.object_id = Some(format!("pack:{}", p.pack_id));
             ev.verdict = Some(if corrected { "corrected" } else { "accepted" }.to_string());
             ev.semantic_success = Some(used);
+            ev.evaluator_id = Some(PACK_EVIDENCE_EVALUATOR_ID.into());
             ev.outcome = Some(
                 if corrected {
                     "the next message read as a correction"
@@ -86,7 +127,13 @@ impl super::ConversationEngine {
                 .to_string(),
             );
             self.recorder.record(ev);
-            let _ = self.memory.record_pack_event(&p.pack_id, mind_types::memory::PackEvent::Graded { good: !corrected }).await;
+            let _ = self
+                .memory
+                .record_pack_event(
+                    &p.pack_id,
+                    mind_types::memory::PackEvent::Graded { good: !corrected },
+                )
+                .await;
         }
         let mut g: serde_json::Value = self
             .memory
@@ -110,7 +157,12 @@ impl super::ConversationEngine {
             }));
             let start = recent.len().saturating_sub(10);
             g["recent"] = serde_json::json!(recent[start..]);
-            self.ledger_correction("turn", &prev.chars().take(140).collect::<String>(), &user_text.chars().take(200).collect::<String>()).await;
+            self.ledger_correction(
+                "turn",
+                &prev.chars().take(140).collect::<String>(),
+                &user_text.chars().take(200).collect::<String>(),
+            )
+            .await;
         }
         let _ = self.memory.profile_set("turn_grades", &g.to_string()).await;
     }
@@ -127,16 +179,28 @@ impl super::ConversationEngine {
                 continue;
             }
             let (used, share) = evidence_used_any(&p.rows, answer);
-            let mut ev = mind_observability::DecisionEvent::span(&p.trace, p.surfaced_event_id.as_deref(), "pack_evidence_used");
+            let mut ev = mind_observability::DecisionEvent::span(
+                &p.trace,
+                p.surfaced_event_id.as_deref(),
+                "pack_evidence_used",
+            );
+            ev.actor = Some("conversation".into());
+            ev.lane = Some(p.lane.clone());
+            ev.context_fingerprint = Some(p.context_fingerprint.clone());
             ev.object_id = Some(format!("pack:{}", p.pack_id));
             ev.verdict = Some(if used { "used" } else { "unused" }.to_string());
+            ev.semantic_success = Some(used);
+            ev.evaluator_id = Some(PACK_EVIDENCE_USE_EVALUATOR_ID.into());
             ev.confidence = Some(share);
             ev.lesson = Some("proxy: the best-matching surfaced row's share of informative words reappearing in the reply (any row clearing counts as use) — not causal use".to_string());
             p.used_event_id = ev.event_id.clone();
             p.used = Some(used);
             self.recorder.record(ev);
             if used {
-                let _ = self.memory.record_pack_event(&p.pack_id, mind_types::memory::PackEvent::Used).await;
+                let _ = self
+                    .memory
+                    .record_pack_event(&p.pack_id, mind_types::memory::PackEvent::Used)
+                    .await;
             }
         }
         *self.turn_packs.lock().unwrap() = packs;
@@ -191,8 +255,12 @@ impl super::ConversationEngine {
     /// Per-domain scoreboard over a trailing window: (sends, engaged, ignored,
     /// corrected, pending). Pending is counted, never absorbed — a rate that
     /// silently drops unresolved rows is flattering itself (see scoreboard.rs).
-    pub(crate) fn ledger_stats(l: &[serde_json::Value], since_ms: i64) -> std::collections::BTreeMap<String, (u32, u32, u32, u32, u32)> {
-        let mut m: std::collections::BTreeMap<String, (u32, u32, u32, u32, u32)> = std::collections::BTreeMap::new();
+    pub(crate) fn ledger_stats(
+        l: &[serde_json::Value],
+        since_ms: i64,
+    ) -> std::collections::BTreeMap<String, (u32, u32, u32, u32, u32)> {
+        let mut m: std::collections::BTreeMap<String, (u32, u32, u32, u32, u32)> =
+            std::collections::BTreeMap::new();
         for e in l {
             if e["ts"].as_i64().unwrap_or(0) < since_ms {
                 continue;
@@ -209,7 +277,6 @@ impl super::ConversationEngine {
         }
         m
     }
-
 }
 
 /// The pack evidence one turn surfaced, carried from grounding to the answer to the next message.
@@ -217,6 +284,8 @@ impl super::ConversationEngine {
 pub(crate) struct TurnPackEvidence {
     pub(crate) pack_id: String,
     pub(crate) trace: String,
+    pub(crate) lane: String,
+    pub(crate) context_fingerprint: String,
     /// The surfaced rows, each kept whole: the used-proxy is judged PER ROW, because a reply that
     /// faithfully uses one of five surfaced rows shares few words with the other four.
     pub(crate) rows: Vec<String>,
@@ -232,7 +301,9 @@ pub(crate) struct TurnPackEvidence {
 pub(crate) fn evidence_used_any(rows: &[String], reply: &str) -> (bool, f64) {
     rows.iter()
         .map(|r| evidence_used(r, reply))
-        .fold((false, 0.0), |(u, s), (ru, rs)| (u || ru, if rs > s { rs } else { s }))
+        .fold((false, 0.0), |(u, s), (ru, rs)| {
+            (u || ru, if rs > s { rs } else { s })
+        })
 }
 
 /// Did the reply USE this row? A PROXY, deliberately cheap and deterministic: the share of the
@@ -267,7 +338,8 @@ mod evidence_proxy_tests {
 
     #[test]
     fn the_used_proxy_needs_real_overlap_and_says_how_much() {
-        let row = "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
+        let row =
+            "Contrast — body text needs at least 4.5 to 1 against its background to be readable.";
         let (used, share) = evidence_used(row, "For body text you want contrast of at least 4.5:1 against the background so it stays readable.");
         assert!(used && share >= 0.25, "share {share}");
         let (unused, share2) = evidence_used(row, "I don't know.");
@@ -293,9 +365,17 @@ mod evidence_proxy_tests {
         let (used, share) = super::evidence_used_any(&rows, reply);
         assert!(used, "one faithfully used row is use");
         assert!(share >= 0.25, "the best row's share is reported: {share}");
-        let (union_used, union_share) = super::evidence_used(&rows.join("
-"), reply);
-        assert!(!union_used && union_share < 0.25, "the union denominator would have hidden it: {union_share}");
+        let (union_used, union_share) = super::evidence_used(
+            &rows.join(
+                "
+",
+            ),
+            reply,
+        );
+        assert!(
+            !union_used && union_share < 0.25,
+            "the union denominator would have hidden it: {union_share}"
+        );
         let (none, _) = super::evidence_used_any(&rows, "I don't know.");
         assert!(!none);
     }

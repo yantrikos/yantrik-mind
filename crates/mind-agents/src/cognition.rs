@@ -39,6 +39,10 @@ use yantrik_ml::{ChatMessage, GenerationConfig};
 use crate::bus::Bus;
 use crate::nba::{self, Action, Verb};
 
+/// Versioned identity for the run-completion proxy that grades whether a tool's evidence was cited.
+/// Citation is observable evidence use, not a causal claim about goal contribution.
+pub const GOAL_CONTRIBUTION_EVALUATOR_ID: &str = "evidence-citation-proxy-v1";
+
 /// One thing the loop did, for the trace. Reason codes rather than prose, so a run is queryable.
 #[derive(Debug, Clone)]
 pub struct Step {
@@ -100,7 +104,14 @@ impl Cognition {
         bus: Arc<dyn Bus>,
         persona: impl Into<String>,
     ) -> Self {
-        Self { step_pool, reason_pool, bus, controller: Controller::default(), persona: persona.into(), grounding: None }
+        Self {
+            step_pool,
+            reason_pool,
+            bus,
+            controller: Controller::default(),
+            persona: persona.into(),
+            grounding: None,
+        }
     }
 
     pub fn with_controller(mut self, controller: Controller) -> Self {
@@ -117,11 +128,24 @@ impl Cognition {
 
     /// Run a compiled goal to an answer.
     pub async fn run(&self, spec: &GoalSpec, clock: &dyn Clock) -> Outcome {
-        let started: UnixMillis = clock.now_ms();
         // One trace id per run — every tool span this run causes parents under it, so the
         // flight recorder can reconstruct which calls served which goal.
         let trace_id = format!("run-{}", clock.now_ms().max(1));
+        self.run_with_trace(spec, clock, &trace_id).await
+    }
+
+    /// Run under a caller-minted trace so work done before the loop (for example goal compilation)
+    /// and every tool span can be reconstructed as one causal path.
+    pub async fn run_with_trace(
+        &self,
+        spec: &GoalSpec,
+        clock: &dyn Clock,
+        trace_id: &str,
+    ) -> Outcome {
+        let started: UnixMillis = clock.now_ms();
+        let trace_id = trace_id.to_string();
         self.bus.declare_trace(&trace_id);
+        self.bus.declare_goal_id(&spec.id);
         let mut capsule = Capsule::new(&spec.id, &spec.goal);
         let mut trace: Vec<Step> = Vec::new();
         let mut next_evidence = 1u32;
@@ -148,7 +172,14 @@ impl Cognition {
         if !capsule.plan.is_empty() {
             trace.push(Step {
                 n: 0,
-                action: format!("recalled approach: {}", procedures.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")),
+                action: format!(
+                    "recalled approach: {}",
+                    procedures
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 ok: true,
                 decision: None,
                 elapsed_ms: 0,
@@ -160,43 +191,75 @@ impl Cognition {
             let confidence_before = capsule.confidence;
 
             // ── CONTROL. Free, and first. ───────────────────────────────────────────────────────
-            let last = StepOutcome { confidence_before, next_is_outward: false };
-            match self.controller.decide(&capsule, &spec.contract, &spec.budget, elapsed, last) {
+            let last = StepOutcome {
+                confidence_before,
+                next_is_outward: false,
+            };
+            match self
+                .controller
+                .decide(&capsule, &spec.contract, &spec.budget, elapsed, last)
+            {
                 Decision::Proceed => {}
                 Decision::Escalate { reason } => {
                     // Not a failure — a considered move to a stronger tier for one decision.
                     escalated = true;
-                    trace.push(Step { n: capsule.progress.steps, action: "escalate".into(), ok: true, decision: Some(reason), elapsed_ms: elapsed });
+                    trace.push(Step {
+                        n: capsule.progress.steps,
+                        action: "escalate".into(),
+                        ok: true,
+                        decision: Some(reason),
+                        elapsed_ms: elapsed,
+                    });
                 }
                 Decision::Replan { reason } => {
                     capsule.progress.replans += 1;
                     capsule.progress.barren_steps = 0; // the stall is being addressed; do not re-trigger on it
                     capsule.plan = self.replan(spec, &capsule).await;
                     capsule.progress.model_calls += 1;
-                    trace.push(Step { n: capsule.progress.steps, action: "replan".into(), ok: true, decision: Some(reason), elapsed_ms: elapsed });
+                    trace.push(Step {
+                        n: capsule.progress.steps,
+                        action: "replan".into(),
+                        ok: true,
+                        decision: Some(reason),
+                        elapsed_ms: elapsed,
+                    });
                     continue;
                 }
-                Decision::AskUser { reason, question: q } => {
+                Decision::AskUser {
+                    reason,
+                    question: q,
+                } => {
                     stopped_because = Some(reason);
                     question = Some(q);
                     break;
                 }
-                Decision::FinishPartial { reason, .. } => {
-                    stopped_because = Some(reason);
-                    break;
-                }
-                Decision::Verify { reason } => {
+                Decision::FinishPartial { reason, .. } | Decision::Verify { reason } => {
                     stopped_because = Some(reason);
                     break;
                 }
             }
 
             // ── NEXT BEST ACTION. One small call. ──────────────────────────────────────────────
-            let verdict = spec.contract.completion.evaluate(&capsule, &spec.contract.requirements);
+            let verdict = spec
+                .contract
+                .completion
+                .evaluate(&capsule, &spec.contract.requirements);
             let shortfalls: Vec<String> = verdict.shortfalls.iter().map(|s| s.describe()).collect();
-            let pool = if escalated { &self.reason_pool } else { &self.step_pool };
-            let choice =
-                nba::choose(pool, self.bus.as_ref(), spec, &capsule, &shortfalls, &procedures, escalated).await;
+            let pool = if escalated {
+                &self.reason_pool
+            } else {
+                &self.step_pool
+            };
+            let choice = nba::choose(
+                pool,
+                self.bus.as_ref(),
+                spec,
+                &capsule,
+                &shortfalls,
+                &procedures,
+                escalated,
+            )
+            .await;
             capsule.progress.model_calls += 1;
             escalated = false; // escalation is per-decision, not sticky for the rest of the run
 
@@ -214,11 +277,21 @@ impl Cognition {
             // the model gets to make: one goal URL → the runtime substitutes it; several → the
             // step is refused with the mismatch named. A goal with no URL constrains nothing —
             // fetching search-result links is what research is.
-            if action.verb == Verb::CallTool && matches!(action.target.as_str(), "web_fetch" | "fetch" | "web") {
-                if let Some(chosen) = action.args.get("url").and_then(|u| u.as_str()).map(str::to_string) {
+            if action.verb == Verb::CallTool
+                && matches!(action.target.as_str(), "web_fetch" | "fetch" | "web")
+            {
+                if let Some(chosen) = action
+                    .args
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .map(str::to_string)
+                {
                     let goal_urls = urls_in(&spec.goal);
                     let provenanced = spec.goal.contains(chosen.as_str())
-                        || capsule.evidence.iter().any(|e| e.summary.contains(chosen.as_str()));
+                        || capsule
+                            .evidence
+                            .iter()
+                            .any(|e| e.summary.contains(chosen.as_str()));
                     if !goal_urls.is_empty() && !provenanced {
                         if goal_urls.len() == 1 {
                             trace.push(Step {
@@ -251,7 +324,11 @@ impl Cognition {
             if !choice.learned.is_empty() {
                 let known: Vec<String> = capsule.evidence.iter().map(|e| e.id.clone()).collect();
                 let contradictions = choice.learned.contradictions.clone();
-                capsule = capsule.reduce(choice.learned.into_observation("extract".to_string(), &known));
+                capsule = capsule.reduce(
+                    choice
+                        .learned
+                        .into_observation("extract".to_string(), &known),
+                );
                 // Contradictions live in their own capsule field because the controller reads that
                 // field to decide whether to escalate — leaving them in `notes` would make the
                 // strongest reason to distrust a conclusion invisible to the thing that acts on it.
@@ -268,7 +345,10 @@ impl Cognition {
 
             // Re-test the contract now that findings may have landed — otherwise a run that just
             // satisfied itself would take one more pointless action before noticing.
-            let verdict = spec.contract.completion.evaluate(&capsule, &spec.contract.requirements);
+            let verdict = spec
+                .contract
+                .completion
+                .evaluate(&capsule, &spec.contract.requirements);
             if verdict.met && !matches!(action.verb, Verb::AskUser) {
                 stopped_because = Some(ReasonCode::ContractMet);
                 break;
@@ -287,17 +367,30 @@ impl Cognition {
                     capsule = capsule.reduce(Observation {
                         action: "premature_finish".into(),
                         ok: false,
-                        error: Some(format!("wanted to finish with {} criteria unmet", verdict.shortfalls.len())),
+                        error: Some(format!(
+                            "wanted to finish with {} criteria unmet",
+                            verdict.shortfalls.len()
+                        )),
                         ..Default::default()
                     });
                     continue;
                 }
                 Verb::AskUser => {
                     stopped_because = Some(ReasonCode::NeedsUserInput);
-                    question = Some(if action.target.is_empty() { "I need something from you to continue.".into() } else { action.target.clone() });
+                    question = Some(if action.target.is_empty() {
+                        "I need something from you to continue.".into()
+                    } else {
+                        action.target.clone()
+                    });
                     break;
                 }
                 Verb::Replan => {
+                    // `choose` already consumed one call. Replanning is a second call and must not
+                    // sneak past the hard ceiling merely because the controller ran before either.
+                    if capsule.progress.model_calls >= spec.budget.max_model_calls {
+                        stopped_because = Some(ReasonCode::ModelBudget);
+                        break;
+                    }
                     capsule.progress.replans += 1;
                     capsule.plan = self.replan(spec, &capsule).await;
                     capsule.progress.model_calls += 1;
@@ -351,7 +444,11 @@ impl Cognition {
                 n: capsule.progress.steps,
                 action: sig,
                 ok,
-                decision: if terminal.is_some() { Some(ReasonCode::Delivered) } else { None },
+                decision: if terminal.is_some() {
+                    Some(ReasonCode::Delivered)
+                } else {
+                    None
+                },
                 elapsed_ms: clock.now_ms().saturating_sub(started),
             });
             // A TERMINAL output ends the run with itself as the answer. Synthesis would paraphrase
@@ -366,33 +463,54 @@ impl Cognition {
         }
 
         // ── The completion boundary: this is where the tokens go. ───────────────────────────────
-        let verdict = spec.contract.completion.evaluate(&capsule, &spec.contract.requirements);
+        let verdict = spec
+            .contract
+            .completion
+            .evaluate(&capsule, &spec.contract.requirements);
 
         // A DELIVERED run is already answered, in the tool's own words. No synthesis (it would
         // paraphrase), no grounding (it would strip the URL as uncited), and no procedure ledger —
         // the contract's verdict says nothing about a run whose answer was the tool's output, so
         // recording met/unmet against a followed approach would teach a lie either way.
         if let Some(raw) = delivered {
-            return Outcome { answer: raw, capsule, verdict, stopped_because, verified: None, question: None, trace, trace_id };
+            return Outcome {
+                answer: raw,
+                capsule,
+                verdict,
+                stopped_because,
+                verified: None,
+                question: None,
+                trace,
+                trace_id,
+            };
         }
         let mut verified = None;
         let mut answer = if question.is_some() {
             question.clone().unwrap_or_default()
+        } else if capsule.progress.model_calls >= spec.budget.max_model_calls {
+            // The cap is hard: producing prettier prose is not permission to exceed it. Be explicit
+            // instead of fabricating a synthesized answer from state without the synthesis call.
+            budget_exhausted_answer(&verdict)
         } else {
-            let synthesized = self.synthesize(spec, &capsule, &verdict).await;
             capsule.progress.model_calls += 1;
+            let synthesized = self.synthesize(spec, &capsule, &verdict).await;
             synthesized
         };
 
         // Grounding runs only when there is evidence to ground against — running it over an empty
         // capsule would strip an honest "I could not find out" down to nothing.
-        if question.is_none() && !capsule.evidence.is_empty() {
+        if question.is_none()
+            && !capsule.evidence.is_empty()
+            && self.bus.has_grounder()
+            && capsule.progress.model_calls < spec.budget.max_model_calls
+        {
             let evidence = capsule
                 .evidence
                 .iter()
                 .map(|e| format!("{}: {} ({})", e.id, e.summary, e.source))
                 .collect::<Vec<_>>()
                 .join("\n");
+            capsule.progress.model_calls += 1;
             match self.bus.ground(&spec.goal, &evidence).await {
                 Some(grounded) if !grounded.trim().is_empty() => {
                     answer = grounded;
@@ -410,35 +528,53 @@ impl Cognition {
         // against "did it finish", because a run that finished without meeting its criteria did not
         // vindicate the approach it followed.
         for p in &procedures {
-            self.bus.record_procedure_outcome(&p.name, verdict.met).await;
+            self.bus
+                .record_procedure_outcome(&p.name, verdict.met)
+                .await;
         }
         // GOAL CONTRIBUTION: which tools' evidence did a finding actually CITE? The contract
         // verdict is the goal-level outcome; this grades the third success kind at the only
         // place it becomes observable — run completion.
-        if !delivered.is_some() {
+        if delivered.is_none() {
             let cited: std::collections::HashSet<&str> = capsule
                 .findings
                 .iter()
                 .flat_map(|f| f.evidence.iter().map(String::as_str))
                 .collect();
-            let mut by_tool: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+            let mut by_tool: std::collections::HashMap<&str, bool> =
+                std::collections::HashMap::new();
             for ev in &capsule.evidence {
                 let entry = by_tool.entry(ev.source.as_str()).or_insert(false);
                 *entry |= cited.contains(ev.id.as_str());
             }
-            let contributors: Vec<(String, bool)> =
-                by_tool.into_iter().map(|(t, c)| (t.to_string(), c)).collect();
-            self.bus.grade_goal(&trace_id, &spec.goal, verdict.met, &contributors).await;
+            let contributors: Vec<(String, bool)> = by_tool
+                .into_iter()
+                .map(|(t, c)| (t.to_string(), c))
+                .collect();
+            self.bus
+                .grade_goal(&trace_id, &spec.goal, verdict.met, &contributors)
+                .await;
         }
         // A run that SUCCEEDED with nothing to guide it is exactly the one worth remembering — next
         // time this shape of goal appears, the reasoning is already done. Only banked on success, and
         // only when there was no procedure, so the library grows from what worked rather than from
         // everything that was attempted.
         if procedures.is_empty() && verdict.met && !capsule.completed.is_empty() {
-            self.bus.bank_procedure(&spec.goal, &spec.goal, &capsule.completed).await;
+            self.bus
+                .bank_procedure(&spec.goal, &spec.goal, &capsule.completed)
+                .await;
         }
 
-        Outcome { answer, capsule, verdict, stopped_because, verified, question, trace, trace_id }
+        Outcome {
+            answer,
+            capsule,
+            verdict,
+            stopped_because,
+            verified,
+            question,
+            trace,
+            trace_id,
+        }
     }
 
     /// Perform one action through the bus.
@@ -450,15 +586,29 @@ impl Cognition {
     async fn execute(&self, action: &Action) -> (Observation, Option<String>) {
         let (tool, args) = match action.verb {
             Verb::CallTool => (action.target.clone(), action.args.clone()),
-            Verb::RecallMemory => ("recall".to_string(), serde_json::json!({ "query": action.target })),
+            Verb::RecallMemory => (
+                "recall".to_string(),
+                serde_json::json!({ "query": action.target }),
+            ),
             // Paging in an evidence body is the bus's `fetch`, addressed by id.
-            Verb::Fetch => ("fetch".to_string(), serde_json::json!({ "id": action.target })),
+            Verb::Fetch => (
+                "fetch".to_string(),
+                serde_json::json!({ "id": action.target }),
+            ),
             // A banked skill runs through the engine's own sandboxed skill path — reuse never grants
             // unsandboxed power, which is the invariant the skill store was built on.
-            Verb::RunSkill => ("run_skill".to_string(), serde_json::json!({ "name": action.target })),
+            Verb::RunSkill => (
+                "run_skill".to_string(),
+                serde_json::json!({ "name": action.target }),
+            ),
             _ => {
                 return (
-                    Observation { action: action.signature(), ok: false, error: Some("not an executable action".into()), ..Default::default() },
+                    Observation {
+                        action: action.signature(),
+                        ok: false,
+                        error: Some("not an executable action".into()),
+                        ..Default::default()
+                    },
                     None,
                 )
             }
@@ -468,7 +618,10 @@ impl Cognition {
                 let terminal = self.bus.is_terminal(&tool, &raw).then(|| raw.clone());
                 (self.bus.normalize(&tool, &args, &raw, true), terminal)
             }
-            Err(e) => (self.bus.normalize(&tool, &args, &e.to_string(), false), None),
+            Err(e) => (
+                self.bus.normalize(&tool, &args, &e.to_string(), false),
+                None,
+            ),
         }
     }
 
@@ -480,10 +633,21 @@ impl Cognition {
             state = capsule.render(1500),
             n = spec.horizon.clamp(1, 4),
         );
-        let cfg = GenerationConfig { max_tokens: 250, think: mind_inference::think_for("replan", Some(false)), prefer_reasoner: true, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 250,
+            think: mind_inference::think_for("replan", Some(false)),
+            prefer_reasoner: true,
+            ..GenerationConfig::default()
+        };
         let text = match self
             .reason_pool
-            .chat_grounded(vec![ChatMessage::system("Output ONLY a JSON array of short strings."), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system("Output ONLY a JSON array of short strings."),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
             .await
         {
             Ok(r) => r.text,
@@ -491,7 +655,9 @@ impl Cognition {
         };
         let body = text.rsplit("</think>").next().unwrap_or(&text);
         match (body.find('['), body.rfind(']')) {
-            (Some(a), Some(b)) if b > a => serde_json::from_str::<Vec<String>>(&body[a..=b]).unwrap_or_default(),
+            (Some(a), Some(b)) if b > a => {
+                serde_json::from_str::<Vec<String>>(&body[a..=b]).unwrap_or_default()
+            }
             _ => Vec::new(),
         }
         .into_iter()
@@ -543,18 +709,48 @@ impl Cognition {
             shape = shape.join(" "),
             format = out.format.as_deref().map(|f| format!(" Format: {f}.")).unwrap_or_default(),
         );
-        let cfg = GenerationConfig { max_tokens: 2000, think: mind_inference::think_for("synthesize", None), prefer_reasoner: true, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 2000,
+            think: mind_inference::think_for("synthesize", None),
+            prefer_reasoner: true,
+            ..GenerationConfig::default()
+        };
         self.reason_pool
-            .chat_grounded(vec![ChatMessage::system(&self.persona), ChatMessage::user(&prompt)], cfg)
+            .chat_grounded(
+                vec![
+                    ChatMessage::system(&self.persona),
+                    ChatMessage::user(&prompt),
+                ],
+                cfg,
+            )
             .await
             // Through `plain_prose` for the same reason the sub-agent's synthesis is: a model that has
             // spent the whole run emitting control JSON emits one more on the final call, and this
             // string is what the user reads. The sub-agent leaked exactly that into the cockpit on
             // 2026-08-11; this path is behind YM_COGNITION and would have leaked it the day the flag
             // flipped.
-            .map(|r| crate::plain_prose(&r.text))
-            .unwrap_or_else(|_| "I did the work but could not put the answer together.".to_string())
+            .map_or_else(
+                |_| "I did the work but could not put the answer together.".to_string(),
+                |r| crate::plain_prose(&r.text),
+            )
     }
+}
+
+/// A deterministic completion response for the one case where calling the synthesizer would break
+/// the budget contract. It names the limitation and the unmet criteria without inventing content.
+fn budget_exhausted_answer(verdict: &Verdict) -> String {
+    if verdict.met {
+        return "The run met its completion criteria, but the model-call budget was exhausted before I could compose the final answer.".into();
+    }
+    let missing = verdict
+        .shortfalls
+        .iter()
+        .map(|s| s.describe())
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "I reached the model-call budget before I could compose a complete answer. Missing: {missing}"
+    )
 }
 
 /// The http(s) URLs literally present in a text, trailing punctuation trimmed. This is what "the
@@ -562,7 +758,10 @@ impl Cognition {
 fn urls_in(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|t| t.starts_with("http://") || t.starts_with("https://"))
-        .map(|t| t.trim_end_matches(['.', ',', ';', ':', ')', ']', '!', '?']).to_string())
+        .map(|t| {
+            t.trim_end_matches(['.', ',', ';', ':', ')', ']', '!', '?'])
+                .to_string()
+        })
         .filter(|t| t.len() > 10)
         .collect()
 }
@@ -575,7 +774,13 @@ mod tests {
     use mind_types::clock::TestClock;
     use yantrik_ml::LLMBackend;
 
-    fn pools(replies: Vec<&str>) -> (InferencePool, InferencePool, Arc<mind_inference::SequencedLLM>) {
+    fn pools(
+        replies: Vec<&str>,
+    ) -> (
+        InferencePool,
+        InferencePool,
+        Arc<mind_inference::SequencedLLM>,
+    ) {
         let backend = Arc::new(mind_inference::SequencedLLM::new(replies));
         let p = InferencePool::new(backend.clone() as Arc<dyn LLMBackend>, 1);
         (p.clone(), p, backend)
@@ -585,16 +790,27 @@ mod tests {
         GoalSpec {
             contract: Contract {
                 requirements: vec![],
-                completion: CompletionCriteria { min_findings, require_full_coverage: false, ..Default::default() },
+                completion: CompletionCriteria {
+                    min_findings,
+                    require_full_coverage: false,
+                    ..Default::default()
+                },
                 output: OutputContract::default(),
             },
-            budget: Budget { max_steps: 12, max_model_calls: 12, max_wall_ms: 600_000, max_usd: None },
+            budget: Budget {
+                max_steps: 12,
+                max_model_calls: 12,
+                max_wall_ms: 600_000,
+                max_usd: None,
+            },
             ..GoalSpec::simple("find the thing")
         }
     }
 
     fn call(tool: &str, q: &str) -> String {
-        format!(r#"{{"verb":"CALL_TOOL","target":"{tool}","args":{{"query":"{q}"}},"why":"NEED_EVIDENCE"}}"#)
+        format!(
+            r#"{{"verb":"CALL_TOOL","target":"{tool}","args":{{"query":"{q}"}},"why":"NEED_EVIDENCE"}}"#
+        )
     }
 
     /// A reply that reports what the previous step established AND chooses to finish. This is the
@@ -610,15 +826,31 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_run_gathers_evidence_then_answers() {
         let f = learned_then_finish("the thing is X", "E1");
-        let (step, reason, backend) = pools(vec![&call("search", "the thing"), &f, "The thing is X, per E1."]);
+        let (step, reason, backend) = pools(vec![
+            &call("search", "the thing"),
+            &f,
+            "The thing is X, per E1.",
+        ]);
         let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "The thing is X"));
         let c = Cognition::new(step, reason, bus.clone(), "JARVIS");
         let out = c.run(&goal(1), &TestClock::new(0)).await;
 
-        assert!(out.complete(), "one evidenced finding should meet a min_findings=1 contract: {:?}", out.verdict.shortfalls);
+        assert!(
+            out.complete(),
+            "one evidenced finding should meet a min_findings=1 contract: {:?}",
+            out.verdict.shortfalls
+        );
         assert_eq!(out.stopped_because, Some(ReasonCode::ContractMet));
-        assert_eq!(bus.called(), vec!["search|{\"query\":\"the thing\"}"], "exactly one tool call");
-        assert!(backend.call_count() <= 3, "2 decisions + 1 synthesis, got {}", backend.call_count());
+        assert_eq!(
+            bus.called(),
+            vec!["search|{\"query\":\"the thing\"}"],
+            "exactly one tool call"
+        );
+        assert!(
+            backend.call_count() <= 3,
+            "2 decisions + 1 synthesis, got {}",
+            backend.call_count()
+        );
         assert!(out.answer.contains('X'));
     }
 
@@ -628,22 +860,43 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_terminal_tool_output_is_delivered_verbatim() {
         let ack = "Done — I published it as a page (works on your home network):\nhttp://192.168.4.90:8088/x.html";
-        let (step, reason, backend) =
-            pools(vec![&call("publish_page", "the page"), "SYNTHESIS MUST NOT RUN"]);
+        let (step, reason, backend) = pools(vec![
+            &call("publish_page", "the page"),
+            "SYNTHESIS MUST NOT RUN",
+        ]);
         let bus = Arc::new(
             FakeBus::new(&["publish_page"])
                 .returning("publish_page", ack)
                 .terminal(&["publish_page"])
                 .grounding("a grounded paraphrase that must not replace the url"),
         );
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
 
         assert_eq!(out.answer, ack, "the tool's words reach the user exactly");
         assert_eq!(out.stopped_because, Some(ReasonCode::Delivered));
-        assert!(out.verified.is_none(), "nothing was synthesized, so nothing reads as verified");
-        assert_eq!(backend.call_count(), 1, "one decision, zero synthesis calls — got {}", backend.call_count());
-        assert!(bus.banked_names().is_empty(), "a delivered run banks no approach");
-        assert!(out.trace.iter().any(|s| s.decision == Some(ReasonCode::Delivered)), "{:?}", out.trace);
+        assert!(
+            out.verified.is_none(),
+            "nothing was synthesized, so nothing reads as verified"
+        );
+        assert_eq!(
+            backend.call_count(),
+            1,
+            "one decision, zero synthesis calls — got {}",
+            backend.call_count()
+        );
+        assert!(
+            bus.banked_names().is_empty(),
+            "a delivered run banks no approach"
+        );
+        assert!(
+            out.trace
+                .iter()
+                .any(|s| s.decision == Some(ReasonCode::Delivered)),
+            "{:?}",
+            out.trace
+        );
     }
 
     /// THE FIRST LIVE NIGHT'S BUG, pinned: the goal names packs.yantrikdb.com, the decision model
@@ -654,10 +907,15 @@ mod tests {
         let bad = r#"{"verb":"CALL_TOOL","target":"web_fetch","args":{"url":"http://example.com"},"why":"NEED_EVIDENCE"}"#;
         let f = learned_then_finish("the page is about packs", "E1");
         let (step, reason, _) = pools(vec![bad, &f, "It is about packs."]);
-        let bus = Arc::new(FakeBus::new(&["web_fetch"]).returning("web_fetch", "PACKS: mount what your model was never trained on"));
+        let bus = Arc::new(FakeBus::new(&["web_fetch"]).returning(
+            "web_fetch",
+            "PACKS: mount what your model was never trained on",
+        ));
         let mut g = goal(1);
         g.goal = "fetch https://packs.yantrikdb.com and tell me what is on that page".into();
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
         assert_eq!(bus.called().len(), 1);
         assert!(
@@ -666,7 +924,13 @@ mod tests {
             bus.called()
         );
         assert!(!bus.called()[0].contains("example.com"));
-        assert!(out.trace.iter().any(|s| s.action.starts_with("url corrected:")), "{:?}", out.trace);
+        assert!(
+            out.trace
+                .iter()
+                .any(|s| s.action.starts_with("url corrected:")),
+            "{:?}",
+            out.trace
+        );
         assert!(out.complete());
     }
 
@@ -678,8 +942,14 @@ mod tests {
         let f = learned_then_finish("found it", "E1");
         let (step, reason, _) = pools(vec![pick, &f, "answer"]);
         let bus = Arc::new(FakeBus::new(&["web_fetch"]).returning("web_fetch", "the article body"));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
-        assert!(bus.called()[0].contains("a-search-result.example"), "{:?}", bus.called());
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
+        assert!(
+            bus.called()[0].contains("a-search-result.example"),
+            "{:?}",
+            bus.called()
+        );
         assert!(out.complete());
     }
 
@@ -690,14 +960,27 @@ mod tests {
         let (step, reason, _) = pools(vec![
             r#"{"verb":"FINISH","why":"SUFFICIENT"}"#, // step 1: wants out with 0 findings
             &call("search", "again"),                  // refused, so it must actually work
-            &f,                                        // now it reports a finding, and the contract is met
+            &f, // now it reports a finding, and the contract is met
             "Answer with evidence.",
         ]);
         let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "a real finding"));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
 
-        assert_eq!(bus.called().len(), 1, "the refused finish forced actual work");
-        assert!(out.capsule.failures.iter().any(|f| f.contains("premature_finish")), "{:?}", out.capsule.failures);
+        assert_eq!(
+            bus.called().len(),
+            1,
+            "the refused finish forced actual work"
+        );
+        assert!(
+            out.capsule
+                .failures
+                .iter()
+                .any(|f| f.contains("premature_finish")),
+            "{:?}",
+            out.capsule.failures
+        );
         assert!(out.complete());
     }
 
@@ -705,12 +988,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_outward_action_stops_and_asks_without_running() {
         let (step, reason, _) = pools(vec![&call("send_email", "x")]);
-        let bus = Arc::new(FakeBus::new(&["send_email"]).returning("send_email", "sent!").outward(&["send_email"]));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let bus = Arc::new(
+            FakeBus::new(&["send_email"])
+                .returning("send_email", "sent!")
+                .outward(&["send_email"]),
+        );
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
 
         assert_eq!(out.stopped_because, Some(ReasonCode::HighConsequence));
         assert!(out.question.as_deref().unwrap().contains("send_email"));
-        assert!(bus.called().is_empty(), "an outward action must NOT have run before asking");
+        assert!(
+            bus.called().is_empty(),
+            "an outward action must NOT have run before asking"
+        );
     }
 
     /// The time limit binds without the step limit, and reports its own reason.
@@ -719,14 +1011,98 @@ mod tests {
         let (step, reason, _) = pools(vec![&call("search", "a"), "partial answer"]);
         let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "something"));
         let mut g = goal(9); // unreachable, so only a limit can stop it
-        // Zero, so the ceiling is already reached at the first control check. `elapsed` is measured
-        // from the clock read at entry, so pre-setting a TestClock proves nothing — it moves the start
-        // line too. (That was the bug in the first version of this test.)
+                             // Zero, so the ceiling is already reached at the first control check. `elapsed` is measured
+                             // from the clock read at entry, so pre-setting a TestClock proves nothing — it moves the start
+                             // line too. (That was the bug in the first version of this test.)
         g.budget.max_wall_ms = 0;
-        let out = Cognition::new(step, reason, bus, "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
         assert_eq!(out.stopped_because, Some(ReasonCode::Timeout));
         assert!(!out.complete());
+    }
+
+    /// The advertised model-call ceiling covers every model seam, including a model-selected
+    /// replan and the final synthesis. Completion work is not a hidden exception to a hard budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_model_call_budget_is_a_hard_end_to_end_ceiling() {
+        use crate::procedure::{Procedure, ProcedureKind};
+        use mind_spec::Prior;
+
+        let (step, reason, backend) = pools(vec![
+            &call("search", "first step"),
+            r#"{"verb":"REPLAN","why":"NEED_NEW_APPROACH"}"#,
+            r#"["this third call must never run"]"#,
+            "nor may synthesis run",
+        ]);
+        let bus = Arc::new(
+            FakeBus::new(&["search"])
+                .returning("search", "not enough yet")
+                .knowing(vec![Procedure {
+                    name: "known approach".into(),
+                    when: "testing the budget".into(),
+                    steps: vec!["try the first approach".into()],
+                    kind: ProcedureKind::Instructions,
+                    reliability: Prior::measured(0.8, 2),
+                }]),
+        );
+        let mut g = goal(1);
+        g.budget.max_model_calls = 2;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
+
+        assert_eq!(out.stopped_because, Some(ReasonCode::ModelBudget));
+        assert_eq!(out.capsule.progress.model_calls, 2);
+        assert_eq!(
+            backend.call_count(),
+            2,
+            "no call may cross the hard ceiling"
+        );
+        assert!(out.answer.contains("model-call budget"));
+    }
+
+    /// Grounding is another model request in production. It is counted when configured and skipped
+    /// when synthesis has consumed the last permitted call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn grounding_respects_and_is_counted_by_the_model_call_budget() {
+        let f = learned_then_finish("found a thing", "E1");
+        let (step, reason, _) = pools(vec![&call("search", "a"), &f, "answer"]);
+        let bus = Arc::new(
+            FakeBus::new(&["search"])
+                .returning("search", "found")
+                .grounding("grounded answer"),
+        );
+        let mut g = goal(1);
+        g.budget.max_model_calls = 3; // two decisions + synthesis; no room for grounding
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
+
+        assert_eq!(out.capsule.progress.model_calls, 3);
+        assert_eq!(
+            out.verified, None,
+            "grounding must be skipped at the ceiling"
+        );
+        assert_eq!(out.answer, "answer");
+
+        let f = learned_then_finish("found a thing", "E1");
+        let (step, reason, _) = pools(vec![&call("search", "a"), &f, "answer"]);
+        let bus = Arc::new(
+            FakeBus::new(&["search"])
+                .returning("search", "found")
+                .grounding("grounded answer"),
+        );
+        let mut g = goal(1);
+        g.budget.max_model_calls = 4;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
+
+        assert_eq!(out.capsule.progress.model_calls, 4);
+        assert_eq!(out.verified, Some(true));
+        assert_eq!(out.answer, "grounded answer");
     }
 
     /// A partial answer must SAY it is partial — the synthesis prompt has to carry the disclosure.
@@ -736,13 +1112,24 @@ mod tests {
         let bus = Arc::new(FakeBus::new(&["search"]));
         let mut g = goal(5);
         g.budget.max_steps = 0; // stop immediately, nothing found
-        let out = Cognition::new(step, reason, bus, "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
         assert_eq!(out.stopped_because, Some(ReasonCode::StepBudget));
         let synth = backend.prompt_at(0);
-        assert!(synth.contains("did not fully meet its own criteria"), "{synth}");
-        assert!(synth.contains("0 of 5 findings"), "the specific shortfall must be named:\n{synth}");
-        assert!(out.verified.is_none(), "nothing was verified, so it must not read as verified");
+        assert!(
+            synth.contains("did not fully meet its own criteria"),
+            "{synth}"
+        );
+        assert!(
+            synth.contains("0 of 5 findings"),
+            "the specific shortfall must be named:\n{synth}"
+        );
+        assert!(
+            out.verified.is_none(),
+            "nothing was verified, so it must not read as verified"
+        );
     }
 
     /// An absent verifier is NOT a pass. This is the distinction a UI needs to avoid implying a check
@@ -753,20 +1140,40 @@ mod tests {
         let f = learned_then_finish("found a thing", "E1");
         let (s1, r1, _) = pools(vec![&call("search", "a"), &f, "answer"]);
         let bus1 = Arc::new(FakeBus::new(&["search"]).returning("search", "found"));
-        let out1 = Cognition::new(s1, r1, bus1, "JARVIS").run(&goal(1), &TestClock::new(0)).await;
-        assert_eq!(out1.verified, None, "no verifier means UNVERIFIED, never verified");
+        let out1 = Cognition::new(s1, r1, bus1, "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
+        assert_eq!(
+            out1.verified, None,
+            "no verifier means UNVERIFIED, never verified"
+        );
 
         // A grounding seam that accepts.
         let (s2, r2, _) = pools(vec![&call("search", "a"), &f, "answer"]);
-        let bus2 = Arc::new(FakeBus::new(&["search"]).returning("search", "found").grounding("grounded answer"));
-        let out2 = Cognition::new(s2, r2, bus2, "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let bus2 = Arc::new(
+            FakeBus::new(&["search"])
+                .returning("search", "found")
+                .grounding("grounded answer"),
+        );
+        let out2 = Cognition::new(s2, r2, bus2, "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
         assert_eq!(out2.verified, Some(true));
-        assert_eq!(out2.answer, "grounded answer", "the grounded text replaces the draft");
+        assert_eq!(
+            out2.answer, "grounded answer",
+            "the grounded text replaces the draft"
+        );
 
         // A grounding seam that strips everything: the answer did not survive its own check.
         let (s3, r3, _) = pools(vec![&call("search", "a"), &f, "answer"]);
-        let bus3 = Arc::new(FakeBus::new(&["search"]).returning("search", "found").grounding("   "));
-        let out3 = Cognition::new(s3, r3, bus3, "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let bus3 = Arc::new(
+            FakeBus::new(&["search"])
+                .returning("search", "found")
+                .grounding("   "),
+        );
+        let out3 = Cognition::new(s3, r3, bus3, "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
         assert_eq!(out3.verified, Some(false));
     }
 
@@ -778,10 +1185,24 @@ mod tests {
         let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "same thing"));
         let mut g = goal(9); // never satisfiable, so the loop keeps trying
         g.budget.max_steps = 6;
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
-        assert_eq!(bus.called().len(), 2, "the 3rd+ identical call must never reach the tool: {:?}", bus.called());
-        assert!(out.capsule.failures.iter().any(|f| f.contains("already tried")), "{:?}", out.capsule.failures);
+        assert_eq!(
+            bus.called().len(),
+            2,
+            "the 3rd+ identical call must never reach the tool: {:?}",
+            bus.called()
+        );
+        assert!(
+            out.capsule
+                .failures
+                .iter()
+                .any(|f| f.contains("already tried")),
+            "{:?}",
+            out.capsule.failures
+        );
     }
 
     /// Nothing usable from the model means answer with what we have — never an invented action.
@@ -789,7 +1210,9 @@ mod tests {
     async fn an_unusable_decision_ends_the_run_rather_than_guessing() {
         let (step, reason, _) = pools(vec!["I'm not sure what to do here!", "partial"]);
         let bus = Arc::new(FakeBus::new(&["search"]));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
         assert_eq!(out.stopped_because, Some(ReasonCode::NoProgress));
         assert!(bus.called().is_empty(), "no tool should have been invented");
     }
@@ -799,18 +1222,34 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_failing_tool_is_recorded_and_the_run_still_ends() {
         let (step, reason, _) = pools(vec![
-            &call("missing_tool", "a"), &call("missing_tool", "b"), &call("missing_tool", "c"),
-            &call("missing_tool", "d"), &call("missing_tool", "e"), &call("missing_tool", "f"),
+            &call("missing_tool", "a"),
+            &call("missing_tool", "b"),
+            &call("missing_tool", "c"),
+            &call("missing_tool", "d"),
+            &call("missing_tool", "e"),
+            &call("missing_tool", "f"),
             "partial answer",
         ]);
         let bus = Arc::new(FakeBus::new(&["search"])); // every call fails
         let mut g = goal(3);
         g.budget.max_steps = 10;
-        let out = Cognition::new(step, reason, bus, "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
         assert!(out.capsule.progress.failures > 0);
-        assert!(out.capsule.failures.iter().any(|f| f.contains("no such tool")), "{:?}", out.capsule.failures);
-        assert!(out.stopped_because.is_some(), "it must stop for a stated reason");
+        assert!(
+            out.capsule
+                .failures
+                .iter()
+                .any(|f| f.contains("no such tool")),
+            "{:?}",
+            out.capsule.failures
+        );
+        assert!(
+            out.stopped_because.is_some(),
+            "it must stop for a stated reason"
+        );
         assert!(!out.complete());
     }
 
@@ -821,11 +1260,19 @@ mod tests {
         let f = learned_then_finish("two sources agree", "E2");
         let (step, reason, _) = pools(vec![&call("search", "a"), &call("news", "b"), &f, "answer"]);
         let bus = Arc::new(
-            FakeBus::new(&["search", "news"]).returning("search", "first source").returning("news", "second source"),
+            FakeBus::new(&["search", "news"])
+                .returning("search", "first source")
+                .returning("news", "second source"),
         );
-        let out = Cognition::new(step, reason, bus, "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
         let ids: Vec<&str> = out.capsule.evidence.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["E1", "E2"], "ids are sequential and owned by the run");
+        assert_eq!(
+            ids,
+            vec!["E1", "E2"],
+            "ids are sequential and owned by the run"
+        );
     }
 
     /// THE ECONOMIC CLAIM, measured.
@@ -837,7 +1284,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_prompt_stays_flat_over_a_long_run() {
         // Twenty distinct tool calls, each producing a substantial body, then an answer.
-        let mut replies: Vec<String> = (0..20).map(|i| call("search", &format!("query number {i}"))).collect();
+        let mut replies: Vec<String> = (0..20)
+            .map(|i| call("search", &format!("query number {i}")))
+            .collect();
         replies.push("the answer".to_string());
         let refs: Vec<&str> = replies.iter().map(|s| s.as_str()).collect();
         let (step, reason, backend) = pools(refs);
@@ -845,12 +1294,17 @@ mod tests {
         let bus = Arc::new(FakeBus::new(&["search"]).returning(
             "search",
             // A realistic tool result: a headline plus a lot of body.
-            &format!("A finding worth noting\n{}", "supporting detail. ".repeat(600)),
+            &format!(
+                "A finding worth noting\n{}",
+                "supporting detail. ".repeat(600)
+            ),
         ));
         let mut g = goal(99); // unreachable, so the run uses its whole step budget
         g.budget.max_steps = 20;
         g.budget.max_model_calls = 40;
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
         assert_eq!(bus.called().len(), 20, "the run really did twenty steps");
         assert_eq!(out.stopped_because, Some(ReasonCode::StepBudget));
@@ -865,7 +1319,9 @@ mod tests {
         // And no tool body ever reached the model.
         for i in 0..20 {
             assert!(
-                !backend.prompt_at(i).contains("supporting detail. supporting detail."),
+                !backend
+                    .prompt_at(i)
+                    .contains("supporting detail. supporting detail."),
                 "step {i} leaked a raw tool body into the prompt"
             );
         }
@@ -890,22 +1346,46 @@ mod tests {
         };
         let f = learned_then_finish("the repo is well maintained", "E1");
         let (step, reason, backend) = pools(vec![&call("search", "the repo"), &f, "answer"]);
-        let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "found").knowing(vec![known]));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let bus = Arc::new(
+            FakeBus::new(&["search"])
+                .returning("search", "found")
+                .knowing(vec![known]),
+        );
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
 
         // The plan came from MEMORY — no planning call was made, and the trace says where it came from.
-        assert_eq!(out.capsule.plan, vec!["read the README", "read the commit history"]);
-        assert!(out.trace[0].action.contains("recalled approach: repo review"), "{:?}", out.trace[0]);
+        assert_eq!(
+            out.capsule.plan,
+            vec!["read the README", "read the commit history"]
+        );
+        assert!(
+            out.trace[0]
+                .action
+                .contains("recalled approach: repo review"),
+            "{:?}",
+            out.trace[0]
+        );
 
         // The decision step was shown the approach, with its track record.
         let prompt = backend.prompt_at(0);
         assert!(prompt.contains("KNOWN APPROACH"), "{prompt}");
-        assert!(prompt.contains("read the commit history"), "the steps must reach the model:\n{prompt}");
-        assert!(prompt.contains("worked 90% of 8 time(s)"), "and its standing, so deviation is informed");
+        assert!(
+            prompt.contains("read the commit history"),
+            "the steps must reach the model:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("worked 90% of 8 time(s)"),
+            "and its standing, so deviation is informed"
+        );
 
         // And the outcome was recorded against it.
         assert_eq!(bus.recorded(), vec![("repo review".to_string(), true)]);
-        assert!(bus.banked_names().is_empty(), "a run that FOLLOWED an approach must not bank a rival");
+        assert!(
+            bus.banked_names().is_empty(),
+            "a run that FOLLOWED an approach must not bank a rival"
+        );
     }
 
     /// A run that succeeded with nothing to guide it is exactly the one worth remembering — otherwise
@@ -915,10 +1395,16 @@ mod tests {
         let f = learned_then_finish("the answer is X", "E1");
         let (step, reason, _) = pools(vec![&call("search", "x"), &f, "answer"]);
         let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "found"));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
 
         assert!(out.complete());
-        assert_eq!(bus.banked_names(), vec!["find the thing"], "the approach is kept for next time");
+        assert_eq!(
+            bus.banked_names(),
+            vec!["find the thing"],
+            "the approach is kept for next time"
+        );
     }
 
     /// A FAILED run must not be banked. The library has to grow from what worked, or it fills with
@@ -927,9 +1413,14 @@ mod tests {
     async fn a_failed_run_banks_nothing() {
         let (step, reason, _) = pools(vec!["unusable", "partial answer"]);
         let bus = Arc::new(FakeBus::new(&["search"]));
-        let out = Cognition::new(step, reason, bus.clone(), "JARVIS").run(&goal(3), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus.clone(), "JARVIS")
+            .run(&goal(3), &TestClock::new(0))
+            .await;
         assert!(!out.complete());
-        assert!(bus.banked_names().is_empty(), "failure must not become a remembered approach");
+        assert!(
+            bus.banked_names().is_empty(),
+            "failure must not become a remembered approach"
+        );
     }
 
     /// A contradiction must reach the capsule field the CONTROLLER reads, not just the notes — the
@@ -939,14 +1430,35 @@ mod tests {
     async fn a_reported_contradiction_reaches_the_controller() {
         let clash = r#"{"learned":{"contradictions":["two sources disagree on the volume figure"]},
             "verb":"CALL_TOOL","target":"search","args":{"query":"reconcile"},"why":"RECONCILE"}"#;
-        let (step, reason, _) = pools(vec![&call("search", "first"), clash, &call("news", "second"), "answer"]);
-        let bus = Arc::new(FakeBus::new(&["search", "news"]).returning("search", "a").returning("news", "b"));
+        let (step, reason, _) = pools(vec![
+            &call("search", "first"),
+            clash,
+            &call("news", "second"),
+            "answer",
+        ]);
+        let bus = Arc::new(
+            FakeBus::new(&["search", "news"])
+                .returning("search", "a")
+                .returning("news", "b"),
+        );
         let mut g = goal(9);
         g.budget.max_steps = 4;
-        let out = Cognition::new(step, reason, bus, "JARVIS").run(&g, &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&g, &TestClock::new(0))
+            .await;
 
-        assert_eq!(out.capsule.contradictions.len(), 1, "the clash must be where the controller looks");
-        assert!(out.trace.iter().any(|s| s.decision == Some(ReasonCode::Contradiction)), "and must have escalated: {:?}", out.trace);
+        assert_eq!(
+            out.capsule.contradictions.len(),
+            1,
+            "the clash must be where the controller looks"
+        );
+        assert!(
+            out.trace
+                .iter()
+                .any(|s| s.decision == Some(ReasonCode::Contradiction)),
+            "and must have escalated: {:?}",
+            out.trace
+        );
     }
 
     /// The trace records what happened, with reason codes — the observability substrate.
@@ -955,10 +1467,11 @@ mod tests {
         let f = learned_then_finish("a finding", "E1");
         let (step, reason, _) = pools(vec![&call("search", "a"), &f, "answer"]);
         let bus = Arc::new(FakeBus::new(&["search"]).returning("search", "found"));
-        let out = Cognition::new(step, reason, bus, "JARVIS").run(&goal(1), &TestClock::new(0)).await;
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
         assert_eq!(out.trace.len(), 1);
         assert!(out.trace[0].action.starts_with("search"));
         assert!(out.trace[0].ok);
     }
 }
-

@@ -113,7 +113,10 @@ pub fn peek(headline: &str, w: &Watchlist) -> Option<Interest> {
         }
     }
     for e in &w.entities {
-        if !e.trim().is_empty() && e.split_whitespace().all(|word| word.len() >= 3 && has_word(&b, word)) {
+        if !e.trim().is_empty()
+            && e.split_whitespace()
+                .all(|word| word.len() >= 3 && has_word(&b, word))
+        {
             return Some(Interest::KnownEntity(e.clone()));
         }
     }
@@ -175,17 +178,30 @@ mod tests {
         assert_eq!(hit, Some(Interest::PendingClaim("MU".into())));
         assert!(hit.unwrap().why().contains("open claim"));
         // Longer symbols match as bare words too.
-        assert_eq!(peek("SNDK rallies after earnings", &w), Some(Interest::PendingClaim("SNDK".into())));
+        assert_eq!(
+            peek("SNDK rallies after earnings", &w),
+            Some(Interest::PendingClaim("SNDK".into()))
+        );
     }
 
     #[test]
     fn short_symbols_need_the_dollar_form_or_they_swallow_english() {
-        let w = Watchlist { claim_symbols: vec!["IT".into(), "AI".into(), "MU".into()], ..Default::default() };
+        let w = Watchlist {
+            claim_symbols: vec!["IT".into(), "AI".into(), "MU".into()],
+            ..Default::default()
+        };
         // These would match constantly on substrings; they must not.
         assert_eq!(peek("The council said it will review the policy", &w), None);
-        assert_eq!(peek("Analysts said AI spending is rising", &w), None, "bare two-letter tickers are not credible");
+        assert_eq!(
+            peek("Analysts said AI spending is rising", &w),
+            None,
+            "bare two-letter tickers are not credible"
+        );
         // The explicit form is unambiguous and does match.
-        assert_eq!(peek("Shares of $AI jumped 9%", &w), Some(Interest::PendingClaim("AI".into())));
+        assert_eq!(
+            peek("Shares of $AI jumped 9%", &w),
+            Some(Interest::PendingClaim("AI".into()))
+        );
     }
 
     #[test]
@@ -200,14 +216,26 @@ mod tests {
         assert_eq!(peek(h, &w), Some(Interest::PendingClaim("SPY".into())));
         // Without the symbol, the topic wins over the entity.
         let h2 = "Anthropic comments as interest rates rise";
-        assert_eq!(peek(h2, &w), Some(Interest::TrackedTopic("interest rates".into())));
+        assert_eq!(
+            peek(h2, &w),
+            Some(Interest::TrackedTopic("interest rates".into()))
+        );
     }
 
     #[test]
     fn a_multiword_topic_needs_all_of_its_words() {
-        let w = Watchlist { topics: vec!["interest rates".into()], ..Default::default() };
-        assert!(peek("Interest in the sector rose", &w).is_none(), "half a phrase is not the topic");
-        assert!(peek("Rates and interest both climbed", &w).is_some(), "all words present, any order");
+        let w = Watchlist {
+            topics: vec!["interest rates".into()],
+            ..Default::default()
+        };
+        assert!(
+            peek("Interest in the sector rose", &w).is_none(),
+            "half a phrase is not the topic"
+        );
+        assert!(
+            peek("Rates and interest both climbed", &w).is_some(),
+            "all words present, any order"
+        );
     }
 
     #[test]
@@ -231,7 +259,10 @@ mod tests {
     #[test]
     fn an_empty_watchlist_reads_nothing_rather_than_everything() {
         // A mind with no open questions and no topics should go quiet, not consume the firehose.
-        let pass = peek_batch(&["Anything at all".to_string(), "Something else".to_string()], &Watchlist::default());
+        let pass = peek_batch(
+            &["Anything at all".to_string(), "Something else".to_string()],
+            &Watchlist::default(),
+        );
         assert!(pass.kept.is_empty());
         assert_eq!(pass.dropped, 2);
     }

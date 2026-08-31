@@ -76,7 +76,12 @@ impl ThreadState {
 /// Classify one commitment.
 ///
 /// `asked_ms` is when the closure question was put (None = never asked). Pure: no clock, no store.
-pub fn classify(task: &Task, now_ms: i64, deadline_ms: Option<i64>, asked_ms: Option<i64>) -> ThreadState {
+pub fn classify(
+    task: &Task,
+    now_ms: i64,
+    deadline_ms: Option<i64>,
+    asked_ms: Option<i64>,
+) -> ThreadState {
     // No deadline means no occasion to be past. An open-ended intention ("read more") is not stale
     // just because time passed, and closing those would delete the user's own standing goals.
     let Some(dl) = deadline_ms.or_else(|| task.due_ms.map(|m| m as i64)) else {
@@ -91,7 +96,9 @@ pub fn classify(task: &Task, now_ms: i64, deadline_ms: Option<i64>, asked_ms: Op
     }
     match asked_ms {
         // Asked, and long enough ago that a reply was not coming.
-        Some(asked) if (now_ms - asked) / 86_400_000 >= CLOSE_AFTER_DAYS => ThreadState::Abandoned { days_over },
+        Some(asked) if (now_ms - asked) / 86_400_000 >= CLOSE_AFTER_DAYS => {
+            ThreadState::Abandoned { days_over }
+        }
         // Asked recently — waiting, not nagging.
         Some(_) => ThreadState::Live,
         None => ThreadState::NeedsClosure { days_over },
@@ -131,8 +138,18 @@ pub fn closure_question(description: &str, days_over: i64) -> String {
 pub fn parse_deadline_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
     use chrono::Datelike;
     const MONTHS: [(&str, u32); 12] = [
-        ("january", 1), ("february", 2), ("march", 3), ("april", 4), ("may", 5), ("june", 6),
-        ("july", 7), ("august", 8), ("september", 9), ("october", 10), ("november", 11), ("december", 12),
+        ("january", 1),
+        ("february", 2),
+        ("march", 3),
+        ("april", 4),
+        ("may", 5),
+        ("june", 6),
+        ("july", 7),
+        ("august", 8),
+        ("september", 9),
+        ("october", 10),
+        ("november", 11),
+        ("december", 12),
     ];
     let low = text.to_lowercase();
     for (name, m) in MONTHS {
@@ -142,10 +159,17 @@ pub fn parse_deadline_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffse
                 let at = start + pos;
                 let end = at + pat.len();
                 let before_ok = at == 0 || !low.as_bytes()[at - 1].is_ascii_alphabetic();
-                let after_ok = low[end..].chars().next().map(|c| !c.is_ascii_alphabetic()).unwrap_or(false);
+                let after_ok = low[end..]
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_ascii_alphabetic())
+                    .unwrap_or(false);
                 if before_ok && after_ok {
-                    let digits: String =
-                        low[end..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                    let digits: String = low[end..]
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
                     if let Ok(d) = digits.parse::<u32>() {
                         if (1..=31).contains(&d) {
                             let this_year = chrono::NaiveDate::from_ymd_opt(today.year(), m, d)?;
@@ -155,7 +179,10 @@ pub fn parse_deadline_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffse
                             } else {
                                 this_year
                             };
-                            let ts = nd.and_hms_opt(12, 0, 0)?.and_local_timezone(*today.offset()).single()?;
+                            let ts = nd
+                                .and_hms_opt(12, 0, 0)?
+                                .and_local_timezone(*today.offset())
+                                .single()?;
                             return Some(ts.timestamp_millis());
                         }
                     }
@@ -212,30 +239,61 @@ pub(crate) fn stop_tracking_subjects(text: &str) -> Option<Vec<String>> {
     let mut s = t.as_str();
     loop {
         let before = s;
-        for p in ["please ", "pls ", "ok ", "okay ", "yes ", "sure ", "can you ", "could you ", "you can ", "let's ", "lets ", "also ", "and "] {
+        for p in [
+            "please ",
+            "pls ",
+            "ok ",
+            "okay ",
+            "yes ",
+            "sure ",
+            "can you ",
+            "could you ",
+            "you can ",
+            "let's ",
+            "lets ",
+            "also ",
+            "and ",
+        ] {
             s = s.strip_prefix(p).unwrap_or(s);
         }
         if s == before {
             break;
         }
     }
-    const VERBS: &[&str] = &["drop ", "untrack ", "stop tracking ", "forget about ", "cancel ", "stop reminding me about ", "stop reminding me of "];
-    let tail = match VERBS.iter().find_map(|v| s.strip_prefix(v)) {
-        Some(x) => x,
-        None => {
-            // The postfix form from the live transcript: "Maa durga family
-            // celebration, you can drop this too" — subject before the comma,
-            // anaphoric object after.
-            if let Some((subject, rest)) = t.split_once(',') {
-                let r = rest.trim();
-                let dropish = ["you can drop", "please drop", "drop", "let's drop", "lets drop", "we can drop"].iter().any(|v| r.starts_with(v));
-                let anaphoric = [" this", " that", " it", " them"].iter().any(|a| r.contains(a)) || r.ends_with("drop");
-                if dropish && anaphoric && subject.trim().len() >= 3 {
-                    return Some(vec![subject.trim().to_string()]);
-                }
+    const VERBS: &[&str] = &[
+        "drop ",
+        "untrack ",
+        "stop tracking ",
+        "forget about ",
+        "cancel ",
+        "stop reminding me about ",
+        "stop reminding me of ",
+    ];
+    let Some(tail) = VERBS.iter().find_map(|v| s.strip_prefix(v)) else {
+        // The postfix form from the live transcript: "Maa durga family
+        // celebration, you can drop this too" — subject before the comma,
+        // anaphoric object after.
+        if let Some((subject, rest)) = t.split_once(',') {
+            let r = rest.trim();
+            let dropish = [
+                "you can drop",
+                "please drop",
+                "drop",
+                "let's drop",
+                "lets drop",
+                "we can drop",
+            ]
+            .iter()
+            .any(|v| r.starts_with(v));
+            let anaphoric = [" this", " that", " it", " them"]
+                .iter()
+                .any(|a| r.contains(a))
+                || r.ends_with("drop");
+            if dropish && anaphoric && subject.trim().len() >= 3 {
+                return Some(vec![subject.trim().to_string()]);
             }
-            return None;
         }
+        return None;
     };
     let tail = tail.trim().trim_end_matches(['.', '!', '?']).trim();
     let tail = tail.strip_suffix(" too").unwrap_or(tail).trim();
@@ -296,7 +354,10 @@ mod tests {
         assert_eq!(stop_tracking_subjects("please drop that"), Some(vec![]));
         // Ordinary prose must never fire — a false positive silently deletes a commitment.
         assert_eq!(stop_tracking_subjects("prices may drop tomorrow"), None);
-        assert_eq!(stop_tracking_subjects("the drop in temperature was sharp"), None);
+        assert_eq!(
+            stop_tracking_subjects("the drop in temperature was sharp"),
+            None
+        );
         assert_eq!(stop_tracking_subjects("what's on my plate today?"), None);
     }
 
@@ -325,10 +386,16 @@ mod tests {
     #[test]
     fn a_long_dead_thread_stops_being_carried() {
         let now = 100 * DAY;
-        let t = task("order the Rosefield watch for her birthday", Some(now - 21 * DAY));
+        let t = task(
+            "order the Rosefield watch for her birthday",
+            Some(now - 21 * DAY),
+        );
         let s = classify(&t, now, None, None);
         assert_eq!(s, ThreadState::NeedsClosure { days_over: 21 });
-        assert!(!s.is_carried(), "a three-week-old commitment must not read as outstanding work");
+        assert!(
+            !s.is_carried(),
+            "a three-week-old commitment must not read as outstanding work"
+        );
     }
 
     /// It earns exactly one question, and the question is about the OUTCOME — which is information the
@@ -337,8 +404,14 @@ mod tests {
     fn the_closure_question_asks_what_happened_and_offers_an_exit() {
         let q = closure_question("order the Rosefield watch for her birthday", 21);
         assert!(q.contains("Rosefield"), "{q}");
-        assert!(q.contains("how it went") || q.contains("Did it happen"), "it asks about the outcome: {q}");
-        assert!(q.contains("drop it"), "and offers a way out, so it need never be asked again: {q}");
+        assert!(
+            q.contains("how it went") || q.contains("Did it happen"),
+            "it asks about the outcome: {q}"
+        );
+        assert!(
+            q.contains("drop it"),
+            "and offers a way out, so it need never be asked again: {q}"
+        );
         assert!(!q.contains("OVERDUE"), "it is not another nudge: {q}");
     }
 
@@ -435,7 +508,10 @@ impl super::ConversationEngine {
         list.sort(); // stable on disk, so a diff of the profile is readable
         let _ = self
             .memory
-            .profile_set(super::NOT_DUPLICATE_KEY, &serde_json::to_string(&list).unwrap_or_default())
+            .profile_set(
+                super::NOT_DUPLICATE_KEY,
+                &serde_json::to_string(&list).unwrap_or_default(),
+            )
             .await;
     }
 
@@ -533,7 +609,10 @@ impl super::ConversationEngine {
         match closed.len() {
             0 => "I could not close that one.".to_string(),
             1 => format!("Dropped: {}. I will stop bringing it up.", closed[0]),
-            n => format!("Dropped {n}: {}. I will stop bringing those up.", closed.join("; ")),
+            n => format!(
+                "Dropped {n}: {}. I will stop bringing those up.",
+                closed.join("; ")
+            ),
         }
     }
 
@@ -557,7 +636,10 @@ impl super::ConversationEngine {
         // 1. Commitment ledger — the store that re-lists in every grounding.
         let (open, _) = self.open_and_internal_tasks().await;
         let mut asked = self.closure_asks().await;
-        for t in open.iter().filter(|t| t.description.to_lowercase().contains(&n)) {
+        for t in open
+            .iter()
+            .filter(|t| t.description.to_lowercase().contains(&n))
+        {
             if self.memory.complete_task(&t.id).await.unwrap_or(false) {
                 asked.remove(&t.id);
                 out.push(format!("reminder \u{201c}{}\u{201d}", t.description));
@@ -568,11 +650,21 @@ impl super::ConversationEngine {
         let mut threads = self.load_threads().await;
         let mut changed = false;
         for th in threads.iter_mut() {
-            let is_live = matches!(th.get("status").and_then(|x| x.as_str()), Some("open") | Some("fired"));
+            let is_live = matches!(
+                th.get("status").and_then(|x| x.as_str()),
+                Some("open") | Some("fired")
+            );
             if is_live && th.to_string().to_lowercase().contains(&n) {
                 th["status"] = serde_json::json!("dropped");
-                let what = th.get("deliverable").or_else(|| th.get("trigger")).and_then(|x| x.as_str()).unwrap_or("thread");
-                out.push(format!("thread \u{201c}{}\u{201d}", what.chars().take(60).collect::<String>()));
+                let what = th
+                    .get("deliverable")
+                    .or_else(|| th.get("trigger"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("thread");
+                out.push(format!(
+                    "thread \u{201c}{}\u{201d}",
+                    what.chars().take(60).collect::<String>()
+                ));
                 changed = true;
             }
         }
@@ -583,9 +675,16 @@ impl super::ConversationEngine {
         let mut watches = self.load_watches().await;
         let before = watches.len();
         watches.retain(|w| {
-            let hit = w.get("query").and_then(|x| x.as_str()).map(|s| s.to_lowercase().contains(&n)).unwrap_or(false);
+            let hit = w
+                .get("query")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_lowercase().contains(&n))
+                .unwrap_or(false);
             if hit {
-                out.push(format!("price watch \u{201c}{}\u{201d}", w.get("query").and_then(|x| x.as_str()).unwrap_or("?")));
+                out.push(format!(
+                    "price watch \u{201c}{}\u{201d}",
+                    w.get("query").and_then(|x| x.as_str()).unwrap_or("?")
+                ));
             }
             !hit
         });
@@ -621,13 +720,23 @@ impl super::ConversationEngine {
             let dismissed = node.get("status").and_then(|x| x.as_str()) == Some("dismissed");
             if !dismissed && node.to_string().to_lowercase().contains(&n) {
                 node["status"] = serde_json::json!("dismissed");
-                let label = node.get("label").or_else(|| node.get("title")).and_then(|x| x.as_str()).unwrap_or("future item");
-                out.push(format!("planned item \u{201c}{}\u{201d}", label.chars().take(60).collect::<String>()));
+                let label = node
+                    .get("label")
+                    .or_else(|| node.get("title"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("future item");
+                out.push(format!(
+                    "planned item \u{201c}{}\u{201d}",
+                    label.chars().take(60).collect::<String>()
+                ));
                 nchanged = true;
             }
         }
         if nchanged {
-            let _ = self.memory.profile_set("future_nodes", &serde_json::Value::Array(nodes).to_string()).await;
+            let _ = self
+                .memory
+                .profile_set("future_nodes", &serde_json::Value::Array(nodes).to_string())
+                .await;
         }
         out
     }
@@ -636,16 +745,16 @@ impl super::ConversationEngine {
     ///
     /// `split_tasks` deliberately hides stale threads, so the lifecycle cannot use it — it would never
     /// see the very threads it exists to close. Same partition, no filter.
-    pub(crate) async fn open_and_internal_tasks(&self) -> (Vec<mind_types::Task>, Vec<mind_types::Task>) {
-        let open: Vec<mind_types::Task> = self
-            .memory
+    pub(crate) async fn open_and_internal_tasks(
+        &self,
+    ) -> (Vec<mind_types::Task>, Vec<mind_types::Task>) {
+        self.memory
             .list_tasks(false)
             .await
             .unwrap_or_default()
             .into_iter()
             .filter(|t| t.is_open())
-            .collect();
-        open.into_iter().partition(|t| super::is_personal_reminder(&t.description))
+            .partition(|t| super::is_personal_reminder(&t.description))
     }
 }
 
@@ -663,13 +772,20 @@ mod deadline_tests {
     #[test]
     fn a_deadline_that_has_passed_reads_as_passed() {
         let today = aug11();
-        let dl = parse_deadline_ms("Order Brishti's Rosefield watch before July 17th", &today).unwrap();
-        assert!(dl < today.timestamp_millis(), "17 July is BEHIND 11 August, not ahead of it");
+        let dl =
+            parse_deadline_ms("Order Brishti's Rosefield watch before July 17th", &today).unwrap();
+        assert!(
+            dl < today.timestamp_millis(),
+            "17 July is BEHIND 11 August, not ahead of it"
+        );
         // 24, not 25: the deadline resolves to NOON on 17 July and "today" is 10am on 11 August, so the
         // final partial day floors away. Worth pinning exactly — an off-by-one here is the difference
         // between a thread closing on time and lingering one more day.
         let days_over = (today.timestamp_millis() - dl) / 86_400_000;
-        assert_eq!(days_over, 24, "17 July noon to 11 August 10am is 24 whole days");
+        assert_eq!(
+            days_over, 24,
+            "17 July noon to 11 August 10am is 24 whole days"
+        );
 
         // And the classifier now sees it, which is the whole point.
         let t = mind_types::Task {
@@ -679,7 +795,12 @@ mod deadline_tests {
             priority: "high".into(),
             due_ms: None,
         };
-        let s = classify(&t, today.timestamp_millis(), parse_deadline_ms(&t.description, &today), None);
+        let s = classify(
+            &t,
+            today.timestamp_millis(),
+            parse_deadline_ms(&t.description, &today),
+            None,
+        );
         assert!(matches!(s, ThreadState::NeedsClosure { .. }), "got {s:?}");
         assert!(!s.is_carried());
     }
@@ -699,11 +820,17 @@ mod deadline_tests {
     fn a_date_far_behind_is_read_as_the_coming_one() {
         let december = chrono::DateTime::parse_from_rfc3339("2026-12-20T10:00:00-05:00").unwrap();
         let dl = parse_deadline_ms("renew it by January 5", &december).unwrap();
-        assert!(dl > december.timestamp_millis(), "January means NEXT January when read in December");
+        assert!(
+            dl > december.timestamp_millis(),
+            "January means NEXT January when read in December"
+        );
 
         // But a date only weeks behind is genuinely behind.
         let dl2 = parse_deadline_ms("renew it by November 5", &december).unwrap();
-        assert!(dl2 < december.timestamp_millis(), "5 November is behind 20 December");
+        assert!(
+            dl2 < december.timestamp_millis(),
+            "5 November is behind 20 December"
+        );
     }
 
     /// A recurring occasion must KEEP rolling forward — the birthday parser is right for birthdays, and
@@ -712,7 +839,10 @@ mod deadline_tests {
     fn the_recurring_parser_is_untouched() {
         let today = aug11();
         let birthday = crate::parse_text_date_ms("Brishti's birthday is July 23", &today).unwrap();
-        assert!(birthday > today.timestamp_millis(), "a birthday in July means NEXT July");
+        assert!(
+            birthday > today.timestamp_millis(),
+            "a birthday in July means NEXT July"
+        );
     }
 
     #[test]

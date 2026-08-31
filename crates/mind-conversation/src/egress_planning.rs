@@ -16,8 +16,32 @@ use super::{ConversationEngine, TurnIdentity};
 /// numbers, names, and dates — those are low precision and are clean planning's job.
 pub(crate) fn distinctive_pii(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | ',' | '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ';' | '/' | '\\' | ':' | '=' | '&' | '?' | '|')) {
-        let tok = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+');
+    for raw in text.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | ','
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | ';'
+                    | '/'
+                    | '\\'
+                    | ':'
+                    | '='
+                    | '&'
+                    | '?'
+                    | '|'
+            )
+    }) {
+        let tok = raw.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_' && c != '+'
+        });
         if tok.len() < 7 {
             continue;
         }
@@ -29,7 +53,8 @@ pub(crate) fn distinctive_pii(text: &str) -> Vec<String> {
             }
         };
         let digits = tok.chars().filter(|c| c.is_ascii_digit()).count();
-        let is_phone_like = tok.chars().all(|c| c.is_ascii_digit()) && (7..=15).contains(&tok.len());
+        let is_phone_like =
+            tok.chars().all(|c| c.is_ascii_digit()) && (7..=15).contains(&tok.len());
         let is_long_id = tok.len() >= 16
             && tok.chars().all(|c| c.is_ascii_alphanumeric())
             && digits > 0
@@ -71,7 +96,13 @@ impl ConversationEngine {
     /// them the article. The pass-through also restores DETERMINISM, which the loop's repeat-guard
     /// depends on: a re-authoring model call gives the same tool call a different signature each
     /// time, so the guard never fires on exactly the repeats this failure produces.
-    pub(crate) async fn egress_clean_args(&self, tool: &str, user_text: &str, grounded: serde_json::Value, external_provenance: &str) -> Option<serde_json::Value> {
+    pub(crate) async fn egress_clean_args(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: serde_json::Value,
+        external_provenance: &str,
+    ) -> Option<serde_json::Value> {
         // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
         if self.egress.is_none() {
             return Some(grounded);
@@ -81,13 +112,29 @@ impl ConversationEngine {
         // widen this set only as each connector's isolation boundary is proven with a test.
         let eligible = matches!(
             tool,
-            "search" | "web_search" | "google" | "ddg" | "mail_search" | "mailsearch" | "search_mail"
-                | "findmail" | "web_fetch" | "fetch" | "web" | "wikipedia" | "wiki" | "translate" | "tr"
+            "search"
+                | "web_search"
+                | "google"
+                | "ddg"
+                | "mail_search"
+                | "mailsearch"
+                | "search_mail"
+                | "findmail"
+                | "web_fetch"
+                | "fetch"
+                | "web"
+                | "wikipedia"
+                | "wiki"
+                | "translate"
+                | "tr"
         );
         if !eligible {
             return Some(grounded);
         }
-        if !matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
+        if !matches!(
+            mind_governance::egress::classify(tool),
+            Some(mind_governance::egress::EgressClass::External(_))
+        ) {
             return Some(grounded);
         }
         // PROVENANCE PASS-THROUGH (scoped to the url-bearing fetch tools, where the breakage is
@@ -96,7 +143,8 @@ impl ConversationEngine {
         // from the user's request, which the clean planner CAN see, so it does its job there.
         if matches!(tool, "web_fetch" | "fetch" | "web") {
             if let Some(url) = grounded.get("url").and_then(|u| u.as_str()) {
-                if !url.is_empty() && (user_text.contains(url) || external_provenance.contains(url)) {
+                if !url.is_empty() && (user_text.contains(url) || external_provenance.contains(url))
+                {
                     return Some(grounded);
                 }
             }
@@ -112,7 +160,10 @@ impl ConversationEngine {
             finances, addresses, account numbers) that is not present VERBATIM in the user's literal \
             request below. Build the argument ONLY from the literal request. Output ONLY one JSON object.";
         let user = format!("Tool: {tool}\nArgument shape: {schema}\nUser's literal request: {user_text}\n\nOutput ONLY the JSON args.");
-        let cfg = GenerationConfig { max_tokens: 300, ..GenerationConfig::default() };
+        let cfg = GenerationConfig {
+            max_tokens: 300,
+            ..GenerationConfig::default()
+        };
         // A plain (ungrounded) call — no private lane, no grounding, a FRESH message list with no
         // shared state carrying private context.
         let text = self
@@ -152,13 +203,25 @@ impl ConversationEngine {
     /// Deliberately narrow (high precision over recall, per sol): separated phone numbers, paraphrase,
     /// encoding, and non-PII-shaped facts are NOT caught here — that residue is clean planning's job
     /// (for eligible tools) and remains open for the rest (documented).
-    pub(crate) async fn model_injected_private_value(&self, tool: &str, args: &serde_json::Value, user_text: &str, id: &TurnIdentity) -> Option<String> {
-        if !matches!(mind_governance::egress::classify(tool), Some(mind_governance::egress::EgressClass::External(_))) {
+    pub(crate) async fn model_injected_private_value(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        user_text: &str,
+        id: &TurnIdentity,
+    ) -> Option<String> {
+        if !matches!(
+            mind_governance::egress::classify(tool),
+            Some(mind_governance::egress::EgressClass::External(_))
+        ) {
             return None;
         }
         let canon = mind_governance::egress::canonicalize(args);
         let user_lc = user_text.to_lowercase();
-        let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
+        let ctx = mind_types::AccessContext::principal(
+            id.viewer(),
+            mind_types::Purpose::conversation(&id.owner),
+        );
         for value in distinctive_pii(&canon) {
             let vlc = value.to_lowercase();
             if user_lc.contains(&vlc) {
@@ -167,7 +230,10 @@ impl ConversationEngine {
             // Is this exact value a stored fact the speaker's memory holds? (substring-confirm, not
             // just word-overlap, so we don't false-positive on a shared token.)
             if let Ok(hits) = self.memory.beliefs_matching(&value, &ctx).await {
-                if hits.iter().any(|b| b.statement.to_lowercase().contains(&vlc)) {
+                if hits
+                    .iter()
+                    .any(|b| b.statement.to_lowercase().contains(&vlc))
+                {
                     return Some(format!(
                         "(that would send what looks like a stored private detail out through `{tool}`, and you didn't include it in your request — I'll hold off. Tell me the exact terms to send if that's intended.)"
                     ));
@@ -187,8 +253,14 @@ mod tests {
         let vals = distinctive_pii("email a.b@ex.com call 5551234567 id ABC123DEF456GHI7 word");
         assert!(vals.iter().any(|v| v == "a.b@ex.com"), "email");
         assert!(vals.iter().any(|v| v == "5551234567"), "unseparated phone");
-        assert!(vals.iter().any(|v| v == "ABC123DEF456GHI7"), "long mixed id");
+        assert!(
+            vals.iter().any(|v| v == "ABC123DEF456GHI7"),
+            "long mixed id"
+        );
         assert!(!vals.iter().any(|v| v == "word"), "plain words are not PII");
-        assert!(distinctive_pii("meet at 7 on July 4 in Pune").is_empty(), "dates/short numbers are not distinctive PII");
+        assert!(
+            distinctive_pii("meet at 7 on July 4 in Pune").is_empty(),
+            "dates/short numbers are not distinctive PII"
+        );
     }
 }

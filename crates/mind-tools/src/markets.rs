@@ -17,7 +17,14 @@ pub struct Quote {
 impl Quote {
     fn render(&self, icon: &str, span: &str) -> String {
         let arrow = if self.change_pct >= 0.0 { "▲" } else { "▼" };
-        format!("{icon} {} ({}): {}{} {arrow}{:.2}% ({span})", self.name, self.symbol, self.currency, fmt_money(self.price), self.change_pct.abs())
+        format!(
+            "{icon} {} ({}): {}{} {arrow}{:.2}% ({span})",
+            self.name,
+            self.symbol,
+            self.currency,
+            fmt_money(self.price),
+            self.change_pct.abs()
+        )
     }
     pub fn render_crypto(&self) -> String {
         self.render("💰", "24h")
@@ -73,7 +80,10 @@ impl MarketsClient for LiveMarkets {
                 .query("query", &q)
                 .call()?
                 .into_json()?;
-            let coin = s["coins"].get(0).cloned().ok_or_else(|| anyhow::anyhow!("no coin matching \"{q}\""))?;
+            let coin = s["coins"]
+                .get(0)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no coin matching \"{q}\""))?;
             let id = coin["id"].as_str().unwrap_or("").to_string();
             let name = coin["name"].as_str().unwrap_or(&q).to_string();
             let sym = coin["symbol"].as_str().unwrap_or("").to_uppercase();
@@ -86,9 +96,17 @@ impl MarketsClient for LiveMarkets {
                 .call()?
                 .into_json()?;
             let row = &p[&id];
-            let price = row["usd"].as_f64().ok_or_else(|| anyhow::anyhow!("no price for {name}"))?;
+            let price = row["usd"]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("no price for {name}"))?;
             let change_pct = row["usd_24h_change"].as_f64().unwrap_or(0.0);
-            Ok(Quote { name, symbol: sym, price, change_pct, currency: "$".into() })
+            Ok(Quote {
+                name,
+                symbol: sym,
+                price,
+                change_pct,
+                currency: "$".into(),
+            })
         })
         .await?
     }
@@ -108,11 +126,27 @@ impl MarketsClient for LiveMarkets {
                 .query("range", "1d")
                 .call()?
                 .into_json()?;
-            let meta = v["chart"]["result"].get(0).map(|r| r["meta"].clone()).ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\" (check the ticker)"))?;
-            let price = meta["regularMarketPrice"].as_f64().ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\""))?;
-            let prev = meta["chartPreviousClose"].as_f64().or_else(|| meta["previousClose"].as_f64()).unwrap_or(price);
-            let change_pct = if prev != 0.0 { (price - prev) / prev * 100.0 } else { 0.0 };
-            let name = meta["shortName"].as_str().or_else(|| meta["longName"].as_str()).unwrap_or(&sym).to_string();
+            let meta = v["chart"]["result"]
+                .get(0)
+                .map(|r| r["meta"].clone())
+                .ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\" (check the ticker)"))?;
+            let price = meta["regularMarketPrice"]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("no quote for \"{sym}\""))?;
+            let prev = meta["chartPreviousClose"]
+                .as_f64()
+                .or_else(|| meta["previousClose"].as_f64())
+                .unwrap_or(price);
+            let change_pct = if prev != 0.0 {
+                (price - prev) / prev * 100.0
+            } else {
+                0.0
+            };
+            let name = meta["shortName"]
+                .as_str()
+                .or_else(|| meta["longName"].as_str())
+                .unwrap_or(&sym)
+                .to_string();
             let currency = match meta["currency"].as_str().unwrap_or("USD") {
                 "USD" => "$".to_string(),
                 "INR" => "₹".to_string(),
@@ -121,7 +155,13 @@ impl MarketsClient for LiveMarkets {
                 "JPY" => "¥".to_string(),
                 other => format!("{other} "),
             };
-            Ok(Quote { name, symbol: sym, price, change_pct, currency })
+            Ok(Quote {
+                name,
+                symbol: sym,
+                price,
+                change_pct,
+                currency,
+            })
         })
         .await?
     }
@@ -143,7 +183,16 @@ fn fmt_money(v: f64) -> String {
         grouped.push(c);
     }
     let int_fmt: String = grouped.chars().rev().collect();
-    format!("{}{}{}", if neg { "-" } else { "" }, int_fmt, if frac.is_empty() { String::new() } else { format!(".{frac}") })
+    format!(
+        "{}{}{}",
+        if neg { "-" } else { "" },
+        int_fmt,
+        if frac.is_empty() {
+            String::new()
+        } else {
+            format!(".{frac}")
+        }
+    )
 }
 
 /// Deterministic markets for tests. `crypto`/`stock` are the canned chat lines; `price` is the
@@ -157,10 +206,22 @@ pub struct ScriptedMarkets {
 #[async_trait]
 impl MarketsClient for ScriptedMarkets {
     async fn crypto_quote(&self, q: &str) -> anyhow::Result<Quote> {
-        Ok(Quote { name: q.to_string(), symbol: q.to_uppercase(), price: self.price, change_pct: 0.0, currency: "$".into() })
+        Ok(Quote {
+            name: q.to_string(),
+            symbol: q.to_uppercase(),
+            price: self.price,
+            change_pct: 0.0,
+            currency: "$".into(),
+        })
     }
     async fn stock_quote(&self, s: &str) -> anyhow::Result<Quote> {
-        Ok(Quote { name: s.to_string(), symbol: s.to_uppercase(), price: self.price, change_pct: 0.0, currency: "$".into() })
+        Ok(Quote {
+            name: s.to_string(),
+            symbol: s.to_uppercase(),
+            price: self.price,
+            change_pct: 0.0,
+            currency: "$".into(),
+        })
     }
     async fn crypto(&self, _q: &str) -> anyhow::Result<String> {
         Ok(self.crypto.clone())

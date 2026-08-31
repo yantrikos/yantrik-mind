@@ -10,15 +10,27 @@ impl crate::plugins::CapabilityHandler for HomeCapability {
         "home"
     }
 
-    async fn handle_command(&self, host: &super::ConversationEngine, cmd: &str, _rest: &str) -> Option<String> {
+    async fn handle_command(
+        &self,
+        host: &super::ConversationEngine,
+        cmd: &str,
+        _rest: &str,
+    ) -> Option<String> {
         match cmd {
             // same guard the old arm had: with no Home Assistant configured, fall through
-            "home" | "house" if host.home.is_some() => Some(host.run_agent_tool("home", &serde_json::json!({})).await),
+            "home" | "house" if host.home.is_some() => {
+                Some(host.run_agent_tool("home", &serde_json::json!({})).await)
+            }
             _ => None,
         }
     }
 
-    async fn handle_tool(&self, host: &super::ConversationEngine, tool: &str, _args: &serde_json::Value) -> Option<String> {
+    async fn handle_tool(
+        &self,
+        host: &super::ConversationEngine,
+        tool: &str,
+        _args: &serde_json::Value,
+    ) -> Option<String> {
         Some(match tool {
             "home" | "home_status" | "house" | "smart_home" => match &host.home {
                 Some(h) => match h.states().await {

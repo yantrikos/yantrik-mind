@@ -37,7 +37,11 @@ impl Default for ExitRule {
         // 3% stop and 5% target against a move that was already 9%: the position is sized small and
         // the thesis is about the rest of a move, not the whole of it. The horizon is the session —
         // a same-day view has no business surviving the day it was about.
-        Self { stop_pct: 3.0, target_pct: 5.0, horizon_ms: 8 * 60 * 60 * 1000 }
+        Self {
+            stop_pct: 3.0,
+            target_pct: 5.0,
+            horizon_ms: 8 * 60 * 60 * 1000,
+        }
     }
 }
 
@@ -125,7 +129,13 @@ mod tests {
 
     fn wmt_short(at_ms: i64) -> OpenPosition {
         // The real first position.
-        OpenPosition { symbol: "WMT".into(), qty: -2.0, entry: 103.75, entered_at_ms: at_ms, rule: ExitRule::default() }
+        OpenPosition {
+            symbol: "WMT".into(),
+            qty: -2.0,
+            entry: 103.75,
+            entered_at_ms: at_ms,
+            rule: ExitRule::default(),
+        }
     }
 
     #[test]
@@ -155,7 +165,10 @@ mod tests {
         // about when a thesis expires. Holding past the horizon is not patience — it is a different
         // trade, entered by forgetting.
         let p = wmt_short(0);
-        assert_eq!(should_close(&p, 103.84, 9 * HOUR), Some(ExitReason::HorizonPassed));
+        assert_eq!(
+            should_close(&p, 103.84, 9 * HOUR),
+            Some(ExitReason::HorizonPassed)
+        );
     }
 
     #[test]
@@ -171,7 +184,11 @@ mod tests {
     fn the_stop_fires_before_the_horizon_does() {
         // A position that is already wrong should not wait for the clock.
         let p = wmt_short(0);
-        assert_eq!(should_close(&p, 107.0, 1), Some(ExitReason::Stopped), "3% against on a short = price up 3%");
+        assert_eq!(
+            should_close(&p, 107.0, 1),
+            Some(ExitReason::Stopped),
+            "3% against on a short = price up 3%"
+        );
     }
 
     #[test]

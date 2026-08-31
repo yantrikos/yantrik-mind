@@ -8,6 +8,22 @@ const $ = (id) => document.getElementById(id);
 const feed = $("feed");
 const input = $("input");
 const HDRS = { "Content-Type": "application/json", "X-YM-Web": "1" };
+
+// Every mutating call goes through here (Codex review 865248f9/ead24438: handlers that parsed
+// error bodies as JSON fell back to {} and reported success copy on 403s, clearing the form).
+// Contract: ok is the TRANSPORT verdict — callers may only show success copy, clear inputs, or
+// refresh state when ok is true; on failure they show status+text and PRESERVE the form.
+async function postJson(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: HDRS, body: JSON.stringify(body) });
+    const text = await r.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (_) {}
+    return { ok: r.ok, status: r.status, data, text };
+  } catch (_) {
+    return { ok: false, status: 0, data: null, text: "could not reach the mind" };
+  }
+}
 let MIND = "the mind";
 
 /* ── boot ─────────────────────────────────────────────────────────────── */
@@ -265,7 +281,8 @@ async function loadDevices() {
         const b = el("button", "revoke-btn"); b.textContent = "Revoke";
         b.addEventListener("click", async () => {
           if (!confirm(`Revoke '${d.name}'? Its access ends immediately.`)) return;
-          await fetch("/api/revoke", { method: "POST", headers: HDRS, body: JSON.stringify({ id: d.id }) });
+          const res = await postJson("/api/revoke", { id: d.id });
+          if (!res.ok) alert(`revoke failed (${res.status || "offline"}): ${res.text}`);
           loadDevices();
         });
         side.appendChild(b);
@@ -310,7 +327,8 @@ async function loadTasks() {
         const b = el("button"); b.textContent = label;
         b.addEventListener("click", async () => {
           if (ask && !confirm(ask)) return;
-          await fetch("/api/task-action", { method: "POST", headers: HDRS, body: JSON.stringify({ verb, id: j.id }) });
+          const res = await postJson("/api/task-action", { verb, id: j.id });
+          if (!res.ok) alert(`${verb} failed (${res.status || "offline"}): ${res.text}`);
           loadTasks();
         });
         actions.appendChild(b);
@@ -397,12 +415,13 @@ $("agent-form").addEventListener("submit", async (e) => {
   const btn = $("agent-btn"), reply = $("agent-reply");
   btn.disabled = true;
   reply.classList.remove("hidden"); reply.textContent = "delegating…";
-  try {
-    const r = await fetch("/api/agent", { method: "POST", headers: HDRS, body: JSON.stringify({ name, task }) });
-    const data = await r.json().catch(() => ({}));
-    reply.textContent = data.reply || "delegated.";
+  const res = await postJson("/api/agent", { name, task });
+  if (res.ok) {
+    reply.textContent = (res.data && res.data.reply) || "delegated.";
     $("agent-name").value = ""; $("agent-task").value = "";
-  } catch (_) { reply.textContent = "could not reach the mind."; }
+  } else {
+    reply.textContent = `delegation failed (${res.status || "offline"}): ${res.text}`;
+  }
   btn.disabled = false;
   loadTasks();
 });
@@ -411,15 +430,17 @@ $("horizon-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const delay = $("horizon-delay").value, goal = $("horizon-goal").value.trim();
   if (!goal) return;
-  const btn = $("horizon-btn"), reply = $("agent-reply");
+  const btn = $("horizon-btn"), reply = $("horizon-reply");
   btn.disabled = true;
   reply.classList.remove("hidden"); reply.textContent = "asking the planner… (this can take a minute — the plan is audited before it may persist)";
-  try {
-    const r = await fetch("/api/horizon", { method: "POST", headers: HDRS, body: JSON.stringify({ delay, goal }) });
-    const data = await r.json().catch(() => ({}));
-    reply.textContent = data.reply || "scheduled.";
-    if ((data.reply || "").includes("scheduled")) $("horizon-goal").value = "";
-  } catch (_) { reply.textContent = "could not reach the mind."; }
+  const res = await postJson("/api/horizon", { delay, goal });
+  if (res.ok) {
+    const said = (res.data && res.data.reply) || "";
+    reply.textContent = said || "the planner returned nothing — the goal was NOT scheduled.";
+    if (said.includes("scheduled")) $("horizon-goal").value = "";
+  } else {
+    reply.textContent = `scheduling failed (${res.status || "offline"}): ${res.text}`;
+  }
   btn.disabled = false;
   loadHorizons();
 });
@@ -431,12 +452,13 @@ $("import-form").addEventListener("submit", async (e) => {
   const btn = $("import-btn"), reply = $("agent-reply");
   btn.disabled = true;
   reply.classList.remove("hidden"); reply.textContent = "importing…";
-  try {
-    const r = await fetch("/api/import-agent", { method: "POST", headers: HDRS, body: JSON.stringify({ doc }) });
-    const data = await r.json().catch(() => ({}));
-    reply.textContent = data.reply || "imported.";
-    if (r.ok) $("import-doc").value = "";
-  } catch (_) { reply.textContent = "could not reach the mind."; }
+  const res = await postJson("/api/import-agent", { doc });
+  if (res.ok) {
+    reply.textContent = (res.data && res.data.reply) || "imported.";
+    $("import-doc").value = "";
+  } else {
+    reply.textContent = `import failed (${res.status || "offline"}): ${res.text}`;
+  }
   btn.disabled = false;
   loadTasks();
 });

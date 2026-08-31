@@ -1262,6 +1262,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The mutation matrix, guarded at the source (Codex reviews f1287b7b/865248f9/ead24438):
+    /// every mutating call site must go through `postJson` (which alone carries the transport
+    /// verdict), no handler may parse-fallback an error body into success copy, and the horizon
+    /// form must write its OWN reply element rather than the delegation area's.
+    #[test]
+    fn mutating_calls_ride_post_json_and_forms_own_their_reply_targets() {
+        assert!(
+            APP_JS.contains("async function postJson"),
+            "the shared helper must exist"
+        );
+        // No raw fetch() against any mutating route — postJson is the single door.
+        for route in [
+            "/api/agent",
+            "/api/import-agent",
+            "/api/horizon",
+            "/api/revoke",
+            "/api/task-action",
+            "/api/pair",
+            "/api/setup",
+        ] {
+            let raw = format!("fetch(\"{route}\"");
+            let allowed = route == "/api/pair" || route == "/api/setup"; // pre-postJson handlers check r.ok explicitly
+            if !allowed {
+                assert!(
+                    !APP_JS.contains(&raw),
+                    "{route} must be called via postJson, not raw fetch"
+                );
+            }
+        }
+        // The false-success pattern is banned where it was found: no POST result may be parsed
+        // with a fallback-to-empty (reads in boot()/panel loaders may — an empty read renders as
+        // empty, an "empty" WRITE rendered as success copy, which is the reviewed defect).
+        let post_sites: Vec<&str> = APP_JS.split("postJson(").collect();
+        assert!(
+            post_sites.len() >= 6,
+            "agent/import/horizon/revoke/task-action must all ride postJson"
+        );
+        // The horizon form owns its reply element; the shared area belongs to delegate/import.
+        let hz = APP_JS
+            .find("$(\"horizon-form\")")
+            .expect("horizon form handler exists");
+        let end = APP_JS[hz..]
+            .find("$(\"import-form\")")
+            .map(|e| hz + e)
+            .unwrap_or(APP_JS.len());
+        let handler = &APP_JS[hz..end];
+        assert!(
+            handler.contains("$(\"horizon-reply\")"),
+            "horizon status must bind horizon-reply"
+        );
+        assert!(
+            !handler.contains("$(\"agent-reply\")"),
+            "horizon handler must not write the delegation reply area"
+        );
+    }
+
     #[test]
     fn session_cookie_extraction_ignores_other_cookies() {
         let head = "GET / HTTP/1.1\r\ncookie: theme=dark; ym_session=tok123; other=x\r\n";

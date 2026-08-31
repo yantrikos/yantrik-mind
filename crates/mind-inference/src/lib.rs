@@ -160,6 +160,23 @@ pub fn set_lane_observer(observer: Box<dyn Fn(&str, &str) + Send + Sync>) {
     let _ = LANE_OBSERVER.set(observer);
 }
 
+thread_local! {
+    /// E.OBS1c: which chain link actually ANSWERED the call running on this blocking thread.
+    /// Set by ChainBackend at its success returns, taken by the pool wrapper inside the SAME
+    /// spawn_blocking closure — one closure runs to completion on its thread, so concurrent calls
+    /// (other closures) can never cross-label. A tokio task_local cannot do this job: the chat
+    /// trait is synchronous and runs under spawn_blocking, where task-locals do not reach.
+    static SERVING_LINK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note_serving_link(label: &str) {
+    SERVING_LINK.with(|c| *c.borrow_mut() = Some(label.to_string()));
+}
+
+fn take_serving_link() -> Option<String> {
+    SERVING_LINK.with(|c| c.borrow_mut().take())
+}
+
 fn record_household_callsite(callsite: &'static str) {
     // A public caller can still supply an empty static string. Do not let that create a visually
     // blank dashboard row that looks attributed while naming nobody; fold missing identities into
@@ -402,9 +419,15 @@ impl InferencePool {
             .acquire_owned()
             .await
             .expect("semaphore never closed");
-        tokio::task::spawn_blocking(move || {
+        let scope_for_lane = scope;
+        let provider_for_lane = self.provider.clone();
+        let result = tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
+            // E.OBS1c: clear any stale note left on this pooled blocking thread, so the label we
+            // read afterwards can only have been written by THIS call's chain traversal.
+            let _ = take_serving_link();
             let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
+            let outcome: anyhow::Result<LLMResponse> = (|| {
             // BACKPRESSURE IS NOT AN OUTAGE.
             //
             // The endpoint answers 429 when more calls arrive than it has slots. That is the server
@@ -441,8 +464,28 @@ impl InferencePool {
                 }
             }
             unreachable!("the loop returns on every path")
+            })();
+            // Captured on the SAME blocking thread the chain ran on — the only place the note is
+            // visible, and the reason a task-local could not carry it.
+            let served = take_serving_link();
+            (outcome, served)
         })
-        .await?
+        .await?;
+        let (outcome, served) = result;
+        let response = outcome?;
+        // E.OBS1c: "served by" is a POST-SUCCESS fact. A chain notes the link that answered; a
+        // single-provider backend never notes, and its configured label IS the server — but a
+        // chain label ("chain[a -> b]") that somehow arrives un-noted must NOT be shown as if a
+        // route were a server, so it emits nothing rather than a plausible lie.
+        if let Some(observe) = LANE_OBSERVER.get() {
+            let label = served.or_else(|| {
+                (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.to_string())
+            });
+            if let Some(label) = label {
+                observe(scope_for_lane.as_str(), &label);
+            }
+        }
+        Ok(response)
     }
 
     /// The privacy gate, shared by the plain and STREAMING call paths so they can never drift:
@@ -491,10 +534,11 @@ impl InferencePool {
             record_household_callsite(callsite);
             eprintln!("[privacy] household lane served by '{label}' at '{callsite}'");
         }
+        // EXPOSURE, not service (E.OBS1c, Codex's split): this pre-dispatch count is the
+        // conservative privacy record — a failed cloud request may still have TRANSMITTED the
+        // prompt, so it must be counted here regardless of outcome. The UI's "served by" is a
+        // different fact and is emitted post-success from the link that actually answered.
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
-        if let Some(observe) = LANE_OBSERVER.get() {
-            observe(scope.as_str(), &label);
-        }
         Ok(backend)
     }
 
@@ -521,13 +565,28 @@ impl InferencePool {
             .acquire_owned()
             .await
             .expect("semaphore never closed");
-        tokio::task::spawn_blocking(move || {
+        let scope_for_lane = scope;
+        let provider_for_lane = self.provider.clone();
+        let (outcome, served) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            backend.chat_streaming(&messages, &config, None, &mut |tok| {
+            let _ = take_serving_link();
+            let out = backend.chat_streaming(&messages, &config, None, &mut |tok| {
                 let _ = sink.send(tok.to_string());
-            })
+            });
+            (out, take_serving_link())
         })
-        .await?
+        .await?;
+        let response = outcome?;
+        // Same post-success rule as the plain path (E.OBS1c): a route is not a server.
+        if let Some(observe) = LANE_OBSERVER.get() {
+            let label = served.or_else(|| {
+                (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.to_string())
+            });
+            if let Some(label) = label {
+                observe(scope_for_lane.as_str(), &label);
+            }
+        }
+        Ok(response)
     }
 
     /// PRIVATE-GROUNDED inference (Constitutional-Kernel first rung, tier-agnostic): a turn that
@@ -1266,6 +1325,7 @@ impl LLMBackend for ChainBackend {
                         r.prompt_tokens as u64,
                         r.completion_tokens as u64,
                     );
+                    note_serving_link(label);
                     return Ok(r);
                 }
                 Ok(_) => {
@@ -1301,6 +1361,7 @@ impl LLMBackend for ChainBackend {
                         r.prompt_tokens as u64,
                         r.completion_tokens as u64,
                     );
+                    note_serving_link(local_label);
                     return Ok(r);
                 }
                 Ok(_) => {
@@ -2162,6 +2223,152 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    // ── E.OBS1c: "served by" is a post-success fact ──────────────────────────────────────────
+    //
+    // The lane observer is a process-wide OnceLock; these fixtures install ONE collector for the
+    // whole test binary (first install wins — same rule production plays by) and every fixture
+    // reads its own events by draining after its call. Serialized by a mutex so interleaved
+    // fixtures cannot read each other's events.
+
+    static LANE_EVENTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    static LANE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn install_lane_collector() {
+        set_lane_observer(Box::new(|scope, label| {
+            LANE_EVENTS
+                .lock()
+                .unwrap()
+                .push((scope.to_string(), label.to_string()));
+        }));
+    }
+
+    /// A link that always errors — the dead first hop of the failover fixture.
+    struct DeadLink;
+    impl LLMBackend for DeadLink {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            anyhow::bail!("connection refused (scripted dead link)")
+        }
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "deadlink"
+        }
+        fn chat_streaming(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            anyhow::bail!("connection refused (scripted dead link)")
+        }
+    }
+
+    /// Kill criterion (1): first link fails, second answers — exactly ONE lane event, naming the
+    /// SECOND link's label, never the joined route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_badge_names_the_link_that_answered_not_the_route() {
+        let _hold = LANE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        install_lane_collector();
+        LANE_EVENTS.lock().unwrap().clear();
+
+        let chain = ChainBackend::new_labeled(
+            vec![
+                Arc::new(DeadLink) as Arc<dyn LLMBackend>,
+                Arc::new(ScriptedLLM::new("answered")) as Arc<dyn LLMBackend>,
+            ],
+            vec!["deadlink".into(), "goodlink:with/colons".into()],
+        );
+        let pool = InferencePool::new(Arc::new(chain) as Arc<dyn LLMBackend>, 1)
+            .with_provider("chain[deadlink -> goodlink:with/colons]");
+        let r = pool
+            .chat_scoped(
+                vec![ChatMessage::user("hi")],
+                GenerationConfig::default(),
+                PrivacyScope::Public,
+            )
+            .await
+            .expect("second link answers");
+        assert_eq!(r.text, "answered");
+
+        // The collector is process-wide and OTHER suite tests make pool calls concurrently, so
+        // fixtures assert over their own UNIQUE labels, never over global counts.
+        let events = LANE_EVENTS.lock().unwrap().clone();
+        let mine: Vec<_> = events.iter().filter(|(_, l)| l.contains("goodlink") || l.contains("deadlink") || l.contains("chain[")).collect();
+        assert_eq!(mine.len(), 1, "exactly one served event for this chain: {mine:?}");
+        assert_eq!(mine[0].0, "public");
+        assert_eq!(
+            mine[0].1, "goodlink:with/colons",
+            "the SERVING link, colons intact, never the route or the dead link: {mine:?}"
+        );
+    }
+
+    /// Kill criterion (2): every link fails — no success-shaped lane event at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn total_failure_never_wears_a_served_chip() {
+        let _hold = LANE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        install_lane_collector();
+        LANE_EVENTS.lock().unwrap().clear();
+
+        let chain = ChainBackend::new_labeled(
+            vec![
+                Arc::new(DeadLink) as Arc<dyn LLMBackend>,
+                Arc::new(DeadLink) as Arc<dyn LLMBackend>,
+            ],
+            vec!["deadlink-a".into(), "deadlink-b".into()],
+        );
+        let pool = InferencePool::new(Arc::new(chain) as Arc<dyn LLMBackend>, 1)
+            .with_provider("chain[deadlink-a -> deadlink-b]");
+        let out = pool
+            .chat_scoped(
+                vec![ChatMessage::user("hi")],
+                GenerationConfig::default(),
+                PrivacyScope::Public,
+            )
+            .await;
+        assert!(out.is_err(), "every link is dead");
+
+        let events = LANE_EVENTS.lock().unwrap().clone();
+        let mine: Vec<_> = events.iter().filter(|(_, l)| l.contains("deadlink") || l.contains("chain[")).collect();
+        assert!(
+            mine.is_empty(),
+            "no provider answered, so nothing may claim to have served: {mine:?}"
+        );
+    }
+
+    /// Kill criterion (3): a single-provider pool still names its provider on success — the
+    /// configured label IS the server when there is no chain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_single_backend_pool_names_its_provider() {
+        let _hold = LANE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        install_lane_collector();
+        LANE_EVENTS.lock().unwrap().clear();
+
+        let pool = InferencePool::new(
+            Arc::new(ScriptedLLM::new("plain")) as Arc<dyn LLMBackend>,
+            1,
+        )
+        .with_provider("solo-fixture-provider");
+        let r = pool
+            .chat_scoped(
+                vec![ChatMessage::user("hi")],
+                GenerationConfig::default(),
+                PrivacyScope::Public,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.text, "plain");
+        let events = LANE_EVENTS.lock().unwrap().clone();
+        let mine: Vec<_> = events.iter().filter(|(_, l)| l == "solo-fixture-provider").collect();
+        assert_eq!(mine.len(), 1, "the single backend's configured label serves: {mine:?}");
+    }
 
     fn resp(text: &str) -> LLMResponse {
         LLMResponse {

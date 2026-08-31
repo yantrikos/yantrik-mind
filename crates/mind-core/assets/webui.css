@@ -364,3 +364,12 @@ body {
   color: #0a0e1e; background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
   border: 0; border-radius: 10px; cursor: pointer; }
 #agent-btn:disabled, #import-btn:disabled { filter: grayscale(.6) brightness(.7); cursor: wait; }
+
+/* long-horizon goals */
+.delay-select { flex: none; width: 150px; color: var(--ink); background: rgba(0,0,0,.3); }
+#horizon-btn { align-self: flex-end; padding: 10px 22px; font-size: 14px; font-weight: 600;
+  color: #0a0e1e; background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+  border: 0; border-radius: 10px; cursor: pointer; }
+#horizon-btn:disabled { filter: grayscale(.6) brightness(.7); cursor: wait; }
+.budget-chips { display: flex; gap: 6px; margin-top: 5px; flex-wrap: wrap; }
+.budget-chips .tag { font-size: 10px; }

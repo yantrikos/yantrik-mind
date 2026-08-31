@@ -651,6 +651,70 @@ fn handle(
                 }
             }
         }
+        ("GET", "/api/horizons") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let out = rt.block_on(conv.cli_dispatch(
+                    "horizons_json",
+                    &mind_types::AccessContext::operator_audit(),
+                ));
+                match serde_json::from_str::<serde_json::Value>(&out) {
+                    Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                    Err(_) => send(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "",
+                        "horizons failed",
+                    ),
+                }
+            }
+        },
+        ("POST", "/api/horizon") => {
+            if !has_client_header {
+                send(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "",
+                    "missing client header",
+                );
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let delay = parsed["delay"].as_str().unwrap_or("").trim();
+                    let goal = parsed["goal"].as_str().unwrap_or("").trim();
+                    // The delay grammar is the engine's (bounded durations); the web only refuses
+                    // shapes that could smuggle a second verb into the dispatcher line.
+                    let delay_ok = !delay.is_empty()
+                        && delay.len() <= 4
+                        && delay.chars().all(|c| c.is_ascii_alphanumeric());
+                    if !delay_ok || goal.is_empty() {
+                        send(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "",
+                            "delay and goal are required",
+                        );
+                        return;
+                    }
+                    let line = format!("horizon {delay} :: {goal}");
+                    let out = rt.block_on(
+                        conv.cli_dispatch(&line, &mind_types::AccessContext::operator_audit()),
+                    );
+                    send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "reply": out }),
+                    );
+                }
+            }
+        }
         ("GET", "/api/orders") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {

@@ -328,7 +328,47 @@ async function loadTasks() {
     clearTimeout(tasksTimer);
     if (anyRunning && $("panel-tasks").classList.contains("active")) tasksTimer = setTimeout(loadTasks, 5000);
   } catch (_) { host.replaceChildren(textP("Could not read the board.")); }
+  loadHorizons();
   loadOrders();
+}
+
+async function loadHorizons() {
+  const host = $("horizon-cards");
+  try {
+    const r = await fetch("/api/horizons", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    if (data.available === false) { host.appendChild(textP("The durable-goal engine is not available on this build.")); return; }
+    for (const g of data.goals || []) {
+      const card = el("div", "card setting-row");
+      const main = el("div", "card-main");
+      const t = el("div", "card-title"); t.textContent = g.objective || g.goal_id; main.appendChild(t);
+      const wake = g.next_wake_ms ? Math.max(0, g.next_wake_ms - Date.now()) : null;
+      const meta = el("div", "dev-meta");
+      const mins = wake === null ? null : Math.round(wake / 60000);
+      meta.textContent = wake === null ? (g.queue_status || g.status || "")
+        : mins >= 120 ? `wakes in ${Math.round(mins / 60)}h · ${g.queue_status || ""}`
+        : `wakes in ${mins}m · ${g.queue_status || ""}`;
+      main.appendChild(meta);
+      const chips = el("div", "budget-chips");
+      for (const [label, used, max] of [["actions", g.actions_used, g.max_actions], ["cost", g.spent_cost_units, g.max_cost_units], ["replans", g.plan_revision, null]]) {
+        const c = el("span", "tag");
+        c.textContent = max == null ? `${label} ${used ?? 0}` : `${label} ${used ?? 0}/${max}`;
+        chips.appendChild(c);
+      }
+      if (g.budget_expired) { const c = el("span", "tag restart"); c.textContent = "budget expired"; chips.appendChild(c); }
+      main.appendChild(chips);
+      const key = el("div", "setting-key"); key.textContent = g.goal_id; main.appendChild(key);
+      card.appendChild(main);
+      const side = el("div", "card-side");
+      const st = el("span", "job-state " + ((g.status || "").includes("active") ? "running" : "done"));
+      st.textContent = g.status || "?"; side.appendChild(st);
+      card.appendChild(side);
+      host.appendChild(card);
+    }
+    if (!(data.goals || []).length) host.appendChild(textP("No durable goals — schedule one above. They survive restarts and act on schedule."));
+  } catch (_) { host.replaceChildren(textP("Could not read durable goals.")); }
 }
 
 async function loadOrders() {
@@ -365,6 +405,23 @@ $("agent-form").addEventListener("submit", async (e) => {
   } catch (_) { reply.textContent = "could not reach the mind."; }
   btn.disabled = false;
   loadTasks();
+});
+
+$("horizon-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const delay = $("horizon-delay").value, goal = $("horizon-goal").value.trim();
+  if (!goal) return;
+  const btn = $("horizon-btn"), reply = $("agent-reply");
+  btn.disabled = true;
+  reply.classList.remove("hidden"); reply.textContent = "asking the planner… (this can take a minute — the plan is audited before it may persist)";
+  try {
+    const r = await fetch("/api/horizon", { method: "POST", headers: HDRS, body: JSON.stringify({ delay, goal }) });
+    const data = await r.json().catch(() => ({}));
+    reply.textContent = data.reply || "scheduled.";
+    if ((data.reply || "").includes("scheduled")) $("horizon-goal").value = "";
+  } catch (_) { reply.textContent = "could not reach the mind."; }
+  btn.disabled = false;
+  loadHorizons();
 });
 
 $("import-form").addEventListener("submit", async (e) => {

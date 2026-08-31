@@ -133,6 +133,18 @@
           </form>
           <p id="agent-reply" class="loading hidden"></p>
           <div id="job-cards"><p class="loading">reading the board…</p></div>
+          <div class="cap-group">Long-horizon goals</div>
+          <form id="horizon-form" class="agent-form glass" autocomplete="off">
+            <select id="horizon-delay" class="agent-input delay-select" aria-label="When to act">
+              <option value="15m">in 15 minutes</option>
+              <option value="2h" selected>in 2 hours</option>
+              <option value="3d">in 3 days</option>
+            </select>
+            <input id="horizon-goal" class="agent-input wide" maxlength="300" placeholder="a read-only goal the mind pursues later — it survives restarts (e.g. check GitHub for new issues)" aria-label="Goal" required>
+            <button id="horizon-btn" type="submit">Schedule</button>
+          </form>
+          <p id="horizon-reply" class="loading hidden"></p>
+          <div id="horizon-cards"><p class="loading">reading durable goals…</p></div>
           <div class="cap-group">Standing orders</div>
           <pre id="orders-text" class="orders glass">…</pre>
         </div>

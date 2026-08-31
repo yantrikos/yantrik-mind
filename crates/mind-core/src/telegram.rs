@@ -555,17 +555,17 @@ async fn reminder_loop(api: String, mem: MemoryHandle, active_chat: Arc<AtomicI6
     }
 }
 
-fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Count how many header lines start with a given (lowercase) field name.
-fn header_count(head: &str, name_lc: &str) -> usize {
+pub(crate) fn header_count(head: &str, name_lc: &str) -> usize {
     head.lines()
         .filter(|l| l.to_ascii_lowercase().trim_start().starts_with(name_lc))
         .count()
 }
-fn header_value(head: &str, name_lc: &str) -> Option<String> {
+pub(crate) fn header_value(head: &str, name_lc: &str) -> Option<String> {
     head.lines().find_map(|l| {
         l.to_ascii_lowercase().strip_prefix(name_lc).map(|_| {
             // strip_prefix on the lowercased copy tells us it matched; re-slice the ORIGINAL for the value.
@@ -1271,7 +1271,7 @@ fn ctl_handle(
 /// SAME running companion as telegram (shared memory). 127.0.0.1 only; YM_CTL=off disables.
 /// The mind's state directory: the parent of `YM_DB`, else `/var/lib/yantrik-mind`. The device store
 /// and its `console.token` anchor live here (owner-only), the same dir the sandbox is denied.
-fn state_dir() -> String {
+pub(crate) fn state_dir() -> String {
     std::env::var("YM_DB")
         .ok()
         .and_then(|p| {
@@ -1326,6 +1326,7 @@ pub(crate) fn listener_plan() -> Vec<(&'static str, u16)> {
         ("YM_CHAT_PORT", port("YM_CHAT_PORT", 8079)),
         ("YM_FRAME_PORT", port("YM_FRAME_PORT", 8078)),
         ("YM_WEB_PORT", port("YM_WEB_PORT", 8088)),
+        ("YM_WEBUI_PORT", port("YM_WEBUI_PORT", 8090)),
     ]
 }
 
@@ -1791,6 +1792,10 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
     }
     spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
     spawn_ha_event_listener(conv.clone(), tokio::runtime::Handle::current());
+    if let Some(d) = &devices {
+        crate::web::ensure_pairing_code(d);
+        crate::web::spawn_webui_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
+    }
     for line in conv.reconcile_leases().await {
         eprintln!("{line}");
     }
@@ -1844,6 +1849,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     }
     spawn_frame_server(conv.clone(), tokio::runtime::Handle::current());
     spawn_ha_event_listener(conv.clone(), tokio::runtime::Handle::current());
+    if let Some(d) = &devices {
+        crate::web::ensure_pairing_code(d);
+        crate::web::spawn_webui_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
+    }
 
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT")
         .ok()

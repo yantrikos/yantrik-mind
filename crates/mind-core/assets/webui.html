@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Mind</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g' cx='35%25' cy='30%25'%3E%3Cstop offset='0%25' stop-color='%23a78bfa'/%3E%3Cstop offset='100%25' stop-color='%230ea5e9'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='28' fill='url(%23g)'/%3E%3C/svg%3E">
+</head>
+<body>
+
+  <!-- ══ First-time registration: a two-step ceremony, not a form ══ -->
+  <section id="pair-screen" class="screen hidden" aria-label="First-time registration">
+    <div class="pair-card glass">
+      <div class="orb big" aria-hidden="true"></div>
+      <h1 id="pair-title">Hello.</h1>
+
+      <div id="pair-step-code">
+        <p class="sub">This mind isn't paired with a browser yet.<br>Enter the registration code from the installation output.</p>
+        <form id="pair-form" autocomplete="off">
+          <input id="pair-code" class="code-input" inputmode="latin" maxlength="9"
+                 placeholder="XXXX-XXXX" spellcheck="false" aria-label="Registration code" required>
+          <button id="pair-btn" type="submit">Pair this browser</button>
+        </form>
+        <p id="pair-error" class="error hidden" role="alert"></p>
+        <p class="hint">The code is single-use and printed once in the install log.<br>Wrong attempts lock registration for a while.</p>
+      </div>
+
+      <div id="pair-step-name" class="hidden">
+        <p class="sub">Paired. Now the two names that make this a companion,<br>not an appliance — both are required.</p>
+        <form id="name-form" autocomplete="off">
+          <input id="mind-name-input" class="name-input" maxlength="40" placeholder="Name your mind (e.g. Vega, Muni, Jarvis)" aria-label="The mind's name" required>
+          <input id="user-name" class="name-input" maxlength="40" placeholder="Your name" aria-label="Your name" required>
+          <button id="name-btn" type="submit">Begin</button>
+        </form>
+        <p id="setup-error" class="error hidden" role="alert"></p>
+        <p class="hint">The mind's name is written to its own state and used everywhere.<br>Yours goes to it as your introduction — remembered in its memory, on your hardware.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ The app shell ══ -->
+  <section id="app" class="screen hidden">
+    <nav class="sidebar glass" aria-label="Navigation">
+      <div class="brand">
+        <div class="orb" id="status-orb" aria-hidden="true"></div>
+        <div class="who">
+          <span class="mind-name" id="mind-name">…</span>
+          <span class="mind-state" id="mind-state">at home</span>
+        </div>
+      </div>
+
+      <div class="nav">
+        <button class="nav-item active" data-panel="chat">
+          <span class="nav-ico">◈</span> Chat
+        </button>
+        <button class="nav-item" data-panel="capabilities">
+          <span class="nav-ico">⬡</span> Capabilities
+        </button>
+        <button class="nav-item" data-panel="settings">
+          <span class="nav-ico">☰</span> Settings
+        </button>
+        <button class="nav-item" data-panel="devices">
+          <span class="nav-ico">▣</span> Devices
+        </button>
+        <button class="nav-item" data-panel="tasks">
+          <span class="nav-ico">◷</span> Agents
+        </button>
+        <div class="nav-soon" title="Being built next">
+          <span class="nav-item soon"><span class="nav-ico">✦</span> Memory <em>soon</em></span>
+        </div>
+      </div>
+
+      <div class="sidebar-foot">
+        <span class="person-chip" id="person-chip" title="Who this device speaks as"></span>
+        <button id="logout-btn" class="ghost" title="Sign out on this browser">Sign out</button>
+      </div>
+    </nav>
+
+    <div class="content">
+      <!-- Chat -->
+      <div class="panel active" id="panel-chat">
+        <main id="feed" class="feed" aria-live="polite">
+          <div id="welcome" class="welcome hidden">
+            <div class="orb big soft" aria-hidden="true"></div>
+            <h2 id="welcome-line">…</h2>
+            <p class="welcome-sub">Everything here stays on your hardware unless a turn explicitly needs the world.</p>
+            <div class="suggest" id="suggest"></div>
+          </div>
+        </main>
+        <footer class="composer-wrap">
+          <div class="composer glass">
+            <textarea id="input" rows="1" placeholder="Talk to the mind…" aria-label="Message"></textarea>
+            <button id="send-btn" title="Send (Enter)" aria-label="Send">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 11.5 21 3l-8.5 18-2.3-7.2L3 11.5z" fill="currentColor"/></svg>
+            </button>
+          </div>
+          <div class="under-composer">
+            <button id="clear-btn" class="linklike">clear transcript</button>
+          </div>
+        </footer>
+      </div>
+
+      <!-- Capabilities -->
+      <div class="panel" id="panel-capabilities">
+        <header class="panel-head">
+          <h2>Capabilities</h2>
+          <p class="panel-sub">What this mind can do right now — and what's missing when it can't. <span id="cap-counts"></span></p>
+        </header>
+        <div class="cards" id="cap-cards"><p class="loading">reading the capability report…</p></div>
+      </div>
+
+      <!-- Agents & standing orders -->
+      <div class="panel" id="panel-tasks">
+        <header class="panel-head">
+          <h2>Agents</h2>
+          <p class="panel-sub">Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Results wait on the board until you keep or drop them.</p>
+        </header>
+        <div class="cards" id="tasks-cards">
+          <div class="agent-tabs">
+            <button id="tab-delegate" class="agent-tab active" type="button">Delegate</button>
+            <button id="tab-import" class="agent-tab" type="button">Import agent document</button>
+          </div>
+          <form id="agent-form" class="agent-form glass" autocomplete="off">
+            <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check) — a banked skill's name runs that skill" aria-label="Agent name" required>
+            <textarea id="agent-task" class="agent-desc" rows="4" maxlength="8000" placeholder="Describe the task as broadly as you like — goal, constraints, sources to prefer, what a good result looks like. The agent gets all of it." aria-label="Task description" required></textarea>
+            <button id="agent-btn" type="submit">Run agent</button>
+          </form>
+          <form id="import-form" class="agent-form glass hidden" autocomplete="off">
+            <textarea id="import-doc" class="agent-desc tall" rows="12" maxlength="64000" placeholder="Paste a full agent document (SKILL.md style): name, instructions, and optional schedule: frontmatter to make it a standing order." aria-label="Agent document" required></textarea>
+            <button id="import-btn" type="submit">Import</button>
+          </form>
+          <p id="agent-reply" class="loading hidden"></p>
+          <div id="job-cards"><p class="loading">reading the board…</p></div>
+          <div class="cap-group">Standing orders</div>
+          <pre id="orders-text" class="orders glass">…</pre>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div class="panel" id="panel-settings">
+        <header class="panel-head">
+          <h2>Settings</h2>
+          <p class="panel-sub">Every knob, resolved live from the running mind. Read-only in this build — edits arrive with the config-write slice.</p>
+        </header>
+        <div class="cards" id="settings-cards"><p class="loading">reading configuration…</p></div>
+      </div>
+
+      <!-- Devices -->
+      <div class="panel" id="panel-devices">
+        <header class="panel-head">
+          <h2>Paired devices</h2>
+          <p class="panel-sub">Everything with a key to this mind. Revocation is immediate.</p>
+        </header>
+        <div class="cards" id="device-cards"><p class="loading">reading device store…</p></div>
+      </div>
+    </div>
+  </section>
+
+  <script src="/app.js"></script>
+</body>
+</html>

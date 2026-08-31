@@ -13,6 +13,7 @@ use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 pub mod setup;
 pub mod telegram;
 pub mod wallet_setup;
+pub mod web;
 
 /// Parse the two conflicting belief statements from a Contradiction tension's `about` field.
 /// Handles both formats emitted by the memory layer:

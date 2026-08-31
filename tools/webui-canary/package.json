@@ -1,0 +1,14 @@
+{
+  "name": "webui-canary-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned dev/CI runner for the web UI browser canaries (XSS kill criterion; 403 regressions). Never installed or executed by deployments.",
+  "type": "module",
+  "scripts": {
+    "canary:xss": "node ../../crates/mind-core/assets/xss_canary.mjs ../../crates/mind-core/assets",
+    "browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

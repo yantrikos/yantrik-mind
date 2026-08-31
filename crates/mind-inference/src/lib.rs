@@ -412,7 +412,7 @@ impl InferencePool {
         // order — and it makes the mind portable across templates instead of only working on the
         // ones that happen to be lenient.
         let messages = merge_system_messages(messages);
-        let backend = self.gate_scope(scope, callsite)?;
+        let (backend, selected_label) = self.gate_scope(scope, callsite)?;
         let permit = self
             .sem
             .clone()
@@ -420,7 +420,7 @@ impl InferencePool {
             .await
             .expect("semaphore never closed");
         let scope_for_lane = scope;
-        let provider_for_lane = self.provider.clone();
+        let provider_for_lane = selected_label;
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
             // E.OBS1c: clear any stale note left on this pooled blocking thread, so the label we
@@ -479,7 +479,7 @@ impl InferencePool {
         // route were a server, so it emits nothing rather than a plausible lie.
         if let Some(observe) = LANE_OBSERVER.get() {
             let label = served.or_else(|| {
-                (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.to_string())
+                (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.clone())
             });
             if let Some(label) = label {
                 observe(scope_for_lane.as_str(), &label);
@@ -502,7 +502,7 @@ impl InferencePool {
         &self,
         scope: PrivacyScope,
         callsite: &'static str,
-    ) -> anyhow::Result<Arc<dyn LLMBackend>> {
+    ) -> anyhow::Result<(Arc<dyn LLMBackend>, String)> {
         use std::sync::atomic::Ordering;
         let household = std::env::var("YM_HOUSEHOLD_PROVIDERS")
             .unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
@@ -539,7 +539,10 @@ impl InferencePool {
         // prompt, so it must be counted here regardless of outcome. The UI's "served by" is a
         // different fact and is emitted post-success from the link that actually answered.
         PRIVACY_SERVED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
-        Ok(backend)
+        // The SELECTED label rides out with the backend (E.OBS1c review): a Private call served by
+        // the private lane must fall back to the PRIVATE label, never to self.provider — which on
+        // that path is the household backend's name and would be a privacy-misleading badge.
+        Ok((backend, label.to_string()))
     }
 
     /// Household-scope chat that STREAMS tokens into `sink` as the model generates them, returning
@@ -558,7 +561,7 @@ impl InferencePool {
         // compose declared the same lane for a turn grounded in family memory as for one about the
         // weather. A lane belongs to the MATERIAL, not to the transport that happens to carry it.
         let messages = merge_system_messages(messages);
-        let backend = self.gate_scope(scope, "chat_streaming_sink")?;
+        let (backend, selected_label) = self.gate_scope(scope, "chat_streaming_sink")?;
         let permit = self
             .sem
             .clone()
@@ -566,7 +569,7 @@ impl InferencePool {
             .await
             .expect("semaphore never closed");
         let scope_for_lane = scope;
-        let provider_for_lane = self.provider.clone();
+        let provider_for_lane = selected_label;
         let (outcome, served) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _ = take_serving_link();
@@ -580,7 +583,7 @@ impl InferencePool {
         // Same post-success rule as the plain path (E.OBS1c): a route is not a server.
         if let Some(observe) = LANE_OBSERVER.get() {
             let label = served.or_else(|| {
-                (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.to_string())
+                (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.clone())
             });
             if let Some(label) = label {
                 observe(scope_for_lane.as_str(), &label);
@@ -2301,8 +2304,17 @@ mod tests {
         // The collector is process-wide and OTHER suite tests make pool calls concurrently, so
         // fixtures assert over their own UNIQUE labels, never over global counts.
         let events = LANE_EVENTS.lock().unwrap().clone();
-        let mine: Vec<_> = events.iter().filter(|(_, l)| l.contains("goodlink") || l.contains("deadlink") || l.contains("chain[")).collect();
-        assert_eq!(mine.len(), 1, "exactly one served event for this chain: {mine:?}");
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|(_, l)| {
+                l.contains("goodlink") || l.contains("deadlink") || l.contains("chain[")
+            })
+            .collect();
+        assert_eq!(
+            mine.len(),
+            1,
+            "exactly one served event for this chain: {mine:?}"
+        );
         assert_eq!(mine[0].0, "public");
         assert_eq!(
             mine[0].1, "goodlink:with/colons",
@@ -2336,10 +2348,54 @@ mod tests {
         assert!(out.is_err(), "every link is dead");
 
         let events = LANE_EVENTS.lock().unwrap().clone();
-        let mine: Vec<_> = events.iter().filter(|(_, l)| l.contains("deadlink") || l.contains("chain[")).collect();
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|(_, l)| l.contains("deadlink") || l.contains("chain["))
+            .collect();
         assert!(
             mine.is_empty(),
             "no provider answered, so nothing may claim to have served: {mine:?}"
+        );
+    }
+
+    /// Codex's c504228 review fixture: a PRIVATE call served by the private lane must badge the
+    /// PRIVATE label — never the pool's main provider, which on that path is the household/cloud
+    /// backend's name and would be a privacy-misleading badge on exactly the turn that stayed home.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_private_turn_badges_the_private_label_never_the_cloud_main() {
+        let _hold = LANE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        install_lane_collector();
+        LANE_EVENTS.lock().unwrap().clear();
+
+        std::env::set_var("YM_PRIVATE_PROVIDERS", "owned-fixture");
+        let pool = InferencePool::new(
+            Arc::new(ScriptedLLM::new("cloud answer")) as Arc<dyn LLMBackend>,
+            1,
+        )
+        .with_provider("cloud-main-fixture")
+        .with_private_backend(
+            Arc::new(ScriptedLLM::new("stayed home")) as Arc<dyn LLMBackend>,
+            "owned-fixture:model",
+        );
+        let r = pool
+            .chat_scoped(
+                vec![ChatMessage::user("hi")],
+                GenerationConfig::default(),
+                PrivacyScope::Private,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.text, "stayed home");
+        let events = LANE_EVENTS.lock().unwrap().clone();
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|(_, l)| l.contains("fixture"))
+            .collect();
+        assert_eq!(mine.len(), 1, "one private served event: {mine:?}");
+        assert_eq!(mine[0].0, "private");
+        assert_eq!(
+            mine[0].1, "owned-fixture:model",
+            "the PRIVATE lane's own label, never cloud-main: {mine:?}"
         );
     }
 
@@ -2366,8 +2422,15 @@ mod tests {
             .unwrap();
         assert_eq!(r.text, "plain");
         let events = LANE_EVENTS.lock().unwrap().clone();
-        let mine: Vec<_> = events.iter().filter(|(_, l)| l == "solo-fixture-provider").collect();
-        assert_eq!(mine.len(), 1, "the single backend's configured label serves: {mine:?}");
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|(_, l)| l == "solo-fixture-provider")
+            .collect();
+        assert_eq!(
+            mine.len(),
+            1,
+            "the single backend's configured label serves: {mine:?}"
+        );
     }
 
     fn resp(text: &str) -> LLMResponse {

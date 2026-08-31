@@ -594,9 +594,54 @@ fn handle(
     }
 }
 
-/// Redeem the one-time pairing code. Serialized, rate-limited, constant-time, single-winner:
-/// the store's own duplicate-name refusal is the race arbiter — two racers both read the code,
-/// but only one `pair` call creates `web:browser`, and the loser's redemption fails cleanly.
+/// Serializes the read-verify-pair-delete redemption sequence. Process-wide, and sufficient:
+/// one process owns the port, so every racer for this code passes through this lock.
+///
+/// The first shipped arbiter was the store's duplicate-NAME refusal, and the E.WEB0 race canary
+/// killed it in its first run: two concurrent redemptions under DIFFERENT names both returned 200
+/// and both paired. The name was never the invariant — the CODE is, and single-use has to be
+/// enforced where the code is consumed, atomically with its verification.
+static REDEEM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Why a redemption was refused — carried as (status, message) so the HTTP layer stays dumb.
+type Refusal = (&'static str, &'static str);
+
+/// Atomically redeem the one-time code: verify, pair, delete, all under `REDEEM_LOCK`. The loser
+/// of a race re-reads the file INSIDE the lock, finds it gone (or a browser already enrolled),
+/// and is refused without touching the wrong-code lockout counter.
+fn redeem_code(
+    devices: &mind_governance::devices::DeviceStore,
+    code: &str,
+    label: &str,
+) -> std::result::Result<(String, mind_governance::devices::Secret), Refusal> {
+    let _hold = REDEEM_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = crate::telegram::state_dir();
+    let path = std::path::Path::new(&dir).join(PAIRING_CODE_FILE);
+    // Both reads happen INSIDE the lock: the code file and the already-enrolled check are one
+    // atomic question — "is registration still open, and is this the code?"
+    let already = devices.list().iter().any(|d| !d.revoked && d.name.starts_with(WEB_DEVICE_PREFIX));
+    if already {
+        let _ = std::fs::remove_file(&path);
+        return Err(("409 Conflict", "registration is closed — a browser is already paired"));
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_default().trim().to_uppercase();
+    if expected.is_empty() || !ct_str_eq(code, &expected) {
+        return Err(("403 Forbidden", "wrong or expired code"));
+    }
+    let name = format!("{WEB_DEVICE_PREFIX}{label}");
+    match devices.pair(&name, mind_governance::devices::DeviceRole::Operator {
+        default_person: mind_types::PRIMARY.to_string(),
+    }) {
+        Ok(secret) => {
+            let _ = std::fs::remove_file(&path); // single-use: the code dies with its redemption
+            Ok((name, secret))
+        }
+        Err(_) => Err(("409 Conflict", "pairing failed")),
+    }
+}
+
+/// Redeem the one-time pairing code over HTTP: lockout bookkeeping outside the lock, the atomic
+/// redemption inside `redeem_code`.
 fn pair(stream: &mut std::net::TcpStream, devices: &mind_governance::devices::DeviceStore, body: &str) {
     let now = now_ms();
     if now < PAIR_LOCKED_UNTIL_MS.load(Ordering::Relaxed) {
@@ -608,30 +653,9 @@ fn pair(stream: &mut std::net::TcpStream, devices: &mind_governance::devices::De
     let label = parsed["name"].as_str().unwrap_or("browser").trim().chars().take(32).collect::<String>();
     let label = if label.is_empty() { "browser".to_string() } else { label };
 
-    let dir = crate::telegram::state_dir();
-    let path = std::path::Path::new(&dir).join(PAIRING_CODE_FILE);
-    let expected = std::fs::read_to_string(&path).unwrap_or_default().trim().to_uppercase();
-    let ok = !expected.is_empty() && ct_str_eq(&code, &expected);
-    if !ok {
-        let n = PAIR_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
-        if n >= PAIR_MAX_ATTEMPTS {
-            PAIR_LOCKED_UNTIL_MS.store(now + PAIR_LOCKOUT_MS, Ordering::Relaxed);
+    match redeem_code(devices, &code, &label) {
+        Ok((name, secret)) => {
             PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
-            eprintln!("[web-ui] pairing LOCKED OUT after {PAIR_MAX_ATTEMPTS} wrong codes");
-        }
-        send(stream, "403 Forbidden", "text/plain", "", "wrong or expired code");
-        return;
-    }
-
-    // First browser is the installer: an operator device speaking as the primary, exactly like the
-    // console. Additional browsers/members are operator-issued (`ym device pair`), not self-served.
-    let name = format!("{WEB_DEVICE_PREFIX}{label}");
-    match devices.pair(&name, mind_governance::devices::DeviceRole::Operator {
-        default_person: mind_types::PRIMARY.to_string(),
-    }) {
-        Ok(secret) => {
-            PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
-            let _ = std::fs::remove_file(&path); // single-use: the code dies with its redemption
             eprintln!("[web-ui] browser paired as '{name}' — registration closed");
             let cookie = format!(
                 "Set-Cookie: ym_session={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000\r\n",
@@ -639,9 +663,17 @@ fn pair(stream: &mut std::net::TcpStream, devices: &mind_governance::devices::De
             );
             send_json(stream, "200 OK", &cookie, &serde_json::json!({ "ok": true, "device": name }));
         }
-        Err(e) => {
-            // The duplicate-name arm IS the pairing race resolving: someone else just won.
-            send(stream, "409 Conflict", "text/plain", "", &format!("pairing failed: {e}"));
+        Err((status, msg)) => {
+            // Only a WRONG code advances the lockout counter — a race loser guessed nothing.
+            if status.starts_with("403") {
+                let n = PAIR_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= PAIR_MAX_ATTEMPTS {
+                    PAIR_LOCKED_UNTIL_MS.store(now + PAIR_LOCKOUT_MS, Ordering::Relaxed);
+                    PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
+                    eprintln!("[web-ui] pairing LOCKED OUT after {PAIR_MAX_ATTEMPTS} wrong codes");
+                }
+            }
+            send(stream, status, "text/plain", "", msg);
         }
     }
 }
@@ -728,6 +760,35 @@ mod tests {
         assert!(ct_str_eq("ABCD-EFGH", "ABCD-EFGH"));
         assert!(!ct_str_eq("ABCD-EFGH", "ABCD-EFGJ"));
         assert!(!ct_str_eq("ABCD", "ABCD-EFGH"));
+    }
+
+    /// The E.WEB0 race criterion, at the exact function that must enforce it: two concurrent
+    /// redemptions of ONE code under DIFFERENT names — the pairing that shipped first and both
+    /// won. Exactly one may succeed, and the loser's refusal must not be the wrong-code kind
+    /// (a race loser guessed nothing and must not advance the lockout).
+    #[test]
+    fn two_racers_one_code_exactly_one_winner() {
+        let dir = std::env::temp_dir().join(format!("ym-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // state_dir() derives from YM_DB — point it at the scratch dir for this process.
+        std::env::set_var("YM_DB", dir.join("mind.db").to_string_lossy().to_string());
+        std::fs::write(dir.join(super::PAIRING_CODE_FILE), "RACE-CODE").unwrap();
+        let store = std::sync::Arc::new(mind_governance::devices::DeviceStore::open(&dir).unwrap());
+
+        let (a, b) = std::thread::scope(|s| {
+            let s1 = store.clone();
+            let s2 = store.clone();
+            let t1 = s.spawn(move || super::redeem_code(&s1, "RACE-CODE", "racer-one").is_ok());
+            let t2 = s.spawn(move || super::redeem_code(&s2, "RACE-CODE", "racer-two").is_ok());
+            (t1.join().unwrap(), t2.join().unwrap())
+        });
+        assert!(a ^ b, "exactly one racer must win (got a={a}, b={b})");
+        let web_devices = store.list().iter().filter(|d| !d.revoked && d.name.starts_with(super::WEB_DEVICE_PREFIX)).count();
+        assert_eq!(web_devices, 1, "one code, one enrolled browser");
+        assert!(!dir.join(super::PAIRING_CODE_FILE).exists(), "the code dies with its redemption");
+        // A third redemption after the race is refused: registration is closed.
+        assert!(super::redeem_code(&store, "RACE-CODE", "latecomer").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

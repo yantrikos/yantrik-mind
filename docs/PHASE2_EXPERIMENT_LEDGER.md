@@ -2815,3 +2815,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Decision | Keep the store's `standing: <agent>` naming for now: removing it changes persisted, shared recipe semantics, existing rows stay prefixed, and a store change exceeds E.WEB18's prereg. One canonical UI key is the right scoped compatibility fix (`be71fe0`). |
 | Debt | Name normalisation is convention-based; generic `sched:` rows remain identity-ambiguous. A later prereg should add a typed origin / canonical agent identity server-side and migrate or backfill before the prefix is removed. |
 | Also folded | Goal badge reads the board's `queue_status` rule (a FAILED goal no longer shows "active"); `E.WEB18` residual closed. |
+
+## E.MQ6 — candidate FROZEN at `69b9e82` (seam named; v4 may now be opened by Codex)
+
+| Field | Value |
+| --- | --- |
+| Candidate | `69b9e82af1e7ec2a5180f6254b2aed518bcbdbdc`. Clean full suite on that tree: 45 binaries / 1,490 passed / 0 failed. |
+| Exact seams | Stage 1: `self_claims::shortlist(q) -> Vec<&Claim>` and `self_claims::singleton(q) -> Option<&Claim>` (deterministic, replayable with grep). Stage 2: `ConversationEngine::confirm_claim_with(&InferencePool, q, &Claim) -> (raw, confirmed)` (greedy, ≤ 8 tokens, think off, `chat_grounded`, prompt = `self_claims::confirm_prompt`). End-to-end: `ConversationEngine::route_claim_two_stage_with(&InferencePool, q) -> (candidate_id, raw, routed_id)`; no candidate ⇒ no model call. Versions: `self-claims-shortlist-v1`, `self-claims-confirm-v1`. |
+| Floor (author's own sentences, NOT the gate) | 10/10 own paraphrases → the intended singleton; 7/7 own negatives → nothing; a two-topic question → two candidates → nothing. One topical near-miss ("can you predict whether the trade will make real money?") is emitted by stage 1 as `real-money` on purpose — separating it is stage 2's job, and the prereg's stage-1 negative gate will say whether that is acceptable. |
+| Honest expectation | Stage-1 recall ≥ 18/20 and 0/40 negative candidates are demanding for a lexicon; the capability/explanation frame is the only precision instrument. A miss is a KILL, not a tuning round. |

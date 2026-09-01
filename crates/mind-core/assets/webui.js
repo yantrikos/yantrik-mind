@@ -300,6 +300,33 @@ async function loadSettings() {
         host.appendChild(card);
       }
     }
+    // E.WEB13: operator restart — confirmation-locked. The server exits cleanly and the
+    // supervisor brings the mind back; we poll /api/me until it answers again.
+    const rWrap = el("div", "card setting-row");
+    const rMain = el("div", "card-main");
+    const rt = el("div", "card-title"); rt.textContent = "Restart the mind"; rMain.appendChild(rt);
+    const rd = el("div", "card-desc"); rd.textContent = "Exits cleanly and lets the supervisor bring it back — a few seconds of downtime. Applies settings tagged 'restart'."; rMain.appendChild(rd);
+    const rRow = el("div", "job-actions");
+    const rBtn = el("button"); rBtn.textContent = "Restart…";
+    const rOut = el("div", "setting-key");
+    rBtn.addEventListener("click", async () => {
+      if (!window.confirm("Restart the mind now? It will be back in a few seconds.")) return;
+      rBtn.disabled = true;
+      const res = await postJson("/api/restart", { confirm: "restart" });
+      if (!res.ok) { rOut.textContent = `restart refused (${res.status || "offline"}): ${res.text}`; rBtn.disabled = false; return; }
+      rOut.textContent = "restarting…";
+      const started = Date.now();
+      const poll = setInterval(async () => {
+        try {
+          const ok = (await fetch("/api/me", { headers: { "X-YM-Web": "1" } })).ok;
+          if (ok) { clearInterval(poll); rOut.textContent = "back online."; rBtn.disabled = false; return; }
+        } catch (_) {}
+        if (Date.now() - started > 120000) { clearInterval(poll); rOut.textContent = "still down after 2 minutes — check the box."; rBtn.disabled = false; }
+      }, 2000);
+    });
+    rRow.appendChild(rBtn); rMain.append(rRow, rOut);
+    rWrap.appendChild(rMain);
+    host.appendChild(rWrap);
   } catch (_) { host.replaceChildren(textP("Could not read configuration.")); }
 }
 

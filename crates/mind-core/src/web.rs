@@ -1166,6 +1166,61 @@ fn handle(
                 }
             }
         }
+        // E.WEB13: restart — the mind asks nothing of the OS but its own exit. systemd's
+        // `Restart=always` does the restarting; this handler's whole mechanism is a clean
+        // process::exit AFTER the response has flushed. Operator device only, exact confirm
+        // body only, two witnesses before the exit (hash chain best-effort + journald always).
+        ("POST", "/api/restart") => {
+            if !has_client_header {
+                send(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "",
+                    "missing client header",
+                );
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(dev) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    if parsed["confirm"].as_str() != Some("restart") {
+                        send(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "",
+                            "restart requires {\"confirm\":\"restart\"}",
+                        );
+                        return;
+                    }
+                    // Witness 1: the hash-chained decision log. record() is fail-safe by
+                    // construction — a broken chain logs its own degradation and must never
+                    // block an operator's restart (E.WEB13 kill criterion).
+                    conv.recorder()
+                        .record(mind_observability::DecisionEvent::new(
+                            &format!("web-restart-{}", dev.id),
+                            "operator_restart",
+                        ));
+                    // Witness 2: journald, unconditionally.
+                    eprintln!("[restart] operator-requested restart (device={})", dev.id);
+                    send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "restarting": true }),
+                    );
+                    // The response is flushed; give the socket a beat, then exit cleanly and
+                    // let the supervisor bring the mind back. This is the ONLY process::exit
+                    // in this crate, and it sits behind the operator gate above (source-guarded).
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        std::process::exit(0);
+                    });
+                }
+            }
+        }
         ("GET", "/api/capabilities") => {
             let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
                 send(
@@ -1982,6 +2037,92 @@ mod tests {
         assert!(
             src.contains("c.is_ascii_alphanumeric() || c == '-' || c == '_'"),
             "the plugin id is charset-checked before dispatch"
+        );
+    }
+
+    /// E.WEB13 gate (4): the exit is reachable ONLY from the authenticated restart handler.
+    /// There is exactly one process::exit in this file, it sits inside the "/api/restart" arm,
+    /// and that arm passes the operator gate and the exact-confirm check before reaching it.
+    #[test]
+    fn restart_exit_is_unique_operator_gated_and_confirm_locked() {
+        let src = include_str!("web.rs");
+        // Build the needle at runtime so this test's own source cannot satisfy the count.
+        let needle = String::from("std::process::") + "exit(0)";
+        assert_eq!(
+            src.matches(needle.as_str()).count(),
+            1,
+            "exactly one exit site in the web surface"
+        );
+        let arm_start = src
+            .find("(\"POST\", \"/api/restart\")")
+            .expect("restart arm exists");
+        let arm_end = src[arm_start..]
+            .find("(\"GET\", \"/api/capabilities\")")
+            .expect("next arm bounds the slice")
+            + arm_start;
+        let arm = &src[arm_start..arm_end];
+        assert!(
+            arm.contains(needle.as_str()),
+            "the one exit lives inside the restart arm"
+        );
+        let gate = arm
+            .find("operator(&head, &devices)")
+            .expect("operator gate present");
+        let confirm = arm
+            .find("parsed[\"confirm\"].as_str() != Some(\"restart\")")
+            .expect("exact-confirm check present");
+        let exit = arm.find(needle.as_str()).unwrap();
+        assert!(
+            gate < confirm && confirm < exit,
+            "gate, then confirm, then exit — in that order"
+        );
+        assert!(
+            !arm.contains("cli_dispatch"),
+            "the restart arm forwards NOTHING to the tool dispatcher — no model-visible path"
+        );
+    }
+
+    /// E.WEB13 gate (3): both witnesses precede the exit — the hash-chain record and the
+    /// journald line appear in the arm before the exit site, and the response is sent before
+    /// the exit is scheduled (the operator sees success, not a dropped socket).
+    #[test]
+    fn restart_witnesses_and_response_precede_the_exit() {
+        let src = include_str!("web.rs");
+        let arm_start = src.find("(\"POST\", \"/api/restart\")").unwrap();
+        let arm_end = src[arm_start..]
+            .find("(\"GET\", \"/api/capabilities\")")
+            .unwrap()
+            + arm_start;
+        let arm = &src[arm_start..arm_end];
+        let needle = String::from("std::process::") + "exit(0)";
+        let exit = arm.find(needle.as_str()).expect("exit in arm");
+        let chain = arm.find("operator_restart").expect("chain witness present");
+        let journald = arm
+            .find("[restart] operator-requested")
+            .expect("journald witness present");
+        let respond = arm.find("\"restarting\": true").expect("response present");
+        assert!(
+            chain < exit && journald < exit && respond < exit,
+            "chain witness, journald witness, and the flushed response all precede the exit"
+        );
+    }
+
+    /// E.WEB13 gate (2), client side: the console asks the HUMAN before posting, and posts the
+    /// exact confirm body from its single call site — nothing else in the app reaches the route.
+    #[test]
+    fn restart_ui_is_confirm_locked_with_one_call_site() {
+        assert_eq!(
+            APP_JS.matches("postJson(\"/api/restart\"").count(),
+            1,
+            "exactly one restart call site in the app"
+        );
+        assert!(
+            APP_JS.contains("window.confirm(\"Restart the mind now?"),
+            "a human confirmation precedes the post"
+        );
+        assert!(
+            APP_JS.contains("postJson(\"/api/restart\", { confirm: \"restart\" })"),
+            "the exact confirm body is posted"
         );
     }
 

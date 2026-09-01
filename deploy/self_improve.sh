@@ -29,10 +29,22 @@ handoff() { # $1 = OUTCOME, $2 = note
 }
 [ -f "$KILL" ] && { echo "kill-switch present ($KILL) — self-build disabled"; exit 0; }
 
-# Auth: subscription token for Claude, yantrikdb token for the push. (root:600 env.)
+# Auth is BUILDER-SCOPED: a working Codex or Qwen lane must not be disabled by an unrelated stale
+# Claude token. The push credential is common to every lane. (root:600 env.)
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
-: "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"
+case "${YM_BUILDER:-claude}" in
+  qwen) : "${QWEN_API_KEY:?qwen builder selected but QWEN_API_KEY is unset}" ;;
+  codex)
+    CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"
+    [ -f "$CODEX_AUTH_HOME/auth.json" ] || [ -f /root/.codex/auth.json ] || {
+      echo "codex builder selected but no Codex auth.json is available" >&2
+      exit 1
+    }
+    ;;
+  claude) : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}" ;;
+  *) echo "unsupported YM_BUILDER: ${YM_BUILDER}" >&2; exit 1 ;;
+esac
 # Force real Claude (drop any MiniMax override that may be in the env).
 unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_API_KEY
 
@@ -78,7 +90,10 @@ if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   # (our own tool-selection workload) vs 4-5/6 for every local pool member, so it is the strongest
   # candidate to actually drive a build.
   echo "==> builder: Claude Code -> QwenCloud (${YM_QWEN_MODEL:-qwen3.8-max})"
-  ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"   ANTHROPIC_AUTH_TOKEN="${QWEN_API_KEY:?need QWEN_API_KEY for the qwen builder}"   ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"   BUILD_JSON="$(timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format json 2>&1)"
+  export ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+  export ANTHROPIC_AUTH_TOKEN="$QWEN_API_KEY"
+  export ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"
+  BUILD_JSON="$(timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format json 2>&1)"
   # Recover the prose for the gates (ALREADY-EXISTS detection) and RECORD THE SPEND.
   # Both delegate to real scripts on the box: inline python inside a shell inside ssh does not
   # survive the quoting - the first attempt died silently behind `2>/dev/null || true`, leaving no

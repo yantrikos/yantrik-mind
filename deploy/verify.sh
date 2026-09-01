@@ -38,6 +38,15 @@ for sib in ../yantrikdb ../yantrik-companion; do
   fi
 done
 
+step "self-build script wiring"
+if bash -n deploy/self_improve.sh deploy/self_build_tick.sh \
+  && python3 deploy/check_self_build.py >/tmp/ym_selfbuild_wiring.log 2>&1; then
+  ok
+else
+  bad
+  cat /tmp/ym_selfbuild_wiring.log 2>/dev/null || true
+fi
+
 step "cargo build --workspace"
 if cargo build --workspace --quiet 2>/tmp/ym_build.log; then ok; else bad; tail -20 /tmp/ym_build.log; fi
 

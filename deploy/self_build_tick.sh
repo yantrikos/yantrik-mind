@@ -40,7 +40,8 @@ if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   # builder also overrides the generator - see the self-review block.
   : "${QWEN_API_KEY:?qwen builder selected but QWEN_API_KEY is unset}"
 elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
-  [ -f "$HOME/.codex/auth.json" ] || [ -f /root/.codex/auth.json ] || { echo "$(date -u +%FT%TZ) codex builder selected but no ~/.codex/auth.json — tick skipped"; exit 0; }
+  CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"
+  [ -f "$CODEX_AUTH_HOME/auth.json" ] || [ -f /root/.codex/auth.json ] || { echo "$(date -u +%FT%TZ) codex builder selected but no Codex auth.json — tick skipped"; exit 0; }
 else
   : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
   AUTH_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 12 \
@@ -88,7 +89,6 @@ exec 9>/var/lib/yantrik-mind/.selfbuild.lock
 flock -n 9 || { echo "$(date -u +%FT%TZ) another tick is still running — skip"; exit 0; }
 
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
-: "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"
 unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_API_KEY
 export CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
@@ -98,16 +98,20 @@ export PATH="/usr/local/bin:/root/.cargo/bin:$PATH"
 echo "=========================================================="
 echo "$(date -u +%FT%TZ) self-build tick start"
 
-# QUOTA GUARD: the builder shares Pranab's Max subscription. If the 5-hour window is hot
-# (>= YM_BUILDER_HOT_PCT, default 85%), defer — his interactive hours outrank autonomous builds.
-# Runs BEFORE the goal pop, so nothing is consumed; cron retries in 6h.
-HOT="${YM_BUILDER_HOT_PCT:-85}"
-UTIL=$(curl -4 -s -m 12 -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN"   -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage 2>/dev/null   | python3 -c "import json,sys
+# QUOTA GUARD: only the Claude builder shares Pranab's Max subscription. Codex and Qwen have their
+# own auth/budget paths and must not dereference an absent Claude token. Runs BEFORE the goal pop,
+# so nothing is consumed; cron retries in 6h.
+if [ "${YM_BUILDER:-claude}" = "claude" ]; then
+  HOT="${YM_BUILDER_HOT_PCT:-85}"
+  UTIL=$(curl -4 -s -m 12 -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN"   -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage 2>/dev/null   | python3 -c "import json,sys
 try: print(int(json.load(sys.stdin).get(\"five_hour\",{}).get(\"utilization\",0)))
 except Exception: print(0)" 2>/dev/null || echo 0); UTIL=$(printf "%s" "$UTIL" | tail -1)
-if [ "${UTIL:-0}" -ge "$HOT" ]; then
-  echo "$(date -u +%FT%TZ) quota guard: Max 5h window at ${UTIL}% (>= ${HOT}%) — deferring build to after reset"
-  exit 0
+  if [ "${UTIL:-0}" -ge "$HOT" ]; then
+    echo "$(date -u +%FT%TZ) quota guard: Max 5h window at ${UTIL}% (>= ${HOT}%) — deferring build to after reset"
+    exit 0
+  fi
+else
+  echo "quota guard: Claude Max window does not apply to ${YM_BUILDER:-claude} builder"
 fi
 
 GOALS=/var/lib/yantrik-mind/selfbuild-goals.txt
@@ -159,15 +163,10 @@ if [ -z "$GOAL" ]; then
   # commits, so without this the loop cannot see its own aborts/drafts and re-proposes doomed goals.
   HANDOFF="$(curl -s -m 20 -H "Authorization: Bearer $(cat /var/lib/yantrik-mind/console.token 2>/dev/null)"       -X POST "http://127.0.0.1:${YM_CONTROL_PORT:-8077}/cli" -d "handoff_prompt" 2>/dev/null || true)"
   [ -n "$HANDOFF" ] && echo "self-review: handoff attached ($(printf %s "$HANDOFF" | wc -l) lines)"
-  # When the builder is qwen, the GOAL GENERATOR runs on qwen too - otherwise a dead Claude token
-  # kills the tick before the (working) builder is ever reached, which is exactly what happened for
-  # six consecutive ticks on 2026-07-27/28.
-  if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
-    export ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
-    export ANTHROPIC_AUTH_TOKEN="$QWEN_API_KEY"
-    export ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"
-  fi
-  GOAL="$(timeout 480 claude -p "You are yantrik-mind reviewing your own codebase to pick your next improvement.
+  # The GOAL GENERATOR rides the selected builder too. Otherwise Codex/Qwen can pass their auth
+  # preflight and still die here on an unrelated Claude credential before their builder is reached.
+  # That exact split-brain failure stalled six consecutive ticks on 2026-07-27/28.
+  GOAL_PROMPT="You are yantrik-mind reviewing your own codebase to pick your next improvement.
 
 $FITNESS
 $HANDOFF
@@ -179,8 +178,17 @@ NORTH STAR: make the typed-memory moat — typed beliefs, confidence scores, con
 Recently done (do NOT repeat or trivially restate these):
 $RECENT
 
-Read the core moat crates (crates/mind-conversation, crates/mind-memory, crates/mind-core) and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It MUST be self-contained, keep the build green WITH a test, be reversible, and MUST NOT touch crates/mind-governance. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes." \
-    --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r' || true)"
+Read the core moat crates (crates/mind-conversation, crates/mind-memory, crates/mind-core) and propose exactly ONE concrete, minimal, genuinely high-value improvement to implement next as a single focused PR. It MUST be self-contained, keep the build green WITH a test, be reversible, and MUST NOT touch crates/mind-governance. Reply with ONLY the goal as one imperative sentence — no preamble, no markdown, no quotes."
+  if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
+    export ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+    export ANTHROPIC_AUTH_TOKEN="$QWEN_API_KEY"
+    export ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"
+    GOAL="$(timeout 480 claude -p "$GOAL_PROMPT" --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r' || true)"
+  elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
+    GOAL="$(timeout 480 codex exec --skip-git-repo-check --sandbox read-only "$GOAL_PROMPT" </dev/null 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r' || true)"
+  else
+    GOAL="$(timeout 480 claude -p "$GOAL_PROMPT" --allowedTools "Read" --output-format text 2>/dev/null | awk 'NF{l=$0} END{print l}' | tr -d '\r' || true)"
+  fi
   cd /; rm -rf "$W" "$CH"; trap - EXIT
   [ -n "$GOAL" ] && echo "self-review proposed a goal" || echo "self-review produced no goal"
 fi

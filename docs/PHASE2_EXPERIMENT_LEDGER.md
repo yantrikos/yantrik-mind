@@ -2162,3 +2162,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Prediction (pre-registered) | The ≥99% completeness gate will NOT pass on first live contact — the roadmap itself lists absent stamps (legacy free-form turns unstamped, serving-link versions absent). Predicted: below 99%, with `goal_id`/`model_route` among the named gaps. A pass would be surprising and would need adversarial re-verification before being believed. |
 | Kill criteria | KILL the capture (record REFUSED) if the tool prints anything resembling a memory value, query text, or identifier rather than counts/kinds — that would violate the no-values-leave-the-box constraint and the tool's own contract. |
 | AGI feed | This IS the roadmap: Phase A's gate moves from DEFINED to its first live REACHABLE reading, and the honest number (pass or fail) becomes the Phase A baseline. |
+
+## E.AGI-A1 — RESULT: the Phase A gate met production and read 0.0%
+
+| Field | Value |
+| --- | --- |
+| Reading (2026-09-01, production box, live decision log) | `why chains`: **0/200 latest tool calls complete (0.0%; gate >=99%)** — 199/200 missing actor, context_fingerprint, evaluator_id, goal_id, lane, latency_ms, model_route, tool_version; 1 missing its observation link. `why packet-chains`: **0/6 complete (0.0%)**. `why forecast-chains`: no closure candidates yet. Aggregates only; no identifiers or values left the box. |
+| Prediction vs outcome | Prereg predicted "below 99%, goal_id/model_route among the named gaps." Correct in direction, wrong in magnitude: not a shortfall but a VOID — essentially every provenance stamp is absent from live traffic. |
+| Honest diagnosis (not over-claimed) | Consistent with the roadmap's own caveat: the stamping sites live on the compiled bounded-run and pack paths, while the family's actual traffic flows through the legacy free-form turn loop, which stamps nothing. E.R2's lesson at full scale: BENCHMARKED machinery, unreachable from production. The gate itself is now REACHABLE (first live reading captured); the provenance it measures is not. |
+| What this feeds | Phase A's real work order, now evidence-backed: unify the LIVE turn loop with the observation contract. Until then, every downstream phase gated on evaluator identity (C) or goal identity (F) is building on a log production never writes. |
+| Side-finding | The operator CLI (`deploy/ym`) was broken against the server's own ARCH-2 auth gate — the wrapper predates it. Fixed same day; the token is read on-box only. A capability is not integrated until it is reachable — including the diagnostic tools themselves. |

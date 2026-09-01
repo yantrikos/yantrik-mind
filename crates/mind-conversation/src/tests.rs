@@ -8337,6 +8337,48 @@ fn the_knock_decision_never_reads_the_world_shadow() {
     );
 }
 
+// ── E.WEB14: THE CONSOLE'S JSON DOORS — CLAIMS AND RECEIPT CHAINS ──────────────────────────────
+
+/// Gate (3): claims_json is the registry verbatim — same ids, answers, authority, evidence, and
+/// version as render() reads. Gate (2)/kill: horizon_history_json refuses a malformed id at the
+/// engine boundary regardless of what any caller checked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_console_json_doors_serve_the_registry_verbatim_and_refuse_bad_ids() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let ctx = mind_types::AccessContext::operator_audit();
+    let claims: serde_json::Value =
+        serde_json::from_str(&conv.cli_dispatch("claims_json", &ctx).await).unwrap();
+    assert_eq!(
+        claims["version"].as_str(),
+        Some(crate::self_claims::REGISTRY_VERSION)
+    );
+    let served = claims["claims"].as_array().unwrap();
+    assert_eq!(served.len(), crate::self_claims::CLAIMS.len());
+    for (json, claim) in served.iter().zip(crate::self_claims::CLAIMS) {
+        assert_eq!(json["id"].as_str(), Some(claim.id));
+        assert_eq!(json["answer"].as_str(), Some(claim.answer));
+        assert_eq!(json["authority"].as_str(), Some(claim.authority));
+        assert_eq!(
+            json["evidence"].as_array().unwrap().len(),
+            claim.evidence.len()
+        );
+    }
+    for bad in ["", "goal:horizon:x; DROP", "../etc", "a b", &"x".repeat(65)] {
+        let out = conv
+            .cli_dispatch(&format!("horizon_history_json {bad}"), &ctx)
+            .await;
+        assert!(
+            out.contains("malformed goal id"),
+            "the engine boundary refuses {bad:?}: {out}"
+        );
+    }
+}
+
 // ── E.MQ5a: THE REGISTRY'S EXPLICIT DOOR ────────────────────────────────────────────────────────
 
 /// Gates (1)-(3): `claims` lists exactly the registry (count, every id, version stamp);

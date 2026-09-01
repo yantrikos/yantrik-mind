@@ -413,3 +413,11 @@ body {
 .board-card.running { border-color: rgba(34,211,238,.4); }
 @media (max-width: 900px) { .board { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .board { grid-template-columns: 1fr; } }
+
+/* E.WEB14: receipt chains on horizon cards; boundaries reuse existing card styles. */
+.link-btn { background: none; border: none; color: var(--accent, #6b8cff); cursor: pointer; padding: 0; font-size: 0.85em; margin-top: 4px; }
+.link-btn:hover { text-decoration: underline; }
+.receipts { margin-top: 6px; padding: 6px 8px; border-left: 2px solid var(--border, #444); font-family: ui-monospace, monospace; font-size: 0.78em; }
+.receipts.hidden { display: none; }
+.receipt-line { padding: 2px 0; opacity: 0.9; }
+.receipt-line.outcome { font-weight: 600; opacity: 1; }

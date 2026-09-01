@@ -926,6 +926,74 @@ fn handle(
                 }
             }
         },
+        // E.WEB14: one goal's verified receipt chain. Operator-only like the horizons list; the
+        // id is charset-checked AGAIN at the engine boundary (defence in depth, same as plugin ids).
+        ("GET", p) if p.starts_with("/api/horizon-history") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let id = p
+                    .split_once("id=")
+                    .map(|(_, v)| v.split('&').next().unwrap_or("").to_string())
+                    .unwrap_or_default();
+                if id.is_empty()
+                    || id.len() > 64
+                    || !id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_')
+                {
+                    send(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        "",
+                        "invalid goal id",
+                    );
+                    return;
+                }
+                let out = rt.block_on(conv.cli_dispatch(
+                    &format!("horizon_history_json {id}"),
+                    &mind_types::AccessContext::operator_audit(),
+                ));
+                match serde_json::from_str::<serde_json::Value>(&out) {
+                    Ok(v) if v.get("error").is_none() => send_json(&mut stream, "200 OK", "", &v),
+                    Ok(v) => send_json(&mut stream, "409 Conflict", "", &v),
+                    Err(_) => send(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "",
+                        "horizon history failed",
+                    ),
+                }
+            }
+        },
+        // E.WEB14: the self-claims registry — readable by ANY paired device: what the mind states
+        // about its own boundaries is exactly what a household member is entitled to know.
+        ("GET", "/api/claims") => {
+            let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "",
+                    "not paired",
+                );
+                return;
+            };
+            let out = rt.block_on(
+                conv.cli_dispatch("claims_json", &mind_types::AccessContext::operator_audit()),
+            );
+            match serde_json::from_str::<serde_json::Value>(&out) {
+                Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                Err(_) => send(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    "text/plain",
+                    "",
+                    "claims failed",
+                ),
+            }
+        }
         ("POST", "/api/horizon") => {
             if !has_client_header {
                 send(
@@ -2106,6 +2174,43 @@ mod tests {
         assert!(
             chain < exit && journald < exit && respond < exit,
             "chain witness, journald witness, and the flushed response all precede the exit"
+        );
+    }
+
+    /// E.WEB14 gates (2) and (4): horizon-history is operator-gated with an id charset check
+    /// BEFORE dispatch; claims requires a paired device; the client renders receipts DOM-only.
+    #[test]
+    fn the_console_doors_are_gated_and_charset_checked() {
+        let src = include_str!("web.rs");
+        let hh = src
+            .find("p.starts_with(\"/api/horizon-history\")")
+            .expect("horizon-history route exists");
+        let arm = &src[hh..hh + 2200];
+        let gate = arm
+            .find("operator(&head, &devices)")
+            .expect("operator gate");
+        let check = arm
+            .find("c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_'")
+            .expect("id charset check");
+        let dispatch = arm.find("horizon_history_json").expect("dispatch");
+        assert!(
+            gate < check && check < dispatch,
+            "gate, then charset, then dispatch"
+        );
+        let cl = src
+            .find("(\"GET\", \"/api/claims\")")
+            .expect("claims route exists");
+        assert!(
+            src[cl..cl + 600].contains("devices.authenticate(&t)"),
+            "claims requires a paired device"
+        );
+        assert!(
+            APP_JS.contains("encodeURIComponent(g.goal_id)"),
+            "the client encodes the id it sends"
+        );
+        assert!(
+            APP_JS.contains("line.textContent = "),
+            "receipt lines are rendered as text, never markup"
         );
     }
 

@@ -6708,6 +6708,41 @@ impl ConversationEngine {
                 },
                 None => serde_json::json!({ "available": false, "goals": [] }).to_string(),
             },
+            // E.WEB14: the verified receipt chain for ONE goal, as the console's JSON. The id is
+            // charset-checked here so no caller — web or otherwise — can hand the store free text.
+            "horizon_history_json" => {
+                let id = rest.trim();
+                let well_formed = !id.is_empty()
+                    && id.len() <= 64
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_');
+                if !well_formed {
+                    return serde_json::json!({ "error": "malformed goal id" }).to_string();
+                }
+                match &self.recipes {
+                    Some(recipes) => match recipes.horizon_history(id, Self::now_ms()) {
+                        Ok(view) => surface::json_or_error(&view),
+                        Err(error) => serde_json::json!({
+                            "error": format!("horizon history failed verification: {error}")
+                        })
+                        .to_string(),
+                    },
+                    None => serde_json::json!({ "error": "durable storage unavailable" }).to_string(),
+                }
+            }
+            // E.WEB14: the self-claims registry as JSON — the same constants render() reads,
+            // so the console shows exactly what the interceptor would say (one renderer principle).
+            "claims_json" => serde_json::json!({
+                "version": self_claims::REGISTRY_VERSION,
+                "claims": self_claims::CLAIMS.iter().map(|c| serde_json::json!({
+                    "id": c.id,
+                    "answer": c.answer,
+                    "authority": c.authority,
+                    "evidence": c.evidence,
+                })).collect::<Vec<_>>(),
+            })
+            .to_string(),
             "posture_json" => self.posture_report().await.to_string(),
             "threads_json" => surface::json_or_error(&self.thread_report().await),
             "skills_json" => surface::json_or_error(&self.skill_report().await),

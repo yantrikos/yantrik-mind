@@ -265,6 +265,24 @@ async function loadCapabilities() {
       }
     }
     if (!byCat.size) host.appendChild(textP("No capabilities reported."));
+    // E.WEB14: BOUNDARIES — the typed self-claims registry, exactly what the mind would say
+    // about its own powers when asked (one renderer principle: same constants, same version).
+    try {
+      const cr = await fetch("/api/claims", { headers: { "X-YM-Web": "1" } });
+      if (cr.ok) {
+        const reg = await cr.json();
+        const g = el("div", "cap-group"); g.textContent = `boundaries · ${reg.version || "registry"}`; host.appendChild(g);
+        for (const c of reg.claims || []) {
+          const card = el("div", "card setting-row");
+          const main = el("div", "card-main");
+          const t = el("div", "card-title"); t.textContent = c.id; main.appendChild(t);
+          const d = el("div", "card-desc"); d.textContent = c.answer; main.appendChild(d);
+          const k = el("div", "setting-key"); k.textContent = `enforced by ${c.authority} · evidence: ${(c.evidence || []).join(", ")}`; main.appendChild(k);
+          card.appendChild(main);
+          host.appendChild(card);
+        }
+      }
+    } catch (_) { /* boundaries are additive; the capability report stands without them */ }
   } catch (_) { host.replaceChildren(textP("Could not read the capability report.")); }
 }
 
@@ -623,6 +641,32 @@ async function loadHorizons() {
       if (g.budget_expired) { const c = el("span", "tag restart"); c.textContent = "budget expired"; chips.appendChild(c); }
       main.appendChild(chips);
       const key = el("div", "setting-key"); key.textContent = g.goal_id; main.appendChild(key);
+      // E.WEB14: the receipt chain, on demand — the same verified view the peer checked
+      // cryptographically, rendered DOM-only (receipt text is data, never markup).
+      const rx = el("div", "receipts hidden");
+      const rbtn = el("button"); rbtn.textContent = "receipts"; rbtn.className = "link-btn";
+      rbtn.addEventListener("click", async () => {
+        if (!rx.classList.contains("hidden")) { rx.classList.add("hidden"); return; }
+        rx.replaceChildren(textP("reading the chain…")); rx.classList.remove("hidden");
+        const hr = await fetch(`/api/horizon-history?id=${encodeURIComponent(g.goal_id)}`, { headers: { "X-YM-Web": "1" } });
+        const h = await hr.json().catch(() => ({ error: "unreadable" }));
+        rx.replaceChildren();
+        if (!hr.ok || h.error) { rx.appendChild(textP(`chain not verified: ${h.error || hr.status}`)); return; }
+        for (const ev of h.lifecycle || []) {
+          const line = el("div", "receipt-line");
+          const when = new Date(ev.occurred_at_ms).toLocaleTimeString();
+          const hop = `${ev.previous_queue_status || "no-queue"} → ${ev.next_queue_status || "terminal"}`;
+          line.textContent = `${when} · ${String(ev.event).toUpperCase()} · ${hop} · ${String(ev.receipt_sha256).slice(0, 12)}${ev.failure_reason ? " · " + ev.failure_reason : ""}`;
+          rx.appendChild(line);
+        }
+        if (h.outcome) {
+          const o = el("div", "receipt-line outcome");
+          o.textContent = `OUTCOME ${h.outcome.status} · actions ${h.outcome.actions} · cost ${h.outcome.spent_cost_units} · ${String(h.outcome.receipt_sha256).slice(0, 12)}`;
+          rx.appendChild(o);
+        }
+        if (!(h.lifecycle || []).length && !h.outcome) rx.appendChild(textP("no receipts yet."));
+      });
+      main.appendChild(rbtn); main.appendChild(rx);
       card.appendChild(main);
       const side = el("div", "card-side");
       const st = el("span", "job-state " + ((g.status || "").includes("active") ? "running" : "done"));

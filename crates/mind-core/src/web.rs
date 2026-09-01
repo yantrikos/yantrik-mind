@@ -2314,6 +2314,12 @@ mod tests {
                 && group_body.contains("get(o.name || o.id)"),
             "runs and orders share the name rule"
         );
+        // The schedule store names an order "standing: <agent>" (import_skill.rs); the key rule
+        // sees through it, or one agent becomes two threads the first time its order fires.
+        assert!(
+            group_body.contains(".replace(/^standing:\\s*/i, \"\")"),
+            "the key rule strips the store's standing: prefix"
+        );
         // The list row carries the next fire time from the server's own countdown.
         let tasks_fn = js.find("async function loadTasks()").unwrap();
         assert!(

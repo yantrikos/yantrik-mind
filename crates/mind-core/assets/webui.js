@@ -770,7 +770,9 @@ function bucketPaint() {
 function agentThreads(jobs, orders) {
   const byName = new Map();
   const get = (name) => {
-    const key = String(name || "(unnamed)");
+    // The schedule store names an order "standing: <agent>"; the agent's runs carry "<agent>".
+    // One thread per agent means one key rule that sees through that prefix.
+    const key = String(name || "(unnamed)").replace(/^standing:\s*/i, "");
     if (!byName.has(key)) byName.set(key, { name: key, runs: [], orders: [], running: false, last_ms: 0, task: "" });
     return byName.get(key);
   };

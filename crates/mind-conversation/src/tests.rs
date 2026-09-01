@@ -8192,6 +8192,49 @@ async fn the_walls_travel_with_every_turn_upstream_of_untrusted_blocks() {
     );
 }
 
+// ── E.MQ5a: THE REGISTRY'S EXPLICIT DOOR ────────────────────────────────────────────────────────
+
+/// Gates (1)-(3): `claims` lists exactly the registry (count, every id, version stamp);
+/// `claims <id>` is byte-identical to render(); an unknown id gets usage, never a guess.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_claims_command_is_the_registry_verbatim() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let ctx = mind_types::AccessContext::operator_audit();
+    let list = conv.cli_dispatch("claims", &ctx).await;
+    assert!(
+        list.contains(crate::self_claims::REGISTRY_VERSION),
+        "version stamped: {list}"
+    );
+    for claim in crate::self_claims::CLAIMS {
+        assert!(list.contains(claim.id), "listed: {}", claim.id);
+    }
+    assert!(
+        list.contains(&format!(
+            "{} typed claims",
+            crate::self_claims::CLAIMS.len()
+        )),
+        "count stated: {list}"
+    );
+    let one = conv.cli_dispatch("claims self-restart", &ctx).await;
+    let direct = crate::self_claims::render(
+        crate::self_claims::CLAIMS
+            .iter()
+            .find(|c| c.id == "self-restart")
+            .unwrap(),
+    );
+    assert_eq!(one, direct, "one renderer, two doors — byte-identical");
+    let unknown = conv.cli_dispatch("claims no-such-claim", &ctx).await;
+    assert!(
+        unknown.contains("Unknown claim id") && unknown.contains("ym claims"),
+        "usage, never a guess: {unknown}"
+    );
+}
+
 // ── E.MQ4: MATCHED SELF-CAPABILITY QUESTIONS NEVER REACH GENERATION ─────────────────────────────
 
 /// Gates (2) and (4): a matched question is answered by the registry VERBATIM with provenance

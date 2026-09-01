@@ -8637,6 +8637,31 @@ impl ConversationEngine {
                     _ => "Usage: ym pack install <json> · certify <name> · draft <topic> · rm <name> · mount <file.ydbpack> · adopt <file.ydbpack> · unmount <id> · disown <id> · seal-learned [dest.ydbpack] · mounted · probe <query> · stats · route <query> · library · lease <id> [days=N] [reason=…] · release <id> · leases".to_string(),
                 }
             }
+            // E.MQ5a: the registry's EXPLICIT door — same render() as the interceptor, no
+            // matcher involved. The trustworthy surface ships before the clever one.
+            "claims" => {
+                let want = rest.trim();
+                if want.is_empty() {
+                    let mut out = format!(
+                        "SELF-CLAIMS REGISTRY ({}) — {} typed claims. `ym claims <id>` for one.\n",
+                        self_claims::REGISTRY_VERSION,
+                        self_claims::CLAIMS.len()
+                    );
+                    for claim in self_claims::CLAIMS {
+                        let head: String = claim.answer.chars().take(72).collect();
+                        out.push_str(&format!("  {} — {head}…\n", claim.id));
+                    }
+                    out
+                } else {
+                    match self_claims::CLAIMS.iter().find(|c| c.id == want) {
+                        Some(claim) => self_claims::render(claim),
+                        None => format!(
+                            "Unknown claim id '{want}'. `ym claims` lists all {}.",
+                            self_claims::CLAIMS.len()
+                        ),
+                    }
+                }
+            }
             "leases" => self.leases_render().await,
             "plugins" => self.plugins.lock().unwrap().render_list(),
             "plugin" => {

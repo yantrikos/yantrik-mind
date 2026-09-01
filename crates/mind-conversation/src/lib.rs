@@ -12428,8 +12428,25 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
     /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
-                                   // ARCH-1 slice 2: every memory read this turn makes — directly or via an intercept
-                                   // (drafting, grounding, pinning) — carries the speaker's Principal ctx.
+                                   // E.MQ4 (placement per E.MQ4b, gate 4): SELF-CAPABILITY QUESTIONS ARE ANSWERED BY THE
+                                   // REGISTRY, NOT THE MODEL — and the deterministic decision happens BEFORE any memory-
+                                   // touching operation (episode recording, proactive resolution, ledger) runs. A matched
+                                   // question returns the typed claim VERBATIM; only the transcript appends follow the
+                                   // decision. Unmatched questions flow through untouched.
+        if let Some(claim) = self_claims::match_claim(user_text) {
+            let reply = self_claims::render(claim);
+            let _ = self
+                .memory
+                .append_message_scoped("user", user_text, ws.clone())
+                .await;
+            let _ = self
+                .memory
+                .append_message_scoped("assistant", &reply, ws.clone())
+                .await;
+            return Ok(reply);
+        }
+        // ARCH-1 slice 2: every memory read this turn makes — directly or via an intercept
+        // (drafting, grounding, pinning) — carries the speaker's Principal ctx.
         let turn_ctx = mind_types::AccessContext::principal(
             id.viewer(),
             mind_types::Purpose::conversation(&id.owner),
@@ -12447,22 +12464,6 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Intercepted here so the pre-committed engagement prediction gets GRADED (a knock the user
         // deferred or muted must cost the ledger, not quietly vanish). Parsing is tight, so ordinary
         // conversation that merely contains "later" flows straight through to the normal path.
-        // E.MQ4: SELF-CAPABILITY QUESTIONS ARE ANSWERED BY THE REGISTRY, NOT THE MODEL. A matched
-        // question returns the typed claim VERBATIM — no memory read, no LLM, no paraphrase
-        // (E.MQ4a). Three audits measured the generative path confidently wrong about the mind's
-        // own powers; a wall answers for the walls now. Unmatched questions flow through untouched.
-        if let Some(claim) = self_claims::match_claim(user_text) {
-            let reply = self_claims::render(claim);
-            let _ = self
-                .memory
-                .append_message_scoped("user", user_text, ws.clone())
-                .await;
-            let _ = self
-                .memory
-                .append_message_scoped("assistant", &reply, ws)
-                .await;
-            return Ok(reply);
-        }
         if let Some(reply) = self.knock_reply(user_text).await {
             let _ = self
                 .memory

@@ -39,8 +39,8 @@ pub const CLAIMS: &[Claim] = &[
         authority: "compile-time const wall",
         evidence: &["paper-broker boundary"],
         match_groups: &[
-            &["trade", "trading"],
-            &["real", "live", "actual", "money", "funds"],
+            &["trade", "trades", "trading"],
+            &["real", "real-money", "live", "actual", "money", "funds"],
         ],
     },
     Claim {
@@ -68,14 +68,17 @@ pub const CLAIMS: &[Claim] = &[
                  Malformed calls are refused before prediction, by design.",
         authority: "flight recorder, live-verified",
         evidence: &["E.AGI-A2", "E.AGI-A4"],
-        match_groups: &[&["predict", "forecast"], &["tool", "call", "invoke"]],
+        match_groups: &[
+            &["predict", "predicted", "forecast"],
+            &["tool", "invoke", "tool call"],
+        ],
     },
     Claim {
         id: "privacy-lanes",
         answer: "No. Household answers cannot read private-lane memories — the private lane \
                  fails closed.",
         authority: "privacy-lane scoping walls",
-        evidence: &["E.SEC16", "E.OBS1"],
+        evidence: &["ARCH-1 read isolation"],
         match_groups: &[&["private"], &["household"]],
     },
     Claim {
@@ -97,7 +100,7 @@ pub const CLAIMS: &[Claim] = &[
                  from live chat. A governed self-build lane can propose code changes as \
                  human-reviewed drafts; it cannot merge deploy or config changes autonomously.",
         authority: "governance walls plus the gated self-build lane",
-        evidence: &["ARCH-2", "E.MQ amendment"],
+        evidence: &["governance: config-write REFUSED", "E.MQ amendment"],
         match_groups: &[
             &[
                 "config",
@@ -107,6 +110,9 @@ pub const CLAIMS: &[Claim] = &[
                 "builds you",
             ],
             &["edit", "change", "modify", "alter", "rewrite"],
+            // Self-TARGET, not just self-address: "can you change settings on the TV?" is
+            // about the TV (Codex's audit example) — this claim needs the mind as object.
+            &["your", "yourself"],
         ],
     },
     Claim {
@@ -116,14 +122,29 @@ pub const CLAIMS: &[Claim] = &[
                  matters.",
         authority: "the DMN ring, surfaced in the console's Dreaming panel",
         evidence: &["E.WEB12"],
-        match_groups: &[&[
-            "dream",
-            "offline",
-            "sleep",
-            "between conversations",
-            "between our conversations",
-            "reflection",
-        ]],
+        match_groups: &[
+            // "reflection" removed: it names a common programming concept and hijacked
+            // "explain reflection in Rust" (Codex's audit example).
+            &[
+                "dream",
+                "dreams",
+                "dreaming",
+                "offline",
+                "sleep",
+                "between conversations",
+                "between our conversations",
+            ],
+            // Second-person-subject markers: the question must be about what the MIND does,
+            // not a request to explain the concept.
+            &[
+                "do you",
+                "you run",
+                "your",
+                "are you",
+                "you dream",
+                "you sleep",
+            ],
+        ],
     },
     Claim {
         id: "tamper-evidence",
@@ -134,8 +155,10 @@ pub const CLAIMS: &[Claim] = &[
         evidence: &["E.WEB7b"],
         match_groups: &[
             &["log"],
+            // Past/perfective forms only: "can you edit my log entry?" is an action REQUEST,
+            // not a question about tamper behavior — bare "edit"/"changed" invited hijacks.
             &[
-                "tamper", "edited", "edit", "mutate", "forge", "altered", "changed",
+                "tamper", "tampered", "edited", "mutated", "forged", "altered",
             ],
         ],
     },
@@ -152,7 +175,7 @@ pub const CLAIMS: &[Claim] = &[
         answer: "Yes. I distinguish a call that merely ran from one that actually worked: every \
                  tool outcome carries a six-way verdict plus a semantic-success grade, per tool.",
         authority: "the tool-outcome classifier",
-        evidence: &["E.PK2b"],
+        evidence: &["E.PK2b-E.PK2e"],
         match_groups: &[
             &["ran", "completed", "executed"],
             &["worked", "succeeded", "succeed", "success"],
@@ -160,26 +183,56 @@ pub const CLAIMS: &[Claim] = &[
     },
 ];
 
-/// A question is in scope only when it is about the MIND ITSELF — it must address "you/your".
-/// The per-claim topic groups carry the rest of the specificity; a question that mentions
-/// "you" and a claim's full topic set gets that claim's truth, which is correct information
-/// even when the phrasing is unusual.
+/// Word-bounded containment: the needle (word or multi-word phrase) matches only at word
+/// boundaries. Codex's audit of the first matcher found "live" hiding inside "deliver" and
+/// "you" inside "youth" — raw substring containment is not a lexical test.
+fn word_bounded(hay: &str, needle: &str) -> bool {
+    let bytes = hay.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(needle) {
+        let begin = start + pos;
+        let end = begin + needle.len();
+        let left_ok = begin == 0 || !bytes[begin - 1].is_ascii_alphanumeric();
+        let right_ok = end == hay.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = begin + 1;
+    }
+    false
+}
+
+/// A question is in scope only when it addresses the MIND ITSELF, word-bounded — "youth"
+/// is not "you". The per-claim topic groups carry the rest of the specificity.
 fn self_directed(lower: &str) -> bool {
-    lower.contains("you") || lower.contains("your")
+    word_bounded(lower, "you") || word_bounded(lower, "your") || word_bounded(lower, "yourself")
+}
+
+/// Structural self-capability intent: the turn must actually be a QUESTION — it ends with a
+/// question mark or opens interrogatively. A statement that happens to contain topic words is
+/// not asking the mind about its powers (Codex's gate-3 finding).
+fn interrogative(lower: &str) -> bool {
+    lower.trim_end().ends_with('?')
+        || [
+            "can ", "could ", "do ", "does ", "are ", "is ", "would ", "will ", "have ", "if ",
+            "when ", "suppose ", "before ",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
 }
 
 /// Deterministic match: first claim whose every group has at least one term present.
 /// No scores, no thresholds, no model — an auditor can replay this with grep.
 pub fn match_claim(user_text: &str) -> Option<&'static Claim> {
     let lower = user_text.to_lowercase();
-    if !self_directed(&lower) {
+    if !self_directed(&lower) || !interrogative(&lower) {
         return None;
     }
     CLAIMS.iter().find(|claim| {
         claim
             .match_groups
             .iter()
-            .all(|group| group.iter().any(|term| lower.contains(term)))
+            .all(|group| group.iter().any(|term| word_bounded(&lower, term)))
     })
 }
 
@@ -258,6 +311,16 @@ mod tests {
             "What did we talk about yesterday?",
             "My brother wants to learn woodworking from documentation",
             "Can you search for real estate listings?",
+            // ── E.MQ4b: Codex's audit hijacks, permanent regressions ──────────────────
+            "Can you deliver a trading summary?",
+            "Can you change settings on the TV?",
+            "Can you explain reflection in Rust?",
+            "Could youth learn a tool from docs?",
+            // Same-shape probes: action requests and concept questions near claim topics.
+            "Can you edit my log entry?",
+            "Can you predict who will call me tomorrow?",
+            "Can you explain lucid dreaming?",
+            "Did the backup script run and succeed?",
         ] {
             assert_eq!(
                 match_claim(question).map(|c| c.id),
@@ -279,6 +342,33 @@ mod tests {
             out.starts_with(claim.answer),
             "the claim text is delivered verbatim, first"
         );
+    }
+
+    /// E.MQ4b gate (4): the deterministic decision precedes every memory-touching operation in
+    /// handle_turn_as — a source guard on placement, since the audit found the first wiring ran
+    /// episode recording, proactive resolution, and the ledger BEFORE the match.
+    #[test]
+    fn the_intercept_precedes_all_memory_operations_in_the_turn() {
+        let src = include_str!("lib.rs");
+        let turn = src
+            .find("pub async fn handle_turn_as")
+            .expect("handle_turn_as exists");
+        let body = &src[turn..turn + 4000];
+        let matched = body
+            .find("self_claims::match_claim")
+            .expect("the intercept is present");
+        for later in [
+            "record_episode",
+            "resolve_proactive",
+            "ledger_resolve",
+            "knock_reply",
+        ] {
+            let pos = body.find(later).unwrap_or(usize::MAX);
+            assert!(
+                matched < pos,
+                "match_claim must precede {later} in handle_turn_as"
+            );
+        }
     }
 
     /// Registry completeness: every claim has nonempty answer, authority, evidence, and at

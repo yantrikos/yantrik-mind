@@ -2143,3 +2143,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The gap | E.WEB7b shipped the fail-closed behavior but no adversarial regression pinned it: nothing proved a VALID PREFIX plus one parseable forged line yields an EMPTY feed rather than a trusted-looking prefix. |
 | The test | `web_decisions_fail_empty_when_the_decision_chain_does_not_verify` (Codex-authored): records one genuine event, appends a parseable line with a zeroed chain hash, asserts `web_recent_decisions` returns nothing. Green on both workspaces; fmt clean. |
 | AGI feed | The oversight surface's integrity contract is now regression-locked — future refactors of the decision reader cannot silently weaken fail-closed without a red test. |
+
+## E.WEB13 — restart control, least-privilege: the mind asks nothing of the OS but its own exit (prereg)
+
+| Field | Value |
+| --- | --- |
+| Hypothesis | An operator can restart the mind from the console with bounded downtime and full attribution, WITHOUT the process gaining any new OS privilege. Design: systemd already runs `Restart=always, RestartSec=5`; the endpoint's whole mechanism is a clean `process::exit` after the response flushes. No shell, no helper binary, no root, no new capability anywhere. |
+| Gates (all must hold) | (1) `POST /api/restart` requires the client header AND an authenticated OPERATOR device; members and unauthenticated callers are refused without side effects. (2) The body must be exactly `{"confirm":"restart"}` — a UI misfire cannot restart the mind. (3) Before exiting, the handler appends a `operator_restart` event to the hash-chained decision log AND emits a journald-visible line — two independent witnesses (Doctrine 3). (4) The exit is reachable ONLY from this authenticated HTTP handler: no tool, plugin, skill, or model-visible path may reference it (source-guard test). |
+| Kill criteria (pre-written) | KILL if any non-operator identity or any tool-dispatch path can reach the exit; KILL if the response cannot be flushed before exit (operator would see an error for a successful restart); KILL if the audit event cannot be recorded fail-safe (a broken recorder must not block an operator's restart — audit degrades to journald alone, and that degradation is itself logged). |
+| AGI feed | Phase F interruptibility: "every action traceable, interruptible ... irreversible operations always human-authorised." The human-authorised restart is the base interrupt primitive, witnessed on the same chain as every other decision. |

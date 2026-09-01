@@ -903,4 +903,18 @@ function inline(parent, text) {
   }
 }
 
+// E.WEB10: theme choice — a per-viewer convenience, remembered in localStorage, never server state.
+(function initTheme() {
+  try {
+    const saved = localStorage.getItem("ym-theme");
+    if (saved === "light" || saved === "dark") document.documentElement.setAttribute("data-theme", saved);
+  } catch (_) {}
+  const btn = document.getElementById("theme-btn");
+  if (btn) btn.addEventListener("click", () => {
+    const now = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", now);
+    try { localStorage.setItem("ym-theme", now); } catch (_) {}
+  });
+})();
+
 boot();

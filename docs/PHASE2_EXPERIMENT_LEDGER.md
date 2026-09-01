@@ -2102,3 +2102,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | CLIENT-ONLY: a `[data-theme]` attribute on the root drives a light token override block; a toggle in the sidebar footer flips it and persists the choice to localStorage (wrapped in try/catch — a private window that throws still renders). Default follows the dark house look; the toggle is a per-viewer convenience, never server state. |
 | Kill criteria | (1) The light block redefines only tokens already defined on `:root` — no color gets its sole definition inside the theme block (a guard test greps the CSS for the token names in both places). (2) The toggle persists and restores across reload; a storage exception is swallowed and the UI still renders (default theme). (3) Workspace green (assets embedded). |
 | AGI feed | None claimed — this is honest UX polish, and the ledger says so rather than inventing a feed. Not every slice feeds the AGI journey; pretending otherwise would cheapen the field. |
+
+## E.WEB10 — RESULTS: a light theme, chooseable and remembered
+
+| Field | Value |
+| --- | --- |
+| What shipped | A `[data-theme="light"]` token override block (redefining only existing :root tokens), a sidebar toggle that flips and persists the choice to localStorage in try/catch, default following the dark house look. Client-only. Locale/i18n recorded as a NON-GOAL (disproportionate for one household). |
+| Kill criteria | (1) `the_light_theme_only_overrides_existing_tokens` asserts every token in the light block is also defined on :root: PASS. (2) Toggle persists across reload; a storage exception is swallowed and the UI still renders. (3) Workspace 1407/0/4: PASS. |
+| AGI feed | None claimed — honest UX polish, recorded as such. Not every slice feeds the journey; the field is more valuable for being able to say so. |

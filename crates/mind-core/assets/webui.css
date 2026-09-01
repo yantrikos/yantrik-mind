@@ -22,6 +22,24 @@
   --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
+/* E.WEB10: light theme — redefines ONLY tokens already on :root; the toggle sets data-theme. */
+:root[data-theme="light"] {
+  --bg0: #eef1f8;
+  --bg1: #f7f9fc;
+  --glass: rgba(20, 24, 45, 0.03);
+  --glass-strong: rgba(20, 24, 45, 0.06);
+  --line: rgba(20, 24, 45, 0.12);
+  --ink: #1a1f33;
+  --ink-dim: #4a5170;
+  --ink-faint: #8189a8;
+  --accent-a: #7c3aed;
+  --accent-b: #0891b2;
+  --ok: #059669;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --user-bubble: linear-gradient(135deg, rgba(124,58,237,.10), rgba(8,145,178,.08));
+}
+
 html, body { height: 100%; }
 body {
   font: 15px/1.55 -apple-system, "Segoe UI Variable", "Segoe UI", Inter, Roboto, sans-serif;

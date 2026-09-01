@@ -2019,6 +2019,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
+    /// E.WEB10: the light theme redefines only tokens already on :root — no color gets its sole
+    /// definition inside the theme block (which would make it undefined in the default theme).
+    #[test]
+    fn the_light_theme_only_overrides_existing_tokens() {
+        let css = APP_CSS;
+        let light_start = css
+            .find("[data-theme=\"light\"]")
+            .expect("light block exists");
+        let light_block = &css[light_start
+            ..css[light_start..]
+                .find('}')
+                .map(|e| light_start + e)
+                .unwrap_or(css.len())];
+        for tok in [
+            "--bg0",
+            "--ink",
+            "--line",
+            "--accent-a",
+            "--danger",
+            "--user-bubble",
+        ] {
+            let defined_on_root = css[..light_start].contains(&format!("{tok}:"));
+            let in_light = light_block.contains(&format!("{tok}:"));
+            if in_light {
+                assert!(
+                    defined_on_root,
+                    "{tok} is overridden in light but never defined on :root"
+                );
+            }
+        }
+    }
+
     #[test]
     fn session_cookie_extraction_ignores_other_cookies() {
         let head = "GET / HTTP/1.1\r\ncookie: theme=dark; ym_session=tok123; other=x\r\n";

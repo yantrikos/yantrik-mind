@@ -72,9 +72,18 @@
         <button class="nav-item" data-panel="board">
           <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="10" rx="1"/><rect x="17" y="4" width="4" height="13" rx="1"/></svg>Board
         </button>
-        <button class="nav-item" data-panel="tasks">
-          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/></svg>Agents &amp; goals
+        <!-- E.WEB17: agents are a sub-menu — what is working now, what is waiting, and the composer.
+             Three views over the same data; one classifier decides which bucket an item is in. -->
+        <div class="nav-item nav-parent" aria-hidden="true">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/></svg>Agents
+        </div>
+        <button class="nav-item nav-sub" data-panel="tasks" data-view="running">
+          Running<span class="nav-count" id="count-running" hidden>0</span>
         </button>
+        <button class="nav-item nav-sub" data-panel="tasks" data-view="dormant">
+          Dormant<span class="nav-count" id="count-dormant" hidden>0</span>
+        </button>
+        <button class="nav-item nav-sub" data-panel="tasks" data-view="new">New agent</button>
         <button class="nav-item" data-panel="files">
           <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Files
         </button>
@@ -129,12 +138,13 @@
       </div>
 
       <!-- Agents & standing orders -->
-      <div class="panel" id="panel-tasks">
+      <div class="panel" id="panel-tasks" data-view="running">
         <header class="panel-head">
-          <h2>Agents &amp; goals</h2>
-          <p class="panel-sub">Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Durable goals survive restarts and act on schedule.</p>
+          <h2 id="tasks-title">Running</h2>
+          <p class="panel-sub" id="tasks-sub">Agents and durable goals working right now.</p>
         </header>
         <div class="cards" id="tasks-cards">
+          <div class="agents-section view-new">
           <div class="agent-tabs">
             <button id="tab-delegate" class="agent-tab active" type="button">Delegate</button>
             <button id="tab-import" class="agent-tab" type="button">Import agent document</button>
@@ -171,7 +181,20 @@
             <button id="import-btn" type="submit">Import</button>
           </form>
           <p id="agent-reply" class="loading hidden"></p>
-          <div id="job-cards"><p class="loading">reading the board…</p></div>
+          </div>
+          <div class="agents-section view-running view-dormant">
+            <div class="cap-group">Agent runs</div>
+            <div id="job-cards"><p class="loading">reading the board…</p></div>
+          </div>
+          <div class="agents-section view-dormant">
+            <div class="cap-group">Standing orders</div>
+            <div id="orders-cards"><p class="loading">reading standing orders…</p></div>
+          </div>
+          <div class="agents-section view-running view-dormant">
+            <div class="cap-group">Long-horizon goals</div>
+            <div id="horizon-cards"><p class="loading">reading durable goals…</p></div>
+          </div>
+          <div class="agents-section view-new">
           <div class="cap-group">Long-horizon goals</div>
           <form id="horizon-form" class="agent-form" autocomplete="off">
             <select id="horizon-delay" class="agent-input delay-select" aria-label="When to act">
@@ -183,9 +206,7 @@
             <button id="horizon-btn" type="submit">Schedule</button>
           </form>
           <p id="horizon-reply" class="loading hidden"></p>
-          <div id="horizon-cards"><p class="loading">reading durable goals…</p></div>
-          <div class="cap-group">Standing orders</div>
-          <pre id="orders-text" class="orders">…</pre>
+          </div>
         </div>
       </div>
 

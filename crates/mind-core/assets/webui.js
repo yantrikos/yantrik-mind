@@ -221,6 +221,7 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
     document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     $("panel-" + btn.dataset.panel).classList.add("active");
+    if (btn.dataset.view) setAgentsView(btn.dataset.view);
     if (btn.dataset.panel === "capabilities") loadCapabilities();
     if (btn.dataset.panel === "settings") loadSettings();
     if (btn.dataset.panel === "devices") loadDevices();
@@ -720,10 +721,49 @@ async function loadActivity() {
   } catch (_) { host.replaceChildren(textP("Could not read the decision log.")); }
 }
 
+/* E.WEB17: agents as a sub-menu. ONE classifier decides the bucket of every item the three
+   views share — a job, a durable goal, a standing order — so nothing can appear in both views or
+   in neither. States are the server's own words: jobs "running|done|failed"; goals by
+   queue_status "RUNNING|PENDING|SCHEDULED|COMPLETED|FAILED" (+ budget_expired); orders
+   "sleeping|paused". */
+function agentBucket(item) {
+  const s = String(item.queue_status || item.state || item.status || "").toLowerCase();
+  if (s.includes("run")) return "running";
+  return "dormant";
+}
+const AGENT_VIEWS = {
+  running: ["Running", "Agents and durable goals working right now."],
+  dormant: ["Dormant", "Waiting to run: standing orders on their schedule, goals not yet due, and past runs."],
+  new: ["New agent", "Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Durable goals survive restarts and act on schedule."],
+};
+function setAgentsView(view) {
+  const v = AGENT_VIEWS[view] ? view : "running";
+  $("panel-tasks").dataset.view = v;
+  $("tasks-title").textContent = AGENT_VIEWS[v][0];
+  $("tasks-sub").textContent = AGENT_VIEWS[v][1];
+}
+const bucketCounts = { running: 0, dormant: 0 };
+function bucketReset() { bucketCounts.running = 0; bucketCounts.dormant = 0; }
+function bucketAdd(card, item) {
+  const b = agentBucket(item);
+  card.classList.add("bucket-" + b);
+  bucketCounts[b] += 1;
+  return b;
+}
+function bucketPaint() {
+  for (const b of ["running", "dormant"]) {
+    const n = $("count-" + b);
+    if (!n) continue;
+    n.textContent = String(bucketCounts[b]);
+    n.hidden = bucketCounts[b] === 0;
+  }
+}
+
 async function loadTasks() {
   const host = $("job-cards");
   loadTemplates();
   loadAllowance();
+  bucketReset();
   try {
     const r = await fetch("/api/tasks", { headers: { "X-YM-Web": "1" } });
     if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
@@ -737,6 +777,7 @@ async function loadTasks() {
       const running = state.includes("run");
       if (running) anyRunning = true;
       const card = el("div", "run " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
+      bucketAdd(card, j);
       // head: name · state · elapsed
       const head = el("div", "run-head");
       const name = el("span", "run-name"); name.textContent = j.name || j.id; head.appendChild(name);
@@ -803,13 +844,19 @@ async function loadTasks() {
       card.appendChild(actions);
       host.appendChild(card);
     }
-    if (!jobs.length) host.appendChild(textP("No runs yet — compose one above."));
+    if (!jobs.length) host.appendChild(textP("No runs yet — compose one under New agent."));
+    else {
+      // Each view says so when its half of the feed is empty, instead of showing a blank.
+      if (!anyRunning) { const p = textP("Nothing running right now."); p.classList.add("bucket-running"); host.appendChild(p); }
+      if (!jobs.some((j) => agentBucket(j) === "dormant")) { const p = textP("No past runs."); p.classList.add("bucket-dormant"); host.appendChild(p); }
+    }
     // A running agent keeps the board live; a quiet board stops polling.
     clearTimeout(tasksTimer);
     if (anyRunning && $("panel-tasks").classList.contains("active")) tasksTimer = setTimeout(loadTasks, 5000);
   } catch (_) { host.replaceChildren(textP("Could not read the board.")); }
-  loadHorizons();
-  loadOrders();
+  await loadHorizons();
+  await loadStandingOrders();
+  bucketPaint();
 }
 
 function fmtElapsed(ms) {
@@ -886,6 +933,7 @@ async function loadHorizons() {
     if (data.available === false) { host.appendChild(textP("The durable-goal engine is not available on this build.")); return; }
     for (const g of data.goals || []) {
       const card = el("div", "card setting-row");
+      bucketAdd(card, g);
       const main = el("div", "card-main");
       const t = el("div", "card-title"); t.textContent = g.objective || g.goal_id; main.appendChild(t);
       const wake = g.next_wake_ms ? Math.max(0, g.next_wake_ms - Date.now()) : null;
@@ -941,13 +989,49 @@ async function loadHorizons() {
   } catch (_) { host.replaceChildren(textP("Could not read durable goals.")); }
 }
 
-async function loadOrders() {
-  const pre = $("orders-text");
+/* E.WEB17: standing orders as items — the typed report from the same store the tick reads.
+   Every order is dormant by definition (it is waiting for its time, or paused); the actions are
+   the ones the server says apply, through the existing order-action gate. */
+async function loadStandingOrders() {
+  const host = $("orders-cards");
   try {
-    const r = await fetch("/api/orders", { headers: { "X-YM-Web": "1" } });
+    const r = await fetch("/api/standing-orders", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
     const data = await r.json();
-    pre.textContent = data.text || "(none)";
-  } catch (_) { pre.textContent = "(could not read standing orders)"; }
+    host.replaceChildren();
+    if (data.store === false) { host.appendChild(textP("The schedule store is not available on this build.")); return; }
+    for (const o of data.orders || []) {
+      const card = el("div", "card setting-row");
+      bucketAdd(card, o);
+      const main = el("div", "card-main");
+      const t = el("div", "card-title"); t.textContent = o.name || o.id; main.appendChild(t);
+      const meta = el("div", "dev-meta");
+      const secs = Number(o.in_seconds);
+      const when = !Number.isFinite(secs) ? "" : secs <= 0 ? "due now" : secs < 3600 ? `in ${Math.round(secs / 60)}m` : secs < 172800 ? `in ${Math.round(secs / 3600)}h` : `in ${Math.round(secs / 86400)}d`;
+      meta.textContent = o.state === "paused" ? `paused · would have fired ${when}` : `next ${when}`;
+      main.appendChild(meta);
+      const key = el("div", "setting-key"); key.textContent = o.id; main.appendChild(key);
+      card.appendChild(main);
+      const side = el("div", "card-side");
+      const st = el("span", "job-state " + (o.state === "paused" ? "failed" : "done")); st.textContent = o.state; side.appendChild(st);
+      const actions = el("div", "job-actions");
+      for (const verb of o.actions || []) {
+        const b = el("button"); b.type = "button"; b.textContent = verb;
+        b.addEventListener("click", async () => {
+          if (verb === "cancel" && !confirm("Cancel this standing order?")) return;
+          b.disabled = true;
+          const res = await postJson("/api/order-action", { verb, id: o.id });
+          if (!res.ok) { alert(`${verb} failed (${res.status || "offline"}): ${res.text}`); b.disabled = false; }
+          else loadTasks();
+        });
+        actions.appendChild(b);
+      }
+      side.appendChild(actions);
+      card.appendChild(side);
+      host.appendChild(card);
+    }
+    if (!(data.orders || []).length) host.appendChild(textP("No standing orders — schedule an agent under New agent to create one."));
+  } catch (_) { host.replaceChildren(textP("Could not read standing orders.")); }
 }
 
 $("tab-delegate").addEventListener("click", () => {

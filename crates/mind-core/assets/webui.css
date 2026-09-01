@@ -162,6 +162,23 @@ body {
 }
 .nav-item:hover { background: var(--bg2); color: var(--ink); }
 .nav-item.active { background: var(--bg3); color: var(--ink); }
+/* E.WEB17: the agents sub-menu — a non-clickable parent, indented children, live counts. */
+.nav-parent { cursor: default; color: var(--ink-dim); }
+.nav-parent:hover { background: transparent; color: var(--ink-dim); }
+.nav-sub { padding-left: 34px; font-size: 12.5px; }
+.nav-count {
+  margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 9px; text-align: center;
+  font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: var(--bg3); color: var(--ink);
+}
+.nav-sub[data-view="running"] .nav-count { background: var(--accent-soft, var(--bg3)); color: var(--accent, var(--ink)); }
+/* One panel, three views: a section or card shows only in the views it belongs to. */
+#panel-tasks .agents-section { display: none; }
+#panel-tasks[data-view="running"] .view-running,
+#panel-tasks[data-view="dormant"] .view-dormant,
+#panel-tasks[data-view="new"] .view-new { display: block; }
+#panel-tasks[data-view="running"] .bucket-dormant,
+#panel-tasks[data-view="dormant"] .bucket-running { display: none; }
 .nav-ico { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: .8; }
 
 /* work area */

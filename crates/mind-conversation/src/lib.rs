@@ -7472,6 +7472,12 @@ impl ConversationEngine {
             // rides as the argument; `schedule:` frontmatter arms a standing order.
             "import" if !rest.trim().is_empty() => self.import_agent(&rest).await,
             "orders" => {
+                // E.WEB17: the typed report, for a surface that lists standing orders as items
+                // rather than as a text dump. Same store the tick reads; nothing new to drift.
+                if rest.trim() == "json" {
+                    return serde_json::to_string(&self.orders_report())
+                        .unwrap_or_else(|_| "{}".to_string());
+                }
                 let Some(recipes) = &self.recipes else { return "(recipe engine unavailable)".to_string() };
                 let rest = rest.trim();
                 // A standing order you can only create and destroy is a list, not a scheduler.

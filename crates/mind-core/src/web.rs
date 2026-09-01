@@ -1161,6 +1161,26 @@ fn handle(
                 );
             }
         },
+        // E.WEB17: standing orders as items (typed report), for the Dormant view. The text form
+        // above is untouched; this is the same store read through the same verb.
+        ("GET", "/api/standing-orders") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let out = rt.block_on(
+                    conv.cli_dispatch("orders json", &mind_types::AccessContext::operator_audit()),
+                );
+                match serde_json::from_str::<serde_json::Value>(&out) {
+                    Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                    Err(_) => send(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "",
+                        "orders report failed",
+                    ),
+                }
+            }
+        },
         ("POST", "/api/order-action") => {
             if !has_client_header {
                 send(
@@ -2237,6 +2257,77 @@ mod tests {
             chain < exit && journald < exit && respond < exit,
             "chain witness, journald witness, and the flushed response all precede the exit"
         );
+    }
+
+    /// E.WEB17 gates: agents are a sub-menu of three views over the SAME data; one classifier
+    /// decides the bucket; standing orders arrive typed through a read-only operator route; the
+    /// text dump is gone; every state the server emits is named in the classifier's contract.
+    #[test]
+    fn the_agents_submenu_is_three_views_over_one_classifier() {
+        let src = include_str!("web.rs");
+        let html = APP_HTML;
+        let js = APP_JS;
+        for view in ["running", "dormant", "new"] {
+            assert!(
+                html.contains(&format!("data-panel=\"tasks\" data-view=\"{view}\"")),
+                "nav has the {view} view"
+            );
+        }
+        assert!(
+            html.contains("id=\"panel-tasks\" data-view=\"running\""),
+            "the panel opens on what is working now"
+        );
+        assert!(
+            !html.contains("orders-text"),
+            "the standing-orders text dump is gone"
+        );
+        assert!(
+            js.contains("function agentBucket(item)")
+                && [
+                    "bucketAdd(card, j)",
+                    "bucketAdd(card, g)",
+                    "bucketAdd(card, o)"
+                ]
+                .iter()
+                .all(|call| js.contains(call)),
+            "one classifier, applied to jobs, goals and orders alike"
+        );
+        // The classifier's contract names every state the server emits.
+        for word in [
+            "running|done|failed",
+            "RUNNING|PENDING|SCHEDULED|COMPLETED|FAILED",
+            "sleeping|paused",
+        ] {
+            assert!(
+                js.contains(word),
+                "classifier contract names the server's states: {word}"
+            );
+        }
+        assert!(
+            js.contains("fetch(\"/api/standing-orders\""),
+            "orders are read typed, from the server"
+        );
+        let route = src
+            .find("(\"GET\", \"/api/standing-orders\")")
+            .expect("standing-orders route exists");
+        assert!(
+            src[route..route + 300].contains("operator(&head, &devices)")
+                && src[route..route + 400].contains("\"orders json\""),
+            "standing-orders is operator-gated and read-only"
+        );
+        // The text form still serves the Activity panel's summary; the agents views never read it.
+        let tasks_fn = js
+            .find("async function loadTasks()")
+            .expect("loadTasks exists");
+        let orders_fn = js
+            .find("async function loadStandingOrders()")
+            .expect("loadStandingOrders exists");
+        for start in [tasks_fn, orders_fn] {
+            assert!(
+                !js[start..start + 1500].contains("fetch(\"/api/orders\""),
+                "the agents views read orders typed, never as text"
+            );
+        }
     }
 
     /// E.WEB16 gates: no new mutation path (schedules become an agent DOCUMENT through the

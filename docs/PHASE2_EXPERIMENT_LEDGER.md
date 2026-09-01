@@ -2807,3 +2807,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Precision frame (reasoned, not fitted) | A candidate additionally requires: self-address (`you` / `your` / `yourself`, word-bounded), an interrogative shape (the existing rule), and a CAPABILITY frame — one of `can you`, `could you`, `are you able`, `do you`, `did you`, `will you`, `would you`, `have you`, `is it possible for you`, `are you allowed` — while an EXPLANATION frame excludes (`explain`, `describe`, `what is`, `what are`, `tell me about`, `how does`, `define`): "can you explain what paper trading is?" is about the concept, not the mind's powers. The near-miss negatives a sealed set would contain are, by construction, topical; only the frame can separate them without a model. |
 | Stage 2 (the only model call) | `confirm_claim_with(pool, question, claim) → (raw, confirmed)`: the model sees the question and ONE topic line, answers `CONFIRM` or `ABSTAIN`; any other output is malformed = ABSTAIN. Greedy, ≤ 8 tokens, no memory, no registry answers in the prompt. The LLM never sees another claim id, so it cannot cross-route. |
 | What is NOT done | No reading of v3 rows (disclosed, burned into tests.rs by Codex) while designing synonyms; no v4 (withheld). Synonym lists come from the registry's own answers and ordinary paraphrase, and are frozen at the candidate SHA before disclosure. |
+
+## E.WEB18 — debt recorded (Codex's judgment on the `standing:` prefix, accepted)
+
+| Field | Value |
+| --- | --- |
+| Decision | Keep the store's `standing: <agent>` naming for now: removing it changes persisted, shared recipe semantics, existing rows stay prefixed, and a store change exceeds E.WEB18's prereg. One canonical UI key is the right scoped compatibility fix (`be71fe0`). |
+| Debt | Name normalisation is convention-based; generic `sched:` rows remain identity-ambiguous. A later prereg should add a typed origin / canonical agent identity server-side and migrate or backfill before the prefix is removed. |
+| Also folded | Goal badge reads the board's `queue_status` rule (a FAILED goal no longer shows "active"); `E.WEB18` residual closed. |

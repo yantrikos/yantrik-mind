@@ -1127,7 +1127,12 @@ fn handle(
 static REDEEM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Why a redemption was refused — carried as (status, message) so the HTTP layer stays dumb.
-type Refusal = (&'static str, &'static str);
+/// Why a redemption was refused: (status, message, counts_as_guess). The flag is the lockout's
+/// signal (Codex's E.WEB5 security review): a WRONG code while ANY live credential exists — boot
+/// code or member invite — must spend an attempt, even when the public response is the generic
+/// registration-closed 409. A race loser after the last credential was consumed guessed nothing
+/// and must not count.
+type Refusal = (&'static str, &'static str, bool);
 
 /// Atomically redeem the one-time code: verify, pair, delete, all under `REDEEM_LOCK`. The loser
 /// of a race re-reads the file INSIDE the lock, finds it gone (or a browser already enrolled),
@@ -1142,9 +1147,11 @@ fn redeem_code(
     // first-boot registration is open — they are a different grant with a narrower role. Single
     // use: the entry is removed under the same lock that validates it. Expiry is checked at
     // redemption; an invite can only ever mint a MEMBER for the person it was bound to.
+    let live_invites_exist;
     {
         let mut invites = PENDING_INVITES.lock().unwrap_or_else(|p| p.into_inner());
         invites.retain(|i| i.expires_ms > now_ms());
+        live_invites_exist = !invites.is_empty();
         if let Some(pos) = invites.iter().position(|i| ct_str_eq(code, &i.code)) {
             let invite = invites.remove(pos);
             drop(invites);
@@ -1156,7 +1163,7 @@ fn redeem_code(
                 },
             ) {
                 Ok(secret) => Ok((name, secret)),
-                Err(_) => Err(("409 Conflict", "pairing failed")),
+                Err(_) => Err(("409 Conflict", "pairing failed", false)),
             };
         }
     }
@@ -1170,9 +1177,13 @@ fn redeem_code(
         .any(|d| !d.revoked && d.name.starts_with(WEB_DEVICE_PREFIX));
     if already {
         let _ = std::fs::remove_file(&path);
+        // The public response stays the generic 409 (no oracle about which credentials exist),
+        // but a wrong guess while live invites were outstanding SPENDS AN ATTEMPT — without this
+        // flag, invite codes had no online guess cap at all (Codex's E.WEB5 finding).
         return Err((
             "409 Conflict",
             "registration is closed — a browser is already paired",
+            live_invites_exist,
         ));
     }
     let expected = std::fs::read_to_string(&path)
@@ -1180,7 +1191,7 @@ fn redeem_code(
         .trim()
         .to_uppercase();
     if expected.is_empty() || !ct_str_eq(code, &expected) {
-        return Err(("403 Forbidden", "wrong or expired code"));
+        return Err(("403 Forbidden", "wrong or expired code", true));
     }
     let name = format!("{WEB_DEVICE_PREFIX}{label}");
     match devices.pair(
@@ -1193,7 +1204,7 @@ fn redeem_code(
             let _ = std::fs::remove_file(&path); // single-use: the code dies with its redemption
             Ok((name, secret))
         }
-        Err(_) => Err(("409 Conflict", "pairing failed")),
+        Err(_) => Err(("409 Conflict", "pairing failed", false)),
     }
 }
 
@@ -1245,9 +1256,11 @@ fn pair(
                 &serde_json::json!({ "ok": true, "device": name }),
             );
         }
-        Err((status, msg)) => {
-            // Only a WRONG code advances the lockout counter — a race loser guessed nothing.
-            if status.starts_with("403") {
+        Err((status, msg, counts_as_guess)) => {
+            // The refusal itself carries the verdict: a wrong code against ANY live credential
+            // spends an attempt (even behind the generic 409); a race loser after the last
+            // credential was consumed guessed nothing and does not count.
+            if counts_as_guess {
                 let n = PAIR_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
                 if n >= PAIR_MAX_ATTEMPTS {
                     PAIR_LOCKED_UNTIL_MS.store(now + PAIR_LOCKOUT_MS, Ordering::Relaxed);
@@ -1355,12 +1368,18 @@ mod tests {
         assert!(!ct_str_eq("ABCD", "ABCD-EFGH"));
     }
 
+    /// Tests that must point `state_dir()` somewhere (via YM_DB) serialize here: the env var is
+    /// process-global, and two such tests in parallel would read each other's scratch dirs —
+    /// the exact hygiene class Codex flagged on the private-lane fixture.
+    static WEB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The E.WEB0 race criterion, at the exact function that must enforce it: two concurrent
     /// redemptions of ONE code under DIFFERENT names — the pairing that shipped first and both
     /// won. Exactly one may succeed, and the loser's refusal must not be the wrong-code kind
     /// (a race loser guessed nothing and must not advance the lockout).
     #[test]
     fn two_racers_one_code_exactly_one_winner() {
+        let _env = WEB_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("ym-race-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // state_dir() derives from YM_DB — point it at the scratch dir for this process.
@@ -1528,6 +1547,85 @@ mod tests {
             );
         }
         PENDING_INVITES.lock().unwrap().clear();
+    }
+
+    /// Codex's E.WEB5 review, both asks in one fixture: (a) END-TO-END — an invite redeems
+    /// through `redeem_code` into a persisted Member device whose authenticate→identity_for chain
+    /// yields HouseholdMember scope, and can never widen to operator; (b) THE LOCKOUT BYPASS —
+    /// a wrong guess while a live invite exists returns the generic 409 but MUST count as a guess,
+    /// and after the invite is consumed the same wrong guess no longer counts (race-loser rule).
+    #[test]
+    fn invite_redemption_is_member_scoped_end_to_end_and_wrong_guesses_count() {
+        let _env = WEB_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("ym-invite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YM_DB", dir.join("mind.db").to_string_lossy().to_string());
+        let store = mind_governance::devices::DeviceStore::open(&dir).unwrap();
+        // A paired operator browser already exists (the normal state when invites are in play).
+        let _op = store
+            .pair(
+                "web:owner",
+                mind_governance::devices::DeviceRole::Operator {
+                    default_person: mind_types::PRIMARY.to_string(),
+                },
+            )
+            .unwrap();
+
+        PENDING_INVITES.lock().unwrap().clear();
+        PENDING_INVITES.lock().unwrap().push(super::MemberInvite {
+            code: "INVITE-99".into(),
+            person: "brishti".into(),
+            expires_ms: now_ms() + 60_000,
+        });
+
+        // (b1) wrong guess WHILE the invite is live: generic 409, counts_as_guess = true.
+        let miss = super::redeem_code(&store, "WRONG-GUESS", "x");
+        match miss {
+            Err((status, _, counts)) => {
+                assert!(
+                    status.starts_with("409"),
+                    "public response stays generic: {status}"
+                );
+                assert!(
+                    counts,
+                    "a wrong guess against a live invite must spend an attempt"
+                );
+            }
+            Ok(_) => panic!("a wrong code must not redeem"),
+        }
+
+        // (a) the real redemption: Member role, correct person, member scope end to end.
+        let (name, secret) =
+            super::redeem_code(&store, "INVITE-99", "ignored").expect("invite redeems");
+        assert_eq!(name, "web:member:brishti");
+        let authed = store
+            .authenticate(secret.expose())
+            .expect("token authenticates");
+        assert!(
+            !authed.is_operator(),
+            "an invite must never mint an operator"
+        );
+        assert_eq!(authed.chat_person(), "brishti");
+        let ident = super::identity_for(&authed);
+        assert_eq!(ident.owner, "brishti");
+        assert!(
+            matches!(
+                ident.output_scope,
+                mind_conversation::OutputScope::HouseholdMember
+            ),
+            "member device identity must be HouseholdMember scope"
+        );
+
+        // (b2) after consumption: same wrong guess, still 409, but counts_as_guess = false.
+        let after = super::redeem_code(&store, "WRONG-GUESS", "x");
+        match after {
+            Err((status, _, counts)) => {
+                assert!(status.starts_with("409"));
+                assert!(!counts, "with no live credentials, a miss is not a guess");
+            }
+            Ok(_) => panic!("nothing left to redeem"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -42,6 +42,10 @@ def main() -> int:
         auth_block.index("claude)") < auth_block.index("CLAUDE_CODE_OAUTH_TOKEN"),
         "Claude OAuth is required before builder selection",
     )
+    require(
+        'export CODEX_HOME="$CODEX_AUTH_HOME"' in improve,
+        "self_improve must preserve the preflighted Codex auth path after isolating HOME",
+    )
 
     qwen_build = improve.index('if [ "${YM_BUILDER:-claude}" = "qwen" ]')
     require(
@@ -58,6 +62,10 @@ def main() -> int:
     require(
         'CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"' in tick,
         "self_build_tick must honor an explicit Codex auth directory",
+    )
+    require(
+        'export CODEX_HOME="$CODEX_AUTH_HOME"' in tick,
+        "Codex goal generation must preserve its auth path after isolating HOME",
     )
     quota_if = tick.index('if [ "${YM_BUILDER:-claude}" = "claude" ]; then')
     quota_curl = tick.index("api.anthropic.com/api/oauth/usage", quota_if)

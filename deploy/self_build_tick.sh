@@ -34,13 +34,13 @@ trap 'rc=$?; [ $rc -ne 0 ] && tg_alert crash "tick crashed (exit $rc) — check 
 # builder authenticates via ~/.codex (self-refreshing), so it does NOT need the Claude OAuth token.
 # The Claude preflight only gates the Claude builder — a dead Claude token must not block a Codex tick.
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
+CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"
 if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   # The qwen builder authenticates with QWEN_API_KEY, not the Claude OAuth token, so a dead Claude
   # token must not block it. Goal GENERATION below still needs a working CLI, which is why the qwen
   # builder also overrides the generator - see the self-review block.
   : "${QWEN_API_KEY:?qwen builder selected but QWEN_API_KEY is unset}"
 elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
-  CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"
   [ -f "$CODEX_AUTH_HOME/auth.json" ] || [ -f /root/.codex/auth.json ] || { echo "$(date -u +%FT%TZ) codex builder selected but no Codex auth.json — tick skipped"; exit 0; }
 else
   : "${CLAUDE_CODE_OAUTH_TOKEN:?need CLAUDE_CODE_OAUTH_TOKEN}"
@@ -134,6 +134,9 @@ if [ -z "$GOAL" ]; then
   W="$(mktemp -d /root/codes/ymreview.XXXXXX)"; CH="$(mktemp -d /opt/yantrik-mind/ymrh.XXXXXX)"
   trap 'rm -rf "$W" "$CH"' EXIT
   export HOME="$CH"
+  if [ "${YM_BUILDER:-claude}" = "codex" ]; then
+    export CODEX_HOME="$CODEX_AUTH_HOME"
+  fi
   git clone -q https://github.com/yantrikos/yantrik-mind.git "$W" 2>/dev/null || { echo "self-review: clone failed — skip tick"; rm -rf "$W" "$CH"; exit 0; }
   cd "$W"
   # 40, not 20: self-improve subjects are enormous run-on sentences, so a 20-commit window covers

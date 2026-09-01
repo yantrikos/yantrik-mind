@@ -33,10 +33,10 @@ handoff() { # $1 = OUTCOME, $2 = note
 # Claude token. The push credential is common to every lane. (root:600 env.)
 set -a; . /etc/yantrik-mind.env 2>/dev/null || true; set +a
 : "${YANTRIKDB_ACC_GIT_TOKEN:?need YANTRIKDB_ACC_GIT_TOKEN}"
+CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"
 case "${YM_BUILDER:-claude}" in
   qwen) : "${QWEN_API_KEY:?qwen builder selected but QWEN_API_KEY is unset}" ;;
   codex)
-    CODEX_AUTH_HOME="${CODEX_HOME:-${HOME:-/root}/.codex}"
     [ -f "$CODEX_AUTH_HOME/auth.json" ] || [ -f /root/.codex/auth.json ] || {
       echo "codex builder selected but no Codex auth.json is available" >&2
       exit 1
@@ -55,7 +55,7 @@ WORK="$(mktemp -d /root/codes/ymbuild.XXXXXX)"          # the repo clone (siblin
 CFGHOME="$(mktemp -d /opt/yantrik-mind/ymhome.XXXXXX)"  # Claude config, outside the git tree
 trap 'rm -rf "$WORK" "$CFGHOME"' EXIT
 export HOME="$CFGHOME"
-export CODEX_HOME="${CODEX_HOME:-/root/.codex}"         # isolated HOME blanks codex auth → point at real ~/.codex
+export CODEX_HOME="$CODEX_AUTH_HOME"                    # isolated HOME must not move the auth path we preflighted
 export CARGO_HOME=/root/.cargo                          # warm crates registry (avoid re-download)
 export RUSTUP_HOME=/root/.rustup                        # keep rustup's default toolchain (HOME moved)
 # cron runs with a minimal PATH; claude lives in /usr/local/bin, cargo in /root/.cargo/bin.

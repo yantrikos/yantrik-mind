@@ -40,6 +40,15 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn planner_generation_config() -> GenerationConfig {
+    GenerationConfig {
+        max_tokens: 8000,
+        think: mind_inference::think_for("plan", Some(false)),
+        prefer_reasoner: true,
+        ..GenerationConfig::greedy()
+    }
+}
+
 /// A throwaway TurnContext for the harm-gate (it inspects the intent, not the context).
 fn dummy_ctx(req: &ActionRequest) -> TurnContext {
     TurnContext::new(
@@ -737,12 +746,10 @@ GOAL: GOAL_HERE"#;
         // Recipe planning IS reasoning → strong reasoner model (prefer_reasoner), default think:FALSE
         // (think:true's huge preamble holds the GPU and queues everything; the 35B plans fine without
         // it). Generous max_tokens headroom retained. YM_THINK_PLAN=on re-enables thinking.
-        let cfg = GenerationConfig {
-            max_tokens: 8000,
-            think: mind_inference::think_for("plan", Some(false)),
-            prefer_reasoner: true,
-            ..GenerationConfig::default()
-        };
+        // Planning produces an executable contract, so sampling variance is a correctness defect:
+        // the same goal must not alternate between a valid recipe and an unparsable refusal. Keep
+        // the fixed seed as a secondary backend hint, but make decoding greedy at the source.
+        let cfg = planner_generation_config();
         // PRIVATE-GROUNDED: the plan is generated from the caller's goal, which on a companion turn
         // is the user's own words about their life. Private lane first, fail closed.
         let resp = self.inference.chat_grounded(messages, cfg).await.ok()?;
@@ -3504,6 +3511,16 @@ mod tests {
         let steps: Vec<RecipeStep> =
             serde_json::from_str(&arr).expect("should parse despite think+fence");
         assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn planner_contract_uses_greedy_decoding() {
+        let cfg = planner_generation_config();
+        assert_eq!(cfg.temperature, 0.0);
+        assert_eq!(cfg.top_p, None);
+        assert_eq!(cfg.top_k, None);
+        assert_eq!(cfg.max_tokens, 8_000);
+        assert!(cfg.prefer_reasoner);
     }
 
     /// The planner authors a JSON recipe from a goal (LLM scripted), and the recipe then runs.

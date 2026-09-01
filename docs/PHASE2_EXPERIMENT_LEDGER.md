@@ -2661,3 +2661,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | What the clean suite found | Two real failures from the every-turn shadow: a scripted-sequence loop test whose 4th model call now carried the router prompt, and a denied-capture test asserting zero model calls. A detached inference call per turn is not free of side effects on anything that counts calls — including, one day, a paid provider. |
 | Decision | `YM_CLAIM_ROUTE_SHADOW=on` enables the shadow; staging sets it, a box that has not opted in makes no extra call. The prereg's "on every turn" now reads "on every turn of an opted-in box" — the live base-rate sample still accumulates on staging, which is where the measurement was always going to be taken. The router seam (`route_claim_with`) is what Codex's sealed run exercises; it is unaffected. |
+
+## E.MQ5 — FROZEN at fbeae7f; staging opted in
+
+| Field | Value |
+| --- | --- |
+| Freeze | Implementation SHA `fbeae7f`, clean full suite on that tree: 45 binaries, 1,479 passed, 0 failed. Single router seam `route_claim_with`; the turn path never reads `parse_route`. Named to Codex (98a8cdf8) — sealed v3 (`1e4c97bd…`) opens only now, against an isolated backend, counts reported only. |
+| Live sample | Staging deployed at `fbeae7f` with `YM_CLAIM_ROUTE_SHADOW=on` in `/etc/yantrik-mind.env`; the `claim_route_shadow` base-rate sample starts from this deploy. Prod is not opted in and would make no extra call even at this SHA. |
+| Hygiene | Screenshot device `ui-snap2` revoked (mint → use → revoke, as with `ui-snap`). |

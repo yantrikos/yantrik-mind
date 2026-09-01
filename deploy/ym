@@ -27,7 +27,11 @@ case "$cmd" in
     ssh_box "journalctl -u yantrik-mind --no-pager ${*:--n 40}"
     ;;
   deploy)
-    ssh_box 'cd /root/codes/yantrik-mind && CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/usr/local/bin:/root/.cargo/bin:/usr/bin:/bin cargo build --release -p mind-core 2>&1 | tail -2 && systemctl stop yantrik-mind && cp target/release/mind-core /opt/yantrik-mind/mind-core && chown yantrikmind:yantrikmind /opt/yantrik-mind/mind-core && systemctl start yantrik-mind && sleep 3 && systemctl is-active yantrik-mind'
+    # E.DEP1: every deploy goes through the provenance-gated pipeline — self_deploy.sh
+    # interrogates the built binary's --build-commit BEFORE any swap and records the outcome
+    # in evolution.log. The old raw build+cp+restart here was exactly the stale-binary trap
+    # that gate was built to close; the operator command must not keep a side door around it.
+    ssh_box 'export PATH=/usr/local/bin:/root/.cargo/bin:$PATH && cd /root/codes/ym-autodeploy && bash deploy/self_deploy.sh 2>&1 | tail -3'
     ;;
   ""|-h|--help|help)
     echo "ym — talk to yantrik-mind (live, shared memory)"

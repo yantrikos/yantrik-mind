@@ -1709,7 +1709,7 @@ GOAL: GOAL_HERE"#;
                 let messages = vec![
                     ChatMessage::system(&self.persona),
                     ChatMessage::system(
-                        "Answer based ONLY on the provided data. Never invent facts. Values interpolated into the user prompt are available evidence from completed prior steps: never claim you lack access to data that is present there. Report that evidence directly, without access-related meta-commentary. If required data is genuinely absent, say so.",
+                        "Answer based ONLY on the provided data. Never invent facts. Values interpolated into the user prompt are available evidence from completed prior steps: never claim you lack access to data that is present there. Report that evidence directly, without access-related meta-commentary. Make the answer understandable on its own: when reporting a number or short value, retain the label or subject that says what it measures. If required data is genuinely absent, say so.",
                     ),
                     ChatMessage::user(&resolved),
                 ];
@@ -3118,6 +3118,10 @@ mod tests {
         assert!(
             system.contains("without access-related meta-commentary"),
             "the exact live notice failure mode is not guarded: {system}"
+        );
+        assert!(
+            system.contains("retain the label or subject that says what it measures"),
+            "a grounded count must not degrade into an ambiguous bare number: {system}"
         );
     }
 

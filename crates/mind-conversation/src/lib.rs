@@ -11918,6 +11918,32 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         Ok(ans)
     }
 
+    /// E.WEB8: the plugin registry as a JSON list for the web capability manager — id, title,
+    /// security, enabled, provenance, plus live availability from the capability report. Read-only;
+    /// toggling routes through the existing `plugin enable|disable` cli verb.
+    pub fn web_plugins(&self) -> Vec<serde_json::Value> {
+        let avail: std::collections::HashMap<String, String> = self
+            .capability_report()
+            .capabilities
+            .into_iter()
+            .map(|c| (c.id, format!("{:?}", c.availability).to_lowercase()))
+            .collect();
+        let reg = self.plugins.lock().unwrap();
+        reg.all_specs()
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "security": p.security.as_str(),
+                    "enabled": p.enabled,
+                    "provenance": p.provenance.as_str(),
+                    "availability": avail.get(&p.id).cloned().unwrap_or_else(|| "unknown".into()),
+                })
+            })
+            .collect()
+    }
+
     /// E.WEB7: the recent decision trace for the web Activity panel — the recorder's own log,
     /// tailed and REDUCED to a content-free shape. The `goal` field can carry user text, so it is
     /// run through the same redactor the answer path uses; every other field is telemetry by

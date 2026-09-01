@@ -202,9 +202,37 @@ $("logout-btn").addEventListener("click", async () => {
 async function loadCapabilities() {
   const host = $("cap-cards");
   try {
-    const r = await fetch("/api/capabilities", { headers: { "X-YM-Web": "1" } });
+    const [r, pr] = await Promise.all([
+      fetch("/api/capabilities", { headers: { "X-YM-Web": "1" } }),
+      fetch("/api/plugins", { headers: { "X-YM-Web": "1" } }),
+    ]);
     const rep = await r.json();
+    const plugins = pr.ok ? ((await pr.json()).plugins || []) : [];
+    const pluginById = new Map(plugins.map((p) => [p.id, p]));
     host.replaceChildren();
+    if (plugins.length) {
+      const g = el("div", "cap-group"); g.textContent = "manage · enable/disable"; host.appendChild(g);
+      for (const p of plugins) {
+        const card = el("div", "card");
+        card.appendChild(el("span", "dot " + (p.enabled ? "ready" : "disabled")));
+        const main = el("div", "card-main");
+        const t = el("div", "card-title"); t.textContent = p.title || p.id; main.appendChild(t);
+        const d = el("div", "card-desc"); d.textContent = `${p.security} · ${p.provenance} · ${p.availability}`; main.appendChild(d);
+        card.appendChild(main);
+        const side = el("div", "card-side");
+        const btn = el("button", "revoke-btn");
+        btn.textContent = p.enabled ? "Disable" : "Enable";
+        btn.style.color = p.enabled ? "var(--warn)" : "var(--ok)";
+        btn.addEventListener("click", async () => {
+          const res = await postJson("/api/plugin-toggle", { id: p.id, enable: !p.enabled });
+          if (!res.ok) alert(`toggle failed (${res.status || "offline"}): ${res.text}`);
+          else loadCapabilities();
+        });
+        side.appendChild(btn);
+        card.appendChild(side);
+        host.appendChild(card);
+      }
+    }
     $("cap-counts").textContent = `${rep.connected} ready · ${rep.unavailable} missing something · ${rep.disabled} off`;
     const byCat = new Map();
     for (const c of rep.capabilities || []) {

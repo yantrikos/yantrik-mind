@@ -1008,6 +1008,71 @@ fn handle(
         }
         // Panels below are read surfaces over structures the engine already maintains. Settings and
         // devices are operator-only: a member browser gets the chat, not the cockpit.
+        ("GET", "/api/plugins") => {
+            let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "",
+                    "not paired",
+                );
+                return;
+            };
+            send_json(
+                &mut stream,
+                "200 OK",
+                "",
+                &serde_json::json!({ "plugins": conv.web_plugins() }),
+            );
+        }
+        ("POST", "/api/plugin-toggle") => {
+            if !has_client_header {
+                send(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "",
+                    "missing client header",
+                );
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = parsed["id"].as_str().unwrap_or("").trim();
+                    let enable = parsed["enable"].as_bool().unwrap_or(false);
+                    // Closed verb set + id charset check: only enable|disable reach the dispatcher,
+                    // and the id can carry nothing that isn't a plugin name.
+                    if id.is_empty()
+                        || !id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    {
+                        send(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "",
+                            "invalid plugin id",
+                        );
+                        return;
+                    }
+                    let verb = if enable { "enable" } else { "disable" };
+                    let out = rt.block_on(conv.cli_dispatch(
+                        &format!("plugin {verb} {id}"),
+                        &mind_types::AccessContext::operator_audit(),
+                    ));
+                    send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "reply": out }),
+                    );
+                }
+            }
+        }
         ("GET", "/api/capabilities") => {
             let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
                 send(
@@ -1804,6 +1869,27 @@ mod tests {
         );
         PENDING_INVITES.lock().unwrap().clear();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E.WEB8 criterion (3): plugin-toggle forwards only enable|disable to the dispatcher, with a
+    /// charset-checked id — a source guard on the route's construction, no free-text passthrough.
+    #[test]
+    fn plugin_toggle_forwards_only_a_closed_verb_set() {
+        // The route builds exactly "plugin {enable|disable} {id}"; assert the source contains that
+        // shape and no interpolation that could smuggle a second verb.
+        let src = include_str!("web.rs");
+        assert!(
+            src.contains("format!(\"plugin {verb} {id}\")"),
+            "the dispatcher line is fixed-shape"
+        );
+        assert!(
+            src.contains("if enable { \"enable\" } else { \"disable\" }"),
+            "verb is a closed set, not request text"
+        );
+        assert!(
+            src.contains("c.is_ascii_alphanumeric() || c == '-' || c == '_'"),
+            "the plugin id is charset-checked before dispatch"
+        );
     }
 
     #[test]

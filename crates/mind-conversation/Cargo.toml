@@ -12,6 +12,7 @@ mind-recipes = { workspace = true }
 mind-spec = { workspace = true }
 mind-agents = { workspace = true }
 mind-observability = { workspace = true }
+mind-world = { path = "../mind-world" }
 mind-governance = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false }
 tokio = { workspace = true }

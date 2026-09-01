@@ -2041,6 +2041,7 @@ dependencies = [
  "mind-spec",
  "mind-tools",
  "mind-types",
+ "mind-world",
  "serde",
  "serde_json",
  "tokio",

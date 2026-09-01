@@ -4872,6 +4872,12 @@ pub struct ConversationEngine {
     /// the real engine wires one beside its DB via `with_recorder`. It OBSERVES — every
     /// authoritative store stays exactly that.
     recorder: Arc<mind_observability::DecisionLog>,
+    /// E.G1: the LIVE world model — world-state-v1.1 finally seeing the world it models.
+    /// One presence event ingested per handled turn (data the turn already holds, nothing
+    /// more); consulted ONLY in shadow — no decision path reads it (source-guarded).
+    world: Mutex<mind_world::WorldLog>,
+    /// Monotonic source-event counter: world ingestion demands collision-free source ids.
+    world_seq: std::sync::atomic::AtomicU64,
     /// Mail client — when set, an "check my email" turn pulls the inbox (read-only, untrusted).
     mail: Option<Arc<dyn MailClient>>,
     /// Optional SEPARATE read-only inbox for finance discovery — the user's PERSONAL mailbox (where
@@ -5007,6 +5013,10 @@ impl ConversationEngine {
             packs_path: None,
             attestor: None,
             recorder: Arc::new(mind_observability::DecisionLog::disabled()),
+            // E.G1: 30-minute presence freshness — a "user was here" older than that reads
+            // Stale, which is exactly the epistemic honesty the shadow exists to measure.
+            world: Mutex::new(mind_world::WorldLog::new().with_freshness_ms(30 * 60 * 1000)),
+            world_seq: std::sync::atomic::AtomicU64::new(0),
             scan_mail: Vec::new(),
             home: None,
             home_alerts_seen: Mutex::new(None),
@@ -9817,6 +9827,45 @@ impl ConversationEngine {
          - choosing which expertise pack answers a question (leases are operator-driven).\n"
     }
 
+    /// E.G1: one presence observation per handled turn — the world model finally sees the
+    /// world it models, from data the turn already holds and nothing more.
+    pub(crate) fn world_ingest_presence(&self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let seq = self
+            .world_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.world.lock().unwrap().ingest(&mind_world::WorldEvent {
+            source_event_id: format!("turn:{now}:{seq}"),
+            source_id: "conversation".into(),
+            kind: mind_world::Kind::Assert,
+            occurred_at: now,
+            observed_at: now,
+            entity: "user".into(),
+            attr: "presence".into(),
+            value: "active".into(),
+        });
+    }
+
+    /// E.G1: what world-state-v1.1 WOULD say about the recipient's presence right now —
+    /// rendered for the flight recorder, NEVER read by any decision path (source-guarded).
+    pub(crate) fn world_shadow_presence(&self, now_ms: i64) -> String {
+        let q = mind_world::WorldQuery {
+            valid_at: now_ms,
+            known_at: now_ms,
+            access: mind_types::AccessContext::operator_audit(),
+        };
+        match self.world.lock().unwrap().state_at("user", "presence", &q) {
+            mind_world::StateAt::Known(v) => format!("known:{v}"),
+            mind_world::StateAt::Stale {
+                value,
+                last_verified,
+            } => format!("stale:{value}:last_verified={last_verified}"),
+            mind_world::StateAt::Unknown => "unknown".into(),
+            mind_world::StateAt::Conflicted(vs) => format!("conflicted:{}", vs.len()),
+            mind_world::StateAt::Expired => "expired".into(),
+        }
+    }
+
     async fn self_configuration(&self) -> String {
         let mut s =
             String::from("LIVE SELF-CONFIGURATION (measured from the running process just now):\n");
@@ -12507,6 +12556,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         // Feed the temporal layer: every turn is a life-event episode (rhythm/periodicity/bursts),
         // labeled by life-bucket so the causal/motif miners have event TYPES to work with.
+        self.world_ingest_presence(); // E.G1: the model sees a turn happen — nothing else
         let _ = self.memory.record_episode(episode_label(user_text)).await;
         // Resolve any outstanding proactive send: replying now (within the window) counts as
         // ENGAGED — the world model learns when pings actually land.

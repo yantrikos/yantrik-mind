@@ -8251,6 +8251,92 @@ async fn the_walls_travel_with_every_turn_upstream_of_untrusted_blocks() {
     );
 }
 
+// ── E.G1: THE WORLD MODEL BECOMES REACHABLE — LIVE INGESTION, SHADOWED CONSULT, ZERO AUTHORITY ──
+
+/// Gates (1) and (2): a handled turn ingests presence (Unknown before, Known after; Stale past
+/// the freshness window), and a knock evaluation writes a fully stamped world_shadow event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_world_model_sees_turns_and_shadows_the_knock() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let dir = std::env::temp_dir().join(format!("ym-eg1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&dir.join("d.jsonl")));
+    let conv = conv.with_recorder(log);
+
+    let now = chrono::Utc::now().timestamp_millis();
+    assert_eq!(
+        conv.world_shadow_presence(now),
+        "unknown",
+        "before any turn the model honestly knows nothing"
+    );
+    conv.world_ingest_presence();
+    assert_eq!(
+        conv.world_shadow_presence(now),
+        "known:active",
+        "one turn later presence is Known"
+    );
+    assert!(
+        conv.world_shadow_presence(now + 31 * 60 * 1000)
+            .starts_with("stale:active"),
+        "past the freshness window the SAME fact reads Stale — epistemic honesty, live"
+    );
+
+    // A knock evaluation writes the shadow event, fully stamped from birth.
+    let _ = conv.maybe_knock().await;
+    let events = conv
+        .recorder()
+        .read_tail_verified(20)
+        .expect("chain verifies");
+    let shadow = events
+        .iter()
+        .find(|e| e.kind == "world_shadow")
+        .expect("the shadow event exists");
+    assert_eq!(shadow.actor.as_deref(), Some("proactive"));
+    assert_eq!(shadow.lane.as_deref(), Some("primary"));
+    assert_eq!(
+        shadow.goal_id.as_deref(),
+        Some("worldshadow:knock-receptivity")
+    );
+    assert_eq!(shadow.evaluator_id.as_deref(), Some("world-state-v1.1"));
+    assert!(
+        shadow
+            .outcome
+            .as_deref()
+            .is_some_and(|o| o.starts_with("known:") || o == "unknown" || o.starts_with("stale:")),
+        "the verdict is one of the model's five epistemic states: {:?}",
+        shadow.outcome
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Gate (3): the shadow cannot influence the decision — a source guard on the wall. The world
+/// is consulted exactly once in proactive.rs, inside the shadow block, and nothing below it
+/// references the world or the verdict.
+#[test]
+fn the_knock_decision_never_reads_the_world_shadow() {
+    let src = include_str!("proactive.rs");
+    assert_eq!(
+        src.matches("world_shadow_presence").count(),
+        1,
+        "exactly one consult site in the proactive surface"
+    );
+    let consult = src.find("world_shadow_presence").unwrap();
+    let after = &src[consult..];
+    let block_end = after.find("ORDER CHANGED").expect("decision code follows");
+    let decision_code = &after[block_end..];
+    // Guard CODE references, not prose: pre-existing comments legitimately say "world model".
+    assert!(
+        !decision_code.contains("self.world") && !decision_code.contains("world_shadow"),
+        "no decision code below the shadow block touches the world model"
+    );
+}
+
 // ── E.MQ5a: THE REGISTRY'S EXPLICIT DOOR ────────────────────────────────────────────────────────
 
 /// Gates (1)-(3): `claims` lists exactly the registry (count, every id, version stamp);

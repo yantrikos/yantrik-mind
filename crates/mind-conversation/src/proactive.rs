@@ -637,6 +637,28 @@ impl super::ConversationEngine {
             return None;
         }
         let now = chrono::Utc::now().timestamp_millis();
+        // E.G1: THE WORLD MODEL'S SHADOW. Record what world-state-v1.1 would say about the
+        // recipient's presence at this decision moment, then decide EXACTLY as before — the
+        // verdict goes to the flight recorder and is never read by anything below this block
+        // (source-guarded). Shadow ranks; it does not choose (E.PK3's discipline).
+        {
+            let mut shadow = mind_observability::DecisionEvent::new(
+                &format!("world-shadow-{now}"),
+                "world_shadow",
+            );
+            shadow.actor = Some("proactive".into());
+            shadow.lane = Some("primary".into());
+            shadow.goal_id = Some("worldshadow:knock-receptivity".into());
+            shadow.context_fingerprint = Some(mind_observability::opaque_id(
+                "context",
+                "knock-receptivity",
+            ));
+            shadow.chosen = Some("shadow-only".into());
+            shadow.outcome = Some(self.world_shadow_presence(now));
+            shadow.verdict = Some("shadowed".into());
+            shadow.evaluator_id = Some("world-state-v1.1".into());
+            self.recorder.record(shadow);
+        }
         // ORDER CHANGED for INTERRUPTION ESCROW: find the CANDIDATE first, then evaluate the gates.
         // A silence is only meaningful — and only worth recording — when there was something real to
         // say. Checking gates first would discard the candidate and leave no trace of what was held,

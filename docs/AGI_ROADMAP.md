@@ -57,7 +57,7 @@ this table's point of view however much code exists.*
 | Closed learning chain (tool calls) | ACTIVE, reachable | E.L1 (prediction → outcome → Brier), E.T1 (trace tree), **E.R2** — which found it recording on a loop production does not run, and fixed it. The reachability doctrine was paid for here. |
 | Outcome attribution | ACTIVE | Six-way `Outcome` (Ok / Empty / Denied / Unavailable / **Malformed** / error) with one write site; E.PK2b→E.PK2e pinned the planner-vs-tool boundary and proved on the live loop that a refused call feeds no bandit and leaks no value. |
 | Abstention | SHADOWED | E.PK3's coverage router abstains by floor and by margin; it decides nothing yet. Elsewhere abstention exists as refusal, not as a chosen alternative to answering (Phase D). |
-| Self-observation | ACTIVE, not outcome-validated | Instrument panel, `ym why`, two-witness pack stats (E.PK2). **Self-model accuracy has never been measured** — the mind has never been scored on claims about itself (Phase B's audit). |
+| Self-observation | ACTIVE, outcome-audited but inaccurate | Instrument panel, `ym why`, two-witness pack stats (E.PK2). E.MQ1–E.MQ3 scored spoken capability claims: the first audit was killed at 7/10 scoreable, and the clean-subject deterministic prompt still returned 2/10 wrong verbatim answers. The self-model gap is measured; it is not closed. |
 | Expertise routing | SHADOWED | E.PK3: 35/38 agreement, 12/12 abstention on a pre-registered labelled set; live it has ranked correctly and incorrectly, both recorded. It has never chosen anything. |
 | Expertise attachment (leases) | ACTIVE (operator-driven) | E.PK4: grant → mount → a live turn that used the leased row (0.635, both witnesses agreeing) → expiry swept in ~20 s. Efficacy explicitly not claimed. |
 | Bounded planning | BENCHMARKED | Executive EX1–EX4: 26/37 pre-registered decisions representable (E.EX4-R2). One decision reached the live path in shadow (E.EX4-LIVE-A) and **decided nothing**. |
@@ -69,7 +69,7 @@ this table's point of view however much code exists.*
 | Long-horizon agency | ABSENT | No goal has been carried across sessions with checkpoints, replans and a completion measurement. |
 | Causal reasoning | ABSENT | Prediction exists for tool success only (a Beta posterior over one tool's track record); no action-effect model. |
 | Calibrated uncertainty | PARTIAL, ACTIVE | Brier scored on tool-success predictions (E.T1). Never scored on answers, and E.P2 is the standing warning about what a good-looking calibration number can hide. |
-| Multi-agent cooperation | ACTIVE, unmeasured | This roadmap was itself produced by two agents working through a message bus with independent review; the arrangement has produced ~10 accepted defect reports in two days, and **not one of those was scored against a solo baseline.** |
+| Multi-agent cooperation | ACTIVE, partially measured | E.AGI-I0 found 16/152 experiment rows (~10.5%) recording a second-agent defect catch after the author's own gates were green. This is a one-directional lower bound with coordination costs recorded, not a controlled solo comparison; reverse-direction attribution and quality/cost lift remain unmeasured. |
 | Safe self-improvement | DEFINED | A self-build lane exists with an epistemic gate (E.C1) and two-tier fitness grading; no promotion has ever been blinded, and none has been scored against a hidden holdout. |
 
 **The honest summary.** What is genuinely ACTIVE and witnessed is *instrumentation*: memory,
@@ -115,7 +115,7 @@ follow.
 | Semantic beliefs (polarity, confidence, temporal validity, evidence, contradiction state) | Yes | Belief revision with provenance; conflicts surfaced, contradictions tracked, tensions aged (E.P2's swamp fix). |
 | Procedures (applicability, preconditions, failure modes, version, outcome history) | Partial | Skills carry measured ledgers; banked approaches carry none of the four qualifiers. |
 | Causal / world model | Partial | Temporal-epistemic world state (BENCHMARKED); no action→effect representation. |
-| Self-model (live tools/permissions/costs + measured competence) | Partial | Live capability report exists and outranks memory by construction; measured competence exists per tool; no accuracy measurement of the self-model itself. |
+| Self-model (live tools/permissions/costs + measured competence) | Partial, measured inaccurate | Live capability report and code-owned boundary facts exist, and measured competence exists per tool. E.MQ1–E.MQ3 found the generative answer path can override trusted capability facts, including on a clean subject; deterministic answering or a separate trusted self lane remains unbuilt. |
 
 House invariants already enforced and worth keeping as roadmap constraints: no derived record
 without provenance; corrections preserve history; a re-sealed pack never inherits its predecessor's
@@ -136,10 +136,26 @@ the observation contract (they already share `tool_outcome`; they do not share e
 zero secret leakage (already regression-tested at the argument boundary); replay reproduces
 classifications. `ym why chains` now measures the latest 200 tool calls against this completeness
 contract, counts both orphan observations and predictions that never closed, and names aggregate
-missing fields without printing identifiers. Duplicate observations for one prediction fail the
-one-to-one linkage check instead of inflating completeness. On compiled traces, the prediction must
-also parent to the single identified compilation root; a flat same-trace label no longer passes as
-causal provenance. The first live result still needs to be captured as evidence. The gate reads only
+missing fields without printing identifiers. Duplicate observations for one prediction and globally
+duplicated prediction or observation event IDs fail closed instead of inflating completeness;
+blank provenance values and zero timestamps do not count as present, and observations require one
+of the six defined verdicts, an actual-outcome field, a nonblank lesson, and an
+`ok=true` / `empty=false` semantic grade. Graded `ok`/`empty`/`failed` outcomes must carry
+the exact prediction error and Brier score implied by the recorded prior, while unavailable,
+denied, and malformed outcomes must carry neither. An observation may share its prediction's
+millisecond but cannot predate it, and its evaluator must be the versioned `tool-outcome-v1`
+classifier rather than an arbitrary nonblank label. On compiled traces, the prediction must
+also parent to the single identified compilation root; that root id must resolve globally to one
+nonblank, same-trace event whose nonzero timestamp does not follow the prediction. A flat
+same-trace label, cross-trace duplicate id, or postdated root no longer passes as causal provenance.
+When a trace declares no compiled root, its prediction must be parentless rather than carrying a
+dangling or cross-trace parent claim.
+Rooted preflight refusals enforce the same root identity and temporal-integrity contract even though
+they correctly carry no prediction; a parentless refusal qualifies for that lane only when its trace
+declares no compiled root.
+E.AGI-A1 captured the first live reading at 0/200 on the pre-wiring binary;
+E.AGI-A2 then measured 1/16 (6.2%) on staging, with the single fresh post-wiring call complete and
+the other 15 rows preserved as historical stratigraphy. The gate reads only
 a fully verified hash chain and reports unavailable on the first corrupt or forged line.
 
 `ym why packet-chains` applies the same ≥99% evidence gate to the latest 200 action-packet closure
@@ -203,8 +219,9 @@ regressions, deterministic rollback, human approval for code/policy promotion.
 **I — Multi-agent cooperation.** Delegation, specialisation, disagreement resolution, provenance
 handoff, duplicated-work avoidance, adversarial peer input; peer messages are untrusted evidence.
 *Gate:* quality/cost lift over solo execution, no authority laundering, complete responsibility
-attribution. *Note:* the Mind/Codex arrangement is a live instance of this phase running unmeasured;
-scoring it retrospectively against a solo baseline is the cheapest experiment in this document.
+attribution. *Note:* E.AGI-I0 measured the arrangement's one-directional post-green peer-catch rate
+(16/152 rows, ~10.5%) and recorded coordination costs, but did not supply the missing solo baseline,
+reverse-direction attribution, or a controlled quality/cost comparison.
 
 ## 6. Evaluation design
 

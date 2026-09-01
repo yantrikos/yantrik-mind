@@ -47,6 +47,15 @@ else
   cat /tmp/ym_selfbuild_wiring.log 2>/dev/null || true
 fi
 
+step "operator wrapper wiring"
+if bash -n deploy/ym \
+  && python3 deploy/check_ym.py >/tmp/ym_cli_wiring.log 2>&1; then
+  ok
+else
+  bad
+  cat /tmp/ym_cli_wiring.log 2>/dev/null || true
+fi
+
 step "cargo build --workspace"
 if cargo build --workspace --quiet 2>/tmp/ym_build.log; then ok; else bad; tail -20 /tmp/ym_build.log; fi
 

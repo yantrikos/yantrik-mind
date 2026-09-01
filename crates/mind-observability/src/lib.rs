@@ -1324,8 +1324,10 @@ pub fn render_model_call_resources(events: &[DecisionEvent]) -> String {
 /// Measure the roadmap's closed-chain gate over the latest 200 tool calls. A call is
 /// complete only when its observation joins to one prediction and the pair carries the provenance
 /// needed to compare behavior across goals, contexts, lanes, evaluators, and runtime versions.
-/// Aggregate defect counts are reported instead of identifiers, so this remains safe to paste into
-/// an operations channel.
+/// Malformed arguments refused before prediction are not tool calls; they are reported separately
+/// under a strict preflight-refusal contract so safe boundary behavior cannot either poison or evade
+/// the executed-call gate. Aggregate defect counts are reported instead of identifiers, so this
+/// remains safe to paste into an operations channel.
 pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     const SAMPLE_LIMIT: usize = 200;
 
@@ -1341,6 +1343,14 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
         .filter(|event| event.kind == "tool_predicted")
         .filter_map(|event| event.event_id.as_deref().map(|id| (id, event)))
         .collect();
+    let mut prediction_id_counts: std::collections::HashMap<&str, usize> = Default::default();
+    for event_id in events
+        .iter()
+        .filter(|event| event.kind == "tool_predicted")
+        .filter_map(|event| event.event_id.as_deref())
+    {
+        *prediction_id_counts.entry(event_id).or_insert(0) += 1;
+    }
     let mut observed_parent_counts: std::collections::HashMap<&str, usize> = Default::default();
     for parent in events
         .iter()
@@ -1349,13 +1359,47 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     {
         *observed_parent_counts.entry(parent).or_insert(0) += 1;
     }
+    let mut events_by_id: std::collections::HashMap<&str, Vec<&DecisionEvent>> = Default::default();
+    for event in events {
+        if let Some(event_id) = event.event_id.as_deref() {
+            events_by_id.entry(event_id).or_default().push(event);
+        }
+    }
+    // A malformed observation is an explicit preflight refusal when it has no parent (the standalone
+    // EngineBus shape) or parents directly to the run's goal_compiled root (the production loop
+    // shape). In either case the argument boundary refused it before a prediction or egress existed.
+    // A dangling parent, or a parent of any other kind, remains an ordinary call and must join a
+    // prediction; checking the verdict alone would let an orphan evade this gate.
+    let is_preflight_refusal = |event: &DecisionEvent| {
+        event.kind == "tool_observed"
+            && event.verdict.as_deref() == Some("malformed")
+            && match event.parent_event_id.as_deref() {
+                None => !compiled_roots.contains_key(event.trace_id.as_str()),
+                Some(parent) => events_by_id.get(parent).is_some_and(|parents| {
+                    parents.len() == 1
+                        && parents[0].kind == "goal_compiled"
+                        && parents[0].trace_id == event.trace_id
+                        && compiled_roots
+                            .get(event.trace_id.as_str())
+                            .is_some_and(|roots| roots.len() == 1 && roots[0] == Some(parent))
+                }),
+            }
+    };
+    let mut preflight_refusals: Vec<(usize, &DecisionEvent)> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| is_preflight_refusal(event))
+        .collect();
+    preflight_refusals.sort_unstable_by_key(|(index, _)| std::cmp::Reverse(*index));
+    preflight_refusals.truncate(SAMPLE_LIMIT);
+
     // One row per observed call, plus every prediction that has no observed child. Sampling only
     // observations would make a crash between the two events disappear from the denominator and
     // let the report go falsely green precisely when the recorder lost closure.
     let mut calls: Vec<(usize, Option<&DecisionEvent>, Option<&DecisionEvent>)> = events
         .iter()
         .enumerate()
-        .filter(|(_, event)| event.kind == "tool_observed")
+        .filter(|(_, event)| event.kind == "tool_observed" && !is_preflight_refusal(event))
         .map(|(index, observation)| {
             let prediction = observation
                 .parent_event_id
@@ -1379,7 +1423,7 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     );
     calls.sort_unstable_by_key(|(index, _, _)| std::cmp::Reverse(*index));
     calls.truncate(SAMPLE_LIMIT);
-    if calls.is_empty() {
+    if calls.is_empty() && preflight_refusals.is_empty() {
         return "No tool-chain calls yet — completeness appears after a tool decision.".into();
     }
 
@@ -1387,6 +1431,11 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     let mut defects: std::collections::BTreeMap<&str, usize> = Default::default();
     for (_, prediction, observation) in &calls {
         let mut row_complete = true;
+        let present = |value: &Option<String>| {
+            value
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        };
         let mut require = |condition: bool, label: &'static str| {
             if !condition {
                 row_complete = false;
@@ -1396,14 +1445,48 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
 
         require(prediction.is_some(), "prediction link");
         require(observation.is_some(), "observation link");
+        if let Some(prediction) = prediction {
+            require(present(&prediction.event_id), "prediction event_id");
+            require(
+                prediction
+                    .event_id
+                    .as_deref()
+                    .and_then(|event_id| prediction_id_counts.get(event_id))
+                    == Some(&1),
+                "prediction cardinality",
+            );
+            require(
+                prediction
+                    .event_id
+                    .as_deref()
+                    .and_then(|event_id| events_by_id.get(event_id))
+                    .is_some_and(|matches| matches.len() == 1),
+                "prediction event_id uniqueness",
+            );
+            require(prediction.ts_ms > 0, "prediction ts_ms");
+        }
         if let (Some(prediction), Some(observation)) = (prediction, observation) {
             if let Some(roots) = compiled_roots.get(prediction.trace_id.as_str()) {
-                require(
-                    roots.len() == 1
-                        && roots[0].is_some()
-                        && prediction.parent_event_id.as_deref() == roots[0],
-                    "bounded root linkage",
-                );
+                let root_id = roots.first().copied().flatten();
+                let root_linked = roots.len() == 1
+                    && root_id.is_some()
+                    && prediction.parent_event_id.as_deref() == root_id;
+                require(root_linked, "bounded root linkage");
+                if let Some(root_id) = root_id.filter(|_| root_linked) {
+                    require(
+                        !root_id.trim().is_empty()
+                            && events_by_id.get(root_id).is_some_and(|matches| {
+                                matches.len() == 1
+                                    && matches[0].kind == "goal_compiled"
+                                    && matches[0].trace_id == prediction.trace_id
+                                    && matches[0].ts_ms > 0
+                                    && matches[0].ts_ms <= prediction.ts_ms
+                            }),
+                        "bounded root integrity",
+                    );
+                }
+            } else {
+                require(prediction.parent_event_id.is_none(), "bounded root linkage");
             }
             require(
                 observation
@@ -1413,52 +1496,124 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
                     == Some(&1),
                 "observation cardinality",
             );
-            require(prediction.trace_id == observation.trace_id, "trace linkage");
             require(
-                prediction.object_id.is_some() && prediction.object_id == observation.object_id,
+                !prediction.trace_id.trim().is_empty()
+                    && !observation.trace_id.trim().is_empty()
+                    && prediction.trace_id == observation.trace_id,
+                "trace linkage",
+            );
+            require(
+                prediction.ts_ms > 0 && observation.ts_ms >= prediction.ts_ms,
+                "temporal ordering",
+            );
+            require(
+                present(&prediction.object_id) && prediction.object_id == observation.object_id,
                 "object linkage",
             );
             require(
-                prediction.actor.is_some() && prediction.actor == observation.actor,
+                present(&prediction.actor) && prediction.actor == observation.actor,
                 "actor",
             );
             require(
-                prediction.lane.is_some() && prediction.lane == observation.lane,
+                present(&prediction.lane) && prediction.lane == observation.lane,
                 "lane",
             );
             require(
-                prediction.context_fingerprint.is_some()
+                present(&prediction.context_fingerprint)
                     && prediction.context_fingerprint == observation.context_fingerprint,
                 "context_fingerprint",
             );
             require(
-                prediction.goal_id.is_some() && prediction.goal_id == observation.goal_id,
+                present(&prediction.goal_id) && prediction.goal_id == observation.goal_id,
                 "goal_id",
             );
             require(
-                prediction.tool_version.is_some()
+                present(&prediction.tool_version)
                     && prediction.tool_version == observation.tool_version,
                 "tool_version",
             );
             require(
-                prediction.model_route.is_some()
+                present(&prediction.model_route)
                     && prediction.model_route == observation.model_route,
                 "model_route",
             );
-            require(prediction.predicted.is_some(), "predicted outcome");
+            require(present(&prediction.predicted), "predicted outcome");
             require(
                 prediction.confidence.is_some_and(valid_probability),
                 "predicted probability",
             );
+            if let Some(probability) = prediction
+                .confidence
+                .filter(|value| valid_probability(*value))
+            {
+                let observed = match observation.verdict.as_deref() {
+                    Some("ok" | "empty") => Some(1.0),
+                    Some("failed") => Some(0.0),
+                    _ => None,
+                };
+                if let Some(observed) = observed {
+                    let expected_error = observed - probability;
+                    let expected_brier = (probability - observed).powi(2);
+                    require(
+                        observation.prediction_error.is_some_and(|actual| {
+                            actual.is_finite() && (actual - expected_error).abs() <= 1e-9
+                        }),
+                        "prediction_error consistency",
+                    );
+                    require(
+                        observation.brier.is_some_and(|actual| {
+                            actual.is_finite() && (actual - expected_brier).abs() <= 1e-9
+                        }),
+                        "brier consistency",
+                    );
+                } else if matches!(
+                    observation.verdict.as_deref(),
+                    Some("unavailable" | "denied" | "malformed")
+                ) {
+                    require(
+                        observation.prediction_error.is_none() && observation.brier.is_none(),
+                        "calibration exclusion",
+                    );
+                }
+            }
         }
         if let Some(observation) = observation {
-            require(observation.verdict.is_some(), "actual verdict");
-            require(observation.evaluator_id.is_some(), "evaluator_id");
+            require(present(&observation.event_id), "observation event_id");
+            require(
+                observation
+                    .event_id
+                    .as_deref()
+                    .and_then(|event_id| events_by_id.get(event_id))
+                    .is_some_and(|matches| matches.len() == 1),
+                "observation event_id uniqueness",
+            );
+            require(observation.ts_ms > 0, "observation ts_ms");
+            require(observation.outcome.is_some(), "actual outcome");
+            require(
+                matches!(
+                    observation.verdict.as_deref(),
+                    Some("ok" | "empty" | "unavailable" | "denied" | "failed" | "malformed")
+                ),
+                "actual verdict",
+            );
+            require(
+                observation.evaluator_id.as_deref() == Some("tool-outcome-v1"),
+                "evaluator_id",
+            );
+            require(present(&observation.lesson), "lesson");
             if !matches!(observation.verdict.as_deref(), Some("malformed" | "denied")) {
                 require(observation.latency_ms.is_some(), "latency_ms");
             }
-            if matches!(observation.verdict.as_deref(), Some("ok" | "empty")) {
-                require(observation.semantic_success.is_some(), "semantic_success");
+            match observation.verdict.as_deref() {
+                Some("ok") => require(
+                    observation.semantic_success == Some(true),
+                    "semantic_success consistency",
+                ),
+                Some("empty") => require(
+                    observation.semantic_success == Some(false),
+                    "semantic_success consistency",
+                ),
+                _ => {}
             }
         }
         if row_complete {
@@ -1467,33 +1622,125 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     }
 
     let total = calls.len();
-    let percent = 100.0 * complete as f64 / total as f64;
-    let mut out = format!(
-        "TOOL CHAIN COMPLETENESS — {complete}/{total} latest call(s) complete ({percent:.1}%; gate ≥99%)\n"
-    );
-    // E.AGI-A2: a live reading must say WHEN its evidence is from — a window full of history
-    // reads very differently from a window of yesterday's traffic. Timestamps only, aggregate.
-    let mut span_ts: Vec<u64> = calls
-        .iter()
-        .flat_map(|(_, prediction, observation)| {
-            prediction
-                .iter()
-                .chain(observation.iter())
-                .map(|event| event.ts_ms)
-        })
-        .filter(|ts| *ts > 0)
-        .collect();
-    span_ts.sort_unstable();
-    if let (Some(oldest), Some(newest)) = (span_ts.first(), span_ts.last()) {
-        out.push_str(&format!(
-            "  window spans ts_ms {oldest}..{newest} across {total} sampled call(s)\n"
-        ));
-    }
-    if defects.is_empty() {
-        out.push_str("  no missing or mismatched provenance in this sample\n");
+    let mut out = if total == 0 {
+        "No tool-chain calls yet — completeness appears after a tool decision.\n".into()
     } else {
-        for (field, count) in defects {
-            out.push_str(&format!("  missing or mismatched {field}: {count}\n"));
+        let percent = 100.0 * complete as f64 / total as f64;
+        let mut report = format!(
+            "TOOL CHAIN COMPLETENESS — {complete}/{total} latest call(s) complete ({percent:.1}%; gate ≥99%)\n"
+        );
+        // E.AGI-A2: a live reading must say WHEN its evidence is from — a window full of history
+        // reads very differently from a window of yesterday's traffic. Timestamps only, aggregate.
+        let mut span_ts: Vec<u64> = calls
+            .iter()
+            .flat_map(|(_, prediction, observation)| {
+                prediction
+                    .iter()
+                    .chain(observation.iter())
+                    .map(|event| event.ts_ms)
+            })
+            .filter(|ts| *ts > 0)
+            .collect();
+        span_ts.sort_unstable();
+        if let (Some(oldest), Some(newest)) = (span_ts.first(), span_ts.last()) {
+            report.push_str(&format!(
+                "  window spans ts_ms {oldest}..{newest} across {total} sampled call(s)\n"
+            ));
+        }
+        if defects.is_empty() {
+            report.push_str("  no missing or mismatched provenance in this sample\n");
+        } else {
+            for (field, count) in defects {
+                report.push_str(&format!("  missing or mismatched {field}: {count}\n"));
+            }
+        }
+        report
+    };
+
+    if !preflight_refusals.is_empty() {
+        let mut refusal_complete = 0usize;
+        let mut refusal_defects: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (_, observation) in &preflight_refusals {
+            let mut row_complete = true;
+            let present = |value: &Option<String>| {
+                value
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            };
+            let mut require = |condition: bool, label: &'static str| {
+                if !condition {
+                    row_complete = false;
+                    *refusal_defects.entry(label).or_insert(0) += 1;
+                }
+            };
+            require(present(&observation.event_id), "event_id");
+            if let Some(event_id) = observation.event_id.as_deref() {
+                require(
+                    events_by_id
+                        .get(event_id)
+                        .is_some_and(|matches| matches.len() == 1),
+                    "event_id uniqueness",
+                );
+            }
+            require(!observation.trace_id.trim().is_empty(), "trace_id");
+            require(observation.ts_ms > 0, "ts_ms");
+            if let Some(parent_id) = observation.parent_event_id.as_deref() {
+                require(
+                    !parent_id.trim().is_empty()
+                        && events_by_id.get(parent_id).is_some_and(|matches| {
+                            matches.len() == 1
+                                && matches[0].kind == "goal_compiled"
+                                && matches[0].trace_id == observation.trace_id
+                                && matches[0].ts_ms > 0
+                                && matches[0].ts_ms <= observation.ts_ms
+                        }),
+                    "bounded root integrity",
+                );
+            }
+            require(present(&observation.actor), "actor");
+            require(present(&observation.lane), "lane");
+            require(
+                present(&observation.context_fingerprint),
+                "context_fingerprint",
+            );
+            require(present(&observation.goal_id), "goal_id");
+            require(present(&observation.tool_version), "tool_version");
+            require(present(&observation.model_route), "model_route");
+            require(present(&observation.object_id), "object_id");
+            require(
+                observation.evaluator_id.as_deref() == Some("tool-outcome-v1"),
+                "evaluator_id",
+            );
+            require(present(&observation.outcome), "outcome");
+            require(present(&observation.lesson), "lesson");
+            require(
+                observation.prediction_error.is_none() && observation.brier.is_none(),
+                "calibration exclusion",
+            );
+            if row_complete {
+                refusal_complete += 1;
+            }
+        }
+        let refusal_total = preflight_refusals.len();
+        out.push_str(&format!(
+            "  PREFLIGHT REFUSALS — {refusal_complete}/{refusal_total} latest malformed refusal(s) complete (prediction intentionally absent)\n"
+        ));
+        let mut refusal_ts: Vec<u64> = preflight_refusals
+            .iter()
+            .map(|(_, observation)| observation.ts_ms)
+            .filter(|ts| *ts > 0)
+            .collect();
+        refusal_ts.sort_unstable();
+        if let (Some(oldest), Some(newest)) = (refusal_ts.first(), refusal_ts.last()) {
+            let timestamped = refusal_ts.len();
+            out.push_str(&format!(
+                "    refusal window spans ts_ms {oldest}..{newest} across {timestamped}/{refusal_total} timestamped refusal(s)\n"
+            ));
+        }
+        for (field, count) in refusal_defects {
+            out.push_str(&format!(
+                "    missing or mismatched preflight {field}: {count}\n"
+            ));
         }
     }
     out
@@ -2788,10 +3035,14 @@ mod tests {
         observation.tool_version = prediction.tool_version.clone();
         observation.model_route = prediction.model_route.clone();
         observation.object_id = prediction.object_id.clone();
+        observation.outcome = Some("42".into());
         observation.verdict = Some("ok".into());
         observation.evaluator_id = Some("tool-outcome-v1".into());
         observation.latency_ms = Some(3);
         observation.semantic_success = Some(true);
+        observation.prediction_error = Some(0.5);
+        observation.brier = Some(0.25);
+        observation.lesson = Some("the execution matched the prior".into());
 
         let mut orphan = DecisionEvent::new("legacy", "tool_observed");
         orphan.parent_event_id = Some("missing".into());
@@ -2827,6 +3078,215 @@ mod tests {
             "{report}"
         );
 
+        let mut blank_prediction = prediction.clone();
+        blank_prediction.actor = Some("   ".into());
+        blank_prediction.predicted = Some("\t".into());
+        blank_prediction.ts_ms = 0;
+        let mut blank_observation = observation.clone();
+        blank_observation.actor = blank_prediction.actor.clone();
+        blank_observation.evaluator_id = Some(" ".into());
+        blank_observation.ts_ms = 0;
+        let blank =
+            render_tool_chain_completeness(&[compile.clone(), blank_prediction, blank_observation]);
+        assert!(blank.contains("0/1 latest call(s) complete"), "{blank}");
+        for defect in [
+            "actor",
+            "predicted outcome",
+            "evaluator_id",
+            "prediction ts_ms",
+            "observation ts_ms",
+        ] {
+            assert!(
+                blank.contains(&format!("missing or mismatched {defect}: 1")),
+                "{blank}"
+            );
+        }
+
+        let mut blank_prediction_id = prediction.clone();
+        blank_prediction_id.event_id = Some(" ".into());
+        let mut observation_for_blank_prediction = observation.clone();
+        observation_for_blank_prediction.parent_event_id = blank_prediction_id.event_id.clone();
+        let blank = render_tool_chain_completeness(&[
+            compile.clone(),
+            blank_prediction_id,
+            observation_for_blank_prediction,
+        ]);
+        assert!(
+            blank.contains("missing or mismatched prediction event_id: 1"),
+            "{blank}"
+        );
+
+        let mut blank_observation_id = observation.clone();
+        blank_observation_id.event_id = Some(" ".into());
+        let blank = render_tool_chain_completeness(&[
+            compile.clone(),
+            prediction.clone(),
+            blank_observation_id,
+        ]);
+        assert!(
+            blank.contains("missing or mismatched observation event_id: 1"),
+            "{blank}"
+        );
+
+        let mut contradictory_observation = observation.clone();
+        contradictory_observation.semantic_success = Some(false);
+        let contradictory = render_tool_chain_completeness(&[
+            compile.clone(),
+            prediction.clone(),
+            contradictory_observation,
+        ]);
+        assert!(
+            contradictory.contains("0/1 latest call(s) complete"),
+            "{contradictory}"
+        );
+        assert!(
+            contradictory.contains("missing or mismatched semantic_success consistency: 1"),
+            "{contradictory}"
+        );
+        let mut contradictory_empty = observation.clone();
+        contradictory_empty.verdict = Some("empty".into());
+        contradictory_empty.semantic_success = Some(true);
+        let contradictory = render_tool_chain_completeness(&[
+            compile.clone(),
+            prediction.clone(),
+            contradictory_empty,
+        ]);
+        assert!(
+            contradictory.contains("missing or mismatched semantic_success consistency: 1"),
+            "{contradictory}"
+        );
+
+        let mut invalid_verdict = observation.clone();
+        invalid_verdict.verdict = Some("mystery".into());
+        let invalid =
+            render_tool_chain_completeness(&[compile.clone(), prediction.clone(), invalid_verdict]);
+        assert!(
+            invalid.contains("missing or mismatched actual verdict: 1"),
+            "{invalid}"
+        );
+
+        let mut wrong_evaluator = observation.clone();
+        wrong_evaluator.evaluator_id = Some("unversioned-evaluator".into());
+        let wrong_evaluator =
+            render_tool_chain_completeness(&[compile.clone(), prediction.clone(), wrong_evaluator]);
+        assert!(
+            wrong_evaluator.contains("missing or mismatched evaluator_id: 1"),
+            "{wrong_evaluator}"
+        );
+
+        let mut incomplete_observation = observation.clone();
+        incomplete_observation.outcome = None;
+        incomplete_observation.lesson = Some("   ".into());
+        let incomplete = render_tool_chain_completeness(&[
+            compile.clone(),
+            prediction.clone(),
+            incomplete_observation,
+        ]);
+        assert!(
+            incomplete.contains("missing or mismatched actual outcome: 1"),
+            "{incomplete}"
+        );
+        assert!(
+            incomplete.contains("missing or mismatched lesson: 1"),
+            "{incomplete}"
+        );
+
+        let mut inconsistent_grade = observation.clone();
+        inconsistent_grade.prediction_error = Some(0.25);
+        inconsistent_grade.brier = Some(0.125);
+        let inconsistent = render_tool_chain_completeness(&[
+            compile.clone(),
+            prediction.clone(),
+            inconsistent_grade,
+        ]);
+        assert!(
+            inconsistent.contains("missing or mismatched prediction_error consistency: 1"),
+            "{inconsistent}"
+        );
+        assert!(
+            inconsistent.contains("missing or mismatched brier consistency: 1"),
+            "{inconsistent}"
+        );
+
+        let mut falsely_graded_denial = observation.clone();
+        falsely_graded_denial.verdict = Some("denied".into());
+        falsely_graded_denial.semantic_success = None;
+        let excluded = render_tool_chain_completeness(&[
+            compile.clone(),
+            prediction.clone(),
+            falsely_graded_denial,
+        ]);
+        assert!(
+            excluded.contains("missing or mismatched calibration exclusion: 1"),
+            "{excluded}"
+        );
+
+        let mut out_of_order = observation.clone();
+        out_of_order.ts_ms = prediction.ts_ms - 1;
+        let out_of_order =
+            render_tool_chain_completeness(&[compile.clone(), prediction.clone(), out_of_order]);
+        assert!(
+            out_of_order.contains("missing or mismatched temporal ordering: 1"),
+            "{out_of_order}"
+        );
+
+        let mut duplicate_root = compile.clone();
+        duplicate_root.trace_id = "foreign-trace".into();
+        let ambiguous_root = render_tool_chain_completeness(&[
+            compile.clone(),
+            duplicate_root,
+            prediction.clone(),
+            observation.clone(),
+        ]);
+        assert!(
+            ambiguous_root.contains("missing or mismatched bounded root integrity: 1"),
+            "{ambiguous_root}"
+        );
+
+        let mut zero_time_root = compile.clone();
+        zero_time_root.ts_ms = 0;
+        let zero_time_root = render_tool_chain_completeness(&[
+            zero_time_root,
+            prediction.clone(),
+            observation.clone(),
+        ]);
+        assert!(
+            zero_time_root.contains("missing or mismatched bounded root integrity: 1"),
+            "{zero_time_root}"
+        );
+
+        let mut blank_root = compile.clone();
+        blank_root.event_id = Some("   ".into());
+        let mut blank_root_prediction = prediction.clone();
+        blank_root_prediction.parent_event_id = blank_root.event_id.clone();
+        let blank_root = render_tool_chain_completeness(&[
+            blank_root,
+            blank_root_prediction,
+            observation.clone(),
+        ]);
+        assert!(
+            blank_root.contains("missing or mismatched bounded root integrity: 1"),
+            "{blank_root}"
+        );
+
+        let mut future_root = compile.clone();
+        future_root.ts_ms = prediction.ts_ms + 1;
+        let future_root =
+            render_tool_chain_completeness(&[future_root, prediction.clone(), observation.clone()]);
+        assert!(
+            future_root.contains("missing or mismatched bounded root integrity: 1"),
+            "{future_root}"
+        );
+
+        let mut dangling_root_prediction = prediction.clone();
+        dangling_root_prediction.parent_event_id = Some("missing-compile-root".into());
+        let dangling_root =
+            render_tool_chain_completeness(&[dangling_root_prediction, observation.clone()]);
+        assert!(
+            dangling_root.contains("missing or mismatched bounded root linkage: 1"),
+            "{dangling_root}"
+        );
+
         prediction.parent_event_id = Some("not-the-compile-root".into());
         let broken = render_tool_chain_completeness(&[compile, prediction, observation]);
         assert!(broken.contains("0/1 latest call(s) complete"), "{broken}");
@@ -2835,6 +3295,234 @@ mod tests {
             "{broken}"
         );
         assert!(render_tool_chain_completeness(&[]).starts_with("No tool-chain calls"));
+    }
+
+    #[test]
+    fn tool_chain_completeness_separates_strict_preflight_refusals_from_calls() {
+        let mut refusal = DecisionEvent::new("refused", "tool_observed");
+        refusal.ts_ms = 42;
+        refusal.actor = Some("conversation".into());
+        refusal.lane = Some("primary".into());
+        refusal.context_fingerprint = Some("context:opaque".into());
+        refusal.goal_id = Some("freeform:opaque".into());
+        refusal.tool_version = Some("mind-conversation/0.1.0".into());
+        refusal.model_route = Some("scripted".into());
+        refusal.object_id = Some("calc:malformed".into());
+        refusal.outcome = Some("missing required expression".into());
+        refusal.verdict = Some("malformed".into());
+        refusal.evaluator_id = Some("tool-outcome-v1".into());
+        refusal.lesson = Some("planner arguments did not fit the tool".into());
+        refusal.event_id = Some("refusal-1".into());
+
+        let report = render_tool_chain_completeness(&[refusal.clone()]);
+        assert!(report.starts_with("No tool-chain calls yet"), "{report}");
+        assert!(
+            report.contains("PREFLIGHT REFUSALS — 1/1 latest malformed refusal(s) complete"),
+            "{report}"
+        );
+        assert!(
+            report.contains("prediction intentionally absent"),
+            "{report}"
+        );
+        assert!(
+            report.contains("refusal window spans ts_ms 42..42 across 1/1 timestamped refusal(s)"),
+            "{report}"
+        );
+        assert!(!report.contains("prediction link"), "{report}");
+
+        // Production parents a preflight refusal directly to goal_compiled so it remains in the
+        // run's causal tree without pretending that a tool prediction existed.
+        let mut root = DecisionEvent::new("refused", "goal_compiled");
+        root.event_id = Some("goal-root".into());
+        root.ts_ms = 41;
+        refusal.parent_event_id = Some("goal-root".into());
+        let report = render_tool_chain_completeness(&[root.clone(), refusal.clone()]);
+        assert!(report.starts_with("No tool-chain calls yet"), "{report}");
+        assert!(
+            report.contains("PREFLIGHT REFUSALS — 1/1 latest malformed refusal(s) complete"),
+            "{report}"
+        );
+        assert!(!report.contains("prediction link"), "{report}");
+
+        let mut wrong_evaluator = refusal.clone();
+        wrong_evaluator.parent_event_id = None;
+        wrong_evaluator.evaluator_id = Some("unversioned-evaluator".into());
+        let report = render_tool_chain_completeness(&[wrong_evaluator]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight evaluator_id: 1"),
+            "{report}"
+        );
+
+        let mut falsely_graded = refusal.clone();
+        falsely_graded.parent_event_id = None;
+        falsely_graded.prediction_error = Some(0.25);
+        falsely_graded.brier = Some(0.0625);
+        let report = render_tool_chain_completeness(&[falsely_graded]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight calibration exclusion: 1"),
+            "{report}"
+        );
+
+        // Parentless is only the standalone-bus shape when the trace declares no compiled root.
+        // Once a bounded root exists, dropping its parent link is a causal defect, not an exemption.
+        let mut missing_parent = refusal.clone();
+        missing_parent.parent_event_id = None;
+        let report = render_tool_chain_completeness(&[root.clone(), missing_parent]);
+        assert!(report.contains("0/1 latest call(s) complete"), "{report}");
+        assert!(
+            report.contains("missing or mismatched prediction link: 1"),
+            "{report}"
+        );
+        assert!(!report.contains("PREFLIGHT REFUSALS"), "{report}");
+
+        let mut zero_time_root = root.clone();
+        zero_time_root.ts_ms = 0;
+        let report = render_tool_chain_completeness(&[zero_time_root, refusal.clone()]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight bounded root integrity: 1"),
+            "{report}"
+        );
+
+        let mut future_root = root.clone();
+        future_root.ts_ms = refusal.ts_ms + 1;
+        let report = render_tool_chain_completeness(&[future_root, refusal.clone()]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight bounded root integrity: 1"),
+            "{report}"
+        );
+
+        let mut blank_root = root.clone();
+        blank_root.event_id = Some("   ".into());
+        let mut blank_parent_refusal = refusal.clone();
+        blank_parent_refusal.parent_event_id = blank_root.event_id.clone();
+        let report = render_tool_chain_completeness(&[blank_root, blank_parent_refusal]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight bounded root integrity: 1"),
+            "{report}"
+        );
+
+        // Duplicate span IDs make the alleged root ambiguous; ambiguity must fail closed rather
+        // than letting insertion order decide whether an observation escapes the call gate.
+        let mut duplicate = DecisionEvent::new("refused", "tool_predicted");
+        duplicate.event_id = Some("goal-root".into());
+        let report = render_tool_chain_completeness(&[root.clone(), duplicate, refusal.clone()]);
+        assert!(report.contains("0/1 latest call(s) complete"), "{report}");
+        assert!(!report.contains("PREFLIGHT REFUSALS"), "{report}");
+
+        // An ID match across traces is not causal linkage. A cross-trace alleged root must remain
+        // visible as a broken ordinary call rather than qualifying for the refusal exemption.
+        let mut cross_trace_root = root.clone();
+        cross_trace_root.trace_id = "other-trace".into();
+        let report = render_tool_chain_completeness(&[cross_trace_root, refusal.clone()]);
+        assert!(report.contains("0/1 latest call(s) complete"), "{report}");
+        assert!(
+            report.contains("missing or mismatched prediction link: 1"),
+            "{report}"
+        );
+        assert!(!report.contains("PREFLIGHT REFUSALS"), "{report}");
+
+        // A bounded run has exactly one compiled root. Even individually unique root IDs are
+        // ambiguous when the trace declares two roots, so neither can grant an exemption.
+        let mut second_root = DecisionEvent::new("refused", "goal_compiled");
+        second_root.event_id = Some("second-root".into());
+        let report = render_tool_chain_completeness(&[root.clone(), second_root, refusal.clone()]);
+        assert!(report.contains("0/1 latest call(s) complete"), "{report}");
+        assert!(!report.contains("PREFLIGHT REFUSALS"), "{report}");
+
+        // Mixing the two populations must not let safe refusals dilute the executed-call gate.
+        let call_root = DecisionEvent::span("mixed", None, "goal_compiled");
+        let mut prediction =
+            DecisionEvent::span("mixed", call_root.event_id.as_deref(), "tool_predicted");
+        prediction.actor = Some("conversation".into());
+        prediction.lane = Some("primary".into());
+        prediction.context_fingerprint = Some("context:opaque".into());
+        prediction.goal_id = Some("goal:mixed".into());
+        prediction.tool_version = Some("mind-conversation/0.1.0".into());
+        prediction.model_route = Some("scripted".into());
+        prediction.object_id = Some("calc:opaque".into());
+        prediction.predicted = Some("usable output".into());
+        prediction.confidence = Some(0.5);
+        let mut observation =
+            DecisionEvent::span("mixed", prediction.event_id.as_deref(), "tool_observed");
+        observation.actor = prediction.actor.clone();
+        observation.lane = prediction.lane.clone();
+        observation.context_fingerprint = prediction.context_fingerprint.clone();
+        observation.goal_id = prediction.goal_id.clone();
+        observation.tool_version = prediction.tool_version.clone();
+        observation.model_route = prediction.model_route.clone();
+        observation.object_id = prediction.object_id.clone();
+        observation.outcome = Some("42".into());
+        observation.verdict = Some("ok".into());
+        observation.evaluator_id = Some("tool-outcome-v1".into());
+        observation.latency_ms = Some(3);
+        observation.semantic_success = Some(true);
+        observation.prediction_error = Some(0.5);
+        observation.brier = Some(0.25);
+        observation.lesson = Some("the execution matched the prior".into());
+        refusal.parent_event_id = None;
+        let report =
+            render_tool_chain_completeness(&[call_root, prediction, observation, refusal.clone()]);
+        assert!(report.contains("1/1 latest call(s) complete"), "{report}");
+        assert!(report.contains("PREFLIGHT REFUSALS — 1/1"), "{report}");
+
+        let mut incomplete = refusal.clone();
+        incomplete.parent_event_id = None;
+        incomplete.ts_ms = 0;
+        incomplete.evaluator_id = None;
+        incomplete.outcome = None;
+        let report = render_tool_chain_completeness(&[incomplete]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight evaluator_id: 1"),
+            "{report}"
+        );
+        assert!(
+            report.contains("missing or mismatched preflight outcome: 1"),
+            "{report}"
+        );
+        assert!(
+            report.contains("missing or mismatched preflight ts_ms: 1"),
+            "{report}"
+        );
+
+        let mut empty = refusal.clone();
+        empty.parent_event_id = None;
+        empty.event_id = Some(String::new());
+        empty.lesson = Some("   ".into());
+        let report = render_tool_chain_completeness(&[empty]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/1"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight event_id: 1"),
+            "{report}"
+        );
+        assert!(
+            report.contains("missing or mismatched preflight lesson: 1"),
+            "{report}"
+        );
+
+        let duplicate_refusal = refusal.clone();
+        let report = render_tool_chain_completeness(&[refusal.clone(), duplicate_refusal]);
+        assert!(report.contains("PREFLIGHT REFUSALS — 0/2"), "{report}");
+        assert!(
+            report.contains("missing or mismatched preflight event_id uniqueness: 2"),
+            "{report}"
+        );
+
+        // A verdict cannot claim the exemption while also claiming to be the child of a prediction.
+        // With a dangling parent it remains an ordinary broken chain.
+        refusal.parent_event_id = Some("missing-prediction".into());
+        let report = render_tool_chain_completeness(&[refusal]);
+        assert!(report.contains("0/1 latest call(s) complete"), "{report}");
+        assert!(
+            report.contains("missing or mismatched prediction link: 1"),
+            "{report}"
+        );
+        assert!(!report.contains("PREFLIGHT REFUSALS"), "{report}");
     }
 
     #[test]
@@ -2860,19 +3548,45 @@ mod tests {
             event.tool_version = prediction.tool_version.clone();
             event.model_route = prediction.model_route.clone();
             event.object_id = prediction.object_id.clone();
+            event.outcome = Some("42".into());
             event.verdict = Some("ok".into());
             event.evaluator_id = Some("tool-outcome-v1".into());
             event.latency_ms = Some(3);
             event.semantic_success = Some(true);
+            event.prediction_error = Some(0.5);
+            event.brier = Some(0.25);
+            event.lesson = Some("the execution matched the prior".into());
             event
         };
 
         let first = observation("observation-1");
         let second = observation("observation-2");
-        let report = render_tool_chain_completeness(&[prediction, first, second]);
+        let report = render_tool_chain_completeness(&[prediction.clone(), first.clone(), second]);
         assert!(report.contains("0/2 latest call(s) complete"), "{report}");
         assert!(
             report.contains("missing or mismatched observation cardinality: 2"),
+            "{report}"
+        );
+
+        let duplicate_prediction = prediction.clone();
+        let report =
+            render_tool_chain_completeness(&[prediction.clone(), duplicate_prediction, first]);
+        assert!(report.contains("0/1 latest call(s) complete"), "{report}");
+        assert!(
+            report.contains("missing or mismatched prediction cardinality: 1"),
+            "{report}"
+        );
+
+        let mut second_prediction = prediction.clone();
+        second_prediction.event_id = Some("prediction-2".into());
+        let first = observation("shared-observation");
+        let mut second = observation("shared-observation");
+        second.parent_event_id = second_prediction.event_id.clone();
+        let report =
+            render_tool_chain_completeness(&[prediction, first, second_prediction, second]);
+        assert!(report.contains("0/2 latest call(s) complete"), "{report}");
+        assert!(
+            report.contains("missing or mismatched observation event_id uniqueness: 2"),
             "{report}"
         );
     }

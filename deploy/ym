@@ -8,30 +8,117 @@ set -uo pipefail
 BOX="${YM_BOX:-root@192.168.4.90}"
 KEY="${YM_KEY:-$HOME/.ssh/id_deploy}"
 CTL="${YM_CTL_URL:-http://127.0.0.1:8077}"
+case "$BOX" in
+  -*) echo "YM_BOX must be a host, not an SSH option" >&2; exit 2 ;;
+esac
 ssh_box() { ssh -i "$KEY" -o ConnectTimeout=8 "$BOX" "$@"; }
 # Forward a line to the server-side router; the message is piped via stdin so quotes/spaces never hit a shell.
 # ARCH-2: /cli authenticates every call. The console token is read ON the box inside the ssh
 # session and goes straight into the local curl header — it never crosses the wire or appears
 # in any argv on this side. SSH remains the trust boundary, exactly as before.
 YM_TOKEN_FILE="${YM_TOKEN_FILE:-/var/lib/yantrik-mind/console.token}"
-ym_send() { printf '%s' "$1" | ssh_box "curl -s -m 150 -H \"Authorization: Bearer \$(cat $YM_TOKEN_FILE)\" --data-binary @- $CTL/cli"; echo; }
+# These values are interpolated into the remote shell command below. Keep that boundary narrower
+# than general shell syntax: the token must be an absolute simple path, and the control endpoint
+# must remain loopback-only with a simple URL. Operator overrides that fail this contract stop
+# locally before SSH.
+case "$YM_TOKEN_FILE" in
+  /*) ;;
+  *) echo "YM_TOKEN_FILE must be an absolute path" >&2; exit 2 ;;
+esac
+case "$YM_TOKEN_FILE" in
+  *[!A-Za-z0-9_./-]*) echo "YM_TOKEN_FILE contains unsupported characters" >&2; exit 2 ;;
+esac
+case "$CTL" in
+  *[!A-Za-z0-9_./:-]*) echo "YM_CTL_URL contains unsupported characters" >&2; exit 2 ;;
+esac
+YM_CTL_HOST="${CTL%:*}"
+YM_CTL_PORT="${CTL##*:}"
+case "$YM_CTL_HOST" in
+  http://127.0.0.1|http://localhost) ;;
+  *) echo "YM_CTL_URL must be a bare loopback HTTP host and port" >&2; exit 2 ;;
+esac
+case "$YM_CTL_PORT" in
+  ''|*[!0-9]*|0) echo "YM_CTL_URL must include a positive numeric port" >&2; exit 2 ;;
+esac
+if [ "${#YM_CTL_PORT}" -gt 5 ] || [ "$YM_CTL_PORT" -gt 65535 ]; then
+  echo "YM_CTL_URL port must be at most 65535" >&2
+  exit 2
+fi
+# Agentic turns have been observed completing after the old 150s client ceiling. Keep the timeout
+# above that measured tail while still bounding a genuinely stuck request. Validate before placing
+# the value inside the remote shell command so an environment override cannot become shell syntax.
+YM_CLI_TIMEOUT_SECS="${YM_CLI_TIMEOUT_SECS:-300}"
+case "$YM_CLI_TIMEOUT_SECS" in
+  ''|*[!0-9]*|0) echo "YM_CLI_TIMEOUT_SECS must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "${#YM_CLI_TIMEOUT_SECS}" -gt 4 ] || [ "$YM_CLI_TIMEOUT_SECS" -gt 3600 ]; then
+  echo "YM_CLI_TIMEOUT_SECS must be at most 3600" >&2
+  exit 2
+fi
+ym_send() {
+  local rc
+  printf '%s' "$1" | ssh_box "curl -sS --fail-with-body -m $YM_CLI_TIMEOUT_SECS -H \"Authorization: Bearer \$(cat $YM_TOKEN_FILE)\" --data-binary @- $CTL/cli"
+  rc=$?
+  echo
+  return "$rc"
+}
+
+ym_logs_command() {
+  local follow="" lines=40
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f|--follow) follow=" -f" ;;
+      -n|--lines)
+        shift
+        if [ "$#" -eq 0 ]; then
+          echo "ym logs: -n/--lines requires a count" >&2
+          return 2
+        fi
+        lines="$1"
+        ;;
+      *) echo "ym logs: expected only -f/--follow or -n/--lines COUNT" >&2; return 2 ;;
+    esac
+    shift
+  done
+  case "$lines" in
+    ''|*[!0-9]*|0) echo "ym logs: line count must be a positive integer" >&2; return 2 ;;
+  esac
+  if [ "${#lines}" -gt 5 ] || [ "$lines" -gt 10000 ]; then
+    echo "ym logs: line count must be at most 10000" >&2
+    return 2
+  fi
+  printf 'journalctl -u yantrik-mind --no-pager -n %s%s' "$lines" "$follow"
+}
+
+ym_status() {
+  local status_rc=0
+  printf 'service:  '
+  ssh_box 'systemctl is-active yantrik-mind' || status_rc=$?
+  printf 'endpoint: '
+  if ! ssh_box "curl -sS --fail-with-body -m 6 $CTL/status"; then
+    echo UNREACHABLE
+    [ "$status_rc" -ne 0 ] || status_rc=1
+  fi
+  return "$status_rc"
+}
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 
 case "$cmd" in
   status)
-    printf 'service:  '; ssh_box 'systemctl is-active yantrik-mind'
-    printf 'endpoint: '; ssh_box "curl -s -m 6 $CTL/status || echo UNREACHABLE"
+    ym_status
+    exit $?
     ;;
   logs)
-    ssh_box "journalctl -u yantrik-mind --no-pager ${*:--n 40}"
+    logs_command=$(ym_logs_command "$@") || exit $?
+    ssh_box "$logs_command"
     ;;
   deploy)
     # E.DEP1: every deploy goes through the provenance-gated pipeline — self_deploy.sh
     # interrogates the built binary's --build-commit BEFORE any swap and records the outcome
     # in evolution.log. The old raw build+cp+restart here was exactly the stale-binary trap
     # that gate was built to close; the operator command must not keep a side door around it.
-    ssh_box 'export PATH=/usr/local/bin:/root/.cargo/bin:$PATH && cd /root/codes/ym-autodeploy && bash deploy/self_deploy.sh 2>&1 | tail -3'
+    ssh_box "export PATH=/usr/local/bin:/root/.cargo/bin:\$PATH && cd /root/codes/ym-autodeploy && bash -o pipefail -c 'bash deploy/self_deploy.sh 2>&1 | tail -3'"
     ;;
   ""|-h|--help|help)
     echo "ym — talk to yantrik-mind (live, shared memory)"

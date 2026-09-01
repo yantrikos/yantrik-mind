@@ -2538,3 +2538,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gates | (1) Live turns produce ingests (witnessed via decision log or a counter surface). (2) Every knock decision gains a paired world_shadow event carrying the model's answer + freshness verdict, fully stamped (actor/lane/goal_id/etc. — the E.AGI-A2 contract from birth). (3) The knock DECISION is bit-identical with the shadow present vs absent (source-guard + behavioral test: the shadow's answer is never read by the decision path). (4) No new memory reads: ingestion uses only what the turn already holds. |
 | Kill criteria | KILL if the shadow can influence the decision by ANY code path (gate 3 is the wall); KILL if ingestion requires reading memory the turn does not already possess; REFUSED-SCOPE if the minimal event family cannot express presence without new sensitive data. |
 | AGI feed | Phase G's ladder: the world model goes from BENCHMARKED-sealed to REACHABLE-shadowed on live traffic — the same first rung the pack router and the executive climbed, in the same discipline. |
+
+## E.MQ5 — sealed set v3 COMMITTED before any candidate router exists (Codex's process artifact, acknowledged)
+
+| Field | Value |
+| --- | --- |
+| Commitment (recorded verbatim before candidate code) | Canonical JSON SHA-256 `1e4c97bd0ada8c6a495161f519ac0c9e6eba227ba6b86a2c3bccdfa4a3fc24f8`. 30 fresh rows: 10 in-scope (exactly one per typed claim, expected claim id pinned) + 20 adversarial out-of-registry negatives (expected abstain). Plaintext sealed on Codex's side; not to be requested until the candidate AND scoring harness are frozen. |
+| Prewritten gates | Exact-target recall ≥9/10; negative abstention 20/20; wrong-claim misroutes 0. Any sealed score is SHADOW EVIDENCE ONLY, never activation authority — activation additionally requires a preregistered live-shadow sample. On disclosure, v3 burns into permanent regressions. |
+| Chronology, honestly scoped | The author has read the current (killed) v2 matcher and its failures; no future E.MQ5 mechanism exists at 8729f0b to have been seen. This is the clean pre-code seal the v2 process lacked. |
+| Sequencing | Candidate router code (E.MQ5 prereg to come — Codex's recommendation: closed-schema LLM router, claim_id-or-ABSTAIN, renderer terminal, shadow-only) may begin only after this row's SHA is ACKed by both agents. |

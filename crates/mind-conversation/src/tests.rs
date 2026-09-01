@@ -7769,6 +7769,48 @@ fn rendering_rich_does_not_disturb_read_isolation() {
 // exactly that: the same tool, never the same arguments twice. It fails against the old guard (which
 // would run all 30 scripted steps) and passes against the observation-based one.
 
+// ── E.WEB7: THE DECISIONS FEED IS REDACTED AND FAIL-EMPTY ────────────────────────────────────────
+
+/// Kill criterion (1)+(2): a recorded event whose goal carries a credential renders with the
+/// secret MASKED in the web feed, and a disabled recorder yields an empty feed, not an error.
+#[tokio::test]
+async fn web_decisions_redacts_goals_and_is_empty_without_a_recorder() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    // No recorder wired (the default is disabled): the feed is empty, never an error.
+    assert!(
+        conv.web_recent_decisions(50).is_empty(),
+        "a disabled recorder yields nothing"
+    );
+
+    // Wire a real recorder and record an event whose goal carries a token-shaped secret.
+    let dir = std::env::temp_dir().join(format!("ym-dec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let logpath = dir.join("d.jsonl");
+    let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&logpath));
+    let mut ev = mind_observability::DecisionEvent::new("trace-1", "pack_route_shadow");
+    ev.goal = Some("please remember my key is ghp_ABCDEFGH1234567890wxyz".to_string());
+    log.record(ev);
+    let conv = conv.with_recorder(log);
+
+    let rows = conv.web_recent_decisions(50);
+    assert_eq!(rows.len(), 1, "the recorded event surfaces: {rows:?}");
+    let goal = rows[0]["goal"].as_str().unwrap_or("");
+    assert!(
+        !goal.contains("ghp_ABCDEFGH1234567890wxyz"),
+        "the secret must be masked in the feed: {goal}"
+    );
+    assert!(
+        rows[0]["kind"] == "pack_route_shadow",
+        "the kind survives: {rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── E.WEB6: THE CEREMONY WAKES THE BRAIN BEFORE PROMISING ONE ───────────────────────────────────
 
 /// Criterion (1): a live pool preflights ok, and the serving label is captured from the same lane

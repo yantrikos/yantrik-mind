@@ -11918,6 +11918,37 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         Ok(ans)
     }
 
+    /// E.WEB7: the recent decision trace for the web Activity panel — the recorder's own log,
+    /// tailed and REDUCED to a content-free shape. The `goal` field can carry user text, so it is
+    /// run through the same redactor the answer path uses; every other field is telemetry by
+    /// construction. A disabled recorder yields an empty feed, never an error.
+    pub fn web_recent_decisions(&self, limit: usize) -> Vec<serde_json::Value> {
+        let limit = limit.clamp(1, 200);
+        let Some(path) = self.recorder.trace_path() else {
+            return Vec::new();
+        };
+        let mut events = mind_observability::read_events(&path);
+        let n = events.len();
+        if n > limit {
+            events.drain(0..n - limit);
+        }
+        events
+            .into_iter()
+            .rev()
+            .map(|e| {
+                serde_json::json!({
+                    "ts_ms": e.ts_ms,
+                    "kind": e.kind,
+                    "actor": e.actor,
+                    "verdict": e.verdict,
+                    "chosen": e.chosen,
+                    "confidence": e.confidence,
+                    "goal": e.goal.map(|g| crate::redact::redact_answer(&g)),
+                })
+            })
+            .collect()
+    }
+
     /// E.WEB6: one tiny call to prove a brain answers, BEFORE the ceremony promises one. The
     /// serving label rides the same lane events the badge uses — no new instrumentation, and the
     /// label is therefore post-success truth, never the configured route. Household lane on

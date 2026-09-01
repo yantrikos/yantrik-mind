@@ -929,6 +929,24 @@ fn handle(
                 }
             }
         }
+        ("GET", "/api/decisions") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let n: usize = target
+                    .split('?')
+                    .nth(1)
+                    .and_then(|q| q.strip_prefix("n="))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60);
+                let rows = conv.web_recent_decisions(n);
+                send_json(
+                    &mut stream,
+                    "200 OK",
+                    "",
+                    &serde_json::json!({ "decisions": rows }),
+                );
+            }
+        },
         ("GET", "/api/orders") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {

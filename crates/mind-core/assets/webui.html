@@ -67,6 +67,9 @@
         <button class="nav-item" data-panel="tasks">
           <span class="nav-ico">◷</span> Agents
         </button>
+        <button class="nav-item" data-panel="activity">
+          <span class="nav-ico">≣</span> Activity
+        </button>
         <div class="nav-soon" title="Being built next">
           <span class="nav-item soon"><span class="nav-ico">✦</span> Memory <em>soon</em></span>
         </div>
@@ -147,6 +150,20 @@
           <div id="horizon-cards"><p class="loading">reading durable goals…</p></div>
           <div class="cap-group">Standing orders</div>
           <pre id="orders-text" class="orders glass">…</pre>
+        </div>
+      </div>
+
+      <!-- Activity: decisions log + standing orders -->
+      <div class="panel" id="panel-activity">
+        <header class="panel-head">
+          <h2>Activity</h2>
+          <p class="panel-sub">What the mind decided, and what it will do on a schedule. Read from the hash-chained decision log and the standing-orders store; goals are redacted.</p>
+        </header>
+        <div class="cards" id="activity-cards">
+          <div class="cap-group">Standing orders &amp; durable goals</div>
+          <pre id="activity-orders" class="orders glass">…</pre>
+          <div class="cap-group">Recent decisions</div>
+          <div id="activity-decisions"><p class="loading">reading the decision log…</p></div>
         </div>
       </div>
 

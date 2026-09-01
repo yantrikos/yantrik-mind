@@ -90,6 +90,7 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
     if (btn.dataset.panel === "settings") loadSettings();
     if (btn.dataset.panel === "devices") loadDevices();
     if (btn.dataset.panel === "tasks") loadTasks();
+    if (btn.dataset.panel === "activity") loadActivity();
     if (btn.dataset.panel === "chat") input.focus();
   });
 });
@@ -364,6 +365,37 @@ function textP(s) { const p = el("p", "loading"); p.textContent = s; return p; }
 
 /* ── agents & standing orders ─────────────────────────────────────────── */
 let tasksTimer = null;
+async function loadActivity() {
+  // Standing orders (reuse the orders verb) + a redacted decisions timeline.
+  try {
+    const r = await fetch("/api/orders", { headers: { "X-YM-Web": "1" } });
+    $("activity-orders").textContent = r.ok ? ((await r.json()).text || "(none)") : "(operator only)";
+  } catch (_) { $("activity-orders").textContent = "(unavailable)"; }
+  const host = $("activity-decisions");
+  try {
+    const r = await fetch("/api/decisions?n=60", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    const rows = data.decisions || [];
+    if (!rows.length) { host.appendChild(textP("No decisions recorded yet (the flight recorder may be disabled).")); return; }
+    for (const d of rows) {
+      const card = el("div", "card setting-row");
+      const main = el("div", "card-main");
+      const t = el("div", "card-title");
+      t.textContent = (d.kind || "?") + (d.verdict ? " · " + d.verdict : "") + (d.chosen ? " → " + d.chosen : "");
+      main.appendChild(t);
+      if (d.goal) { const g = el("div", "card-desc"); g.textContent = d.goal; main.appendChild(g); }
+      const meta = el("div", "setting-key");
+      const when = d.ts_ms ? new Date(d.ts_ms).toLocaleString() : "";
+      meta.textContent = `${d.actor || ""} ${when}${d.confidence != null ? " · conf " + Number(d.confidence).toFixed(2) : ""}`.trim();
+      main.appendChild(meta);
+      card.appendChild(main);
+      host.appendChild(card);
+    }
+  } catch (_) { host.replaceChildren(textP("Could not read the decision log.")); }
+}
+
 async function loadTasks() {
   const host = $("job-cards");
   try {

@@ -197,6 +197,8 @@ body {
 .thread-brief { margin-bottom: 14px; }
 .run.scheduled { border-style: dashed; }
 .thread-reply { display: flex; justify-content: flex-end; padding: 12px 0 4px; }
+.board-card.opens-thread { cursor: pointer; }
+.board-card.opens-thread:hover { border-color: var(--line-strong, var(--line)); background: var(--bg2); }
 .nav-ico { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: .8; }
 
 /* work area */

@@ -619,19 +619,28 @@ async function loadBoard() {
   const host = $("board-columns");
   const cols = { scheduled: [], running: [], done: [], needs: [] };
   async function pull(url) { try { const r = await fetch(url, { headers: { "X-YM-Web": "1" } }); return r.ok ? await r.json() : {}; } catch (_) { return {}; } }
-  const [tasks, horizons, orders] = await Promise.all([pull("/api/tasks"), pull("/api/horizons"), pull("/api/orders")]);
-  for (const j of (tasks.jobs || [])) cols[columnFor("job", j.state || j.status)].push({ title: j.name || j.id, meta: (j.task || j.goal || "").slice(0, 80), cls: columnFor("job", j.state || j.status) });
+  const [tasks, horizons, orders] = await Promise.all([pull("/api/tasks"), pull("/api/horizons"), fetchStandingOrders()]);
+  // E.WEB18b: a run's card opens its agent's thread — the same key rule the lists use.
+  for (const j of (tasks.jobs || [])) cols[columnFor("job", j.state || j.status)].push({ title: j.name || j.id, meta: (j.task || j.goal || "").slice(0, 80), cls: columnFor("job", j.state || j.status), agent: j.name || j.id });
   for (const g of (horizons.goals || [])) { const st = g.budget_expired ? "failed" : (g.queue_status || g.status); const col = columnFor("horizon", st); cols[col].push({ title: g.objective || g.goal_id, meta: g.budget_expired ? "budget expired" : (g.queue_status || g.status || ""), cls: col }); }
-  // Standing orders text is a blob; show a single card pointing to Activity for detail.
-  if (orders.text && !orders.text.includes("No standing")) cols.scheduled.push({ title: "Standing orders", meta: "see Activity for schedule + controls", cls: "scheduled" });
+  // Standing orders, typed: one card each with the server's countdown, opening the agent's thread.
+  for (const o of orders) {
+    const secs = Number(o.in_seconds);
+    const when = !Number.isFinite(secs) ? "" : secs <= 0 ? "due now" : secs < 3600 ? `in ${Math.round(secs / 60)}m` : secs < 172800 ? `in ${Math.round(secs / 3600)}h` : `in ${Math.round(secs / 86400)}d`;
+    cols.scheduled.push({ title: o.name || o.id, meta: o.state === "paused" ? `paused · would fire ${when}` : `fires ${when}`, cls: "scheduled", agent: o.name || o.id });
+  }
   host.replaceChildren();
   for (const [key, label] of [["scheduled", "Scheduled"], ["running", "Running"], ["done", "Done"], ["needs", "Needs review"]]) {
     const col = el("div", "board-col");
     const h = el("h3"); h.textContent = `${label} · ${cols[key].length}`; col.appendChild(h);
     for (const c of cols[key]) {
-      const card = el("div", "board-card " + (key === "needs" ? "needs" : key === "running" ? "running" : ""));
+      const card = el("div", "board-card " + (key === "needs" ? "needs" : key === "running" ? "running" : "") + (c.agent ? " opens-thread" : ""));
       const t = el("div", "bc-title"); t.textContent = c.title; card.appendChild(t);
       if (c.meta) { const m = el("div", "bc-meta"); m.textContent = c.meta; card.appendChild(m); }
+      if (c.agent) {
+        card.setAttribute("role", "button"); card.tabIndex = 0;
+        card.addEventListener("click", () => openThreadFromAnywhere(c.agent));
+      }
       col.appendChild(card);
     }
     if (!cols[key].length) { const e = el("div", "bc-meta"); e.textContent = "—"; col.appendChild(e); }
@@ -867,6 +876,15 @@ function openThread(name) {
 function closeThread() {
   openThreadName = null;
   setAgentsView(threadReturnView);
+}
+// E.WEB18b: from any panel (the Board), land in the agent's thread with fresh data.
+async function openThreadFromAnywhere(name) {
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+  $("panel-tasks").classList.add("active");
+  setAgentsView("running");
+  await loadTasks();
+  openThread(name);
 }
 
 function renderThread(name) {

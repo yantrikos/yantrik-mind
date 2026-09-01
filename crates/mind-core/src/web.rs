@@ -2360,6 +2360,18 @@ mod tests {
             js.contains("back.addEventListener(\"click\", closeThread)"),
             "a thread can be left"
         );
+        // E.WEB18b: the Board opens threads too, and reads orders typed — never the text blob.
+        let board = js.find("async function loadBoard()").unwrap();
+        let board_body =
+            &js[board..board + js[board..].find("async function loadDreaming()").unwrap()];
+        assert!(
+            board_body.contains("fetchStandingOrders()")
+                && !board_body.contains("/api/orders")
+                && board_body.contains("openThreadFromAnywhere(c.agent)")
+                && board_body.contains("agent: j.name || j.id")
+                && board_body.contains("agent: o.name || o.id"),
+            "board cards open their agent's thread; orders are typed on the board"
+        );
         // The classifier's contract names every state the server emits.
         for word in [
             "running|done|failed",

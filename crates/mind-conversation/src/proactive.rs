@@ -2,6 +2,130 @@
 
 use super::*;
 
+// E.G2a's tests live ABOVE the proactive surface on purpose: E.G1's source guard scans every
+// byte after the shadow consult for the tokens a decision must never touch, and a test that
+// filters events by kind would otherwise trip it.
+/// E.G2a: every knock evaluation ends in exactly one `knock_disposition` event whose parent is
+/// the paired world-shadow row. That an evaluation which never began (YM_KNOCK=off) leaves
+/// neither row is pinned by the source guard below, not by a runtime test: `YM_KNOCK` is
+/// process-wide, and a test that flips it races every other test that evaluates a knock.
+#[cfg(test)]
+mod knock_disposition_tests {
+    use super::*;
+    use mind_inference::{InferencePool, ScriptedLLM};
+    use mind_memory::MemoryHandle;
+    use std::sync::Arc;
+    use yantrik_ml::LLMBackend;
+
+    const SRC: &str = include_str!("proactive.rs");
+
+    fn engine(tag: &str) -> (ConversationEngine, std::path::PathBuf) {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+            "JARVIS",
+        );
+        let dir = std::env::temp_dir().join(format!("ym-eg2a-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = Arc::new(mind_observability::DecisionLog::open(dir.join("d.jsonl")));
+        (conv.with_recorder(log), dir)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_evaluation_with_no_packets_leaves_one_shadow_and_one_joined_disposition() {
+        let (conv, dir) = engine("nopk");
+        assert!(
+            conv.maybe_knock().await.is_none(),
+            "no packet ⇒ no knock (unchanged)"
+        );
+        let events = conv
+            .recorder()
+            .read_tail_verified(20)
+            .expect("chain verifies");
+        let shadows: Vec<_> = events.iter().filter(|e| e.kind == "world_shadow").collect();
+        let disp: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "knock_disposition")
+            .collect();
+        assert_eq!(shadows.len(), 1, "one paired shadow row");
+        assert_eq!(disp.len(), 1, "exactly one disposition per evaluation");
+        assert_eq!(
+            disp[0].parent_event_id.as_deref(),
+            Some(shadows[0].trace_id.as_str()),
+            "the disposition's parent is the shadow row — the offline join key"
+        );
+        assert_eq!(disp[0].chosen.as_deref(), Some("no_packets"));
+        assert_eq!(disp[0].verdict.as_deref(), Some("before-gate"));
+        assert_eq!(
+            disp[0].semantic_success, None,
+            "receptive is null before the gate"
+        );
+        assert_eq!(disp[0].object_id, None, "no packet ref unless sent");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Source guards: every exit of `maybe_knock` after the shadow row is preceded by a disposition;
+    /// the set of dispositions is exactly the preregistered nine; the judgment ref is untouched.
+    #[test]
+    fn every_exit_after_the_shadow_carries_a_disposition_and_the_ref_is_byte_identical() {
+        let start = SRC.find(concat!("pub async fn ", "maybe_knock(")).unwrap();
+        let end = start
+            + SRC[start..]
+                .find(concat!("pub async fn ", "knock_reply("))
+                .unwrap();
+        let body = &SRC[start..end];
+        let shadow_at = body
+            .find("record_world_shadow(now, \"knock-receptivity\")")
+            .unwrap();
+        let after = &body[shadow_at..];
+        let mut idx = 0;
+        let mut exits = 0;
+        while let Some(i) = after[idx..].find("return None;") {
+            let at = idx + i;
+            let window = &after[at.saturating_sub(400)..at];
+            assert!(
+                window.contains("record_knock_disposition("),
+                "an exit without a disposition at offset {at}"
+            );
+            exits += 1;
+            idx = at + 12;
+        }
+        assert_eq!(exits, 3, "no_packets, candidate-none, blocked");
+        assert!(
+            after.contains(
+                "record_knock_disposition(&eval_id, now, \"sent\", Some(!unreceptive), Some(sref))"
+            ),
+            "the sent branch records with the packet ref"
+        );
+        for d in [
+            "no_packets",
+            "not_knockworthy",
+            "provenance",
+            "escrow_held",
+            "sent",
+        ] {
+            assert!(
+                after.contains(&format!("\"{d}\"")),
+                "disposition {d} is named"
+            );
+        }
+        // muted / daily_cap / unreceptive / below_band come from Silence::as_str with '-' → '_'.
+        assert!(after.contains("reason.as_str().replace('-', \"_\")"));
+        assert!(
+            after.contains("let sref = format!(\"knock:{pkt_id}\");"),
+            "the judgment ref is byte-identical — knock_reply rebuilds it"
+        );
+        // The evaluation begins after the precheck: the off-return precedes the shadow row.
+        let off_at = body.find("return None;").unwrap();
+        assert!(
+            off_at < shadow_at,
+            "YM_KNOCK=off exits before any row is written"
+        );
+    }
+}
+
 /// Maximum number of redacted offline-cognition lines retained for operator surfaces.
 pub const DMN_LOG_CAPACITY: usize = 200;
 
@@ -631,11 +755,9 @@ impl super::ConversationEngine {
     /// canary can never open (no phone channel ⇒ no knock loop ⇒ zero events, ever). The two must
     /// never be pooled: one measures agreement with a decision, the other only that the pipeline
     /// ingestion → gate → verdict is alive.
-    pub fn record_world_shadow(&self, now_ms: i64, moment: &str) {
-        let mut shadow = mind_observability::DecisionEvent::new(
-            &format!("world-shadow-{now_ms}"),
-            "world_shadow",
-        );
+    pub fn record_world_shadow(&self, now_ms: i64, moment: &str) -> String {
+        let id = format!("world-shadow-{now_ms}");
+        let mut shadow = mind_observability::DecisionEvent::new(&id, "world_shadow");
         shadow.actor = Some("proactive".into());
         shadow.lane = Some("primary".into());
         shadow.goal_id = Some(format!("worldshadow:{moment}"));
@@ -645,6 +767,48 @@ impl super::ConversationEngine {
         shadow.verdict = Some("shadowed".into());
         shadow.evaluator_id = Some("world-state-v1.1".into());
         self.recorder.record(shadow);
+        id
+    }
+
+    /// E.G2a: the knock evaluation's TERMINAL event — one per evaluation, whichever exit it took.
+    /// `parent_event_id` is the paired shadow row's id (the offline join key E.G2's table needs);
+    /// `receptive` is the legacy receptivity gate ALONE (`None` on exits before the gate);
+    /// `object_id` is the packet ref `knock:<pkt_id>` on `sent`, so the judgment grade joins too
+    /// — the ref itself is untouched, `knock_reply` reconstructs it byte for byte. Read by nothing
+    /// on the decision path (source-guarded).
+    pub fn record_knock_disposition(
+        &self,
+        eval_id: &str,
+        now_ms: i64,
+        disposition: &str,
+        receptive: Option<bool>,
+        object_id: Option<String>,
+    ) {
+        let mut ev = mind_observability::DecisionEvent::new(
+            &format!("knock-disposition-{now_ms}"),
+            "knock_disposition",
+        );
+        ev.actor = Some("proactive".into());
+        ev.lane = Some("primary".into());
+        ev.goal_id = Some("knock:evaluation".into());
+        ev.parent_event_id = Some(eval_id.to_string());
+        ev.context_fingerprint = Some(mind_observability::opaque_id(
+            "context",
+            "knock-receptivity",
+        ));
+        ev.chosen = Some(disposition.to_string());
+        ev.verdict = Some(
+            match receptive {
+                Some(true) => "receptive",
+                Some(false) => "unreceptive",
+                None => "before-gate",
+            }
+            .into(),
+        );
+        ev.semantic_success = receptive;
+        ev.object_id = object_id;
+        ev.evaluator_id = Some("knock-disposition-v1".into());
+        self.recorder.record(ev);
     }
 
     /// THE CALIBRATED KNOCK (sol's #1, day-one rung). At most ONE per day, and only when every part
@@ -665,7 +829,9 @@ impl super::ConversationEngine {
         let now = chrono::Utc::now().timestamp_millis();
         // E.G1: THE WORLD MODEL'S SHADOW, recorded at this decision moment and never read by
         // anything below this line (source-guarded). Shadow ranks; it does not choose.
-        self.record_world_shadow(now, "knock-receptivity");
+        // E.G2a: the evaluation begins here (after the YM_KNOCK=off precheck) and ends with exactly
+        // one `knock_disposition` event whose parent is this shadow row.
+        let eval_id = self.record_world_shadow(now, "knock-receptivity");
         // ORDER CHANGED for INTERRUPTION ESCROW: find the CANDIDATE first, then evaluate the gates.
         // A silence is only meaningful — and only worth recording — when there was something real to
         // say. Checking gates first would discard the candidate and leave no trace of what was held,
@@ -681,6 +847,7 @@ impl super::ConversationEngine {
             // The feed, not a gate, is empty — historically THE most common killer and the least
             // visible one. Count it: "no packets" and "below-band" need different fixes.
             self.funnel_bump("knock:no-packets").await;
+            self.record_knock_disposition(&eval_id, now, "no_packets", None, None);
             return None;
         }
         // Held candidates are SKIPPED, not treated as blockers: one thing the mind is rightly quiet
@@ -725,6 +892,12 @@ impl super::ConversationEngine {
                 "knock:escrow-held"
             };
             self.funnel_bump(reason).await;
+            let disposition = match reason {
+                "knock:not-knockworthy" => "not_knockworthy",
+                "knock:provenance" => "provenance",
+                _ => "escrow_held",
+            };
+            self.record_knock_disposition(&eval_id, now, disposition, None, None);
             return None;
         };
         // Raw receptivity, shrunk toward the GRADED engagement record before it drives anything.
@@ -775,6 +948,13 @@ impl super::ConversationEngine {
             self.funnel_bump(&format!("knock:{}", reason.as_str()))
                 .await;
             self.escrow_hold(pkt, reason, p_engage, now).await;
+            self.record_knock_disposition(
+                &eval_id,
+                now,
+                &reason.as_str().replace('-', "_"),
+                Some(!unreceptive),
+                None,
+            );
             return None;
         }
         self.funnel_bump("knock:sent").await;
@@ -806,6 +986,7 @@ impl super::ConversationEngine {
         .await;
         let _ = self.memory.profile_set("knock_last_date", &today).await;
         let _ = self.memory.profile_set("knock_pending", &pkt_id).await;
+        self.record_knock_disposition(&eval_id, now, "sent", Some(!unreceptive), Some(sref));
         Some(crate::knock::render(band, trigger, title))
     }
 

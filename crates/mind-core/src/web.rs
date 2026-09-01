@@ -2327,6 +2327,14 @@ mod tests {
                 && js[tasks_fn..tasks_fn + 4000].contains("next in "),
             "agent rows show when the soonest sleeping order fires"
         );
+        // A goal's badge and the board read the SAME rule; a FAILED goal never wears "active".
+        let goals_fn = js.find("async function loadHorizons()").unwrap();
+        assert!(
+            js[goals_fn..goals_fn + 6000].contains(
+                "columnFor(\"horizon\", g.budget_expired ? \"failed\" : (g.queue_status || g.status))"
+            ) && !js[goals_fn..goals_fn + 6000].contains("includes(\"active\") ? \"running\""),
+            "the goal badge classifies by queue_status through the board's rule"
+        );
         assert!(
             html.contains("id=\"agent-thread\"")
                 && APP_CSS.contains("#panel-tasks[data-view=\"thread\"] .view-thread"),

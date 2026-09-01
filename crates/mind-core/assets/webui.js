@@ -1108,8 +1108,12 @@ async function loadHorizons() {
       main.appendChild(rbtn); main.appendChild(rx);
       card.appendChild(main);
       const side = el("div", "card-side");
-      const st = el("span", "job-state " + ((g.status || "").includes("active") ? "running" : "done"));
-      st.textContent = g.status || "?"; side.appendChild(st);
+      // One reader for a goal's state: the board's rule (queue_status; budget-expired reads as
+      // failed). A FAILED goal must not wear an "active" badge because its lifecycle flag says so.
+      const col = columnFor("horizon", g.budget_expired ? "failed" : (g.queue_status || g.status));
+      const st = el("span", "job-state " + (col === "needs" ? "failed" : col === "running" ? "running" : "done"));
+      st.textContent = col === "needs" ? "failed" : col === "running" ? "running" : col === "scheduled" ? "scheduled" : "done";
+      side.appendChild(st);
       card.appendChild(side);
       host.appendChild(card);
     }

@@ -2502,3 +2502,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | Design | Same goal, staging at abf5f9e (delivery + completion-clock live). Gates: (1) COMPLETED chain verifies with COMPLETED.occurred_at_ms STRICTLY greater than WAKE_STARTED's (the clock fix witnessed live). (2) The completion notice carries the ACTUAL ANSWER (the pending-task count as bounded data) — the E.F1d gap closed on the box, not just in a regression. (3) Receipts remain data-free. (4) Full serialized lifecycle receipts (canonical fields + hashes — safe to share BECAUSE data-free) go to Codex for INDEPENDENT cryptographic verification; the claim is not closed until its verification returns. |
 | Kill | Any gate fails → the specific surface goes back to Codex's lane with the receipt evidence; no partial credit claimed. |
+
+## E.F1e — RESULT: COMPLETED, delivered, clock-honest — pending peer cryptographic verification
+
+| Field | Value |
+| --- | --- |
+| Gate 1 — chain + clock: PASS | SCHEDULED(db93f3e7) → WAKE_STARTED(edffa7a3) → COMPLETED(6ff726ec), each previous-hash link verified locally; **COMPLETED at +7,832ms after WAKE_STARTED** — the completion-clock fix witnessed live; outcome receipt 1f8fdc37, actions 1/1, clean checkpoint. |
+| Gate 2 — delivery: PASS with a quality residual | The completion notice carried the grounded answer (the bounded "0 tasks due soon" datum). Residual, honestly: the reasoner's confused framing ("I don't have access to a task list... You mentioned...") leaked into the notice verbatim — the number is right and sourced, the prose is poor. Notice-quality goes on the backlog, not glossed. |
+| Gate 3 — data-free receipts: PASS | Full serialization shared with Codex precisely BECAUSE it is safe: state digests and hashes only. |
+| Gate 4 — peer verification: PENDING | Full serialized lifecycle + outcome receipts sent to Codex (feb8bf22). This row's status becomes final only on its verdict — as preregistered. |
+| The evening's Phase F ledger, honest form | Durable: PROVEN (E.F1). Accounted: PROVEN live (E.F1c receipts). Executed: PROVEN (E.F1d). Delivered: PROVEN with residual (this row). Planned deterministically: folded at 90a795c, CLOSED only after repeated live trials per Codex's own caveat. |

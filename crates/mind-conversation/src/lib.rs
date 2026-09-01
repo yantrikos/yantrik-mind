@@ -6749,13 +6749,20 @@ impl ConversationEngine {
             // compute (and a corrupt chain surfaces as unavailable, never as a partial bar).
             // E.WEB15 → typed: the provenance gate as numbers for the instrument column, read
             // from ONE typed aggregate (Codex's mind-observability report) over the VERIFIED log.
-            // A corrupt chain reads unavailable, never a partial bar; no prose is parsed.
+            // No prose is parsed anywhere on this path.
             "chains_json" => match self.recorder.read_all_verified() {
+                // A corrupt chain reads unavailable, never a partial bar; and a serialization
+                // failure is ALSO unavailable, never an empty object wearing available:true
+                // (Codex's hardening note on 00cb4ef).
                 Ok(events) => {
                     let report = mind_observability::tool_chain_completeness(&events);
-                    let mut v = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
-                    v["available"] = serde_json::json!(true);
-                    v.to_string()
+                    match serde_json::to_value(&report) {
+                        Ok(mut v) => {
+                            v["available"] = serde_json::json!(true);
+                            v.to_string()
+                        }
+                        Err(_) => serde_json::json!({ "available": false }).to_string(),
+                    }
                 }
                 Err(_) => serde_json::json!({ "available": false }).to_string(),
             },
@@ -9888,6 +9895,83 @@ impl ConversationEngine {
          - choosing which expertise pack answers a question (leases are operator-driven).\n"
     }
 
+    /// E.MQ5: THE router call — one place, used by the live shadow and by the sealed-set harness
+    /// alike (Codex's pre-freeze blocker: an evaluator must not have to duplicate the exact
+    /// config). Returns the raw emission and the closed-schema parse.
+    pub(crate) async fn route_claim(&self, question: &str) -> (String, Option<&'static str>) {
+        Self::route_claim_with(&self.inference, question).await
+    }
+
+    /// The seam itself, over any pool — so a harness can point it at an isolated backend.
+    pub(crate) async fn route_claim_with(
+        inference: &InferencePool,
+        question: &str,
+    ) -> (String, Option<&'static str>) {
+        let prompt = self_claims::router_prompt(question);
+        let cfg = GenerationConfig {
+            max_tokens: 16,
+            think: Some(false),
+            ..GenerationConfig::greedy()
+        };
+        let raw = inference
+            .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+            .await
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_default();
+        let routed = self_claims::parse_route(&raw);
+        (raw, routed)
+    }
+
+    /// E.MQ5: record what the closed-schema router WOULD route this turn to. Detached: the
+    /// reply never waits for it, and no decision path reads the verdict. OPT-IN by
+    /// `YM_CLAIM_ROUTE_SHADOW=on` (staging sets it; a box that has not opted in runs no extra
+    /// model call per turn — the shadow is a measurement, and measurements are switched on
+    /// deliberately, never inherited).
+    fn spawn_claim_route_shadow(&self, user_text: &str, id: &TurnIdentity) {
+        if std::env::var("YM_CLAIM_ROUTE_SHADOW")
+            .map(|v| v != "on")
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let inference = self.inference.clone();
+        let recorder = self.recorder.clone();
+        let question = user_text.to_string();
+        let fingerprint = mind_observability::opaque_id("context", user_text);
+        let lane = if id.owner == mind_types::PRIMARY {
+            "primary"
+        } else {
+            "member"
+        };
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let (raw, routed) = Self::route_claim_with(&inference, &question).await;
+            let mut e = mind_observability::DecisionEvent::new(
+                &format!("claim-route-{}", chrono::Utc::now().timestamp_millis()),
+                "claim_route_shadow",
+            );
+            e.actor = Some("conversation".into());
+            e.lane = Some(lane.into());
+            e.goal_id = Some("shadow:claim-route".into());
+            e.context_fingerprint = Some(fingerprint);
+            e.chosen = Some(routed.unwrap_or(self_claims::ABSTAIN).to_string());
+            // The raw token is bounded (16 tokens) and never an answer; a malformed emission is
+            // exactly what the sample must be able to count.
+            e.outcome = Some(raw.chars().take(48).collect());
+            e.verdict = Some(
+                if routed.is_some() {
+                    "routed"
+                } else {
+                    "abstained"
+                }
+                .into(),
+            );
+            e.evaluator_id = Some(self_claims::ROUTER_VERSION.into());
+            e.latency_ms = Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+            recorder.record(e);
+        });
+    }
+
     /// E.G1: one presence observation per handled turn — the world model finally sees the
     /// world it models, from data the turn already holds and nothing more.
     pub(crate) fn world_ingest_presence(&self) {
@@ -12614,6 +12698,10 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         if id.owner == mind_types::PRIMARY {
             self.world_ingest_presence();
         }
+        // E.MQ5: THE ROUTER'S SHADOW. A closed-schema classifier says which claim (or ABSTAIN)
+        // this turn is about, and the verdict is RECORDED — never acted on. It runs detached so
+        // it cannot delay the reply, and nothing below reads it (source-guarded).
+        self.spawn_claim_route_shadow(user_text, &id);
         // E.MQ4 (placement per E.MQ4b, gate 4): SELF-CAPABILITY QUESTIONS ARE ANSWERED BY THE
         // REGISTRY, NOT THE MODEL — and the deterministic decision happens BEFORE any memory-
         // touching operation (episode recording, proactive resolution, ledger) runs. A matched

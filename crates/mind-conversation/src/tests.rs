@@ -8251,6 +8251,79 @@ async fn the_walls_travel_with_every_turn_upstream_of_untrusted_blocks() {
     );
 }
 
+// ── E.MQ5: THE ROUTER MAY ONLY POINT — SHADOW VERDICTS, NEVER A REPLY ───────────────────────────
+
+/// Kill guard: the router's verdict can reach the flight recorder and nothing else. The shadow is
+/// spawned detached; the turn path never awaits it and never reads parse_route; render() is
+/// reached only through match_claim (the deterministic registry), never through the router.
+#[test]
+fn the_claim_router_output_cannot_reach_the_user() {
+    let src = include_str!("lib.rs");
+    let spawn = src
+        .find("fn spawn_claim_route_shadow(")
+        .expect("shadow spawner exists");
+    let body: String = src[spawn..].chars().take(2600).collect();
+    assert!(
+        body.contains("tokio::spawn(async move"),
+        "the router runs detached"
+    );
+    assert!(
+        body.contains("recorder.record(e)"),
+        "its verdict lands on the recorder"
+    );
+    assert!(
+        !body.contains("render("),
+        "the spawner never renders a claim"
+    );
+    assert!(
+        !body.contains("append_message"),
+        "the spawner never writes the transcript"
+    );
+    let turn = src.find("pub async fn handle_turn_as").unwrap();
+    let turn_body: String = src[turn..].chars().take(6000).collect();
+    assert!(
+        turn_body.contains("self.spawn_claim_route_shadow(user_text, &id);"),
+        "the shadow is invoked, fire-and-forget"
+    );
+    assert!(
+        !turn_body.contains("parse_route") && !turn_body.contains(".await; // router"),
+        "the turn path never reads the router's verdict"
+    );
+    assert_eq!(
+        src.matches("self_claims::parse_route(").count(),
+        1,
+        "exactly one call site for the router's parser, inside route_claim_with"
+    );
+    // The shadow and any harness share ONE router call (Codex's pre-freeze blocker): the spawner
+    // uses the seam, and the seam is the only place the config and the parse live.
+    assert!(
+        body.contains("Self::route_claim_with(&inference, &question)"),
+        "the shadow uses the seam"
+    );
+    assert_eq!(src.matches("fn route_claim_with(").count(), 1, "one seam");
+}
+
+/// The seam is real: pointed at a scripted backend it returns the raw emission AND the parse,
+/// so a sealed-set harness runs the exact production router with nothing duplicated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_router_seam_returns_raw_and_parsed_from_any_backend() {
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new("self-restart")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let (raw, routed) =
+        ConversationEngine::route_claim_with(&pool, "Could you reboot yourself?").await;
+    assert_eq!(raw, "self-restart");
+    assert_eq!(routed, Some("self-restart"));
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new("I think ABSTAIN is right")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let (raw, routed) = ConversationEngine::route_claim_with(&pool, "What's the weather?").await;
+    assert!(raw.contains("ABSTAIN"));
+    assert_eq!(routed, None, "an explanation has left the closed schema");
+}
+
 // ── E.G1: THE WORLD MODEL BECOMES REACHABLE — LIVE INGESTION, SHADOWED CONSULT, ZERO AUTHORITY ──
 
 /// Gates (1) and (2): a handled turn ingests presence (Unknown before, Known after; Stale past
@@ -8476,6 +8549,15 @@ async fn chains_json_mirrors_the_verified_completeness_report() {
     assert_eq!(one["total"], serde_json::json!(1));
     assert_eq!(one["complete"], serde_json::json!(0));
     assert_eq!(one["defects"]["goal_id"], serde_json::json!(1));
+    // The typed aggregate's extra fields ride through verbatim: the preflight-refusal contract
+    // and the sampled window (Codex's hardening note: pin the whole struct, not a subset).
+    assert_eq!(one["preflight"]["total"], serde_json::json!(0));
+    assert!(one["preflight"]["defects"].is_object());
+    assert_eq!(one["window"]["timestamped"], serde_json::json!(2));
+    assert!(
+        one["window"]["oldest_ts_ms"].as_u64().unwrap()
+            <= one["window"]["newest_ts_ms"].as_u64().unwrap()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

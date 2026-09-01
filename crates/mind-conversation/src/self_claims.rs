@@ -239,6 +239,53 @@ pub fn match_claim(user_text: &str) -> Option<&'static Claim> {
     })
 }
 
+/// E.MQ5: the router's closed-schema prompt. The model sees claim IDS and one-line topics —
+/// never an answer — and must emit exactly one id or ABSTAIN. Anything else parses as
+/// malformed, which is recorded and counts as ABSTAIN. This prompt is the whole of the
+/// router's knowledge; there is nothing to fit to a held-out set except the registry itself.
+pub const ROUTER_VERSION: &str = "self-claims-router-v1";
+pub const ABSTAIN: &str = "ABSTAIN";
+
+pub fn router_prompt(question: &str) -> String {
+    let mut s = String::from(
+        "You are a ROUTER, not an answerer. Decide whether the user's message is a question about \
+         the assistant's OWN capabilities or boundaries that matches exactly one of the claim ids \
+         below. Output EXACTLY one line containing only the claim id, or ABSTAIN. If the message \
+         is a request to do something, a question about the world, or ambiguous, output ABSTAIN. \
+         Never output anything else.\n\nClaim ids and what they are about:\n",
+    );
+    for c in CLAIMS {
+        // The topic line is the id's own words plus its first match group — never the answer.
+        let topic = c
+            .match_groups
+            .first()
+            .map(|g| g.join("/"))
+            .unwrap_or_default();
+        s.push_str(&format!("- {} : {}\n", c.id, topic));
+    }
+    s.push_str("\nUser message:\n");
+    s.push_str(question);
+    s.push_str("\n\nOutput (one line, a claim id or ABSTAIN):");
+    s
+}
+
+/// Parse the router's output against the CLOSED schema: a known claim id → Some(id); ABSTAIN
+/// or anything else → None. Whitespace, quotes, and a trailing period are tolerated; a second
+/// token is not (a router that explains itself has left the schema).
+pub fn parse_route(output: &str) -> Option<&'static str> {
+    let cleaned = output
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '.')
+        .trim();
+    if cleaned.split_whitespace().count() != 1 {
+        return None;
+    }
+    if cleaned.eq_ignore_ascii_case(ABSTAIN) {
+        return None;
+    }
+    CLAIMS.iter().find(|c| c.id == cleaned).map(|c| c.id)
+}
+
 /// The verbatim terminal answer, stamped with registry version, authority, and evidence —
 /// the provenance E.MQ4 gate (2) requires in the output itself.
 pub fn render(claim: &Claim) -> String {
@@ -373,6 +420,33 @@ mod tests {
                 "match_claim must precede {later} in handle_turn_as"
             );
         }
+    }
+
+    /// E.MQ5: the router's schema is CLOSED — only a known id or ABSTAIN parses; explanations,
+    /// unknown ids, and multi-token output all read as ABSTAIN (None).
+    #[test]
+    fn the_router_schema_is_closed() {
+        assert_eq!(parse_route("self-restart"), Some("self-restart"));
+        assert_eq!(parse_route("  \"real-money\".\n"), Some("real-money"));
+        assert_eq!(parse_route("ABSTAIN"), None);
+        assert_eq!(parse_route("abstain"), None);
+        assert_eq!(parse_route("self-restart because the user asked"), None);
+        assert_eq!(parse_route("weather"), None);
+        assert_eq!(parse_route(""), None);
+        let p = router_prompt("Can you reboot yourself?");
+        for c in CLAIMS {
+            assert!(
+                p.contains(&format!("- {} :", c.id)),
+                "prompt lists {}",
+                c.id
+            );
+            assert!(
+                !p.contains(c.answer),
+                "the prompt never carries an answer: {}",
+                c.id
+            );
+        }
+        assert!(p.contains("ABSTAIN"));
     }
 
     /// Registry completeness: every claim has nonempty answer, authority, evidence, and at

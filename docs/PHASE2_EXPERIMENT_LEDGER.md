@@ -2185,6 +2185,17 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Noted residual (not this slice) | Malformed calls record an observation with no prediction BY DESIGN (P.2d: nothing to predict) yet the checker requires a prediction link — zero such rows in the live window today; the contract question goes to Codex's evaluator lane. |
 | AGI feed | Phase A directly: the live loop joins the observation contract, unblocking Phase C (evaluator identity) and Phase F (goal identity) from measuring a log production actually writes. |
 
+## E.AGI-A3 — malformed preflight refusals must not forge tool predictions (prereg)
+
+| Field | Value |
+| --- | --- |
+| Finding behind it | P.2d deliberately refuses malformed arguments before prediction or egress, but the closed-chain evaluator currently treats every `tool_observed` row as an executed call and requires a prediction link. The safer live behavior would therefore create a permanent false defect in the Phase-A gate. |
+| Change | Classify only a `malformed` observation with no parent as a preflight refusal: keep it outside the executed-tool-call denominator, report it in a separate aggregate lane, and require its own actor, lane, context, goal, runtime, model-route, object, verdict, and evaluator provenance. A malformed row carrying a dangling parent receives no exemption and remains a broken tool chain. |
+| Gates | (1) The REAL live-loop malformed emitter still records zero predictions, while its report shows complete preflight refusals and no prediction-link defect. (2) A synthetic preflight row missing provenance is not complete and names the aggregate defect. (3) A malformed observation with a dangling parent still fails the ordinary prediction-link gate. (4) Existing complete-pair and duplicate-observation gates remain unchanged. |
+| Prediction (pre-registered) | Fresh malformed traffic increments an explicitly labelled preflight-refusal count without lowering or inflating executed-call completeness; actual orphaned calls still fail. No promised live count. |
+| Kill criteria | KILL the exemption if clearing a parent lets an ordinary failed/denied/ok observation escape the tool-call gate, if an incomplete malformed refusal reads green, or if the report hides how many refusals were excluded from the call denominator. |
+| AGI feed | Phase A: separates planner-boundary evidence from tool-execution evidence without weakening either causal contract. |
+
 ## E.AGI-A2 — RESULT: the first fresh call under the new binary passes the gate
 
 | Field | Value |
@@ -2204,3 +2215,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Witnesses | journald: 1× "operator-requested restart". Hash chain: `ym why web-restart` reconstructs the `operator_restart` event from persisted state — Doctrine 3's independent-witness form. |
 | Follow-up folded same day | The reconstruction showed `actor ?` — the restart event itself lacked actor/lane stamps, found by the same lens E.AGI-A2 built. It now records actor=console, lane=operator. Source guards still 3/3. |
 | Rung | E.WEB13 is REACHABLE: refused live, exercised live, witnessed twice, recovered by the supervisor. Prod exercise pending the deploy permission decision. |
+
+## E.AGI-A3 — do the packet emitters satisfy the packet gate? (prereg)
+
+| Field | Value |
+| --- | --- |
+| Question | The packet wiring-proof test asserts fields one by one; nothing ever runs the REAL `render_packet_chain_completeness` over what the real emitters write — the exact blind spot that hid E.AGI-A2's goal_id defect. Prod's 0/6 is presumed historical stratigraphy, but that presumption is untested. |
+| Method | Extend the in-process lifecycle test: create + decide a packet through the REAL engine methods, read back through the verified reader, run the REAL packet gate, require 1/1 (100%). |
+| Prediction (pre-registered, honest) | UNKNOWN. The gate checks requires the wiring test never exercised (creation cardinality, expiry-horizon linkage, trigger-authority stamp, evaluator version). Pass → prod's 0/6 is dated history and the next live packet should read complete. Fail → a real emitter/gate divergence found in-process before it costs another live cycle — the finding this row exists to catch. |
+| Kill criteria | None applicable — a read-only in-process measurement; either outcome is recorded as the result. |
+| AGI feed | Phase A: the second of the three chain gates gets the same emitters-through-gate lock the tool chain now has. |

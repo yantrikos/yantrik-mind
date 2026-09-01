@@ -2316,9 +2316,23 @@ mod tests {
         );
         // The schedule store names an order "standing: <agent>" (import_skill.rs); the key rule
         // sees through it, or one agent becomes two threads the first time its order fires.
+        // E.WEB18b found by use: opening a thread from the Board with the store's name showed
+        // "No such agent" — so the rule is ONE function, used by grouping and by every opener.
+        let key_fn = js.find("function agentKey(name)").expect("one key rule");
         assert!(
-            group_body.contains(".replace(/^standing:\\s*/i, \"\")"),
+            js[key_fn..key_fn + 200].contains(".replace(/^standing:\\s*/i, \"\")"),
             "the key rule strips the store's standing: prefix"
+        );
+        assert!(
+            group_body.contains("const key = agentKey(name);"),
+            "grouping uses the key rule"
+        );
+        let open_fn = js
+            .find("function openThread(rawName)")
+            .expect("openThread exists");
+        assert!(
+            js[open_fn..open_fn + 120].contains("const name = agentKey(rawName);"),
+            "opening a thread from anywhere uses the same key rule"
         );
         // The list row carries the next fire time from the server's own countdown.
         let tasks_fn = js.find("async function loadTasks()").unwrap();

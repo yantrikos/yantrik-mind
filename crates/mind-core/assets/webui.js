@@ -776,12 +776,14 @@ function bucketPaint() {
    composer already uses; the lists show agents, and a thread shows one agent's history like a
    conversation — brief, then every run in time order, then what is scheduled, then the reply box
    (run again). One pure function does the grouping so a run can never sit in two threads. */
+// The ONE key rule: the schedule store names an order "standing: <agent>" while the agent's runs
+// carry "<agent>"; one thread per agent means every path — grouping, opening from a list, opening
+// from the Board — sees through that prefix the same way.
+function agentKey(name) { return String(name || "(unnamed)").replace(/^standing:\s*/i, ""); }
 function agentThreads(jobs, orders) {
   const byName = new Map();
   const get = (name) => {
-    // The schedule store names an order "standing: <agent>"; the agent's runs carry "<agent>".
-    // One thread per agent means one key rule that sees through that prefix.
-    const key = String(name || "(unnamed)").replace(/^standing:\s*/i, "");
+    const key = agentKey(name);
     if (!byName.has(key)) byName.set(key, { name: key, runs: [], orders: [], running: false, last_ms: 0, task: "" });
     return byName.get(key);
   };
@@ -866,7 +868,8 @@ async function loadTasks() {
   if (openThreadName && $("panel-tasks").dataset.view === "thread") renderThread(openThreadName);
 }
 
-function openThread(name) {
+function openThread(rawName) {
+  const name = agentKey(rawName);
   openThreadName = name;
   const v = $("panel-tasks").dataset.view;
   if (v !== "thread") threadReturnView = v || "running";

@@ -103,12 +103,14 @@ pub struct OutcomeReceipt {
 /// An explicit operator intervention against a durable horizon goal.
 ///
 /// These actions never rewrite the goal checkpoint. The receipt binds the exact checkpoint digest
-/// and scheduler transition so a pause, resume, or cancellation remains independently auditable.
+/// and scheduler transition so a pause, resume, retry, or cancellation remains independently
+/// auditable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HorizonControlAction {
     Pause,
     Resume,
+    Retry,
     Cancel,
 }
 
@@ -117,6 +119,7 @@ impl HorizonControlAction {
         match self {
             Self::Pause => "pause",
             Self::Resume => "resume",
+            Self::Retry => "retry",
             Self::Cancel => "cancel",
         }
     }
@@ -185,6 +188,10 @@ impl HorizonControlReceipt {
             }
             HorizonControlAction::Resume => {
                 self.previous_queue_status.as_deref() == Some("paused")
+                    && self.next_queue_status.as_deref() == Some("pending")
+            }
+            HorizonControlAction::Retry => {
+                self.previous_queue_status.as_deref() == Some("failed")
                     && self.next_queue_status.as_deref() == Some("pending")
             }
             HorizonControlAction::Cancel => {
@@ -761,13 +768,33 @@ mod tests {
         .unwrap();
         assert!(pause.verify());
 
+        let retry = HorizonControlReceipt::issue(
+            "goal:controlled",
+            HorizonControlAction::Retry,
+            1_900_000_000_001,
+            checkpoint.clone(),
+            Some("failed".into()),
+            Some("pending".into()),
+        )
+        .unwrap();
+        assert!(retry.verify());
+        assert!(HorizonControlReceipt::issue(
+            "goal:controlled",
+            HorizonControlAction::Retry,
+            1_900_000_000_002,
+            checkpoint.clone(),
+            Some("paused".into()),
+            Some("pending".into()),
+        )
+        .is_err());
+
         let mut tampered = pause.clone();
         tampered.next_queue_status = Some("pending".into());
         assert!(!tampered.verify());
         assert!(HorizonControlReceipt::issue(
             "goal:controlled",
             HorizonControlAction::Cancel,
-            1_900_000_000_001,
+            1_900_000_000_003,
             checkpoint,
             Some("running".into()),
             None,

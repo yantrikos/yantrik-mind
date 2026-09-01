@@ -1475,7 +1475,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn terminal_delivery_is_one_definition_across_both_loops() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary());
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
+            .for_turn("Remember my password is hunter2");
         assert!(bus.is_terminal(
             "publish_page",
             "Done — published (works on your home network):\nhttp://192.168.4.90:8088/x.html"
@@ -1488,6 +1489,34 @@ mod tests {
             "news",
             &format!("MORNING BRIEF\n{}", "story with sources. ".repeat(20))
         ));
+        assert!(
+            bus.is_terminal("remember", crate::MEMORY_WRITE_GATE_REFUSAL),
+            "a denied native mutation is the bounded answer on both loops"
+        );
+        assert!(
+            bus.is_terminal("add_reminder", crate::REMINDER_WRITE_GATE_REFUSAL),
+            "the terminal rule covers the second roadmap mutation"
+        );
+        assert!(
+            !bus.is_terminal("remember", "(remember failed: memory was not changed)"),
+            "an infrastructure failure still needs recovery; it is not a safety postcondition"
+        );
+        let refused = bus
+            .call(
+                "remember",
+                &serde_json::json!({ "text": "my password is hunter2" }),
+            )
+            .await
+            .expect_err("the real memory boundary must refuse the secret");
+        let refusal = refused.to_string();
+        assert!(
+            bus.is_terminal("remember", &refusal),
+            "the real EngineBus Err must satisfy the shared terminal rule: {refusal}"
+        );
+        assert!(
+            !refusal.contains("hunter2"),
+            "the terminal refusal echoed the rejected value: {refusal}"
+        );
         assert!(
             !bus.is_terminal("publish_page", "(couldn't publish the page)"),
             "a failed publish is not an answer"

@@ -1622,6 +1622,13 @@ async fn dmn_associates_a_hypothesis_when_idle() {
         log.iter().any(|l| l.contains("associated")),
         "associate phase should run: {log:?}"
     );
+    let history = conv.dmn_log_tail(20);
+    assert!(
+        history
+            .iter()
+            .any(|entry| entry.phase == "associate" && entry.message.contains("associated")),
+        "the read-only history must surface completed associate ticks: {history:?}"
+    );
     let r = memarc
         .recall_typed(
             mind_types::RecallQuery {
@@ -1650,6 +1657,27 @@ async fn dmn_associates_a_hypothesis_when_idle() {
             .map(|t| (t.kind, &t.about))
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dmn_history_records_the_low_substrate_early_return() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("unused")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(memarc, pool, "JARVIS");
+
+    let _ = conv.dmn_tick().await;
+    let _ = conv.dmn_tick().await;
+    let log = conv.dmn_tick().await;
+    assert!(log.iter().any(|line| line.contains("too little stored")));
+
+    let history = conv.dmn_log_tail(1);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].phase, "associate");
+    assert!(history[0].message.contains("too little stored"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2014,6 +2042,137 @@ async fn a_refused_remember_reports_denial_and_a_clean_remember_still_succeeds()
     assert!(
         clean.iter().any(|belief| belief.statement == CLEAN),
         "the control write did not land: {clean:?}"
+    );
+}
+
+#[test]
+fn memory_write_gate_classification_is_exact_not_a_substring() {
+    assert!(
+        MindError::memory_write_gate_refusal("credential-phrase").is_memory_write_gate_refusal()
+    );
+    assert!(
+        !MindError::Denied("memory write-gate_events unavailable".to_string())
+            .is_memory_write_gate_refusal()
+    );
+    assert!(
+        !MindError::Memory("sqlite table write-gate_events is unavailable".to_string())
+            .is_memory_write_gate_refusal()
+    );
+    assert!(
+        !MindError::Other("memory write-gate: credential-phrase".to_string())
+            .is_memory_write_gate_refusal()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_denied_remember_is_terminal_before_the_model_can_claim_it_succeeded() {
+    const REJECTED: &str = "my password is hunter2";
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let llm = Arc::new(mind_inference::SequencedLLM::new(vec![
+        format!(r#"{{"thought":"saving it","tool":"remember","args":{{"text":"{REJECTED}"}}}}"#),
+        "Done — I saved that password to memory.".to_string(),
+    ]));
+    let pool = InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+        pool,
+        "JARVIS",
+    );
+
+    let answer = conv
+        .agent_loop_for_eval("Remember my password for me", &TurnIdentity::primary())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        answer,
+        super::MEMORY_WRITE_GATE_REFUSAL,
+        "the gate's postcondition must replace any model-authored success claim"
+    );
+    assert_eq!(
+        llm.call_count(),
+        1,
+        "a denied mutation must terminate without a compose or correction model call"
+    );
+    assert!(!answer.contains("hunter2"), "the refusal echoed the secret");
+    let rejected = mem
+        .beliefs_matching(REJECTED, &mind_types::AccessContext::operator_audit())
+        .await
+        .unwrap_or_default();
+    assert!(rejected.is_empty(), "the refused value reached memory");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_permitted_remember_still_reaches_the_models_normal_confirmation() {
+    const CLEAN: &str = "favorite color is teal";
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let llm = Arc::new(mind_inference::SequencedLLM::new(vec![
+        format!(r#"{{"thought":"saving it","tool":"remember","args":{{"text":"{CLEAN}"}}}}"#),
+        "Done — I saved your favorite color as teal.".to_string(),
+    ]));
+    let pool = InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+        pool,
+        "JARVIS",
+    );
+
+    let answer = conv
+        .agent_loop_for_eval(
+            "Remember that my favorite color is teal",
+            &TurnIdentity::primary(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(answer, "Done — I saved your favorite color as teal.");
+    assert_eq!(
+        llm.call_count(),
+        2,
+        "a successful mutation must continue to the model's normal confirmation"
+    );
+    let remembered = mem
+        .beliefs_matching(CLEAN, &mind_types::AccessContext::operator_audit())
+        .await
+        .unwrap_or_default();
+    assert!(
+        remembered.iter().any(|belief| belief.statement == CLEAN),
+        "the permitted write did not land: {remembered:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_denied_reminder_is_terminal_secret_free_and_never_persisted() {
+    const REJECTED: &str = "remind me that my password is hunter2";
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let llm = Arc::new(mind_inference::SequencedLLM::new(vec![
+        format!(
+            r#"{{"thought":"setting it","tool":"add_reminder","args":{{"text":"{REJECTED}","when":"tomorrow"}}}}"#
+        ),
+        "Done — I set that reminder for tomorrow.".to_string(),
+    ]));
+    let pool = InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(
+        Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+        pool,
+        "JARVIS",
+    );
+
+    let answer = conv
+        .agent_loop_for_eval("Set that password reminder", &TurnIdentity::primary())
+        .await
+        .unwrap();
+
+    assert_eq!(answer, super::REMINDER_WRITE_GATE_REFUSAL);
+    assert_eq!(
+        llm.call_count(),
+        1,
+        "a denied reminder must terminate before model-authored confirmation"
+    );
+    assert!(!answer.contains("hunter2"), "the refusal echoed the secret");
+    assert!(
+        mem.list_tasks(false).await.unwrap().is_empty(),
+        "the refused reminder reached task storage"
     );
 }
 
@@ -3909,6 +4068,111 @@ async fn operator_horizon_command_enters_the_durable_read_only_scheduler() {
         .cli_dispatch("horizons", &mind_types::AccessContext::operator_audit(),)
         .await
         .contains("No active durable horizon goals"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_horizon_reason_and_retry_are_visible_on_every_operator_surface() {
+    use mind_recipes::RecipeStore;
+
+    struct FailingInboxHost;
+    #[async_trait::async_trait]
+    impl RecipeHost for FailingInboxHost {
+        async fn call_tool(
+            &self,
+            _tool: &str,
+            _args: &serde_json::Value,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("PRIVATE backend detail must not reach a horizon status surface")
+        }
+    }
+
+    let authored = r#"[
+        {"Tool":{"tool_name":"inbox","args":{"limit":1},"store_as":"fresh"}},
+        {"Notify":{"message":"{{fresh}}"}}
+    ]"#;
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new(authored)) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let store = Arc::new(RecipeStore::open(":memory:").unwrap());
+    let recipes = Arc::new(
+        RecipeEngine::new(pool.clone(), Arc::new(FailingInboxHost), "JARVIS")
+            .with_store(store.clone()),
+    );
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_recipes(recipes.clone());
+    let before = ConversationEngine::now_ms();
+    let scheduled = conv
+        .cli_dispatch(
+            "horizon 1m :: Observe the inbox safely",
+            &mind_types::AccessContext::operator_audit(),
+        )
+        .await;
+    let goal_id = scheduled
+        .split_once('[')
+        .and_then(|(_, tail)| tail.split_once(']'))
+        .map(|(goal_id, _)| goal_id)
+        .expect("scheduled goal id");
+    let outcome = recipes.resume_due_horizons(before + 120_000).await;
+    assert_eq!(outcome.len(), 1);
+    assert_eq!(outcome[0].state, mind_recipes::HorizonTickState::Failed);
+
+    let listing = conv
+        .cli_dispatch("horizons", &mind_types::AccessContext::operator_audit())
+        .await;
+    assert!(
+        listing.contains("FAILED") && listing.contains("segment_contract_failed"),
+        "{listing}"
+    );
+    assert!(!listing.contains("PRIVATE backend detail"), "{listing}");
+    let history = conv
+        .cli_dispatch(
+            &format!("horizon history {goal_id}"),
+            &mind_types::AccessContext::operator_audit(),
+        )
+        .await;
+    assert!(
+        history.contains("Failure reason: segment_contract_failed"),
+        "{history}"
+    );
+    assert!(!history.contains("PRIVATE backend detail"), "{history}");
+    let typed: serde_json::Value = serde_json::from_str(
+        &conv
+            .cli_dispatch(
+                "horizons_json",
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await,
+    )
+    .unwrap();
+    assert_eq!(typed["goals"][0]["queue_status"], "failed");
+    assert_eq!(
+        typed["goals"][0]["failure_reason"],
+        "segment_contract_failed"
+    );
+    assert!(!typed.to_string().contains("PRIVATE backend detail"));
+
+    let retry = conv
+        .cli_dispatch(
+            &format!("horizon retry {goal_id}"),
+            &mind_types::AccessContext::operator_audit(),
+        )
+        .await;
+    assert!(
+        retry.contains("Retry queued")
+            && retry.contains("next scheduler tick")
+            && retry.contains("no checkpoint or budget was reset"),
+        "{retry}"
+    );
+    let after = recipes.list_horizons(ConversationEngine::now_ms()).unwrap();
+    assert_eq!(after[0].queue_status.as_deref(), Some("pending"));
+    assert_eq!(after[0].failure_reason, None);
+    assert_eq!(after[0].actions_used, 0);
+    assert_eq!(after[0].spent_cost_units, 0);
+    let controls = store.load_horizon_controls(goal_id).unwrap();
+    assert_eq!(controls.len(), 1);
+    assert_eq!(controls[0].action, mind_spec::HorizonControlAction::Retry);
+    assert!(controls[0].verify());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -9315,6 +9579,79 @@ async fn taught_belief_is_captured_on_the_default_agent_path() {
             .any(|b| b.statement.contains("garage code is 4417")),
         "an explicitly-taught fact must become a belief on the default loop: {hits:?}"
     );
+}
+
+/// E.LOOP6 applies before the loop fork too: deterministic capture is itself a mutation boundary.
+/// A denied capture must not hand the turn to either model loop, where a fluent "noted" could turn
+/// the already-failed write into a false success claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn denied_deterministic_capture_is_terminal_across_both_loops() {
+    const FALSE_SUCCESS: &str = "Done — I saved it.";
+    const REJECTED_BELIEF: &str = "my password is hunter2";
+
+    for primary in [true, false] {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let llm = Arc::new(mind_inference::SequencedLLM::new(vec![
+            FALSE_SUCCESS.to_string()
+        ]));
+        let pool = InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(
+            Arc::new(mem.clone()) as Arc<dyn MemoryFacade>,
+            pool,
+            mind_types::default_persona("the user"),
+        )
+        .with_agent_primary(primary);
+
+        let answer = conv
+            .handle_turn("remember that my password is hunter2")
+            .await
+            .unwrap();
+        assert_eq!(
+            answer,
+            super::MEMORY_WRITE_GATE_REFUSAL,
+            "agent_primary={primary}: deterministic belief refusal must be the answer"
+        );
+        assert_eq!(
+            llm.call_count(),
+            0,
+            "agent_primary={primary}: a rejected capture reached the model"
+        );
+        assert!(!answer.contains("hunter2"), "the refusal echoed the secret");
+        let rejected = mem
+            .beliefs_matching(
+                REJECTED_BELIEF,
+                &mind_types::AccessContext::operator_audit(),
+            )
+            .await
+            .unwrap_or_default();
+        assert!(
+            rejected.is_empty(),
+            "agent_primary={primary}: rejected belief reached typed memory"
+        );
+
+        let reminder = conv
+            .handle_turn("remind me to write down my password is hunter2 tomorrow")
+            .await
+            .unwrap();
+        assert_eq!(
+            reminder,
+            super::REMINDER_WRITE_GATE_REFUSAL,
+            "agent_primary={primary}: deterministic reminder refusal must be the answer"
+        );
+        assert_eq!(
+            llm.call_count(),
+            0,
+            "agent_primary={primary}: a rejected reminder reached the model"
+        );
+        assert!(
+            !reminder.contains("hunter2"),
+            "the refusal echoed the secret"
+        );
+        assert!(
+            mem.list_tasks(false).await.unwrap().is_empty(),
+            "agent_primary={primary}: rejected reminder reached task storage"
+        );
+    }
 }
 
 /// THE PAIRED FIXTURE: identical turns through the LEGACY dispatch chain (agent_primary=false)

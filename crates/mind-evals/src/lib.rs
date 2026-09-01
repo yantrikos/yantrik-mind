@@ -14,6 +14,7 @@ pub mod competitive;
 pub mod immune;
 pub mod loop_compare;
 pub mod loop_eval;
+pub mod promotion;
 
 use std::sync::Arc;
 

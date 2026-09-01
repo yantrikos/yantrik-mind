@@ -451,20 +451,35 @@ enum Cmd {
 
 // ── pure helpers (run on the actor thread, with &YantrikDB) ──────────────────
 
-/// THE write gate: nothing secret-shaped may enter the cognitive moat (beliefs/observations).
+/// THE write gate: nothing secret-shaped may enter the cognitive moat
+/// (beliefs/observations/tasks).
 /// Deterministic, shared with the harm-gate (one source of truth). Raw transcript is exempt
 /// (verbatim ephemeral context, never reasoned over as knowledge).
+const WRITE_GATE_ACTOR_PREFIX: &str = "refused: write contains ";
+const WRITE_GATE_ACTOR_SUFFIX: &str = " (write-gate)";
+
 fn gate_write(text: &str) -> std::result::Result<(), String> {
     // The refusal names the KIND and nothing else. A message that quoted what it refused would put
     // the secret into an error string, a log line and probably a chat reply — the leak the gate
     // exists to prevent (E.SEC1).
     if let Some(found) = mind_types::first_sensitive(text) {
         return Err(format!(
-            "refused: write contains {} (write-gate)",
-            found.kind.label()
+            "{WRITE_GATE_ACTOR_PREFIX}{}{WRITE_GATE_ACTOR_SUFFIX}",
+            found.kind.label(),
         ));
     }
     Ok(())
+}
+
+fn actor_error(message: String) -> MindError {
+    match message
+        .strip_prefix(WRITE_GATE_ACTOR_PREFIX)
+        .and_then(|message| message.strip_suffix(WRITE_GATE_ACTOR_SUFFIX))
+        .filter(|kind| !kind.is_empty())
+    {
+        Some(kind) => MindError::memory_write_gate_refusal(kind),
+        None => MindError::Memory(message),
+    }
 }
 
 fn now_secs() -> f64 {
@@ -2889,6 +2904,10 @@ fn add_task(
     priority: &str,
     due_ms: Option<u64>,
 ) -> std::result::Result<Task, String> {
+    // Tasks enter working-set grounding and reminder surfaces just like beliefs do. Applying the
+    // shared gate here (rather than only in `add_reminder`) covers deterministic commitment
+    // capture, consolidation, the CLI, and every future caller by construction.
+    gate_write(description)?;
     // Dedup: if an OPEN task is a close paraphrase of this one, reuse it instead of piling up.
     // Two complementary signals — mirrors the belief store's word-overlap + embedder moat:
     //   • word-overlap (jaccard ≥ 0.6) catches shared-vocabulary restatements, and is the only
@@ -5135,7 +5154,7 @@ impl MemoryHandle {
             .map_err(|_| MindError::Memory("memory actor is gone".into()))?;
         rx.await
             .map_err(|_| MindError::Memory("memory actor dropped the reply".into()))?
-            .map_err(MindError::Memory)
+            .map_err(actor_error)
     }
 
     /// Current backlog as (queued_or_running, high_water_since_spawn). A climbing high-water
@@ -8336,9 +8355,15 @@ mod tests {
                 provenance: "told".into(),
             })
             .await;
+        let belief_error = belief.expect_err("secret-bearing belief must be refused");
         assert!(
-            belief.is_err(),
-            "secret-bearing belief must be refused by the write-gate"
+            belief_error.is_memory_write_gate_refusal(),
+            "the sole-writer boundary must preserve a typed refusal: {belief_error}"
+        );
+        assert!(
+            belief_error.to_string().contains("token")
+                && !belief_error.to_string().contains("ghp_"),
+            "the typed refusal must name only the sensitivity kind: {belief_error}"
         );
         // …nor as an observation…
         let obs_secret = mem
@@ -8351,11 +8376,30 @@ mod tests {
             obs_secret.is_err(),
             "secret-bearing observation must be refused"
         );
+        // …nor as a task, which would otherwise re-enter prompts through commitment grounding.
+        let task_secret = mem
+            .add_task("remind me that my password is hunter2", "high", None)
+            .await;
+        let task_error = task_secret.expect_err("secret-bearing task must be refused");
+        assert!(
+            task_error.is_memory_write_gate_refusal(),
+            "task callers must receive the same typed refusal: {task_error}"
+        );
+        assert!(
+            mem.list_tasks(false).await.unwrap().is_empty(),
+            "the refused task reached the cognitive graph"
+        );
         // …but a clean observation is stored (provenance-tagged), never a belief.
         let ok = mem
             .remember_observation("the CSV had 412 rows", ProvenanceCategory::SandboxedSkill)
             .await;
         assert!(ok.is_ok(), "clean observation should store: {ok:?}");
+        assert!(
+            mem.add_task("call the dentist tomorrow", "medium", None)
+                .await
+                .is_ok(),
+            "clean tasks must remain writable"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

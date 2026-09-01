@@ -17,7 +17,51 @@ use serde_json::Value;
 
 use crate::{HorizonJob, RecipeStep};
 
-type HorizonStatusRow = (String, String, String, Option<i64>, Option<String>);
+type HorizonStatusRow = (
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
+
+const LEGACY_HORIZON_FAILURE: &str = "legacy_unclassified_failure";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HorizonFailureReason {
+    CheckpointValidation,
+    SegmentContract,
+    ActionLedger,
+    AssumptionObservation,
+    StatePersistence,
+}
+
+impl HorizonFailureReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CheckpointValidation => "checkpoint_validation_failed",
+            Self::SegmentContract => "segment_contract_failed",
+            Self::ActionLedger => "action_ledger_failed",
+            Self::AssumptionObservation => "assumption_observation_failed",
+            Self::StatePersistence => "state_persistence_failed",
+        }
+    }
+}
+
+const HORIZON_FAILURE_CODES: &[&str] = &[
+    HorizonFailureReason::CheckpointValidation.as_str(),
+    HorizonFailureReason::SegmentContract.as_str(),
+    HorizonFailureReason::ActionLedger.as_str(),
+    HorizonFailureReason::AssumptionObservation.as_str(),
+    HorizonFailureReason::StatePersistence.as_str(),
+];
+
+fn bounded_failure_reason(raw: Option<&str>) -> String {
+    raw.filter(|reason| HORIZON_FAILURE_CODES.contains(reason))
+        .unwrap_or(LEGACY_HORIZON_FAILURE)
+        .to_string()
+}
 
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -38,6 +82,8 @@ pub struct ActiveHorizonRecord {
     pub run: HorizonRun,
     pub wake_at_ms: Option<u64>,
     pub queue_status: Option<String>,
+    /// A bounded code owned by the scheduler. Raw tool/backend errors never reach operator views.
+    pub failure_reason: Option<String>,
 }
 
 impl RecipeStore {
@@ -281,7 +327,7 @@ impl RecipeStore {
     pub fn list_horizons(&self, _now_ms: u64) -> anyhow::Result<Vec<ActiveHorizonRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT c.goal_id,c.checkpoint_json,c.state_sha256,j.wake_ms,j.status
+            "SELECT c.goal_id,c.checkpoint_json,c.state_sha256,j.wake_ms,j.status,j.error
              FROM mind_horizon_checkpoints c
              LEFT JOIN mind_horizon_jobs j ON j.goal_id=c.goal_id
              ORDER BY COALESCE(j.wake_ms,9223372036854775807),c.goal_id",
@@ -294,11 +340,12 @@ impl RecipeStore {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut active = Vec::with_capacity(rows.len());
-        for (goal_id, checkpoint_json, stored_sha256, wake_ms, queue_status) in rows {
+        for (goal_id, checkpoint_json, stored_sha256, wake_ms, queue_status, queue_error) in rows {
             let checkpoint: GoalCheckpoint = serde_json::from_str(&checkpoint_json)?;
             if checkpoint.goal_id != goal_id || checkpoint.state_sha256 != stored_sha256 {
                 anyhow::bail!("horizon checkpoint identity or digest mismatch");
@@ -321,10 +368,16 @@ impl RecipeStore {
                         .map_err(|_| anyhow::anyhow!("horizon wake timestamp is out of range"))
                 })
                 .transpose()?;
+            let failure_reason = match queue_status.as_deref() {
+                Some("failed") => Some(bounded_failure_reason(queue_error.as_deref())),
+                _ if queue_error.is_none() => None,
+                _ => anyhow::bail!("a non-failed horizon job carried a failure reason"),
+            };
             active.push(ActiveHorizonRecord {
                 run,
                 wake_at_ms,
                 queue_status,
+                failure_reason,
             });
         }
         Ok(active)
@@ -395,6 +448,16 @@ impl RecipeStore {
                     .map_err(|error| anyhow::anyhow!("horizon goal cannot resume: {error:?}"))?;
                 Some("pending".to_string())
             }
+            HorizonControlAction::Retry => {
+                if previous_status.as_deref() != Some("failed") {
+                    anyhow::bail!("only a failed horizon goal can be retried");
+                }
+                // Retry restores only scheduler eligibility. Revalidate the signed checkpoint and
+                // elapsed-time budget at the operator's current clock; never rewrite either one.
+                HorizonRun::resume(&checkpoint, now_ms)
+                    .map_err(|error| anyhow::anyhow!("horizon goal cannot retry: {error:?}"))?;
+                Some("pending".to_string())
+            }
             HorizonControlAction::Cancel => {
                 if previous_status.as_deref() == Some("running") {
                     anyhow::bail!("a running horizon segment cannot be cancelled mid-execution");
@@ -413,7 +476,9 @@ impl RecipeStore {
         .map_err(|error| anyhow::anyhow!("horizon control rejected: {error:?}"))?;
 
         match action {
-            HorizonControlAction::Pause | HorizonControlAction::Resume => {
+            HorizonControlAction::Pause
+            | HorizonControlAction::Resume
+            | HorizonControlAction::Retry => {
                 let changed = tx.execute(
                     "UPDATE mind_horizon_jobs SET status=?2,error=NULL
                      WHERE goal_id=?1 AND status=?3",
@@ -640,12 +705,24 @@ impl RecipeStore {
         Ok(())
     }
 
-    pub fn fail_horizon_job(&self, goal_id: &str, error: &str) {
+    pub(crate) fn fail_horizon_job(
+        &self,
+        goal_id: &str,
+        reason: HorizonFailureReason,
+    ) -> anyhow::Result<()> {
+        // This field is operator-visible, so callers can provide only this typed, code-owned
+        // vocabulary. Free-text backend errors have no type-correct route into persistence.
+        let reason_code = reason.as_str();
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE mind_horizon_jobs SET status='failed',error=?2 WHERE goal_id=?1",
-            rusqlite::params![goal_id, error],
-        );
+        let changed = conn.execute(
+            "UPDATE mind_horizon_jobs SET status='failed',error=?2
+             WHERE goal_id=?1 AND status='running'",
+            rusqlite::params![goal_id, reason_code],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("horizon failure status did not match one running job");
+        }
+        Ok(())
     }
 
     /// All scheduler jobs are validated read-only segments, so a process crash may safely return a
@@ -758,6 +835,187 @@ mod horizon_tests {
     }
 
     #[test]
+    fn failed_horizon_diagnosis_and_retry_receipt_survive_store_restart() {
+        let scratch = mind_types::scratch::file("horizon-failed-retry", "db");
+        let db = scratch.as_str();
+        let start = 1_900_000_000_000;
+        let mut original = run(start);
+        let original_budget = original.budget;
+        let checkpoint = original.checkpoint(start + 10).unwrap();
+        let job = HorizonJob {
+            goal_id: original.goal_id.clone(),
+            segment_id: "observe-once".into(),
+            recipe: crate::Recipe {
+                id: "observe-inbox".into(),
+                name: "Observe the inbox once".into(),
+                steps: vec![RecipeStep::Tool {
+                    tool_name: "inbox".into(),
+                    args: serde_json::json!({"limit": 1}),
+                    store_as: "fresh".into(),
+                    on_error: crate::ErrorAction::Fail,
+                }],
+            },
+            assumption_vars: BTreeMap::new(),
+            wake_at_ms: start + 20,
+            cost_units: 1,
+            complete_on_success: false,
+        };
+
+        let store = RecipeStore::open(&db).unwrap();
+        store.save_horizon_checkpoint(&checkpoint).unwrap();
+        store.schedule_horizon_job(&job).unwrap();
+        assert!(store
+            .fail_horizon_job(&original.goal_id, HorizonFailureReason::SegmentContract)
+            .is_err());
+        assert_eq!(store.claim_due_horizon_jobs(start + 20).unwrap().len(), 1);
+        store
+            .fail_horizon_job(&original.goal_id, HorizonFailureReason::SegmentContract)
+            .unwrap();
+        assert!(store
+            .fail_horizon_job(&original.goal_id, HorizonFailureReason::ActionLedger)
+            .is_err());
+        drop(store);
+
+        let reopened = RecipeStore::open(&db).unwrap();
+        let failed = reopened.list_horizons(start + 30).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].queue_status.as_deref(), Some("failed"));
+        assert_eq!(
+            failed[0].failure_reason.as_deref(),
+            Some("segment_contract_failed")
+        );
+        let receipt = reopened
+            .control_horizon(&original.goal_id, HorizonControlAction::Retry, start + 30)
+            .unwrap();
+        assert!(receipt.verify());
+        drop(reopened);
+
+        let after_retry_restart = RecipeStore::open(&db).unwrap();
+        let pending = after_retry_restart.list_horizons(start + 40).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].queue_status.as_deref(), Some("pending"));
+        assert_eq!(pending[0].failure_reason, None);
+        assert_eq!(pending[0].run.budget, original_budget);
+        let controls = after_retry_restart
+            .load_horizon_controls(&original.goal_id)
+            .unwrap();
+        assert_eq!(controls, vec![receipt]);
+        assert!(after_retry_restart
+            .fail_horizon_job("goal:missing", HorizonFailureReason::SegmentContract)
+            .is_err());
+        after_retry_restart
+            .control_horizon(&original.goal_id, HorizonControlAction::Pause, start + 40)
+            .unwrap();
+        assert!(after_retry_restart
+            .control_horizon(&original.goal_id, HorizonControlAction::Retry, start + 41,)
+            .is_err());
+        after_retry_restart
+            .control_horizon(&original.goal_id, HorizonControlAction::Resume, start + 42)
+            .unwrap();
+        assert_eq!(
+            after_retry_restart
+                .claim_due_horizon_jobs(start + 42)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(after_retry_restart
+            .control_horizon(&original.goal_id, HorizonControlAction::Retry, start + 43,)
+            .is_err());
+    }
+
+    #[test]
+    fn legacy_free_text_horizon_failure_is_never_exposed() {
+        const PRIVATE_LEGACY_ERROR: &str =
+            "provider rejected credential sk-test-private: this must stay in SQLite";
+        let scratch = mind_types::scratch::file("horizon-legacy-failure", "db");
+        let db = scratch.as_str();
+        let start = 1_900_000_000_000;
+        let mut original = run(start);
+        let checkpoint = original.checkpoint(start + 10).unwrap();
+        let job = HorizonJob {
+            goal_id: original.goal_id.clone(),
+            segment_id: "observe-once".into(),
+            recipe: crate::Recipe {
+                id: "observe-inbox".into(),
+                name: "Observe the inbox once".into(),
+                steps: vec![RecipeStep::Tool {
+                    tool_name: "inbox".into(),
+                    args: serde_json::json!({"limit": 1}),
+                    store_as: "fresh".into(),
+                    on_error: crate::ErrorAction::Fail,
+                }],
+            },
+            assumption_vars: BTreeMap::new(),
+            wake_at_ms: start + 20,
+            cost_units: 1,
+            complete_on_success: false,
+        };
+
+        let store = RecipeStore::open(&db).unwrap();
+        store.save_horizon_checkpoint(&checkpoint).unwrap();
+        store.schedule_horizon_job(&job).unwrap();
+        assert_eq!(store.claim_due_horizon_jobs(start + 20).unwrap().len(), 1);
+        store
+            .fail_horizon_job(&original.goal_id, HorizonFailureReason::SegmentContract)
+            .unwrap();
+        let bounded_current_error: String = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT error FROM mind_horizon_jobs WHERE goal_id=?1",
+                [&original.goal_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            bounded_current_error,
+            HorizonFailureReason::SegmentContract.as_str()
+        );
+        assert!(!bounded_current_error.contains(PRIVATE_LEGACY_ERROR));
+
+        // Simulate a pre-E.HOR1 row that already persisted free text; reads still redact it.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mind_horizon_jobs SET status='failed',error=?2 WHERE goal_id=?1",
+                rusqlite::params![original.goal_id, PRIVATE_LEGACY_ERROR],
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = RecipeStore::open(&db).unwrap();
+        let failed = reopened.list_horizons(start + 30).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].failure_reason.as_deref(),
+            Some(LEGACY_HORIZON_FAILURE)
+        );
+        assert!(!failed[0]
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains(PRIVATE_LEGACY_ERROR));
+        reopened
+            .control_horizon(&original.goal_id, HorizonControlAction::Retry, start + 30)
+            .unwrap();
+        let persisted_error: Option<String> = reopened
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT error FROM mind_horizon_jobs WHERE goal_id=?1",
+                [&original.goal_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_error, None);
+    }
+
+    #[test]
     fn horizon_store_rejects_stale_and_corrupt_checkpoints() {
         let scratch = mind_types::scratch::file("horizon-store-corrupt", "db");
         let db = scratch.as_str();
@@ -796,5 +1054,8 @@ mod horizon_tests {
             store.list_horizons(start + 30).is_err(),
             "the operator view must not hide or default a corrupt checkpoint"
         );
+        assert!(store
+            .control_horizon("goal:persisted", HorizonControlAction::Retry, start + 30,)
+            .is_err());
     }
 }

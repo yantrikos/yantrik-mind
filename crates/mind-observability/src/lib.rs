@@ -337,6 +337,10 @@ pub struct DecisionLog {
     health: Mutex<RecorderHealth>,
 }
 
+/// Hard ceiling for UI/API consumers of the recent decision stream. Analytics that need complete
+/// history use [`DecisionLog::read_all_verified`] explicitly; interactive surfaces stay bounded.
+pub const DECISION_TAIL_MAX: usize = 200;
+
 // NOTE: this handle deliberately holds NO chain state. It used to cache the head and the seen ids
 // per handle, which is wrong whenever two handles address one file: handle B's append left handle
 // A's cached head and id set stale, so A's next write chained onto a superseded head and could
@@ -559,6 +563,25 @@ impl DecisionLog {
             Some(p) => read_events_verified(&p),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// A bounded, integrity-verified, re-sanitized tail for operator surfaces.
+    ///
+    /// The whole chain is verified before selecting the tail, so a forged or corrupt earlier line
+    /// cannot disappear outside the requested window. Events are sanitized again after reading to
+    /// protect the UI from valid legacy records written before today's detector/budgets existed.
+    pub fn read_tail_verified(
+        &self,
+        limit: usize,
+    ) -> std::result::Result<Vec<DecisionEvent>, usize> {
+        let events = self.read_all_verified()?;
+        let keep = limit.min(DECISION_TAIL_MAX);
+        let start = events.len().saturating_sub(keep);
+        Ok(events
+            .into_iter()
+            .skip(start)
+            .map(DecisionEvent::sanitized)
+            .collect())
     }
 
     /// Every event under a trace-id prefix, in recorded order — the raw material for `ym why`.
@@ -3695,6 +3718,48 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].kind, "cognitive_run");
         assert_eq!(all[2].trace_id, "t2");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn operator_tail_is_bounded_verified_and_resanitized() {
+        let path = scratch("operator_tail");
+        let log = DecisionLog::open(&path);
+        for i in 0..=DECISION_TAIL_MAX {
+            log.record(ev("tail", "decision", &format!("n{i}")));
+        }
+        // Simulate a valid legacy record whose text predates append-time redaction. The public
+        // operator-tail reader must still scan it before returning anything to a UI.
+        let mut legacy = DecisionEvent::new("tail", "decision");
+        legacy.goal = Some("my password is hunter2 and must never reach a dashboard".into());
+        let previous = chain_head(&path).expect("existing chain head");
+        append_chained(&path, &legacy, &previous).expect("append valid legacy-shaped record");
+
+        let tail = log
+            .read_tail_verified(usize::MAX)
+            .expect("the complete chain verifies");
+        assert_eq!(tail.len(), DECISION_TAIL_MAX, "the UI ceiling is binding");
+        assert_eq!(
+            tail.last().and_then(|event| event.goal.as_deref()),
+            Some("[redacted-secret]")
+        );
+        assert!(
+            log.read_tail_verified(0)
+                .expect("zero is still verified")
+                .is_empty(),
+            "a zero-sized request returns no records"
+        );
+
+        // Corruption anywhere in the chain withholds the whole tail rather than presenting a
+        // plausible-looking suffix as verified evidence.
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"torn\":")
+            .unwrap();
+        assert!(log.read_tail_verified(10).is_err());
         let _ = std::fs::remove_file(&path);
     }
 

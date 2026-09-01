@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub mod store;
+use store::HorizonFailureReason;
 pub use store::{ActiveHorizonRecord, RecipeStore, RunRecord};
 
 use async_trait::async_trait;
@@ -469,6 +470,9 @@ pub struct HorizonView {
     pub budget_expired: bool,
     pub next_wake_ms: Option<u64>,
     pub queue_status: Option<String>,
+    /// Bounded scheduler-owned diagnosis present only while `queue_status == failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -885,6 +889,7 @@ GOAL: GOAL_HERE"#;
                     budget_expired,
                     next_wake_ms: record.wake_at_ms,
                     queue_status: record.queue_status,
+                    failure_reason: record.failure_reason,
                 })
             })
             .collect()
@@ -1023,8 +1028,14 @@ GOAL: GOAL_HERE"#;
         };
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            let failed = |error: anyhow::Error| {
-                store.fail_horizon_job(&job.goal_id, &error.to_string());
+            let failed = |reason: HorizonFailureReason, error: anyhow::Error| {
+                let error = match store.fail_horizon_job(&job.goal_id, reason) {
+                    Ok(()) => error,
+                    Err(persist_error) => anyhow::anyhow!(
+                        "horizon segment failed with {}; durable failure status could not be persisted: {persist_error}",
+                        reason.as_str()
+                    ),
+                };
                 HorizonTickOutcome {
                     goal_id: job.goal_id.clone(),
                     state: HorizonTickState::Failed,
@@ -1036,13 +1047,14 @@ GOAL: GOAL_HERE"#;
             let mut run = match store.load_horizon(&job.goal_id, now_ms) {
                 Ok(Some(run)) => run,
                 Ok(None) => {
-                    outcomes.push(failed(anyhow::anyhow!(
-                        "scheduled horizon goal has no active checkpoint"
-                    )));
+                    outcomes.push(failed(
+                        HorizonFailureReason::CheckpointValidation,
+                        anyhow::anyhow!("scheduled horizon goal has no active checkpoint"),
+                    ));
                     continue;
                 }
                 Err(error) => {
-                    outcomes.push(failed(error));
+                    outcomes.push(failed(HorizonFailureReason::CheckpointValidation, error));
                     continue;
                 }
             };
@@ -1061,7 +1073,9 @@ GOAL: GOAL_HERE"#;
                         receipt: None,
                         error: None,
                     }),
-                    Err(error) => outcomes.push(failed(error)),
+                    Err(error) => {
+                        outcomes.push(failed(HorizonFailureReason::StatePersistence, error))
+                    }
                 }
                 continue;
             }
@@ -1073,7 +1087,9 @@ GOAL: GOAL_HERE"#;
                         receipt: None,
                         error: None,
                     }),
-                    Err(error) => outcomes.push(failed(error)),
+                    Err(error) => {
+                        outcomes.push(failed(HorizonFailureReason::StatePersistence, error))
+                    }
                 }
                 continue;
             }
@@ -1090,9 +1106,10 @@ GOAL: GOAL_HERE"#;
                 || recipe_outcome.sleeping_until.is_some()
                 || !recipe_outcome.notifications.is_empty()
             {
-                outcomes.push(failed(anyhow::anyhow!(
-                    "horizon segment violated the unattended execution contract"
-                )));
+                outcomes.push(failed(
+                    HorizonFailureReason::SegmentContract,
+                    anyhow::anyhow!("horizon segment violated the unattended execution contract"),
+                ));
                 continue;
             }
             if let Err(error) = run.record_action(ActionTrace {
@@ -1103,9 +1120,10 @@ GOAL: GOAL_HERE"#;
                 reversible: true,
                 authorization_receipt: None,
             }) {
-                outcomes.push(failed(anyhow::anyhow!(
-                    "horizon action ledger rejected the segment: {error:?}"
-                )));
+                outcomes.push(failed(
+                    HorizonFailureReason::ActionLedger,
+                    anyhow::anyhow!("horizon action ledger rejected the segment: {error:?}"),
+                ));
                 continue;
             }
 
@@ -1133,7 +1151,7 @@ GOAL: GOAL_HERE"#;
                 }
             }
             if let Some(error) = observation_error {
-                outcomes.push(failed(error));
+                outcomes.push(failed(HorizonFailureReason::AssumptionObservation, error));
                 continue;
             }
 
@@ -1150,7 +1168,9 @@ GOAL: GOAL_HERE"#;
                         receipt: None,
                         error: None,
                     }),
-                    Err(error) => outcomes.push(failed(error)),
+                    Err(error) => {
+                        outcomes.push(failed(HorizonFailureReason::StatePersistence, error))
+                    }
                 }
                 continue;
             }
@@ -1170,7 +1190,9 @@ GOAL: GOAL_HERE"#;
                         receipt: Some(receipt),
                         error: None,
                     }),
-                    Err(error) => outcomes.push(failed(error)),
+                    Err(error) => {
+                        outcomes.push(failed(HorizonFailureReason::StatePersistence, error))
+                    }
                 }
                 continue;
             }
@@ -1187,7 +1209,7 @@ GOAL: GOAL_HERE"#;
                     receipt: None,
                     error: None,
                 }),
-                Err(error) => outcomes.push(failed(error)),
+                Err(error) => outcomes.push(failed(HorizonFailureReason::StatePersistence, error)),
             }
         }
         outcomes
@@ -2210,6 +2232,37 @@ mod tests {
     }
 
     #[test]
+    fn horizon_view_accepts_json_from_before_failure_diagnosis() {
+        let legacy = serde_json::json!({
+            "goal_id": "goal:legacy-view",
+            "objective": "Keep an older client payload readable",
+            "status": "active",
+            "plan_revision": 0,
+            "actions_used": 0,
+            "max_actions": 4,
+            "spent_cost_units": 0,
+            "max_cost_units": 20,
+            "budget_expired": false,
+            "next_wake_ms": 1_900_000_001_000u64,
+            "queue_status": "pending"
+        });
+
+        let mut view: HorizonView = serde_json::from_value(legacy).unwrap();
+        assert_eq!(view.goal_id, "goal:legacy-view");
+        assert_eq!(view.failure_reason, None);
+        let unchanged_shape = serde_json::to_value(&view).unwrap();
+        assert!(unchanged_shape.get("failure_reason").is_none());
+
+        view.queue_status = Some("failed".into());
+        view.failure_reason = Some("segment_contract_failed".into());
+        let diagnosed = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            diagnosed["failure_reason"],
+            serde_json::Value::String("segment_contract_failed".into())
+        );
+    }
+
+    #[test]
     fn horizon_operator_controls_are_atomic_and_receipt_backed() {
         let store = Arc::new(RecipeStore::open(":memory:").unwrap());
         let engine = plain_engine_with_store(store.clone());
@@ -2261,6 +2314,100 @@ mod tests {
         assert!(history.active.is_none());
         assert!(history.outcome.is_none());
         assert_eq!(history.controls, controls);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_horizon_exposes_only_a_code_and_retry_is_receipt_backed() {
+        struct FailingHost(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl RecipeHost for FailingHost {
+            async fn call_tool(&self, _tool: &str, _args: &Value) -> anyhow::Result<String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                anyhow::bail!("TOP-SECRET backend detail must not reach status")
+            }
+        }
+
+        let store = Arc::new(RecipeStore::open(":memory:").unwrap());
+        let host = Arc::new(FailingHost(std::sync::atomic::AtomicUsize::new(0)));
+        let pool = InferencePool::new(
+            Arc::new(ScriptedLLM::new("unused")) as Arc<dyn LLMBackend>,
+            1,
+        );
+        let engine = RecipeEngine::new(pool, host.clone(), "JARVIS").with_store(store.clone());
+        let start = now_ms();
+        let mut run = horizon_run("goal:retryable", BTreeMap::new(), start);
+        let original_budget = run.budget;
+        let retryable_job = horizon_job(&run.goal_id, false, start + 1);
+        engine
+            .schedule_horizon_segment(&mut run, retryable_job, start)
+            .unwrap();
+
+        let failed = engine.resume_due_horizons(start + 1).await;
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].state, HorizonTickState::Failed);
+        assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let before = engine.list_horizons(start + 2).unwrap().remove(0);
+        assert_eq!(before.queue_status.as_deref(), Some("failed"));
+        assert_eq!(
+            before.failure_reason.as_deref(),
+            Some("segment_contract_failed")
+        );
+        assert!(!before.failure_reason.unwrap().contains("TOP-SECRET"));
+        assert_eq!(before.actions_used, 0);
+        assert_eq!(before.spent_cost_units, 0);
+
+        let receipt = engine
+            .control_horizon(&run.goal_id, HorizonControlAction::Retry, start + 2)
+            .unwrap();
+        assert!(receipt.verify());
+        assert_eq!(receipt.previous_queue_status.as_deref(), Some("failed"));
+        assert_eq!(receipt.next_queue_status.as_deref(), Some("pending"));
+        assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let after = engine.list_horizons(start + 2).unwrap().remove(0);
+        assert_eq!(after.queue_status.as_deref(), Some("pending"));
+        assert_eq!(after.failure_reason, None);
+        assert_eq!(after.actions_used, 0);
+        assert_eq!(after.spent_cost_units, 0);
+        let persisted = store
+            .load_horizon(&run.goal_id, start + 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.budget, original_budget);
+        assert!(engine
+            .control_horizon(&run.goal_id, HorizonControlAction::Retry, start + 3)
+            .is_err());
+        assert!(engine
+            .control_horizon("goal:missing", HorizonControlAction::Retry, start + 3)
+            .is_err());
+        engine
+            .control_horizon(&run.goal_id, HorizonControlAction::Cancel, start + 4)
+            .unwrap();
+
+        let mut expired = horizon_run("goal:expired-retry", BTreeMap::new(), start);
+        let expired_job = horizon_job(&expired.goal_id, false, start + 1);
+        engine
+            .schedule_horizon_segment(&mut expired, expired_job, start)
+            .unwrap();
+        let failed_expired = engine.resume_due_horizons(start + 1).await;
+        assert_eq!(failed_expired.len(), 1);
+        assert!(engine
+            .control_horizon(
+                &expired.goal_id,
+                HorizonControlAction::Retry,
+                start + expired.budget.max_elapsed_ms + 1,
+            )
+            .is_err());
+        let expired_view = engine
+            .list_horizons(start + expired.budget.max_elapsed_ms + 1)
+            .unwrap()
+            .into_iter()
+            .find(|view| view.goal_id == expired.goal_id)
+            .unwrap();
+        assert_eq!(expired_view.queue_status.as_deref(), Some("failed"));
+        assert_eq!(
+            expired_view.failure_reason.as_deref(),
+            Some("segment_contract_failed")
+        );
     }
 
     #[test]

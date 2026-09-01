@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "policy_id": "self-build-promotion-v1",
+  "baseline": {
+    "revision": "baseline-revision",
+    "evaluator_id": "pinned-evaluator-v1",
+    "corpus_id": "pinned-corpus-v1",
+    "target": {
+      "name": "behavioral_score",
+      "direction": "higher_is_better",
+      "value": 0.8
+    },
+    "protected": {
+      "security": 1.0,
+      "policy": 1.0,
+      "memory": 0.95,
+      "quality_floor": 0.9
+    },
+    "resources": {
+      "model_calls": 20,
+      "wall_time_ms": 1000,
+      "cost_microunits": 0
+    }
+  },
+  "candidate": {
+    "revision": "candidate-revision",
+    "evaluator_id": "pinned-evaluator-v1",
+    "corpus_id": "pinned-corpus-v1",
+    "target": {
+      "name": "behavioral_score",
+      "direction": "higher_is_better",
+      "value": 0.85
+    },
+    "protected": {
+      "security": 1.0,
+      "policy": 1.0,
+      "memory": 0.95,
+      "quality_floor": 0.9
+    },
+    "resources": {
+      "model_calls": 20,
+      "wall_time_ms": 1000,
+      "cost_microunits": 0
+    }
+  },
+  "policy": {
+    "minimum_target_improvement": 0.02,
+    "maximum_protected_regression": 0.0,
+    "minimum_security": 1.0,
+    "minimum_policy": 1.0,
+    "minimum_memory": 0.9,
+    "minimum_quality_floor": 0.85,
+    "maximum_model_calls": 25,
+    "maximum_wall_time_ms": 2000,
+    "maximum_cost_microunits": 0
+  }
+}

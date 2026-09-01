@@ -2,7 +2,133 @@
 
 use super::*;
 
+/// Maximum number of redacted offline-cognition lines retained for operator surfaces.
+pub const DMN_LOG_CAPACITY: usize = 200;
+
+/// One display-safe line from the default-mode network. This is deliberately an in-process,
+/// best-effort observation rather than another authoritative memory store.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DmnLogEntry {
+    pub at_ms: u64,
+    pub tick_no: u64,
+    pub phase: String,
+    pub message: String,
+}
+
+#[derive(Default)]
+pub(crate) struct DmnLog {
+    entries: std::collections::VecDeque<DmnLogEntry>,
+}
+
+impl DmnLog {
+    fn append_tick(&mut self, at_ms: u64, tick_no: u64, phase: u64, lines: &[String]) {
+        let phase = match phase {
+            0 => "rehearse",
+            1 => "reconcile",
+            _ => "associate",
+        };
+        for line in lines {
+            self.entries.push_back(DmnLogEntry {
+                at_ms,
+                tick_no,
+                phase: phase.to_string(),
+                message: sanitize_dmn_log_line(line),
+            });
+            while self.entries.len() > DMN_LOG_CAPACITY {
+                self.entries.pop_front();
+            }
+        }
+    }
+
+    fn tail(&self, limit: usize) -> Vec<DmnLogEntry> {
+        let take = limit.min(DMN_LOG_CAPACITY).min(self.entries.len());
+        self.entries
+            .iter()
+            .skip(self.entries.len().saturating_sub(take))
+            .cloned()
+            .map(|mut entry| {
+                // Re-sanitize at the display boundary too. This protects the surface if a future
+                // producer or a legacy in-process entry predates ingestion-time redaction.
+                entry.message = sanitize_dmn_log_line(&entry.message);
+                entry
+            })
+            .collect()
+    }
+}
+
+fn sanitize_dmn_log_line(line: &str) -> String {
+    let clipped: String = line.chars().take(400).collect();
+    if mind_types::contains_secret(&clipped) {
+        "[dmn] [redacted-secret]".to_string()
+    } else {
+        crate::redact::redact_stream(&clipped)
+    }
+}
+
+#[cfg(test)]
+mod dmn_log_tests {
+    use super::*;
+
+    #[test]
+    fn history_is_bounded_and_tail_preserves_chronological_order() {
+        let mut history = DmnLog::default();
+        for tick in 0..DMN_LOG_CAPACITY + 5 {
+            history.append_tick(
+                1_000 + tick as u64,
+                tick as u64,
+                tick as u64 % 3,
+                &[format!("[dmn] tick {tick}")],
+            );
+        }
+
+        let all = history.tail(usize::MAX);
+        assert_eq!(all.len(), DMN_LOG_CAPACITY);
+        assert_eq!(all.first().map(|entry| entry.tick_no), Some(5));
+        assert_eq!(
+            all.last().map(|entry| entry.tick_no),
+            Some((DMN_LOG_CAPACITY + 4) as u64)
+        );
+        assert_eq!(history.tail(2).len(), 2);
+        assert!(history.tail(0).is_empty());
+    }
+
+    #[test]
+    fn history_redacts_on_ingest_and_again_on_read() {
+        let mut history = DmnLog::default();
+        history.append_tick(
+            1,
+            1,
+            0,
+            &["[dmn] contacted alice.secret@example.com".to_string()],
+        );
+        assert!(!history.tail(1)[0].message.contains("alice.secret"));
+
+        // Simulate an old entry written before ingestion-time sanitization existed.
+        history.entries.push_back(DmnLogEntry {
+            at_ms: 2,
+            tick_no: 2,
+            phase: "reconcile".to_string(),
+            message: "[dmn] used token sk-live-EXAMPLE1234567890".to_string(),
+        });
+        let read = history.tail(1);
+        assert_eq!(read[0].message, "[dmn] [redacted-secret]");
+        assert!(!read[0].message.contains("EXAMPLE"));
+    }
+}
+
 impl super::ConversationEngine {
+    fn record_dmn_log(&self, phase: u64, tick_no: u64, lines: &[String]) {
+        self.dmn_log
+            .lock()
+            .unwrap()
+            .append_tick(Self::now_ms(), tick_no, phase, lines);
+    }
+
+    /// Bounded, chronological, display-safe offline-cognition history for read-only operator UIs.
+    pub fn dmn_log_tail(&self, limit: usize) -> Vec<DmnLogEntry> {
+        self.dmn_log.lock().unwrap().tail(limit)
+    }
+
     /// SELF-VIGILANCE (self-healing) — read the mind's own self-build cron log and, if its most recent
     /// run FAILED, emit an Operational urge so the failure surfaces (via the digest) instead of dying
     /// silently. Observation-only (rung 1–2): it never remediates, just notices + records. Cheap (a
@@ -384,6 +510,7 @@ impl super::ConversationEngine {
                     .unwrap_or_default();
                 if rs.len() < 3 {
                     log.push("[dmn] associate: too little stored to connect".to_string());
+                    self.record_dmn_log(phase, tick_no, &log);
                     return log;
                 }
                 let facts = rs
@@ -433,6 +560,7 @@ impl super::ConversationEngine {
                 }
             }
         }
+        self.record_dmn_log(phase, tick_no, &log);
         log
     }
 

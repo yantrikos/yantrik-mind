@@ -19,6 +19,9 @@ type MediaQueueItem = (Vec<u8>, String, Option<i64>);
 type MediaQueue = Arc<Mutex<Vec<MediaQueueItem>>>;
 type LastSentPhoto = Arc<Mutex<Option<(Vec<u8>, String)>>>;
 const CONSOLIDATION_BATCH_LIMIT: usize = 40;
+const MEMORY_WRITE_GATE_REFUSAL: &str = "(refused by memory write-gate: memory was not changed)";
+const REMINDER_WRITE_GATE_REFUSAL: &str =
+    "(refused by memory write-gate: reminder was not changed)";
 
 fn parse_horizon_delay_ms(raw: &str) -> Option<u64> {
     let raw = raw.trim().to_ascii_lowercase();
@@ -85,6 +88,7 @@ mod plugins_mod;
 #[cfg(test)]
 mod privacy_audit;
 mod proactive;
+pub use proactive::{DmnLogEntry, DMN_LOG_CAPACITY};
 mod reflex;
 pub(crate) mod research;
 mod say;
@@ -4913,6 +4917,9 @@ pub struct ConversationEngine {
     last_consolidated: Mutex<i64>,
     /// Default-mode ("sleep") phase rotor: rehearse → reconcile → associate, one bounded op per idle tick.
     dmn_phase: Mutex<u64>,
+    /// Bounded, display-safe observations from default-mode ticks. Best-effort and process-local;
+    /// authoritative beliefs, tensions, and decisions remain in their existing stores.
+    dmn_log: Mutex<proactive::DmnLog>,
     /// Onboarding interview: when set, the mind is awaiting the user's answer to a "name"/"purpose"
     /// question — the next user turn is captured as that slot's value (then the interview advances).
     /// Is the agentic loop the primary turn handler? Default true (overridable by `YM_AGENT=off`);
@@ -5016,6 +5023,7 @@ impl ConversationEngine {
             last_run: Mutex::new(None),
             last_consolidated: Mutex::new(0),
             dmn_phase: Mutex::new(0),
+            dmn_log: Mutex::new(proactive::DmnLog::default()),
             agent_primary: std::env::var("YM_AGENT")
                 .map(|v| v != "off")
                 .unwrap_or(true),
@@ -7072,6 +7080,9 @@ impl ConversationEngine {
                                 view.plan_revision,
                                 objective
                             ));
+                            if let Some(reason) = view.failure_reason {
+                                report.push_str(&format!("    failure reason: {reason}\n"));
+                            }
                         }
                         report
                     }
@@ -7106,6 +7117,9 @@ impl ConversationEngine {
                                 active.max_cost_units,
                                 active.plan_revision
                             ));
+                            if let Some(reason) = active.failure_reason {
+                                report.push_str(&format!("Failure reason: {reason}\n"));
+                            }
                         } else {
                             report.push_str("Active checkpoint: none\n");
                         }
@@ -7152,14 +7166,14 @@ impl ConversationEngine {
             "horizon"
                 if matches!(
                     rest.split_whitespace().next(),
-                    Some("pause" | "resume" | "cancel")
+                    Some("pause" | "resume" | "retry" | "cancel")
                 ) =>
             {
                 let mut args = rest.split_whitespace();
                 let verb = args.next().unwrap_or_default();
                 let goal_id = args.next().unwrap_or_default();
                 if goal_id.is_empty() || args.next().is_some() {
-                    return "Usage: ym horizon pause|resume|cancel <exact-goal-id>".to_string();
+                    return "Usage: ym horizon pause|resume|retry|cancel <exact-goal-id>".to_string();
                 }
                 let Some(recipes) = &self.recipes else {
                     return "(recipe engine unavailable)".to_string();
@@ -7167,6 +7181,7 @@ impl ConversationEngine {
                 let action = match verb {
                     "pause" => mind_spec::HorizonControlAction::Pause,
                     "resume" => mind_spec::HorizonControlAction::Resume,
+                    "retry" => mind_spec::HorizonControlAction::Retry,
                     "cancel" => mind_spec::HorizonControlAction::Cancel,
                     _ => unreachable!("guard accepts only horizon controls"),
                 };
@@ -7179,6 +7194,9 @@ impl ConversationEngine {
                             ),
                             mind_spec::HorizonControlAction::Resume => format!(
                                 "▶ Resumed [{goal_id}]. Its existing wake is claimable again; no budget was reset. Control receipt {receipt_id}."
+                            ),
+                            mind_spec::HorizonControlAction::Retry => format!(
+                                "↻ Retry queued [{goal_id}]. The failed segment will wait for the next scheduler tick; no checkpoint or budget was reset. Control receipt {receipt_id}."
                             ),
                             mind_spec::HorizonControlAction::Cancel => format!(
                                 "⏹ Cancelled [{goal_id}]. No segment can run; the verified control history was retained. Control receipt {receipt_id}."
@@ -8888,7 +8906,7 @@ impl ConversationEngine {
         lines.push("ym horizon 15m|2h|3d :: <goal>   durable delayed read-only goal; crash-safe, receipt-backed, no writes".to_string());
         lines.push("ym horizons              verified active durable goals, wake times, gates, and consumed budgets".to_string());
         lines.push("ym horizon history <goal-id>   verified active, completion, and operator-control receipts".to_string());
-        lines.push("ym horizon pause|resume|cancel <goal-id>   atomic operator control with durable receipts".to_string());
+        lines.push("ym horizon pause|resume|retry|cancel <goal-id>   atomic operator control with durable receipts".to_string());
         lines.push(
             "ym discover              find subscriptions in your email + track them".to_string(),
         );
@@ -9678,7 +9696,15 @@ impl ConversationEngine {
     ///   balanced; a re-paraphrase drops the source links and dilutes it.
     /// - A MUTATING MCP tool: its result is a confirmation prompt the user must see verbatim (a
     ///   pending confirmation pauses the turn), a denial, or a done — never a working material.
+    /// - A DENIED NATIVE MUTATION: the gate's bounded postcondition is the answer. Giving the model
+    ///   another turn after `remember` was refused is how "memory was not changed" became "noted".
     pub(crate) fn terminal_delivery(&self, tool: &str, obs: &str) -> bool {
+        if matches!(tool, "remember" | "add_reminder")
+            && crate::tool_outcome::Outcome::classify(tool, obs)
+                == crate::tool_outcome::Outcome::Denied
+        {
+            return true;
+        }
         if tool == "code" && obs.starts_with("On it — building") {
             return true;
         }
@@ -9942,8 +9968,8 @@ impl ConversationEngine {
                     // write-gate refusal. Preserve that distinction without echoing the rejected
                     // value: the old `let _ = ...; (remembered)` turned a refusal into a false
                     // success before the model even saw the observation.
-                    Err(e) if e.to_string().contains("write-gate") => {
-                        "(refused by memory write-gate: memory was not changed)".to_string()
+                    Err(e) if e.is_memory_write_gate_refusal() => {
+                        MEMORY_WRITE_GATE_REFUSAL.to_string()
                     }
                     // A broken store is not a refusal, but it is still never a successful write.
                     // Keep the status code-owned and content-free for the same reason.
@@ -10300,7 +10326,11 @@ impl ConversationEngine {
                 match self.memory.add_task(&text, "medium", due).await {
                     Ok(_) if due.is_some() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
                     Ok(_) => format!("Noted as an open task: \"{text}\" (no date parsed from \"{when}\")."),
-                    Err(e) => format!("(couldn't set reminder: {e})"),
+                    Err(e) if e.is_memory_write_gate_refusal() => {
+                        REMINDER_WRITE_GATE_REFUSAL.to_string()
+                    }
+                    // Do not expose storage internals through a user-facing tool observation.
+                    Err(_) => "(couldn't set reminder: reminder was not changed)".to_string(),
                 }
             }
             "run_skill" => {
@@ -12786,8 +12816,11 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // beliefs are proposition-keyed (re-teaching = evidence update, not a duplicate row)
         // and add_task dedups jaccard/cosine against open tasks.
         if let Some(stmt) = Self::extract_taught_belief(user_text) {
-            // Capture failure must never fail the turn; memory already warned.
-            if let Ok(b) = self
+            // Ordinary capture failure must not fail the turn. A write-gate refusal is different:
+            // letting the model answer after code already rejected the mutation recreates E.LOOP6
+            // even when the model never chose the `remember` tool. Make the postcondition terminal
+            // at this earlier, loop-independent mutation boundary too.
+            match self
                 .memory
                 .remember_as_belief(BeliefAssertion {
                     statement: stmt.clone(),
@@ -12798,7 +12831,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 })
                 .await
             {
-                self.recorder.record({
+                Ok(b) => self.recorder.record({
                     let mut e = mind_observability::DecisionEvent::span(
                         format!("belief:{}", b.id),
                         None,
@@ -12809,14 +12842,27 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                     e.trigger = Some("explicit teaching intent in user turn".into());
                     e.verdict = Some("captured".into());
                     e
-                });
+                }),
+                Err(e) if e.is_memory_write_gate_refusal() => {
+                    let reply = MEMORY_WRITE_GATE_REFUSAL.to_string();
+                    let _ = self
+                        .memory
+                        .append_message_scoped("user", user_text, ws.clone())
+                        .await;
+                    let _ = self
+                        .memory
+                        .append_message_scoped("assistant", &reply, ws.clone())
+                        .await;
+                    return Ok(reply);
+                }
+                Err(_) => {}
             }
         }
         if let Some((desc, due_ms)) = Self::extract_commitment(user_text) {
-            if let Ok(t) = self.memory.add_task(&desc, "medium", due_ms).await {
-                // The task's own id is the object trace: reminder_loop nudges, follow-through
-                // and completion can later parent onto it (`ym why task:<id>`).
-                self.recorder.record({
+            match self.memory.add_task(&desc, "medium", due_ms).await {
+                Ok(t) => self.recorder.record({
+                    // The task's own id is the object trace: reminder_loop nudges, follow-through
+                    // and completion can later parent onto it (`ym why task:<id>`).
                     let mut e = mind_observability::DecisionEvent::span(
                         format!("task:{}", t.id),
                         None,
@@ -12827,7 +12873,20 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                     e.trigger = Some("spoken commitment pattern in user turn".into());
                     e.verdict = Some("captured".into());
                     e
-                });
+                }),
+                Err(e) if e.is_memory_write_gate_refusal() => {
+                    let reply = REMINDER_WRITE_GATE_REFUSAL.to_string();
+                    let _ = self
+                        .memory
+                        .append_message_scoped("user", user_text, ws.clone())
+                        .await;
+                    let _ = self
+                        .memory
+                        .append_message_scoped("assistant", &reply, ws.clone())
+                        .await;
+                    return Ok(reply);
+                }
+                Err(_) => {}
             }
         }
         // ── TYPED DIRECT ROUTE: arithmetic (E.LOOP3, Codex's design) ───────────────────────────

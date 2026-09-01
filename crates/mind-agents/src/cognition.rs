@@ -618,10 +618,15 @@ impl Cognition {
                 let terminal = self.bus.is_terminal(&tool, &raw).then(|| raw.clone());
                 (self.bus.normalize(&tool, &args, &raw, true), terminal)
             }
-            Err(e) => (
-                self.bus.normalize(&tool, &args, &e.to_string(), false),
-                None,
-            ),
+            Err(e) => {
+                let raw = e.to_string();
+                // A bus can declare an error itself to be the terminal answer. The conversation
+                // bus uses this for denied mutations: the bounded, code-owned "not changed"
+                // postcondition must reach the user verbatim instead of entering synthesis, where
+                // a model could turn a refusal into an affirmative claim.
+                let terminal = self.bus.is_terminal(&tool, &raw).then(|| raw.clone());
+                (self.bus.normalize(&tool, &args, &raw, false), terminal)
+            }
         }
     }
 
@@ -896,6 +901,28 @@ mod tests {
                 .any(|s| s.decision == Some(ReasonCode::Delivered)),
             "{:?}",
             out.trace
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_terminal_error_is_delivered_verbatim_without_synthesis() {
+        let (step, reason, backend) = pools(vec![
+            &call("remember", "the denied value"),
+            "SYNTHESIS MUST NOT RUN",
+        ]);
+        // No canned reply means FakeBus returns `no such tool: remember`; marking the tool terminal
+        // proves the generic loop honors a bus's decision even on its Err path.
+        let bus = Arc::new(FakeBus::new(&["remember"]).terminal(&["remember"]));
+        let out = Cognition::new(step, reason, bus, "JARVIS")
+            .run(&goal(1), &TestClock::new(0))
+            .await;
+
+        assert_eq!(out.answer, "no such tool: remember");
+        assert_eq!(out.stopped_because, Some(ReasonCode::Delivered));
+        assert_eq!(
+            backend.call_count(),
+            1,
+            "one decision, zero synthesis calls"
         );
     }
 

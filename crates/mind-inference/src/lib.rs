@@ -100,7 +100,9 @@ pub fn scope_allows(
     }
 }
 
-/// Per-scope served/refused counters — the audit trail `ym privacy` renders. Process-lifetime.
+/// Per-scope authorized-dispatch/refused counters — the audit trail `ym privacy` renders.
+/// Process-lifetime. A permitted call is counted before backend execution, so this is deliberately
+/// an attempt/exposure-risk measure, not evidence that a provider returned a usable response.
 static PRIVACY_SERVED: [std::sync::atomic::AtomicU64; 3] = [
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
@@ -2128,10 +2130,58 @@ mod privacy_tests {
             .into_iter()
             .find_map(|(site, count)| (site == SITE).then_some(count))
             .unwrap_or(0);
-        assert_eq!(after, before + 1, "the serving boundary owns the count");
+        assert_eq!(after, before + 1, "the dispatch boundary owns the count");
         assert!(
             privacy_report("scripted").contains(&format!("{SITE} {after}")),
             "the operator-facing audit must name the producer"
+        );
+    }
+
+    #[test]
+    fn privacy_report_never_calls_pre_dispatch_attempts_service() {
+        let report = privacy_report("scripted");
+        // Reconciled to the shipped upstream wording during the fold (Codex's map: mind-inference
+        // wording is authoritative from upstream). Both sides fixed the same thing; this keeps the
+        // intent — the pre-dispatch count reads as exposure, never as service.
+        assert!(report.contains("dispatched (exposure"));
+        assert!(report.contains("household dispatch sites"));
+        assert!(
+            !report.lines().any(|line| line.trim_start().starts_with("served")),
+            "pre-dispatch counters are not proof that a provider answered: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_allowed_backend_is_a_dispatch_attempt_not_service() {
+        const SITE: &str = "mind-inference/test:failed-dispatch-attempt";
+        let before = household_callsite_stats()
+            .into_iter()
+            .find_map(|(site, count)| (site == SITE).then_some(count))
+            .unwrap_or(0);
+        let pool = InferencePool::new(
+            std::sync::Arc::new(AlwaysDown) as std::sync::Arc<dyn LLMBackend>,
+            1,
+        );
+
+        let out = pool
+            .chat_household_attributed(
+                vec![ChatMessage::user("this backend must fail")],
+                GenerationConfig::default(),
+                SITE,
+            )
+            .await;
+
+        assert!(out.is_err(), "the scripted backend always fails");
+        let after = household_callsite_stats()
+            .into_iter()
+            .find_map(|(site, count)| (site == SITE).then_some(count))
+            .unwrap_or(0);
+        assert_eq!(after, before + 1, "the failed dispatch is still audited");
+        let report = privacy_report("scripted");
+        assert!(report.contains(&format!("{SITE} {after}")));
+        assert!(
+            !report.lines().any(|line| line.trim_start().starts_with("served")),
+            "a backend error must never become a rendered service claim: {report}"
         );
     }
 

@@ -8217,7 +8217,7 @@ async fn matched_self_capability_questions_are_answered_by_the_registry_not_the_
         "the typed claim, verbatim: {reply}"
     );
     assert!(
-        reply.contains("self-claims-v1"),
+        reply.contains("self-claims-v2"),
         "provenance stamped: {reply}"
     );
     assert!(
@@ -8230,7 +8230,7 @@ async fn matched_self_capability_questions_are_answered_by_the_registry_not_the_
         .await
         .unwrap();
     assert!(
-        spoken.contains("compile-time constant") && spoken.contains("self-claims-v1"),
+        spoken.contains("compile-time constant") && spoken.contains("self-claims-v2"),
         "voice path answers from the registry: {spoken}"
     );
     // Abstention: an ordinary request must NOT be captured by the registry.
@@ -8239,7 +8239,7 @@ async fn matched_self_capability_questions_are_answered_by_the_registry_not_the_
         .await
         .unwrap();
     assert!(
-        !normal.contains("self-claims-v1"),
+        !normal.contains("self-claims-v2"),
         "unmatched questions flow to the normal lane: {normal}"
     );
 }

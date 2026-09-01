@@ -14,7 +14,10 @@
 //! not a fix.
 
 /// Version stamp rendered into every matched answer — provenance the reader can audit.
-pub const REGISTRY_VERSION: &str = "self-claims-v1";
+// v1 stamped be4d97a's contents and burned with that evaluation; the repaired contents carry a
+// new stamp (Codex's finding: one version string over two different registries is not
+// provenance). Bump this on ANY change to claims, anchors, or rendering.
+pub const REGISTRY_VERSION: &str = "self-claims-v2";
 
 pub struct Claim {
     pub id: &'static str,
@@ -240,8 +243,9 @@ pub fn match_claim(user_text: &str) -> Option<&'static Claim> {
 /// the provenance E.MQ4 gate (2) requires in the output itself.
 pub fn render(claim: &Claim) -> String {
     format!(
-        "{}\n\n[{REGISTRY_VERSION} · enforced by {} · evidence: {}]",
+        "{}\n\n[{REGISTRY_VERSION} · claim:{} · enforced by {} · evidence: {}]",
         claim.answer,
+        claim.id,
         claim.authority,
         claim.evidence.join(", ")
     )

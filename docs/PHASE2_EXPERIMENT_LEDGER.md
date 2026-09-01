@@ -2331,3 +2331,20 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Solved en route | The "EMPTY answer" mystery (E.MQ1 Q1/Q6, here Q9/Q10): the turns COMPLETED in 157-195s — past the ym wrapper's 150s curl ceiling. Client hangup, not server failure. The wrapper timeout needs raising for agentic turns; separate small fix. |
 | Scores vs prior runs | Wrong went 4 (MQ1) → 4 (MQ2) → 2 (MQ3-clean), correct 3 → 5 → 5 of fewer scoreable. Real movement — and exactly the two model-self-narrative claims stayed immovable, which is the finding. |
 | AGI feed | Phase B now has the precise shape of the metacognition gap: capability-claim precision fails at the MODEL, not the surface — measured on a clean subject with the evidence in hand. That is the strongest possible steer for what to build (or which model to trust) next. |
+
+## E.MQ1–E.MQ3 — AMENDMENT: the truth key was wrong on three of ten, and the model-blame conclusion is withdrawn
+
+| Field | Value |
+| --- | --- |
+| Peer findings accepted (Codex's review, in full) | (Q3) The pinned truth "a prediction before EACH tool call" was over-universal — malformed calls are refused BEFORE prediction by design (E.AGI-A4's whole point); the scoped truth is "each ADMITTED call". (Q6) "Cannot edit my own configuration or builder" was false as written — the governed self-build lane DOES edit code and propose deploy/config changes as human-reviewed drafts; only the direct live-chat path is denied. (Q8) "The hash chain as independent witness" was too strong — it is tamper-EVIDENCE with fail-closed feeds, not proof recorded actions occurred. |
+| What is withdrawn | E.MQ3's causal conclusion "capability-claim precision fails at the MODEL, not the surface" — UNEARNED: with a flawed truth key on the exact questions the model got 'wrong', the clean-subject failures cannot cleanly indict the model over the key. REFUSED-STRONGER stands as a kill status only. |
+| What stands | The Q2 self-restart flip (that key was correct); the contamination finding (E.MQ2's regression vanished on the clean subject); the wrapper-timeout diagnosis; and the qualitative observation that the answering path does not consistently track in-context capability text — now with "or the text was wrong" as a live alternative. |
+| Repairs made | The `capability_boundaries` block now states the scoped truths (admitted calls; live-chat vs governed self-build; tamper-evident, fail-closed). Source-guard updated. The joint next design (Codex's, accepted verbatim): typed/versioned claim registry + deterministic renderer before memory/LLM, one factor changed at a time, fresh subject per trial, held-out paraphrases. |
+
+## E.AGI-I0 — reverse direction: REFUSED-INSUFFICIENT-RECORD (Codex's independent sweep, recorded verbatim)
+
+| Field | Value |
+| --- | --- |
+| Codex's sweep of its own record | 7 commits attributed to yantrik-mind-codex (5 code/test-bearing, 2 ledger-only). Clear post-green defects caught by Claude in that attributed work: 0 recorded. Verdict: NOT "0/5" — REFUSED-INSUFFICIENT-RECORD: absence of attribution is ambiguous, and the slices lack a symmetric durable review-outcome field, below the 90% classification bar. |
+| Adopted going forward | Codex's proposed neutral per-slice fields for future result rows in BOTH directions: authored_by, reviewed_by, post_green_defect_caught_by, severity, review_cost — populated at result time, so Phase I's next measurement has a denominator an adversary would accept. |
+| Phase I status | One direction measured (16/152 lower bound), one direction refused for insufficient record — both outcomes on the ledger, neither inflated. |

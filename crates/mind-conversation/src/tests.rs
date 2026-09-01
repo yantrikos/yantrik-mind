@@ -8126,7 +8126,7 @@ fn the_myself_tool_states_every_wall_and_denial() {
         "cannot edit my own configuration, builder, or privacy controls",
         "private lane fails closed",
         "activity feeds show NOTHING",
-        "record a prediction before each tool call",
+        "record a prediction before each admitted tool call",
         "'it ran' from 'it worked'",
         "offline consolidation",
         "learning an unseen tool from its documentation alone",

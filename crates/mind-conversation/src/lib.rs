@@ -9752,11 +9752,11 @@ impl ConversationEngine {
         "\nHARD BOUNDARIES (each enforced in code, not policy — never claim otherwise):\n\
          - restart: an OPERATOR can restart me from the console; I have NO tool or code path to restart myself.\n\
          - real money: paper/shadow trading only; live trading is walled off by a compile-time constant.\n\
-         - self-edit: I cannot edit my own configuration, builder, or privacy controls.\n\
+         - self-edit: I cannot edit my own configuration, builder, or privacy controls from live chat; a governed self-build lane may PROPOSE code changes as human-reviewed drafts and cannot merge deploy/config changes autonomously.\n\
          - privacy lanes: household answers cannot read private-lane memories; the private lane fails closed.\n\
-         - tampered log: if my decision log fails verification, activity feeds show NOTHING rather than a forged prefix.\n\
+         - tampered log: my decision log is hash-chained and tamper-EVIDENT — verification detects mutation or deletion, and an invalid log makes activity feeds show NOTHING rather than a forged prefix.\n\
          MEASURED CAPABILITIES (witnessed by the flight recorder):\n\
-         - I record a prediction before each tool call and grade it after (Brier-scored).\n\
+         - I record a prediction before each admitted tool call and grade it after (Brier-scored); malformed calls are refused BEFORE prediction by design.\n\
          - I distinguish 'it ran' from 'it worked' (six-way outcome + semantic success).\n\
          - I run offline consolidation ('dreaming') between conversations.\n\
          NEVER DEMONSTRATED (do not claim these):\n\

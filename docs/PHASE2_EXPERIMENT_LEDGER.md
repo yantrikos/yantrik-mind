@@ -2842,3 +2842,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Verdict | KILL at stage 1. No owned-model call was made; stage 2 and the three end-to-end runs were not executed. No tuning on v4. The tier-0 intercept and `ym claims` remain the only self-claim path. |
 | What four kills now say together | Lexicon (2/10), closed-schema LLM (7/10, 3 misroutes), and a singleton lexical shortlist (5/20, 2 wrong) all fail the same way: paraphrase recall. The capability frame bought precision (0 overflow, 38/40) but not recall — the frame's own words are what a paraphrase drops. The honest state of the self-model: truthful when the question matches the registry's words, silent otherwise. A different candidate CLASS (semantic, not lexical; or the question routed to `ym claims` explicitly by the user) needs its own prereg; this lane does not iterate. |
 | AGI feed | Phase B. Recorded as a negative result with counts, which is the only way this ledger lets a design die. |
+
+## E.WEB18b — RESULT: live on staging; one join bug found by use, fixed, guarded
+
+| Field | Value |
+| --- | --- |
+| Fold | `3917c14` (Board opens threads; orders typed on the Board) + `495e643` (one `agentKey` rule for grouping AND opening). Clean full suites 45 / 1,490 / 0 on both trees. |
+| Witnessed (staging, Playwright, device minted → used → revoked) | Board shows three cards that open threads — the daily order ("fires in 15h"), Ticker Intelligence Agent, staging-smoke. First click on the order card (build 3917c14) landed in a thread titled with the store's name and reading "No such agent." — the opener compared the raw `standing:` name against the stripped grouping key. After 495e643 the same click lands in the thread "pending-tasks-daily" with its scheduled entry. Page errors: none, both runs. |
+| Lesson | Two callers of one convention is two conventions. The key rule is now one function, and the guard checks both call sites, not the regex. |
